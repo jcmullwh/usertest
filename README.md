@@ -1,6 +1,6 @@
 # Agentic usertest monorepo
 
-[![CI](https://github.com/jcmullwh/agentic-usertest-monorepo/actions/workflows/ci.yml/badge.svg)](https://github.com/jcmullwh/agentic-usertest-monorepo/actions/workflows/ci.yml)
+[![CI](https://github.com/jcmullwh/usertest/actions/workflows/ci.yml/badge.svg)](https://github.com/jcmullwh/usertest/actions/workflows/ci.yml)
 
 This repo contains **usertest**, a runner for repeatable “agentic usertests” and **usertest-backlog**, a backlog miner. We aim to solve two core problems:
 
