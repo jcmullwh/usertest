@@ -1,0 +1,57 @@
+[project]
+name = "backlog_core"
+version = "0.1.0"
+description = "A Python library (PDM)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "run_artifacts",
+  "triage_engine",
+]
+
+[build-system]
+requires = ["pdm-backend>=2.0.0"]
+build-backend = "pdm.backend"
+
+[tool.monorepo]
+status = "incubator"
+
+[tool.pdm]
+distribution = true
+
+[tool.pdm.dev-dependencies]
+dev = [
+  "-e file:///${PROJECT_ROOT}/../run_artifacts#egg=run_artifacts",
+  "-e file:///${PROJECT_ROOT}/../triage_engine#egg=triage_engine",
+  "deptry>=0.20.0",
+  "mypy>=1.8.0",
+  "pytest>=8.0.0",
+  "ruff>=0.14.0",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+
+[tool.deptry]
+# Drop-in snippets are transplantable scaffolding and should not affect dependency linting.
+extend_exclude = ["^\\.agents/dropins/"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "B",
+  "E",
+  "F",
+  "I",
+  "UP",
+]
+ignore = ["UP017"]

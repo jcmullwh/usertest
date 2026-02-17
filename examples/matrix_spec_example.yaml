@@ -1,0 +1,46 @@
+# Matrix spec for usertest "matrix" command.
+#
+# This expands into a cartesian product:
+#   (personas × missions) × (agents × models) × seeds
+# and performs dry-run validation on *every* combination before executing.
+
+repo: /path/to/target/repo   # local path or repo input
+ref: main                    # optional (git ref)
+
+# Optional default policy for any agent entry that doesn't specify one.
+# Use "auto" to pick the least-privileged policy that still satisfies the mission requirements.
+policy: auto
+
+personas:
+  - quickstart_sprinter
+  - ci_bot
+
+missions:
+  # Missions can be strings...
+  - first_output_smoke
+
+  # ...or mappings with requirement overrides for dry-run validation.
+  # This is useful when the mission prompt implies shell/edits but the mission file
+  # isn't annotated with requires_shell/requires_edits yet.
+  - id: verify_install_to_result
+    requires_shell: true
+
+seeds: [0, 1]
+
+agents:
+  - agent: codex
+    models:
+      - GPT-5.3-Codex
+      - GPT-5.2-Codex
+    policy: auto
+
+  - agent: claude
+    models:
+      - claude-3-7-sonnet
+    # You can force a policy, but mismatches will be caught in the dry-run validation.
+    policy: inspect
+
+  - agent: gemini
+    models:
+      - gemini-2.0-pro
+    policy: auto

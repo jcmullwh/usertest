@@ -1,0 +1,5 @@
+targets:
+  - repo: "https://github.com/example/example.git"
+    ref: "main"
+    persona_id: "quickstart_sprinter"
+    mission_id: "first_output_smoke"

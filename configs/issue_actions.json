@@ -1,0 +1,105 @@
+{
+  "version": 1,
+  "actions": [
+    {
+      "id": "2026-02-06-output-contract-hardening",
+      "date": "2026-02-06",
+      "plan": "docs/ops/usertest_issue_remediation_plan_20260206.md (Workstream A: Output Contract Hardening)",
+      "note": "Hardened final-message JSON extraction for Gemini and improved output-contract handling.",
+      "match": {
+        "theme_ids": ["output_contract"],
+        "text_patterns": [
+          "failed to parse json",
+          "could not find a json object",
+          "produced.*json output"
+        ]
+      }
+    },
+    {
+      "id": "2026-02-06-env-determinism-pip-venv",
+      "date": "2026-02-06",
+      "plan": "docs/ops/usertest_issue_remediation_plan_20260206.md (Workstream C: Environment Determinism for Pip Targets)",
+      "note": "Implemented deterministic pip bootstrap behavior with Docker venv fallback and explicit environment guidance.",
+      "match": {
+        "theme_ids": ["environment_determinism", "sandbox_scope"],
+        "text_patterns": [
+          "venv",
+          "virtualenv",
+          "python.*PATH",
+          "pip bootstrap failed inside docker sandbox"
+        ]
+      }
+    },
+    {
+      "id": "2026-02-06-adapter-normalization-fixes",
+      "date": "2026-02-06",
+      "plan": "docs/ops/usertest_issue_remediation_plan_20260206.md (Workstream D: Adapter Correctness and Ergonomics)",
+      "note": "Improved adapter normalization logic, including codex chained command path/read attribution handling.",
+      "match": {
+        "theme_ids": ["adapter_normalization"],
+        "text_patterns": [
+          "normalize",
+          "read attribution",
+          "read_path inference",
+          "cd <dir> && <readlike>"
+        ]
+      }
+    },
+    {
+      "id": "2026-02-06-sandbox-tooling-baseline-procps",
+      "date": "2026-02-06",
+      "plan": "docs/ops/usertest_issue_remediation_plan_20260206.md (Workstream C: Environment Determinism for Pip Targets)",
+      "note": "Added baseline tooling in sandbox image to reduce avoidable command-not-found noise.",
+      "match": {
+        "theme_ids": ["sandbox_tooling"],
+        "text_patterns": [
+          "pgrep: .*not found",
+          "command not found"
+        ]
+      }
+    },
+    {
+      "id": "2026-02-06-codex-noninteractive-approval",
+      "date": "2026-02-06",
+      "plan": "docs/ops/usertest_issue_remediation_plan_20260206.md (Workstream A: Output Contract Hardening)",
+      "note": "Aligned codex invocation toward non-interactive runs to avoid approval deadlocks in automated usertests.",
+      "match": {
+        "theme_ids": ["execution_permissions"],
+        "text_patterns": [
+          "apply_patch_approval_request",
+          "interactive approval",
+          "ask_for_approval"
+        ]
+      }
+    },
+    {
+      "id": "2026-02-07-agent-adapters-standalone-compat",
+      "date": "2026-02-07",
+      "plan": "docs/ops/top5_unaddressed_issues_plan_20260207.md (Items 2/3/5 implementation pass in `agent_adapters` + `runner_core`)",
+      "note": "Removed hard sibling-package coupling by adding optional `normalized_events` fallback, fixed brittle test path assumptions, and added binary-preflight diagnostics.",
+      "match": {
+        "theme_ids": ["environment_determinism", "adapter_normalization", "binary_preflight"],
+        "text_patterns": [
+          "normalized_events",
+          "missing sibling directory",
+          "no such file or directory: '/normalized_events'",
+          "parents\\[3\\]",
+          "required agent binary"
+        ]
+      }
+    },
+    {
+      "id": "2026-02-07-output-schema-nullable-artifact-path",
+      "date": "2026-02-07",
+      "plan": "docs/ops/usertest_issue_remediation_plan_20260206.md (Workstream A: Output Contract Hardening)",
+      "note": "Hardened report schemas to allow nullable artifact paths and classify this failure shape under output-contract compliance.",
+      "match": {
+        "theme_ids": ["output_contract"],
+        "text_patterns": [
+          "\\.outputs\\[[0-9]+\\]\\.path: None is not of type 'string'",
+          "path: None is not of type 'string'"
+        ]
+      }
+    }
+  ]
+}

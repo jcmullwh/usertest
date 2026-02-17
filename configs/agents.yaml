@@ -1,0 +1,49 @@
+# How to invoke each agent CLI in headless mode.
+#
+# This file is intentionally minimal. Treat these as defaults; the runner also has CLI flags.
+
+agents:
+  codex:
+    binary: codex
+    subcommand: exec
+    supports_json_schema: false
+    raw_events_format: jsonl
+    # Optional: extra packages to install into the docker sandbox_cli image when
+    # --exec-backend docker is used with the sandbox_cli context.
+    # These are repo-specific and should stay minimal (agent CLI + its direct runtime deps).
+    sandbox_cli_install:
+      apt: [nodejs]
+      pip: []
+      npm_global: ["@openai/codex"]
+    # Default Codex config overrides passed via `codex exec -c key=value`.
+    # This is useful for guarding against unsupported values in a user's `~/.codex/config.toml`.
+    # If personality/model_personality is configured here, model_messages must also be configured.
+    config_overrides: ["model_reasoning_effort=high"]
+    args:
+      json_events: ["--json"]
+      last_message: ["--output-last-message"]
+      cd: ["--cd"]
+      sandbox: ["--sandbox"]
+
+  claude:
+    binary: claude
+    supports_json_schema: true
+    raw_events_format: jsonl
+    output_format: stream-json
+    notes: "Implemented (headless `claude -p`)."
+    sandbox_cli_install:
+      # Claude Code is commonly installed via npm; keep deps minimal.
+      apt: [nodejs]
+      pip: []
+      npm_global: ["@anthropic-ai/claude-code"]
+
+  gemini:
+    binary: gemini
+    supports_json_schema: false
+    raw_events_format: jsonl
+    output_format: stream-json
+    notes: "Implemented (headless `gemini --output-format stream-json`)."
+    sandbox_cli_install:
+      apt: [nodejs]
+      pip: []
+      npm_global: ["@google/gemini-cli"]

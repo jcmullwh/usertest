@@ -1,0 +1,10 @@
+{
+  "repo_input": "golden_fixture",
+  "ref": null,
+  "commit_sha": "0000000000000000000000000000000000000000",
+  "acquire_mode": "copy",
+  "agent": "claude",
+  "policy": "safe",
+  "seed": 0,
+  "prompt_version": 1
+}

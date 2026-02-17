@@ -1,0 +1,46 @@
+[tool.poetry]
+name = "__NAME__"
+version = "0.1.0"
+description = "A Python app/service (Poetry)"
+readme = "README.md"
+packages = [{ include = "__NAME_SNAKE__", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<4.0"
+
+[tool.poetry.group.dev.dependencies]
+deptry = "^0.20.0"
+mypy = "^1.8.0"
+pytest = "^8.0.0"
+ruff = "^0.14.0"
+
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+
+[tool.deptry]
+# Drop-in snippets are transplantable scaffolding and should not affect dependency linting.
+extend_exclude = ["^\\.agents/dropins/"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "B",
+  "E",
+  "F",
+  "I",
+  "UP",
+]
+ignore = ["UP017"]

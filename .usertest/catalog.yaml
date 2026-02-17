@@ -1,0 +1,13 @@
+version: 1
+
+# Target-local mission/persona overrides for *this* repo when it is being usertested.
+#
+# This keeps repo-specific missions out of the global built-in catalog.
+
+missions_dirs:
+  - .usertest/missions
+personas_dirs:
+  - .usertest/personas
+
+meta:
+  note: Repo-specific usertest missions/personas for agentic-usertest-monorepo.

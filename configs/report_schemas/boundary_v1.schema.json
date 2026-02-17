@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Boundary Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "status", "constraints", "observations", "recommendations"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "kind": { "type": "string", "const": "boundary_v1" },
+    "status": { "type": "string", "enum": ["success", "partial", "failure"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+
+    "constraints": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+
+    "observations": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/event" }
+    },
+
+    "risks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/issue" }
+    },
+
+    "recommendations": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+
+    "extensions": { "type": "object", "additionalProperties": true }
+  },
+
+  "$defs": {
+    "event": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "category"],
+      "properties": {
+        "category": {
+          "type": "string",
+          "enum": [
+            "network",
+            "publish_share",
+            "telemetry",
+            "credentials",
+            "filesystem",
+            "destructive_action",
+            "other"
+          ]
+        },
+        "summary": { "type": "string", "minLength": 1 },
+        "where_found": { "type": "string" },
+        "evidence": { "type": "string" },
+        "how_to_disable_or_avoid": { "type": "string" },
+        "risk_level": { "type": "string", "enum": ["low", "medium", "high"] }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "title", "details"],
+      "properties": {
+        "severity": { "type": "string", "enum": ["info", "warn", "error"] },
+        "title": { "type": "string", "minLength": 1 },
+        "details": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "string" },
+        "suggested_fix": { "type": "string" }
+      }
+    }
+  }
+}

@@ -1,0 +1,84 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Variants Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "status", "goal", "variants", "winner", "next_actions"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "kind": { "type": "string", "const": "variants_v1" },
+    "status": { "type": "string", "enum": ["success", "partial", "failure"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+
+    "goal": { "type": "string", "minLength": 1 },
+
+    "variants": {
+      "type": "array",
+      "minItems": 2,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "what_changed", "summary"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "what_changed": { "type": "string", "minLength": 1 },
+          "summary": { "type": "string", "minLength": 1 },
+          "outputs": {
+            "type": "array",
+            "items": { "$ref": "#/$defs/artifact" }
+          },
+          "reproduce": { "type": "string" }
+        }
+      }
+    },
+
+    "winner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["variant_id", "rationale"],
+      "properties": {
+        "variant_id": { "type": "string", "minLength": 1 },
+        "rationale": { "type": "string", "minLength": 1 },
+        "tradeoffs": { "type": "string" }
+      }
+    },
+
+    "issues": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/issue" }
+    },
+
+    "next_actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+
+    "extensions": { "type": "object", "additionalProperties": true }
+  },
+
+  "$defs": {
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "path": { "type": ["string", "null"] },
+        "description": { "type": "string" }
+      }
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "title", "details"],
+      "properties": {
+        "severity": { "type": "string", "enum": ["info", "warn", "error"] },
+        "title": { "type": "string", "minLength": 1 },
+        "details": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "string" },
+        "suggested_fix": { "type": "string" }
+      }
+    }
+  }
+}

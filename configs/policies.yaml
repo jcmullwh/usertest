@@ -1,0 +1,51 @@
+# Execution policies (safe-by-default).
+#
+# In MVP, `codex`, `claude`, and `gemini` adapters are implemented; policies are still defined generically so
+# additional adapters can map them to their agent-specific flags.
+
+policies:
+  safe:
+    description: "Read-only exploration with no workspace writes; for read-only command probing use inspect."
+    codex:
+      sandbox: "read-only"
+      ask_for_approval: "never"
+      allow_edits: false
+    claude:
+      allow_edits: false
+      allowed_tools: ["Read", "Grep", "Glob"]
+    gemini:
+      allow_edits: false
+      sandbox: true
+      approval_mode: "default"
+      allowed_tools: ["read_file", "search_file_content"]
+
+  inspect:
+    description: "Read-only exploration that allows shell commands for repo inspection."
+    codex:
+      sandbox: "read-only"
+      ask_for_approval: "never"
+      allow_edits: false
+    claude:
+      allow_edits: false
+      allowed_tools: ["Read", "Grep", "Glob", "Bash"]
+    gemini:
+      allow_edits: false
+      sandbox: true
+      approval_mode: "default"
+      allowed_tools: ["read_file", "search_file_content", "run_shell_command"]
+
+  write:
+    description: "Allow workspace writes (still sandboxed)."
+    codex:
+      sandbox: "workspace-write"
+      ask_for_approval: "never"
+      allow_edits: true
+    claude:
+      allow_edits: true
+      permission_mode: "acceptEdits"
+      allowed_tools: ["Read", "Edit", "Bash", "Grep", "Glob"]
+    gemini:
+      allow_edits: true
+      sandbox: true
+      approval_mode: "auto_edit"
+      allowed_tools: ["read_file", "search_file_content", "write_file", "replace", "run_shell_command"]

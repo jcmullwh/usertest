@@ -1,0 +1,184 @@
+# This file is managed by tools/scaffold/scaffold.py.
+# It is the source of truth for what projects exist in this monorepo.
+
+schema_version = 1
+
+[[projects]]
+id = "runner_core"
+kind = "lib"
+path = "packages/runner_core"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "agent_adapters"
+kind = "lib"
+path = "packages/agent_adapters"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "normalized_events"
+kind = "lib"
+path = "packages/normalized_events"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "reporter"
+kind = "lib"
+path = "packages/reporter"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "cli"
+kind = "app"
+path = "apps/usertest"
+generator = "python_pdm_app"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "sandbox_runner"
+kind = "lib"
+path = "packages/sandbox_runner"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "triage_engine"
+kind = "lib"
+path = "packages/triage_engine"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "."]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "backlog_core"
+kind = "lib"
+path = "packages/backlog_core"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "."]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "backlog_miner"
+kind = "lib"
+path = "packages/backlog_miner"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "."]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "backlog_repo"
+kind = "lib"
+path = "packages/backlog_repo"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "."]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "usertest_backlog"
+kind = "app"
+path = "apps/usertest_backlog"
+generator = "python_pdm_app"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "."]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
+id = "run_artifacts"
+kind = "lib"
+path = "packages/run_artifacts"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "."]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]

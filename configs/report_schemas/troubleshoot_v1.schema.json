@@ -1,0 +1,64 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Troubleshoot Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "status",
+    "goal",
+    "failure_point",
+    "evidence",
+    "attempted_fixes",
+    "recommended_fix_path"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "kind": { "type": "string", "const": "troubleshoot_v1" },
+    "status": { "type": "string", "enum": ["success", "partial", "failure"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+
+    "goal": { "type": "string", "minLength": 1 },
+
+    "failure_point": { "type": "string", "minLength": 1 },
+
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["what_happened"],
+      "properties": {
+        "what_happened": { "type": "string", "minLength": 1 },
+        "error_excerpt": { "type": "string" },
+        "context": { "type": "string" }
+      }
+    },
+
+    "attempted_fixes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["fix", "result"],
+        "properties": {
+          "fix": { "type": "string", "minLength": 1 },
+          "result": { "type": "string", "minLength": 1 },
+          "evidence": { "type": "string" }
+        }
+      }
+    },
+
+    "recommended_fix_path": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+
+    "prevent_recurrence": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+
+    "extensions": { "type": "object", "additionalProperties": true }
+  }
+}

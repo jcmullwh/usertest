@@ -1,0 +1,5 @@
+{"type":"message","role":"assistant","content":"Checking USERS.md","delta":true}
+{"type":"tool_use","tool_name":"read_file","tool_id":"t1","parameters":{"file_path":"USERS.md","limit":2}}
+{"type":"tool_result","tool_id":"t1","status":"success"}
+{"type":"tool_use","tool_name":"run_shell_command","tool_id":"t2","parameters":{"command":"echo README.md"}}
+{"type":"tool_result","tool_id":"t2","status":"success"}

@@ -1,0 +1,4 @@
+# Optional Python packages to install into the image with pip.
+# Example:
+#   openai
+#   anthropic

@@ -1,0 +1,3 @@
+# Optional npm packages to install globally (requires node/npm in the image).
+# Example:
+#   @anthropic-ai/claude-code

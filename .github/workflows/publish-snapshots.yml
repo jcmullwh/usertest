@@ -1,0 +1,36 @@
+name: Publish snapshots
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: publish-snapshots-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install publish deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r tools/requirements-publish.txt
+
+      - name: Self-test publisher
+        run: python tools/monorepo_publish/publish_snapshots.py --self-test
+
+      - name: Publish snapshots
+        env:
+          GITLAB_BASE_URL: ${{ secrets.GITLAB_BASE_URL }}
+          GITLAB_PYPI_PROJECT_ID: ${{ secrets.GITLAB_PYPI_PROJECT_ID }}
+          GITLAB_PYPI_USERNAME: ${{ secrets.GITLAB_PYPI_USERNAME }}
+          GITLAB_PYPI_PASSWORD: ${{ secrets.GITLAB_PYPI_PASSWORD }}
+        run: python tools/monorepo_publish/publish_snapshots.py --confirm-live-publish

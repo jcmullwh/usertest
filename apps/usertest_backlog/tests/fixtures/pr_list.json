@@ -1,0 +1,20 @@
+[
+  {
+    "number": 101,
+    "title": "Refine backlog parser JSON recovery",
+    "body": "Improve malformed JSON recovery for backlog tickets.",
+    "files": ["packages/backlog_core/src/backlog_core/backlog.py"]
+  },
+  {
+    "number": 102,
+    "title": "Backlog parser recovery improvements",
+    "body": "More parser fixes and assertions.",
+    "files": ["packages/backlog_core/src/backlog_core/backlog.py"]
+  },
+  {
+    "number": 205,
+    "title": "Update architecture docs typography",
+    "body": "Only docs changes.",
+    "files": ["docs/design/architecture.md"]
+  }
+]

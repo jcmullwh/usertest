@@ -1,0 +1,127 @@
+[scaffold]
+templates_cache_dir = ".scaffold/cache"
+vendor_dir = "tools/templates/vendor"
+
+[kinds.app]
+output_dir = "apps"
+default_generator = "python_stdlib_copy"
+ci = { lint = true, test = true, build = false }
+
+[kinds.web]
+output_dir = "apps"
+default_generator = "node_vite"
+ci = { lint = false, test = false, build = true }
+
+[kinds.lib]
+output_dir = "packages"
+default_generator = "python_stdlib_copy"
+ci = { lint = true, test = true, build = false }
+
+[kinds.data]
+output_dir = "data"
+default_generator = "python_stdlib_copy"
+ci = { lint = false, test = false, build = false }
+
+[kinds.exp]
+output_dir = "experiments"
+default_generator = "python_stdlib_copy"
+ci = { lint = false, test = false, build = false }
+
+[kinds.infra]
+output_dir = "infra"
+default_generator = "python_stdlib_copy"
+ci = { lint = false, test = false, build = false }
+
+
+# ----------------------------
+# GENERATORS
+# ----------------------------
+
+[generators.python_stdlib_copy]
+type = "copy"
+source = "tools/templates/internal/python-stdlib-copy"
+toolchain = "python"
+package_manager = "none"
+substitutions = { "__NAME__" = "{name}", "__NAME_SNAKE__" = "{name_snake}" }
+tasks.lint = ["python", "-m", "compileall", "src"]
+tasks.test = ["python", "-m", "unittest", "discover", "-s", "tests"]
+
+[generators.python_stdlib_cookiecutter]
+type = "cookiecutter"
+source = "tools/templates/internal/python-stdlib-cookiecutter"
+name_var = "project_slug"
+context_defaults = { package_name = "{name_snake}" }
+toolchain = "python"
+package_manager = "none"
+tasks.lint = ["python", "-m", "compileall", "src"]
+tasks.test = ["python", "-m", "unittest", "discover", "-s", "tests"]
+
+[generators.python_pdm_lib]
+type = "cookiecutter"
+source = "tools/templates/internal/python-pdm-lib"
+name_var = "project_slug"
+context_defaults = { package_name = "{name_snake}" }
+toolchain = "python"
+package_manager = "pdm"
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+tasks.depcheck = ["pdm", "run", "deptry", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+
+[generators.python_pdm_app]
+type = "cookiecutter"
+source = "tools/templates/internal/python-pdm-app"
+name_var = "project_slug"
+context_defaults = { package_name = "{name_snake}" }
+toolchain = "python"
+package_manager = "pdm"
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+tasks.depcheck = ["pdm", "run", "deptry", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+
+[generators.python_poetry_app]
+type = "copy"
+source = "tools/templates/internal/python-poetry-app"
+substitutions = { "__NAME__" = "{name}", "__NAME_SNAKE__" = "{name_snake}" }
+toolchain = "python"
+package_manager = "poetry"
+tasks.install = ["poetry", "install"]
+tasks.lint = ["poetry", "run", "ruff", "check", "."]
+tasks.format = ["poetry", "run", "ruff", "format", "."]
+tasks.typecheck = ["poetry", "run", "mypy", "."]
+tasks.depcheck = ["poetry", "run", "deptry", "."]
+tasks.test = ["poetry", "run", "pytest", "-q"]
+
+[generators.python_uv_app]
+type = "copy"
+source = "tools/templates/internal/python-uv-app"
+substitutions = { "__NAME__" = "{name}", "__NAME_SNAKE__" = "{name_snake}" }
+toolchain = "python"
+package_manager = "uv"
+tasks.install = ["uv", "sync"]
+tasks.lint = ["uv", "run", "ruff", "check", "."]
+tasks.format = ["uv", "run", "ruff", "format", "."]
+tasks.typecheck = ["uv", "run", "mypy", "."]
+tasks.depcheck = ["uv", "run", "deptry", "."]
+tasks.test = ["uv", "run", "pytest", "-q"]
+
+[generators.node_vite]
+type = "command"
+toolchain = "node"
+package_manager = "npm"
+command = ["npm", "create", "vite@latest", "{dest_path}", "--", "--template", "vanilla"]
+tasks.install = ["npm", "install"]
+tasks.build = ["npm", "run", "build"]
+
+[generators.terraform_module]
+type = "copy"
+source = "tools/templates/internal/terraform-module"
+substitutions = { "__NAME__" = "{name}" }
+toolchain = "terraform"
+package_manager = "none"
+tasks.lint = ["terraform", "fmt", "-check", "-recursive"]

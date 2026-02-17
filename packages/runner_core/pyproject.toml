@@ -1,0 +1,65 @@
+[project]
+name = "runner_core"
+version = "0.1.0"
+description = "A Python library (PDM)"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "agent-adapters",
+  "normalized_events",
+  "pyyaml>=6.0.3",
+  "reporter",
+  "sandbox_runner",
+]
+
+[build-system]
+requires = ["pdm-backend>=2.0.0"]
+build-backend = "pdm.backend"
+
+[tool.pdm]
+distribution = true
+
+[tool.monorepo]
+status = "incubator"
+
+[tool.pdm.dev-dependencies]
+dev = [
+    "-e file:///${PROJECT_ROOT}/../../packages/agent_adapters#egg=agent-adapters",
+    "-e file:///${PROJECT_ROOT}/../../packages/normalized_events#egg=normalized_events",
+    "-e file:///${PROJECT_ROOT}/../../packages/reporter#egg=reporter",
+    "-e file:///${PROJECT_ROOT}/../run_artifacts#egg=run_artifacts",
+    "-e file:///${PROJECT_ROOT}/../../packages/sandbox_runner#egg=sandbox_runner",
+]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "B",
+  "E",
+  "F",
+  "I",
+  "UP",
+]
+ignore = ["UP017"]
+
+[dependency-groups]
+dev = [
+    "deptry>=0.20.0",
+    "mypy>=1.8.0",
+    "pytest>=8.0.0",
+    "ruff>=0.14.0",
+    "types-PyYAML>=6.0.0.0",
+    "tomlkit>=0.12.0",
+]

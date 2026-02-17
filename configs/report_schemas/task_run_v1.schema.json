@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Task Run Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "kind",
+    "status",
+    "goal",
+    "summary",
+    "steps",
+    "outputs",
+    "next_actions"
+  ],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "kind": { "type": "string", "const": "task_run_v1" },
+    "status": { "type": "string", "enum": ["success", "partial", "failure"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+
+    "goal": { "type": "string", "minLength": 1 },
+    "summary": { "type": "string", "minLength": 1 },
+
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/step" }
+    },
+
+    "outputs": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/artifact" }
+    },
+
+    "issues": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/issue" }
+    },
+
+    "user_experience": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "friction_points": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "unclear_points": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "what_would_help_next_time": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+
+    "next_actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+
+    "extensions": { "type": "object", "additionalProperties": true }
+  },
+
+  "$defs": {
+    "step": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "attempts", "outcome"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "attempts": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "$ref": "#/$defs/attempt" }
+        },
+        "outcome": { "type": "string", "minLength": 1 }
+      }
+    },
+
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action"],
+      "properties": {
+        "action": { "type": "string", "minLength": 1 },
+        "result": { "type": "string" },
+        "evidence": { "type": "string" }
+      }
+    },
+
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["label"],
+      "properties": {
+        "label": { "type": "string", "minLength": 1 },
+        "path": { "type": ["string", "null"] },
+        "description": { "type": "string" }
+      }
+    },
+
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["severity", "title", "details"],
+      "properties": {
+        "severity": { "type": "string", "enum": ["info", "warn", "error"] },
+        "title": { "type": "string", "minLength": 1 },
+        "details": { "type": "string", "minLength": 1 },
+        "evidence": { "type": "string" },
+        "suggested_fix": { "type": "string" }
+      }
+    }
+  }
+}

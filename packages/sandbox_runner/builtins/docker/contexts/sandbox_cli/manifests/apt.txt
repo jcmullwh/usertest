@@ -1,0 +1,15 @@
+# Base tools for sandbox execution.
+#
+# Add/remove packages here and rebuild the image.
+#
+# Keep this list pragmatic but minimal. Avoid hard-coding agent CLIs here; prefer adding them via
+# pip.txt or npm-global.txt (or a custom Dockerfile) as needed.
+
+bash
+ca-certificates
+curl
+git
+openssh-client
+procps
+ripgrep
+build-essential

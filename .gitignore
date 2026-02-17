@@ -1,0 +1,107 @@
+############################################
+# Python
+############################################
+__pycache__/
+**.py[cod]
+**.pyd
+
+# Virtual environments (do NOT ignore repo folder "env/")
+.venv/
+venv/
+.env/
+ENV/
+
+# PDM
+__pypackages__/
+.pdm-python
+.pdm-build/
+.pdm_logs/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+
+############################################
+# Testing / tooling
+############################################
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.hypothesis/
+
+.coverage
+.coverage.**
+coverage.xml
+htmlcov/
+
+pytestdebug.log
+
+**/pytest-cache-files-*/
+
+############################################
+# JavaScript / Node (some tools generate these)
+############################################
+node_modules/
+
+############################################
+# Repo-specific artifacts
+############################################
+# Per-run artifacts (runner output)
+runs/
+usertest/runs/
+usertest/cache/
+
+############################################
+# Editor / IDE
+############################################
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+
+.idea/
+.vs/
+*.code-workspace
+
+############################################
+# OS cruft
+############################################
+.DS_Store
+Thumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+############################################
+# Misc artifacts
+############################################
+.scaffold/
+*.log
+*.tmp
+*.bak
+*.swp
+*.swo
+*.zip
+*.tar.gz
+
+############################################
+# Agent state (local-only)
+############################################
+.agents/**
+!.agents/.gitkeep
+
+
+############################################
+# Repo-specific artifacts
+############################################
+**/backlog_actions.yaml
+**/backlog_atom_actions.yaml
+
+############################################
+# Scaffolding artifacts (local-only)
+############################################
+**/lint_report.json
+

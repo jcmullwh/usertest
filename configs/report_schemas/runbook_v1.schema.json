@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Runbook Report v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "kind", "status", "goal", "runbook", "validation", "next_actions"],
+  "properties": {
+    "schema_version": { "type": "integer", "const": 1 },
+    "kind": { "type": "string", "const": "runbook_v1" },
+    "status": { "type": "string", "enum": ["success", "partial", "failure"] },
+    "confidence": { "type": "number", "minimum": 0, "maximum": 1 },
+
+    "goal": { "type": "string", "minLength": 1 },
+
+    "runbook": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["prerequisites", "steps"],
+      "properties": {
+        "prerequisites": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "steps": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "inputs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "outputs": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+
+    "validation": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+
+    "failures_and_fixes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["symptom", "likely_cause", "fix"],
+        "properties": {
+          "symptom": { "type": "string", "minLength": 1 },
+          "likely_cause": { "type": "string", "minLength": 1 },
+          "fix": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
+
+    "next_actions": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    },
+
+    "extensions": { "type": "object", "additionalProperties": true }
+  }
+}

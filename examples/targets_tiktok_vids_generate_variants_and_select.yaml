@@ -1,0 +1,28 @@
+targets:
+  # creative_curator (seed 0)
+  - repo: "I:\\code\\tiktok_vids"
+    agent: "codex"
+    persona_id: "creative_curator"
+    seed: 0
+  - repo: "I:\\code\\tiktok_vids"
+    agent: "claude"
+    persona_id: "creative_curator"
+    seed: 0
+  - repo: "I:\\code\\tiktok_vids"
+    agent: "gemini"
+    persona_id: "creative_curator"
+    seed: 0
+
+  # routine_operator (seed 1)
+  - repo: "I:\\code\\tiktok_vids"
+    agent: "codex"
+    persona_id: "routine_operator"
+    seed: 1
+  - repo: "I:\\code\\tiktok_vids"
+    agent: "claude"
+    persona_id: "routine_operator"
+    seed: 1
+  - repo: "I:\\code\\tiktok_vids"
+    agent: "gemini"
+    persona_id: "routine_operator"
+    seed: 1

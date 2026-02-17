@@ -1,0 +1,5 @@
+{
+  "project_slug": "my-lib",
+  "package_name": "my_lib",
+  "description": "A Python library (PDM)"
+}

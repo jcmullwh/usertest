@@ -1,0 +1,20 @@
+{
+  "version": 1,
+  "miners": {
+    "coverage_templates": [
+      "miner_default.md",
+      "miner_onboarding.md",
+      "miner_harness.md",
+      "miner_schema.md"
+    ],
+    "bagging_templates": [
+      "miner_default.md",
+      "miner_onboarding.md",
+      "miner_harness.md",
+      "miner_schema.md"
+    ],
+    "orphan_template": "miner_default.md"
+  },
+  "merge_judge_template": "merge_judge.md",
+  "labeler_template": "labeler.md"
+}

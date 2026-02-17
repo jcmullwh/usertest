@@ -1,0 +1,199 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PDM_VERSION: "2.26.2"
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.gen.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - id: gen
+        run: |
+          echo "matrix=$(python tools/scaffold/ci_matrix.py)" >> "$GITHUB_OUTPUT"
+
+  project:
+    runs-on: ubuntu-latest
+    needs: matrix
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.matrix.outputs.matrix) }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: No projects
+        if: ${{ matrix.id == '__no_projects__' }}
+        run: echo "No projects in tools/scaffold/monorepo.toml"
+
+      - uses: actions/setup-python@v5
+        if: ${{ matrix.id != '__no_projects__' }}
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        if: ${{ matrix.id != '__no_projects__' }}
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt', '**/pdm.lock', '**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install PDM
+        if: ${{ matrix.id != '__no_projects__' && matrix.package_manager == 'pdm' }}
+        run: python -m pip install --upgrade pip "pdm==${{ env.PDM_VERSION }}"
+
+      - uses: actions/setup-node@v4
+        if: ${{ matrix.id != '__no_projects__' && matrix.toolchain == 'node' }}
+        with:
+          node-version: "20"
+
+      - uses: hashicorp/setup-terraform@v3
+        if: ${{ matrix.id != '__no_projects__' && matrix.toolchain == 'terraform' }}
+
+      - name: Cache npm
+        uses: actions/cache@v4
+        if: ${{ matrix.id != '__no_projects__' && matrix.toolchain == 'node' }}
+        with:
+          path: ~/.npm
+          key: ${{ runner.os }}-npm-${{ hashFiles('**/package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-npm-
+
+      - name: Doctor
+        if: ${{ matrix.id != '__no_projects__' }}
+        run: python tools/scaffold/scaffold.py doctor
+
+      - name: Install
+        if: ${{ matrix.id != '__no_projects__' }}
+        run: python tools/scaffold/scaffold.py run install --project "${{ matrix.id }}" --skip-missing
+
+      - name: Lint
+        if: ${{ matrix.id != '__no_projects__' && matrix.ci_lint }}
+        run: python tools/scaffold/scaffold.py run lint --project "${{ matrix.id }}"
+
+      - name: Test
+        if: ${{ matrix.id != '__no_projects__' && matrix.ci_test }}
+        run: python tools/scaffold/scaffold.py run test --project "${{ matrix.id }}"
+
+      - name: Build
+        if: ${{ matrix.id != '__no_projects__' && matrix.ci_build }}
+        run: python tools/scaffold/scaffold.py run build --project "${{ matrix.id }}"
+
+  windows_scaffold_smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt', '**/pdm.lock', '**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install PDM
+        run: python -m pip install --upgrade pip "pdm==${{ env.PDM_VERSION }}"
+
+      - name: Doctor
+        run: python tools/scaffold/scaffold.py doctor
+
+      - name: Install (CLI)
+        run: python tools/scaffold/scaffold.py run install --project "cli" --skip-missing
+
+      - name: Test (CLI)
+        run: python tools/scaffold/scaffold.py run test --project "cli"
+
+  windows_script_smoke:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/pyproject.toml', '**/requirements*.txt', '**/pdm.lock', '**/poetry.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Smoke script (help + smoke tests)
+        shell: pwsh
+        run: .\scripts\smoke.ps1
+
+  scaffold_golden_path_smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PDM
+        run: python -m pip install --upgrade pip "pdm==${{ env.PDM_VERSION }}"
+
+      - name: Doctor (baseline)
+        run: python tools/scaffold/scaffold.py doctor
+
+      - name: Add sample app from default copy template
+        run: python tools/scaffold/scaffold.py add app ci-scaffold-smoke --generator python_stdlib_copy --no-install
+
+      - name: Doctor (after add)
+        run: python tools/scaffold/scaffold.py doctor
+
+      - name: Install (generated sample)
+        run: python tools/scaffold/scaffold.py run install --project "ci-scaffold-smoke" --skip-missing
+
+      - name: Test (generated sample)
+        run: python tools/scaffold/scaffold.py run test --project "ci-scaffold-smoke"
+
+      - name: Validate generated artifacts and manifest entry
+        run: |
+          test -d apps/ci-scaffold-smoke
+          test -f apps/ci-scaffold-smoke/README.md
+          test -f apps/ci-scaffold-smoke/src/ci_scaffold_smoke/__init__.py
+          test -f apps/ci-scaffold-smoke/tests/test_basic.py
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          manifest = tomllib.loads(Path("tools/scaffold/monorepo.toml").read_text(encoding="utf-8"))
+          projects = {project["id"]: project for project in manifest.get("projects", [])}
+          project = projects.get("ci-scaffold-smoke")
+          if project is None:
+              raise SystemExit("Missing ci-scaffold-smoke project entry in tools/scaffold/monorepo.toml")
+          if project.get("path") != "apps/ci-scaffold-smoke":
+              raise SystemExit(f"Unexpected project path: {project.get('path')!r}")
+          tasks = project.get("tasks", {})
+          if not isinstance(tasks, dict):
+              raise SystemExit("Project tasks table is missing or invalid")
+          for task_name in ("lint", "test"):
+              if task_name not in tasks:
+                  raise SystemExit(f"Missing tasks.{task_name} in generated manifest entry")
+          print("Generated project artifacts and manifest entry validated")
+          PY

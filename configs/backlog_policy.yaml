@@ -1,0 +1,17 @@
+backlog_policy:
+  surface_area_high:
+    - new_command
+    - breaking_change
+    - new_top_level_mode
+    - new_config_schema
+    - new_api
+  breadth_min_for_surface_area_high:
+    missions: 2
+    targets: 2
+    repo_inputs: 2
+  default_stage_for_high_surface_low_breadth: research_required
+  default_stage_for_labeled: ready_for_ticket
+  investigation_steps_for_high_surface_low_breadth:
+    - Validate repo intent
+    - Check if existing commands/flags can be parameterized
+    - Propose a consolidation plan (avoid new top-level commands)

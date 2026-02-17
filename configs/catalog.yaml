@@ -1,0 +1,10 @@
+version: 1
+personas_dirs:
+  - configs/personas/builtin
+missions_dirs:
+  - configs/missions/builtin
+prompt_templates_dir: configs/prompt_templates
+report_schemas_dir: configs/report_schemas
+defaults:
+  persona_id: quickstart_sprinter
+  mission_id: first_output_smoke

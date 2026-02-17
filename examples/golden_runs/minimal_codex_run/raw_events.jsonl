@@ -1,0 +1,3 @@
+{"id":"1","msg":{"type":"agent_message","message":"Hello"}}
+{"id":"1","msg":{"type":"exec_command_begin","call_id":"call_1","command":["echo","README.md"],"cwd":"C:\\\\ws"}}
+{"id":"1","msg":{"type":"exec_command_end","call_id":"call_1","stdout":"","stderr":"","exit_code":0,"duration":{"secs":0,"nanos":1}}}

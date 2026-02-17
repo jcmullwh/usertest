@@ -1,0 +1,5 @@
+# Minimal deps for running from source + pytest (pip-first workflow).
+# For the repo's fully-managed environments, see `python tools/scaffold/scaffold.py run install --all`.
+pyyaml>=6.0.3
+jsonschema>=4.26.0
+pytest>=8.0.0
