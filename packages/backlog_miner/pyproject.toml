@@ -22,6 +22,14 @@ status = "incubator"
 
 [tool.pdm.dev-dependencies]
 dev = [
+  "-e file:///${PROJECT_ROOT}/../../packages/agent_adapters#egg=agent-adapters",
+  "-e file:///${PROJECT_ROOT}/../../packages/backlog_core#egg=backlog_core",
+  "-e file:///${PROJECT_ROOT}/../../packages/normalized_events#egg=normalized_events",
+  "-e file:///${PROJECT_ROOT}/../../packages/reporter#egg=reporter",
+  "-e file:///${PROJECT_ROOT}/../../packages/runner_core#egg=runner_core",
+  "-e file:///${PROJECT_ROOT}/../../packages/sandbox_runner#egg=sandbox_runner",
+  "-e file:///${PROJECT_ROOT}/../../packages/triage_engine#egg=triage_engine",
+  "-e file:///${PROJECT_ROOT}/../run_artifacts#egg=run_artifacts",
   "deptry>=0.20.0",
   "mypy>=1.8.0",
   "pytest>=8.0.0",
