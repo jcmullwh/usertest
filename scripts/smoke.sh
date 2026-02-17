@@ -64,6 +64,7 @@ if [[ "${SKIP_INSTALL}" -eq 0 ]]; then
     "${PYTHON_BIN}" -m pip install --no-deps \
       -e packages/normalized_events \
       -e packages/agent_adapters \
+      -e packages/run_artifacts \
       -e packages/reporter \
       -e packages/sandbox_runner \
       -e packages/runner_core \
