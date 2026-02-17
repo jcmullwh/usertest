@@ -197,7 +197,7 @@ def test_reports_export_tickets_applies_stage_gates_and_ledger_skip(tmp_path: Pa
     owner_triage = by_ticket["BLG-004"]["owner_repo"]
     assert isinstance(owner_triage, dict)
     assert Path(owner_triage["idea_path"]).exists()
-    assert ".agents\\plans\\0.5 - to_triage\\" in owner_triage["idea_path"]
+    assert ".agents/plans/0.5 - to_triage/" in owner_triage["idea_path"].replace("\\", "/")
 
     atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
     atoms = {item["atom_id"]: item for item in atom_actions_doc["atoms"]}
