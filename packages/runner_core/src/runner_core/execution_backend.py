@@ -36,6 +36,9 @@ _SANDBOX_CLI_PYTHON_VERSION_CANDIDATES: tuple[str, ...] = (
     "3.12",
     "3.13",
 )
+_DEFAULT_DOCKER_CONTEXT_REL = Path(
+    "packages/sandbox_runner/builtins/docker/contexts/sandbox_cli"
+)
 
 
 def prepare_execution_backend(
@@ -61,10 +64,15 @@ def prepare_execution_backend(
 
     context_dir: Path | None = getattr(request, "exec_docker_context", None)
     if context_dir is None:
-        raise ValueError(
-            "exec_backend='docker' requires exec_docker_context "
-            "(CLI: --exec-docker-context PATH)."
-        )
+        default_context = (repo_root / _DEFAULT_DOCKER_CONTEXT_REL).resolve()
+        if default_context.exists() and default_context.is_dir():
+            context_dir = default_context
+        else:
+            raise ValueError(
+                "exec_backend='docker' requires exec_docker_context "
+                "(CLI: --exec-docker-context PATH).\n"
+                f"default_context_checked={default_context}"
+            )
     context_dir = context_dir.resolve()
     if not context_dir.exists() or not context_dir.is_dir():
         raise FileNotFoundError(f"Missing Docker image context directory: {context_dir}")
