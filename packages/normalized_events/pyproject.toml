@@ -1,4 +1,4 @@
-[project]
+﻿[project]
 name = "normalized_events"
 version = "0.1.0"
 description = "Shared normalized-events contract + JSONL helpers"
@@ -16,6 +16,11 @@ distribution = true
 [tool.monorepo]
 status = "incubator"
 
+[tool.pdm.scripts]
+smoke = "python -m pytest -q tests/test_basic.py"
+smoke_extended = "python -m pytest -q tests/test_basic.py"
+test = "python -m pytest -q"
+lint = "python -m ruff check ."
 [tool.pdm.dev-dependencies]
 dev = [
   "deptry>=0.20.0",
@@ -46,3 +51,4 @@ select = [
   "UP",
 ]
 ignore = ["UP017"]
+

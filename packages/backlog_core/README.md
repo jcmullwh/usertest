@@ -19,10 +19,30 @@ It is used heavily by the `usertest-backlog` CLI, but can be consumed as a stand
 
 Distribution name: `backlog_core`
 
-From this monorepo (editable):
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
 
 ```bash
-pip install -e packages/backlog_core
+pdm install
+pdm run smoke
+pdm run test
+pdm run lint
+```
+
+Dependencies for standalone use:
+- `backlog_core` imports `run_artifacts` and `triage_engine` at runtime.
+- If your package index does not provide those internal packages, install local checkouts first.
+- From a sibling checkout layout, run:
+
+```bash
+python -m pip install -e ../run_artifacts -e ../triage_engine
+```
+
+If you need only a runtime install (without dev tooling commands), use:
+
+```bash
+python -m pip install -e .
 ```
 
 From a private GitLab PyPI registry (if you publish it):
@@ -100,7 +120,21 @@ Design rationale for strict capture invariants:
 
 ## Development
 
-Run from the repo root:
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
+
+```bash
+pdm install
+pdm run smoke
+pdm run smoke_extended
+pdm run test
+pdm run lint
+```
+
+### Monorepo contributor workflow
+
+Run from the monorepo root:
 
 ```bash
 python tools/scaffold/scaffold.py run install --project backlog_core

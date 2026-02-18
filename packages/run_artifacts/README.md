@@ -18,10 +18,21 @@ It is shared by:
 
 Distribution name: `run_artifacts`
 
-From this monorepo (editable):
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
 
 ```bash
-pip install -e packages/run_artifacts
+pdm install
+pdm run smoke
+pdm run test
+pdm run lint
+```
+
+If you need only a runtime install (without dev tooling commands), use:
+
+```bash
+python -m pip install -e .
 ```
 
 From a private GitLab PyPI registry (if you publish it):
@@ -103,7 +114,21 @@ Related design doc:
 
 ## Development
 
-Run from the repo root:
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
+
+```bash
+pdm install
+pdm run smoke
+pdm run smoke_extended
+pdm run test
+pdm run lint
+```
+
+### Monorepo contributor workflow
+
+Run from the monorepo root:
 
 ```bash
 python tools/scaffold/scaffold.py run install --project run_artifacts

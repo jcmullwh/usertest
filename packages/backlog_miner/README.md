@@ -18,10 +18,30 @@ observations and issues.
 
 Distribution name: `backlog_miner`
 
-From this monorepo (editable):
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
 
 ```bash
-pip install -e packages/backlog_miner
+pdm install
+pdm run smoke
+pdm run test
+pdm run lint
+```
+
+Dependencies for standalone use:
+- `backlog_miner` imports `agent_adapters`, `backlog_core`, and `runner_core` at runtime.
+- If your package index does not provide those internal packages, install local checkouts first.
+- From a sibling checkout layout, run:
+
+```bash
+python -m pip install -e ../agent_adapters -e ../backlog_core -e ../runner_core
+```
+
+If you need only a runtime install (without dev tooling commands), use:
+
+```bash
+python -m pip install -e .
 ```
 
 From a private GitLab PyPI registry (if you publish it):
@@ -87,7 +107,21 @@ Typical flow:
 
 ## Development
 
-Run from the repo root:
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
+
+```bash
+pdm install
+pdm run smoke
+pdm run smoke_extended
+pdm run test
+pdm run lint
+```
+
+### Monorepo contributor workflow
+
+Run from the monorepo root:
 
 ```bash
 python tools/scaffold/scaffold.py run install --project backlog_miner

@@ -18,10 +18,21 @@ The implementation is not tied to any specific agent or the `usertest` framework
 Distribution name: `sandbox_runner`
 Import package: `sandbox_runner`
 
-From this monorepo (editable):
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
 
 ```bash
-pip install -e packages/sandbox_runner
+pdm install
+pdm run smoke
+pdm run test
+pdm run lint
+```
+
+If you need only a runtime install (without dev tooling commands), use:
+
+```bash
+python -m pip install -e .
 ```
 
 From a private GitLab PyPI registry (snapshot publishing):
@@ -92,7 +103,23 @@ When `usertest run` is invoked with:
 
 ## Development
 
-Run from the repo root:
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
+
+```bash
+pdm install
+pdm run smoke
+pdm run smoke_extended
+pdm run test
+pdm run lint
+```
+
+`pdm run smoke_extended` exercises Docker-backed smoke and skips with an explicit reason when Docker is unavailable.
+
+### Monorepo contributor workflow
+
+Run from the monorepo root:
 
 ```bash
 python tools/scaffold/scaffold.py run install --project sandbox_runner

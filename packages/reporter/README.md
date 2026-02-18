@@ -17,10 +17,30 @@ standalone library for post-processing run artifacts.
 Distribution name: `reporter`
 Import package: `reporter`
 
-From this monorepo (editable):
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
 
 ```bash
-pip install -e packages/reporter
+pdm install
+pdm run smoke
+pdm run test
+pdm run lint
+```
+
+Dependencies for standalone use:
+- `reporter` imports `normalized_events` and `run_artifacts` at runtime.
+- If your package index does not provide those internal packages, install local checkouts first.
+- From a sibling checkout layout, run:
+
+```bash
+python -m pip install -e ../normalized_events -e ../run_artifacts
+```
+
+If you need only a runtime install (without dev tooling commands), use:
+
+```bash
+python -m pip install -e .
 ```
 
 From a private GitLab PyPI registry (snapshot publishing):
@@ -83,6 +103,22 @@ Common entry points:
 ---
 
 ## Development
+
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
+
+```bash
+pdm install
+pdm run smoke
+pdm run smoke_extended
+pdm run test
+pdm run lint
+```
+
+### Monorepo contributor workflow
+
+Run from the monorepo root:
 
 - Run tests: `python tools/scaffold/scaffold.py run test --project reporter`
 - Run lint: `python tools/scaffold/scaffold.py run lint --project reporter`

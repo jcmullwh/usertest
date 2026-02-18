@@ -15,10 +15,21 @@ This package is intentionally minimal so it can act as a shared contract between
 Distribution name: `normalized_events`
 Import package: `normalized_events`
 
-From this monorepo (editable):
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
 
 ```bash
-pip install -e packages/normalized_events
+pdm install
+pdm run smoke
+pdm run test
+pdm run lint
+```
+
+If you need only a runtime install (without dev tooling commands), use:
+
+```bash
+python -m pip install -e .
 ```
 
 From a private GitLab PyPI registry (snapshot publishing):
@@ -59,7 +70,21 @@ See `docs/design/event-model.md` for event semantics and `examples/golden_runs/`
 
 ## Development
 
-Run from the repo root:
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
+
+```bash
+pdm install
+pdm run smoke
+pdm run smoke_extended
+pdm run test
+pdm run lint
+```
+
+### Monorepo contributor workflow
+
+Run from the monorepo root:
 
 ```bash
 python tools/scaffold/scaffold.py run install --project normalized_events

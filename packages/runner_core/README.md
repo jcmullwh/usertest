@@ -18,10 +18,30 @@ It is the core engine behind the `usertest` CLI, but can be used programmaticall
 Distribution name: `runner_core`
 Import package: `runner_core`
 
-From this monorepo (editable):
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
 
 ```bash
-pip install -e packages/runner_core
+pdm install
+pdm run smoke
+pdm run test
+pdm run lint
+```
+
+Dependencies for standalone use:
+- `runner_core` imports sibling packages (`agent_adapters`, `normalized_events`, `reporter`, and `sandbox_runner`) at runtime.
+- If your package index does not provide those internal packages, install local checkouts first.
+- From a sibling checkout layout, run:
+
+```bash
+python -m pip install -e ../agent_adapters -e ../normalized_events -e ../reporter -e ../sandbox_runner
+```
+
+If you need only a runtime install (without dev tooling commands), use:
+
+```bash
+python -m pip install -e .
 ```
 
 From a private GitLab PyPI registry (snapshot publishing):
@@ -89,6 +109,22 @@ logging and run directory naming.
 - Report schemas: `docs/design/report-schema.md`
 
 ## Development
+
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
+
+```bash
+pdm install
+pdm run smoke
+pdm run smoke_extended
+pdm run test
+pdm run lint
+```
+
+### Monorepo contributor workflow
+
+Run from the monorepo root:
 
 - Run tests: `python tools/scaffold/scaffold.py run test --project runner_core`
 - Run lint: `python tools/scaffold/scaffold.py run lint --project runner_core`
