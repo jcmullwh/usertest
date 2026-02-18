@@ -4,6 +4,7 @@ from run_artifacts import (
     TextCapturePolicy,
     TextExcerpt,
     classify_failure_kind,
+    classify_known_stderr_warnings,
     coerce_validation_errors,
     extract_error_artifacts,
     iter_report_history,
@@ -19,6 +20,7 @@ def test_package_surface() -> None:
     assert TextCapturePolicy is not None
     assert TextExcerpt is not None
     assert classify_failure_kind is not None
+    assert classify_known_stderr_warnings is not None
     assert coerce_validation_errors is not None
     assert extract_error_artifacts is not None
     assert iter_report_history is not None

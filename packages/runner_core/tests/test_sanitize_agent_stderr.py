@@ -41,3 +41,40 @@ def test_sanitize_agent_stderr_file_dedupes_codex_personality_warning(tmp_path: 
     assert "Model personality requested but model_messages is missing" in text
     assert "before" in text
     assert "after" in text
+
+
+def test_sanitize_agent_stderr_file_summarizes_known_codex_capability_warnings(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "agent_stderr.txt"
+    shell_snapshot = (
+        "2026-02-18T00:00:00Z WARN codex_core::shell_snapshot: "
+        "Shell snapshot not supported yet for PowerShell"
+    )
+    turn_metadata = (
+        "2026-02-18T00:00:01Z WARN codex_core::turn_metadata: "
+        "timed out after 250ms while building turn metadata header"
+    )
+    path.write_text(
+        "\n".join(
+            [
+                "before",
+                shell_snapshot,
+                shell_snapshot,
+                turn_metadata,
+                "after",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    _sanitize_agent_stderr_file(agent="codex", path=path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "before" in text
+    assert "after" in text
+    assert "Shell snapshot not supported yet for PowerShell" not in text
+    assert "code=shell_snapshot_powershell_unsupported" in text
+    assert "occurrences=2" in text
+    assert "code=turn_metadata_header_timeout" in text

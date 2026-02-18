@@ -204,6 +204,9 @@ _GEMINI_STDERR_STRIP_LINES: frozenset[str] = frozenset({"Loaded cached credentia
 _CODEX_PERSONALITY_MISSING_MESSAGES_WARNING = (
     "Model personality requested but model_messages is missing"
 )
+_CODEX_SHELL_SNAPSHOT_WARNING = "Shell snapshot not supported yet for PowerShell"
+_CODEX_SHELL_SNAPSHOT_WARNING_CODE = "shell_snapshot_powershell_unsupported"
+_CODEX_TURN_METADATA_TIMEOUT_CODE = "turn_metadata_header_timeout"
 _READ_FILE_NOT_FOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"Error executing tool read_file:\s*File not found(?::\s*|\s+)(?P<path>\S+)",
@@ -228,15 +231,52 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
         return "\n".join(lines)
 
     if agent == "codex":
-        # Codex can emit this warning on every turn; keep one copy for debugging, drop duplicates.
+        # Codex can emit repeated warnings every turn; collapse known noise to one structured note.
         saw_personality_warning = False
+        shell_snapshot_count = 0
+        turn_metadata_timeout_count = 0
         lines: list[str] = []
         for line in text.splitlines():
+            lowered = line.lower()
             if _CODEX_PERSONALITY_MISSING_MESSAGES_WARNING in line:
                 if saw_personality_warning:
                     continue
                 saw_personality_warning = True
+            if _CODEX_SHELL_SNAPSHOT_WARNING.lower() in lowered:
+                shell_snapshot_count += 1
+                continue
+            if "turn metadata" in lowered and "timed out" in lowered and "header" in lowered:
+                turn_metadata_timeout_count += 1
+                continue
             lines.append(line)
+
+        if shell_snapshot_count > 0:
+            lines.extend(
+                [
+                    (
+                        "[codex_warning_summary] "
+                        f"code={_CODEX_SHELL_SNAPSHOT_WARNING_CODE} "
+                        f"occurrences={shell_snapshot_count} "
+                        "classification=capability_notice"
+                    ),
+                    (
+                        "hint=PowerShell shell snapshot unsupported; "
+                        "continuing without shell snapshot metadata."
+                    ),
+                ]
+            )
+        if turn_metadata_timeout_count > 0:
+            lines.extend(
+                [
+                    (
+                        "[codex_warning_summary] "
+                        f"code={_CODEX_TURN_METADATA_TIMEOUT_CODE} "
+                        f"occurrences={turn_metadata_timeout_count} "
+                        "classification=capability_notice"
+                    ),
+                    "hint=Turn metadata header timed out; continuing without metadata header.",
+                ]
+            )
         return "\n".join(lines)
 
     return text

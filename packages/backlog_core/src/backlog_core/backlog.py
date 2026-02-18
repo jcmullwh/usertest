@@ -10,6 +10,7 @@ from typing import Any
 from run_artifacts.capture import CaptureResult, TextCapturePolicy, capture_text_artifact
 from run_artifacts.run_failure_event import (
     classify_failure_kind,
+    classify_known_stderr_warnings,
     coerce_validation_errors,
     extract_error_artifacts,
     render_failure_text,
@@ -42,6 +43,7 @@ _TRUST_SOURCE_WEIGHTS: dict[str, float] = {
     "error_json": 0.95,
     "report_validation_error": 0.90,
     "agent_stderr_artifact": 0.85,
+    "capability_warning_artifact": 0.20,
     "agent_last_message_artifact": 0.75,
     "confusion_point": 0.70,
     "suggested_change": 0.65,
@@ -195,6 +197,8 @@ def _infer_severity_hint(*, source: str, text: str, priority: str | None = None)
         if any(token in lowered for token in ("429", "quota", "capacity", "resource_exhausted")):
             return "medium"
         return "high"
+    if source == "capability_warning_artifact":
+        return "low"
     if source == "confidence_missing":
         return "low"
     if source == "confusion_point":
@@ -402,6 +406,28 @@ def extract_backlog_atoms(
             artifact_text = _clean_atom_text(_compose_artifact_text(capture))
             if not artifact_text:
                 artifact_text = "[empty artifact]"
+            if source == "agent_stderr_artifact" and status.strip().lower() == "ok":
+                warning_meta = classify_known_stderr_warnings(artifact_text)
+                warning_only = bool(warning_meta.get("warning_only"))
+                warning_codes = warning_meta.get("codes")
+                warning_counts = warning_meta.get("counts")
+                if warning_only and isinstance(warning_codes, list):
+                    _emit(
+                        "capability_warning_artifact",
+                        (
+                            "Known capability warning(s) in agent stderr: "
+                            + ", ".join(str(code) for code in warning_codes)
+                        ),
+                        warning_codes=warning_codes,
+                        warning_counts=warning_counts if isinstance(warning_counts, dict) else None,
+                        excerpt_head=excerpt_head,
+                        excerpt_tail=excerpt_tail,
+                        truncated=truncated,
+                        capture_error=capture.error,
+                        artifact_ref=_artifact_ref_public(capture),
+                        severity_hint="low",
+                    )
+                    continue
             _emit(
                 source,
                 artifact_text,

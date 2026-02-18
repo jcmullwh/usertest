@@ -210,6 +210,45 @@ def test_extract_backlog_atoms_skips_empty_stderr_on_success(tmp_path: Path) -> 
     assert "agent_last_message_artifact" in sources
 
 
+def test_extract_backlog_atoms_reclassifies_known_warning_only_stderr(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "agent_stderr.txt").write_text(
+        "\n".join(
+            [
+                "[codex_warning_summary] code=shell_snapshot_powershell_unsupported "
+                "occurrences=4 classification=capability_notice",
+                "hint=PowerShell shell snapshot unsupported; continuing without shell snapshot metadata.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "agent_last_message.txt").write_text("ok\n", encoding="utf-8")
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    sources = {item["source"] for item in atoms_doc["atoms"]}
+    assert "agent_stderr_artifact" not in sources
+    assert "capability_warning_artifact" in sources
+    warning_atom = next(
+        atom for atom in atoms_doc["atoms"] if atom.get("source") == "capability_warning_artifact"
+    )
+    assert warning_atom.get("severity_hint") == "low"
+    assert "shell_snapshot_powershell_unsupported" in warning_atom.get("warning_codes", [])
+
+
 def test_parse_ticket_list_recovers_array_and_normalizes() -> None:
     raw = """
     Notes before JSON.
