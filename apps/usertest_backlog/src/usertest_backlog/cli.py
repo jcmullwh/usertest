@@ -68,6 +68,7 @@ from runner_core.catalog import (
     load_catalog_config,
 )
 from runner_core.pathing import slugify
+from runner_core.python_interpreter_probe import probe_python_interpreters
 from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
 from triage_engine import cluster_items, extract_path_anchors_from_chunks
 
@@ -262,6 +263,23 @@ def _probe_command_responsive(*, command: str, timeout_seconds: float) -> str | 
     str | None
         Computed return value.
     """
+    if command in {"python", "python3", "py"}:
+        probe = probe_python_interpreters(
+            candidate_commands=[command],
+            timeout_seconds=max(0.1, timeout_seconds),
+        )
+        candidate = probe.by_command().get(command)
+        if candidate is None or not candidate.present:
+            return None
+        if candidate.usable:
+            return None
+        code = candidate.reason_code or "probe_failed"
+        reason = candidate.reason or "interpreter health probe failed"
+        return (
+            f"command {command!r} resolves to an unusable Python interpreter "
+            f"({code}): {reason}"
+        )
+
     resolved = shutil.which(command)
     if resolved is None:
         return None

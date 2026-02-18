@@ -203,6 +203,13 @@ def test_run_once_writes_preflight_probe_commands(
     diagnostics = payload.get("command_diagnostics", {})
     assert isinstance(diagnostics, dict)
     assert diagnostics.get("dummycmd", {}).get("status") == "present"
+    python_probe = payload.get("python_interpreter")
+    assert isinstance(python_probe, dict)
+    assert isinstance(python_probe.get("candidates"), list)
+    python_diag = diagnostics.get("python", {})
+    assert isinstance(python_diag, dict)
+    assert "reason_code" in python_diag
+    assert "resolved_path" in python_diag
     caps = payload.get("capabilities", {})
     assert isinstance(caps, dict)
     assert caps.get("shell_commands", {}).get("status") == "unknown"

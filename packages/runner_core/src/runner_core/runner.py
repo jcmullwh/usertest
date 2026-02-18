@@ -43,6 +43,7 @@ from runner_core.pip_bootstrap import (
     PipBootstrapResult,
     bootstrap_pip_requirements,
 )
+from runner_core.python_interpreter_probe import probe_python_interpreters
 from runner_core.pip_target import (
     is_pip_repo_input,
     parse_pip_repo_input,
@@ -435,13 +436,41 @@ def _agent_binary_for_preflight_probe(*, agent: str, agent_cfg: dict[str, Any]) 
     return binary
 
 
-def _probe_commands_local(commands: list[str]) -> dict[str, bool]:
+def _probe_commands_local(commands: list[str]) -> tuple[dict[str, bool], dict[str, Any]]:
     out: dict[str, bool] = {}
+    probe_details: dict[str, dict[str, Any]] = {}
+    python_commands = [cmd for cmd in commands if cmd in {"python", "python3", "py"}]
+    python_probe = (
+        probe_python_interpreters(candidate_commands=python_commands, timeout_seconds=5.0)
+        if python_commands
+        else None
+    )
+    python_by_command = python_probe.by_command() if python_probe is not None else {}
     for cmd in commands:
         if not isinstance(cmd, str) or not cmd.strip():
             continue
-        out[cmd] = shutil.which(cmd) is not None
-    return out
+        if cmd in python_by_command:
+            candidate = python_by_command[cmd]
+            out[cmd] = bool(candidate.usable)
+            probe_details[cmd] = candidate.to_dict()
+            continue
+
+        resolved = shutil.which(cmd)
+        present = resolved is not None
+        out[cmd] = present
+        probe_details[cmd] = {
+            "command": cmd,
+            "resolved_path": resolved,
+            "present": present,
+            "usable": present,
+            "reason_code": (None if present else "not_found"),
+            "reason": (None if present else f"`{cmd}` was not found on PATH."),
+        }
+
+    meta: dict[str, Any] = {"command_probe_details": probe_details}
+    if python_probe is not None:
+        meta["python_interpreter"] = python_probe.to_dict()
+    return out, meta
 
 
 def _snapshot_workspace_root(workspace_dir: Path, *, max_entries: int = 200) -> dict[str, Any]:
@@ -1382,7 +1411,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         commands=effective_probe_commands,
                     )
                 else:
-                    preflight_commands_present = _probe_commands_local(probe_commands)
+                    preflight_commands_present, preflight_meta = _probe_commands_local(
+                        probe_commands
+                    )
             except Exception as e:  # noqa: BLE001
                 preflight_commands_present = {}
                 preflight_meta = {"error": str(e)}
@@ -1434,6 +1465,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "This runner can't reliably precompute allowlist outcome."
                 )
 
+            probe_details = preflight_meta.get("command_probe_details")
+            probe_details_dict = probe_details if isinstance(probe_details, dict) else {}
+            python_interpreter_meta = preflight_meta.get("python_interpreter")
+            python_interpreter_summary = (
+                python_interpreter_meta if isinstance(python_interpreter_meta, dict) else None
+            )
+
             command_diagnostics: dict[str, Any] = {}
             for cmd in effective_probe_commands:
                 present = preflight_commands_present.get(cmd)
@@ -1442,14 +1480,35 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     status = "present"
                 elif present is False:
                     status = "missing"
+
+                detail = probe_details_dict.get(cmd)
+                detail_dict = detail if isinstance(detail, dict) else {}
+                reason_code = detail_dict.get("reason_code")
+                reason_code_s = reason_code if isinstance(reason_code, str) else None
+                reason = detail_dict.get("reason")
+                reason_s = reason if isinstance(reason, str) else None
+                resolved_path = detail_dict.get("resolved_path")
+                resolved_path_s = resolved_path if isinstance(resolved_path, str) else None
+
                 if shell_status == "blocked" and status == "present":
                     status = "blocked_by_policy"
                 remediation: str | None = None
                 if status == "missing":
-                    remediation = (
-                        f"Install `{cmd}` in the selected execution backend, "
-                        "or switch --exec-backend."
-                    )
+                    if reason_code_s == "windowsapps_alias":
+                        remediation = (
+                            "Install and expose a full CPython interpreter (not WindowsApps "
+                            "alias), then retry."
+                        )
+                    elif reason_code_s == "missing_stdlib":
+                        remediation = (
+                            "Selected Python runtime is incomplete (missing stdlib). "
+                            "Install a full interpreter and retry."
+                        )
+                    else:
+                        remediation = (
+                            f"Install `{cmd}` in the selected execution backend, "
+                            "or switch --exec-backend."
+                        )
                 elif status == "blocked_by_policy":
                     remediation = (
                         "Enable shell commands in policy (recommended: --policy inspect), "
@@ -1458,6 +1517,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 command_diagnostics[cmd] = {
                     "present": present,
                     "status": status,
+                    "resolved_path": resolved_path_s,
+                    "reason_code": reason_code_s,
+                    "reason": reason_s,
                     "remediation": remediation,
                 }
 
@@ -1478,6 +1540,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "probe_commands": effective_probe_commands,
                     "required_agent_binary": required_agent_binary,
                     "required_agent_binary_present": required_agent_binary_present,
+                    "python_interpreter": python_interpreter_summary,
                     "capabilities": {
                         "shell_commands": {
                             "status": shell_status,
@@ -1703,6 +1766,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "preflight": {
                         "commands": preflight_commands_present,
                         "command_diagnostics": command_diagnostics,
+                        "python_interpreter": python_interpreter_summary,
                         "meta": preflight_meta,
                         "probe_commands": effective_probe_commands,
                         "capabilities": {

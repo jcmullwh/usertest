@@ -136,6 +136,11 @@ pdm run test
 pdm run lint
 ```
 
+Windows interpreter remediation:
+- If smoke/preflight reports `windowsapps_alias`, disable the Microsoft Store app execution alias and install a full CPython distribution.
+- If preflight reports `missing_stdlib` (for example, missing `encodings`), reinstall or repair Python and re-run `pdm run smoke`.
+- Use `pwsh -File scripts/smoke.ps1 -SkipInstall` from monorepo root to print interpreter probe diagnostics before smoke tests.
+
 ### Monorepo contributor workflow
 
 Run from the monorepo root:
