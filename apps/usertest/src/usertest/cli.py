@@ -274,10 +274,16 @@ def _prevalidate_batch_requests(
                     shell_status = "allowed" if shell_enabled else "blocked"
 
             if requires_shell and shell_status == "blocked":
+                hint = "use policy=inspect or policy=write"
+                if req.agent == "gemini" and os.name == "nt" and str(req.exec_backend) != "docker":
+                    hint = (
+                        "use --exec-backend docker (Gemini shell is blocked on Windows local backend) "
+                        "and policy=write"
+                    )
                 errors.append(
                     f"targets[{idx}]: mission {effective_spec.mission_id!r} requires shell "
                     f"commands, but policy {req.policy!r} for agent {req.agent!r} blocks shell "
-                    "commands (use policy=inspect or policy=write)."
+                    f"commands ({hint})."
                 )
             if requires_edits and not allow_edits:
                 errors.append(
@@ -2781,7 +2787,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
             encoding="utf-8",
         )
 
-    print(str(run_dir))
+    print(str(run_dir / "report.md"))
     if errors:
         print("Report validation errors:")
         for e in errors:

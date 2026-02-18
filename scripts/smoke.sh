@@ -99,3 +99,5 @@ echo "==> Backlog CLI help smoke"
 
 echo "==> Pytest smoke suite"
 "${PYTHON_BIN}" -m pytest -q apps/usertest/tests/test_smoke.py apps/usertest/tests/test_golden_fixture.py apps/usertest_backlog/tests/test_smoke.py
+
+echo "==> Smoke complete: all checks passed."

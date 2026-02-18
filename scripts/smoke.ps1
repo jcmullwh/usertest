@@ -124,6 +124,8 @@ try {
     Invoke-Step -Name 'Pytest smoke suite' -Command {
         & $pythonCmd -m pytest -q apps/usertest/tests/test_smoke.py apps/usertest/tests/test_golden_fixture.py apps/usertest_backlog/tests/test_smoke.py
     }
+
+    Write-Host '==> Smoke complete: all checks passed.'
 }
 finally {
     Pop-Location

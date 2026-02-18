@@ -42,6 +42,8 @@ Re-render that fixture from raw events:
 
 `python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics`
 
+Success signal: the command prints the exact `report.md` output path.
+
 ## Repo structure
 
 This is a **monorepo** managed by `tools/scaffold/scaffold.py` (manifest-driven task runner and project generator). It is intentionally structured to facilitate iteration, experimentation, and evolution of the overarching project, particularly by agentic contributors.
@@ -120,7 +122,7 @@ Primary path (plain editable app install):
 
 Fallback path (explicit local editable bootstrap):
 
-`python -m pip install --no-deps -e packages/normalized_events -e packages/agent_adapters -e packages/reporter -e packages/sandbox_runner -e packages/runner_core -e packages/triage_engine -e packages/backlog_core -e packages/backlog_miner -e packages/backlog_repo -e apps/usertest -e apps/usertest_backlog`
+`python -m pip install --no-deps -e packages/normalized_events -e packages/agent_adapters -e packages/run_artifacts -e packages/reporter -e packages/sandbox_runner -e packages/runner_core -e packages/triage_engine -e packages/backlog_core -e packages/backlog_miner -e packages/backlog_repo -e apps/usertest -e apps/usertest_backlog`
 
 Why both paths exist:
 
@@ -143,7 +145,7 @@ macOS/Linux:
 
 After install (editable or PYTHONPATH), run:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy safe --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 Local directory example (initializes `.usertest/` scaffold):
 
@@ -151,7 +153,7 @@ Local directory example (initializes `.usertest/` scaffold):
 
 Then run against that directory (requires an agent CLI + credentials):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy safe --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 List built-in personas/missions:
 
@@ -169,26 +171,26 @@ Defaults are configured in `configs/catalog.yaml`.
 
 Example: quick output with defaults-first mission:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy safe --persona-id burst_user --mission-id produce_default_output`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id burst_user --mission-id produce_default_output`
 
 Claude Code variant:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent claude --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent claude --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 Gemini variant:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent gemini --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent gemini --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 ### Evaluate a published Python package (fresh install)
 
 To usertest a deployed Python package (fresh install into an isolated virtualenv before the agent
 runs), pass a pip target:
 
-`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy safe --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker`
+`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker`
 
 This repo provides support for private registries(GitLab PyPI in particular); in that case also set the additionaly flags below with environment variables and optionally `GITLAB_BASE_URL`. For details, see `docs/monorepo-packages.md`.`
 
-`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy safe --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
+`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
 
 Notes:
 
@@ -204,6 +206,7 @@ Execution-policy notes:
 - `--policy safe` is strictest (no writes; and for Claude/Gemini, no shell commands).
 - `--policy inspect` is read-only but allows shell commands (recommended for first-success probing
   workflows on Claude/Gemini).
+- Built-in `first_output_smoke` / `produce_default_output` missions require edits; use `--policy write` for those runs.
 - If you need repo-specific tool probes, add `--preflight-command <CMD>` (repeatable) and optional
   `--require-preflight-command <CMD>`.
 - `preflight.json` includes per-command diagnostics with status values: `present`, `missing`, and
@@ -225,7 +228,7 @@ layout), see `docs/design/run-artifacts.md`. For offline fixtures, see `examples
 
 ### Docker execution backend (optional)
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker`
 
 Host agent login reuse is enabled by default for Docker runs (`~/.codex`, `~/.claude`,
 `~/.gemini` mounts).

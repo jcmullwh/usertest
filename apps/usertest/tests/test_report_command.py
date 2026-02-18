@@ -9,7 +9,9 @@ from runner_core import find_repo_root
 from usertest.cli import main
 
 
-def test_report_command_renders_markdown(tmp_path: Path) -> None:
+def test_report_command_renders_markdown(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
 
     run_dir = tmp_path / "runs" / "target" / "20260101T000000Z" / "codex" / "0"
@@ -62,6 +64,8 @@ def test_report_command_renders_markdown(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as exc:
         main(["report", "--repo-root", str(repo_root), "--run-dir", str(run_dir)])
     assert exc.value.code == 0
+    out = capsys.readouterr().out
+    assert str(run_dir / "report.md") in out
 
     md = (run_dir / "report.md").read_text(encoding="utf-8")
     assert "# Report" in md
