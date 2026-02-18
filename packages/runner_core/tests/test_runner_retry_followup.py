@@ -347,6 +347,44 @@ def test_run_once_uses_last_message_for_capacity_failures_with_empty_stderr(
     assert "hit your limit" in str(error_obj.get("last_message", "")).lower()
 
 
+def test_run_once_does_not_retry_non_retryable_capacity_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    state_file = tmp_path / "attempt_state_non_retryable_limit.txt"
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "limit_message_failure")
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=2,
+            agent_followup_attempts=0,
+        ),
+    )
+
+    assert result.exit_code == 1
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert len(attempts["attempts"]) == 1
+    assert attempts["rate_limit_retries_used"] == 0
+
+
 def test_run_once_does_not_followup_when_agent_output_is_empty(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -438,3 +476,47 @@ def test_run_once_handles_missing_last_message_file(
 
     assert (result.run_dir / "agent_last_message.txt").exists()
     assert (result.run_dir / "report.md").exists()
+
+
+def test_run_once_writes_fallback_metrics_when_compute_metrics_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    state_file = tmp_path / "attempt_state_metrics_fallback.txt"
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "invalid_then_valid")
+
+    import runner_core.runner as runner_mod
+
+    def _boom(_events: object) -> dict[str, object]:
+        raise RuntimeError("metrics exploded")
+
+    monkeypatch.setattr(runner_mod, "compute_metrics", _boom)
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=0,
+            agent_followup_attempts=2,
+        ),
+    )
+
+    assert result.exit_code == 0
+    metrics_obj = json.loads((result.run_dir / "metrics.json").read_text(encoding="utf-8"))
+    assert metrics_obj.get("metrics_error") == "metrics exploded"

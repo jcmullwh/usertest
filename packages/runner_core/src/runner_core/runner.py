@@ -199,8 +199,19 @@ _FAILURE_SUBTYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
 )
+_NON_RETRYABLE_PROVIDER_CAPACITY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"insufficient[_ -]?quota", re.IGNORECASE),
+    re.compile(r"quota exceeded", re.IGNORECASE),
+    re.compile(r"hit your limit", re.IGNORECASE),
+    re.compile(r"billing", re.IGNORECASE),
+    re.compile(r"payment required", re.IGNORECASE),
+    re.compile(r"upgrade (plan|account)", re.IGNORECASE),
+    re.compile(r"trial (has )?ended", re.IGNORECASE),
+)
 
-_GEMINI_STDERR_STRIP_LINES: frozenset[str] = frozenset({"Loaded cached credentials."})
+_GEMINI_STDERR_STRIP_LINES: frozenset[str] = frozenset(
+    {"Loaded cached credentials.", "Hook registry initialized with 0 hook entries."}
+)
 _CODEX_PERSONALITY_MISSING_MESSAGES_WARNING = (
     "Model personality requested but model_messages is missing"
 )
@@ -453,6 +464,12 @@ def _classify_failure_subtype(text: str) -> str | None:
         if any(pattern.search(text) for pattern in patterns):
             return subtype
     return None
+
+
+def _is_retryable_provider_capacity_failure(text: str) -> bool:
+    if not text.strip():
+        return True
+    return not any(pattern.search(text) for pattern in _NON_RETRYABLE_PROVIDER_CAPACITY_PATTERNS)
 
 
 def _agent_binary_for_preflight_probe(*, agent: str, agent_cfg: dict[str, Any]) -> str | None:
@@ -2099,18 +2116,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             attempt_report_json, effective_spec.report_schema_dict
                         )
 
-                failure_subtype = _classify_failure_subtype(
-                    "\n".join(
-                        [
-                            value
-                            for value in (
-                                attempt_stderr_text,
-                                attempt_last_text.strip() if attempt_last_text else "",
-                            )
-                            if value
-                        ]
-                    )
+                failure_text = "\n".join(
+                    [
+                        value
+                        for value in (
+                            attempt_stderr_text,
+                            attempt_last_text.strip() if attempt_last_text else "",
+                        )
+                        if value
+                    ]
                 )
+                failure_subtype = _classify_failure_subtype(failure_text)
                 attempt_meta: dict[str, Any] = {
                     "attempt": attempt_number,
                     "exit_code": agent_exit_code,
@@ -2127,6 +2143,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 if (
                     agent_exit_code != 0
                     and failure_subtype == "provider_capacity"
+                    and _is_retryable_provider_capacity_failure(failure_text)
                     and rate_limit_retry_count < rate_limit_retries
                 ):
                     delay_seconds = rate_limit_backoff_seconds * (
@@ -2368,7 +2385,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         )
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
-        metrics = compute_metrics(iter_events_jsonl(normalized_events_path))
+        try:
+            metrics = compute_metrics(iter_events_jsonl(normalized_events_path))
+        except Exception as metrics_exc:  # noqa: BLE001
+            metrics = {
+                "event_counts": {},
+                "distinct_files_read": [],
+                "distinct_docs_read": [],
+                "distinct_files_written": [],
+                "commands_executed": 0,
+                "commands_failed": 0,
+                "lines_added_total": 0,
+                "lines_removed_total": 0,
+                "step_count": 0,
+                "metrics_error": str(metrics_exc),
+            }
         if allow_edits:
             metrics["diff_numstat"] = diff_numstat
         _write_json(run_dir / "metrics.json", metrics)
