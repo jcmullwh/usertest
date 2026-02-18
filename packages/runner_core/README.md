@@ -57,6 +57,20 @@ Snapshot publishing status: `incubator` (see `docs/monorepo-packages.md`).
 
 ---
 
+## Canonical smoke
+
+Run from this package directory:
+
+```bash
+pdm run smoke
+pdm run smoke_extended
+```
+
+`pdm run smoke` is the deterministic first-success check. `pdm run smoke_extended` keeps a second
+tier for broader validation passes.
+
+---
+
 ## Quickstart
 
 The CLI is the primary interface, but the public API can be invoked directly:

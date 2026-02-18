@@ -113,6 +113,104 @@ jobs:
         if: ${{ matrix.id != '__no_projects__' && matrix.ci_build }}
         run: python tools/scaffold/scaffold.py run build --project "${{ matrix.id }}"
 
+  package_smoke_linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: agent_adapters
+            run_extended: false
+          - package: runner_core
+            run_extended: false
+          - package: reporter
+            run_extended: false
+          - package: sandbox_runner
+            run_extended: true
+          - package: normalized_events
+            run_extended: false
+          - package: triage_engine
+            run_extended: true
+          - package: backlog_core
+            run_extended: false
+          - package: backlog_miner
+            run_extended: false
+          - package: backlog_repo
+            run_extended: false
+          - package: run_artifacts
+            run_extended: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PDM
+        run: python -m pip install --upgrade pip "pdm==${{ env.PDM_VERSION }}"
+
+      - name: Install package environment
+        working-directory: packages/${{ matrix.package }}
+        run: pdm install
+
+      - name: Canonical smoke
+        working-directory: packages/${{ matrix.package }}
+        run: pdm run smoke
+
+      - name: Extended smoke (capability-aware)
+        if: ${{ matrix.run_extended }}
+        working-directory: packages/${{ matrix.package }}
+        run: pdm run smoke_extended
+
+  package_smoke_windows:
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: agent_adapters
+            run_extended: false
+          - package: runner_core
+            run_extended: false
+          - package: reporter
+            run_extended: false
+          - package: sandbox_runner
+            run_extended: true
+          - package: normalized_events
+            run_extended: false
+          - package: triage_engine
+            run_extended: true
+          - package: backlog_core
+            run_extended: false
+          - package: backlog_miner
+            run_extended: false
+          - package: backlog_repo
+            run_extended: false
+          - package: run_artifacts
+            run_extended: false
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install PDM
+        run: python -m pip install --upgrade pip "pdm==${{ env.PDM_VERSION }}"
+
+      - name: Install package environment
+        working-directory: packages/${{ matrix.package }}
+        run: pdm install
+
+      - name: Canonical smoke
+        working-directory: packages/${{ matrix.package }}
+        run: pdm run smoke
+
+      - name: Extended smoke (capability-aware)
+        if: ${{ matrix.run_extended }}
+        working-directory: packages/${{ matrix.package }}
+        run: pdm run smoke_extended
+
   windows_scaffold_smoke:
     runs-on: windows-latest
     steps:

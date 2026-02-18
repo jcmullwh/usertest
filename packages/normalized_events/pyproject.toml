@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "normalized_events"
 version = "0.1.0"
 description = "Shared normalized-events contract + JSONL helpers"

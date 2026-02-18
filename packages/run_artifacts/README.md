@@ -51,6 +51,20 @@ pip install \
 
 ---
 
+## Canonical smoke
+
+Run from this package directory:
+
+```bash
+pdm run smoke
+pdm run smoke_extended
+```
+
+`pdm run smoke` is the deterministic first-success check. `pdm run smoke_extended` keeps a second
+tier for broader validation passes.
+
+---
+
 ## Quickstart
 
 Capture a text artifact with explicit truncation metadata:

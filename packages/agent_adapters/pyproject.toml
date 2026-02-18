@@ -1,4 +1,4 @@
-﻿[project]
+[project]
 name = "agent-adapters"
 version = "0.1.0"
 description = "Thin CLI adapters and event normalizers for Codex, Claude, and Gemini."

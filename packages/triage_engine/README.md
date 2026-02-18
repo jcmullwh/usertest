@@ -66,6 +66,20 @@ There is no offline/local fallback in the default embedder path.
 
 ---
 
+## Canonical smoke
+
+Run from this package directory:
+
+```bash
+pdm run smoke
+pdm run smoke_extended
+```
+
+`pdm run smoke` is the deterministic first-success check. `pdm run smoke_extended` performs a live
+OpenAI embedding call when `OPENAI_API_KEY` is configured, otherwise it skips with a reason.
+
+---
+
 ## Quickstart
 
 ```python
@@ -126,7 +140,7 @@ pdm run test
 pdm run lint
 ```
 
-`pdm run smoke_extended` runs additional embedding-path checks beyond the base smoke contract.
+`pdm run smoke_extended` runs a live OpenAI embedding smoke test and skips with an explicit reason when `OPENAI_API_KEY` is missing.
 
 ### Monorepo contributor workflow
 

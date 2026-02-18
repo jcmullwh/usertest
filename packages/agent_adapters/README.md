@@ -44,12 +44,15 @@ pip install \
   "agent-adapters==<version>"
 ```
 
-## Quick smoke
+## Canonical smoke
 
 ```bash
 pdm run smoke
-agent-adapters doctor
+pdm run smoke_extended
 ```
+
+`pdm run smoke` is the deterministic first-success check. `pdm run smoke_extended` adds the
+fixture-heavy normalization smoke pass.
 
 ---
 

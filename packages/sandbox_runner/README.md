@@ -48,6 +48,20 @@ Snapshot publishing status: `incubator` (see `docs/monorepo-packages.md`).
 
 ---
 
+## Canonical smoke
+
+Run from this package directory:
+
+```bash
+pdm run smoke
+pdm run smoke_extended
+```
+
+`pdm run smoke` is the deterministic first-success check. `pdm run smoke_extended` runs the Docker
+path and skips with a reason when Docker is unavailable.
+
+---
+
 ## Quickstart
 
 Start a Docker sandbox and use its `command_prefix` to run commands “inside” the container.
