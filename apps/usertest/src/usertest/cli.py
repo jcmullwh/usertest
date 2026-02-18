@@ -32,12 +32,17 @@ from run_artifacts.history import iter_report_history, write_report_history_json
 from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
 from runner_core.catalog import discover_missions, discover_personas, load_catalog_config
 from runner_core.pathing import slugify
-from runner_core.python_interpreter_probe import probe_python_interpreters
 from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
 from runner_core.target_acquire import acquire_target
 
 _LEGACY_RUN_TIMESTAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 _WINDOWS_ABS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+try:
+    from runner_core.python_interpreter_probe import probe_python_interpreters
+except ModuleNotFoundError:
+    probe_python_interpreters = None  # type: ignore[assignment]
+
+
 def _enable_console_backslashreplace(stream: Any) -> None:
     """Configure stream error handling to backslash escapes when supported."""
     reconfigure = getattr(stream, "reconfigure", None)
@@ -133,7 +138,7 @@ def _infer_responsiveness_probe_commands(repo_dir: Path) -> set[str]:
 
 def _probe_command_responsive(*, command: str, timeout_seconds: float) -> str | None:
     """Run a quick command probe and return an error message on failure."""
-    if command in {"python", "python3", "py"}:
+    if command in {"python", "python3", "py"} and callable(probe_python_interpreters):
         probe = probe_python_interpreters(
             candidate_commands=[command],
             timeout_seconds=max(0.1, timeout_seconds),

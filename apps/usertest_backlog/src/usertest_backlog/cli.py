@@ -68,7 +68,6 @@ from runner_core.catalog import (
     load_catalog_config,
 )
 from runner_core.pathing import slugify
-from runner_core.python_interpreter_probe import probe_python_interpreters
 from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
 from triage_engine import cluster_items, extract_path_anchors_from_chunks
 
@@ -79,6 +78,10 @@ _EXPORT_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 _MONOREPO_OWNER_COMPONENTS: set[str] = {"runner_core", "agent_adapters", "sandbox_runner"}
 _ATOM_STATUS_ORDER: dict[str, int] = {"new": 0, "ticketed": 1, "queued": 2, "actioned": 3}
 _WINDOWS_ABS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+try:
+    from runner_core.python_interpreter_probe import probe_python_interpreters
+except ModuleNotFoundError:
+    probe_python_interpreters = None  # type: ignore[assignment]
 
 
 def _enable_console_backslashreplace(stream: Any) -> None:
@@ -263,7 +266,7 @@ def _probe_command_responsive(*, command: str, timeout_seconds: float) -> str | 
     str | None
         Computed return value.
     """
-    if command in {"python", "python3", "py"}:
+    if command in {"python", "python3", "py"} and callable(probe_python_interpreters):
         probe = probe_python_interpreters(
             candidate_commands=[command],
             timeout_seconds=max(0.1, timeout_seconds),

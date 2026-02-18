@@ -43,7 +43,6 @@ from runner_core.pip_bootstrap import (
     PipBootstrapResult,
     bootstrap_pip_requirements,
 )
-from runner_core.python_interpreter_probe import probe_python_interpreters
 from runner_core.pip_target import (
     is_pip_repo_input,
     parse_pip_repo_input,
@@ -52,6 +51,7 @@ from runner_core.pip_target import (
     requirements_path as pip_requirements_path,
 )
 from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
+from runner_core.python_interpreter_probe import probe_python_interpreters
 from runner_core.run_spec import resolve_effective_run_inputs
 from runner_core.target_acquire import acquire_target
 

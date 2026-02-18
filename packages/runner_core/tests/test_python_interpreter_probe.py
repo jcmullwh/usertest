@@ -1,11 +1,29 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
+import sys
+from pathlib import Path
+from types import ModuleType
 
 import pytest
 
-import runner_core.python_interpreter_probe as probe_mod
+
+def _load_probe_module() -> ModuleType:
+    module_path = (
+        Path(__file__).resolve().parents[1] / "src" / "runner_core" / "python_interpreter_probe.py"
+    )
+    spec = importlib.util.spec_from_file_location("runner_core_python_probe_test", module_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+probe_mod = _load_probe_module()
 
 
 def test_probe_rejects_windowsapps_alias(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -94,8 +112,18 @@ def test_probe_selects_verified_fallback_candidate(monkeypatch: pytest.MonkeyPat
         check: bool,
     ) -> subprocess.CompletedProcess[str]:
         assert args[0] == r"C:\Python313\py.exe"
-        payload = json.dumps({"executable": r"C:\Python313\python.exe", "version": "3.13.2"})
-        return subprocess.CompletedProcess(args=args, returncode=0, stdout=payload + "\n", stderr="")
+        payload = json.dumps(
+            {
+                "executable": r"C:\Python313\python.exe",
+                "version": "3.13.2",
+            }
+        )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=payload + "\n",
+            stderr="",
+        )
 
     monkeypatch.setattr(probe_mod.shutil, "which", _which)
     monkeypatch.setattr(probe_mod.subprocess, "run", _run)

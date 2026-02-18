@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, Sequence
+from pathlib import Path
+from typing import Any
 
 DEFAULT_PYTHON_COMMANDS: tuple[str, ...] = ("python", "python3", "py")
 
@@ -59,7 +60,9 @@ def _is_windowsapps_alias(path_text: str | None, *, is_windows: bool) -> bool:
 def _probe_failure_reason(stderr_text: str, stdout_text: str) -> tuple[str, str]:
     merged = "\n".join(value for value in (stderr_text, stdout_text) if value).strip()
     lowered = merged.lower()
-    if "encodings" in lowered and ("modulenotfounderror" in lowered or "no module named" in lowered):
+    if "encodings" in lowered and (
+        "modulenotfounderror" in lowered or "no module named" in lowered
+    ):
         return "missing_stdlib", merged
     if "access is denied" in lowered or "permission denied" in lowered:
         return "access_denied", merged
