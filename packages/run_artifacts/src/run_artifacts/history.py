@@ -8,7 +8,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from run_artifacts.capture import TextCapturePolicy, TextExcerpt, capture_text_artifact
+
 _TIMESTAMP_DIR_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+_EMBED_DEFINITION_KEYS = {
+    "persona_source_md",
+    "persona_resolved_md",
+    "mission_source_md",
+    "mission_resolved_md",
+    "prompt_template_md",
+    "report_schema_json",
+}
 
 
 def _parse_timestamp_dirname(name: str) -> str | None:
@@ -85,19 +95,122 @@ def _read_json(path: Path) -> Any | None:
         return None
 
 
-def _read_text(path: Path, *, max_bytes: int) -> str | None:
+def _history_text_policy(max_embed_bytes: int) -> TextCapturePolicy:
+    head_bytes = max_embed_bytes // 2
+    tail_bytes = max_embed_bytes - head_bytes
+    return TextCapturePolicy(
+        max_excerpt_bytes=max_embed_bytes,
+        head_bytes=head_bytes,
+        tail_bytes=tail_bytes,
+        binary_detection_bytes=2_048,
+    )
+
+
+def _compose_history_excerpt(excerpt: TextExcerpt) -> str:
+    if not excerpt.truncated:
+        return excerpt.head
+    marker = "\n...[truncated; see embedded_capture_manifest]...\n"
+    return f"{excerpt.head}{marker}{excerpt.tail}"
+
+
+def _capture_embedded_text(
+    run_dir: Path,
+    rel_path: str,
+    *,
+    policy: TextCapturePolicy,
+) -> tuple[str | None, dict[str, Any]]:
+    result = capture_text_artifact(run_dir / rel_path, policy=policy, root=run_dir)
+    manifest: dict[str, Any] = {
+        "path": result.artifact.path,
+        "exists": result.artifact.exists,
+        "size_bytes": result.artifact.size_bytes,
+        "sha256": result.artifact.sha256,
+        "truncated": bool(result.excerpt.truncated) if result.excerpt is not None else False,
+        "error": result.error,
+    }
+
+    if not result.artifact.exists:
+        return None, manifest
+    if result.excerpt is not None:
+        return _compose_history_excerpt(result.excerpt), manifest
+    if isinstance(result.error, str) and result.error.strip():
+        return f"[capture_error] {result.error}", manifest
+    return "[capture_error] capture_unavailable", manifest
+
+
+def _embed_allowed_keys(embed_rank: int) -> set[str]:
+    if embed_rank <= 0:
+        return set()
+    keys = set(_EMBED_DEFINITION_KEYS)
+    if embed_rank >= 2:
+        keys.add("prompt_txt")
+    if embed_rank >= 3:
+        keys.add("users_md")
+    return keys
+
+
+def _prune_embedded_map(raw: Any, *, allowed_keys: set[str]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: value
+        for key, value in raw.items()
+        if isinstance(key, str) and key in allowed_keys
+    }
+
+
+def _iter_report_history_jsonl(
+    source_path: Path,
+    *,
+    target_slug: str | None,
+    normalized_repo_input: str | None,
+    embed_rank: int,
+) -> Iterator[dict[str, Any]]:
+    allowed_embed_keys = _embed_allowed_keys(embed_rank)
+
     try:
-        if path.stat().st_size > max_bytes:
-            return None
-        return path.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        return None
+        with source_path.open("r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                item_target_slug = item.get("target_slug")
+                if target_slug is not None and item_target_slug != target_slug:
+                    continue
+
+                if normalized_repo_input is not None:
+                    target_ref = item.get("target_ref")
+                    candidate: str | None = None
+                    if isinstance(target_ref, dict):
+                        repo_raw = target_ref.get("repo_input")
+                        candidate = repo_raw if isinstance(repo_raw, str) else None
+                    if (
+                        candidate is None
+                        or _normalize_repo_input(candidate) != normalized_repo_input
+                    ):
+                        continue
+
+                item["embedded"] = _prune_embedded_map(
+                    item.get("embedded"),
+                    allowed_keys=allowed_embed_keys,
+                )
+                item["embedded_capture_manifest"] = _prune_embedded_map(
+                    item.get("embedded_capture_manifest"),
+                    allowed_keys=allowed_embed_keys,
+                )
+                yield item
     except OSError:
-        return None
+        return
 
 
 def iter_report_history(
-    runs_dir: Path,
+    source: Path | str,
     *,
     target_slug: str | None = None,
     repo_input: str | None = None,
@@ -123,7 +236,19 @@ def iter_report_history(
     if isinstance(repo_input, str) and repo_input.strip():
         normalized_repo_input = _normalize_repo_input(repo_input)
 
-    for run_dir in iter_run_dirs(runs_dir, target_slug=target_slug):
+    source_path = Path(source)
+
+    if source_path.is_file():
+        yield from _iter_report_history_jsonl(
+            source_path,
+            target_slug=target_slug,
+            normalized_repo_input=normalized_repo_input,
+            embed_rank=embed_rank,
+        )
+        return
+
+    policy = _history_text_policy(max_embed_bytes)
+    for run_dir in iter_run_dirs(source_path, target_slug=target_slug):
         run_rel = None
         target = None
         ts_dir = None
@@ -131,8 +256,8 @@ def iter_report_history(
         seed = None
 
         try:
-            run_rel = str(run_dir.relative_to(runs_dir)).replace("\\", "/")
-            parts = run_dir.relative_to(runs_dir).parts
+            run_rel = str(run_dir.relative_to(source_path)).replace("\\", "/")
+            parts = run_dir.relative_to(source_path).parts
             if len(parts) >= 4:
                 target, ts_dir, agent, seed = parts[0], parts[1], parts[2], parts[3]
         except Exception:  # noqa: BLE001
@@ -169,27 +294,58 @@ def iter_report_history(
             status = "ok"
 
         embedded: dict[str, Any] = {}
+        embedded_capture_manifest: dict[str, Any] = {}
         if embed_rank >= 1:
-            embedded["persona_source_md"] = _read_text(
-                run_dir / "persona.source.md", max_bytes=max_embed_bytes
+            embedded["persona_source_md"], embedded_capture_manifest["persona_source_md"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "persona.source.md",
+                    policy=policy,
+                )
             )
-            embedded["persona_resolved_md"] = _read_text(
-                run_dir / "persona.resolved.md", max_bytes=max_embed_bytes
+            embedded["persona_resolved_md"], embedded_capture_manifest["persona_resolved_md"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "persona.resolved.md",
+                    policy=policy,
+                )
             )
-            embedded["mission_source_md"] = _read_text(
-                run_dir / "mission.source.md", max_bytes=max_embed_bytes
+            embedded["mission_source_md"], embedded_capture_manifest["mission_source_md"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "mission.source.md",
+                    policy=policy,
+                )
             )
-            embedded["mission_resolved_md"] = _read_text(
-                run_dir / "mission.resolved.md", max_bytes=max_embed_bytes
+            embedded["mission_resolved_md"], embedded_capture_manifest["mission_resolved_md"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "mission.resolved.md",
+                    policy=policy,
+                )
             )
-            embedded["prompt_template_md"] = _read_text(
-                run_dir / "prompt.template.md", max_bytes=max_embed_bytes
+            embedded["prompt_template_md"], embedded_capture_manifest["prompt_template_md"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "prompt.template.md",
+                    policy=policy,
+                )
             )
             embedded["report_schema_json"] = _read_json(run_dir / "report.schema.json")
         if embed_rank >= 2:
-            embedded["prompt_txt"] = _read_text(run_dir / "prompt.txt", max_bytes=max_embed_bytes)
+            embedded["prompt_txt"], embedded_capture_manifest["prompt_txt"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "prompt.txt",
+                    policy=policy,
+                )
+            )
         if embed_rank >= 3:
-            embedded["users_md"] = _read_text(run_dir / "users.md", max_bytes=max_embed_bytes)
+            embedded["users_md"], embedded_capture_manifest["users_md"] = _capture_embedded_text(
+                run_dir,
+                "users.md",
+                policy=policy,
+            )
 
         ts_utc = _parse_timestamp_dirname(ts_dir) if isinstance(ts_dir, str) else None
 
@@ -211,6 +367,7 @@ def iter_report_history(
             "error": error,
             "report_validation_errors": report_validation_errors,
             "embedded": embedded,
+            "embedded_capture_manifest": embedded_capture_manifest,
         }
 
 

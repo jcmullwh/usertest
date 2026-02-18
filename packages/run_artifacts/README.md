@@ -75,7 +75,7 @@ from pathlib import Path
 from run_artifacts import TextCapturePolicy, capture_text_artifact
 
 policy = TextCapturePolicy(max_excerpt_bytes=10_000, head_bytes=5_000, tail_bytes=5_000)
-result = capture_text_artifact(Path("runs/.../agent_stderr.txt"), capture_policy=policy)
+result = capture_text_artifact(Path("runs/.../agent_stderr.txt"), policy=policy)
 
 print(result.artifact.path, result.artifact.exists, result.excerpt.truncated if result.excerpt else None)
 ```
@@ -89,6 +89,22 @@ for record in iter_report_history("runs/usertest/report_history.jsonl"):
     print(record.get("run_rel"), record.get("status"))
 ```
 
+Compile run directories into JSONL history (large text embeddings are truncated, not dropped):
+
+```python
+from pathlib import Path
+
+from run_artifacts import write_report_history_jsonl
+
+counts = write_report_history_jsonl(
+    Path("runs/usertest"),
+    out_path=Path("runs/usertest/_compiled/all.report_history.jsonl"),
+    embed="definitions",
+    max_embed_bytes=200_000,
+)
+print(counts)
+```
+
 ---
 
 ## Public API
@@ -96,13 +112,13 @@ for record in iter_report_history("runs/usertest/report_history.jsonl"):
 ### Artifact capture
 
 - `TextCapturePolicy`
-- `capture_text_artifact(path, capture_policy=...)`
+- `capture_text_artifact(path, policy=...)`
 - `CaptureResult`, `ArtifactRef`, `TextExcerpt`
 
 ### Run history
 
-- `iter_report_history(path)`
-- `write_report_history_jsonl(path, records)`
+- `iter_report_history(source, target_slug=..., repo_input=..., embed=..., max_embed_bytes=...)`
+- `write_report_history_jsonl(runs_dir, out_path=..., target_slug=..., repo_input=..., embed=..., max_embed_bytes=...)`
 
 ### Failure shaping
 

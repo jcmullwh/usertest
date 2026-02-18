@@ -917,6 +917,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Runs directory (defaults to <repo_root>/runs/usertest).",
     )
     reports_analyze_p.add_argument(
+        "--history",
+        type=Path,
+        help="Path to a compiled report history JSONL (from `reports compile`).",
+    )
+    reports_analyze_p.add_argument(
         "--out-json",
         type=Path,
         help=(
@@ -2967,6 +2972,12 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     cfg = _load_runner_config(repo_root)
 
     runs_dir = args.runs_dir.resolve() if args.runs_dir is not None else cfg.runs_dir
+    history_path: Path | None
+    if args.history is not None:
+        history_path = _resolve_optional_path(repo_root, args.history) or args.history.resolve()
+    else:
+        history_path = None
+
     target_slug: str | None = None
     if isinstance(args.target, str) and args.target.strip():
         target_slug = str(args.target).strip()
@@ -2981,7 +2992,9 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     if args.out_json is not None:
         out_json = _resolve_optional_path(repo_root, args.out_json) or args.out_json.resolve()
     else:
-        if target_slug is not None:
+        if history_path is not None:
+            out_json = history_path.with_name(f"{history_path.stem}.issue_analysis.json")
+        elif target_slug is not None:
             out_json = runs_dir / target_slug / "_compiled" / f"{default_name}.issue_analysis.json"
         else:
             out_json = runs_dir / "_compiled" / f"{default_name}.issue_analysis.json"
@@ -2998,9 +3011,10 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
         default_actions = repo_root / "configs" / "issue_actions.json"
         actions_path = default_actions if default_actions.exists() else None
 
+    history_source = history_path if history_path is not None else runs_dir
     records = list(
         iter_report_history(
-            runs_dir,
+            history_source,
             target_slug=target_slug,
             repo_input=repo_input,
             embed="none",

@@ -51,6 +51,14 @@ usertest-backlog reports compile --repo-root . --runs-dir runs/usertest --out ru
 usertest-backlog reports analyze --repo-root . --history runs/usertest/report_history.jsonl
 ```
 
+Notes:
+
+- `reports analyze --history <path.jsonl>` reads the compiled JSONL directly.
+- When `--history` is used and `--out-json/--out-md` are omitted, outputs are written next
+  to the history file as `<stem>.issue_analysis.json` and `<stem>.issue_analysis.md`.
+- `reports backlog` now runs labelers by default (`--labelers 3`). Use `--labelers 0` only
+  when you intentionally want unlabeled tickets (`change_surface.kinds=["unknown"]`).
+
 ### PR triage
 
 ```bash

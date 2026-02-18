@@ -78,6 +78,7 @@ def test_write_report_history_jsonl_filters_and_embeds(tmp_path: Path) -> None:
     items = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines() if line]
     assert items[0]["status"] == "ok"
     assert items[0]["embedded"]["persona_source_md"].startswith("persona source")
+    assert items[0]["embedded_capture_manifest"]["persona_source_md"]["exists"] is True
     assert items[1]["status"] == "error"
     assert items[1]["agent_exit_code"] == 2
 
@@ -93,3 +94,64 @@ def test_iter_report_history_embed_none(tmp_path: Path) -> None:
     items = list(iter_report_history(runs_dir, target_slug="tiktok_vids", embed="none"))
     assert len(items) == 1
     assert items[0]["embedded"] == {}
+    assert items[0]["embedded_capture_manifest"] == {}
+
+
+def test_write_report_history_jsonl_truncates_and_records_manifest(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "tiktok_vids" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "target_ref.json", {"repo_input": "C:/repo/tiktok_vids"})
+    _write_json(run_dir / "effective_run_spec.json", {})
+    _write_json(run_dir / "report.json", {"schema_version": 1})
+    (run_dir / "persona.source.md").write_text("A" * 512, encoding="utf-8")
+    (run_dir / "persona.resolved.md").write_text("persona resolved\n", encoding="utf-8")
+    (run_dir / "mission.source.md").write_text("mission source\n", encoding="utf-8")
+    (run_dir / "mission.resolved.md").write_text("mission resolved\n", encoding="utf-8")
+    (run_dir / "prompt.template.md").write_text("template\n", encoding="utf-8")
+
+    out_path = tmp_path / "history.jsonl"
+    write_report_history_jsonl(
+        runs_dir,
+        out_path=out_path,
+        target_slug="tiktok_vids",
+        embed="definitions",
+        max_embed_bytes=100,
+    )
+
+    items = [json.loads(line) for line in out_path.read_text(encoding="utf-8").splitlines() if line]
+    assert len(items) == 1
+
+    excerpt = items[0]["embedded"]["persona_source_md"]
+    assert isinstance(excerpt, str)
+    assert "[truncated; see embedded_capture_manifest]" in excerpt
+
+    manifest = items[0]["embedded_capture_manifest"]["persona_source_md"]
+    assert manifest["path"] == "persona.source.md"
+    assert manifest["exists"] is True
+    assert manifest["size_bytes"] > 100
+    assert isinstance(manifest["sha256"], str)
+    assert manifest["truncated"] is True
+    assert manifest["error"] is None
+
+
+def test_iter_report_history_accepts_jsonl_source(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "tiktok_vids" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "target_ref.json", {"repo_input": "C:/repo/tiktok_vids"})
+    _write_json(run_dir / "effective_run_spec.json", {})
+    _write_json(run_dir / "report.json", {"schema_version": 1})
+    (run_dir / "persona.source.md").write_text("persona source\n", encoding="utf-8")
+    (run_dir / "persona.resolved.md").write_text("persona resolved\n", encoding="utf-8")
+    (run_dir / "mission.source.md").write_text("mission source\n", encoding="utf-8")
+    (run_dir / "mission.resolved.md").write_text("mission resolved\n", encoding="utf-8")
+    (run_dir / "prompt.template.md").write_text("template\n", encoding="utf-8")
+
+    out_path = tmp_path / "history.jsonl"
+    write_report_history_jsonl(runs_dir, out_path=out_path, target_slug="tiktok_vids", embed="all")
+
+    items = list(iter_report_history(out_path, target_slug="tiktok_vids", embed="none"))
+    assert len(items) == 1
+    assert items[0]["embedded"] == {}
+    assert items[0]["embedded_capture_manifest"] == {}

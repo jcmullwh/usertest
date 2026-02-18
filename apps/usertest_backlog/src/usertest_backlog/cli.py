@@ -559,6 +559,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Runs directory (defaults to <repo_root>/runs/usertest).",
     )
     reports_analyze_p.add_argument(
+        "--history",
+        type=Path,
+        help="Path to a compiled report history JSONL (from `reports compile`).",
+    )
+    reports_analyze_p.add_argument(
         "--out-json",
         type=Path,
         help=(
@@ -707,10 +712,11 @@ def build_parser() -> argparse.ArgumentParser:
     reports_backlog_p.add_argument(
         "--labelers",
         type=int,
-        default=0,
+        default=3,
         help=(
-            "Run N labeler passes per ticket to classify change surface (default: 0 disables). "
-            "Labeling requires an agent CLI unless cached outputs exist."
+            "Run N labeler passes per ticket to classify change surface "
+            "(default: 3; use 0 to disable). Labeling requires an agent CLI unless "
+            "cached outputs exist."
         ),
     )
     reports_backlog_p.add_argument(
@@ -2375,6 +2381,12 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     cfg = _load_runner_config(repo_root)
 
     runs_dir = args.runs_dir.resolve() if args.runs_dir is not None else cfg.runs_dir
+    history_path: Path | None
+    if args.history is not None:
+        history_path = _resolve_optional_path(repo_root, args.history) or args.history.resolve()
+    else:
+        history_path = None
+
     target_slug: str | None = None
     if isinstance(args.target, str) and args.target.strip():
         target_slug = str(args.target).strip()
@@ -2389,7 +2401,9 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     if args.out_json is not None:
         out_json = _resolve_optional_path(repo_root, args.out_json) or args.out_json.resolve()
     else:
-        if target_slug is not None:
+        if history_path is not None:
+            out_json = history_path.with_name(f"{history_path.stem}.issue_analysis.json")
+        elif target_slug is not None:
             out_json = runs_dir / target_slug / "_compiled" / f"{default_name}.issue_analysis.json"
         else:
             out_json = runs_dir / "_compiled" / f"{default_name}.issue_analysis.json"
@@ -2406,9 +2420,10 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
         default_actions = repo_root / "configs" / "issue_actions.json"
         actions_path = default_actions if default_actions.exists() else None
 
+    history_source = history_path if history_path is not None else runs_dir
     records = list(
         iter_report_history(
-            runs_dir,
+            history_source,
             target_slug=target_slug,
             repo_input=repo_input,
             embed="none",
@@ -3138,7 +3153,7 @@ def _render_export_issue_body(
     str
         Normalized string result.
     """
-    ticket_id = _coerce_string(ticket.get("ticket_id")) or "BLG-???"
+    ticket_id = _coerce_string(ticket.get("ticket_id")) or "TKT-unknown"
     title = _coerce_string(ticket.get("title")) or ""
     problem = _coerce_string(ticket.get("problem")) or ""
     user_impact = _coerce_string(ticket.get("user_impact")) or ""
@@ -3866,6 +3881,12 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     agent = str(args.agent)
     model = str(args.model) if isinstance(args.model, str) and args.model.strip() else None
     labelers = max(0, int(args.labelers))
+    if labelers == 0:
+        print(
+            "WARNING: --labelers=0 disables ticket labeling; tickets keep "
+            "change_surface.kinds=['unknown'] and policy stage promotion will not run.",
+            file=sys.stderr,
+        )
 
     policy_cfg: BacklogPolicyConfig | None = None
     policy_config_path: Path | None
