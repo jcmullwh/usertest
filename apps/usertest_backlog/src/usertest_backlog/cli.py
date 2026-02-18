@@ -71,6 +71,15 @@ from runner_core.pathing import slugify
 from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
 from triage_engine import cluster_items, extract_path_anchors_from_chunks
 
+from usertest_backlog.triage_backlog import (
+    load_issue_items,
+    triage_issues,
+    write_triage_xlsx,
+)
+from usertest_backlog.triage_backlog import (
+    render_triage_markdown as render_backlog_triage_markdown,
+)
+
 _LEGACY_RUN_TIMESTAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 _EXPORT_SEVERITY_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "blocker": 3}
 _EXPORT_PATH_LIKE_RE = re.compile(r"(?:[A-Za-z]:[\\/])?[A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+){1,}")
@@ -1068,6 +1077,62 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.55,
         help="Title token Jaccard threshold for similarity edges.",
+    )
+
+    triage_backlog_p = sub.add_parser(
+        "triage-backlog",
+        help="Cluster issue-like backlog items by dedupe + functional theme similarity.",
+    )
+    triage_backlog_p.add_argument(
+        "--in",
+        dest="input_json",
+        type=Path,
+        required=True,
+        help="Path to issue JSON input (list, or object with a `tickets` list).",
+    )
+    triage_backlog_p.add_argument(
+        "--group-key",
+        type=str,
+        help="Optional field name used to compute cross-group coverage (defaults to `package`).",
+    )
+    triage_backlog_p.add_argument(
+        "--out-json",
+        type=Path,
+        help="Output JSON path (default: <input>.triage_backlog.json).",
+    )
+    triage_backlog_p.add_argument(
+        "--out-md",
+        type=Path,
+        help="Output markdown path (default: <input>.triage_backlog.md).",
+    )
+    triage_backlog_p.add_argument(
+        "--out-xlsx",
+        type=Path,
+        help="Optional XLSX output path.",
+    )
+    triage_backlog_p.add_argument(
+        "--dedupe-overall-threshold",
+        type=float,
+        default=0.90,
+        help="Overall similarity threshold used for strict dedupe clustering.",
+    )
+    triage_backlog_p.add_argument(
+        "--theme-overall-threshold",
+        type=float,
+        default=0.78,
+        help="Overall similarity threshold used for theme clustering edges.",
+    )
+    triage_backlog_p.add_argument(
+        "--theme-k",
+        type=int,
+        default=10,
+        help="Top-K neighbor count per item in the theme graph.",
+    )
+    triage_backlog_p.add_argument(
+        "--theme-representative-threshold",
+        type=float,
+        default=0.75,
+        help="Minimum similarity to theme representative during refinement.",
     )
 
     return parser
@@ -4033,6 +4098,57 @@ def _default_triage_output_path(input_json: Path, *, suffix: str) -> Path:
     return input_json.with_name(f"{input_json.stem}{suffix}")
 
 
+def _cmd_triage_backlog(args: argparse.Namespace) -> int:
+    """Execute the ``triage-backlog`` command."""
+
+    input_json = args.input_json.resolve()
+    if not input_json.exists():
+        raise FileNotFoundError(f"Input file not found: {input_json}")
+
+    issues, input_metadata = load_issue_items(input_json)
+    report = triage_issues(
+        issues,
+        group_key=args.group_key,
+        dedupe_overall_threshold=float(args.dedupe_overall_threshold),
+        theme_overall_threshold=float(args.theme_overall_threshold),
+        theme_k=int(args.theme_k),
+        theme_representative_threshold=float(args.theme_representative_threshold),
+    )
+    report["input_json"] = str(input_json)
+    if input_metadata:
+        report["input_metadata"] = input_metadata
+
+    out_json = (
+        args.out_json.resolve()
+        if args.out_json is not None
+        else _default_triage_output_path(input_json, suffix=".triage_backlog.json")
+    )
+    out_md = (
+        args.out_md.resolve()
+        if args.out_md is not None
+        else _default_triage_output_path(input_json, suffix=".triage_backlog.md")
+    )
+    out_xlsx = args.out_xlsx.resolve() if args.out_xlsx is not None else None
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    out_md.write_text(
+        render_backlog_triage_markdown(report, title="Backlog Triage Report"),
+        encoding="utf-8",
+    )
+
+    if out_xlsx is not None:
+        write_triage_xlsx(report, out_xlsx)
+
+    print(str(out_json))
+    print(str(out_md))
+    if out_xlsx is not None:
+        print(str(out_xlsx))
+    print(json.dumps(report.get("totals", {}), indent=2, ensure_ascii=False))
+    return 0
+
+
 def _coerce_pr_items(raw_payload: Any) -> list[dict[str, Any]]:
     """Normalize PR input payload into canonical in-memory records.
 
@@ -4319,6 +4435,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(2)
     if args.cmd == "triage-prs":
         raise SystemExit(_cmd_triage_prs(args))
+    if args.cmd == "triage-backlog":
+        raise SystemExit(_cmd_triage_backlog(args))
     raise SystemExit(2)
 
 

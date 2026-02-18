@@ -1,8 +1,9 @@
 from triage_engine.candidates import build_merge_candidates
-from triage_engine.clustering import cluster_items
+from triage_engine.clustering import cluster_items, cluster_items_knn
 from triage_engine.dedupe import dedupe_clusters
 from triage_engine.embeddings import (
     CachedEmbedder,
+    DiskCachedEmbedder,
     Embedder,
     HashingEmbedder,
     OpenAIEmbedder,
@@ -21,6 +22,7 @@ from triage_engine.trust import TrustAssessment, TrustEvidence, assess_trust
 __all__ = [
     "build_merge_candidates",
     "cluster_items",
+    "cluster_items_knn",
     "compute_pair_similarity",
     "dedupe_clusters",
     "extract_path_anchors_from_chunks",
@@ -34,6 +36,7 @@ __all__ = [
     # Embeddings
     "Embedder",
     "CachedEmbedder",
+    "DiskCachedEmbedder",
     "HashingEmbedder",
     "SentenceTransformersEmbedder",
     "OpenAIEmbedder",

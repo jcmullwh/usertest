@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import os
 import re
+import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
@@ -14,6 +16,7 @@ __all__ = [
     "Embedder",
     "get_default_embedder",
     "CachedEmbedder",
+    "DiskCachedEmbedder",
     "HashingEmbedder",
     "SentenceTransformersEmbedder",
     "OpenAIEmbedder",
@@ -108,6 +111,118 @@ class CachedEmbedder:
                 self._cache[key] = list(vec)
 
         return [list(self._cache[key]) for key in keys]
+
+
+def _embedder_model_id(embedder: Embedder) -> str:
+    current: object = embedder
+    visited: set[int] = set()
+    while True:
+        current_id = id(current)
+        if current_id in visited:
+            break
+        visited.add(current_id)
+
+        for attribute in ("model", "model_name"):
+            value = getattr(current, attribute, None)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+
+        inner = getattr(current, "inner", None)
+        if inner is None:
+            break
+        current = inner
+    return type(embedder).__name__
+
+
+@dataclass
+class DiskCachedEmbedder:
+    """SQLite cache wrapper for any embedder.
+
+    Vectors are stored as JSON arrays keyed by model identifier and exact text hash.
+    """
+
+    inner: Embedder
+    path: str
+
+    def _connect(self) -> sqlite3.Connection:
+        db_path = os.fspath(self.path)
+        parent = os.path.dirname(db_path)
+        if parent:
+            os.makedirs(parent, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS embedding_cache (
+                model_id TEXT NOT NULL,
+                text_hash TEXT NOT NULL,
+                vector_json TEXT NOT NULL,
+                PRIMARY KEY (model_id, text_hash)
+            )
+            """
+        )
+        return conn
+
+    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            return []
+
+        model_id = _embedder_model_id(self.inner)
+        hashes = [hashlib.sha256(text.encode("utf-8")).hexdigest() for text in texts]
+
+        unique_text_by_hash: dict[str, str] = {}
+        ordered_unique_hashes: list[str] = []
+        for text, text_hash in zip(texts, hashes, strict=True):
+            if text_hash not in unique_text_by_hash:
+                unique_text_by_hash[text_hash] = text
+                ordered_unique_hashes.append(text_hash)
+
+        cached_vectors: dict[str, list[float]] = {}
+        with self._connect() as conn:
+            placeholders = ", ".join("?" for _ in ordered_unique_hashes)
+            rows = conn.execute(
+                (
+                    "SELECT text_hash, vector_json FROM embedding_cache "
+                    f"WHERE model_id = ? AND text_hash IN ({placeholders})"
+                ),
+                [model_id, *ordered_unique_hashes],
+            ).fetchall()
+            for text_hash, vector_json in rows:
+                cached_vectors[str(text_hash)] = list(map(float, json.loads(vector_json)))
+
+            missing_hashes = [
+                text_hash for text_hash in ordered_unique_hashes if text_hash not in cached_vectors
+            ]
+            if missing_hashes:
+                missing_texts = [unique_text_by_hash[text_hash] for text_hash in missing_hashes]
+                missing_vectors = self.inner.embed_texts(missing_texts)
+                if len(missing_vectors) != len(missing_hashes):
+                    raise ValueError(
+                        "Embedding backend returned unexpected vector count: "
+                        f"expected {len(missing_hashes)}, got {len(missing_vectors)}"
+                    )
+
+                rows_to_insert: list[tuple[str, str, str]] = []
+                for text_hash, vector in zip(missing_hashes, missing_vectors, strict=True):
+                    normalized = [float(value) for value in vector]
+                    cached_vectors[text_hash] = normalized
+                    rows_to_insert.append(
+                        (
+                            model_id,
+                            text_hash,
+                            json.dumps(normalized, ensure_ascii=False, separators=(",", ":")),
+                        )
+                    )
+                conn.executemany(
+                    (
+                        "INSERT OR IGNORE INTO embedding_cache(model_id, text_hash, vector_json) "
+                        "VALUES (?, ?, ?)"
+                    ),
+                    rows_to_insert,
+                )
+                conn.commit()
+
+        return [list(cached_vectors[text_hash]) for text_hash in hashes]
 
 
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
@@ -220,18 +335,16 @@ class OpenAIEmbedder:
 
     def __post_init__(self) -> None:
         try:
-            from openai import OpenAI  # type: ignore
+            from openai import OpenAI
         except ModuleNotFoundError as exc:  # pragma: no cover
             raise ModuleNotFoundError(
                 "openai is not installed. Add openai to your environment."
             ) from exc
 
-        kwargs: dict[str, object] = {}
-        if self.api_key:
-            kwargs["api_key"] = self.api_key
-        if self.base_url:
-            kwargs["base_url"] = self.base_url
-        self._client = OpenAI(**kwargs)
+        self._client = OpenAI(
+            api_key=self.api_key if self.api_key else None,
+            base_url=self.base_url if self.base_url else None,
+        )
 
     def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
         batch_size = int(self.batch_size)
@@ -283,8 +396,12 @@ def get_default_embedder() -> Embedder:
     spec_lower = spec.lower()
 
     def _wrap(embedder: Embedder) -> Embedder:
-        # Cache is always safe and helps both local and remote backends.
-        return CachedEmbedder(embedder)
+        # Memory cache is always safe and helps both local and remote backends.
+        wrapped: Embedder = CachedEmbedder(embedder)
+        cache_path = (os.getenv("TRIAGE_ENGINE_EMBED_CACHE_PATH") or "").strip()
+        if cache_path:
+            wrapped = DiskCachedEmbedder(wrapped, path=cache_path)
+        return wrapped
 
     model = os.getenv("TRIAGE_ENGINE_OPENAI_MODEL") or "text-embedding-3-small"
     if spec_lower:

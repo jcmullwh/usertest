@@ -27,6 +27,9 @@ def test_parser_smoke_backlog_commands() -> None:
     args = parser.parse_args(["triage-prs", "--in", "prs.json"])
     assert args.input_json.name == "prs.json"
 
+    args = parser.parse_args(["triage-backlog", "--in", "issues.json"])
+    assert args.input_json.name == "issues.json"
+
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--repo", "C:\\tmp\\x"])
     with pytest.raises(SystemExit):
