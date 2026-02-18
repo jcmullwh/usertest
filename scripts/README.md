@@ -18,6 +18,13 @@ These run a deterministic checklist used in onboarding and CI verification:
 - CLI help
 - smoke tests
 
+Use strict preflight mode when needed:
+
+- `smoke.sh --require-doctor`
+- `smoke.ps1 -RequireDoctor`
+
+In strict mode, missing `pdm` is treated as a failure instead of a skip.
+
 See the repo root `README.md` for copy/paste invocations.
 
 ---

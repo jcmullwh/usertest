@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [switch]$SkipInstall,
-    [switch]$UsePythonPath
+    [switch]$UsePythonPath,
+    [switch]$RequireDoctor
 )
 
 $ErrorActionPreference = 'Stop'
@@ -84,7 +85,11 @@ try {
         }
     }
     else {
-        Write-Host "==> Scaffold doctor skipped (pdm not found on PATH)"
+        if ($RequireDoctor) {
+            Write-Error 'Scaffold doctor required but pdm was not found on PATH. Install pdm or rerun without -RequireDoctor.'
+            exit 1
+        }
+        Write-Host "==> Scaffold doctor skipped (pdm not found on PATH; preflight coverage reduced)"
     }
 
     if (-not $SkipInstall) {

@@ -10,6 +10,7 @@ set -euo pipefail
 
 SKIP_INSTALL=0
 USE_PYTHONPATH=0
+REQUIRE_DOCTOR=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -21,9 +22,13 @@ while [[ $# -gt 0 ]]; do
       USE_PYTHONPATH=1
       shift
       ;;
+    --require-doctor)
+      REQUIRE_DOCTOR=1
+      shift
+      ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: scripts/smoke.sh [--skip-install] [--use-pythonpath]" >&2
+      echo "Usage: scripts/smoke.sh [--skip-install] [--use-pythonpath] [--require-doctor]" >&2
       exit 2
       ;;
   esac
@@ -47,7 +52,12 @@ if command -v pdm >/dev/null 2>&1; then
   echo "==> Scaffold doctor"
   "${PYTHON_BIN}" tools/scaffold/scaffold.py doctor
 else
-  echo "==> Scaffold doctor skipped (pdm not found on PATH)"
+  if [[ "${REQUIRE_DOCTOR}" -eq 1 ]]; then
+    echo "Scaffold doctor required but pdm was not found on PATH." >&2
+    echo "Install pdm or rerun without --require-doctor." >&2
+    exit 1
+  fi
+  echo "==> Scaffold doctor skipped (pdm not found on PATH; preflight coverage reduced)"
 fi
 
 if [[ "${SKIP_INSTALL}" -eq 0 ]]; then
