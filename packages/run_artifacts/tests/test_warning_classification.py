@@ -6,8 +6,15 @@ from run_artifacts.run_failure_event import classify_known_stderr_warnings
 def test_classify_known_stderr_warnings_detects_warning_only_payload() -> None:
     text = "\n".join(
         [
-            "[codex_warning_summary] code=shell_snapshot_powershell_unsupported occurrences=3 classification=capability_notice",
-            "hint=PowerShell shell snapshot unsupported; continuing without shell snapshot metadata.",
+            (
+                "[codex_warning_summary] "
+                "code=shell_snapshot_powershell_unsupported "
+                "occurrences=3 classification=capability_notice"
+            ),
+            (
+                "hint=PowerShell shell snapshot unsupported; "
+                "continuing without shell snapshot metadata."
+            ),
         ]
     )
     meta = classify_known_stderr_warnings(text)
@@ -19,7 +26,11 @@ def test_classify_known_stderr_warnings_detects_warning_only_payload() -> None:
 def test_classify_known_stderr_warnings_marks_mixed_payload_as_not_warning_only() -> None:
     text = "\n".join(
         [
-            "[codex_warning_summary] code=turn_metadata_header_timeout occurrences=2 classification=capability_notice",
+            (
+                "[codex_warning_summary] "
+                "code=turn_metadata_header_timeout "
+                "occurrences=2 classification=capability_notice"
+            ),
             "real error line",
         ]
     )

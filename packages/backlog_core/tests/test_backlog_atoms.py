@@ -218,7 +218,8 @@ def test_extract_backlog_atoms_reclassifies_known_warning_only_stderr(tmp_path: 
             [
                 "[codex_warning_summary] code=shell_snapshot_powershell_unsupported "
                 "occurrences=4 classification=capability_notice",
-                "hint=PowerShell shell snapshot unsupported; continuing without shell snapshot metadata.",
+                "hint=PowerShell shell snapshot unsupported; "
+                "continuing without shell snapshot metadata.",
             ]
         )
         + "\n",
