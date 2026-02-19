@@ -247,3 +247,19 @@ def test_sanitize_agent_stderr_file_collapses_gemini_provider_capacity_stack_tra
     assert "model=gemini-3-flash-preview" in text
     assert "hint=If this is transient vendor capacity" in text
     assert "Gaxios._request" not in text
+
+
+def test_sanitize_agent_stderr_file_rewrites_missing_pgrep_output_noise(tmp_path: Path) -> None:
+    path = tmp_path / "agent_stderr.txt"
+    path.write_text(
+        "Error executing tool read_file: File not found.\nmissing pgrep output\n",
+        encoding="utf-8",
+    )
+
+    _sanitize_agent_stderr_file(agent="gemini", path=path)
+
+    text = path.read_text(encoding="utf-8")
+    assert all(line.strip().lower() != "missing pgrep output" for line in text.splitlines())
+    assert "Error executing tool read_file" in text
+    assert "tool=read_file" in text
+    assert "code=missing_pgrep_output" in text

@@ -277,6 +277,12 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
         raw_lines = text.splitlines()
         lines = [line for line in raw_lines if line.strip() not in _GEMINI_STDERR_STRIP_LINES]
 
+        saw_missing_pgrep_output = any(
+            line.strip().lower() == "missing pgrep output" for line in lines
+        )
+        if saw_missing_pgrep_output:
+            lines = [line for line in lines if line.strip().lower() != "missing pgrep output"]
+
         metrics_lines: list[str] = []
         other_lines: list[str] = []
         for line in lines:
@@ -385,6 +391,33 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
                     ]
                 )
             )
+
+        if (
+            "error executing tool read_file" in lowered
+            and "file not found" in lowered
+            and "tool=read_file" not in lowered
+        ):
+            if saw_missing_pgrep_output:
+                hints.append(
+                    "\n".join(
+                        [
+                            "[gemini_tool_hint] tool=read_file code=missing_pgrep_output classification=capability_notice",
+                            "hint=Gemini CLI sometimes emits `missing pgrep output` alongside read_file "
+                            "`File not found` errors. Inspect raw_events.jsonl for the full missing path "
+                            "and re-run with a corrected, workspace-relative path.",
+                        ]
+                    )
+                )
+            else:
+                hints.append(
+                    "\n".join(
+                        [
+                            "[gemini_tool_hint] tool=read_file code=file_not_found classification=user_input_error",
+                            "hint=Confirm the file path exists in the active workspace. If the stderr line "
+                            "omits the missing path, check raw_events.jsonl for the full File not found message.",
+                        ]
+                    )
+                )
 
         rendered_blocks: list[str] = []
         if prefix_blocks:
