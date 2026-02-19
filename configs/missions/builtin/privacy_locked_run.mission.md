@@ -14,6 +14,11 @@ requires_edits: false
 
 Execute a useful workflow while minimizing external side effects: avoid unintended network calls, uploads, telemetry, and publishing.
 
+Note: this mission constrains the *target workflow* (commands the agent chooses to run against the repo). It does **not**
+make the run “offline” in the sense of preventing the agent CLI from reaching its hosted API provider. In this repo’s
+Docker execution backend, the agent CLI runs inside the container; setting `--exec-network none` will prevent hosted
+agents (Codex/Claude/Gemini) from running.
+
 ## Approach
 
 1) Identify any documented â€œoffline,â€ â€œlocal-only,â€ or â€œno-telemetryâ€ modes.
