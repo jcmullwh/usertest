@@ -193,3 +193,57 @@ def test_sanitize_agent_stderr_file_appends_hint_for_gemini_replace_not_found(tm
     assert "tool=replace" in text
     assert "code=string_not_found" in text
     assert "hint=Gemini replace requires an exact match" in text
+
+
+def test_sanitize_agent_stderr_file_summarizes_gemini_metrics_recording_dns_failures(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "agent_stderr.txt"
+    line = (
+        "Error recording tool call interactions: request to "
+        "https://cloudcode-pa.googleapis.com/v1internal:recordCodeAssistMetrics failed, "
+        "reason: getaddrinfo EAI_AGAIN cloudcode-pa.googleapis.com"
+    )
+    path.write_text("\n".join([line, line, "after"]) + "\n", encoding="utf-8")
+
+    _sanitize_agent_stderr_file(agent="gemini", path=path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "Error recording tool call interactions" not in text
+    assert "code=metrics_recording_failed" in text
+    assert "occurrences=2" in text
+    assert "EAI_AGAIN" in text
+    assert "hint=This is best-effort telemetry" in text
+    assert "after" in text
+
+
+def test_sanitize_agent_stderr_file_collapses_gemini_provider_capacity_stack_traces(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "agent_stderr.txt"
+    path.write_text(
+        "\n".join(
+            [
+                "Attempt 1 failed with status 429. Retrying with backoff... GaxiosError: [{",
+                '  "error": {',
+                '    "code": 429,',
+                '    "message": "No capacity available for model gemini-3-flash-preview on the server",',
+                '    "status": "RESOURCE_EXHAUSTED",',
+                "  }",
+                "}]",
+                "    at Gaxios._request (/usr/lib/node_modules/@google/gemini-cli/node_modules/gaxios/build/src/gaxios.js:142:23)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    _sanitize_agent_stderr_file(agent="gemini", path=path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "code=provider_capacity" in text
+    assert "classification=transient_error" in text
+    assert "retryable=true" in text
+    assert "model=gemini-3-flash-preview" in text
+    assert "hint=If this is transient vendor capacity" in text
+    assert "Gaxios._request" not in text

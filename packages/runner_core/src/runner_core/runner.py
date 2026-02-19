@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import platform
+import random
 import re
 import shutil
 import subprocess
@@ -172,6 +173,14 @@ _FAILURE_SUBTYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "transient_network",
+        (
+            re.compile(r"\bEAI_AGAIN\b", re.IGNORECASE),
+            re.compile(r"temporary failure in name resolution", re.IGNORECASE),
+            re.compile(r"\bENOTFOUND\b", re.IGNORECASE),
+        ),
+    ),
+    (
         "disk_full",
         (
             re.compile(r"\bENOSPC\b", re.IGNORECASE),
@@ -217,6 +226,7 @@ _NON_RETRYABLE_PROVIDER_CAPACITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"upgrade (plan|account)", re.IGNORECASE),
     re.compile(r"trial (has )?ended", re.IGNORECASE),
 )
+_NON_RETRYABLE_TRANSIENT_NETWORK_PATTERNS: tuple[re.Pattern[str], ...] = ()
 
 _GEMINI_STDERR_STRIP_LINES: frozenset[str] = frozenset(
     {
@@ -233,6 +243,7 @@ _CODEX_SHELL_SNAPSHOT_WARNING_CODE = "shell_snapshot_powershell_unsupported"
 _CODEX_TURN_METADATA_TIMEOUT_CODE = "turn_metadata_header_timeout"
 _CODEX_MODEL_REFRESH_TIMEOUT_CODE = "codex_model_refresh_timeout"
 _CODEX_MODEL_REFRESH_TIMEOUT_HINT = "hint=Codex model refresh timed out; model list may be stale."
+_MAX_AGENT_RETRY_DELAY_SECONDS = 60.0
 _READ_FILE_NOT_FOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"Error executing tool read_file:\s*File not found(?::\s*|\s+)(?P<path>\S+)",
@@ -244,6 +255,17 @@ _READ_FILE_NOT_FOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 _WINDOWS_POSIX_DRIVE_PATH_RE = re.compile(r"^/([a-zA-Z])/(.*)$")
+_GEMINI_METRICS_RECORDING_LINE_RE = re.compile(
+    (
+        r"^Error recording tool call interactions: .*recordCodeAssistMetrics failed, "
+        r"reason:\s*(?P<reason>.+)$"
+    ),
+    re.IGNORECASE,
+)
+_GEMINI_PROVIDER_CAPACITY_MODEL_RE = re.compile(
+    r"No capacity available for model\s+(?P<model>[A-Za-z0-9_.:-]+)",
+    re.IGNORECASE,
+)
 
 
 def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
@@ -251,12 +273,87 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
         return text
 
     if agent == "gemini":
-        lines = [
-            line for line in text.splitlines() if line.strip() not in _GEMINI_STDERR_STRIP_LINES
-        ]
-        sanitized = "\n".join(lines)
-        lowered = sanitized.lower()
+        raw_lines = text.splitlines()
+        lines = [line for line in raw_lines if line.strip() not in _GEMINI_STDERR_STRIP_LINES]
+
+        metrics_lines: list[str] = []
+        other_lines: list[str] = []
+        for line in lines:
+            if _GEMINI_METRICS_RECORDING_LINE_RE.match(line.strip()):
+                metrics_lines.append(line.strip())
+            else:
+                other_lines.append(line)
+
+        metrics_occurrences = len(metrics_lines)
+        metrics_reason = ""
+        if metrics_lines:
+            match = _GEMINI_METRICS_RECORDING_LINE_RE.match(metrics_lines[0])
+            if match is not None:
+                metrics_reason = match.group("reason").strip()
+
+        other_text = "\n".join(other_lines).strip()
+        lowered = "\n".join(lines).lower()
         hints: list[str] = []
+        prefix_blocks: list[str] = []
+        body_lines: list[str] = []
+
+        if _classify_failure_subtype(other_text) == "provider_capacity":
+            model = ""
+            model_match = _GEMINI_PROVIDER_CAPACITY_MODEL_RE.search(other_text)
+            if model_match is not None:
+                model = model_match.group("model")
+            else:
+                json_model_match = re.search(r"\"model\"\s*:\s*\"(?P<model>[^\"]+)\"", other_text)
+                if json_model_match is not None:
+                    model = json_model_match.group("model")
+
+            retryable = _is_retryable_provider_capacity_failure(other_text)
+            model_clause = f" model={model}" if model else ""
+            classification = "transient_error" if retryable else "account_or_quota_error"
+            prefix_blocks.append(
+                "\n".join(
+                    [
+                        (
+                            "[gemini_error_summary] code=provider_capacity "
+                            f"classification={classification} retryable={str(retryable).lower()}"
+                        ),
+                        (
+                            "detail=Gemini API reported HTTP 429 RESOURCE_EXHAUSTED "
+                            f"(capacity unavailable).{model_clause}"
+                        ),
+                        (
+                            "hint=If this is transient vendor capacity, retry later or pick a "
+                            "different model via `--model`. "
+                            "If this is quota/billing related, retries will not help."
+                        ),
+                    ]
+                )
+            )
+            body_lines = [
+                line
+                for line in other_lines
+                if line.lstrip().startswith("Error executing tool") or line.lstrip().startswith("[")
+            ]
+        else:
+            body_lines = other_lines
+
+        if metrics_occurrences:
+            reason_clause = f" reason={metrics_reason}" if metrics_reason else ""
+            prefix_blocks.append(
+                "\n".join(
+                    [
+                        (
+                            "[gemini_warning_summary] code=metrics_recording_failed "
+                            f"occurrences={metrics_occurrences} classification=transient_warning"
+                        ),
+                        f"detail=Gemini CLI failed to record metrics.{reason_clause}".strip(),
+                        (
+                            "hint=This is best-effort telemetry and typically does not affect the "
+                            "run output. If it persists, check DNS/proxy/network access and retry."
+                        ),
+                    ]
+                )
+            )
 
         if (
             "error executing tool grep_search" in lowered
@@ -288,10 +385,15 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
                 )
             )
 
+        rendered_blocks: list[str] = []
+        if prefix_blocks:
+            rendered_blocks.append("\n\n".join(prefix_blocks).strip())
+        if body_lines:
+            rendered_blocks.append("\n".join(body_lines).strip())
+        sanitized = "\n\n".join([block for block in rendered_blocks if block]).strip()
+
         if hints:
-            if sanitized and not sanitized.endswith("\n"):
-                sanitized += "\n"
-            sanitized = sanitized + "\n\n".join(hints)
+            sanitized = (sanitized + "\n\n" if sanitized else "") + "\n\n".join(hints)
 
         return sanitized
 
@@ -592,6 +694,12 @@ def _is_retryable_provider_capacity_failure(text: str) -> bool:
     return not any(pattern.search(text) for pattern in _NON_RETRYABLE_PROVIDER_CAPACITY_PATTERNS)
 
 
+def _is_retryable_transient_network_failure(text: str) -> bool:
+    if not text.strip():
+        return True
+    return not any(pattern.search(text) for pattern in _NON_RETRYABLE_TRANSIENT_NETWORK_PATTERNS)
+
+
 def _agent_binary_for_preflight_probe(*, agent: str, agent_cfg: dict[str, Any]) -> str | None:
     default_binary = {
         "codex": "codex",
@@ -705,6 +813,13 @@ def _effective_gemini_cli_sandbox(*, policy_value: Any, has_outer_sandbox: bool)
         # executing inside a Docker sandbox, rely on the outer sandbox and disable Gemini's
         # nested sandbox.
         return False
+    try:
+        if Path("/.dockerenv").exists():
+            # Some environments run the runner inside a container even when the runner's
+            # execution backend is "local". Avoid asking Gemini CLI to create a nested container.
+            return False
+    except OSError:
+        pass
     if os.name == "nt":
         # Gemini CLI's `--sandbox` relies on docker/podman and can hang on Windows hosts in
         # headless/non-interactive runs. For runner use-cases, prefer the runner's own Docker
@@ -2485,16 +2600,28 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 }
                 attempts_meta.append(attempt_meta)
 
-                if (
-                    agent_exit_code != 0
-                    and failure_subtype == "provider_capacity"
-                    and _is_retryable_provider_capacity_failure(failure_text)
-                    and rate_limit_retry_count < rate_limit_retries
-                ):
-                    delay_seconds = rate_limit_backoff_seconds * (
+                retry_reason: str | None = None
+                if agent_exit_code != 0 and rate_limit_retry_count < rate_limit_retries:
+                    if failure_subtype == "provider_capacity" and _is_retryable_provider_capacity_failure(
+                        failure_text
+                    ):
+                        retry_reason = "provider_capacity"
+                    elif (
+                        failure_subtype == "transient_network"
+                        and _is_retryable_transient_network_failure(failure_text)
+                    ):
+                        retry_reason = "transient_network"
+
+                if retry_reason is not None:
+                    raw_delay_seconds = rate_limit_backoff_seconds * (
                         rate_limit_backoff_multiplier**rate_limit_retry_count
                     )
-                    attempt_meta["retry_reason"] = "provider_capacity"
+                    capped_delay_seconds = min(_MAX_AGENT_RETRY_DELAY_SECONDS, raw_delay_seconds)
+                    delay_seconds = (
+                        random.uniform(0.0, capped_delay_seconds) if capped_delay_seconds > 0 else 0.0
+                    )
+                    attempt_meta["retry_reason"] = retry_reason
+                    attempt_meta["retry_delay_seconds_raw"] = raw_delay_seconds
                     attempt_meta["retry_delay_seconds"] = delay_seconds
                     rate_limit_retry_count += 1
                     if delay_seconds > 0:
@@ -2618,10 +2745,58 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             last_message_truncated = False
             if len(last_message_excerpt) > 4000:
                 last_message_excerpt = last_message_excerpt[:4000] + "\n...[truncated]..."
-                last_message_truncated = True
+            last_message_truncated = True
 
             combined_text = "\n".join([x for x in (stderr_text, last_message_text) if x])
             failure_subtype = _classify_failure_subtype(combined_text)
+            if (
+                stderr_text
+                and failure_subtype in {"provider_capacity", "transient_network"}
+                and "[runner_retry_summary]" not in stderr_text
+            ):
+                retryable = True
+                if failure_subtype == "provider_capacity":
+                    retryable = _is_retryable_provider_capacity_failure(combined_text)
+                elif failure_subtype == "transient_network":
+                    retryable = _is_retryable_transient_network_failure(combined_text)
+
+                retry_summary_lines = [
+                    (
+                        "[runner_retry_summary] "
+                        f"code={failure_subtype} "
+                        f"retryable={str(retryable).lower()} "
+                        f"retries_configured={rate_limit_retries} "
+                        f"retries_used={rate_limit_retry_count} "
+                        f"backoff_seconds={rate_limit_backoff_seconds} "
+                        f"backoff_multiplier={rate_limit_backoff_multiplier} "
+                        f"max_delay_seconds={_MAX_AGENT_RETRY_DELAY_SECONDS}"
+                    )
+                ]
+                if not retryable:
+                    retry_summary_lines.append(
+                        "hint=This failure looks non-retryable (quota/billing/account). Fix the account "
+                        "issue and re-run; retries will not help."
+                    )
+                elif rate_limit_retries <= 0:
+                    retry_summary_lines.append(
+                        "hint=Retries are disabled (agent_rate_limit_retries=0). Re-run later or increase "
+                        "agent_rate_limit_retries for transient failures."
+                    )
+                elif rate_limit_retry_count >= rate_limit_retries:
+                    retry_summary_lines.append(
+                        "hint=Runner retries were exhausted. Retry later, reduce concurrency, or switch models."
+                    )
+                else:
+                    retry_summary_lines.append(
+                        "hint=Transient error detected. The runner may retry automatically; see agent_attempts.json."
+                    )
+
+                stderr_text = "\n".join(retry_summary_lines).strip() + "\n\n" + stderr_text
+                if stderr_path.exists():
+                    try:
+                        stderr_path.write_text(stderr_text.rstrip() + "\n", encoding="utf-8")
+                    except OSError:
+                        pass
             stderr_was_empty = not bool(stderr_text)
             raw_events_size_bytes = (
                 raw_events_path.stat().st_size if raw_events_path.exists() else 0
