@@ -66,7 +66,12 @@ fi
 if [[ "${SKIP_INSTALL}" -eq 0 ]]; then
   if command -v id >/dev/null 2>&1; then
     if [[ "$(id -u)" -eq 0 ]]; then
-      echo "==> Note: running as root; consider using a virtualenv to avoid global site-packages installs"
+      if [[ -z "${VIRTUAL_ENV:-}" ]]; then
+        echo "==> Note: running as root without an active virtualenv; pip installs may land in system site-packages"
+        echo "    Recommended:"
+        echo "      python -m venv .venv"
+        echo "      source .venv/bin/activate"
+      fi
     fi
   fi
 
