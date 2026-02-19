@@ -188,7 +188,7 @@ def _git_check_ignore(*, repo_root: Path, paths: list[str]) -> set[str]:
 
     payload = ("\0".join(paths) + "\0").encode("utf-8")
     proc = subprocess.run(
-        ["git", "-C", str(repo_root), "check-ignore", "-z", "--stdin"],
+        ["git", "-C", str(repo_root), "check-ignore", "--no-index", "-z", "--stdin"],
         input=payload,
         capture_output=True,
         check=False,
