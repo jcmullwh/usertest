@@ -32,7 +32,7 @@ def main() -> None:
     # sandbox_runner mounts workspace -> /workspace and artifacts -> /artifacts by default.
     spec = SandboxSpec(
         backend="docker",
-        image_context_path=repo_root / "packages" / "sandbox_runner" / "builtins" / "docker" / "contexts" / "sandbox_cli",
+        image_context_path=repo_root / "packages" / "sandbox_runner" / "src" / "sandbox_runner" / "builtins" / "docker" / "contexts" / "sandbox_cli",
         network_mode="open",
     )
     sandbox = DockerSandbox(
