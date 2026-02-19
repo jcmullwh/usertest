@@ -56,10 +56,14 @@ if command -v pdm >/dev/null 2>&1; then
 else
   if [[ "${REQUIRE_DOCTOR}" -eq 1 ]]; then
     echo "Scaffold doctor required but pdm was not found on PATH." >&2
-    echo "Install pdm or rerun without --require-doctor." >&2
+    echo "Install pdm (recommended): ${PYTHON_BIN} -m pip install -U pdm" >&2
+    echo "Or rerun without --require-doctor." >&2
     exit 1
   fi
   echo "==> Scaffold doctor (tool checks skipped; pdm not found on PATH)"
+  echo "    Note: pdm is optional; continuing with the pip-based flow."
+  echo "    To enable tool checks: ${PYTHON_BIN} -m pip install -U pdm"
+  echo "    To require doctor: bash ./scripts/smoke.sh --require-doctor"
   "${PYTHON_BIN}" tools/scaffold/scaffold.py doctor --skip-tool-checks
 fi
 

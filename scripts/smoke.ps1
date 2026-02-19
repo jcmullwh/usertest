@@ -87,10 +87,13 @@ try {
     }
     else {
         if ($RequireDoctor) {
-            Write-Error 'Scaffold doctor required but pdm was not found on PATH. Install pdm or rerun without -RequireDoctor.'
+            Write-Error "Scaffold doctor required but pdm was not found on PATH.`nInstall pdm (recommended): $pythonCmd -m pip install -U pdm`nOr rerun without -RequireDoctor."
             exit 1
         }
         Invoke-Step -Name 'Scaffold doctor (tool checks skipped; pdm not found on PATH)' -Command {
+            Write-Host '    Note: pdm is optional; continuing with the pip-based flow.'
+            Write-Host "    To enable tool checks: $pythonCmd -m pip install -U pdm"
+            Write-Host '    To require doctor: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -RequireDoctor'
             & $pythonCmd tools/scaffold/scaffold.py doctor --skip-tool-checks
         }
     }
