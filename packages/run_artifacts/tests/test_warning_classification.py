@@ -38,3 +38,14 @@ def test_classify_known_stderr_warnings_marks_mixed_payload_as_not_warning_only(
     assert meta["warning_only"] is False
     assert meta["codes"] == ["turn_metadata_header_timeout"]
     assert meta["unknown_lines"] == ["real error line"]
+
+
+def test_classify_known_stderr_warnings_detects_codex_model_refresh_timeout_warning_only() -> None:
+    text = (
+        "2026-02-19T00:36:28.774151Z ERROR codex_core::models_manager::manager: "
+        "failed to refresh available models: timeout waiting for child process to exit"
+    )
+    meta = classify_known_stderr_warnings(text)
+    assert meta["warning_only"] is True
+    assert meta["codes"] == ["codex_model_refresh_timeout"]
+    assert meta["unknown_lines"] == []

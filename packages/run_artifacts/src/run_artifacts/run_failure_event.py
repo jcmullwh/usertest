@@ -8,12 +8,16 @@ MAX_ERROR_FALLBACK_CHARS = 2_000
 
 _SHELL_SNAPSHOT_WARNING_CODE = "shell_snapshot_powershell_unsupported"
 _TURN_METADATA_TIMEOUT_WARNING_CODE = "turn_metadata_header_timeout"
+_CODEX_MODEL_REFRESH_TIMEOUT_WARNING_CODE = "codex_model_refresh_timeout"
 
 _SHELL_SNAPSHOT_WARNING_HINT = (
     "hint=PowerShell shell snapshot unsupported; continuing without shell snapshot metadata."
 )
 _TURN_METADATA_TIMEOUT_HINT = (
     "hint=Turn metadata header timed out; continuing without metadata header."
+)
+_CODEX_MODEL_REFRESH_TIMEOUT_HINT = (
+    "hint=Codex model refresh timed out; model list may be stale."
 )
 
 
@@ -85,6 +89,7 @@ def classify_known_stderr_warnings(text: str) -> dict[str, Any]:
     counts: dict[str, int] = {
         _SHELL_SNAPSHOT_WARNING_CODE: 0,
         _TURN_METADATA_TIMEOUT_WARNING_CODE: 0,
+        _CODEX_MODEL_REFRESH_TIMEOUT_WARNING_CODE: 0,
     }
     unknown_lines: list[str] = []
 
@@ -104,6 +109,14 @@ def classify_known_stderr_warnings(text: str) -> dict[str, Any]:
             or lowered == _TURN_METADATA_TIMEOUT_HINT.lower()
         ):
             counts[_TURN_METADATA_TIMEOUT_WARNING_CODE] += 1
+            continue
+
+        if (
+            ("failed to refresh available models" in lowered and "timeout waiting for child process" in lowered)
+            or f"code={_CODEX_MODEL_REFRESH_TIMEOUT_WARNING_CODE}" in lowered
+            or lowered == _CODEX_MODEL_REFRESH_TIMEOUT_HINT.lower()
+        ):
+            counts[_CODEX_MODEL_REFRESH_TIMEOUT_WARNING_CODE] += 1
             continue
 
         unknown_lines.append(line)

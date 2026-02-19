@@ -222,6 +222,8 @@ _CODEX_PERSONALITY_MISSING_MESSAGES_WARNING = (
 _CODEX_SHELL_SNAPSHOT_WARNING = "Shell snapshot not supported yet for PowerShell"
 _CODEX_SHELL_SNAPSHOT_WARNING_CODE = "shell_snapshot_powershell_unsupported"
 _CODEX_TURN_METADATA_TIMEOUT_CODE = "turn_metadata_header_timeout"
+_CODEX_MODEL_REFRESH_TIMEOUT_CODE = "codex_model_refresh_timeout"
+_CODEX_MODEL_REFRESH_TIMEOUT_HINT = "hint=Codex model refresh timed out; model list may be stale."
 _READ_FILE_NOT_FOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"Error executing tool read_file:\s*File not found(?::\s*|\s+)(?P<path>\S+)",
@@ -250,6 +252,7 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
         saw_personality_warning = False
         shell_snapshot_count = 0
         turn_metadata_timeout_count = 0
+        model_refresh_timeout_count = 0
         lines: list[str] = []
         for line in text.splitlines():
             lowered = line.lower()
@@ -262,6 +265,12 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
                 continue
             if "turn metadata" in lowered and "timed out" in lowered and "header" in lowered:
                 turn_metadata_timeout_count += 1
+                continue
+            if (
+                "failed to refresh available models" in lowered
+                and "timeout waiting for child process" in lowered
+            ):
+                model_refresh_timeout_count += 1
                 continue
             lines.append(line)
 
@@ -290,6 +299,18 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
                         "classification=capability_notice"
                     ),
                     "hint=Turn metadata header timed out; continuing without metadata header.",
+                ]
+            )
+        if model_refresh_timeout_count > 0:
+            lines.extend(
+                [
+                    (
+                        "[codex_warning_summary] "
+                        f"code={_CODEX_MODEL_REFRESH_TIMEOUT_CODE} "
+                        f"occurrences={model_refresh_timeout_count} "
+                        "classification=capability_notice"
+                    ),
+                    _CODEX_MODEL_REFRESH_TIMEOUT_HINT,
                 ]
             )
         return "\n".join(lines)

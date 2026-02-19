@@ -87,6 +87,10 @@ def test_sanitize_agent_stderr_file_summarizes_known_codex_capability_warnings(
         "2026-02-18T00:00:01Z WARN codex_core::turn_metadata: "
         "timed out after 250ms while building turn metadata header"
     )
+    model_refresh = (
+        "2026-02-19T00:36:28.774151Z ERROR codex_core::models_manager::manager: "
+        "failed to refresh available models: timeout waiting for child process to exit"
+    )
     path.write_text(
         "\n".join(
             [
@@ -94,6 +98,7 @@ def test_sanitize_agent_stderr_file_summarizes_known_codex_capability_warnings(
                 shell_snapshot,
                 shell_snapshot,
                 turn_metadata,
+                model_refresh,
                 "after",
                 "",
             ]
@@ -110,3 +115,5 @@ def test_sanitize_agent_stderr_file_summarizes_known_codex_capability_warnings(
     assert "code=shell_snapshot_powershell_unsupported" in text
     assert "occurrences=2" in text
     assert "code=turn_metadata_header_timeout" in text
+    assert "failed to refresh available models" not in text
+    assert "code=codex_model_refresh_timeout" in text
