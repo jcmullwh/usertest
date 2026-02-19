@@ -78,11 +78,26 @@ To understand what a run produces without installing anything, open the checked-
 
 You can also re-render that fixture from raw events:
 
-```bash
-python -m usertest.cli report \
-  --repo-root . \
-  --run-dir examples/golden_runs/minimal_codex_run \
-  --recompute-metrics
+```text
+python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics
+```
+
+---
+
+## One-command smoke (recommended)
+
+For a fast, deterministic end-to-end sanity check (doctor â†’ deps â†’ CLI help â†’ smoke tests), use the OS-specific smoke script:
+
+Windows PowerShell:
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1
+```
+
+macOS/Linux:
+
+```text
+bash ./scripts/smoke.sh
 ```
 
 ---
@@ -168,14 +183,8 @@ and what “success” means. If present, it is snapshotted into the run directo
 
 For a first attempt, use `inspect` (read-only + allows shell commands):
 
-```bash
-usertest run \
-  --repo-root . \
-  --repo "PATH_OR_GIT_URL" \
-  --agent codex \
-  --policy inspect \
-  --persona-id quickstart_sprinter \
-  --mission-id first_output_smoke
+```text
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke
 ```
 
 Strictest mode (no shell, no writes):

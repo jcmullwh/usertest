@@ -14,22 +14,14 @@ If you don’t yet have a working environment, start with `docs/tutorials/gettin
 
 ### Local directory
 
-```bash
-python -m usertest.cli run \
-  --repo-root . \
-  --repo "PATH/TO/TARGET" \
-  --agent codex \
-  --policy inspect
+```text
+python -m usertest.cli run --repo-root . --repo "PATH/TO/TARGET" --agent codex --policy inspect
 ```
 
 ### Git URL
 
-```bash
-python -m usertest.cli run \
-  --repo-root . \
-  --repo "https://github.com/org/repo.git" \
-  --agent codex \
-  --policy inspect
+```text
+python -m usertest.cli run --repo-root . --repo "https://github.com/org/repo.git" --agent codex --policy inspect
 ```
 
 ---
@@ -45,14 +37,8 @@ python -m usertest.cli missions list --repo-root .
 
 Run with explicit IDs:
 
-```bash
-python -m usertest.cli run \
-  --repo-root . \
-  --repo "PATH_OR_GIT_URL" \
-  --agent codex \
-  --policy inspect \
-  --persona-id burst_user \
-  --mission-id produce_default_output
+```text
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id burst_user --mission-id produce_default_output
 ```
 
 ---
@@ -89,12 +75,8 @@ Full guide: `docs/how-to/personas-and-missions.md`.
 
 Run multiple targets from a YAML file:
 
-```bash
-python -m usertest.cli batch \
-  --repo-root . \
-  --targets examples/targets.yaml \
-  --agent codex \
-  --policy safe
+```text
+python -m usertest.cli batch --repo-root . --targets examples/targets.yaml --agent codex --policy safe
 ```
 
 Batch runs still produce per-target run directories; they’re just orchestrated from one command.
@@ -125,13 +107,8 @@ The Docker backend is useful when you want:
 - fewer host OS quirks (especially around shell commands)
 - a more repeatable environment
 
-```bash
-python -m usertest.cli run \
-  --repo-root . \
-  --repo "PATH_OR_GIT_URL" \
-  --agent codex \
-  --policy inspect \
-  --exec-backend docker
+```text
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker
 ```
 
 By default, Docker runs reuse host agent logins by mounting `~/.codex`, `~/.claude`, and/or
@@ -139,15 +116,8 @@ By default, Docker runs reuse host agent logins by mounting `~/.codex`, `~/.clau
 
 If you want API-key auth for Codex instead:
 
-```bash
-python -m usertest.cli run \
-  --repo-root . \
-  --repo "PATH_OR_GIT_URL" \
-  --agent codex \
-  --policy inspect \
-  --exec-backend docker \
-  --exec-use-api-key-auth \
-  --exec-env OPENAI_API_KEY
+```text
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker --exec-use-api-key-auth --exec-env OPENAI_API_KEY
 ```
 
 ---
@@ -158,16 +128,8 @@ To test the “fresh install” experience (instead of a repo checkout), use a `
 
 Example (GitLab PyPI credentials are passed through as exec env vars):
 
-```bash
-python -m usertest.cli run \
-  --repo-root . \
-  --repo "pip:agent-adapters" \
-  --agent codex \
-  --policy safe \
-  --exec-backend docker \
-  --exec-env GITLAB_PYPI_PROJECT_ID \
-  --exec-env GITLAB_PYPI_USERNAME \
-  --exec-env GITLAB_PYPI_PASSWORD
+```text
+python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy safe --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD
 ```
 
 See `docs/monorepo-packages.md` for details.
