@@ -54,9 +54,12 @@ The workflow is:
 
 - `.github/workflows/publish-snapshots.yml`
 
-It publishes snapshots automatically on every push to `main`.
+On every push to `main`, it runs a **safe validation-only** path (self-test + build + artifact scan)
+and does **not** upload anything.
 
-You can also trigger it manually via `workflow_dispatch`; both paths run live publish.
+To actually publish snapshots, trigger the workflow manually via `workflow_dispatch`. The manual
+path runs the same validation step and then performs a live publish (requires explicit confirmation
+in the command via `--confirm-live-publish`).
 
 The live publish job requires these secrets:
 

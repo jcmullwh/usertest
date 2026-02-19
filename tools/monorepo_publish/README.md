@@ -45,6 +45,15 @@ python tools/monorepo_publish/publish_snapshots.py --self-test
 python tools/monorepo_publish/publish_snapshots.py --dry-run
 ```
 
+### Validate distributions (build + scan, no upload)
+
+This mode is safe to run in CI on every push. It builds sdists/wheels and fails if they contain
+obviously sensitive files (for example `.env`, `.pypirc`, or private key material).
+
+```bash
+python tools/monorepo_publish/publish_snapshots.py --validate-dists
+```
+
 ### Live publish
 
 Live publishing requires explicit confirmation:
