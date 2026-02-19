@@ -871,7 +871,9 @@ def _gemini_include_directories_for_workspace(*, workspace_dir: Path) -> list[st
     read generated `report.md` / `report.json` / `metrics.json` during triage flows.
     """
 
-    include_rel = str(Path("runs") / "usertest")
+    # Gemini CLI runs inside the runner's Docker sandbox (Linux). Always pass POSIX-style
+    # include-directories to avoid `runs\\usertest` being interpreted as a literal path segment.
+    include_rel = (Path("runs") / "usertest").as_posix()
     candidate = workspace_dir / "runs" / "usertest"
     if candidate.is_dir():
         return [include_rel]
