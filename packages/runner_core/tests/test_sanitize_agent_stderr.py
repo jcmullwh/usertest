@@ -32,6 +32,22 @@ def test_sanitize_agent_stderr_file_strips_gemini_zero_hook_registry_line(
     assert "Something else." in text
 
 
+def test_sanitize_agent_stderr_file_strips_gemini_zero_hook_registry_line_without_period(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "agent_stderr.txt"
+    path.write_text(
+        "Hook registry initialized with 0 hook entries\nSomething else.\n",
+        encoding="utf-8",
+    )
+
+    _sanitize_agent_stderr_file(agent="gemini", path=path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "Hook registry initialized with 0 hook entries" not in text
+    assert "Something else." in text
+
+
 def test_sanitize_agent_stderr_file_dedupes_codex_personality_warning(tmp_path: Path) -> None:
     path = tmp_path / "agent_stderr.txt"
     warning = (

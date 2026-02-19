@@ -210,7 +210,11 @@ _NON_RETRYABLE_PROVIDER_CAPACITY_PATTERNS: tuple[re.Pattern[str], ...] = (
 )
 
 _GEMINI_STDERR_STRIP_LINES: frozenset[str] = frozenset(
-    {"Loaded cached credentials.", "Hook registry initialized with 0 hook entries."}
+    {
+        "Loaded cached credentials.",
+        "Hook registry initialized with 0 hook entries.",
+        "Hook registry initialized with 0 hook entries",
+    }
 )
 _CODEX_PERSONALITY_MISSING_MESSAGES_WARNING = (
     "Model personality requested but model_messages is missing"
