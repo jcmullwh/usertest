@@ -118,6 +118,13 @@ Fallback mode if you want PYTHONPATH-based execution instead of editable install
 - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -UsePythonPath`
 - macOS/Linux: `bash ./scripts/smoke.sh --use-pythonpath`
 
+Restricted environments (no editable installs / pre-provisioned deps):
+
+- No editable installs (still installs `requirements-dev.txt`): use the PYTHONPATH modes above.
+- No installs at runtime (deps already provisioned, e.g., offline wheelhouse): run smoke with both flags:
+  - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -SkipInstall -UsePythonPath`
+  - macOS/Linux: `bash ./scripts/smoke.sh --skip-install --use-pythonpath`
+
 ### Manual editable install (no PYTHONPATH)
 
 Run these in an activated virtual environment (otherwise pip may default to user-site install):
