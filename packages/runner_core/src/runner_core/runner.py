@@ -8,6 +8,7 @@ import re
 import shutil
 import subprocess
 import time
+import traceback
 from dataclasses import dataclass
 from json import JSONDecoder
 from pathlib import Path
@@ -2966,6 +2967,44 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             hint_s = hint.strip()
             extra["hint"] = hint_s
             user_errors.append(f"hint={hint_s}")
+        if isinstance(e, OSError):
+            if e.errno is not None:
+                extra["errno"] = e.errno
+                user_errors.append(f"errno={e.errno}")
+            winerror = getattr(e, "winerror", None)
+            if winerror is not None:
+                extra["winerror"] = winerror
+                user_errors.append(f"winerror={winerror}")
+            if e.strerror is not None:
+                extra["strerror"] = e.strerror
+                user_errors.append(f"strerror={e.strerror}")
+            if e.filename is not None:
+                extra["filename"] = e.filename
+                user_errors.append(f"filename={e.filename}")
+            filename2 = getattr(e, "filename2", None)
+            if filename2 is not None:
+                extra["filename2"] = filename2
+                user_errors.append(f"filename2={filename2}")
+
+            traceback_path = run_dir / "error_traceback.txt"
+            try:
+                traceback_path.write_text(traceback.format_exc(), encoding="utf-8")
+            except OSError:
+                traceback_path = None
+            if traceback_path is not None:
+                extra["traceback_artifact"] = traceback_path.name
+                user_errors.append(f"traceback={traceback_path.name}")
+
+            derived_hint = (
+                "Common causes on Windows: invalid filename characters (< > : \" / \\\\ | ? *), "
+                "overly long paths, or output streams that reject writes. See error_traceback.txt for "
+                "the failing operation."
+            )
+            if "hint" in extra and isinstance(extra["hint"], str) and extra["hint"].strip():
+                extra["hint"] = extra["hint"].strip() + "\n" + derived_hint
+            else:
+                extra["hint"] = derived_hint
+            user_errors.append(f"hint={derived_hint}")
         _write_json(
             run_dir / "error.json",
             {
