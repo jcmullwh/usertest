@@ -170,6 +170,7 @@ def run_gemini(
     model: str | None = None,
     approval_mode: str = "default",
     allowed_tools: Iterable[str] = (),
+    include_directories: Iterable[str] = (),
     command_prefix: Iterable[str] = (),
     env_overrides: dict[str, str] | None = None,
 ) -> GeminiRunResult:
@@ -197,6 +198,10 @@ def run_gemini(
     tools = [t for t in allowed_tools if isinstance(t, str) and t.strip()]
     for tool in tools:
         argv.extend(["--allowed-tools", tool])
+
+    include_dirs = [d for d in include_directories if isinstance(d, str) and d.strip()]
+    for directory in include_dirs:
+        argv.extend(["--include-directories", directory])
 
     full_argv = [*prefix, *argv] if prefix else argv
 

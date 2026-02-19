@@ -618,6 +618,20 @@ def _effective_gemini_cli_sandbox(*, policy_value: Any, has_outer_sandbox: bool)
     return True
 
 
+def _gemini_include_directories_for_workspace(*, workspace_dir: Path) -> list[str]:
+    """
+    Gemini CLI may apply gitignore-like "ignore patterns" to file tools (read/search), which can
+    hide local-only run artifacts (this repo ignores `runs/`).
+
+    When a workspace contains `runs/usertest/`, explicitly include that directory so agents can
+    read generated `report.md` / `report.json` / `metrics.json` during triage flows.
+    """
+
+    if (workspace_dir / "runs" / "usertest").is_dir():
+        return [str(Path("runs") / "usertest")]
+    return []
+
+
 def _infer_docker_container_name(command_prefix: list[str]) -> str | None:
     if (
         len(command_prefix) >= 3
@@ -2239,6 +2253,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     model=request.model,
                     approval_mode=gemini_approval_mode,
                     allowed_tools=gemini_allowed_tools,
+                    include_directories=_gemini_include_directories_for_workspace(
+                        workspace_dir=acquired.workspace_dir
+                    ),
                     command_prefix=command_prefix,
                     env_overrides=gemini_env_overrides,
                 )
