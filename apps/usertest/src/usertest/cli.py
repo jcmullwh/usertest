@@ -3031,13 +3031,27 @@ def _render_target_catalog_yaml(*, persona_id: str | None, mission_id: str | Non
     return "\n".join(
         [
             "version: 1",
+            "",
+            "# Target-local usertest overrides.",
+            "#",
+            "# Path semantics:",
+            "# - `personas_dirs` / `missions_dirs` entries are resolved relative to the *target repo root*",
+            "#   (the directory passed to `init-usertest --repo`), not relative to this file.",
+            "# - These lists are additive: they are appended to the base catalog's directories.",
+            "# - Duplicate persona/mission ids across directories are an error; use unique ids or `extends`.",
+            "",
             "defaults:",
             f"  persona_id: {resolved_persona}",
             f"  mission_id: {resolved_mission}",
             "",
+            "personas_dirs:",
+            "  - .usertest/personas",
+            "",
+            "missions_dirs:",
+            "  - .usertest/missions",
+            "",
             "meta:",
-            "  note: Target-local usertest overrides. Add personas_dirs/missions_dirs here as "
-            "needed.",
+            "  note: Put local `*.persona.md` and `*.mission.md` files under the directories above.",
             "",
         ]
     )
@@ -3067,6 +3081,14 @@ def _cmd_init_users(args: argparse.Namespace) -> int:
         return 2
 
     usertest_dir.mkdir(parents=True, exist_ok=True)
+    personas_dir = usertest_dir / "personas"
+    missions_dir = usertest_dir / "missions"
+    personas_dir.mkdir(parents=True, exist_ok=True)
+    missions_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure empty directories survive a git commit when the scaffold is checked in.
+    (personas_dir / ".gitkeep").write_text("", encoding="utf-8", newline="\n")
+    (missions_dir / ".gitkeep").write_text("", encoding="utf-8", newline="\n")
 
     catalog_dest.write_text(
         _render_target_catalog_yaml(
