@@ -25,6 +25,28 @@ READLIKE_COMMANDS = {
 }
 CHAIN_OPERATORS = {"&&", ";", "||", "|"}
 _WINDOWS_DRIVE_POSIX_RE = re.compile(r"^/([a-zA-Z])/(.*)$")
+_MAX_OUTPUT_EXCERPT_CHARS = 2_000
+
+
+def _excerpt_text(text: str, *, max_chars: int = _MAX_OUTPUT_EXCERPT_CHARS) -> tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    marker = "\n...[truncated_output]...\n"
+    available = max_chars - len(marker)
+    if available <= 0:
+        return text[:max_chars], True
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return text[:head_chars] + marker + text[-tail_chars:], True
+
+
+def _join_streams(stdout: Any, stderr: Any) -> str:
+    parts: list[str] = []
+    if isinstance(stdout, str) and stdout.strip():
+        parts.append("[stdout]\n" + stdout.rstrip())
+    if isinstance(stderr, str) and stderr.strip():
+        parts.append("[stderr]\n" + stderr.rstrip())
+    return "\n".join(parts).strip()
 
 
 def _format_argv(argv: list[str]) -> str:
@@ -370,13 +392,26 @@ def normalize_codex_events(
                 if not isinstance(exit_code, int):
                     exit_code = -1
 
+                data: dict[str, Any] = {
+                    "argv": argv,
+                    "command": _format_argv(argv),
+                    "exit_code": exit_code,
+                }
+
+                if cwd is not None:
+                    data["cwd"] = str(cwd).replace("\\", "/")
+
+                if exit_code != 0:
+                    output_text = _join_streams(msg.get("stdout"), msg.get("stderr"))
+                    if output_text:
+                        excerpt, truncated = _excerpt_text(output_text)
+                        data["output_excerpt"] = excerpt
+                        if truncated:
+                            data["output_excerpt_truncated"] = True
+
                 event = make_event(
                     "run_command",
-                    {
-                        "argv": argv,
-                        "command": _format_argv(argv),
-                        "exit_code": exit_code,
-                    },
+                    data,
                 )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
@@ -427,9 +462,21 @@ def normalize_codex_events(
                 status = item.get("status")
                 exit_code = 1 if isinstance(status, str) and status.lower() == "failed" else -1
 
+            data: dict[str, Any] = {"argv": argv, "command": _format_argv(argv), "exit_code": exit_code}
+            if exit_code != 0:
+                output_text = _join_streams(
+                    item.get("stdout") or item.get("output"),
+                    item.get("stderr"),
+                )
+                if output_text:
+                    excerpt, truncated = _excerpt_text(output_text)
+                    data["output_excerpt"] = excerpt
+                    if truncated:
+                        data["output_excerpt_truncated"] = True
+
             event = make_event(
                 "run_command",
-                {"argv": argv, "command": _format_argv(argv), "exit_code": exit_code},
+                data,
             )
             out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
 

@@ -10,6 +10,29 @@ from typing import Any
 
 from agent_adapters.events import make_event
 
+_MAX_OUTPUT_EXCERPT_CHARS = 2_000
+
+
+def _excerpt_text(text: str, *, max_chars: int = _MAX_OUTPUT_EXCERPT_CHARS) -> tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    marker = "\n...[truncated_output]...\n"
+    available = max_chars - len(marker)
+    if available <= 0:
+        return text[:max_chars], True
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return text[:head_chars] + marker + text[-tail_chars:], True
+
+
+def _join_streams(stdout: Any, stderr: Any) -> str:
+    parts: list[str] = []
+    if isinstance(stdout, str) and stdout.strip():
+        parts.append("[stdout]\n" + stdout.rstrip())
+    if isinstance(stderr, str) and stderr.strip():
+        parts.append("[stderr]\n" + stderr.rstrip())
+    return "\n".join(parts).strip()
+
 
 def _format_argv(argv: list[str]) -> str:
     if os.name == "nt":
@@ -192,14 +215,22 @@ def normalize_gemini_events(
                 cmd = tool_input.get("command")
                 if isinstance(cmd, str) and cmd.strip():
                     argv = _split_command(cmd)
-                    event = make_event(
-                        "run_command",
-                        {
-                            "argv": argv,
-                            "command": _format_argv(argv),
-                            "exit_code": 1 if is_error else 0,
-                        },
-                    )
+                    data: dict[str, Any] = {
+                        "argv": argv,
+                        "command": _format_argv(argv),
+                        "exit_code": 1 if is_error else 0,
+                    }
+                    if is_error:
+                        output_text = _join_streams(
+                            payload.get("stdout") or payload.get("output") or payload.get("content"),
+                            payload.get("stderr"),
+                        )
+                        if output_text:
+                            excerpt, truncated = _excerpt_text(output_text)
+                            data["output_excerpt"] = excerpt
+                            if truncated:
+                                data["output_excerpt_truncated"] = True
+                    event = make_event("run_command", data)
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
