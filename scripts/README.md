@@ -39,6 +39,21 @@ See the repo root `README.md` for copy/paste invocations.
 
 These configure `PYTHONPATH` so you can run CLIs from source without editable installs.
 
+### From-source pytest example
+
+In an activated virtual environment:
+
+`python -m pip install -r requirements-dev.txt`
+
+Then run a minimal smoke test from source:
+
+- PowerShell:
+  - `. .\scripts\set_pythonpath.ps1`
+  - `python -m pytest -q apps/usertest/tests/test_smoke.py`
+- bash:
+  - `source scripts/set_pythonpath.sh`
+  - `python -m pytest -q apps/usertest/tests/test_smoke.py`
+
 ---
 
 ## Operational helpers
