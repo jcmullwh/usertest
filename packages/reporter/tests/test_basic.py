@@ -37,6 +37,28 @@ def test_compute_metrics_basic_counts() -> None:
     assert metrics["lines_added_total"] == 5
 
 
+def test_compute_metrics_adds_hint_for_policy_denied_heredoc_commands() -> None:
+    metrics = compute_metrics(
+        [
+            {
+                "ts": "2026-01-01T00:00:00Z",
+                "type": "run_command",
+                "data": {
+                    "argv": ["cat", "<<EOF"],
+                    "command": "cat <<EOF",
+                    "exit_code": 1,
+                    "output_excerpt": "Tool execution denied by policy.",
+                },
+            }
+        ]
+    )
+    assert metrics["commands_executed"] == 1
+    assert metrics["commands_failed"] == 1
+    assert metrics["failed_commands"][0]["failure_category"] == "policy_denial"
+    assert metrics["failed_commands"][0]["policy_category"] == "bash_heredoc_unsupported"
+    assert "heredoc" in metrics["failed_commands"][0]["hint"].lower()
+
+
 def test_validate_report_errors() -> None:
     schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",

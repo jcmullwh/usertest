@@ -195,6 +195,35 @@ def test_sanitize_agent_stderr_file_appends_hint_for_gemini_replace_not_found(tm
     assert "hint=Gemini replace requires an exact match" in text
 
 
+def test_sanitize_agent_stderr_file_appends_hint_for_gemini_policy_denied_heredoc(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "agent_stderr.txt"
+    path.write_text(
+        "\n".join(
+            [
+                "Bash command parsing error detected for command: cat <<EOF",
+                "{",
+                '  "schema_version": 1,',
+                "}",
+                "EOF",
+                "Error executing tool run_shell_command: Tool execution denied by policy.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    _sanitize_agent_stderr_file(agent="gemini", path=path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "code=policy_denial" in text
+    assert "tool=run_shell_command" in text
+    assert "code=policy_denied_heredoc" in text
+    assert "heredoc" in text.lower()
+    assert '"schema_version"' not in text
+
+
 def test_sanitize_agent_stderr_file_summarizes_gemini_metrics_recording_dns_failures(
     tmp_path: Path,
 ) -> None:

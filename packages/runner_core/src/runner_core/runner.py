@@ -304,6 +304,10 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
         prefix_blocks: list[str] = []
         body_lines: list[str] = []
 
+        is_policy_denial = "tool execution denied by policy" in lowered
+        is_run_shell_command_denial = "error executing tool run_shell_command" in lowered
+        has_heredoc = bool(re.search(r"<<\s*\w+", other_text))
+
         if _classify_failure_subtype(other_text) == "provider_capacity":
             model = ""
             model_match = _GEMINI_PROVIDER_CAPACITY_MODEL_RE.search(other_text)
@@ -340,6 +344,33 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
                 line
                 for line in other_lines
                 if line.lstrip().startswith("Error executing tool") or line.lstrip().startswith("[")
+            ]
+        elif is_policy_denial:
+            prefix_blocks.append(
+                "\n".join(
+                    [
+                        "[gemini_error_summary] code=policy_denial classification=policy_denial retryable=false",
+                        "detail=Gemini tool execution was denied by policy.",
+                        (
+                            "hint=Rewrite the operation using sandbox-safe tools "
+                            "(read_file/write_file/replace) or simplify the command. "
+                            "Check preflight.json -> capabilities for allowed tools."
+                        ),
+                    ]
+                )
+            )
+            # Keep stderr concise: policy-denial errors sometimes echo huge payloads (for example
+            # heredocs). Prefer only tool-level error lines and brief parser diagnostics.
+            body_lines = [
+                line
+                for line in other_lines
+                if (
+                    line.lstrip().startswith("Error executing tool")
+                    or "tool execution denied by policy" in line.lower()
+                    or "bash command parsing error" in line.lower()
+                    or "syntax errors" in line.lower()
+                    or line.lstrip().startswith("[")
+                )
             ]
         else:
             body_lines = other_lines
@@ -416,8 +447,38 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
                             "hint=Confirm the file path exists in the active workspace. If the stderr line "
                             "omits the missing path, check raw_events.jsonl for the full File not found message.",
                         ]
-                    )
                 )
+            )
+
+        if (
+            is_policy_denial
+            and is_run_shell_command_denial
+            and "tool=run_shell_command" not in lowered
+            and has_heredoc
+        ):
+            hints.append(
+                "\n".join(
+                    [
+                        "[gemini_tool_hint] tool=run_shell_command code=policy_denied_heredoc classification=policy_denial",
+                        (
+                            "hint=This sandbox/policy rejects heredoc syntax (for example `<<EOF`). "
+                            "Use `write_file`/`replace` for multiline content instead of heredocs."
+                        ),
+                    ]
+                )
+            )
+        elif is_policy_denial and is_run_shell_command_denial and "tool=run_shell_command" not in lowered:
+            hints.append(
+                "\n".join(
+                    [
+                        "[gemini_tool_hint] tool=run_shell_command code=policy_denied classification=policy_denial",
+                        (
+                            "hint=This command was denied by sandbox/policy. "
+                            "Check preflight.json -> capabilities and adjust the command to use allowed tools."
+                        ),
+                    ]
+                )
+            )
 
         rendered_blocks: list[str] = []
         if prefix_blocks:
