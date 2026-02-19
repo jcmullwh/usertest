@@ -385,6 +385,17 @@ def build_parser() -> argparse.ArgumentParser:
             "Create a zip snapshot of the repo using git's standard excludes (.gitignore, etc). "
             "By default, `.gitignore` files themselves are excluded from the archive."
         ),
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python tools/snapshot_repo.py --out repo_snapshot.zip\n"
+            "  python tools/snapshot_repo.py --out repo_snapshot.zip --overwrite\n"
+            "  python tools/snapshot_repo.py --out repo_snapshot.zip --include-gitignore-files\n"
+            "\n"
+            "Notes:\n"
+            "  - `--out` must be a .zip file path.\n"
+            "  - `.gitignore` files are excluded by default; pass --include-gitignore-files to include them.\n"
+        ),
     )
     parser.add_argument(
         "--repo-root",

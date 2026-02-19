@@ -328,8 +328,10 @@ Golden fixture verification command:
 - Runner outputs default to `runs/usertest/` (legacy paths are not auto-deleted). To migrate:
   `python tools/migrations/migrate_runs_layout.py` then
   `python tools/migrations/migrate_runs_layout.py --apply`.
-- To create a shareable snapshot of this repo, run
-  `python tools/snapshot_repo.py --out repo_snapshot.zip`.
+- To create a shareable snapshot ZIP of this repo:
+  `python tools/snapshot_repo.py --out repo_snapshot.zip`
+  - `.gitignore` files are excluded by default; pass `--include-gitignore-files` to include them.
+  - If the output already exists, pass `--overwrite`.
 - If a run fails mid-acquisition or disk usage grows, delete `runs/usertest/_workspaces/`.
 - If you change `packages/runner_core`, `packages/agent_adapters`, or `packages/reporter` and the
   CLI still behaves like old code, refresh the CLI env:

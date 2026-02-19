@@ -68,4 +68,6 @@ These are typically invoked by CI.
 ## Other utilities
 
 - `snapshot_repo.py` – create a shareable snapshot ZIP of this repo
+  - Example: `python tools/snapshot_repo.py --out repo_snapshot.zip`
+  - Default: `.gitignore` files are excluded; pass `--include-gitignore-files` to include them.
 - `pdm_shim.py` – small shim to make PDM invocation consistent across environments
