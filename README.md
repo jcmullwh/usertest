@@ -30,15 +30,23 @@ The backlog CLI provides tools to mine and analyze data produced by usertest, ge
 - **Docs hub:** `docs/README.md`
 - **Tutorial:** `docs/tutorials/getting-started.md`
 - **Monorepo setup + scaffold workflow:** `docs/tutorials/monorepo-setup.md`
+- **One-command smoke (per OS):** `scripts/smoke.ps1` (Windows) / `scripts/smoke.sh` (macOS/Linux)
 
 ## Fastest output (no setup)
 
-Open the checked-in golden fixture artifacts directly:
+Open the checked-in golden fixture artifacts directly (no Python deps required):
 
 - `examples/golden_runs/minimal_codex_run/report.md`
 - `examples/golden_runs/minimal_codex_run/metrics.json`
 
-Re-render that fixture from raw events:
+Re-render that fixture from raw events (requires minimal Python deps + import-path setup):
+
+- Install minimal deps:
+  `python -m pip install -r requirements-dev.txt`
+- Configure `PYTHONPATH`:
+  - PowerShell: `. .\scripts\set_pythonpath.ps1`
+  - macOS/Linux: `source scripts/set_pythonpath.sh`
+- Re-render:
 
 `python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics`
 
@@ -63,7 +71,7 @@ The monorepo is managed by `tools/scaffold/scaffold.py` (manifest-driven task ru
 
 ### Requirements
 
-- Python 3.11+
+- Python 3.11+ (CI currently runs 3.11; newer versions are best-effort)
 - `git`
 - At least one of: agent CLIs on PATH + credentials
   - `codex` CLI (logged in via `codex login` / subscription)
