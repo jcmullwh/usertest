@@ -264,3 +264,61 @@ def test_batch_fails_fast_when_agent_binary_missing(
     assert "agent binary" in out.err
     assert "claude" in out.err
     assert "targets[0]" in out.err
+
+
+def test_batch_reports_legacy_keys_and_other_errors_together(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    target_repo = tmp_path / "target_repo"
+    target_repo.mkdir(parents=True, exist_ok=True)
+
+    targets_path = tmp_path / "targets.yaml"
+    targets_path.write_text(
+        "\n".join(
+            [
+                "targets:",
+                f"- repo: {target_repo.as_posix()!r}",
+                "  agent: codex",
+                "  policy: inspect",
+                "  persona: quickstart_sprinter",
+                "  persona_id: quickstart_sprinter",
+                "  mission_id: privacy_locked_run",
+                f"- repo: {target_repo.as_posix()!r}",
+                "  agent: does_not_exist",
+                "  policy: inspect",
+                "  persona_id: quickstart_sprinter",
+                "  mission_id: privacy_locked_run",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        usertest.cli,
+        "run_once",
+        lambda *_args, **_kwargs: pytest.fail("run_once should not run after batch validation"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "batch",
+                "--repo-root",
+                str(repo_root),
+                "--targets",
+                str(targets_path),
+                "--skip-command-probes",
+            ]
+        )
+    assert exc.value.code == 2
+
+    out = capsys.readouterr()
+    assert "Batch validation failed" in out.err
+    assert "legacy keys" in out.err
+    assert "unknown agent" in out.err
+    assert "targets[0]" in out.err
+    assert "targets[1]" in out.err
+    assert "Traceback" not in out.err

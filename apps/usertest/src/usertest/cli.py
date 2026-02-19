@@ -1320,6 +1320,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
     if not isinstance(targets, list):
         raise ValueError(f"Expected targets: [] in {targets_path}")
 
+    parse_errors: list[str] = []
     requests: list[tuple[int, RunRequest]] = []
     for idx, item in enumerate(targets):
         if not isinstance(item, dict) or "repo" not in item:
@@ -1334,8 +1335,8 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         } & set(item)
         if legacy_keys:
             legacy_list = ", ".join(sorted(legacy_keys))
-            raise ValueError(
-                f"targets[{idx}] uses legacy keys ({legacy_list}). "
+            parse_errors.append(
+                f"targets[{idx}]: uses legacy keys ({legacy_list}). "
                 "Update to persona_id / mission_id and remove legacy fields."
             )
 
@@ -1478,9 +1479,10 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         probe_timeout_seconds=float(args.command_probe_timeout_seconds),
         skip_command_responsiveness_probes=bool(args.skip_command_probes),
     )
-    if validation_errors:
+    all_errors = [*parse_errors, *validation_errors]
+    if all_errors:
         print("Batch validation failed; no targets were executed.", file=sys.stderr)
-        for e in validation_errors:
+        for e in all_errors:
             print(f"- {e}", file=sys.stderr)
         return 2
     if bool(getattr(args, "validate_only", False)):
