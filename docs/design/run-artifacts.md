@@ -49,18 +49,25 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
     append_system_prompt.md
   sandbox/                            # only for docker backend
     sandbox.json
-    docker_logs.txt
-    docker_inspect.json
+    container_logs.txt
+    container_inspect.json
     dns_snapshot.txt
 ```
 
-Offline reference fixture:
+Offline reference fixtures (minimal / synthetic):
 
-- `examples/golden_runs/minimal_codex_run/` provides a minimal sanitized artifact set used in tests.
+- `examples/golden_runs/minimal_*_run/` provides minimal sanitized run directories used in tests.
+  These fixtures are **not** full “normal operation” runs; they intentionally omit many artifacts
+  that exist in real runs (for example `effective_run_spec.json`, persona/mission markdown,
+  `preflight.json`, sandbox diagnostics, and per-attempt artifacts). Each fixture directory
+  includes `FIXTURE_NOTICE.md` describing what is intentionally missing.
 
 ## File-level contract
 
 Files that are expected for successful runs in normal operation:
+
+Note: The golden fixtures are minimal/synthetic and may omit some of these files; see
+`examples/golden_runs/` and each fixture’s `FIXTURE_NOTICE.md`.
 
 - `target_ref.json`: normalized target metadata (`repo_input`, git/ref context, target slug).
 - `effective_run_spec.json`: resolved persona/mission/template/schema identifiers and paths.

@@ -1,1 +1,28 @@
-{"schema_version":1}
+{
+  "schema_version": 1,
+  "persona": {
+    "name": "Evaluator",
+    "description": "Golden fixture report."
+  },
+  "mission": "Assess fit quickly and safely.",
+  "minimal_mental_model": {
+    "summary": "This is a minimal, synthetic fixture used for regression tests.",
+    "entry_points": [
+      "README.md"
+    ]
+  },
+  "confidence_signals": {
+    "found": [
+      "Runner can execute commands"
+    ],
+    "missing": [
+      "Real target context"
+    ]
+  },
+  "confusion_points": [],
+  "adoption_decision": {
+    "recommendation": "investigate",
+    "rationale": "Fixture output only."
+  },
+  "suggested_changes": []
+}
