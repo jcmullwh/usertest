@@ -105,6 +105,18 @@ elif [[ "${USE_PYTHONPATH}" -eq 1 ]]; then
   source "${SCRIPT_DIR}/set_pythonpath.sh"
 fi
 
+if [[ "${SKIP_INSTALL}" -eq 1 && "${USE_PYTHONPATH}" -eq 0 ]]; then
+  if ! "${PYTHON_BIN}" -c "import usertest" >/dev/null 2>&1; then
+    echo "==> Smoke preflight failed: 'usertest' is not importable in this Python environment." >&2
+    echo "    Fix options:" >&2
+    echo "      - Rerun without --skip-install (installs editables into the active env)." >&2
+    echo "      - Or use PYTHONPATH mode:" >&2
+    echo "          ${PYTHON_BIN} -m pip install -r requirements-dev.txt" >&2
+    echo "          bash ./scripts/smoke.sh --skip-install --use-pythonpath" >&2
+    exit 1
+  fi
+fi
+
 echo "==> CLI help smoke"
 "${PYTHON_BIN}" -m usertest.cli --help
 
