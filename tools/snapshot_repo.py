@@ -99,16 +99,28 @@ def _run_git(args: list[str], *, cwd: Path) -> bytes:
     fails, we raise with a clear error so the operator can decide how to proceed.
     """
 
-    proc = subprocess.run(
-        ["git", "-C", str(cwd), *args],
-        capture_output=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        raise SnapshotError("git not found on PATH (required for snapshot_repo).") from e
+    except OSError as e:
+        raise SnapshotError(f"Failed to run git: {e}") from e
     if proc.returncode == 0:
         return proc.stdout
     msg = (proc.stderr or proc.stdout).decode("utf-8", errors="replace").strip()
     if not msg:
         msg = f"git failed (exit {proc.returncode}): {' '.join(args)}"
+    lowered = msg.lower()
+    if "not a git repository" in lowered:
+        raise SnapshotError(
+            "Not a git repository.\n"
+            f"- repo_root: {cwd}\n"
+            "Hint: pass --repo-root pointing at a git checkout (a directory containing `.git`)."
+        )
     raise SnapshotError(msg)
 
 
@@ -223,11 +235,11 @@ def _plan_snapshot(
         include_ignored=include_ignored,
     )
 
-    excluded_outputs: list[str] = []
+    excluded_output_candidates: set[str] = set()
     try:
         out_rel = out_path.resolve().relative_to(repo_root.resolve()).as_posix()
-        excluded_outputs.append(out_rel)
-        excluded_outputs.append(out_rel + ".tmp")
+        excluded_output_candidates.add(out_rel)
+        excluded_output_candidates.add(out_rel + ".tmp")
     except Exception:
         pass
 
@@ -236,11 +248,13 @@ def _plan_snapshot(
     included: list[str] = []
     excluded_gitignores: list[str] = []
     excluded_ignored: list[str] = []
+    excluded_outputs: list[str] = []
     for rel in all_files:
         if rel in ignored_set:
             excluded_ignored.append(rel)
             continue
-        if rel in excluded_outputs:
+        if rel in excluded_output_candidates:
+            excluded_outputs.append(rel)
             continue
         if not include_gitignore_files and _posix_basename(rel).lower() == ".gitignore":
             excluded_gitignores.append(rel)
@@ -380,7 +394,7 @@ def _verify_zip(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="snapshot_repo",
+        prog="python tools/snapshot_repo.py",
         description=(
             "Create a zip snapshot of the repo using git's standard excludes (.gitignore, etc). "
             "By default, `.gitignore` files themselves are excluded from the archive."
@@ -436,6 +450,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Print the snapshot plan and exit (do not write the archive).",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite --out if it already exists.",
@@ -468,11 +487,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"- include_ignored: {bool(args.include_ignored)}")
     print(f"- include_gitignore_files: {bool(args.include_gitignore_files)}")
     print(f"- verify: {bool(args.verify)}")
+    print(f"- plan_only: {bool(args.plan_only)}")
     print(f"- files: {len(plan.files)}")
     print(f"- excluded_gitignores: {len(plan.excluded_gitignores)}")
     print(f"- excluded_ignored: {len(plan.excluded_ignored)}")
     print(f"- excluded_outputs: {len(plan.excluded_outputs)}")
     print("")
+
+    if bool(args.plan_only):
+        print("Plan-only: no archive written.")
+        return 0
 
     _write_zip(plan, overwrite=bool(args.overwrite))
     if bool(args.verify):

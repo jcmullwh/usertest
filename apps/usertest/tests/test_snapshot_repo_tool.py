@@ -145,3 +145,67 @@ def test_snapshot_repo_excludes_tracked_but_ignored_files_by_default(tmp_path: P
         names2 = set(zf.namelist())
     assert "normal.txt" in names2
     assert "ignored.txt" in names2
+
+
+def test_snapshot_repo_plan_only_does_not_write_archive(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    target_repo = tmp_path / "repo_plan_only"
+    target_repo.mkdir(parents=True, exist_ok=True)
+
+    subprocess.run(
+        ["git", "-C", str(target_repo), "init"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    (target_repo / "file.txt").write_text("ok", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(target_repo), "add", "file.txt"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    out_zip = tmp_path / "plan_only.zip"
+    proc = _run_snapshot_repo(
+        repo_root=repo_root,
+        args=[
+            "--repo-root",
+            str(target_repo),
+            "--out",
+            str(out_zip),
+            "--plan-only",
+        ],
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert "SNAPSHOT PLAN" in proc.stdout
+    assert "Plan-only" in proc.stdout
+    assert not out_zip.exists()
+
+
+def test_snapshot_repo_non_git_repo_has_actionable_hint(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    non_repo = tmp_path / "not_a_repo"
+    non_repo.mkdir(parents=True, exist_ok=True)
+    (non_repo / "file.txt").write_text("ok", encoding="utf-8")
+
+    out_zip = tmp_path / "out.zip"
+    proc = _run_snapshot_repo(
+        repo_root=repo_root,
+        args=[
+            "--repo-root",
+            str(non_repo),
+            "--out",
+            str(out_zip),
+        ],
+    )
+
+    assert proc.returncode == 2
+    assert "ERROR:" in proc.stderr
+    assert "not a git repository" in proc.stderr.lower()
+    assert "--repo-root" in proc.stderr
+    assert "Traceback" not in proc.stderr
