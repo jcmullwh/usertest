@@ -15,7 +15,20 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Missing dependency `pyyaml` (import name: `yaml`). "
+        "Fix: `python -m pip install -r requirements-dev.txt`."
+    ) from exc
+try:
+    import jsonschema  # noqa: F401
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Missing dependency `jsonschema`. "
+        "Fix: `python -m pip install -r requirements-dev.txt`."
+    ) from exc
 from backlog_core import (
     build_backlog_document,
     extract_backlog_atoms,

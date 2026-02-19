@@ -13,7 +13,20 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Missing dependency `pyyaml` (import name: `yaml`). "
+        "Fix: `python -m pip install -r requirements-dev.txt`."
+    ) from exc
+try:
+    import jsonschema  # noqa: F401
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Missing dependency `jsonschema`. "
+        "Fix: `python -m pip install -r requirements-dev.txt`."
+    ) from exc
 from agent_adapters import (
     normalize_claude_events,
     normalize_codex_events,
