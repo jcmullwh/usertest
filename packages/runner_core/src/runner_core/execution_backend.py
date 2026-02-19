@@ -130,6 +130,20 @@ def prepare_execution_backend(
     ]
     if bool(getattr(request, "exec_use_host_agent_login", False)):
         extra_mounts.append(_resolve_host_agent_login_mount(agent=request.agent))
+        if (request.agent or "").strip().lower() == "claude":
+            host_claude_json = Path.home() / ".claude.json"
+            if host_claude_json.exists() and host_claude_json.is_file():
+                try:
+                    host_claude_json = host_claude_json.resolve()
+                except OSError:
+                    pass
+                extra_mounts.append(
+                    MountSpec(
+                        host_path=host_claude_json,
+                        container_path="/root/.claude.json",
+                        read_only=False,
+                    )
+                )
 
     spec = SandboxSpec(
         backend="docker",
