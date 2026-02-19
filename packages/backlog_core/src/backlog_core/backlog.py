@@ -56,6 +56,7 @@ _DEFAULT_CAPTURE_POLICY = TextCapturePolicy(
     max_line_count=300,
     binary_detection_bytes=2_048,
 )
+_MAX_COMMAND_FAILURE_ATOMS_PER_RUN = 10
 
 
 def _safe_relpath(path: Path, root: Path) -> str:
@@ -311,6 +312,117 @@ def extract_backlog_atoms(
             atoms.append(atom)
             source_counts[source] += 1
             severity_counts[severity_hint] += 1
+
+        metrics_raw = record.get("metrics")
+        metrics = metrics_raw if isinstance(metrics_raw, dict) else None
+
+        failed_commands: list[dict[str, Any]] = []
+        failed_commands_omitted_hint: int | None = None
+        if metrics is not None:
+            failed_raw = metrics.get("failed_commands")
+            if isinstance(failed_raw, list):
+                for item in failed_raw:
+                    if not isinstance(item, dict):
+                        continue
+                    command = _coerce_string(item.get("command"))
+                    exit_code = item.get("exit_code")
+                    if command is None or not isinstance(exit_code, int) or exit_code == 0:
+                        continue
+                    failed_commands.append(
+                        {
+                            "command": command,
+                            "exit_code": exit_code,
+                            "cwd": _coerce_string(item.get("cwd")),
+                            "output_excerpt": _coerce_string(item.get("output_excerpt")),
+                            "output_excerpt_truncated": item.get("output_excerpt_truncated")
+                            is True,
+                            "from_metrics": True,
+                        }
+                    )
+            if metrics.get("failed_commands_truncated") is True:
+                omitted = metrics.get("failed_commands_omitted_count")
+                if isinstance(omitted, int) and omitted > 0:
+                    failed_commands_omitted_hint = omitted
+
+        if not failed_commands:
+            events_path = run_dir / "normalized_events.jsonl"
+            if events_path.exists():
+                try:
+                    with events_path.open("r", encoding="utf-8") as f:
+                        for line in f:
+                            raw = line.strip()
+                            if not raw:
+                                continue
+                            try:
+                                event = json.loads(raw)
+                            except json.JSONDecodeError:
+                                continue
+                            if not isinstance(event, dict):
+                                continue
+                            if _coerce_string(event.get("type")) != "run_command":
+                                continue
+                            data = event.get("data")
+                            if not isinstance(data, dict):
+                                continue
+                            exit_code = data.get("exit_code")
+                            if not isinstance(exit_code, int) or exit_code == 0:
+                                continue
+                            command = _coerce_string(data.get("command"))
+                            if command is None:
+                                argv = data.get("argv")
+                                if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
+                                    command = " ".join(argv)
+                            if command is None:
+                                continue
+                            failed_commands.append(
+                                {
+                                    "command": command,
+                                    "exit_code": exit_code,
+                                    "cwd": _coerce_string(data.get("cwd")),
+                                    "output_excerpt": _coerce_string(data.get("output_excerpt")),
+                                    "output_excerpt_truncated": data.get("output_excerpt_truncated")
+                                    is True,
+                                    "from_events": True,
+                                }
+                            )
+                            if len(failed_commands) >= _MAX_COMMAND_FAILURE_ATOMS_PER_RUN:
+                                break
+                except OSError:
+                    failed_commands = []
+
+        if failed_commands:
+            emitted = 0
+            for entry in failed_commands:
+                if emitted >= _MAX_COMMAND_FAILURE_ATOMS_PER_RUN:
+                    break
+                command = _coerce_string(entry.get("command"))
+                exit_code = entry.get("exit_code")
+                if command is None or not isinstance(exit_code, int) or exit_code == 0:
+                    continue
+                output_excerpt = _coerce_string(entry.get("output_excerpt"))
+                _emit(
+                    "command_failure",
+                    f"Command failed: exit_code={exit_code}; command={command}",
+                    command=command,
+                    exit_code=exit_code,
+                    cwd=_coerce_string(entry.get("cwd")),
+                    output_excerpt=output_excerpt,
+                    output_excerpt_truncated=True if entry.get("output_excerpt_truncated") is True else None,
+                    from_events=True if entry.get("from_events") else None,
+                    from_metrics=True if entry.get("from_metrics") else None,
+                )
+                emitted += 1
+
+            if failed_commands_omitted_hint is not None and failed_commands_omitted_hint > 0:
+                _emit(
+                    "command_failure_truncated",
+                    (
+                        "Command failure list truncated by reporter: omitted "
+                        f"{failed_commands_omitted_hint} additional failures."
+                    ),
+                    omitted_count=failed_commands_omitted_hint,
+                    severity_hint="low",
+                )
 
         report = record.get("report")
         if isinstance(report, dict):
@@ -934,7 +1046,16 @@ def build_backlog_document(
         "generated_at_utc": datetime.now(tz=timezone.utc).isoformat().replace("+00:00", "Z"),
         "input": input_meta,
         "totals": {
-            "runs": len({str(atom.get("run_rel")) for atom in atoms if atom.get("run_rel")}),
+            "runs": len(
+                {
+                    str(run_rel)
+                    for atom in atoms
+                    for run_rel in [atom.get("run_rel")]
+                    if isinstance(run_rel, str)
+                    and run_rel
+                    and not run_rel.startswith("__aggregate__/")
+                }
+            ),
             "atoms": len(atoms),
             "tickets": len(ordered),
             "source_counts": source_counts,

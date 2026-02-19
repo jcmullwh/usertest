@@ -69,6 +69,20 @@ def _seed_runs_fixture(runs_dir: Path) -> None:
     )
     _write_json(run_a / "effective_run_spec.json", {})
     _write_json(
+        run_a / "metrics.json",
+        {
+            "commands_executed": 7,
+            "commands_failed": 0,
+            "step_count": 11,
+            "event_counts": {},
+            "distinct_files_read": [],
+            "distinct_docs_read": [],
+            "distinct_files_written": [],
+            "lines_added_total": 0,
+            "lines_removed_total": 0,
+        },
+    )
+    _write_json(
         run_a / "report.json",
         {
             "confusion_points": [{"summary": "No quickstart section"}],
@@ -97,6 +111,27 @@ def _seed_runs_fixture(runs_dir: Path) -> None:
         },
     )
     _write_json(run_b / "effective_run_spec.json", {})
+    _write_json(
+        run_b / "metrics.json",
+        {
+            "commands_executed": 3,
+            "commands_failed": 1,
+            "failed_commands": [
+                {
+                    "command": "python -m pip install -r requirements-dev.txt",
+                    "exit_code": 1,
+                    "output_excerpt": "Temporary failure in name resolution",
+                }
+            ],
+            "step_count": 6,
+            "event_counts": {},
+            "distinct_files_read": [],
+            "distinct_docs_read": [],
+            "distinct_files_written": [],
+            "lines_added_total": 0,
+            "lines_removed_total": 0,
+        },
+    )
     _write_json(
         run_b / "report_validation_errors.json",
         ["$: failed to parse JSON from agent output"],
@@ -167,6 +202,8 @@ def test_reports_backlog_dry_run_writes_outputs(tmp_path: Path) -> None:
     summary = json.loads(out_json.read_text(encoding="utf-8"))
     assert summary["totals"]["runs"] == 2
     assert summary["totals"]["miners_total"] == 2
+    assert summary["totals"]["source_counts"].get("aggregate_metrics", 0) == 2
+    assert summary["totals"]["source_counts"].get("command_failure", 0) == 1
 
     markdown = out_md.read_text(encoding="utf-8")
     assert "Untriaged Tail" in markdown

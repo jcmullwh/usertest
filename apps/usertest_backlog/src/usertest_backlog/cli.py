@@ -22,6 +22,7 @@ from backlog_core import (
     write_backlog,
     write_backlog_atoms,
 )
+from backlog_core.aggregate_metrics import build_aggregate_metrics_atoms
 from backlog_core.backlog_policy import BacklogPolicyConfig, apply_backlog_policy
 from backlog_miner import (
     load_prompt_manifest,
@@ -1871,7 +1872,7 @@ def _summarize_atoms_for_totals(atoms: list[dict[str, Any]]) -> dict[str, Any]:
     runs: set[str] = set()
     for atom in atoms:
         run_rel = _coerce_string(atom.get("run_rel"))
-        if run_rel is not None:
+        if run_rel is not None and not run_rel.startswith("__aggregate__/"):
             runs.add(run_rel)
         source = _coerce_string(atom.get("source"))
         if source is not None:
@@ -1970,7 +1971,7 @@ def _update_atom_actions_from_backlog(
             # Blocked tickets are intentionally not treated as "ticket outcomes" for the
             # atom ledger so evidence can accumulate across runs/models and be re-mined.
             continue
-        ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+        ticket_id = f"TKT-{ticket_export_fingerprint(ticket)}"
         for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
             bucket = ticket_ids_by_atom.setdefault(atom_id, set())
             bucket.add(ticket_id)
@@ -1984,6 +1985,10 @@ def _update_atom_actions_from_backlog(
     for atom in atoms:
         atom_id = _coerce_string(atom.get("atom_id"))
         if atom_id is None:
+            continue
+        if atom_id.startswith("__aggregate__/"):
+            # Synthetic aggregates are regenerated every time and should not be tracked
+            # in the lifecycle ledger.
             continue
         observed += 1
         desired = "ticketed" if atom_id in ticket_ids_by_atom else "new"
@@ -2069,6 +2074,8 @@ def _update_atom_actions_from_exports(
     for ref in queued_refs:
         atom_id_raw = _coerce_string(ref.get("atom_id"))
         if atom_id_raw is None:
+            continue
+        if atom_id_raw.startswith("__aggregate__/"):
             continue
         derived_from_atom_id: str | None = None
         atom_id = atom_id_raw
@@ -3838,6 +3845,26 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             continue
         atoms.append(atom)
 
+    eligible_atoms_trackable = len(atoms)
+    eligible_run_rels = {
+        run_rel
+        for atom in atoms
+        for run_rel in [_coerce_string(atom.get("run_rel"))]
+        if run_rel is not None
+    }
+    aggregate_run_id_prefix = (
+        "__aggregate__/"
+        + (target_slug or "all")
+        + "/"
+        + (slugify(repo_input) if repo_input is not None else "all")
+    )
+    aggregate_atoms = build_aggregate_metrics_atoms(
+        records,
+        eligible_run_rels,
+        run_id_prefix=aggregate_run_id_prefix,
+    )
+    atoms.extend(aggregate_atoms)
+
     atom_totals = _summarize_atoms_for_totals(atoms)
     atoms_doc = dict(atoms_doc_raw)
     atoms_doc["atoms"] = atoms
@@ -3848,6 +3875,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     atoms_doc["atom_filter"] = {
         "exclude_statuses": sorted(exclude_atom_status_set),
         "eligible_atoms": len(atoms),
+        "eligible_atoms_trackable": eligible_atoms_trackable,
+        "synthetic_atoms_added": len(aggregate_atoms),
         "excluded_atoms": len(excluded_atoms),
         "excluded_status_counts": excluded_status_counts,
         "plan_folder_sync": plan_sync_meta,

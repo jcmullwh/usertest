@@ -250,6 +250,58 @@ def test_extract_backlog_atoms_reclassifies_known_warning_only_stderr(tmp_path: 
     assert "shell_snapshot_powershell_unsupported" in warning_atom.get("warning_codes", [])
 
 
+def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+            "metrics": {
+                "commands_executed": 3,
+                "commands_failed": 2,
+                "failed_commands": [
+                    {
+                        "command": "python -m pip install -e .",
+                        "exit_code": 1,
+                        "cwd": "C:/ws",
+                        "output_excerpt": "ERROR: Could not find a version that satisfies the requirement ...",
+                        "output_excerpt_truncated": True,
+                    },
+                    {
+                        "command": "python -m pytest -q",
+                        "exit_code": 2,
+                        "output_excerpt": "ImportError: No module named foo",
+                    },
+                ],
+                "failed_commands_truncated": True,
+                "failed_commands_omitted_count": 3,
+            },
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    failures = [atom for atom in atoms_doc["atoms"] if atom.get("source") == "command_failure"]
+    assert len(failures) == 2
+
+    first = failures[0]
+    assert first.get("from_metrics") is True
+    assert first.get("command") == "python -m pip install -e ."
+    assert first.get("exit_code") == 1
+    assert first.get("cwd") == "C:/ws"
+    assert first.get("output_excerpt_truncated") is True
+
+    trunc = next(atom for atom in atoms_doc["atoms"] if atom.get("source") == "command_failure_truncated")
+    assert trunc.get("omitted_count") == 3
+
+
 def test_parse_ticket_list_recovers_array_and_normalizes() -> None:
     raw = """
     Notes before JSON.
