@@ -35,6 +35,7 @@ ${environment_json}
 
 - Prefer the environment's file/directory tools for repo inspection (read/search/list) over launching shell commands when possible.
 - When using `run_shell_command`, use syntax compatible with the execution shell family in `environment.execution_backend.shell` (bash vs PowerShell). Example: bash `export FOO=bar`; PowerShell `$env:FOO='bar'`.
+- Avoid heredocs (for example `<<EOF ... EOF`) in `run_shell_command`; they may be rejected by sandbox policy. For multiline content, prefer `write_file` / `replace`.
 - Before inspecting a specific subpath, confirm it exists (use `environment.preflight.workspace_root_snapshot` and/or list parent directories first).
 - On Windows PowerShell, prefer `-LiteralPath` for paths that contain `{` or `}` (for example Cookiecutter template paths).
 - If command execution is blocked, record the block and consult `environment.preflight.capabilities` and `environment.preflight.command_diagnostics` for an actionable remediation path.
@@ -46,5 +47,7 @@ Return a single JSON object that validates against this JSON Schema:
 ```json
 ${report_schema_json}
 ```
+
+Do not use `run_shell_command` to print this JSON (for example via `cat`); return it directly as your assistant response.
 
 Do not include any other text outside the JSON object.
