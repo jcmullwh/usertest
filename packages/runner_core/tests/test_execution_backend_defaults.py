@@ -179,3 +179,47 @@ def test_prepare_execution_backend_mounts_host_claude_json_when_present(
     mounts = spec.extra_mounts
     assert any(m.container_path == "/root/.claude" for m in mounts)
     assert any(m.container_path == "/root/.claude.json" for m in mounts)
+
+
+def test_prepare_execution_backend_fails_before_docker_start_when_host_login_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    _make_default_context(repo_root)
+
+    fake_home = tmp_path / "home"
+    fake_home.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    monkeypatch.setattr(backend_mod.Path, "home", lambda: fake_home)
+
+    class _FailDockerSandbox:
+        def __init__(self, *args: object, **kwargs: object) -> None:  # noqa: ARG002
+            raise AssertionError(
+                "DockerSandbox should not be constructed when host login mount preflight fails"
+            )
+
+    monkeypatch.setattr(backend_mod, "DockerSandbox", _FailDockerSandbox)
+
+    req = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_context=None,
+        exec_use_host_agent_login=True,
+    )
+
+    with pytest.raises(FileNotFoundError, match="Host agent login directory not found"):
+        prepare_execution_backend(
+            repo_root=repo_root,
+            run_dir=run_dir,
+            workspace_dir=workspace_dir,
+            request=req,
+            workspace_id="w1",
+            agent_cfg={},
+        )
