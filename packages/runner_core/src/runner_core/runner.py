@@ -683,8 +683,23 @@ def _gemini_include_directories_for_workspace(*, workspace_dir: Path) -> list[st
     read generated `report.md` / `report.json` / `metrics.json` during triage flows.
     """
 
-    if (workspace_dir / "runs" / "usertest").is_dir():
-        return [str(Path("runs") / "usertest")]
+    include_rel = str(Path("runs") / "usertest")
+    candidate = workspace_dir / "runs" / "usertest"
+    if candidate.is_dir():
+        return [include_rel]
+
+    # Some missions run this repo's own CLI inside the workspace and then try to inspect the
+    # resulting artifacts under `runs/usertest/...`. Gemini CLI's file tools may ignore `runs/`
+    # by default, so ensure the directory exists up front for this runner repo so we can pass
+    # `--include-directories runs/usertest` at process start.
+    marker = workspace_dir / "tools" / "scaffold" / "monorepo.toml"
+    if marker.exists():
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return []
+        return [include_rel]
+
     return []
 
 
