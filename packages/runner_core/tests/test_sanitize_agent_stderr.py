@@ -143,3 +143,17 @@ def test_sanitize_agent_stderr_file_dedupes_claude_missing_config_warning(tmp_pa
     assert "code=claude_config_missing" in text
     assert "occurrences=3" in text
     assert slow_warning in text
+
+
+def test_sanitize_agent_stderr_file_appends_hint_for_nested_claude_sessions(tmp_path: Path) -> None:
+    path = tmp_path / "agent_stderr.txt"
+    path.write_text(
+        "Error: Claude Code cannot be launched inside another Claude Code session.\n",
+        encoding="utf-8",
+    )
+
+    _sanitize_agent_stderr_file(agent="claude", path=path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "code=claude_nested_session" in text
+    assert "hint=Claude Code cannot be launched inside another Claude Code session" in text

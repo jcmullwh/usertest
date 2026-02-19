@@ -190,6 +190,15 @@ _FAILURE_SUBTYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "nested_agent_session",
+        (
+            re.compile(
+                r"claude code cannot be launched inside another claude code session",
+                re.IGNORECASE,
+            ),
+        ),
+    ),
+    (
         "binary_or_command_missing",
         (
             re.compile(r"command not found", re.IGNORECASE),
@@ -278,6 +287,17 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
                 (
                     "[claude_warning_summary] code=claude_config_missing "
                     f"occurrences={config_missing_occurrences} classification=capability_notice"
+                )
+            )
+
+        if "Claude Code cannot be launched inside another Claude Code session" in text:
+            rendered_blocks.append(
+                "\n".join(
+                    [
+                        "[claude_error_hint] code=claude_nested_session classification=env_error",
+                        "hint=Claude Code cannot be launched inside another Claude Code session. "
+                        "Run usertest outside Claude Code, or use --agent codex/gemini.",
+                    ]
                 )
             )
 
