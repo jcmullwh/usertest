@@ -41,6 +41,13 @@ Open the checked-in golden fixture artifacts directly (no Python deps required):
 
 Re-render that fixture from raw events (requires minimal Python deps + import-path setup):
 
+One-command (recommended):
+
+- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1`
+- macOS/Linux: `bash ./scripts/offline_first_success.sh`
+
+Manual steps (if you want to control an existing env):
+
 - Install minimal deps:
   `python -m pip install -r requirements-dev.txt`
 - Configure `PYTHONPATH`:

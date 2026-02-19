@@ -39,6 +39,17 @@ See the repo root `README.md` for copy/paste invocations.
 
 These configure `PYTHONPATH` so you can run CLIs from source without editable installs.
 
+### One-command offline-first success
+
+- `offline_first_success.sh`
+- `offline_first_success.ps1`
+
+These scripts create/use a local `.venv`, install `requirements-dev.txt`, set `PYTHONPATH`, and
+re-render a golden fixture report in a scratch directory.
+
+They are the recommended "from source" verification path when you just want a quick, offline-safe
+success signal.
+
 ### From-source pytest example
 
 In an activated virtual environment:

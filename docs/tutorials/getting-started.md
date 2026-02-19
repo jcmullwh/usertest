@@ -82,11 +82,16 @@ You can also re-render that fixture from raw events:
 python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics
 ```
 
+If you haven't set up a Python environment for this repo yet, use the one-command scripts (creates `.venv`, installs minimal deps, sets `PYTHONPATH`, renders a scratch copy):
+
+- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1`
+- macOS/Linux: `bash ./scripts/offline_first_success.sh`
+
 ---
 
 ## One-command smoke (recommended)
 
-For a fast, deterministic end-to-end sanity check (doctor â†’ deps â†’ CLI help â†’ smoke tests), use the OS-specific smoke script:
+For a fast, deterministic end-to-end sanity check (doctor -> deps -> CLI help -> smoke tests), use the OS-specific smoke script:
 
 Windows PowerShell:
 
@@ -104,7 +109,7 @@ bash ./scripts/smoke.sh
 
 ## Offline / air-gapped workflows
 
-This repo supports some offline-safe workflows, but itâ€™s important to distinguish:
+This repo supports some offline-safe workflows, but it's important to distinguish:
 
 - **Offline-safe:** rendering reports from existing run artifacts (including the checked-in golden fixtures).
 - **Not offline-safe:** running hosted agents (Codex/Claude/Gemini) requires outbound network access to the model provider APIs.

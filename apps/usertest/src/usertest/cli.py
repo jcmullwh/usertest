@@ -28,26 +28,66 @@ except ModuleNotFoundError as exc:
         "Missing dependency `jsonschema`. "
         "Fix: `python -m pip install -r requirements-dev.txt`."
     ) from exc
-from agent_adapters import (
-    normalize_claude_events,
-    normalize_codex_events,
-    normalize_gemini_events,
-)
-from reporter import (
-    analyze_report_history,
-    compute_metrics,
-    iter_events_jsonl,
-    make_event,
-    render_report_markdown,
-    validate_report,
-    write_issue_analysis,
-)
-from run_artifacts.history import iter_report_history, write_report_history_jsonl
-from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
-from runner_core.catalog import discover_missions, discover_personas, load_catalog_config
-from runner_core.pathing import slugify
-from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
-from runner_core.target_acquire import acquire_target
+
+
+def _from_source_import_remediation(*, missing_module: str) -> str:
+    return (
+        f"Missing import `{missing_module}`.\n"
+        "This usually means you're running from source without editable installs or PYTHONPATH.\n"
+        "\n"
+        "Fix (from repo root):\n"
+        "  python -m pip install -r requirements-dev.txt\n"
+        "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
+        "  macOS/Linux: source scripts/set_pythonpath.sh\n"
+        "\n"
+        "Or install editables (recommended):\n"
+        "  python -m pip install -e apps/usertest\n"
+    )
+
+
+try:
+    from agent_adapters import (
+        normalize_claude_events,
+        normalize_codex_events,
+        normalize_gemini_events,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name == "agent_adapters":
+        raise SystemExit(_from_source_import_remediation(missing_module="agent_adapters")) from exc
+    raise
+
+try:
+    from reporter import (
+        analyze_report_history,
+        compute_metrics,
+        iter_events_jsonl,
+        make_event,
+        render_report_markdown,
+        validate_report,
+        write_issue_analysis,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name == "reporter":
+        raise SystemExit(_from_source_import_remediation(missing_module="reporter")) from exc
+    raise
+
+try:
+    from run_artifacts.history import iter_report_history, write_report_history_jsonl
+except ModuleNotFoundError as exc:
+    if exc.name == "run_artifacts":
+        raise SystemExit(_from_source_import_remediation(missing_module="run_artifacts")) from exc
+    raise
+
+try:
+    from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
+    from runner_core.catalog import discover_missions, discover_personas, load_catalog_config
+    from runner_core.pathing import slugify
+    from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
+    from runner_core.target_acquire import acquire_target
+except ModuleNotFoundError as exc:
+    if exc.name == "runner_core":
+        raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
+    raise
 
 _LEGACY_RUN_TIMESTAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 _WINDOWS_ABS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
