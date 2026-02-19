@@ -7,7 +7,7 @@ execution_mode: single_pass_inline_report
 prompt_template: inline_report_v1.prompt.md
 report_schema: boundary_v1.schema.json
 requires_shell: true
-requires_edits: true
+requires_edits: false
 ---
 
 ## Goal

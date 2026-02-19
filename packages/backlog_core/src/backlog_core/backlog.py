@@ -488,11 +488,13 @@ def extract_backlog_atoms(
             capture = capture_text_artifact(run_dir / filename, policy=policy, root=run_dir)
             run_capture_entries.append(_capture_manifest_entry(capture))
             if is_failure:
+                if not capture.artifact.exists and not (
+                    isinstance(capture.error, str) and capture.error.strip()
+                ):
+                    continue
                 excerpt_head = capture.excerpt.head if capture.excerpt is not None else None
                 excerpt_tail = capture.excerpt.tail if capture.excerpt is not None else None
-                truncated = (
-                    bool(capture.excerpt.truncated) if capture.excerpt is not None else False
-                )
+                truncated = bool(capture.excerpt.truncated) if capture.excerpt is not None else False
                 attachments.append(
                     {
                         "path": capture.artifact.path,

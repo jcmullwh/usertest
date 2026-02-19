@@ -123,6 +123,39 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
     assert totals["source_counts"].get("agent_last_message_artifact", 0) == 0
 
 
+def test_extract_backlog_atoms_omits_missing_agent_artifact_attachments_on_failure(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "gemini" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/gemini/0",
+            "agent": "gemini",
+            "status": "error",
+            "report": None,
+            "report_validation_errors": None,
+            "error": {
+                "type": "AgentPreflightFailed",
+                "message": "Mission requires edits, but policy has allow_edits=false.",
+            },
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    failure_atom = next(item for item in atoms_doc["atoms"] if item["source"] == "run_failure_event")
+    assert failure_atom["attachments"] == []
+
+    run_manifest = atoms_doc["capture_manifest"]["target_a/20260101T000000Z/gemini/0"]
+    assert any(item.get("path") == "agent_stderr.txt" and item.get("exists") is False for item in run_manifest)
+    assert any(
+        item.get("path") == "agent_last_message.txt" and item.get("exists") is False
+        for item in run_manifest
+    )
+
+
 def test_extract_backlog_atoms_handles_missing_files(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
     run_dir.mkdir(parents=True, exist_ok=True)
