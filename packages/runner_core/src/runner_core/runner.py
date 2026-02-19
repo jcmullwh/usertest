@@ -899,6 +899,21 @@ def _runner_host_os() -> str:
     return platform.system()
 
 
+def _execution_shell_family(*, exec_backend: str, host_os: str) -> str:
+    """
+    Return the intended shell "family" for commands executed via sandboxed shell tools.
+
+    This is used only for prompt metadata / agent guidance, not for selecting an actual
+    interpreter. Keep it coarse and predictable.
+    """
+
+    if exec_backend != "local":
+        return "bash"
+    if host_os.strip().lower().startswith("windows"):
+        return "powershell"
+    return "bash"
+
+
 def _effective_gemini_cli_sandbox(*, policy_value: Any, has_outer_sandbox: bool) -> bool:
     enabled = bool(policy_value) if isinstance(policy_value, bool) else True
     if not enabled:
@@ -2397,6 +2412,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     artifacts_dir=run_dir / "sandbox",
                 )
 
+            host_os = _runner_host_os()
+            execution_shell = _execution_shell_family(
+                exec_backend=request.exec_backend, host_os=host_os
+            )
+
             policy_json = json.dumps(
                 {
                     "agent": request.agent,
@@ -2418,7 +2438,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
             environment_json = json.dumps(
                 {
-                    "runner_host_os": _runner_host_os(),
+                    "runner_host_os": host_os,
                     "runner_host_python": platform.python_version(),
                     "workspace": {
                         "path": str(workspace_dir_for_agent),
@@ -2427,6 +2447,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     },
                     "execution_backend": {
                         "backend": request.exec_backend,
+                        "shell": execution_shell,
                         "network": request.exec_network,
                         "cache": request.exec_cache,
                         "container_image": getattr(sandbox, "image_tag", None)
