@@ -618,6 +618,87 @@ def _effective_gemini_cli_sandbox(*, policy_value: Any, has_outer_sandbox: bool)
     return True
 
 
+def _infer_docker_container_name(command_prefix: list[str]) -> str | None:
+    if (
+        len(command_prefix) >= 3
+        and command_prefix[0] == "docker"
+        and command_prefix[1] == "exec"
+        and isinstance(command_prefix[-1], str)
+        and command_prefix[-1].strip()
+    ):
+        return command_prefix[-1].strip()
+    return None
+
+
+def _render_sandbox_cli_install_hint(agent_cfg: dict[str, Any]) -> str | None:
+    install_cfg = agent_cfg.get("sandbox_cli_install")
+    if not isinstance(install_cfg, dict):
+        return None
+
+    npm_global = install_cfg.get("npm_global")
+    npm_pkgs = (
+        [x.strip() for x in npm_global if isinstance(x, str) and x.strip()]
+        if isinstance(npm_global, list)
+        else []
+    )
+    if npm_pkgs:
+        pkgs = " ".join(npm_pkgs)
+        return f"`npm install -g {pkgs}` (requires Node.js + npm)"
+
+    pip_items = install_cfg.get("pip")
+    pip_pkgs = (
+        [x.strip() for x in pip_items if isinstance(x, str) and x.strip()]
+        if isinstance(pip_items, list)
+        else []
+    )
+    if pip_pkgs:
+        pkgs = " ".join(pip_pkgs)
+        return f"`python -m pip install {pkgs}`"
+
+    return None
+
+
+def _build_binary_missing_hints(
+    *,
+    agent: str,
+    required_binary: str,
+    exec_backend: str,
+    agent_cfg: dict[str, Any],
+    command_prefix: list[str],
+) -> dict[str, str]:
+    hints: dict[str, str] = {}
+
+    hints["verify"] = f"`{required_binary} --version`"
+    hints["config"] = (
+        f"Update `configs/agents.yaml` `agents.{agent}.binary` to a valid path/name."
+    )
+    hints["doctor"] = "Run `python -m agent_adapters.cli doctor` to check which agent CLIs are on PATH."
+
+    install_hint = _render_sandbox_cli_install_hint(agent_cfg)
+    if exec_backend == "docker":
+        details = f" (expected install: {install_hint})" if install_hint else ""
+        hints["install"] = (
+            "Rebuild the Docker sandbox image so it can install the agent CLI"
+            f"{details}; rerun with `--exec-rebuild-image`."
+        )
+        hints["debug"] = (
+            "See `sandbox/docker_build.log` and `sandbox/sandbox_cli_install.json` in the run directory."
+        )
+        container_name = _infer_docker_container_name(command_prefix)
+        if container_name is not None:
+            hints["container"] = (
+                "For interactive debugging, rerun with `--exec-keep-container` and inspect "
+                f"`sandbox/sandbox.json` (container_name={container_name!r})."
+            )
+    else:
+        hints["install"] = (
+            f"Install `{required_binary}` on PATH"
+            + (f"; suggested: {install_hint}." if install_hint else ".")
+        )
+
+    return hints
+
+
 def _infer_shell_policy_status(
     *,
     agent: str,
@@ -1814,20 +1895,59 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 and preflight_commands_present
                 and preflight_commands_present.get(required_agent_binary) is False
             ):
-                message = (
-                    f"Required agent binary '{required_agent_binary}' is not available in the "
-                    "execution environment. "
-                    "Install the CLI in the selected backend, or update configs/agents.yaml "
-                    f"for agent '{request.agent}' to a valid binary path."
+                exec_backend = str(getattr(request, "exec_backend", "local") or "local").strip()
+                hints = _build_binary_missing_hints(
+                    agent=request.agent,
+                    required_binary=required_agent_binary,
+                    exec_backend=exec_backend,
+                    agent_cfg=agent_cfg_dict,
+                    command_prefix=command_prefix,
                 )
+                message = (
+                    f"Required agent binary '{required_agent_binary}' is missing for agent "
+                    f"'{request.agent}' (exec_backend={exec_backend})."
+                )
+
+                suggested_command: str | None = None
+                if exec_backend == "docker" and not bool(getattr(request, "exec_rebuild_image", False)):
+                    suggested_command_parts: list[str] = [
+                        "python",
+                        "-m",
+                        "usertest.cli",
+                        "run",
+                        "--repo-root",
+                        ".",
+                        "--repo",
+                        json.dumps(request.repo, ensure_ascii=False),
+                        "--agent",
+                        request.agent,
+                        "--policy",
+                        request.policy,
+                        "--exec-backend",
+                        "docker",
+                        "--exec-rebuild-image",
+                    ]
+                    if request.ref:
+                        suggested_command_parts.extend(
+                            ["--ref", json.dumps(request.ref, ensure_ascii=False)]
+                        )
+                    if effective_spec.persona_id:
+                        suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
+                    if effective_spec.mission_id:
+                        suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
+                    suggested_command = " ".join(suggested_command_parts)
                 _write_json(
                     run_dir / "error.json",
                     {
                         "type": "AgentPreflightFailed",
                         "subtype": "binary_missing",
+                        "code": "binary_missing",
                         "agent": request.agent,
                         "required_binary": required_agent_binary,
+                        "exec_backend": exec_backend,
                         "message": message,
+                        "hints": hints,
+                        "suggested_command": suggested_command,
                         "preflight": {
                             "commands": preflight_commands_present,
                             "meta": preflight_meta,
@@ -1838,7 +1958,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 return RunResult(
                     run_dir=run_dir,
                     exit_code=1,
-                    report_validation_errors=[message],
+                    report_validation_errors=[
+                        message,
+                        "code=binary_missing",
+                        *[f"{key}={value}" for key, value in hints.items() if value],
+                        *(["suggested_command=" + suggested_command] if suggested_command else []),
+                    ],
                 )
 
             if preflight_required_commands:

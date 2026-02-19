@@ -291,7 +291,14 @@ def test_run_once_fails_fast_when_required_agent_binary_missing(tmp_path: Path) 
     payload = json.loads(error_path.read_text(encoding="utf-8"))
     assert payload.get("type") == "AgentPreflightFailed"
     assert payload.get("subtype") == "binary_missing"
+    assert payload.get("code") == "binary_missing"
+    assert payload.get("exec_backend") == "local"
     assert payload.get("required_binary") == missing_binary
+    hints = payload.get("hints", {})
+    assert isinstance(hints, dict)
+    assert "configs/agents.yaml" in str(hints.get("config", ""))
+    assert "agent_adapters.cli doctor" in str(hints.get("doctor", ""))
+    assert "--version" in str(hints.get("verify", ""))
 
 
 def test_run_once_warns_when_codex_personality_missing_model_messages(tmp_path: Path) -> None:
