@@ -578,6 +578,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     batch_p = sub.add_parser("batch", help="Run multiple targets from a YAML file.")
     batch_p.add_argument("--targets", required=True, type=Path, help="YAML file with targets list.")
+    batch_p.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Validate targets.yaml and exit (do not create run dirs or execute targets).",
+    )
     batch_p.add_argument("--agent", default="codex")
     batch_p.add_argument("--policy", default="write")
     batch_p.add_argument("--seed", type=int, default=0)
@@ -1417,6 +1422,9 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         for e in validation_errors:
             print(f"- {e}", file=sys.stderr)
         return 2
+    if bool(getattr(args, "validate_only", False)):
+        print("Batch validation passed; no targets were executed (validate-only).", file=sys.stderr)
+        return 0
 
     exit_code = 0
     for _idx, req in requests:

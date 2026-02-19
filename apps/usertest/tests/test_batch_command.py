@@ -122,3 +122,51 @@ def test_batch_validates_mission_ids_upfront(
     assert "Unknown mission id" in out.err
     assert "code=unknown_mission_id" in out.err
     assert "hint=" in out.err
+
+
+def test_batch_validate_only_exits_zero_without_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    target_repo = tmp_path / "target_repo"
+    target_repo.mkdir(parents=True, exist_ok=True)
+
+    targets_path = tmp_path / "targets.yaml"
+    targets_path.write_text(
+        "\n".join(
+            [
+                "targets:",
+                f"- repo: {target_repo.as_posix()!r}",
+                "  agent: codex",
+                "  policy: inspect",
+                "  persona_id: quickstart_sprinter",
+                "  mission_id: privacy_locked_run",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        usertest.cli,
+        "run_once",
+        lambda *_args, **_kwargs: pytest.fail("run_once should not run in --validate-only mode"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "batch",
+                "--repo-root",
+                str(repo_root),
+                "--targets",
+                str(targets_path),
+                "--skip-command-probes",
+                "--validate-only",
+            ]
+        )
+    assert exc.value.code == 0
+
+    out = capsys.readouterr()
+    assert "Batch validation passed" in out.err
