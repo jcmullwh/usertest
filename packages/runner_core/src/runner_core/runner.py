@@ -893,6 +893,61 @@ def _gemini_include_directories_for_workspace(*, workspace_dir: Path) -> list[st
     return []
 
 
+_RUNS_USERTEST_GITIGNORE_MARKER = (
+    "# usertest: allow reading run artifacts under runs/usertest for agent file tools."
+)
+
+
+def _gitignore_ignores_runs(text: str) -> bool:
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("!"):
+            continue
+        if stripped == "runs" or stripped == "runs/":
+            return True
+        if stripped.startswith("runs/"):
+            return True
+    return False
+
+
+def _maybe_patch_workspace_gitignore_for_runs_usertest(*, workspace_dir: Path) -> None:
+    """
+    Some agent file tools respect gitignore-style ignore patterns and will refuse to read files
+    under ignored directories. Many repos ignore `runs/` by default, but usertest itself writes
+    run artifacts under `runs/usertest/**` which are important for triage/rerender workflows.
+
+    This helper patches the acquired (ephemeral) workspace `.gitignore` to re-include
+    `runs/usertest/**` while keeping other `runs/*` children ignored.
+    """
+
+    gitignore_path = workspace_dir / ".gitignore"
+    try:
+        existing = gitignore_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+
+    if _RUNS_USERTEST_GITIGNORE_MARKER in existing:
+        return
+    if not _gitignore_ignores_runs(existing):
+        return
+
+    # Standard gitignore-compatible pattern sequence to unignore only runs/usertest.
+    patch_lines = [
+        _RUNS_USERTEST_GITIGNORE_MARKER,
+        "!runs/",
+        "runs/*",
+        "!runs/usertest/",
+        "!runs/usertest/**",
+        "",
+    ]
+    prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+    patched = existing + prefix + "\n".join(patch_lines)
+    try:
+        gitignore_path.write_text(patched, encoding="utf-8", newline="\n")
+    except OSError:
+        return
+
+
 def _infer_docker_container_name(command_prefix: list[str]) -> str | None:
     if (
         len(command_prefix) >= 3
@@ -2502,6 +2557,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     )
                     return claude_result.exit_code, claude_result.argv
 
+                _maybe_patch_workspace_gitignore_for_runs_usertest(
+                    workspace_dir=acquired.workspace_dir
+                )
                 gemini_result = run_gemini(
                     workspace_dir=workspace_dir_for_agent,
                     prompt=prompt_text,
