@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -170,3 +171,45 @@ def test_batch_validate_only_exits_zero_without_running(
 
     out = capsys.readouterr()
     assert "Batch validation passed" in out.err
+
+
+def test_batch_invalid_yaml_is_concise(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    targets_path = tmp_path / "targets.yaml"
+    targets_path.write_text(
+        "\n".join(
+            [
+                "targets:",
+                "  - repo: 'x'",
+                "    agent: codex",
+                "    policy: inspect",
+                "    persona_id: quickstart_sprinter",
+                "    mission_id: privacy_locked_run",
+                "    bad: [",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "batch",
+                "--repo-root",
+                str(repo_root),
+                "--targets",
+                str(targets_path),
+                "--skip-command-probes",
+            ]
+        )
+    assert exc.value.code == 2
+
+    out = capsys.readouterr()
+    assert "Batch validation failed" in out.err
+    assert str(targets_path) in out.err
+    assert re.search(r":\d+:\d+", out.err) is not None
+    assert "Traceback" not in out.err

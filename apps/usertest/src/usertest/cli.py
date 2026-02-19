@@ -1254,7 +1254,32 @@ def _cmd_batch(args: argparse.Namespace) -> int:
     targets_path: Path = args.targets
     if not targets_path.is_absolute() and not targets_path.exists():
         targets_path = repo_root / targets_path
-    data = _load_yaml(targets_path)
+    try:
+        data = _load_yaml(targets_path)
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None) or getattr(e, "context_mark", None)
+        location = str(targets_path)
+        if mark is not None and hasattr(mark, "line") and hasattr(mark, "column"):
+            try:
+                line = int(mark.line) + 1
+                col = int(mark.column) + 1
+            except Exception:  # noqa: BLE001
+                line = None
+                col = None
+            if line is not None and col is not None:
+                location = f"{targets_path}:{line}:{col}"
+        summary = str(e).splitlines()[0].strip() or type(e).__name__
+        print("Batch validation failed; no targets were executed.", file=sys.stderr)
+        print(f"- YAML parse error in {location}: {summary}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print("Batch validation failed; no targets were executed.", file=sys.stderr)
+        print(f"- Invalid targets YAML {targets_path}: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print("Batch validation failed; no targets were executed.", file=sys.stderr)
+        print(f"- Failed to read targets YAML {targets_path}: {e}", file=sys.stderr)
+        return 2
     targets = data.get("targets", [])
     if not isinstance(targets, list):
         raise ValueError(f"Expected targets: [] in {targets_path}")
