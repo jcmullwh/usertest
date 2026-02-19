@@ -12,3 +12,7 @@ Start here:
 Backlog extraction invariants:
 
 - `docs/design/backlog_capture_principles.md`
+
+Selected ADRs:
+
+- `docs/design/adr_usertest_smoke_command.md`
