@@ -87,6 +87,40 @@ python -m usertest.cli report \
 
 ---
 
+## Offline / air-gapped workflows
+
+This repo supports some offline-safe workflows, but itâ€™s important to distinguish:
+
+- **Offline-safe:** rendering reports from existing run artifacts (including the checked-in golden fixtures).
+- **Not offline-safe:** running hosted agents (Codex/Claude/Gemini) requires outbound network access to the model provider APIs.
+
+### Offline-safe: render reports and run smoke/tests
+
+To run the **non-agent** parts offline, pre-download Python wheels while you still have network access, then install from a local wheelhouse.
+
+1) While online (from repo root):
+
+   ```bash
+   python -m pip download -r requirements-dev.txt -d wheelhouse
+   ```
+
+2) Later, while offline (fresh virtualenv recommended):
+
+   ```bash
+   python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
+   ```
+
+After that, you can run:
+
+- `python -m usertest.cli report ...` (report re-rendering)
+- `python -m pytest -q apps/usertest/tests/test_smoke.py` (smoke tests)
+
+### Docker note
+
+The Docker execution backend builds a sandbox image that installs tools (APT) and agent CLIs (often via npm). If you need reproducible behavior in restricted environments, build the image ahead of time and avoid rebuilds (do not pass `--exec-rebuild-image`).
+
+---
+
 ## First real run
 
 ### 1) Install the CLI
