@@ -49,3 +49,37 @@ def test_snapshot_repo_out_directory_message_is_specific(tmp_path: Path) -> None
     assert "--overwrite" not in proc.stderr
     assert "SNAPSHOT PLAN" not in proc.stdout
 
+
+def test_snapshot_repo_out_requires_zip_suffix(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    out_path = tmp_path / "snapshot"
+
+    proc = _run_snapshot_repo(
+        repo_root=repo_root,
+        args=["--repo-root", str(repo_root), "--out", str(out_path)],
+    )
+
+    assert proc.returncode == 2
+    assert "ERROR:" in proc.stderr
+    assert "zip" in proc.stderr.lower()
+    assert "Traceback" not in proc.stderr
+    assert "SNAPSHOT PLAN" not in proc.stdout
+
+
+def test_snapshot_repo_parent_collision_has_no_traceback(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    parent_file = tmp_path / "parent_file"
+    parent_file.write_text("not a dir", encoding="utf-8")
+
+    out_path = parent_file / "snapshot.zip"
+
+    proc = _run_snapshot_repo(
+        repo_root=repo_root,
+        args=["--repo-root", str(repo_root), "--out", str(out_path)],
+    )
+
+    assert proc.returncode == 2
+    assert "ERROR:" in proc.stderr
+    assert "not a directory" in proc.stderr.lower()
+    assert "Traceback" not in proc.stderr
+    assert "SNAPSHOT PLAN" not in proc.stdout

@@ -51,12 +51,18 @@ def _validate_out_path(out_path: Path, *, overwrite: bool) -> None:
     "SNAPSHOT PLAN" block that can be mistaken for success in logs.
     """
 
-    if not out_path.exists():
-        return
-    if out_path.is_dir():
-        raise SnapshotError(f"Output path is a directory (pass a .zip file path): {out_path}")
-    if not overwrite:
-        raise SnapshotError(f"Output already exists (pass --overwrite to replace): {out_path}")
+    if out_path.exists():
+        if out_path.is_dir():
+            raise SnapshotError(f"Output path is a directory (pass a .zip file path): {out_path}")
+        if not overwrite:
+            raise SnapshotError(f"Output already exists (pass --overwrite to replace): {out_path}")
+
+    if out_path.suffix.lower() != ".zip":
+        raise SnapshotError(f"Output path must be a .zip file path: {out_path}")
+
+    parent = out_path.parent
+    if parent.exists() and not parent.is_dir():
+        raise SnapshotError(f"Output directory is not a directory: {parent}")
 
 
 def _find_repo_root(start: Path) -> Path:
@@ -267,20 +273,22 @@ def _write_zip(plan: SnapshotPlan, *, overwrite: bool) -> None:
     """
 
     out_path = plan.out_path
-    if out_path.exists():
-        if out_path.is_dir():
-            raise SnapshotError(f"Output path is a directory (pass a .zip file path): {out_path}")
-        if not overwrite:
-            raise SnapshotError(f"Output already exists (pass --overwrite to replace): {out_path}")
+    _validate_out_path(out_path, overwrite=overwrite)
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise SnapshotError(f"Failed to create output directory: {out_path.parent}: {e}") from e
 
     compression = zipfile.ZIP_DEFLATED
     compresslevel = 9
 
     tmp_out = out_path.with_suffix(out_path.suffix + ".tmp")
-    if tmp_out.exists():
-        tmp_out.unlink()
+    try:
+        if tmp_out.exists():
+            tmp_out.unlink()
+    except OSError as e:
+        raise SnapshotError(f"Failed to remove pre-existing temp file: {tmp_out}: {e}") from e
 
     try:
         with zipfile.ZipFile(
@@ -294,15 +302,37 @@ def _write_zip(plan: SnapshotPlan, *, overwrite: bool) -> None:
                 if not abs_path.is_file():
                     raise SnapshotError(f"Missing expected file: {abs_path}")
                 zf.write(abs_path, arcname=rel)
-    except Exception:
+    except SnapshotError:
         try:
             if tmp_out.exists():
                 tmp_out.unlink()
         except OSError:
             pass
         raise
+    except OSError as e:
+        try:
+            if tmp_out.exists():
+                tmp_out.unlink()
+        except OSError:
+            pass
+        raise SnapshotError(f"Failed to write archive: {tmp_out}: {e}") from e
+    except Exception as e:
+        try:
+            if tmp_out.exists():
+                tmp_out.unlink()
+        except OSError:
+            pass
+        raise SnapshotError(f"Failed to write archive: {tmp_out}: {e}") from e
 
-    os.replace(tmp_out, out_path)
+    try:
+        os.replace(tmp_out, out_path)
+    except OSError as e:
+        try:
+            if tmp_out.exists():
+                tmp_out.unlink()
+        except OSError:
+            pass
+        raise SnapshotError(f"Failed to finalize archive: {out_path}: {e}") from e
 
 
 def _verify_zip(
