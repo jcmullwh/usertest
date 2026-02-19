@@ -203,12 +203,37 @@ def _prevalidate_batch_requests(
     """Validate batch requests against catalog and policy constraints."""
     errors: list[str] = []
     local_repos: list[Path] = []
+    missing_agent_binaries: dict[tuple[str, str, str], list[int]] = {}
 
     for idx, req in requests:
         if req.agent not in cfg.agents:
             errors.append(
                 f"targets[{idx}]: unknown agent {req.agent!r} (defined in configs/agents.yaml)."
             )
+        else:
+            agent_cfg = cfg.agents.get(req.agent, {})
+            binary = req.agent
+            if isinstance(agent_cfg, dict):
+                binary_raw = agent_cfg.get("binary")
+                if isinstance(binary_raw, str) and binary_raw.strip():
+                    binary = binary_raw.strip()
+            if binary:
+                p = Path(binary)
+                is_pathish = (
+                    p.is_absolute()
+                    or any(sep in binary for sep in ("/", "\\"))
+                    or (os.name == "nt" and ":" in binary)
+                )
+                if is_pathish:
+                    if not p.exists():
+                        missing_agent_binaries.setdefault(
+                            (req.agent, binary, "path_missing"), []
+                        ).append(idx)
+                elif shutil.which(binary) is None:
+                    missing_agent_binaries.setdefault((req.agent, binary, "not_on_path"), []).append(
+                        idx
+                    )
+
         if req.policy not in cfg.policies:
             errors.append(
                 f"targets[{idx}]: unknown policy {req.policy!r} (defined in configs/policies.yaml)."
@@ -325,6 +350,17 @@ def _prevalidate_batch_requests(
             errors.append(f"targets[{idx}]: {' | '.join(parts)}")
         except Exception as e:  # noqa: BLE001
             errors.append(f"targets[{idx}]: failed to resolve persona/mission: {e}")
+
+    for (agent, binary, kind), indices in sorted(missing_agent_binaries.items()):
+        rendered = ", ".join(f"targets[{idx}]" for idx in sorted(indices))
+        if kind == "path_missing":
+            errors.append(
+                f"env: agent binary path not found: {binary!r} for agent {agent!r} (used by {rendered})."
+            )
+        else:
+            errors.append(
+                f"env: agent binary not on PATH: {binary!r} for agent {agent!r} (used by {rendered})."
+            )
 
     if skip_command_responsiveness_probes:
         return errors
