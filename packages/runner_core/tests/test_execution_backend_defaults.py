@@ -18,6 +18,8 @@ def _make_default_context(repo_root: Path) -> Path:
         repo_root
         / "packages"
         / "sandbox_runner"
+        / "src"
+        / "sandbox_runner"
         / "builtins"
         / "docker"
         / "contexts"
@@ -89,12 +91,18 @@ def test_prepare_execution_backend_uses_default_docker_context(
     assert image_context.resolve() == default_context.resolve()
 
 
-def test_prepare_execution_backend_requires_context_when_default_missing(tmp_path: Path) -> None:
+def test_prepare_execution_backend_requires_context_when_default_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repo_root = tmp_path / "repo"
     run_dir = tmp_path / "run"
     workspace_dir = tmp_path / "workspace"
     run_dir.mkdir(parents=True, exist_ok=True)
     workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    monkeypatch.setattr(backend_mod, "_copy_builtin_sandbox_cli_context_from_resources", lambda **_kwargs: None)
 
     req = RunRequest(
         repo=".",
@@ -113,6 +121,68 @@ def test_prepare_execution_backend_requires_context_when_default_missing(tmp_pat
             workspace_id="w1",
             agent_cfg={},
         )
+
+
+def test_prepare_execution_backend_uses_resource_context_when_repo_default_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    captured: dict[str, object] = {}
+
+    class _DummyInstance:
+        command_prefix = ["docker", "exec"]
+        workspace_mount = "/workspace"
+
+        def close(self) -> None:
+            return
+
+    class _DummyDockerSandbox:
+        def __init__(
+            self,
+            *,
+            workspace_dir: Path,
+            artifacts_dir: Path,
+            spec: object,
+            container_name: str,
+        ):
+            captured["spec"] = spec
+
+        def start(self) -> _DummyInstance:
+            return _DummyInstance()
+
+    monkeypatch.setattr(backend_mod, "DockerSandbox", _DummyDockerSandbox)
+
+    req = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_context=None,
+        exec_use_host_agent_login=False,
+    )
+
+    prepare_execution_backend(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        request=req,
+        workspace_id="w1",
+        agent_cfg={},
+    )
+
+    spec = captured["spec"]
+    image_context = spec.image_context_path
+    assert isinstance(image_context, Path)
+    expected = run_dir / "sandbox" / "builtin_context"
+    assert image_context.resolve() == expected.resolve()
+    assert (expected / "Dockerfile").exists()
+    assert (expected / "scripts" / "install_manifests.sh").exists()
 
 
 def test_prepare_execution_backend_mounts_host_claude_json_when_present(

@@ -268,7 +268,7 @@ not a “privacy-locked agent run” mode. For a no-network / no-credentials fir
 the golden fixtures in “Fastest output (no setup)” above.
 
 If you need to override the Docker build context, pass `--exec-docker-context` explicitly (default:
-`packages/sandbox_runner/builtins/docker/contexts/sandbox_cli`).
+the built-in sandbox_cli context shipped with `sandbox_runner`).
 
 Optional flags:
 

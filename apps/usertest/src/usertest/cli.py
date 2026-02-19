@@ -517,7 +517,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Docker image build context directory. "
             "If omitted with --exec-backend docker, defaults to "
-            "packages/sandbox_runner/builtins/docker/contexts/sandbox_cli."
+            "the built-in sandbox_cli context shipped with sandbox_runner."
         ),
     )
     run_p.add_argument(
