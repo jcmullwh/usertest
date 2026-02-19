@@ -322,3 +322,126 @@ def test_batch_reports_legacy_keys_and_other_errors_together(
     assert "targets[0]" in out.err
     assert "targets[1]" in out.err
     assert "Traceback" not in out.err
+
+
+def test_batch_non_list_targets_is_structured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    targets_path = tmp_path / "targets.yaml"
+    targets_path.write_text(
+        "\n".join(
+            [
+                "targets:",
+                "  bad: not-a-list",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "batch",
+                "--repo-root",
+                str(repo_root),
+                "--targets",
+                str(targets_path),
+                "--skip-command-probes",
+                "--validate-only",
+            ]
+        )
+    assert exc.value.code == 2
+
+    out = capsys.readouterr()
+    assert "Batch validation failed" in out.err
+    assert "targets: expected a list" in out.err
+    assert "Traceback" not in out.err
+    assert "docs/reference/targets-yaml.md" in out.err
+
+
+def test_batch_missing_repo_is_structured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    targets_path = tmp_path / "targets.yaml"
+    targets_path.write_text(
+        "\n".join(
+            [
+                "targets:",
+                "- agent: codex",
+                "  policy: safe",
+                "  seed: 0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "batch",
+                "--repo-root",
+                str(repo_root),
+                "--targets",
+                str(targets_path),
+                "--skip-command-probes",
+                "--validate-only",
+            ]
+        )
+    assert exc.value.code == 2
+
+    out = capsys.readouterr()
+    assert "Batch validation failed" in out.err
+    assert "targets[0].repo is required" in out.err
+    assert "Traceback" not in out.err
+    assert "docs/reference/targets-yaml.md" in out.err
+
+
+def test_batch_invalid_seed_is_structured(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    target_repo = tmp_path / "target_repo"
+    target_repo.mkdir(parents=True, exist_ok=True)
+
+    targets_path = tmp_path / "targets.yaml"
+    targets_path.write_text(
+        "\n".join(
+            [
+                "targets:",
+                f"- repo: {target_repo.as_posix()!r}",
+                "  agent: codex",
+                "  policy: safe",
+                "  seed: nope",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "batch",
+                "--repo-root",
+                str(repo_root),
+                "--targets",
+                str(targets_path),
+                "--skip-command-probes",
+                "--validate-only",
+            ]
+        )
+    assert exc.value.code == 2
+
+    out = capsys.readouterr()
+    assert "Batch validation failed" in out.err
+    assert "targets[0].seed" in out.err
+    assert "integer" in out.err
+    assert "Traceback" not in out.err
+    assert "docs/reference/targets-yaml.md" in out.err

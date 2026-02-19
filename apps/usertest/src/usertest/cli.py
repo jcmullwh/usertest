@@ -1316,15 +1316,73 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         print("Batch validation failed; no targets were executed.", file=sys.stderr)
         print(f"- Failed to read targets YAML {targets_path}: {e}", file=sys.stderr)
         return 2
-    targets = data.get("targets", [])
-    if not isinstance(targets, list):
-        raise ValueError(f"Expected targets: [] in {targets_path}")
-
     parse_errors: list[str] = []
+
+    def _append_arg_list_errors(values: Any, *, flag: str) -> list[str]:
+        if values is None:
+            return []
+        if not isinstance(values, list):
+            parse_errors.append(f"args: {flag} must be repeatable strings; got {type(values).__name__}.")
+            return []
+        normalized: list[str] = []
+        for vidx, value in enumerate(values):
+            if not isinstance(value, str) or not value.strip():
+                parse_errors.append(
+                    f"args: {flag}[{vidx}] must be a non-empty string; got {value!r}."
+                )
+                continue
+            normalized.append(value.strip())
+        return normalized
+
+    base_preflight_commands = _append_arg_list_errors(
+        getattr(args, "preflight_commands", None),
+        flag="--preflight-command",
+    )
+    base_preflight_required_commands = _append_arg_list_errors(
+        getattr(args, "preflight_required_commands", None),
+        flag="--require-preflight-command",
+    )
+    base_agent_config_overrides = _append_arg_list_errors(
+        getattr(args, "agent_config", None),
+        flag="--agent-config",
+    )
+
+    targets_raw = data.get("targets", [])
+    if targets_raw is None:
+        targets_raw = []
+    if not isinstance(targets_raw, list):
+        parse_errors.append(
+            f"targets: expected a list (YAML sequence) in {targets_path}; got {type(targets_raw).__name__}."
+        )
+        targets: list[Any] = []
+    else:
+        targets = targets_raw
     requests: list[tuple[int, RunRequest]] = []
     for idx, item in enumerate(targets):
-        if not isinstance(item, dict) or "repo" not in item:
-            raise ValueError(f"targets[{idx}] must be a mapping with repo.")
+        target_errors: list[str] = []
+
+        if not isinstance(item, dict):
+            parse_errors.append(
+                f"targets[{idx}]: must be a mapping (YAML object); got {type(item).__name__}."
+            )
+            continue
+
+        def _require_non_empty_str(field: str) -> str | None:
+            raw = item.get(field)
+            if raw is None:
+                target_errors.append(f"targets[{idx}].{field} is required.")
+                return None
+            if not isinstance(raw, str) or not raw.strip():
+                target_errors.append(
+                    f"targets[{idx}].{field} must be a non-empty string; got {raw!r}."
+                )
+                return None
+            return raw
+
+        repo_value = _require_non_empty_str("repo")
+        if repo_value is None:
+            parse_errors.extend(target_errors)
+            continue
 
         legacy_keys = {
             "persona",
@@ -1340,95 +1398,155 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 "Update to persona_id / mission_id and remove legacy fields."
             )
 
-        preflight_commands: list[str] = []
-        for cmd in args.preflight_commands or []:
-            if not isinstance(cmd, str) or not cmd.strip():
-                raise ValueError(
-                    f"--preflight-command entries must be non-empty strings; got {cmd!r}."
+        def _optional_str(field: str, default: str | None) -> str | None:
+            if field not in item:
+                return default
+            raw = item.get(field)
+            if raw is None:
+                return None
+            if not isinstance(raw, str):
+                target_errors.append(
+                    f"targets[{idx}].{field} must be a string if present; got {type(raw).__name__}."
                 )
-            preflight_commands.append(cmd.strip())
+                return None
+            return raw
 
-        preflight_required_commands: list[str] = []
-        for cmd in args.preflight_required_commands or []:
-            if not isinstance(cmd, str) or not cmd.strip():
-                raise ValueError(
-                    f"--require-preflight-command entries must be non-empty strings; got {cmd!r}."
-                )
-            preflight_required_commands.append(cmd.strip())
+        def _optional_int(field: str, default: int) -> int | None:
+            raw = item.get(field, default)
+            if raw is None:
+                return default
+            if isinstance(raw, bool):
+                target_errors.append(f"targets[{idx}].{field} must be an integer; got bool.")
+                return None
+            if isinstance(raw, int):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    return int(raw.strip())
+                except ValueError:
+                    target_errors.append(
+                        f"targets[{idx}].{field} must be an integer; got {raw!r}."
+                    )
+                    return None
+            target_errors.append(
+                f"targets[{idx}].{field} must be an integer; got {type(raw).__name__}."
+            )
+            return None
 
-        agent_config_overrides: list[str] = []
-        for override in getattr(args, "agent_config", []) or []:
-            if not isinstance(override, str) or not override.strip():
-                raise ValueError(
-                    f"--agent-config entries must be non-empty strings; got {override!r}."
-                )
-            agent_config_overrides.append(override.strip())
+        def _optional_float(field: str, default: float) -> float | None:
+            raw = item.get(field, default)
+            if raw is None:
+                return default
+            if isinstance(raw, bool):
+                target_errors.append(f"targets[{idx}].{field} must be a number; got bool.")
+                return None
+            if isinstance(raw, (int, float)):
+                return float(raw)
+            if isinstance(raw, str):
+                try:
+                    return float(raw.strip())
+                except ValueError:
+                    target_errors.append(
+                        f"targets[{idx}].{field} must be a number; got {raw!r}."
+                    )
+                    return None
+            target_errors.append(
+                f"targets[{idx}].{field} must be a number; got {type(raw).__name__}."
+            )
+            return None
+
+        preflight_commands: list[str] = list(base_preflight_commands)
+        preflight_required_commands: list[str] = list(base_preflight_required_commands)
+        agent_config_overrides: list[str] = list(base_agent_config_overrides)
 
         raw_agent_config = item.get("agent_config")
         if raw_agent_config is None:
             raw_agent_config = item.get("agent_config_overrides")
         if raw_agent_config is not None:
             if not isinstance(raw_agent_config, list):
-                raise ValueError(
+                target_errors.append(
                     f"targets[{idx}].agent_config must be a list of strings if present."
                 )
             for jdx, override in enumerate(raw_agent_config):
                 if not isinstance(override, str) or not override.strip():
-                    raise ValueError(
+                    target_errors.append(
                         f"targets[{idx}].agent_config[{jdx}] must be a non-empty string; got {override!r}."
                     )
-                agent_config_overrides.append(override.strip())
+                else:
+                    agent_config_overrides.append(override.strip())
         raw_preflight_commands = item.get("preflight_commands")
         if raw_preflight_commands is not None:
             if not isinstance(raw_preflight_commands, list):
-                raise ValueError(
+                target_errors.append(
                     f"targets[{idx}].preflight_commands must be a list of strings if present."
                 )
             for jdx, cmd in enumerate(raw_preflight_commands):
                 if not isinstance(cmd, str) or not cmd.strip():
-                    raise ValueError(
+                    target_errors.append(
                         f"targets[{idx}].preflight_commands[{jdx}] must be a non-empty string; "
                         f"got {cmd!r}."
                     )
-                preflight_commands.append(cmd.strip())
+                else:
+                    preflight_commands.append(cmd.strip())
 
         raw_preflight_required = item.get("preflight_required_commands")
         if raw_preflight_required is not None:
             if not isinstance(raw_preflight_required, list):
-                raise ValueError(
+                target_errors.append(
                     f"targets[{idx}].preflight_required_commands must be a list of strings "
                     f"if present."
                 )
             for jdx, cmd in enumerate(raw_preflight_required):
                 if not isinstance(cmd, str) or not cmd.strip():
-                    raise ValueError(
+                    target_errors.append(
                         f"targets[{idx}].preflight_required_commands[{jdx}] "
                         f"must be a non-empty string; got {cmd!r}."
                     )
-                preflight_required_commands.append(cmd.strip())
+                else:
+                    preflight_required_commands.append(cmd.strip())
+
+        ref_value = _optional_str("ref", None)
+        agent_value = _optional_str("agent", str(args.agent))
+        policy_value = _optional_str("policy", str(args.policy))
+        persona_id_value = _optional_str("persona_id", args.persona_id)
+        mission_id_value = _optional_str("mission_id", args.mission_id)
+        model_value = _optional_str(
+            "model",
+            str(args.model) if getattr(args, "model", None) else None,
+        )
+
+        seed_value = _optional_int("seed", int(args.seed))
+        retries_value = _optional_int(
+            "agent_rate_limit_retries",
+            int(args.agent_rate_limit_retries),
+        )
+        backoff_seconds_value = _optional_float(
+            "agent_rate_limit_backoff_seconds",
+            float(args.agent_rate_limit_backoff_seconds),
+        )
+        backoff_multiplier_value = _optional_float(
+            "agent_rate_limit_backoff_multiplier",
+            float(args.agent_rate_limit_backoff_multiplier),
+        )
+        followup_attempts_value = _optional_int(
+            "agent_followup_attempts",
+            int(args.agent_followup_attempts),
+        )
+
+        if target_errors:
+            parse_errors.extend(target_errors)
+            continue
 
         req = RunRequest(
-            repo=str(item["repo"]),
-            ref=str(item["ref"]) if "ref" in item and item["ref"] is not None else None,
-            agent=str(item.get("agent", args.agent)),
-            policy=str(item.get("policy", args.policy)),
-            persona_id=(
-                str(item["persona_id"])
-                if "persona_id" in item and item["persona_id"] is not None
-                else args.persona_id
-            ),
-            mission_id=(
-                str(item["mission_id"])
-                if "mission_id" in item and item["mission_id"] is not None
-                else args.mission_id
-            ),
+            repo=repo_value,
+            ref=ref_value,
+            agent=agent_value if agent_value is not None else str(args.agent),
+            policy=policy_value if policy_value is not None else str(args.policy),
+            persona_id=persona_id_value,
+            mission_id=mission_id_value,
             obfuscate_agent_docs=bool(args.obfuscate_agent_docs),
-            seed=int(item.get("seed", args.seed)),
-            model=(
-                str(item["model"])
-                if "model" in item and item["model"] is not None
-                else (str(args.model) if getattr(args, "model", None) else None)
-            ),
+            seed=seed_value if seed_value is not None else int(args.seed),
+            model=model_value,
             agent_config_overrides=tuple(agent_config_overrides),
             agent_system_prompt_file=args.agent_system_prompt_file,
             agent_append_system_prompt=args.agent_append_system_prompt,
@@ -1449,23 +1567,25 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             exec_env=tuple(str(x) for x in (args.exec_env or []) if str(x).strip()),
             exec_keep_container=bool(args.exec_keep_container),
             exec_rebuild_image=bool(args.exec_rebuild_image),
-            agent_rate_limit_retries=int(
-                item.get("agent_rate_limit_retries", args.agent_rate_limit_retries)
+            agent_rate_limit_retries=(
+                retries_value
+                if retries_value is not None
+                else int(args.agent_rate_limit_retries)
             ),
-            agent_rate_limit_backoff_seconds=float(
-                item.get(
-                    "agent_rate_limit_backoff_seconds",
-                    args.agent_rate_limit_backoff_seconds,
-                )
+            agent_rate_limit_backoff_seconds=(
+                backoff_seconds_value
+                if backoff_seconds_value is not None
+                else float(args.agent_rate_limit_backoff_seconds)
             ),
-            agent_rate_limit_backoff_multiplier=float(
-                item.get(
-                    "agent_rate_limit_backoff_multiplier",
-                    args.agent_rate_limit_backoff_multiplier,
-                )
+            agent_rate_limit_backoff_multiplier=(
+                backoff_multiplier_value
+                if backoff_multiplier_value is not None
+                else float(args.agent_rate_limit_backoff_multiplier)
             ),
-            agent_followup_attempts=int(
-                item.get("agent_followup_attempts", args.agent_followup_attempts)
+            agent_followup_attempts=(
+                followup_attempts_value
+                if followup_attempts_value is not None
+                else int(args.agent_followup_attempts)
             ),
         )
 
@@ -1484,6 +1604,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         print("Batch validation failed; no targets were executed.", file=sys.stderr)
         for e in all_errors:
             print(f"- {e}", file=sys.stderr)
+        print("- See docs/reference/targets-yaml.md for targets.yaml format.", file=sys.stderr)
         return 2
     if bool(getattr(args, "validate_only", False)):
         print("Batch validation passed; no targets were executed (validate-only).", file=sys.stderr)
