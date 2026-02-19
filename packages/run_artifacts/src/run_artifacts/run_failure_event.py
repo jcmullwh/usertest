@@ -9,6 +9,7 @@ MAX_ERROR_FALLBACK_CHARS = 2_000
 _SHELL_SNAPSHOT_WARNING_CODE = "shell_snapshot_powershell_unsupported"
 _TURN_METADATA_TIMEOUT_WARNING_CODE = "turn_metadata_header_timeout"
 _CODEX_MODEL_REFRESH_TIMEOUT_WARNING_CODE = "codex_model_refresh_timeout"
+_BASH_TOOL_PREFLIGHT_SLOW_WARNING_CODE = "bash_tool_preflight_slow"
 
 _SHELL_SNAPSHOT_WARNING_HINT = (
     "hint=PowerShell shell snapshot unsupported; continuing without shell snapshot metadata."
@@ -90,6 +91,7 @@ def classify_known_stderr_warnings(text: str) -> dict[str, Any]:
         _SHELL_SNAPSHOT_WARNING_CODE: 0,
         _TURN_METADATA_TIMEOUT_WARNING_CODE: 0,
         _CODEX_MODEL_REFRESH_TIMEOUT_WARNING_CODE: 0,
+        _BASH_TOOL_PREFLIGHT_SLOW_WARNING_CODE: 0,
     }
     unknown_lines: list[str] = []
 
@@ -117,6 +119,10 @@ def classify_known_stderr_warnings(text: str) -> dict[str, Any]:
             or lowered == _CODEX_MODEL_REFRESH_TIMEOUT_HINT.lower()
         ):
             counts[_CODEX_MODEL_REFRESH_TIMEOUT_WARNING_CODE] += 1
+            continue
+
+        if "[bashtool]" in lowered and "pre-flight check is taking longer than expected" in lowered:
+            counts[_BASH_TOOL_PREFLIGHT_SLOW_WARNING_CODE] += 1
             continue
 
         unknown_lines.append(line)
