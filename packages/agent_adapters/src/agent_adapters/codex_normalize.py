@@ -268,10 +268,19 @@ def _maybe_emit_read_events(
     cwd: Path | None,
     workspace_root: Path | None,
     workspace_mount: str | None,
+    ts_iter: Iterator[str] | None,
 ) -> Iterable[dict[str, Any]]:
     if workspace_root is None:
         return []
     out: list[dict[str, Any]] = []
+
+    def _next_ts() -> str | None:
+        if ts_iter is None:
+            return None
+        try:
+            return next(ts_iter)
+        except StopIteration:
+            return None
 
     for candidate in _infer_read_candidate_paths(
         argv=argv,
@@ -288,6 +297,7 @@ def _maybe_emit_read_events(
                     "path": _safe_relpath(candidate, workspace_root),
                     "bytes": candidate.stat().st_size,
                 },
+                ts=_next_ts(),
             )
         )
     return out
@@ -297,16 +307,29 @@ def normalize_codex_events(
     *,
     raw_events_path: Path,
     normalized_events_path: Path,
+    ts_iter: Iterator[str] | None = None,
     workspace_root: Path | None = None,
     workspace_mount: str | None = None,
 ) -> None:
     normalized_events_path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _next_ts() -> str | None:
+        if ts_iter is None:
+            return None
+        try:
+            return next(ts_iter)
+        except StopIteration:
+            return None
+
     with normalized_events_path.open("w", encoding="utf-8", newline="\n") as out_f:
         call_ctx: dict[str, dict[str, Any]] = {}
         for raw_line, payload in _iter_codex_raw_lines(raw_events_path):
             if payload is None:
-                event = make_event("error", {"category": "raw_non_json_line", "message": raw_line})
+                event = make_event(
+                    "error",
+                    {"category": "raw_non_json_line", "message": raw_line},
+                    ts=_next_ts(),
+                )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
@@ -316,14 +339,22 @@ def normalize_codex_events(
                 if msg_type == "agent_message":
                     message = msg.get("message")
                     if isinstance(message, str):
-                        event = make_event("agent_message", {"kind": "message", "text": message})
+                        event = make_event(
+                            "agent_message",
+                            {"kind": "message", "text": message},
+                            ts=_next_ts(),
+                        )
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
                 if msg_type == "agent_reasoning":
                     text = msg.get("text")
                     if isinstance(text, str):
-                        event = make_event("agent_message", {"kind": "observation", "text": text})
+                        event = make_event(
+                            "agent_message",
+                            {"kind": "observation", "text": text},
+                            ts=_next_ts(),
+                        )
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
@@ -412,6 +443,7 @@ def normalize_codex_events(
                 event = make_event(
                     "run_command",
                     data,
+                    ts=_next_ts(),
                 )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
@@ -420,6 +452,7 @@ def normalize_codex_events(
                     cwd=cwd,
                     workspace_root=workspace_root,
                     workspace_mount=workspace_mount,
+                    ts_iter=ts_iter,
                 ):
                     out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")
                 continue
@@ -436,14 +469,20 @@ def normalize_codex_events(
             if item_type == "reasoning":
                 text = item.get("text")
                 if isinstance(text, str) and text:
-                    event = make_event("agent_message", {"kind": "observation", "text": text})
+                    event = make_event(
+                        "agent_message",
+                        {"kind": "observation", "text": text},
+                        ts=_next_ts(),
+                    )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
             if item_type == "agent_message":
                 text = item.get("text")
                 if isinstance(text, str) and text:
-                    event = make_event("agent_message", {"kind": "message", "text": text})
+                    event = make_event(
+                        "agent_message", {"kind": "message", "text": text}, ts=_next_ts()
+                    )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
@@ -462,7 +501,11 @@ def normalize_codex_events(
                 status = item.get("status")
                 exit_code = 1 if isinstance(status, str) and status.lower() == "failed" else -1
 
-            data: dict[str, Any] = {"argv": argv, "command": _format_argv(argv), "exit_code": exit_code}
+            data: dict[str, Any] = {
+                "argv": argv,
+                "command": _format_argv(argv),
+                "exit_code": exit_code,
+            }
             if exit_code != 0:
                 output_text = _join_streams(
                     item.get("stdout") or item.get("output"),
@@ -477,6 +520,7 @@ def normalize_codex_events(
             event = make_event(
                 "run_command",
                 data,
+                ts=_next_ts(),
             )
             out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
@@ -485,5 +529,6 @@ def normalize_codex_events(
                 cwd=None,
                 workspace_root=workspace_root,
                 workspace_mount=workspace_mount,
+                ts_iter=ts_iter,
             ):
                 out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")

@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
@@ -2899,22 +2900,37 @@ def _cmd_report(args: argparse.Namespace) -> int:
                 workspace_root = None
 
         normalized_events_path = run_dir / "normalized_events.jsonl"
+        ts_iter: Iterator[str] | None = None
+        if normalized_events_path.exists():
+            try:
+                ts_values: list[str] = []
+                for event in iter_events_jsonl(normalized_events_path):
+                    ts = event.get("ts")
+                    if isinstance(ts, str) and ts.strip():
+                        ts_values.append(ts.strip())
+                if ts_values:
+                    ts_iter = iter(ts_values)
+            except Exception:  # noqa: BLE001
+                ts_iter = None
         if agent_name == "codex":
             normalize_codex_events(
                 raw_events_path=raw_events_path,
                 normalized_events_path=normalized_events_path,
+                ts_iter=ts_iter,
                 workspace_root=workspace_root,
             )
         elif agent_name == "claude":
             normalize_claude_events(
                 raw_events_path=raw_events_path,
                 normalized_events_path=normalized_events_path,
+                ts_iter=ts_iter,
                 workspace_root=workspace_root,
             )
         elif agent_name == "gemini":
             normalize_gemini_events(
                 raw_events_path=raw_events_path,
                 normalized_events_path=normalized_events_path,
+                ts_iter=ts_iter,
                 workspace_root=workspace_root,
             )
         else:
@@ -2953,6 +2969,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
                                             "lines_added": lines_added,
                                             "lines_removed": lines_removed,
                                         },
+                                        ts=next(ts_iter, None) if ts_iter is not None else None,
                                     ),
                                     ensure_ascii=False,
                                 )
@@ -2966,6 +2983,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
         metrics_path.write_text(
             json.dumps(recomputed_metrics, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
+            newline="\n",
         )
 
     report_path = run_dir / "report.json"
@@ -3008,12 +3026,13 @@ def _cmd_report(args: argparse.Namespace) -> int:
         target_ref = target_ref_raw if isinstance(target_ref_raw, dict) else None
 
     md = render_report_markdown(report=report_raw, metrics=metrics, target_ref=target_ref)
-    (run_dir / "report.md").write_text(md, encoding="utf-8")
+    (run_dir / "report.md").write_text(md, encoding="utf-8", newline="\n")
 
     if errors:
         (run_dir / "report_validation_errors.json").write_text(
             json.dumps(errors, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
+            newline="\n",
         )
 
     print(str(run_dir / "report.md"))

@@ -102,10 +102,19 @@ def normalize_gemini_events(
     *,
     raw_events_path: Path,
     normalized_events_path: Path,
+    ts_iter: Iterator[str] | None = None,
     workspace_root: Path | None = None,
     workspace_mount: str | None = None,
 ) -> None:
     normalized_events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _next_ts() -> str | None:
+        if ts_iter is None:
+            return None
+        try:
+            return next(ts_iter)
+        except StopIteration:
+            return None
 
     tool_uses: dict[str, dict[str, Any]] = {}
     pending_message: str = ""
@@ -114,7 +123,9 @@ def normalize_gemini_events(
         nonlocal pending_message
         if not pending_message:
             return
-        event = make_event("agent_message", {"kind": "message", "text": pending_message})
+        event = make_event(
+            "agent_message", {"kind": "message", "text": pending_message}, ts=_next_ts()
+        )
         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
         pending_message = ""
 
@@ -122,7 +133,11 @@ def normalize_gemini_events(
         for raw_line, payload in _iter_raw_lines(raw_events_path):
             if payload is None:
                 _flush_message()
-                event = make_event("error", {"category": "raw_non_json_line", "message": raw_line})
+                event = make_event(
+                    "error",
+                    {"category": "raw_non_json_line", "message": raw_line},
+                    ts=_next_ts(),
+                )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
@@ -166,6 +181,7 @@ def normalize_gemini_events(
                 event = make_event(
                     "error",
                     {"category": "tool_result_missing_use", "message": f"tool_id={tool_id}"},
+                    ts=_next_ts(),
                 )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
@@ -195,7 +211,11 @@ def normalize_gemini_events(
                         if candidate.exists() and candidate.is_file():
                             bytes_read = candidate.stat().st_size
                             out_path = _safe_relpath(candidate, workspace_root)
-                    event = make_event("read_file", {"path": out_path, "bytes": bytes_read})
+                    event = make_event(
+                        "read_file",
+                        {"path": out_path, "bytes": bytes_read},
+                        ts=_next_ts(),
+                    )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
@@ -207,6 +227,7 @@ def normalize_gemini_events(
                         "input": tool_input,
                         "is_error": is_error,
                     },
+                    ts=_next_ts(),
                 )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
@@ -230,14 +251,14 @@ def normalize_gemini_events(
                             data["output_excerpt"] = excerpt
                             if truncated:
                                 data["output_excerpt_truncated"] = True
-                    event = make_event("run_command", data)
+                    event = make_event("run_command", data, ts=_next_ts())
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
             if name == "google_web_search":
                 query = tool_input.get("query")
                 if isinstance(query, str) and query.strip():
-                    event = make_event("web_search", {"query": query.strip()})
+                    event = make_event("web_search", {"query": query.strip()}, ts=_next_ts())
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
@@ -248,6 +269,7 @@ def normalize_gemini_events(
                     "input": tool_input,
                     "is_error": is_error,
                 },
+                ts=_next_ts(),
             )
             out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
 

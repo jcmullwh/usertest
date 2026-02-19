@@ -101,17 +101,30 @@ def normalize_claude_events(
     *,
     raw_events_path: Path,
     normalized_events_path: Path,
+    ts_iter: Iterator[str] | None = None,
     workspace_root: Path | None = None,
     workspace_mount: str | None = None,
 ) -> None:
     normalized_events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _next_ts() -> str | None:
+        if ts_iter is None:
+            return None
+        try:
+            return next(ts_iter)
+        except StopIteration:
+            return None
 
     tool_uses: dict[str, dict[str, Any]] = {}
 
     with normalized_events_path.open("w", encoding="utf-8", newline="\n") as out_f:
         for raw_line, payload in _iter_raw_lines(raw_events_path):
             if payload is None:
-                event = make_event("error", {"category": "raw_non_json_line", "message": raw_line})
+                event = make_event(
+                    "error",
+                    {"category": "raw_non_json_line", "message": raw_line},
+                    ts=_next_ts(),
+                )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
@@ -134,7 +147,9 @@ def normalize_claude_events(
                 if obj_type == "assistant" and role == "assistant" and block_type == "text":
                     text = block.get("text")
                     if isinstance(text, str) and text:
-                        event = make_event("agent_message", {"kind": "message", "text": text})
+                        event = make_event(
+                            "agent_message", {"kind": "message", "text": text}, ts=_next_ts()
+                        )
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
@@ -164,6 +179,7 @@ def normalize_claude_events(
                             "category": "tool_result_missing_use",
                             "message": f"tool_use_id={tool_use_id}",
                         },
+                        ts=_next_ts(),
                     )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
@@ -196,7 +212,7 @@ def normalize_claude_events(
                             data["output_excerpt"] = output_excerpt
                             if output_truncated:
                                 data["output_excerpt_truncated"] = True
-                        event = make_event("run_command", data)
+                        event = make_event("run_command", data, ts=_next_ts())
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
@@ -220,7 +236,11 @@ def normalize_claude_events(
                             if candidate.exists() and candidate.is_file():
                                 bytes_read = candidate.stat().st_size
                                 out_path = _safe_relpath(candidate, workspace_root)
-                        event = make_event("read_file", {"path": out_path, "bytes": bytes_read})
+                        event = make_event(
+                            "read_file",
+                            {"path": out_path, "bytes": bytes_read},
+                            ts=_next_ts(),
+                        )
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
@@ -232,6 +252,7 @@ def normalize_claude_events(
                             "input": tool_input,
                             "is_error": is_error,
                         },
+                        ts=_next_ts(),
                     )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
@@ -239,7 +260,7 @@ def normalize_claude_events(
                 if name in {"websearch", "web_search"}:
                     query = tool_input.get("query") or tool_input.get("text")
                     if isinstance(query, str) and query.strip():
-                        event = make_event("web_search", {"query": query.strip()})
+                        event = make_event("web_search", {"query": query.strip()}, ts=_next_ts())
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
@@ -251,6 +272,7 @@ def normalize_claude_events(
                             "input": tool_input,
                             "is_error": is_error,
                         },
+                        ts=_next_ts(),
                     )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
@@ -258,5 +280,6 @@ def normalize_claude_events(
                 event = make_event(
                     "error",
                     {"category": "unhandled_tool", "message": str(tool_use.get("name", ""))},
+                    ts=_next_ts(),
                 )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")

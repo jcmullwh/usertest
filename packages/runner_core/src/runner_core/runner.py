@@ -1232,7 +1232,11 @@ def _build_followup_prompt(
 
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def _git_diff(path: Path) -> str:
@@ -3029,12 +3033,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         if allow_edits:
             patch = _git_diff(acquired.workspace_dir)
             if patch.strip():
-                (run_dir / "patch.diff").write_text(patch, encoding="utf-8")
+                (run_dir / "patch.diff").write_text(patch, encoding="utf-8", newline="\n")
 
         md = render_report_markdown(
             report=report_json or {}, metrics=metrics, target_ref=target_ref
         )
-        (run_dir / "report.md").write_text(md, encoding="utf-8")
+        (run_dir / "report.md").write_text(md, encoding="utf-8", newline="\n")
 
         return RunResult(
             run_dir=run_dir,

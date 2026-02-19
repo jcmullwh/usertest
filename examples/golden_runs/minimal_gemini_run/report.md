@@ -1,4 +1,4 @@
-# Report
+# Persona exploration report
 
 ## Target
 
@@ -15,38 +15,38 @@
 }
 ```
 
-## Report
+## Summary
 
-```json
-{
-  "schema_version": 1,
-  "persona": {
-    "name": "Evaluator",
-    "description": "Golden fixture report."
-  },
-  "mission": "Assess fit quickly and safely.",
-  "minimal_mental_model": {
-    "summary": "This is a minimal, synthetic fixture used for regression tests.",
-    "entry_points": [
-      "README.md"
-    ]
-  },
-  "confidence_signals": {
-    "found": [
-      "Runner can execute commands"
-    ],
-    "missing": [
-      "Real target context"
-    ]
-  },
-  "confusion_points": [],
-  "adoption_decision": {
-    "recommendation": "investigate",
-    "rationale": "Fixture output only."
-  },
-  "suggested_changes": []
-}
-```
+- Persona: Evaluator
+- Persona description: Golden fixture report.
+- Mission: Assess fit quickly and safely.
+- Recommendation: investigate
+
+## Minimal mental model
+
+This is a minimal, synthetic fixture used for regression tests.
+
+### Entry points
+
+- README.md
+
+## Confidence signals
+
+### Found
+
+- Runner can execute commands
+
+### Missing
+
+- Real target context
+
+## Confusion points
+
+_None reported._
+
+## Suggested changes
+
+_None suggested._
 
 ## Metrics
 
