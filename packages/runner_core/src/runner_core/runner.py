@@ -254,7 +254,46 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
         lines = [
             line for line in text.splitlines() if line.strip() not in _GEMINI_STDERR_STRIP_LINES
         ]
-        return "\n".join(lines)
+        sanitized = "\n".join(lines)
+        lowered = sanitized.lower()
+        hints: list[str] = []
+
+        if (
+            "error executing tool grep_search" in lowered
+            and "invalid regular expression" in lowered
+            and "tool=grep_search" not in lowered
+        ):
+            hints.append(
+                "\n".join(
+                    [
+                        "[gemini_tool_hint] tool=grep_search code=invalid_regex classification=user_input_error",
+                        "hint=Gemini grep_search patterns are regular expressions. Escape regex metacharacters "
+                        "(for example `(`, `)`, `[`, `]`) or search for a simpler literal substring.",
+                    ]
+                )
+            )
+
+        if (
+            "error executing tool replace" in lowered
+            and "could not find the string to replace" in lowered
+            and "tool=replace" not in lowered
+        ):
+            hints.append(
+                "\n".join(
+                    [
+                        "[gemini_tool_hint] tool=replace code=string_not_found classification=user_input_error",
+                        "hint=Gemini replace requires an exact match. Re-run grep_search around the intended "
+                        "edit location and copy/paste a longer, unique snippet (watch whitespace/line endings).",
+                    ]
+                )
+            )
+
+        if hints:
+            if sanitized and not sanitized.endswith("\n"):
+                sanitized += "\n"
+            sanitized = sanitized + "\n\n".join(hints)
+
+        return sanitized
 
     if agent == "claude":
         blocks: list[list[str]] = []

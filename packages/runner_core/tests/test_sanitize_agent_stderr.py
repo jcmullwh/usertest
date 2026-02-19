@@ -157,3 +157,39 @@ def test_sanitize_agent_stderr_file_appends_hint_for_nested_claude_sessions(tmp_
     text = path.read_text(encoding="utf-8")
     assert "code=claude_nested_session" in text
     assert "hint=Claude Code cannot be launched inside another Claude Code session" in text
+
+
+def test_sanitize_agent_stderr_file_appends_hint_for_gemini_invalid_regex(tmp_path: Path) -> None:
+    path = tmp_path / "agent_stderr.txt"
+    path.write_text(
+        (
+            "Error executing tool grep_search: Invalid regular expression pattern provided: "
+            "parser_batch.add_argument(\"--mission-id\". Error: Invalid regular expression: "
+            "/parser_batch.add_argument(\"--mission-id\"/: Unterminated group\n"
+        ),
+        encoding="utf-8",
+    )
+
+    _sanitize_agent_stderr_file(agent="gemini", path=path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "Error executing tool grep_search" in text
+    assert "tool=grep_search" in text
+    assert "code=invalid_regex" in text
+    assert "hint=Gemini grep_search patterns are regular expressions" in text
+
+
+def test_sanitize_agent_stderr_file_appends_hint_for_gemini_replace_not_found(tmp_path: Path) -> None:
+    path = tmp_path / "agent_stderr.txt"
+    path.write_text(
+        "Error executing tool replace: Error: Failed to edit, could not find the string to replace.\n",
+        encoding="utf-8",
+    )
+
+    _sanitize_agent_stderr_file(agent="gemini", path=path)
+
+    text = path.read_text(encoding="utf-8")
+    assert "Error executing tool replace" in text
+    assert "tool=replace" in text
+    assert "code=string_not_found" in text
+    assert "hint=Gemini replace requires an exact match" in text
