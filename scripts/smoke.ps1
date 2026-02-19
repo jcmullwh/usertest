@@ -78,6 +78,7 @@ try {
     $pythonCmd = $pythonInfo.CommandPath
     Write-Host "==> Using Python: $($pythonInfo.Name) -> $pythonCmd"
     Write-Host "==> Python executable: $($pythonInfo.Executable)"
+    $pipFlags = @('--disable-pip-version-check', '--retries', '10', '--timeout', '30')
 
     if (Get-Command pdm -ErrorAction SilentlyContinue) {
         Invoke-Step -Name 'Scaffold doctor' -Command {
@@ -89,12 +90,14 @@ try {
             Write-Error 'Scaffold doctor required but pdm was not found on PATH. Install pdm or rerun without -RequireDoctor.'
             exit 1
         }
-        Write-Host "==> Scaffold doctor skipped (pdm not found on PATH; preflight coverage reduced)"
+        Invoke-Step -Name 'Scaffold doctor (tool checks skipped; pdm not found on PATH)' -Command {
+            & $pythonCmd tools/scaffold/scaffold.py doctor --skip-tool-checks
+        }
     }
 
     if (-not $SkipInstall) {
         Invoke-Step -Name 'Install base Python deps' -Command {
-            & $pythonCmd -m pip install -r requirements-dev.txt
+            & $pythonCmd -m pip install @pipFlags -r requirements-dev.txt
         }
 
         if ($UsePythonPath) {

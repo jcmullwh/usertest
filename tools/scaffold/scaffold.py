@@ -1170,14 +1170,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 if ci.get(task_name) is True:
                     required_tasks.add(task_name)
 
-        for task_name in sorted(required_tasks):
-            cmd = validated_task_cmds.get(task_name)
-            if cmd is None:
-                continue
-            try:
-                _require_on_path(cmd[0], why=f"task '{task_name}' for project '{project_id}'")
-            except ScaffoldError as exc:
-                errors.append(f"{project_id}: {exc}")
+        if not bool(getattr(args, "skip_tool_checks", False)):
+            for task_name in sorted(required_tasks):
+                cmd = validated_task_cmds.get(task_name)
+                if cmd is None:
+                    continue
+                try:
+                    _require_on_path(cmd[0], why=f"task '{task_name}' for project '{project_id}'")
+                except ScaffoldError as exc:
+                    errors.append(f"{project_id}: {exc}")
 
     if errors:
         raise ScaffoldError("Doctor found problems:\n" + "\n".join(f"- {e}" for e in errors))
@@ -1474,6 +1475,14 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_doctor = sub.add_parser(
         "doctor", help="Validate config + manifest and check required tools for existing projects."
+    )
+    p_doctor.add_argument(
+        "--skip-tool-checks",
+        action="store_true",
+        help=(
+            "Skip checking that task command binaries are on PATH. "
+            "This keeps manifest/config validation while allowing pip-first flows without pdm."
+        ),
     )
     p_doctor.set_defaults(func=cmd_doctor)
 

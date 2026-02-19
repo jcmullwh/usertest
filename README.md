@@ -107,8 +107,8 @@ The smoke scripts run:
 4. `python -m usertest_backlog.cli --help`
 5. `python -m pytest -q apps/usertest/tests/test_smoke.py apps/usertest/tests/test_golden_fixture.py apps/usertest_backlog/tests/test_smoke.py`
 
-If `pdm` is not installed, the scripts skip the doctor step and continue with the pip-based flow.
-For CI or strict preflight runs, require doctor explicitly:
+If `pdm` is not installed, the scripts run doctor with tool checks skipped (`scaffold.py doctor --skip-tool-checks`)
+and continue with the pip-based flow. For CI or strict preflight runs, require doctor explicitly:
 
 - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -RequireDoctor`
 - macOS/Linux: `bash ./scripts/smoke.sh --require-doctor`

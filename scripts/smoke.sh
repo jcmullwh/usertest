@@ -48,6 +48,8 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   fi
 fi
 
+PIP_FLAGS=(--disable-pip-version-check --retries 10 --timeout 30)
+
 if command -v pdm >/dev/null 2>&1; then
   echo "==> Scaffold doctor"
   "${PYTHON_BIN}" tools/scaffold/scaffold.py doctor
@@ -57,12 +59,19 @@ else
     echo "Install pdm or rerun without --require-doctor." >&2
     exit 1
   fi
-  echo "==> Scaffold doctor skipped (pdm not found on PATH; preflight coverage reduced)"
+  echo "==> Scaffold doctor (tool checks skipped; pdm not found on PATH)"
+  "${PYTHON_BIN}" tools/scaffold/scaffold.py doctor --skip-tool-checks
 fi
 
 if [[ "${SKIP_INSTALL}" -eq 0 ]]; then
+  if command -v id >/dev/null 2>&1; then
+    if [[ "$(id -u)" -eq 0 ]]; then
+      echo "==> Note: running as root; consider using a virtualenv to avoid global site-packages installs"
+    fi
+  fi
+
   echo "==> Install base Python deps"
-  "${PYTHON_BIN}" -m pip install -r requirements-dev.txt
+  "${PYTHON_BIN}" -m pip install "${PIP_FLAGS[@]}" -r requirements-dev.txt
 
   if [[ "${USE_PYTHONPATH}" -eq 1 ]]; then
     echo "==> Configure PYTHONPATH via scripts/set_pythonpath.sh"
