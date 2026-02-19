@@ -117,3 +117,29 @@ def test_sanitize_agent_stderr_file_summarizes_known_codex_capability_warnings(
     assert "code=turn_metadata_header_timeout" in text
     assert "failed to refresh available models" not in text
     assert "code=codex_model_refresh_timeout" in text
+
+
+def test_sanitize_agent_stderr_file_dedupes_claude_missing_config_warning(tmp_path: Path) -> None:
+    path = tmp_path / "agent_stderr.txt"
+    block = "\n".join(
+        [
+            "Claude configuration file not found at: /root/.claude.json",
+            "A backup file exists at: /root/.claude/backups/.claude.json.backup.1771509292967",
+            'You can manually restore it by running: cp "/root/.claude/backups/.claude.json.backup.1771509292967" "/root/.claude.json"',
+        ]
+    )
+    slow_warning = (
+        '{"level":"warn","message":"[BashTool] Pre-flight check is taking longer than expected."}'
+    )
+    path.write_text(
+        "\n\n".join([block, block, block, slow_warning]) + "\n",
+        encoding="utf-8",
+    )
+
+    _sanitize_agent_stderr_file(agent="claude", path=path)
+
+    text = path.read_text(encoding="utf-8")
+    assert text.count("Claude configuration file not found at:") == 1
+    assert "code=claude_config_missing" in text
+    assert "occurrences=3" in text
+    assert slow_warning in text

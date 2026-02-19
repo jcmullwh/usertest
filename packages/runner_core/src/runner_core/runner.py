@@ -247,6 +247,42 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
         ]
         return "\n".join(lines)
 
+    if agent == "claude":
+        blocks: list[list[str]] = []
+        current: list[str] = []
+        for line in text.splitlines():
+            if not line.strip():
+                if current:
+                    blocks.append(current)
+                    current = []
+                continue
+            current.append(line)
+        if current:
+            blocks.append(current)
+
+        config_missing_occurrences = 0
+        seen_config_blocks: set[str] = set()
+        rendered_blocks: list[str] = []
+
+        for block in blocks:
+            rendered = "\n".join(block)
+            if block and block[0].startswith("Claude configuration file not found at:"):
+                config_missing_occurrences += 1
+                if rendered in seen_config_blocks:
+                    continue
+                seen_config_blocks.add(rendered)
+            rendered_blocks.append(rendered)
+
+        if config_missing_occurrences > 1:
+            rendered_blocks.append(
+                (
+                    "[claude_warning_summary] code=claude_config_missing "
+                    f"occurrences={config_missing_occurrences} classification=capability_notice"
+                )
+            )
+
+        return "\n\n".join(rendered_blocks)
+
     if agent == "codex":
         # Codex can emit repeated warnings every turn; collapse known noise to one structured note.
         saw_personality_warning = False
@@ -319,7 +355,7 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
 
 
 def _sanitize_agent_stderr_file(*, agent: str, path: Path) -> None:
-    if agent not in {"gemini", "codex"} or not path.exists():
+    if agent not in {"gemini", "codex", "claude"} or not path.exists():
         return
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
