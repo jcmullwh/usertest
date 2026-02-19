@@ -246,12 +246,19 @@ layout), see `docs/design/run-artifacts.md`. For offline fixtures, see `examples
 
 `python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker`
 
-Host agent login reuse is enabled by default for Docker runs (`~/.codex`, `~/.claude`,
-`~/.gemini` mounts).
+Docker runs default to:
+
+- outbound network enabled (`--exec-network open`)
+- host agent login reuse enabled (`~/.codex`, `~/.claude`, `~/.gemini` mounts via `--exec-use-host-agent-login`)
 
 If you want API-key auth instead, opt in explicitly with:
 
 `--exec-use-api-key-auth --exec-env OPENAI_API_KEY`
+
+Note: the agent CLI itself runs *inside* the Docker container in this repo. Setting
+`--exec-network none` will prevent Codex/Claude/Gemini from reaching their hosted APIs, so it is
+not a “privacy-locked agent run” mode. For a no-network / no-credentials first success signal, use
+the golden fixtures in “Fastest output (no setup)” above.
 
 If you need to override the Docker build context, pass `--exec-docker-context` explicitly (default:
 `packages/sandbox_runner/builtins/docker/contexts/sandbox_cli`).

@@ -509,7 +509,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--exec-network",
         choices=["open", "none"],
         default="open",
-        help="Docker container network mode.",
+        help=(
+            "Docker container network mode. Note: the agent CLI runs inside the container in this repo; "
+            "`none` will prevent hosted agent CLIs (codex/claude/gemini) from reaching their APIs."
+        ),
     )
     run_p.add_argument(
         "--exec-cache",
@@ -645,7 +648,15 @@ def build_parser() -> argparse.ArgumentParser:
             "overlay manifests."
         ),
     )
-    batch_p.add_argument("--exec-network", choices=["open", "none"], default="open")
+    batch_p.add_argument(
+        "--exec-network",
+        choices=["open", "none"],
+        default="open",
+        help=(
+            "Docker container network mode. Note: the agent CLI runs inside the container in this repo; "
+            "`none` will prevent hosted agent CLIs (codex/claude/gemini) from reaching their APIs."
+        ),
+    )
     batch_p.add_argument("--exec-cache", choices=["cold", "warm"], default="cold")
     batch_p.add_argument("--exec-cache-dir", type=Path)
     batch_p.add_argument("--exec-env", action="append", default=[])
@@ -741,7 +752,15 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--exec-docker-timeout-seconds", type=float, default=None)
         p.add_argument("--exec-use-target-sandbox-cli-install", action="store_true")
         p.add_argument("--exec-use-host-agent-login", action="store_true")
-        p.add_argument("--exec-network", choices=["open", "none"], default="open")
+        p.add_argument(
+            "--exec-network",
+            choices=["open", "none"],
+            default="open",
+            help=(
+                "Docker container network mode. Note: the agent CLI runs inside the container in this repo; "
+                "`none` will prevent hosted agent CLIs (codex/claude/gemini) from reaching their APIs."
+            ),
+        )
         p.add_argument("--exec-cache", choices=["cold", "warm"], default="cold")
         p.add_argument("--exec-cache-dir", type=Path)
         p.add_argument(
