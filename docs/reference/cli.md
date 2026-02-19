@@ -105,7 +105,11 @@ These CLIs evolve quickly.
 Use:
 
 ```bash
+python -m usertest.cli --help
+python -m usertest.cli run --help
+python -m usertest_backlog.cli --help
+
+# If you installed the console scripts:
 usertest --help
-usertest run --help
 usertest-backlog --help
 ```

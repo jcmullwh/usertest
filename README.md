@@ -306,6 +306,9 @@ Golden fixture verification command:
 
 ## Troubleshooting
 
+- If `usertest` is "command not found" / not on PATH, either:
+  - run via module invocation (after installing deps): `python -m usertest.cli --help`, or
+  - install the console script: `python -m pip install -e apps/usertest`
 - If Codex fails with `model_reasoning_effort` enum errors, use one of
   `minimal|low|medium|high` (example: `--agent-config model_reasoning_effort=high`).
 - If preflight reports `blocked_by_policy`, switch to `--policy inspect` (read-only + shell) or

@@ -114,7 +114,8 @@ If you only need `usertest` locally, you can do a normal editable install:
 ```bash
 python -m pip install -r requirements-dev.txt
 python -m pip install -e apps/usertest
-usertest --help
+python -m usertest.cli --help
+# If you installed the console script: usertest --help
 ```
 
 This path is simple, but you lose the “run tasks across the whole monorepo” ergonomics.

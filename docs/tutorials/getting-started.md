@@ -135,8 +135,8 @@ python -m pip install -e apps/usertest
 Sanity check:
 
 ```bash
-usertest --help
-# or: python -m usertest.cli --help
+python -m usertest.cli --help
+# If you installed the console script: usertest --help
 ```
 
 > Monorepo note
