@@ -288,6 +288,10 @@ Golden fixture verification command:
   `minimal|low|medium|high` (example: `--agent-config model_reasoning_effort=high`).
 - If preflight reports `blocked_by_policy`, switch to `--policy inspect` (read-only + shell) or
   update `configs/policies.yaml`.
+- If you use a Windows-host checkout inside WSL or a Linux container and `git status` shows
+  widespread unrelated modifications, it is usually a CRLF/LF line ending mismatch. Mitigations:
+  - For new clones: `git config --global core.autocrlf input`
+  - For existing clones (after stashing real edits): `git add --renormalize .`
 - Windows workaround for bash assumptions:
   - Prefer Docker backend for shell-capable runs:
     `python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent gemini --policy inspect --exec-backend docker`
