@@ -215,6 +215,14 @@ Execution-policy notes:
 - `--policy inspect` is read-only but allows shell commands (recommended for first-success probing
   workflows on Claude/Gemini).
 - Built-in `first_output_smoke` / `produce_default_output` missions require edits; use `--policy write` for those runs.
+- Which policy should I use?
+  - Read-only + shell (no edits): `--policy inspect`
+  - Any workflow that requires edits: `--policy write`
+  - Claude/Gemini with *no shell commands at all*: `--policy safe`
+  - Common missions:
+    - `privacy_locked_run`: `--policy inspect`
+    - `first_output_smoke`: `--policy write`
+    - `produce_default_output`: `--policy write`
 - If you need repo-specific tool probes, add `--preflight-command <CMD>` (repeatable) and optional
   `--require-preflight-command <CMD>`.
 - `preflight.json` includes per-command diagnostics with status values: `present`, `missing`, and

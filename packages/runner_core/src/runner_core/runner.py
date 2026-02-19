@@ -1121,11 +1121,39 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             has_outer_sandbox=(request.exec_backend == "docker"),
         )
         if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
+            suggested_policy = "write" if bool(resolved_inputs.mission.requires_edits) else "inspect"
             message = (
                 f"Mission '{effective_spec.mission_id}' requires shell commands, but "
                 f"policy '{request.policy}' for agent '{request.agent}' blocks shell commands."
             )
-            hint = "Use --policy inspect (read-only + shell) or --policy write."
+            hint = (
+                "Use --policy write (allows edits + shell)."
+                if suggested_policy == "write"
+                else "Use --policy inspect (read-only + shell)."
+            )
+            suggested_command_parts: list[str] = [
+                "python",
+                "-m",
+                "usertest.cli",
+                "run",
+                "--repo-root",
+                ".",
+                "--repo",
+                json.dumps(request.repo, ensure_ascii=False),
+                "--agent",
+                request.agent,
+                "--policy",
+                suggested_policy,
+            ]
+            if request.ref:
+                suggested_command_parts.extend(["--ref", json.dumps(request.ref, ensure_ascii=False)])
+            if effective_spec.persona_id:
+                suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
+            if effective_spec.mission_id:
+                suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
+            if request.exec_backend != "local":
+                suggested_command_parts.extend(["--exec-backend", request.exec_backend])
+            suggested_command = " ".join(suggested_command_parts)
             _write_json(
                 run_dir / "preflight.json",
                 {
@@ -1157,6 +1185,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "capability": "shell_commands",
                     "message": message,
                     "hint": hint,
+                    "suggested_policy": suggested_policy,
+                    "suggested_command": suggested_command,
                     "preflight": {
                         "capabilities": {
                             "shell_commands": {
@@ -1171,7 +1201,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             return RunResult(
                 run_dir=run_dir,
                 exit_code=1,
-                report_validation_errors=[message, "code=mission_requires_shell", f"hint={hint}"],
+                report_validation_errors=[
+                    message,
+                    "code=mission_requires_shell",
+                    f"hint={hint}",
+                    f"suggested_command={suggested_command}",
+                ],
             )
 
         if bool(resolved_inputs.mission.requires_edits) and not allow_edits:
@@ -1641,11 +1676,41 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
 
             if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
+                suggested_policy = (
+                    "write" if bool(resolved_inputs.mission.requires_edits) else "inspect"
+                )
                 message = (
                     f"Mission '{effective_spec.mission_id}' requires shell commands, but "
                     f"policy '{request.policy}' for agent '{request.agent}' blocks shell commands."
                 )
-                hint = "Use --policy inspect (read-only + shell) or --policy write."
+                hint = (
+                    "Use --policy write (allows edits + shell)."
+                    if suggested_policy == "write"
+                    else "Use --policy inspect (read-only + shell)."
+                )
+                suggested_command_parts: list[str] = [
+                    "python",
+                    "-m",
+                    "usertest.cli",
+                    "run",
+                    "--repo-root",
+                    ".",
+                    "--repo",
+                    json.dumps(request.repo, ensure_ascii=False),
+                    "--agent",
+                    request.agent,
+                    "--policy",
+                    suggested_policy,
+                ]
+                if request.ref:
+                    suggested_command_parts.extend(["--ref", json.dumps(request.ref, ensure_ascii=False)])
+                if effective_spec.persona_id:
+                    suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
+                if effective_spec.mission_id:
+                    suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
+                if request.exec_backend != "local":
+                    suggested_command_parts.extend(["--exec-backend", request.exec_backend])
+                suggested_command = " ".join(suggested_command_parts)
                 _write_json(
                     run_dir / "error.json",
                     {
@@ -1658,6 +1723,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "capability": "shell_commands",
                         "message": message,
                         "hint": hint,
+                        "suggested_policy": suggested_policy,
+                        "suggested_command": suggested_command,
                         "preflight": {
                             "capabilities": {
                                 "shell_commands": {
@@ -1676,6 +1743,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         message,
                         "code=mission_requires_shell",
                         f"hint={hint}",
+                        f"suggested_command={suggested_command}",
                     ],
                 )
 
