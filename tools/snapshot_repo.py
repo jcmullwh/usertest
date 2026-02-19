@@ -43,6 +43,22 @@ class SnapshotPlan:
     excluded_outputs: tuple[str, ...]
 
 
+def _validate_out_path(out_path: Path, *, overwrite: bool) -> None:
+    """
+    Validate the `--out` path before doing any expensive work.
+
+    This is intentionally strict so overwrite-guard failures do not print a full
+    "SNAPSHOT PLAN" block that can be mistaken for success in logs.
+    """
+
+    if not out_path.exists():
+        return
+    if out_path.is_dir():
+        raise SnapshotError(f"Output path is a directory (pass a .zip file path): {out_path}")
+    if not overwrite:
+        raise SnapshotError(f"Output already exists (pass --overwrite to replace): {out_path}")
+
+
 def _find_repo_root(start: Path) -> Path:
     """
     Find the monorepo root by walking upward looking for `tools/scaffold/monorepo.toml`.
@@ -252,10 +268,10 @@ def _write_zip(plan: SnapshotPlan, *, overwrite: bool) -> None:
 
     out_path = plan.out_path
     if out_path.exists():
+        if out_path.is_dir():
+            raise SnapshotError(f"Output path is a directory (pass a .zip file path): {out_path}")
         if not overwrite:
             raise SnapshotError(f"Output already exists (pass --overwrite to replace): {out_path}")
-        if out_path.is_dir():
-            raise SnapshotError(f"Output path is a directory: {out_path}")
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -391,6 +407,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = args.repo_root.resolve() if args.repo_root is not None else _find_repo_root(Path.cwd())
     out_path = args.out.resolve()
+    _validate_out_path(out_path, overwrite=bool(args.overwrite))
 
     plan = _plan_snapshot(
         repo_root=repo_root,
