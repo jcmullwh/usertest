@@ -199,6 +199,7 @@ def test_gemini_cli_includes_sandbox_and_allowed_tools(tmp_path: Path) -> None:
 def test_gemini_cli_includes_include_directories(tmp_path: Path) -> None:
     dummy = _make_dummy_executable(tmp_path)
     include_dir = str(Path("runs") / "usertest")
+    (tmp_path / "runs" / "usertest").mkdir(parents=True, exist_ok=True)
     result = run_gemini(
         workspace_dir=tmp_path,
         prompt="hi",
@@ -212,6 +213,27 @@ def test_gemini_cli_includes_include_directories(tmp_path: Path) -> None:
     assert result.exit_code == 0
     pairs = set(zip(result.argv, result.argv[1:], strict=False))
     assert ("--include-directories", include_dir) in pairs
+
+
+def test_gemini_cli_skips_missing_include_directories(tmp_path: Path) -> None:
+    dummy = _make_dummy_executable(tmp_path)
+    include_dir = str(Path("runs") / "usertest")
+    result = run_gemini(
+        workspace_dir=tmp_path,
+        prompt="hi",
+        raw_events_path=tmp_path / "raw.jsonl",
+        last_message_path=tmp_path / "last.txt",
+        stderr_path=tmp_path / "stderr.txt",
+        binary=dummy,
+        sandbox=True,
+        include_directories=[include_dir],
+    )
+    assert result.exit_code == 0
+    pairs = set(zip(result.argv, result.argv[1:], strict=False))
+    assert ("--include-directories", include_dir) not in pairs
+    assert "skipping missing include directory" in (
+        tmp_path / "stderr.txt"
+    ).read_text(encoding="utf-8", errors="replace")
 
 
 def test_codex_cli_includes_sandbox_and_stdin_prompt(tmp_path: Path) -> None:
