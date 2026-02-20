@@ -157,6 +157,41 @@ def _extract_last_message_text(raw_events_path: Path) -> str:
     return last_segment
 
 
+def _filter_existing_include_directories(
+    *,
+    workspace_dir: Path | str,
+    include_directories: Iterable[str],
+    command_prefix: list[str],
+) -> tuple[list[str], list[str]]:
+    """
+    Gemini CLI can fail fast if `--include-directories` points at paths that don't exist.
+
+    When executing locally (no `command_prefix`), filter out missing directories based on the
+    provided `workspace_dir`. When a command prefix is used (typically `docker exec ...`), the
+    process runs in a different filesystem namespace; in that case we can't reliably validate
+    existence here, so pass through unchanged.
+    """
+
+    include_dirs = [d for d in include_directories if isinstance(d, str) and d.strip()]
+    if command_prefix:
+        return include_dirs, []
+
+    workspace_path = Path(workspace_dir)
+    kept: list[str] = []
+    skipped: list[str] = []
+    for directory in include_dirs:
+        candidate = Path(directory)
+        fs_path = candidate if candidate.is_absolute() else (workspace_path / candidate)
+        try:
+            if fs_path.is_dir():
+                kept.append(directory)
+            else:
+                skipped.append(directory)
+        except OSError:
+            skipped.append(directory)
+    return kept, skipped
+
+
 def run_gemini(
     *,
     workspace_dir: Path | str,
@@ -199,7 +234,11 @@ def run_gemini(
     for tool in tools:
         argv.extend(["--allowed-tools", tool])
 
-    include_dirs = [d for d in include_directories if isinstance(d, str) and d.strip()]
+    include_dirs, skipped_include_dirs = _filter_existing_include_directories(
+        workspace_dir=workspace_dir,
+        include_directories=include_directories,
+        command_prefix=prefix,
+    )
     for directory in include_dirs:
         argv.extend(["--include-directories", directory])
 
@@ -209,6 +248,14 @@ def run_gemini(
         "w", encoding="utf-8", newline="\n"
     ) as stderr_f:
         try:
+            if skipped_include_dirs:
+                for directory in skipped_include_dirs:
+                    stderr_f.write(
+                        "usertest: gemini: skipping missing include directory: "
+                        f"{directory.strip()}\n"
+                    )
+                stderr_f.flush()
+
             env: dict[str, str] | None = None
             if env_overrides is not None:
                 if prefix and looks_like_docker_exec_prefix(prefix):
