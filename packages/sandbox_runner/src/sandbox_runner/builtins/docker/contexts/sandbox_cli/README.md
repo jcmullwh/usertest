@@ -9,7 +9,7 @@ editing text files rather than rewriting the Dockerfile.
 ## What this context includes
 
 - Base image: `python:3.11-slim`
-- APT packages listed in `manifests/apt.txt` (e.g., `git`, `curl`, `ripgrep`, build tools)
+- APT packages listed in `manifests/apt.txt` (e.g., `git`, `gh`, `curl`, `ripgrep`, build tools)
 - Optional `pip` packages from `manifests/pip.txt`
 - Optional global `npm` packages from `manifests/npm-global.txt` (only runs if `npm` exists)
 

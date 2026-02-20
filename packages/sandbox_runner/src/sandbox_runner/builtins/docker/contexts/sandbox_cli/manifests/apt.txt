@@ -10,6 +10,7 @@ ca-certificates
 curl
 file
 git
+gh
 openssh-client
 procps
 ripgrep
