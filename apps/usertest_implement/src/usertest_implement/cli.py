@@ -464,6 +464,13 @@ def _cmd_run(args: argparse.Namespace) -> int:
         },
     )
 
+    workspace_ref = _read_json(run_dir / "workspace_ref.json")
+    workspace_dir: Path | None = None
+    if isinstance(workspace_ref, dict):
+        ws = workspace_ref.get("workspace_dir")
+        if isinstance(ws, str) and ws.strip():
+            workspace_dir = Path(ws)
+
     branch = args.branch or _default_branch_name(selected)
     commit_message = (
         args.commit_message
@@ -507,12 +514,6 @@ def _cmd_run(args: argparse.Namespace) -> int:
             if shutil.which("gh") is None:
                 pr_ref["error"] = "gh not found on PATH"
             else:
-                workspace_ref = _read_json(run_dir / "workspace_ref.json")
-                workspace_dir: Path | None = None
-                if isinstance(workspace_ref, dict):
-                    ws = workspace_ref.get("workspace_dir")
-                    if isinstance(ws, str) and ws.strip():
-                        workspace_dir = Path(ws)
                 if workspace_dir is None:
                     pr_ref["error"] = "Missing workspace_ref.json; cannot locate workspace"
                 else:
