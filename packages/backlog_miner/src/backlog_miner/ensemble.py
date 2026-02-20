@@ -1467,6 +1467,15 @@ def _build_miner_prompt(
                 "location": atom.get("location"),
                 "priority": atom.get("priority"),
                 "expected_impact": atom.get("expected_impact"),
+                "report_kind": atom.get("report_kind"),
+                "report_block": atom.get("report_block"),
+                "report_issue_block": atom.get("report_issue_block"),
+                "report_ux_block": atom.get("report_ux_block"),
+                "issue_severity": atom.get("issue_severity"),
+                "issue_title": atom.get("issue_title"),
+                "evidence_text": atom.get("evidence_text"),
+                "path_anchors": atom.get("path_anchors"),
+                "linked_atom_ids": atom.get("linked_atom_ids"),
             }
             for atom in atoms
         ]

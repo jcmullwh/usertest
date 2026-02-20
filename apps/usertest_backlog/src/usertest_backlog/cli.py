@@ -30,6 +30,7 @@ except ModuleNotFoundError as exc:
         "Fix: `python -m pip install -r requirements-dev.txt`."
     ) from exc
 from backlog_core import (
+    add_atom_links,
     build_backlog_document,
     extract_backlog_atoms,
     write_backlog,
@@ -4077,6 +4078,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         run_id_prefix=aggregate_run_id_prefix,
     )
     atoms.extend(aggregate_atoms)
+    atoms = add_atom_links(atoms)
 
     atom_totals = _summarize_atoms_for_totals(atoms)
     atoms_doc = dict(atoms_doc_raw)

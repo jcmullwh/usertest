@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from backlog_core.backlog import (
+    add_atom_links,
     build_backlog_document,
     build_merge_candidates,
     dedupe_tickets,
@@ -121,6 +122,140 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
     assert totals["source_counts"]["run_failure_event"] == 1
     assert totals["source_counts"].get("agent_stderr_artifact", 0) == 0
     assert totals["source_counts"].get("agent_last_message_artifact", 0) == 0
+
+
+def test_extract_backlog_atoms_extracts_task_run_v1_report_blocks(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "task_run_v1",
+                "status": "success",
+                "goal": "Do the thing",
+                "summary": "Done",
+                "steps": [{"name": "step", "attempts": [{"action": "a"}], "outcome": "ok"}],
+                "outputs": [],
+                "issues": [
+                    {
+                        "severity": "error",
+                        "title": "README quickstart missing",
+                        "details": "No copy/paste install commands.",
+                        "evidence": "README.md",
+                        "suggested_fix": "Add a quickstart section to README.md.",
+                    }
+                ],
+                "user_experience": {
+                    "unclear_points": ["Not sure how to run tests."],
+                },
+                "next_actions": ["Run pytest -q apps/usertest/tests/test_smoke.py"],
+            },
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    atoms = atoms_doc["atoms"]
+    assert atoms
+
+    assert any(
+        atom.get("source") == "confusion_point"
+        and atom.get("report_kind") == "task_run_v1"
+        and atom.get("issue_severity") == "error"
+        and atom.get("text") == "README quickstart missing"
+        for atom in atoms
+    )
+    assert any(
+        atom.get("source") == "suggested_change"
+        and atom.get("report_kind") == "task_run_v1"
+        and atom.get("issue_title") == "README quickstart missing"
+        and "quickstart" in str(atom.get("text", "")).lower()
+        for atom in atoms
+    )
+    assert any(
+        atom.get("source") == "confidence_missing"
+        and atom.get("report_kind") == "task_run_v1"
+        and atom.get("report_ux_block") == "unclear_points"
+        for atom in atoms
+    )
+
+
+def test_extract_backlog_atoms_extracts_boundary_v1_risks_and_recommendations(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "boundary_v1",
+                "status": "success",
+                "constraints": ["No network"],
+                "observations": [],
+                "risks": [
+                    {
+                        "severity": "warn",
+                        "title": "Potentially unsafe default",
+                        "details": "This might leak data.",
+                        "evidence": "README.md",
+                        "suggested_fix": "Document the safe default in README.md.",
+                    }
+                ],
+                "recommendations": ["Add a safety note to README.md."],
+            },
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    atoms = atoms_doc["atoms"]
+    assert any(
+        atom.get("source") == "confusion_point"
+        and atom.get("report_kind") == "boundary_v1"
+        and atom.get("report_issue_block") == "risks"
+        and atom.get("text") == "Potentially unsafe default"
+        for atom in atoms
+    )
+    assert any(
+        atom.get("source") == "suggested_change"
+        and atom.get("report_kind") == "boundary_v1"
+        and atom.get("report_block") == "recommendations"
+        for atom in atoms
+    )
+
+
+def test_add_atom_links_links_suggestions_to_evidence_by_path_anchor() -> None:
+    atoms = [
+        {
+            "atom_id": "run:confusion_point:1",
+            "run_rel": "target/20260101T000000Z/codex/0",
+            "source": "confusion_point",
+            "text": "README.md is missing a quickstart section.",
+        },
+        {
+            "atom_id": "run:suggested_change:1",
+            "run_rel": "target/20260101T000000Z/codex/0",
+            "source": "suggested_change",
+            "text": "Add a quickstart to README.md.",
+        },
+    ]
+
+    linked = add_atom_links(atoms)
+    suggested = next(item for item in linked if item["source"] == "suggested_change")
+    assert "readme.md" in suggested.get("path_anchors", [])
+    assert suggested.get("linked_atom_ids") == ["run:confusion_point:1"]
 
 
 def test_extract_backlog_atoms_omits_missing_agent_artifact_attachments_on_failure(
