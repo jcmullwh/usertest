@@ -38,6 +38,7 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
   agent_last_message.txt
   agent_stderr.txt
   agent_attempts.json
+  run_meta.json
   error.json                          # only when run fails
   report_validation_errors.json       # only when schema validation fails
   patch.diff                          # only when write policy allows edits and edits occurred
@@ -80,7 +81,8 @@ Note: The golden fixtures are minimal/synthetic and may omit some of these files
 - `report.md`: rendered markdown report (written even when `report.json` is absent).
 - `agent_last_message.txt`: last agent textual output.
 - `agent_stderr.txt`: stderr captured from adapter process (may be synthesized on non-zero exit).
-- `agent_attempts.json`: per-attempt metadata for retries/follow-ups.
+- `agent_attempts.json`: per-attempt metadata for retries/follow-ups (including attempt timing fields).
+- `run_meta.json`: run-level timing metadata (wall-clock duration + coarse phase timings).
 
 Files that are conditionally present:
 
@@ -108,6 +110,7 @@ Files that are conditionally present:
   - `agent_last_message.txt`
   - `preflight.json`
   - `agent_attempts.json`
+  - `run_meta.json`
 
 ## Verification commands
 

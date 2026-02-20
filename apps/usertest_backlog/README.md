@@ -11,7 +11,7 @@ Use it when you already have usertest runs and you want to:
 - triage PRs
 - triage issue backlogs into dedupe + theme clusters
 
-If you’re looking to *run* usertests, use `usertest` instead.
+If you're looking to *run* usertests, use `usertest` instead.
 
 ---
 
@@ -40,6 +40,7 @@ Commands are grouped under `reports`:
 
 - `compile`: scan run directories and write a JSONL history file
 - `analyze`: analyze a history file and write an issue analysis summary
+- `window`: summarize the last N runs vs previous N runs (timing + outcomes + regressions)
 - `review-ux`: UX-focused review of reports
 - `export-tickets`: export tickets (format depends on repo config)
 - `backlog`: render backlog documents
@@ -49,6 +50,7 @@ Example:
 ```bash
 usertest-backlog reports compile --repo-root . --runs-dir runs/usertest --out runs/usertest/report_history.jsonl
 usertest-backlog reports analyze --repo-root . --history runs/usertest/report_history.jsonl
+usertest-backlog reports window --repo-root . --runs-dir runs/usertest --last 12 --baseline 12
 ```
 
 Notes:

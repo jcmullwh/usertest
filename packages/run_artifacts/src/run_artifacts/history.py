@@ -86,6 +86,63 @@ def iter_run_dirs(runs_dir: Path, *, target_slug: str | None = None) -> Iterator
                         yield seed_dir
 
 
+def select_recent_run_dirs(
+    runs_dir: Path,
+    *,
+    target_slug: str | None = None,
+    repo_input: str | None = None,
+    limit: int,
+) -> list[Path]:
+    """
+    Select the most recent run directories under `runs_dir`.
+
+    Returns run directories in chronological order (oldest-to-newest within the selection).
+    """
+
+    if limit <= 0:
+        return []
+
+    normalized_repo_input: str | None = None
+    if isinstance(repo_input, str) and repo_input.strip():
+        normalized_repo_input = _normalize_repo_input(repo_input)
+
+    candidates: list[tuple[datetime, str, Path]] = []
+    for run_dir in iter_run_dirs(runs_dir, target_slug=target_slug):
+        try:
+            parts = run_dir.relative_to(runs_dir).parts
+        except Exception:  # noqa: BLE001
+            continue
+        if len(parts) < 4:
+            continue
+        ts_dir = parts[1]
+        if not isinstance(ts_dir, str) or not _TIMESTAMP_DIR_RE.match(ts_dir):
+            continue
+        try:
+            ts_dt = datetime.strptime(ts_dir, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+        if normalized_repo_input is not None:
+            target_ref = _read_json(run_dir / "target_ref.json")
+            candidate = None
+            if isinstance(target_ref, dict):
+                raw = target_ref.get("repo_input")
+                candidate = raw if isinstance(raw, str) else None
+            if candidate is None or _normalize_repo_input(candidate) != normalized_repo_input:
+                continue
+
+        try:
+            run_rel = str(run_dir.relative_to(runs_dir)).replace("\\", "/")
+        except Exception:  # noqa: BLE001
+            run_rel = str(run_dir)
+
+        candidates.append((ts_dt, run_rel, run_dir))
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    selected = candidates[-limit:] if len(candidates) > limit else candidates
+    return [item[2] for item in selected]
+
+
 def _read_json(path: Path) -> Any | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -278,6 +335,8 @@ def iter_report_history(
         preflight = _read_json(run_dir / "preflight.json")
         error = _read_json(run_dir / "error.json")
         report_validation_errors = _read_json(run_dir / "report_validation_errors.json")
+        run_meta = _read_json(run_dir / "run_meta.json")
+        agent_attempts = _read_json(run_dir / "agent_attempts.json")
 
         agent_exit_code: int | None = None
         if isinstance(error, dict):
@@ -366,6 +425,8 @@ def iter_report_history(
             "preflight": preflight,
             "error": error,
             "report_validation_errors": report_validation_errors,
+            "run_meta": run_meta,
+            "agent_attempts": agent_attempts,
             "embedded": embedded,
             "embedded_capture_manifest": embedded_capture_manifest,
         }
@@ -405,3 +466,78 @@ def write_report_history_jsonl(
 
     counts["total"] = total
     return counts
+
+
+def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
+    """
+    Load a single run record from a run directory.
+
+    This is a low-overhead alternative to `iter_report_history` when the caller already selected
+    which run directories to inspect (for example, a "last N runs" view).
+    """
+
+    if not (run_dir / "target_ref.json").exists():
+        return None
+
+    run_rel = None
+    target = None
+    ts_dir = None
+    agent = None
+    seed = None
+
+    try:
+        run_rel = str(run_dir.relative_to(runs_dir)).replace("\\", "/")
+        parts = run_dir.relative_to(runs_dir).parts
+        if len(parts) >= 4:
+            target, ts_dir, agent, seed = parts[0], parts[1], parts[2], parts[3]
+    except Exception:  # noqa: BLE001
+        run_rel = None
+
+    target_ref = _read_json(run_dir / "target_ref.json")
+    effective_run_spec = _read_json(run_dir / "effective_run_spec.json")
+    report = _read_json(run_dir / "report.json")
+    metrics = _read_json(run_dir / "metrics.json")
+    preflight = _read_json(run_dir / "preflight.json")
+    error = _read_json(run_dir / "error.json")
+    report_validation_errors = _read_json(run_dir / "report_validation_errors.json")
+    run_meta = _read_json(run_dir / "run_meta.json")
+    agent_attempts = _read_json(run_dir / "agent_attempts.json")
+
+    agent_exit_code: int | None = None
+    if isinstance(error, dict):
+        exit_code_raw = error.get("exit_code")
+        agent_exit_code = exit_code_raw if isinstance(exit_code_raw, int) else None
+
+    if isinstance(error, dict):
+        status = "error"
+    elif report_validation_errors is not None:
+        status = "report_validation_error"
+    elif report is None:
+        status = "missing_report"
+    else:
+        status = "ok"
+
+    ts_utc = _parse_timestamp_dirname(ts_dir) if isinstance(ts_dir, str) else None
+
+    return {
+        "run_dir": str(run_dir),
+        "run_rel": run_rel,
+        "target_slug": target,
+        "timestamp_dir": ts_dir,
+        "timestamp_utc": ts_utc,
+        "agent": agent,
+        "seed": int(seed) if isinstance(seed, str) and seed.isdigit() else seed,
+        "status": status,
+        "agent_exit_code": agent_exit_code,
+        "target_ref": target_ref,
+        "effective_run_spec": effective_run_spec,
+        "report": report,
+        "metrics": metrics,
+        "preflight": preflight,
+        "error": error,
+        "report_validation_errors": report_validation_errors,
+        "run_meta": run_meta,
+        "agent_attempts": agent_attempts,
+        "embedded": {},
+        "embedded_capture_manifest": {},
+    }

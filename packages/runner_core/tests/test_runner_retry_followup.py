@@ -251,9 +251,23 @@ def test_run_once_retries_provider_capacity_then_succeeds(
 
     assert result.exit_code == 0
     assert result.report_validation_errors == []
+    assert (result.run_dir / "run_meta.json").exists()
+    run_meta = json.loads((result.run_dir / "run_meta.json").read_text(encoding="utf-8"))
+    assert isinstance(run_meta.get("run_started_utc"), str)
+    assert isinstance(run_meta.get("run_finished_utc"), str)
+    assert isinstance(run_meta.get("run_wall_seconds"), (int, float))
+    assert run_meta["run_wall_seconds"] >= 0
+
     attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
     assert len(attempts["attempts"]) == 2
     assert attempts["attempts"][0]["failure_subtype"] == "provider_capacity"
+    for attempt in attempts["attempts"]:
+        assert isinstance(attempt.get("attempt_started_utc"), str)
+        assert isinstance(attempt.get("attempt_finished_utc"), str)
+        assert isinstance(attempt.get("attempt_wall_seconds"), (int, float))
+        assert isinstance(attempt.get("agent_exec_wall_seconds"), (int, float))
+        assert attempt["attempt_wall_seconds"] >= 0
+        assert attempt["agent_exec_wall_seconds"] >= 0
 
 
 def test_run_once_followup_prompt_recovers_invalid_json(

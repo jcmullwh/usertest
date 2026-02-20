@@ -10,6 +10,7 @@ import subprocess
 import time
 import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from json import JSONDecoder
 from pathlib import Path
 from typing import Any
@@ -1306,6 +1307,10 @@ def _build_followup_prompt(
     )
 
 
+def _utc_now_z() -> str:
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -1504,6 +1509,16 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
     run_dir = config.runs_dir / target_slug / timestamp / request.agent / str(request.seed)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    run_start_monotonic = time.monotonic()
+    run_meta: dict[str, Any] = {
+        "schema_version": 1,
+        "run_started_utc": _utc_now_z(),
+        "phases": {},
+    }
+    agent_phase_start_monotonic: float | None = None
+    agent_phase_end_monotonic: float | None = None
+    postprocess_phase_start_monotonic: float | None = None
+
     workspace_id = f"{target_slug}_{timestamp}_{request.agent}_{request.seed}"
     try:
         preferred_workspace_dir = config.runs_dir / "_workspaces" / workspace_id
@@ -1522,6 +1537,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             "policy": request.policy,
             "seed": request.seed,
             "obfuscate_agent_docs": bool(request.obfuscate_agent_docs),
+            "requested_persona_id": request.persona_id,
+            "requested_mission_id": request.mission_id,
+            **({"model": request.model} if request.model is not None else {}),
         }
         _write_json(run_dir / "target_ref.json", target_ref)
 
@@ -2581,6 +2599,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
                 _maybe_codex_login_in_sandbox(command_prefix=command_prefix, run_dir=run_dir)
 
+            agent_phase_start_monotonic = time.monotonic()
+            phases = run_meta.get("phases")
+            if isinstance(phases, dict):
+                phases["setup_seconds"] = max(
+                    0.0, agent_phase_start_monotonic - run_start_monotonic
+                )
+
             def _attempt_paths(attempt: int) -> tuple[Path, Path, Path]:
                 suffix = f"attempt{attempt}"
                 return (
@@ -2693,12 +2718,16 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     stderr_attempt_path,
                 ) = _attempt_paths(attempt_number)
 
+                attempt_started_utc = _utc_now_z()
+                attempt_start_monotonic = time.monotonic()
+                agent_exec_start_monotonic = time.monotonic()
                 agent_exit_code, agent_argv = _run_agent_attempt(
                     prompt_text=current_prompt,
                     raw_events_attempt_path=raw_events_attempt_path,
                     last_message_attempt_path=last_message_attempt_path,
                     stderr_attempt_path=stderr_attempt_path,
                 )
+                agent_exec_wall_seconds = time.monotonic() - agent_exec_start_monotonic
 
                 raw_attempt_stderr_text = ""
                 if stderr_attempt_path.exists():
@@ -2767,8 +2796,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     ]
                 )
                 failure_subtype = _classify_failure_subtype(failure_text)
+                attempt_finished_utc = _utc_now_z()
+                attempt_wall_seconds = time.monotonic() - attempt_start_monotonic
                 attempt_meta: dict[str, Any] = {
                     "attempt": attempt_number,
+                    "attempt_started_utc": attempt_started_utc,
+                    "attempt_finished_utc": attempt_finished_utc,
+                    "attempt_wall_seconds": attempt_wall_seconds,
+                    "agent_exec_wall_seconds": agent_exec_wall_seconds,
                     "exit_code": agent_exit_code,
                     "argv": agent_argv,
                     "failure_subtype": failure_subtype,
@@ -2891,6 +2926,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     artifacts_dir=run_dir / "sandbox",
                 )
                 sandbox.close()
+
+        agent_phase_end_monotonic = time.monotonic()
+        if agent_phase_start_monotonic is not None:
+            phases = run_meta.get("phases")
+            if isinstance(phases, dict):
+                phases["agent_seconds"] = max(
+                    0.0, agent_phase_end_monotonic - agent_phase_start_monotonic
+                )
+        postprocess_phase_start_monotonic = agent_phase_end_monotonic
 
         run_errors: list[str] = []
         if agent_exit_code != 0:
@@ -3195,9 +3239,53 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         )
         return RunResult(run_dir=run_dir, exit_code=1, report_validation_errors=user_errors)
     finally:
+        cleanup_start_monotonic = time.monotonic()
+        try:
+            phases = run_meta.get("phases")
+            if not isinstance(phases, dict):
+                phases = {}
+                run_meta["phases"] = phases
+
+            if "setup_seconds" not in phases:
+                if agent_phase_start_monotonic is not None:
+                    phases["setup_seconds"] = max(
+                        0.0, agent_phase_start_monotonic - run_start_monotonic
+                    )
+                else:
+                    phases["setup_seconds"] = max(
+                        0.0, cleanup_start_monotonic - run_start_monotonic
+                    )
+
+            if agent_phase_start_monotonic is not None and "agent_seconds" not in phases:
+                end = agent_phase_end_monotonic or cleanup_start_monotonic
+                phases["agent_seconds"] = max(0.0, end - agent_phase_start_monotonic)
+
+            if (
+                postprocess_phase_start_monotonic is not None
+                and "postprocess_seconds" not in phases
+            ):
+                phases["postprocess_seconds"] = max(
+                    0.0, cleanup_start_monotonic - postprocess_phase_start_monotonic
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        cleanup_seconds: float | None = None
         if (
             acquired is not None
             and not (request.keep_workspace or request.exec_keep_container)
             and acquired.workspace_dir.exists()
         ):
+            cleanup_wall_start = time.monotonic()
             shutil.rmtree(acquired.workspace_dir, ignore_errors=True)
+            cleanup_seconds = time.monotonic() - cleanup_wall_start
+
+        try:
+            phases = run_meta.get("phases")
+            if isinstance(phases, dict) and cleanup_seconds is not None:
+                phases["cleanup_seconds"] = max(0.0, cleanup_seconds)
+            run_meta["run_finished_utc"] = _utc_now_z()
+            run_meta["run_wall_seconds"] = max(0.0, time.monotonic() - run_start_monotonic)
+            _write_json(run_dir / "run_meta.json", run_meta)
+        except Exception:  # noqa: BLE001
+            pass

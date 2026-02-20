@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from run_artifacts.history import iter_report_history, write_report_history_jsonl
+from run_artifacts.history import iter_report_history, select_recent_run_dirs, write_report_history_jsonl
 
 
 def _write_json(path: Path, obj: object) -> None:
@@ -155,3 +155,33 @@ def test_iter_report_history_accepts_jsonl_source(tmp_path: Path) -> None:
     assert len(items) == 1
     assert items[0]["embedded"] == {}
     assert items[0]["embedded_capture_manifest"] == {}
+
+
+def test_iter_report_history_includes_run_meta_and_agent_attempts(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "tiktok_vids" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "target_ref.json", {"repo_input": "C:/repo/tiktok_vids"})
+    _write_json(run_dir / "effective_run_spec.json", {})
+    _write_json(run_dir / "report.json", {"schema_version": 1})
+    _write_json(run_dir / "run_meta.json", {"schema_version": 1, "run_wall_seconds": 12.25})
+    _write_json(run_dir / "agent_attempts.json", {"attempts": [{"attempt": 1}]})
+
+    items = list(iter_report_history(runs_dir, target_slug="tiktok_vids", embed="none"))
+    assert len(items) == 1
+    assert items[0]["run_meta"]["run_wall_seconds"] == 12.25
+    assert items[0]["agent_attempts"]["attempts"][0]["attempt"] == 1
+
+
+def test_select_recent_run_dirs_orders_and_limits(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+
+    for ts_dir in ("20260101T000000Z", "20260102T000000Z", "20260103T000000Z"):
+        run_dir = runs_dir / "tiktok_vids" / ts_dir / "codex" / "0"
+        run_dir.mkdir(parents=True)
+        _write_json(run_dir / "target_ref.json", {"repo_input": "C:/repo/tiktok_vids"})
+
+    selected = select_recent_run_dirs(runs_dir, target_slug="tiktok_vids", limit=2)
+    assert len(selected) == 2
+    assert selected[0].parts[-4:] == ("tiktok_vids", "20260102T000000Z", "codex", "0")
+    assert selected[1].parts[-4:] == ("tiktok_vids", "20260103T000000Z", "codex", "0")

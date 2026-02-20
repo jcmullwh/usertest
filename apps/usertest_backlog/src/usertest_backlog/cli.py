@@ -73,9 +73,16 @@ from backlog_repo import (
 from backlog_repo.export import ticket_export_fingerprint
 from reporter import (
     analyze_report_history,
+    build_window_summary,
+    write_window_summary,
     write_issue_analysis,
 )
-from run_artifacts.history import iter_report_history, write_report_history_jsonl
+from run_artifacts.history import (
+    iter_report_history,
+    load_run_record,
+    select_recent_run_dirs,
+    write_report_history_jsonl,
+)
 from runner_core import RunnerConfig, RunRequest, find_repo_root
 from runner_core.catalog import (
     CatalogError,
@@ -599,6 +606,61 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     reports_analyze_p.add_argument(
+        "--repo-root",
+        type=Path,
+        help="Path to monorepo root (auto-detected by default).",
+    )
+
+    reports_window_p = reports_sub.add_parser(
+        "window",
+        help="Summarize the last N runs vs the previous N runs (timing + outcomes + regressions).",
+    )
+    reports_window_p.add_argument(
+        "--target",
+        help="Optional target slug under runs/usertest (e.g. tiktok_vids).",
+    )
+    reports_window_p.add_argument(
+        "--repo-input",
+        help="Optional match for target_ref.repo_input (path or git URL).",
+    )
+    reports_window_p.add_argument(
+        "--runs-dir",
+        type=Path,
+        help="Runs directory (defaults to <repo_root>/runs/usertest).",
+    )
+    reports_window_p.add_argument(
+        "--last",
+        type=int,
+        default=12,
+        help="Number of most recent runs to summarize.",
+    )
+    reports_window_p.add_argument(
+        "--baseline",
+        type=int,
+        help="Number of prior runs to use as a baseline window (defaults to --last).",
+    )
+    reports_window_p.add_argument(
+        "--out-json",
+        type=Path,
+        help=(
+            "Output summary JSON path (defaults under runs/usertest/<target>/_compiled/ "
+            "or runs/usertest/_compiled/ when --target is omitted)."
+        ),
+    )
+    reports_window_p.add_argument(
+        "--out-md",
+        type=Path,
+        help=("Output markdown summary path (defaults next to --out-json with .md extension)."),
+    )
+    reports_window_p.add_argument(
+        "--actions",
+        type=Path,
+        help=(
+            "Optional JSON action registry for addressed comments (date/plan metadata). "
+            "Defaults to configs/issue_actions.json when present."
+        ),
+    )
+    reports_window_p.add_argument(
         "--repo-root",
         type=Path,
         help="Path to monorepo root (auto-detected by default).",
@@ -2471,6 +2533,144 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     print(str(out_json))
     print(str(out_md))
     print(json.dumps(summary.get("totals", {}), indent=2, ensure_ascii=False))
+    return 0
+
+
+def _cmd_reports_window(args: argparse.Namespace) -> int:
+    """Execute the `reports window` command handler.
+
+    Parameters
+    ----------
+    args:
+        Parsed command-line arguments namespace.
+
+    Returns
+    -------
+    int
+        Process exit code.
+    """
+    repo_root = _resolve_repo_root(args.repo_root)
+    cfg = _load_runner_config(repo_root)
+
+    runs_dir = args.runs_dir.resolve() if args.runs_dir is not None else cfg.runs_dir
+
+    target_slug: str | None = None
+    if isinstance(args.target, str) and args.target.strip():
+        target_slug = str(args.target).strip()
+    repo_input = (
+        str(args.repo_input).strip()
+        if isinstance(args.repo_input, str) and args.repo_input.strip()
+        else None
+    )
+
+    window_size = int(args.last)
+    if window_size <= 0:
+        print("--last must be > 0", file=sys.stderr)
+        return 2
+
+    baseline_size = window_size if args.baseline is None else int(args.baseline)
+    if baseline_size < 0:
+        print("--baseline must be >= 0", file=sys.stderr)
+        return 2
+
+    default_name = slugify(repo_input) if repo_input is not None else (target_slug or "all")
+
+    if args.out_json is not None:
+        out_json = _resolve_optional_path(repo_root, args.out_json) or args.out_json.resolve()
+    else:
+        if target_slug is not None:
+            out_json = runs_dir / target_slug / "_compiled" / f"{default_name}.window_summary.json"
+        else:
+            out_json = runs_dir / "_compiled" / f"{default_name}.window_summary.json"
+
+    if args.out_md is not None:
+        out_md = _resolve_optional_path(repo_root, args.out_md) or args.out_md.resolve()
+    else:
+        out_md = out_json.with_suffix(".md")
+
+    actions_path: Path | None
+    if args.actions is not None:
+        actions_path = _resolve_optional_path(repo_root, args.actions) or args.actions.resolve()
+    else:
+        default_actions = repo_root / "configs" / "issue_actions.json"
+        actions_path = default_actions if default_actions.exists() else None
+
+    limit = window_size + baseline_size
+    run_dirs = select_recent_run_dirs(
+        runs_dir,
+        target_slug=target_slug,
+        repo_input=repo_input,
+        limit=limit,
+    )
+    if not run_dirs:
+        print(
+            f"No runs found under {runs_dir} "
+            f"(target={target_slug or 'all'}, repo_input={repo_input or 'any'}).",
+            file=sys.stderr,
+        )
+        return 1
+
+    records: list[dict[str, Any]] = []
+    for run_dir in run_dirs:
+        record = load_run_record(run_dir, runs_dir=runs_dir)
+        if record is None:
+            continue
+        records.append(record)
+
+    if not records:
+        print("No readable run records found.", file=sys.stderr)
+        return 1
+
+    if baseline_size <= 0 or window_size >= len(records):
+        baseline_records: list[dict[str, Any]] = []
+        current_records = records
+    else:
+        current_records = records[-window_size:]
+        baseline_records = records[: len(records) - window_size]
+        if len(baseline_records) > baseline_size:
+            baseline_records = baseline_records[-baseline_size:]
+
+    summary = build_window_summary(
+        current_records=current_records,
+        baseline_records=baseline_records,
+        repo_root=repo_root,
+        issue_actions_path=actions_path,
+        window_size=window_size,
+        baseline_size=baseline_size,
+    )
+
+    scope_bits = []
+    if target_slug is not None:
+        scope_bits.append(f"target={target_slug}")
+    if repo_input is not None:
+        scope_bits.append(f"repo_input={repo_input}")
+    title_suffix = f" ({', '.join(scope_bits)})" if scope_bits else ""
+    title = f"Usertest Window Summary (last={window_size}, baseline={baseline_size}){title_suffix}"
+    write_window_summary(
+        summary,
+        out_json_path=out_json,
+        out_md_path=out_md,
+        title=title,
+    )
+
+    print(str(out_json))
+    print(str(out_md))
+    current_summary: dict[str, Any] = {}
+    summary_obj = summary.get("summary")
+    if isinstance(summary_obj, dict):
+        cur = summary_obj.get("current")
+        if isinstance(cur, dict):
+            for key in (
+                "runs",
+                "ok_rate",
+                "timing_coverage_runs",
+                "median_run_wall_seconds",
+                "median_attempts_per_run",
+            ):
+                value = cur.get(key)
+                if value is not None:
+                    current_summary[key] = value
+    print(json.dumps(current_summary, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -4487,6 +4687,8 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_cmd_reports_compile(args))
         if args.reports_cmd == "analyze":
             raise SystemExit(_cmd_reports_analyze(args))
+        if args.reports_cmd == "window":
+            raise SystemExit(_cmd_reports_window(args))
         if args.reports_cmd == "intent-snapshot":
             raise SystemExit(_cmd_reports_intent_snapshot(args))
         if args.reports_cmd == "review-ux":
