@@ -173,6 +173,25 @@ def test_iter_report_history_includes_run_meta_and_agent_attempts(tmp_path: Path
     assert items[0]["agent_attempts"]["attempts"][0]["attempt"] == 1
 
 
+def test_iter_report_history_includes_ticket_ref_and_timing(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "tiktok_vids" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "target_ref.json", {"repo_input": "C:/repo/tiktok_vids"})
+    _write_json(run_dir / "effective_run_spec.json", {})
+    _write_json(run_dir / "report.json", {"schema_version": 1})
+    _write_json(
+        run_dir / "ticket_ref.json",
+        {"schema_version": 1, "fingerprint": "ab12cd34", "ticket_id": "BLG-003"},
+    )
+    _write_json(run_dir / "timing.json", {"schema_version": 1, "duration_seconds": 1.25})
+
+    items = list(iter_report_history(runs_dir, target_slug="tiktok_vids", embed="none"))
+    assert len(items) == 1
+    assert items[0]["ticket_ref"]["fingerprint"] == "ab12cd34"
+    assert items[0]["timing"]["duration_seconds"] == 1.25
+
+
 def test_select_recent_run_dirs_orders_and_limits(tmp_path: Path) -> None:
     runs_dir = tmp_path / "runs"
 

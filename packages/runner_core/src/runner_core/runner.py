@@ -1528,6 +1528,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             ref=request.ref,
         )
 
+        _write_json(
+            run_dir / "workspace_ref.json",
+            {
+                "schema_version": 1,
+                "workspace_id": workspace_id,
+                "workspace_dir": str(acquired.workspace_dir),
+                "keep_workspace_requested": bool(request.keep_workspace),
+                "will_cleanup_workspace": not (request.keep_workspace or request.exec_keep_container),
+            },
+        )
+
         target_ref: dict[str, Any] = {
             "repo_input": acquired.repo_input,
             "ref": acquired.ref,

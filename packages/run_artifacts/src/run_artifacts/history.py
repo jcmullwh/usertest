@@ -337,6 +337,8 @@ def iter_report_history(
         report_validation_errors = _read_json(run_dir / "report_validation_errors.json")
         run_meta = _read_json(run_dir / "run_meta.json")
         agent_attempts = _read_json(run_dir / "agent_attempts.json")
+        ticket_ref = _read_json(run_dir / "ticket_ref.json")
+        timing = _read_json(run_dir / "timing.json")
 
         agent_exit_code: int | None = None
         if isinstance(error, dict):
@@ -427,6 +429,8 @@ def iter_report_history(
             "report_validation_errors": report_validation_errors,
             "run_meta": run_meta,
             "agent_attempts": agent_attempts,
+            "ticket_ref": ticket_ref if isinstance(ticket_ref, dict) else None,
+            "timing": timing if isinstance(timing, dict) else None,
             "embedded": embedded,
             "embedded_capture_manifest": embedded_capture_manifest,
         }
