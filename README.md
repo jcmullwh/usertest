@@ -82,6 +82,7 @@ The monorepo is managed by `tools/scaffold/scaffold.py` (manifest-driven task ru
 
 - Python 3.11+ (CI currently runs 3.11; newer versions are best-effort)
 - `git`
+- Optional: GitHub CLI (`gh`) (needed for `usertest-implement run --pr`)
 - At least one of: agent CLIs on PATH + credentials
   - `codex` CLI (logged in via `codex login` / subscription)
   - `claude` CLI (Claude Code)
