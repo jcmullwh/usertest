@@ -18,10 +18,6 @@ class TicketIndexEntry:
     status: str | None
 
 
-PLAN_TICKET_FILENAME_RE = re.compile(
-    r"^(?P<date>[0-9]{8})_(?P<ticket_id>BLG-[0-9]{3})_(?P<fingerprint>[0-9a-f]{16})_.+\\.md$"
-)
-
 
 def build_ticket_index(*, owner_root: Path) -> dict[str, TicketIndexEntry]:
     raw = scan_plan_ticket_index(owner_root=owner_root)

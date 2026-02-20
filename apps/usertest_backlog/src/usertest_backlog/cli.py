@@ -102,10 +102,7 @@ from usertest_backlog.triage_backlog import (
     render_triage_markdown as render_backlog_triage_markdown,
 )
 
-_LEGACY_RUN_TIMESTAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 _EXPORT_SEVERITY_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "blocker": 3}
-_EXPORT_PATH_LIKE_RE = re.compile(r"(?:[A-Za-z]:[\\/])?[A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+){1,}")
-_EXPORT_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 _MONOREPO_OWNER_COMPONENTS: set[str] = {"runner_core", "agent_adapters", "sandbox_runner"}
 _ATOM_STATUS_ORDER: dict[str, int] = {"new": 0, "ticketed": 1, "queued": 2, "actioned": 3}
 _WINDOWS_ABS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
@@ -335,172 +332,6 @@ def _probe_command_responsive(*, command: str, timeout_seconds: float) -> str | 
     except OSError as e:
         return f"command {command!r} probe failed: {e}"
     return None
-
-
-def _prevalidate_batch_requests(
-    *,
-    cfg: RunnerConfig,
-    repo_root: Path,
-    targets_path: Path,
-    requests: list[tuple[int, RunRequest]],
-    probe_timeout_seconds: float,
-    skip_command_responsiveness_probes: bool,
-) -> list[str]:
-    """Handle prevalidate batch requests processing.
-
-    Parameters
-    ----------
-    cfg:
-        Input parameter.
-    repo_root:
-        Repository root path.
-    targets_path:
-        Filesystem path input.
-    requests:
-        Input parameter.
-    probe_timeout_seconds:
-        Input parameter.
-    skip_command_responsiveness_probes:
-        Input parameter.
-
-    Returns
-    -------
-    list[str]
-        Normalized list result.
-    """
-    errors: list[str] = []
-    local_repos: list[Path] = []
-
-    for idx, req in requests:
-        if req.agent not in cfg.agents:
-            errors.append(
-                f"targets[{idx}]: unknown agent {req.agent!r} (defined in configs/agents.yaml)."
-            )
-        if req.policy not in cfg.policies:
-            errors.append(
-                f"targets[{idx}]: unknown policy {req.policy!r} (defined in configs/policies.yaml)."
-            )
-
-        local_repo_root = _resolve_local_repo_root(repo_root, req.repo)
-        if local_repo_root is None:
-            if _looks_like_local_repo_input(req.repo):
-                errors.append(
-                    f"targets[{idx}]: repo looks like a local path but does not exist: "
-                    f"{req.repo!r} (from {targets_path})"
-                )
-            continue
-        if not local_repo_root.is_dir():
-            errors.append(
-                f"targets[{idx}]: repo must be a directory (got file): {local_repo_root} "
-                f"(from {targets_path})"
-            )
-            continue
-
-        local_repos.append(local_repo_root)
-
-        try:
-            catalog_config = load_catalog_config(repo_root, local_repo_root)
-            resolved_inputs = resolve_effective_run_inputs(
-                runner_repo_root=repo_root,
-                target_repo_root=local_repo_root,
-                catalog_config=catalog_config,
-                persona_id=req.persona_id,
-                mission_id=req.mission_id,
-            )
-            effective_spec = resolved_inputs.effective
-            requires_shell = bool(getattr(resolved_inputs.mission, "requires_shell", False))
-            requires_edits = bool(getattr(resolved_inputs.mission, "requires_edits", False))
-
-            policy_cfg = cfg.policies.get(req.policy, {})
-            policy_cfg = policy_cfg if isinstance(policy_cfg, dict) else {}
-            codex_policy = policy_cfg.get("codex", {})
-            codex_policy = codex_policy if isinstance(codex_policy, dict) else {}
-            claude_policy = policy_cfg.get("claude", {})
-            claude_policy = claude_policy if isinstance(claude_policy, dict) else {}
-            gemini_policy = policy_cfg.get("gemini", {})
-            gemini_policy = gemini_policy if isinstance(gemini_policy, dict) else {}
-
-            allow_edits = False
-            if req.agent == "codex":
-                allow_edits = bool(codex_policy.get("allow_edits", False))
-            elif req.agent == "claude":
-                allow_edits = bool(claude_policy.get("allow_edits", False))
-            elif req.agent == "gemini":
-                allow_edits = bool(gemini_policy.get("allow_edits", False))
-
-            shell_status = "unknown"
-            if req.agent == "claude":
-                allowed_tools = claude_policy.get("allowed_tools")
-                allowed_tools = allowed_tools if isinstance(allowed_tools, list) else []
-                shell_status = "allowed" if "Bash" in allowed_tools else "blocked"
-            elif req.agent == "gemini":
-                allowed_tools = gemini_policy.get("allowed_tools")
-                allowed_tools = allowed_tools if isinstance(allowed_tools, list) else []
-                shell_enabled = "run_shell_command" in allowed_tools
-                has_outer_sandbox = str(req.exec_backend) == "docker"
-                gemini_sandbox_enabled = (
-                    bool(gemini_policy.get("sandbox", True))
-                    if isinstance(gemini_policy.get("sandbox", True), bool)
-                    else True
-                )
-                if has_outer_sandbox:
-                    gemini_sandbox_enabled = False
-                if os.name == "nt":
-                    gemini_sandbox_enabled = False
-                shell_available = has_outer_sandbox or gemini_sandbox_enabled
-                if shell_enabled and not shell_available:
-                    shell_status = "blocked"
-                else:
-                    shell_status = "allowed" if shell_enabled else "blocked"
-
-            if requires_shell and shell_status == "blocked":
-                errors.append(
-                    f"targets[{idx}]: mission {effective_spec.mission_id!r} requires shell "
-                    f"commands, but policy {req.policy!r} for agent {req.agent!r} blocks shell "
-                    "commands (use policy=inspect or policy=write)."
-                )
-            if requires_edits and not allow_edits:
-                errors.append(
-                    f"targets[{idx}]: mission {effective_spec.mission_id!r} requires edits, but "
-                    f"policy {req.policy!r} for agent {req.agent!r} has allow_edits=false "
-                    "(use policy=write)."
-                )
-            if (
-                (not requires_shell)
-                and req.policy in {"inspect", "write"}
-                and shell_status == "blocked"
-            ):
-                errors.append(
-                    f"targets[{idx}]: policy {req.policy!r} for agent {req.agent!r} blocks shell "
-                    "commands for this backend (use --exec-backend docker for gemini on Windows, "
-                    "or fix configs/policies.yaml)."
-                )
-        except RunSpecError as e:
-            parts = [str(e)]
-            if isinstance(e.code, str) and e.code.strip():
-                parts.append(f"code={e.code.strip()}")
-            if isinstance(e.details, dict) and e.details:
-                parts.append(f"details={json.dumps(e.details, ensure_ascii=False)}")
-            if isinstance(e.hint, str) and e.hint.strip():
-                parts.append(f"hint={e.hint.strip()}")
-            errors.append(f"targets[{idx}]: {' | '.join(parts)}")
-        except (CatalogError, OSError, RuntimeError, ValueError) as e:
-            errors.append(f"targets[{idx}]: failed to resolve persona/mission: {e}")
-
-    if skip_command_responsiveness_probes:
-        return errors
-
-    commands_to_probe: set[str] = set()
-    for repo_dir in local_repos:
-        commands_to_probe.update(_infer_responsiveness_probe_commands(repo_dir))
-    for cmd in sorted(commands_to_probe):
-        probe_error = _probe_command_responsive(
-            command=cmd, timeout_seconds=max(0.1, probe_timeout_seconds)
-        )
-        if probe_error:
-            errors.append(f"env: {probe_error}")
-
-    return errors
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1861,75 +1692,6 @@ def _parse_first_json_object(raw_text: str) -> dict[str, Any] | None:
     return None
 
 
-def _ticket_export_anchors(ticket: dict[str, Any]) -> set[str]:
-    """Return ticket export anchors data.
-
-    Parameters
-    ----------
-    ticket:
-        Ticket payload mapping.
-
-    Returns
-    -------
-    set[str]
-        Computed return value.
-    """
-    chunks: list[str] = []
-    for key in ("title", "problem", "user_impact", "proposed_fix"):
-        value = _coerce_string(ticket.get(key))
-        if value:
-            chunks.append(value)
-    for item in _coerce_string_list(ticket.get("investigation_steps")):
-        chunks.append(item)
-
-    anchors: set[str] = set()
-    for chunk in chunks:
-        for match in _EXPORT_PATH_LIKE_RE.findall(chunk):
-            anchors.add(match.lower().replace("\\", "/"))
-    return anchors
-
-
-def _ticket_export_fingerprint(ticket: dict[str, Any]) -> str:
-    """
-    Compute a stable fingerprint for action-ledger tracking.
-
-    The fingerprint is intentionally derived from normalized title tokens and "evidence anchors"
-    (path-like strings found in ticket text), plus stable structured labels such as
-    `change_surface.kinds` and `suggested_owner` / `component` when present.
-
-    Parameters
-    ----------
-    ticket:
-        Backlog ticket object.
-
-    Returns
-    -------
-    str
-        A short hex fingerprint suitable for use as a key in `configs/backlog_actions.yaml`.
-    """
-
-    title = _coerce_string(ticket.get("title")) or ""
-    title_tokens = sorted(set(_EXPORT_TOKEN_RE.findall(title.lower())))
-    anchors = sorted(_ticket_export_anchors(ticket))
-
-    change_surface_raw = ticket.get("change_surface")
-    change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
-    kinds = sorted(set(_coerce_string_list(change_surface.get("kinds"))))
-
-    owner = (
-        _coerce_string(ticket.get("suggested_owner"))
-        or _coerce_string(ticket.get("component"))
-        or "unknown"
-    )
-
-    payload = {
-        "title_tokens": title_tokens[:24],
-        "anchors": anchors[:24],
-        "kinds": kinds[:24],
-        "owner": owner,
-    }
-    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    return sha256(blob).hexdigest()[:16]
 def _summarize_atoms_for_totals(atoms: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize atoms for totals into aggregate counters.
 
@@ -2314,87 +2076,6 @@ def _render_intent_snapshot_markdown(snapshot: dict[str, Any]) -> str:
         lines.append("")
 
     return "\n".join(lines) + "\n"
-
-
-def _looks_like_run_timestamp_dirname(name: str) -> bool:
-    """
-    Check whether `name` looks like a UTC run timestamp directory.
-
-    Format: YYYYMMDDTHHMMSSZ (e.g., 20260126T183234Z)
-    """
-
-    return bool(_LEGACY_RUN_TIMESTAMP_RE.match(name))
-
-
-def _looks_like_legacy_target_runs_dir(path: Path) -> bool:
-    """
-    Heuristic for detecting a legacy `runs/<target>/...` directory.
-
-    The legacy layout uses `runs/<target>/<timestamp>/<agent>/<seed>/...` where `timestamp`
-    is the compact UTC form YYYYMMDDTHHMMSSZ.
-    """
-
-    if not path.exists() or not path.is_dir():
-        return False
-
-    try:
-        for child in path.iterdir():
-            if child.is_dir() and _looks_like_run_timestamp_dirname(child.name):
-                return True
-    except OSError:
-        return False
-    return False
-
-
-def _warn_legacy_runs_layout(repo_root: Path) -> None:
-    """
-    Warn (to stderr) when legacy run output directories are present.
-
-    This does not move anything automatically. It only nudges the user to run the explicit
-    migration script.
-    """
-
-    legacy_app_local = repo_root / "usertest" / "runs"
-    legacy_root_runs = repo_root / "runs"
-
-    has_legacy = False
-    legacy_notes: list[str] = []
-
-    if legacy_app_local.exists() and legacy_app_local.is_dir():
-        try:
-            if any(True for _ in legacy_app_local.iterdir()):
-                has_legacy = True
-                legacy_notes.append(f"- legacy dir present: {legacy_app_local}")
-        except OSError:
-            has_legacy = True
-            legacy_notes.append(f"- legacy dir present (unreadable): {legacy_app_local}")
-
-    if legacy_root_runs.exists() and legacy_root_runs.is_dir():
-        try:
-            for child in legacy_root_runs.iterdir():
-                if not child.is_dir():
-                    continue
-                if child.name in {"usertest", "_cache"}:
-                    continue
-                if child.name == "_workspaces" or _looks_like_legacy_target_runs_dir(child):
-                    has_legacy = True
-                    legacy_notes.append(f"- legacy dir present: {child}")
-        except OSError:
-            # If we can't inspect, keep this quiet to avoid spamming unrelated commands.
-            pass
-
-    if not has_legacy:
-        return
-
-    print(
-        "WARNING: Legacy run layout detected. New runs go to runs/usertest/.\n"
-        "To migrate existing runs (dry-run by default):\n"
-        "  python tools/migrations/migrate_runs_layout.py\n"
-        "To apply moves:\n"
-        "  python tools/migrations/migrate_runs_layout.py --apply\n"
-        "Detected:\n" + "\n".join(legacy_notes),
-        file=sys.stderr,
-    )
 
 
 def _cmd_reports_compile(args: argparse.Namespace) -> int:
@@ -4341,6 +4022,21 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     print(str(atoms_jsonl))
     print(json.dumps(summary.get("totals", {}), indent=2, ensure_ascii=False))
     print(json.dumps(summary.get("coverage", {}), indent=2, ensure_ascii=False))
+
+    miners_meta = summary.get("miners_meta") if isinstance(summary, dict) else None
+    miners_failed = 0
+    if isinstance(miners_meta, dict):
+        try:
+            miners_failed = int(miners_meta.get("miners_failed") or 0)
+        except (TypeError, ValueError):
+            miners_failed = 0
+    if miners_failed:
+        print(
+            f"[backlog] WARNING: {miners_failed} miner job(s) failed to parse. "
+            f"See: {artifacts_dir / 'miners'}",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 

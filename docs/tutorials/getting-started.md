@@ -82,10 +82,10 @@ You can also re-render that fixture from raw events:
 python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics
 ```
 
-If you haven't set up a Python environment for this repo yet, use the one-command scripts (creates `.venv`, installs minimal deps, sets `PYTHONPATH`, renders a scratch copy):
+If you haven't set up a Python environment for this repo yet, use the one-command scripts (creates `.venv`, installs minimal deps, sets `PYTHONPATH`, renders a scratch copy). These scripts do **not** execute any agents:
 
-- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1`
-- macOS/Linux: `bash ./scripts/offline_first_success.sh`
+- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_fixture_rerender.ps1`
+- macOS/Linux: `bash ./scripts/offline_fixture_rerender.sh`
 
 ---
 

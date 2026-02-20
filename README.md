@@ -41,10 +41,12 @@ Open the checked-in golden fixture artifacts directly (no Python deps required):
 
 Re-render that fixture from raw events (requires minimal Python deps + import-path setup):
 
+**Note:** this does not execute any agent runs; it just re-renders an existing golden fixture.
+
 One-command (recommended):
 
-- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1`
-- macOS/Linux: `bash ./scripts/offline_first_success.sh`
+- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_fixture_rerender.ps1`
+- macOS/Linux: `bash ./scripts/offline_fixture_rerender.sh`
 
 Manual steps (if you want to control an existing env):
 

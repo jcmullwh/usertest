@@ -303,19 +303,6 @@ def _default_branch_name(selected: SelectedTicket) -> str:
     return f"backlog/{ticket_part}-{fp_part}"
 
 
-def _coerce_remote_url(*, repo_dir: Path, remote_name: str) -> str | None:
-    proc = subprocess.run(
-        ["git", "-C", str(repo_dir), "remote", "get-url", remote_name],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    if proc.returncode != 0:
-        return None
-    out = proc.stdout.strip()
-    return out if out else None
-
-
 def _write_pr_manifest(*, run_dir: Path, selected: SelectedTicket, branch: str) -> tuple[str, str]:
     title = f"{selected.ticket_id or selected.fingerprint}: {selected.title or 'Implement backlog ticket'}"
     excerpt_lines = selected.ticket_markdown.strip().splitlines()
@@ -587,8 +574,55 @@ def _cmd_run(args: argparse.Namespace) -> int:
         except Exception as e:
             print(f"WARNING: failed to update ledger: {e}", file=sys.stderr)
 
+    exit_code = int(result.exit_code or 0)
+
+    if result.report_validation_errors:
+        print("[implement] WARNING: report validation failed:", file=sys.stderr)
+        for err in result.report_validation_errors:
+            print(f"  - {err}", file=sys.stderr)
+        exit_code = max(exit_code, 2)
+
+    workspace_dir_str = str(workspace_dir) if workspace_dir else "<workspace not kept>"
+
+    # Best-effort git operations: if the user asked for them and they failed, return non-zero and
+    # provide a clear remediation path (changes may remain in the kept workspace).
+    if args.commit and git_ref is not None and git_ref.get("error"):
+        print("[implement] ERROR: git commit step failed:", file=sys.stderr)
+        print(f"  {git_ref.get('error')}", file=sys.stderr)
+        print(f"  Workspace: {workspace_dir_str}", file=sys.stderr)
+        print("  Remediation:", file=sys.stderr)
+        print(f"    cd {workspace_dir_str}", file=sys.stderr)
+        print("    git status", file=sys.stderr)
+        print("    # fix the issue, then retry commit/push/PR manually or rerun this command", file=sys.stderr)
+        exit_code = max(exit_code, 3)
+
+    if (args.push or args.pr) and push_ref is not None and push_ref.get("error"):
+        print("[implement] ERROR: git push step failed:", file=sys.stderr)
+        print(f"  {push_ref.get('error')}", file=sys.stderr)
+        print(f"  Workspace: {workspace_dir_str}", file=sys.stderr)
+        print("  Remediation:", file=sys.stderr)
+        remote = push_ref.get("remote_name") or args.remote_name
+        branch = None
+        if isinstance(git_ref, dict):
+            branch = git_ref.get("branch")
+        if not branch:
+            branch = args.branch or "<branch>"
+        print(f"    cd {workspace_dir_str}", file=sys.stderr)
+        print(f"    git push --set-upstream {remote} {branch}", file=sys.stderr)
+        exit_code = max(exit_code, 4)
+
+    if args.pr and pr_ref is not None and pr_ref.get("error"):
+        print("[implement] ERROR: PR creation failed:", file=sys.stderr)
+        print(f"  {pr_ref.get('error')}", file=sys.stderr)
+        print(f"  Workspace: {workspace_dir_str}", file=sys.stderr)
+        print("  Remediation:", file=sys.stderr)
+        print(f"    cd {workspace_dir_str}", file=sys.stderr)
+        print("    gh auth status", file=sys.stderr)
+        print("    gh pr create --help", file=sys.stderr)
+        exit_code = max(exit_code, 5)
+
     print(str(run_dir))
-    return int(result.exit_code)
+    return exit_code
 
 
 def _cmd_reports_summarize(args: argparse.Namespace) -> int:

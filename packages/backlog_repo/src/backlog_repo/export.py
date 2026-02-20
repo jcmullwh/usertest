@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Iterable
 from hashlib import sha256
 from typing import Any
 
@@ -119,22 +118,3 @@ def ticket_export_fingerprint(ticket: dict[str, Any]) -> str:
     return sha256(blob).hexdigest()[:16]
 
 
-def collect_path_like_anchors(chunks: Iterable[str]) -> set[str]:
-    """Collect normalized path anchors from arbitrary text chunks.
-
-    Parameters
-    ----------
-    chunks:
-        Text snippets potentially containing file-like paths.
-
-    Returns
-    -------
-    set[str]
-        Lowercased anchors with forward-slash separators.
-    """
-
-    anchors: set[str] = set()
-    for chunk in chunks:
-        for match in _EXPORT_PATH_LIKE_RE.findall(chunk):
-            anchors.add(match.lower().replace("\\", "/"))
-    return anchors

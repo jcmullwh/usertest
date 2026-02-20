@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from collections import Counter
 from datetime import datetime, timezone
@@ -51,14 +52,59 @@ _TRUST_SOURCE_WEIGHTS: dict[str, float] = {
     "suggested_change": 0.65,
     "confidence_missing": 0.45,
 }
-_DEFAULT_CAPTURE_POLICY = TextCapturePolicy(
-    max_excerpt_bytes=24_000,
-    head_bytes=12_000,
-    tail_bytes=12_000,
-    max_line_count=300,
-    binary_detection_bytes=2_048,
-)
-_MAX_COMMAND_FAILURE_ATOMS_PER_RUN = 10
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        return int(default)
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.getenv(name)
+    if raw is None:
+        return float(default)
+    try:
+        return float(str(raw).strip())
+    except ValueError:
+        return float(default)
+
+
+def _default_capture_policy() -> TextCapturePolicy:
+    """Default capture policy, overridable via environment variables.
+
+    Supported overrides:
+    - BACKLOG_CAPTURE_MAX_EXCERPT_BYTES
+    - BACKLOG_CAPTURE_HEAD_BYTES
+    - BACKLOG_CAPTURE_TAIL_BYTES
+    - BACKLOG_CAPTURE_MAX_LINE_COUNT
+    - BACKLOG_CAPTURE_BINARY_DETECTION_BYTES
+    """
+
+    return TextCapturePolicy(
+        max_excerpt_bytes=_env_int("BACKLOG_CAPTURE_MAX_EXCERPT_BYTES", 24_000),
+        head_bytes=_env_int("BACKLOG_CAPTURE_HEAD_BYTES", 12_000),
+        tail_bytes=_env_int("BACKLOG_CAPTURE_TAIL_BYTES", 12_000),
+        max_line_count=_env_int("BACKLOG_CAPTURE_MAX_LINE_COUNT", 300),
+        binary_detection_bytes=_env_int("BACKLOG_CAPTURE_BINARY_DETECTION_BYTES", 2_048),
+    )
+
+
+def _max_command_failure_atoms_per_run() -> int:
+    """Max number of command-failure atoms emitted per run (env override supported)."""
+
+    names = ("BACKLOG_MAX_COMMAND_FAILURE_ATOMS_PER_RUN", "BACKLOGmax_command_failure_atoms")
+    for name in names:
+        raw = os.getenv(name)
+        if raw is None:
+            continue
+        try:
+            return int(str(raw).strip())
+        except ValueError:
+            continue
+    return 10
 
 
 def _safe_relpath(path: Path, root: Path) -> str:
@@ -450,7 +496,8 @@ def extract_backlog_atoms(
     repo_root: Path | None = None,
     capture_policy: TextCapturePolicy | None = None,
 ) -> dict[str, Any]:
-    policy = capture_policy or _DEFAULT_CAPTURE_POLICY
+    policy = capture_policy or _default_capture_policy()
+    max_command_failure_atoms = _max_command_failure_atoms_per_run()
     atoms: list[dict[str, Any]] = []
     source_counts: Counter[str] = Counter()
     severity_counts: Counter[str] = Counter()
@@ -615,7 +662,7 @@ def extract_backlog_atoms(
                                     "from_events": True,
                                 }
                             )
-                            if len(failed_commands) >= _MAX_COMMAND_FAILURE_ATOMS_PER_RUN:
+                            if len(failed_commands) >= max_command_failure_atoms:
                                 break
                 except OSError:
                     failed_commands = []
@@ -623,7 +670,7 @@ def extract_backlog_atoms(
         if failed_commands:
             emitted = 0
             for entry in failed_commands:
-                if emitted >= _MAX_COMMAND_FAILURE_ATOMS_PER_RUN:
+                if emitted >= max_command_failure_atoms:
                     break
                 command = _coerce_string(entry.get("command"))
                 exit_code = entry.get("exit_code")

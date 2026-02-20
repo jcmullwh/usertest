@@ -4,31 +4,21 @@ import hashlib
 import json
 import math
 import os
-import re
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
-
-from triage_engine.text import tokenize
 
 __all__ = [
     "Embedder",
     "get_default_embedder",
     "CachedEmbedder",
     "DiskCachedEmbedder",
-    "HashingEmbedder",
-    "SentenceTransformersEmbedder",
     "OpenAIEmbedder",
     "dot",
     "l2_normalize",
     "cosine_similarity",
 ]
-
-
-def _stable_hash64(value: str) -> int:
-    digest = hashlib.blake2b(value.encode("utf-8"), digest_size=8).digest()
-    return int.from_bytes(digest, "big", signed=False)
 
 
 def dot(a: Sequence[float], b: Sequence[float]) -> float:
@@ -225,110 +215,11 @@ class DiskCachedEmbedder:
         return [list(cached_vectors[text_hash]) for text_hash in hashes]
 
 
-_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
-
-
-def _iter_char_ngrams(text: str, *, n: int, max_ngrams: int) -> list[str]:
-    cleaned = _NON_ALNUM_RE.sub("", text.lower())
-    if not cleaned:
-        return []
-    if len(cleaned) <= n:
-        return [cleaned]
-
-    out: list[str] = []
-    limit = max(0, max_ngrams)
-    for i in range(len(cleaned) - n + 1):
-        out.append(cleaned[i : i + n])
-        if limit and len(out) >= limit:
-            break
-    return out
-
-
-@dataclass(frozen=True)
-class HashingEmbedder:
-    """Dependency-free embedding.
-
-    This backend is deterministic and works offline. It is not a neural embedding model.
-    It exists so triage logic can operate without external services.
-
-    Implementation
-    --------------
-    - Feature hashing over word tokens + character n-grams.
-    - Signed hashing ("hashing trick") into a fixed-size vector.
-    - L2 normalization to make cosine similarity meaningful.
-    """
-
-    dim: int = 512
-    token_weight: float = 1.0
-    ngram_n: int = 3
-    ngram_weight: float = 0.5
-    max_ngrams: int = 4096
-
-    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
-        vectors: list[list[float]] = []
-        dim = int(self.dim)
-        if dim <= 0:
-            raise ValueError("HashingEmbedder.dim must be > 0")
-
-        for text in texts:
-            vec = [0.0] * dim
-
-            # Word tokens.
-            for token in tokenize(text):
-                h = _stable_hash64(token)
-                idx = int(h % dim)
-                sign = 1.0 if (h >> 63) & 1 else -1.0
-                vec[idx] += sign * self.token_weight
-
-            # Character n-grams (helps with small edits and path-like strings).
-            if self.ngram_weight:
-                for gram in _iter_char_ngrams(text, n=self.ngram_n, max_ngrams=self.max_ngrams):
-                    h = _stable_hash64("g:" + gram)
-                    idx = int(h % dim)
-                    sign = 1.0 if (h >> 63) & 1 else -1.0
-                    vec[idx] += sign * self.ngram_weight
-
-            vectors.append(list(l2_normalize(vec)))
-
-        return vectors
-
-
-@dataclass
-class SentenceTransformersEmbedder:
-    """SentenceTransformers embedder (optional dependency)."""
-
-    model_name: str = "all-MiniLM-L6-v2"
-    batch_size: int = 32
-    normalize: bool = True
-    device: str | None = None
-
-    def __post_init__(self) -> None:
-        try:
-            from sentence_transformers import SentenceTransformer  # type: ignore
-        except ModuleNotFoundError as exc:  # pragma: no cover
-            raise ModuleNotFoundError(
-                "sentence-transformers is not installed. Install triage_engine with the "
-                "sentence_transformers extra (or add sentence-transformers to your environment)."
-            ) from exc
-
-        # Loading the model may download weights if not present.
-        self._model = SentenceTransformer(self.model_name, device=self.device)
-
-    def embed_texts(self, texts: Sequence[str]) -> list[list[float]]:
-        embeddings = self._model.encode(
-            list(texts),
-            batch_size=int(self.batch_size),
-            normalize_embeddings=bool(self.normalize),
-            show_progress_bar=False,
-        )
-        return [list(map(float, row)) for row in embeddings]
-
-
 @dataclass
 class OpenAIEmbedder:
     """OpenAI embeddings backend using the official Python SDK."""
 
-    model: str = "text-embedding-3-small"
+    model: str = "text-embedding-3-large"
     api_key: str | None = None
     base_url: str | None = None
     batch_size: int = 128
@@ -403,7 +294,7 @@ def get_default_embedder() -> Embedder:
             wrapped = DiskCachedEmbedder(wrapped, path=cache_path)
         return wrapped
 
-    model = os.getenv("TRIAGE_ENGINE_OPENAI_MODEL") or "text-embedding-3-small"
+    model = os.getenv("TRIAGE_ENGINE_OPENAI_MODEL") or "text-embedding-3-large"
     if spec_lower:
         if not spec_lower.startswith("openai"):
             raise ValueError(
