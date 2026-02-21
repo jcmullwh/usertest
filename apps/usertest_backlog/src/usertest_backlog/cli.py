@@ -2715,6 +2715,199 @@ def _render_ux_review_markdown(doc: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+_UX_REVIEW_SECTION_START = "<!-- usertest:ux_review:start -->"
+_UX_REVIEW_SECTION_END = "<!-- usertest:ux_review:end -->"
+
+
+def _load_optional_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _index_ux_recommendations(doc: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    review_raw = doc.get("review")
+    review = review_raw if isinstance(review_raw, dict) else {}
+    recs_raw = review.get("recommendations")
+    recs = [item for item in recs_raw if isinstance(item, dict)] if isinstance(recs_raw, list) else []
+    out: dict[str, list[dict[str, Any]]] = {}
+    for rec in recs:
+        ticket_ids_raw = rec.get("ticket_ids")
+        ticket_ids = (
+            [tid for tid in ticket_ids_raw if isinstance(tid, str) and tid.strip()]
+            if isinstance(ticket_ids_raw, list)
+            else []
+        )
+        for ticket_id in ticket_ids:
+            out.setdefault(ticket_id.strip(), []).append(rec)
+    return out
+
+
+def _pick_ux_recommended_approach(recs: list[dict[str, Any]]) -> str | None:
+    approaches = [
+        _coerce_string(rec.get("recommended_approach")) or ""
+        for rec in recs
+        if isinstance(rec, dict)
+    ]
+    normalized = {a.strip() for a in approaches if a.strip()}
+    for choice in ("defer", "new_surface", "parameterize_existing", "docs"):
+        if choice in normalized:
+            return choice
+    return next(iter(sorted(normalized)), None)
+
+
+def _render_ux_review_section_for_ticket(
+    *,
+    ux_review_doc: dict[str, Any],
+    ux_review_json_path: Path,
+    ux_review_md_path: Path,
+    ticket_id: str,
+    recs: list[dict[str, Any]],
+) -> str:
+    lines: list[str] = []
+    lines.append(_UX_REVIEW_SECTION_START)
+    lines.append("## UX review")
+    lines.append("")
+    lines.append(f"- ux_review.json: `{ux_review_json_path}`")
+    lines.append(f"- ux_review.md: `{ux_review_md_path}`")
+
+    status = _coerce_string(ux_review_doc.get("status"))
+    if status:
+        lines.append(f"- reviewer_status: `{status}`")
+    generated_at = _coerce_string(ux_review_doc.get("generated_at"))
+    if generated_at:
+        lines.append(f"- reviewer_generated_at: `{generated_at}`")
+    prompt_hash = _coerce_string(ux_review_doc.get("prompt_hash"))
+    if prompt_hash:
+        lines.append(f"- reviewer_prompt_hash: `{prompt_hash}`")
+
+    review_raw = ux_review_doc.get("review")
+    review = review_raw if isinstance(review_raw, dict) else {}
+    conf_raw = review.get("confidence")
+    if isinstance(conf_raw, (int, float)):
+        lines.append(f"- reviewer_confidence: `{float(conf_raw):.2f}`")
+
+    lines.append("")
+
+    for rec in recs[:5]:
+        rec_id = _coerce_string(rec.get("recommendation_id")) or "UX-???"
+        approach = _coerce_string(rec.get("recommended_approach")) or "unknown"
+        lines.append(f"### {rec_id}: {approach} ({ticket_id})")
+        lines.append("")
+
+        rationale = _coerce_string(rec.get("rationale"))
+        if rationale:
+            lines.append(rationale.strip())
+            lines.append("")
+
+        next_steps_raw = rec.get("next_steps")
+        next_steps = (
+            [step for step in next_steps_raw if isinstance(step, str) and step.strip()]
+            if isinstance(next_steps_raw, list)
+            else []
+        )
+        if next_steps:
+            lines.append("Next steps:")
+            for step in next_steps[:10]:
+                lines.append(f"- {step}")
+            lines.append("")
+
+        breadth_raw = rec.get("evidence_breadth_summary")
+        breadth = breadth_raw if isinstance(breadth_raw, dict) else {}
+        breadth_bits: list[str] = []
+        for key in ("missions", "targets", "repo_inputs", "agents", "runs"):
+            val = breadth.get(key)
+            if isinstance(val, (int, float)):
+                breadth_bits.append(f"{key}={int(val)}")
+        if breadth_bits:
+            lines.append(f"Evidence breadth: `{', '.join(breadth_bits)}`")
+            lines.append("")
+
+        lines.append("Raw recommendation JSON:")
+        lines.append("")
+        lines.append("```json")
+        lines.append(json.dumps(rec, indent=2, ensure_ascii=False))
+        lines.append("```")
+        lines.append("")
+
+    lines.append(_UX_REVIEW_SECTION_END)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _replace_markdown_ticket_field(markdown: str, *, label: str, value: str) -> str:
+    pattern = rf"(?m)^-\s*{re.escape(label)}:\s*`[^`]*`\s*$"
+    replacement = f"- {label}: `{value}`"
+    if re.search(pattern, markdown) is None:
+        return markdown
+    return re.sub(pattern, replacement, markdown, count=1)
+
+
+def _upsert_ux_review_section(markdown: str, *, section: str) -> str:
+    start = markdown.find(_UX_REVIEW_SECTION_START)
+    end = markdown.find(_UX_REVIEW_SECTION_END)
+    if start != -1 and end != -1 and end > start:
+        end_idx = end + len(_UX_REVIEW_SECTION_END)
+        prefix = markdown[:start].rstrip()
+        suffix = markdown[end_idx:].lstrip("\n")
+        out = prefix + "\n\n" + section.strip() + "\n"
+        if suffix:
+            out += suffix
+        return out
+    return markdown.rstrip() + "\n\n" + section.strip() + "\n"
+
+
+def _apply_ux_review_to_plan_ticket(
+    *,
+    path: Path,
+    ux_section: str,
+    stage_override: str | None,
+    export_kind_override: str | None,
+) -> bool:
+    try:
+        original = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    updated = original
+    if export_kind_override:
+        updated = _replace_markdown_ticket_field(
+            updated,
+            label="Export kind",
+            value=export_kind_override,
+        )
+    if stage_override:
+        updated = _replace_markdown_ticket_field(updated, label="Stage", value=stage_override)
+    updated = _upsert_ux_review_section(updated, section=ux_section)
+
+    if updated == original:
+        return False
+    try:
+        path.write_text(updated, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _move_plan_ticket_to_bucket(*, path: Path, owner_repo_root: Path, bucket: str) -> Path | None:
+    plans_dir = owner_repo_root / ".agents" / "plans"
+    dest_dir = plans_dir / bucket
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    dest_path = dest_dir / path.name
+    try:
+        path.replace(dest_path)
+    except OSError:
+        return None
+    return dest_path
+
+
 def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
     """Execute the `reports review ux` command handler.
 
@@ -3378,6 +3571,13 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         else []
     )
 
+    ux_review_json_path = compiled_dir / f"{default_name}.ux_review.json"
+    ux_review_md_path = ux_review_json_path.with_suffix(".md")
+    ux_review_doc = _load_optional_json_object(ux_review_json_path)
+    ux_recommendations_by_ticket_id = (
+        _index_ux_recommendations(ux_review_doc) if ux_review_doc is not None else {}
+    )
+
     stage_filters = [s.strip() for s in args.stage if isinstance(s, str) and s.strip()]
     stages = stage_filters if stage_filters else ["triage", "ready_for_ticket", "research_required"]
     min_severity = str(args.min_severity)
@@ -3400,10 +3600,37 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     idea_files_written: list[str] = []
     plan_index_cache: dict[Path, dict[str, dict[str, Any]]] = {}
     skip_plan_folder_dedupe = bool(getattr(args, "skip_plan_folder_dedupe", False))
+    ux_plan_tickets_updated = 0
+    ux_idea_files_updated = 0
+    ux_tickets_deferred = 0
 
     for ticket in tickets:
         stage = (_coerce_string(ticket.get("stage")) or "triage").strip()
-        if stage not in stages:
+        ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+        ux_recs = ux_recommendations_by_ticket_id.get(ticket_id) or []
+
+        stage_override: str | None = None
+        export_kind_override: str | None = None
+        defer_to_bucket: str | None = None
+        ux_section: str | None = None
+        ux_approach = _pick_ux_recommended_approach(ux_recs) if ux_recs else None
+        if ux_recs and ux_review_doc is not None:
+            ux_section = _render_ux_review_section_for_ticket(
+                ux_review_doc=ux_review_doc,
+                ux_review_json_path=ux_review_json_path,
+                ux_review_md_path=ux_review_md_path,
+                ticket_id=ticket_id,
+                recs=ux_recs,
+            )
+            if stage == "research_required" and ux_approach in ("docs", "parameterize_existing"):
+                stage_override = "ready_for_ticket"
+                export_kind_override = "implementation"
+            elif stage == "research_required" and ux_approach == "defer":
+                defer_to_bucket = "0.1 - deferred"
+
+        stage_effective = stage_override or stage
+
+        if stage_effective not in stages:
             skipped_stage += 1
             continue
         severity = (_coerce_string(ticket.get("severity")) or "medium").strip().lower()
@@ -3422,28 +3649,36 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         user_visible = bool(change_surface.get("user_visible"))
 
         export_kind = "implementation"
-        if stage == "research_required":
+        if stage_effective == "research_required":
             export_kind = "research"
         elif user_visible and bool(kinds & surface_area_high):
             export_kind = "research"
+        if export_kind_override is not None:
+            export_kind = export_kind_override
 
         title = _coerce_string(ticket.get("title")) or "Untitled"
         issue_title = f"[Research] {title}" if export_kind == "research" else title
 
+        ticket_for_body = dict(ticket)
+        ticket_for_body["stage"] = stage_effective
         body = _render_export_issue_body(
-            ticket=ticket,
+            ticket=ticket_for_body,
             fingerprint=fingerprint,
             export_kind=export_kind,
             surface_area_high=surface_area_high,
         )
+        if ux_section is not None:
+            body = body.rstrip() + "\n\n" + ux_section
 
         labels: list[str] = []
-        labels.append(f"stage:{stage}")
+        labels.append(f"stage:{stage_effective}")
         labels.append(f"severity:{severity}")
         if export_kind == "research":
             labels.append("type:research")
         else:
             labels.append("type:implementation")
+        if ux_approach:
+            labels.append(f"ux:{ux_approach}")
         owner = _coerce_string(ticket.get("suggested_owner")) or _coerce_string(
             ticket.get("component")
         )
@@ -3472,7 +3707,26 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 queue_paths = [
                     item for item in existing.get("paths", []) if isinstance(item, str) and item
                 ]
-                ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+                if ux_section is not None and queue_paths:
+                    for path_s in queue_paths:
+                        if _apply_ux_review_to_plan_ticket(
+                            path=Path(path_s),
+                            ux_section=ux_section,
+                            stage_override=stage_override,
+                            export_kind_override=export_kind_override,
+                        ):
+                            ux_plan_tickets_updated += 1
+                    if defer_to_bucket is not None:
+                        primary_path = Path(queue_paths[0])
+                        moved = _move_plan_ticket_to_bucket(
+                            path=primary_path,
+                            owner_repo_root=owner_repo_root,
+                            bucket=defer_to_bucket,
+                        )
+                        if moved is not None:
+                            queue_paths[0] = str(moved)
+                            desired_status = "actioned"
+                            ux_tickets_deferred += 1
                 for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
                     ref: dict[str, str] = {
                         "atom_id": atom_id,
@@ -3502,8 +3756,21 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             cli_repo_input=repo_input,
             keep_path=idea_path,
         )
+        if ux_section is not None:
+            ux_idea_files_updated += 1
+        deferred_moved = False
+        if defer_to_bucket is not None:
+            moved = _move_plan_ticket_to_bucket(
+                path=idea_path,
+                owner_repo_root=owner_repo_root,
+                bucket=defer_to_bucket,
+            )
+            if moved is not None:
+                idea_path = moved
+                deferred_moved = True
+                ux_tickets_deferred += 1
+
         idea_files_written.append(str(idea_path))
-        ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
         for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
             queued_refs.append(
                 {
@@ -3512,6 +3779,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                     "fingerprint": fingerprint,
                     "idea_path": str(idea_path),
                     "owner_root": str(owner_repo_root),
+                    "desired_status": "actioned" if deferred_moved else "queued",
                 }
             )
 
@@ -3524,7 +3792,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 "body_markdown": body,
                 "source_ticket": {
                     "ticket_id": ticket.get("ticket_id"),
-                    "stage": stage,
+                    "stage": stage_effective,
                     "severity": severity,
                 },
                 "owner_repo": {
@@ -3559,6 +3827,8 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             "actions_yaml": str(actions_path),
             "atom_actions_yaml": str(atom_actions_path),
             "policy_config": str(policy_config_path),
+            "ux_review_json": str(ux_review_json_path) if ux_review_json_path.exists() else None,
+            "ux_review_md": str(ux_review_md_path) if ux_review_md_path.exists() else None,
         },
         "filters": {
             "stages": stages,
@@ -3577,6 +3847,10 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             "skipped_severity": skipped_severity,
             "actioned_total": len(actions),
             "idea_files_written": len(idea_files_written),
+            "ux_recommendations_loaded": len(ux_recommendations_by_ticket_id),
+            "ux_plan_tickets_updated": ux_plan_tickets_updated,
+            "ux_idea_files_updated": ux_idea_files_updated,
+            "ux_tickets_deferred": ux_tickets_deferred,
             "atom_status_updates": atom_status_meta,
         },
         "idea_files": idea_files_written,
