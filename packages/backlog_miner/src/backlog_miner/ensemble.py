@@ -1223,6 +1223,7 @@ def run_backlog_prompt(
     tag: str,
     model: str | None,
     cfg: RunnerConfig,
+    workspace_dir: Path | None = None,
 ) -> str:
     """Execute a single backlog prompt and persist raw agent artifacts.
 
@@ -1255,54 +1256,95 @@ def run_backlog_prompt(
 
     prompt_path.write_text(prompt, encoding="utf-8")
 
-    with tempfile.TemporaryDirectory(prefix="usertest_backlog_") as temp_dir:
-        workspace = Path(temp_dir)
-        if agent == "codex":
-            with _codex_host_login_env():
-                run_codex_exec(
-                    workspace_dir=workspace,
-                    prompt=prompt,
-                    raw_events_path=raw_events_path,
-                    last_message_path=last_message_path,
-                    stderr_path=stderr_path,
-                    sandbox="read-only",
-                    ask_for_approval="never",
-                    binary=_agent_binary(cfg, "codex", "codex"),
-                    model=model,
-                    config_overrides=_codex_overrides(cfg),
-                    skip_git_repo_check=True,
-                )
-        elif agent == "claude":
-            run_claude_print(
-                workspace_dir=workspace,
+    workspace: Path | None = None
+    if workspace_dir is not None:
+        workspace = workspace_dir
+    else:
+        with tempfile.TemporaryDirectory(prefix="usertest_backlog_") as temp_dir:
+            workspace = Path(temp_dir)
+            _run_agent_in_workspace(
+                agent=agent,
+                workspace=workspace,
                 prompt=prompt,
                 raw_events_path=raw_events_path,
                 last_message_path=last_message_path,
                 stderr_path=stderr_path,
-                binary=_agent_binary(cfg, "claude", "claude"),
-                output_format=_agent_output_format(cfg, "claude"),
                 model=model,
-                allowed_tools=[],
-                permission_mode=None,
+                cfg=cfg,
             )
-        elif agent == "gemini":
-            run_gemini(
-                workspace_dir=workspace,
-                prompt=prompt,
-                raw_events_path=raw_events_path,
-                last_message_path=last_message_path,
-                stderr_path=stderr_path,
-                binary=_agent_binary(cfg, "gemini", "gemini"),
-                output_format=_agent_output_format(cfg, "gemini"),
-                sandbox=False,
-                model=model,
-                approval_mode="default",
-                allowed_tools=[],
-            )
-        else:
-            raise ValueError(f"Unsupported backlog agent: {agent!r}")
+            return _read_text(last_message_path)
+
+    _run_agent_in_workspace(
+        agent=agent,
+        workspace=workspace,
+        prompt=prompt,
+        raw_events_path=raw_events_path,
+        last_message_path=last_message_path,
+        stderr_path=stderr_path,
+        model=model,
+        cfg=cfg,
+    )
 
     return _read_text(last_message_path)
+
+
+def _run_agent_in_workspace(
+    *,
+    agent: str,
+    workspace: Path,
+    prompt: str,
+    raw_events_path: Path,
+    last_message_path: Path,
+    stderr_path: Path,
+    model: str | None,
+    cfg: RunnerConfig,
+) -> None:
+    if agent == "codex":
+        with _codex_host_login_env():
+            run_codex_exec(
+                workspace_dir=workspace,
+                prompt=prompt,
+                raw_events_path=raw_events_path,
+                last_message_path=last_message_path,
+                stderr_path=stderr_path,
+                sandbox="read-only",
+                ask_for_approval="never",
+                binary=_agent_binary(cfg, "codex", "codex"),
+                model=model,
+                config_overrides=_codex_overrides(cfg),
+                skip_git_repo_check=True,
+            )
+        return
+    if agent == "claude":
+        run_claude_print(
+            workspace_dir=workspace,
+            prompt=prompt,
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+            binary=_agent_binary(cfg, "claude", "claude"),
+            output_format=_agent_output_format(cfg, "claude"),
+            model=model,
+            allowed_tools=[],
+            permission_mode=None,
+        )
+        return
+    if agent == "gemini":
+        run_gemini(
+            workspace_dir=workspace,
+            prompt=prompt,
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+            binary=_agent_binary(cfg, "gemini", "gemini"),
+            output_format=_agent_output_format(cfg, "gemini"),
+            sandbox=False,
+            model=model,
+            approval_mode="default",
+            allowed_tools=[],
+        )
+        return
+    raise ValueError(f"Unsupported backlog agent: {agent!r}")
 
 
 def _atom_weight(atom: dict[str, Any]) -> float:

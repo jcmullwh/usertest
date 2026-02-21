@@ -9,6 +9,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import warnings
 from datetime import datetime, timezone
 from hashlib import sha256
@@ -91,6 +92,7 @@ from runner_core.catalog import (
 )
 from runner_core.pathing import slugify
 from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
+from runner_core.target_acquire import acquire_target
 from triage_engine import cluster_items, extract_path_anchors_from_chunks
 
 from usertest_backlog.triage_backlog import (
@@ -3069,6 +3071,36 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         print(f"Failed reading repo intent doc: {repo_intent_path}: {e}", file=sys.stderr)
         return 2
 
+    repo_head_sha: str | None = None
+    repo_dirty = False
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            sha = proc.stdout.strip()
+            if sha:
+                repo_head_sha = sha
+    except OSError:
+        repo_head_sha = None
+    if repo_head_sha is not None:
+        try:
+            status_proc = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if status_proc.returncode == 0 and status_proc.stdout.strip():
+                repo_dirty = True
+        except OSError:
+            repo_dirty = False
+
     template = template_path.read_text(encoding="utf-8")
     tickets_payload: list[dict[str, Any]] = []
     for ticket in review_tickets:
@@ -3097,6 +3129,8 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         template,
         {
             "REPO_INTENT_MD": repo_intent_text,
+            "REPO_HEAD_SHA": repo_head_sha or "unknown",
+            "REPO_DIRTY": "true" if repo_dirty else "false",
             "INTENT_SNAPSHOT_JSON": json.dumps(intent_snapshot_obj, indent=2, ensure_ascii=False)
             if intent_snapshot_obj is not None
             else "null",
@@ -3120,6 +3154,15 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
     review_obj: dict[str, Any] | None = None
     status = "ok"
     used_cached = False
+    workspace_meta: dict[str, Any] = {
+        "repo_root": str(repo_root),
+        "repo_head_sha": repo_head_sha,
+        "repo_dirty": repo_dirty,
+        "acquired_mode": None,
+        "acquired_commit_sha": None,
+        "provided": False,
+        "error": None,
+    }
 
     if resume and not force and cached_path.exists():
         try:
@@ -3155,14 +3198,28 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             (artifacts_dir / f"{tag}.dry_run.prompt.txt").write_text(prompt, encoding="utf-8")
             status = "dry_run"
         else:
-            raw_text = run_backlog_prompt(
-                agent=agent,
-                prompt=prompt,
-                out_dir=artifacts_dir,
-                tag=tag,
-                model=model,
-                cfg=cfg,
-            )
+            with tempfile.TemporaryDirectory(prefix="usertest_ux_review_") as temp_dir:
+                dest_dir = Path(temp_dir) / "repo"
+                workspace_dir = Path(temp_dir)
+                try:
+                    acquired = acquire_target(repo=str(repo_root), dest_dir=dest_dir, ref=None)
+                except Exception as e:
+                    workspace_meta["error"] = str(e)
+                else:
+                    workspace_meta["provided"] = True
+                    workspace_meta["acquired_mode"] = acquired.mode
+                    workspace_meta["acquired_commit_sha"] = acquired.commit_sha
+                    workspace_dir = acquired.workspace_dir
+
+                raw_text = run_backlog_prompt(
+                    agent=agent,
+                    prompt=prompt,
+                    out_dir=artifacts_dir,
+                    tag=tag,
+                    model=model,
+                    cfg=cfg,
+                    workspace_dir=workspace_dir,
+                )
             parsed = _parse_first_json_object(raw_text)
             if not isinstance(parsed, dict):
                 (artifacts_dir / f"{tag}.parse_error.txt").write_text(
@@ -3199,6 +3256,7 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "model": model,
             "cached": used_cached,
             "template_path": _safe_relpath(template_path, repo_root),
+            "workspace": workspace_meta,
         },
         "tickets_meta": {
             "tickets_total": len(tickets),
