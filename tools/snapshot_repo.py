@@ -65,6 +65,63 @@ def _validate_out_path(out_path: Path, *, overwrite: bool) -> None:
         raise SnapshotError(f"Output directory is not a directory: {parent}")
 
 
+def _validate_repo_root_arg(repo_root: Path) -> None:
+    """
+    Validate an explicit `--repo-root` before invoking git.
+
+    This prevents raw git errors like "fatal: cannot change to ..." from leaking
+    into user-facing output.
+    """
+
+    try:
+        if not repo_root.exists():
+            raise SnapshotError(
+                "Invalid --repo-root (path does not exist): "
+                f"{repo_root}\n"
+                "Hint: pass --repo-root pointing at a git checkout directory."
+            )
+        if not repo_root.is_dir():
+            raise SnapshotError(
+                "Invalid --repo-root (not a directory): "
+                f"{repo_root}\n"
+                "Hint: pass --repo-root pointing at a git checkout directory."
+            )
+    except OSError as e:
+        raise SnapshotError(
+            "Invalid --repo-root (unable to access path): "
+            f"{repo_root}\n"
+            f"Details: {e}"
+        ) from e
+
+    try:
+        out = _run_git(["rev-parse", "--is-inside-work-tree"], cwd=repo_root)
+    except SnapshotError as e:
+        msg = str(e).strip()
+        lowered = msg.lower()
+        if "git not found on path" in lowered:
+            raise
+        if "not a git repository" in lowered:
+            raise SnapshotError(
+                "Invalid --repo-root (not a git repository): "
+                f"{repo_root}\n"
+                "Hint: pass --repo-root pointing at a git checkout (a directory containing `.git`)."
+            ) from e
+        raise SnapshotError(
+            "Invalid --repo-root (failed to run git in that directory): "
+            f"{repo_root}\n"
+            "Hint: pass --repo-root pointing at a git checkout.\n"
+            f"git said: {msg}"
+        ) from e
+
+    inside = out.decode("utf-8", errors="replace").strip().lower()
+    if inside != "true":
+        raise SnapshotError(
+            "Invalid --repo-root (not a git work tree): "
+            f"{repo_root}\n"
+            "Hint: pass --repo-root pointing at a git checkout (not a bare repo)."
+        )
+
+
 def _find_repo_root(start: Path) -> Path:
     """
     Find the monorepo root by walking upward looking for `tools/scaffold/monorepo.toml`.
@@ -465,7 +522,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
-    repo_root = args.repo_root.resolve() if args.repo_root is not None else _find_repo_root(Path.cwd())
+    if args.repo_root is not None:
+        repo_root = args.repo_root.resolve()
+        _validate_repo_root_arg(repo_root)
+    else:
+        repo_root = _find_repo_root(Path.cwd())
     out_path = args.out.resolve()
     _validate_out_path(out_path, overwrite=bool(args.overwrite))
 
