@@ -1634,6 +1634,8 @@ def build_merge_candidates(
     tickets: list[dict[str, Any]],
     *,
     max_candidates: int = 200,
+    overall_similarity_threshold: float | None = None,
+    keep_anchor_pairs: bool = False,
     embedder: _Embedder | None = None,
 ) -> list[tuple[int, int]]:
     def _ticket_title(ticket: dict[str, Any]) -> str:
@@ -1672,5 +1674,7 @@ def build_merge_candidates(
         get_evidence_ids=_ticket_evidence,
         get_text_chunks=_ticket_text_chunks,
         max_candidates=max_candidates,
+        overall_similarity_threshold=overall_similarity_threshold,
+        keep_anchor_pairs=keep_anchor_pairs,
         embedder=embedder,
     )

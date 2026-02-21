@@ -607,6 +607,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip merge-judge passes.",
     )
     reports_backlog_p.add_argument(
+        "--merge-candidate-threshold",
+        type=float,
+        default=0.65,
+        help=(
+            "Minimum overall semantic similarity (in [0,1]) required for merge-candidate pairs. "
+            "Default: 0.65."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--merge-keep-anchor-pairs",
+        action="store_true",
+        help=(
+            "Keep merge-candidate pairs based on anchor overlap (anchor_jaccard > 0) even when "
+            "below the overall similarity threshold. Default: disabled."
+        ),
+    )
+    reports_backlog_p.add_argument(
         "--orphan-pass",
         type=int,
         default=1,
@@ -3803,6 +3820,10 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     force = bool(args.force)
     dry_run = bool(args.dry_run)
     no_merge = bool(args.no_merge)
+    merge_candidate_threshold = float(args.merge_candidate_threshold)
+    if not (0.0 <= merge_candidate_threshold <= 1.0):
+        raise ValueError("--merge-candidate-threshold must be in [0, 1]")
+    merge_keep_anchor_pairs = bool(args.merge_keep_anchor_pairs)
     agent = str(args.agent)
     model = str(args.model) if isinstance(args.model, str) and args.model.strip() else None
     labelers = max(0, int(args.labelers))
@@ -3851,6 +3872,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         force=force,
         dry_run=dry_run,
         no_merge=no_merge,
+        merge_candidate_overall_threshold=merge_candidate_threshold,
+        merge_keep_anchor_pairs=merge_keep_anchor_pairs,
         orphan_pass=orphan_pass,
     )
 
@@ -3933,6 +3956,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             "force": force,
             "seed": seed,
             "no_merge": no_merge,
+            "merge_candidate_overall_threshold": merge_candidate_threshold,
+            "merge_keep_anchor_pairs": merge_keep_anchor_pairs,
             "orphan_pass": orphan_pass,
             "dry_run": dry_run,
             "labelers": labelers,

@@ -2081,6 +2081,8 @@ def _run_merge_judge(
     artifacts_dir: Path,
     tickets: list[dict[str, Any]],
     atoms_by_id: dict[str, dict[str, Any]],
+    merge_candidate_overall_threshold: float | None,
+    merge_keep_anchor_pairs: bool,
     resume: bool,
     force: bool,
     dry_run: bool,
@@ -2118,7 +2120,11 @@ def _run_merge_judge(
         Merged ticket list and number of merge decisions evaluated.
     """
 
-    candidates = build_merge_candidates(tickets)
+    candidates = build_merge_candidates(
+        tickets,
+        overall_similarity_threshold=merge_candidate_overall_threshold,
+        keep_anchor_pairs=merge_keep_anchor_pairs,
+    )
     if not candidates:
         return tickets, 0
 
@@ -2383,6 +2389,8 @@ def run_backlog_ensemble(
     force: bool,
     dry_run: bool,
     no_merge: bool,
+    merge_candidate_overall_threshold: float | None = None,
+    merge_keep_anchor_pairs: bool = False,
     orphan_pass: int,
 ) -> dict[str, Any]:
     """Execute full backlog mining pipeline and return tickets plus run metadata.
@@ -2481,6 +2489,8 @@ def run_backlog_ensemble(
             artifacts_dir=artifacts_dir,
             tickets=tickets,
             atoms_by_id=atoms_by_id,
+            merge_candidate_overall_threshold=merge_candidate_overall_threshold,
+            merge_keep_anchor_pairs=merge_keep_anchor_pairs,
             resume=resume,
             force=force,
             dry_run=dry_run,
