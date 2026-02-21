@@ -46,3 +46,33 @@ Confirm:
 ```bash
 usertest-implement --help
 ```
+
+---
+
+## Usage
+
+### Implement a specific ticket
+
+From a ticket markdown file (for example in `.agents/plans/2 - ready/`):
+
+```bash
+usertest-implement run --ticket-path ".agents/plans/2 - ready/<ticket>.md"
+```
+
+Or from a tickets export JSON:
+
+```bash
+usertest-implement run --tickets-export runs/usertest/<target>/_compiled/<scope>.tickets_export.json --fingerprint <fp>
+```
+
+### Standard flow (refresh + implement next)
+
+This is the recommended “just keep shipping” loop:
+
+```bash
+usertest-implement tickets run-next --backlog-target <target_slug>
+```
+
+It runs the backlog refresh steps via `usertest-backlog` (backlog → intent-snapshot → review-ux → export-tickets),
+then selects the next local plan ticket (research-first) and runs it. Use `--no-refresh-backlog` for a fast path
+that only selects from existing `.agents/plans/*` tickets.

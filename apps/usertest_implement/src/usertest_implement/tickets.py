@@ -4,7 +4,6 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 from backlog_repo.plan_index import scan_plan_ticket_index
 
@@ -16,7 +15,6 @@ class TicketIndexEntry:
     paths: list[Path]
     buckets: list[str]
     status: str | None
-
 
 
 def build_ticket_index(*, owner_root: Path) -> dict[str, TicketIndexEntry]:
@@ -64,6 +62,45 @@ def select_next_ticket(
     return None
 
 
+def select_next_ticket_path(
+    index: dict[str, TicketIndexEntry],
+    *,
+    bucket_priority: list[str],
+    kind_priority: list[str],
+) -> tuple[TicketIndexEntry, Path] | None:
+    kind_priority_clean = [
+        kind.strip().lower() for kind in kind_priority if isinstance(kind, str) and kind.strip()
+    ]
+    kind_rank = {kind: idx for idx, kind in enumerate(kind_priority_clean)}
+    unknown_rank = len(kind_rank)
+
+    for bucket in bucket_priority:
+        candidates: list[tuple[int, str, TicketIndexEntry, Path]] = []
+        for entry in index.values():
+            if bucket not in entry.buckets:
+                continue
+            bucket_paths = [path for path in entry.paths if path.parent.name == bucket]
+            if not bucket_paths:
+                continue
+            path = sorted(bucket_paths, key=lambda p: str(p))[0]
+            try:
+                markdown = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                kind = None
+            else:
+                meta = parse_ticket_markdown_metadata(markdown)
+                export_kind_raw = meta.get("export_kind")
+                kind = export_kind_raw.strip().lower() if export_kind_raw else None
+            rank = kind_rank.get(kind or "", unknown_rank)
+            candidates.append((rank, path.name, entry, path))
+        if not candidates:
+            continue
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        _, _, entry, path = candidates[0]
+        return entry, path
+    return None
+
+
 def move_ticket_file(
     *,
     owner_root: Path,
@@ -94,17 +131,21 @@ def move_ticket_file(
 
 def parse_ticket_markdown_metadata(markdown: str) -> dict[str, str]:
     meta: dict[str, str] = {}
-    for key, label in (("fingerprint", "Fingerprint"), ("ticket_id", "Source ticket")):
+    for key, label in (
+        ("fingerprint", "Fingerprint"),
+        ("ticket_id", "Source ticket"),
+        ("export_kind", "Export kind"),
+        ("stage", "Stage"),
+    ):
         match = re.search(
-            rf"^-\\s*{re.escape(label)}:\\s*`([^`]+)`\\s*$",
+            rf"^-\s*{re.escape(label)}:\s*`([^`]+)`\s*$",
             markdown,
             flags=re.MULTILINE,
         )
         if match is not None:
             meta[key] = match.group(1).strip()
-    title_match = re.search(r"^#\\s+(.+)$", markdown, flags=re.MULTILINE)
+    title_match = re.search(r"^#\s+(.+)$", markdown, flags=re.MULTILINE)
     if title_match is not None:
         meta["title"] = title_match.group(1).strip()
     meta["parsed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     return meta
-

@@ -151,3 +151,40 @@ def test_run_dry_run_requires_exactly_one_selector(tmp_path: Path) -> None:
     )
     assert proc.returncode != 0
 
+
+def test_tickets_run_next_dry_run_prefers_research(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    ready_dir = owner_root / ".agents" / "plans" / "2 - ready"
+    ready_dir.mkdir(parents=True)
+
+    impl_fp = "aaaaaaaaaaaaaaaa"
+    (ready_dir / f"20260220_BLG-001_{impl_fp}_implementation.md").write_text(
+        "# Impl\n\n- Export kind: `implementation`\n- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
+        encoding="utf-8",
+    )
+
+    research_fp = "bbbbbbbbbbbbbbbb"
+    (ready_dir / f"20260220_BLG-002_{research_fp}_research.md").write_text(
+        "# Research\n\n- Export kind: `research`\n- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "tickets",
+            "run-next",
+            "--owner-root",
+            str(owner_root),
+            "--no-refresh-backlog",
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["selected_ticket"]["fingerprint"] == research_fp

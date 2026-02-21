@@ -55,6 +55,7 @@ from usertest_implement.tickets import (
     move_ticket_file,
     parse_ticket_markdown_metadata,
     select_next_ticket,
+    select_next_ticket_path,
 )
 
 
@@ -159,6 +160,101 @@ def _infer_git_root(path: Path) -> Path | None:
     return None
 
 
+def _default_backlog_runs_dir(repo_root: Path) -> Path:
+    return repo_root / "runs" / "usertest"
+
+
+def _list_backlog_targets(runs_dir: Path) -> list[str]:
+    if not runs_dir.exists():
+        return []
+    if not runs_dir.is_dir():
+        return []
+    slugs: list[str] = []
+    for child in runs_dir.iterdir():
+        if not child.is_dir():
+            continue
+        name = child.name
+        if not name or name.startswith("_"):
+            continue
+        slugs.append(name)
+    slugs.sort()
+    return slugs
+
+
+def _resolve_backlog_target(*, runs_dir: Path, target: str | None) -> str:
+    if isinstance(target, str) and target.strip():
+        return target.strip()
+    candidates = _list_backlog_targets(runs_dir)
+    if len(candidates) == 1:
+        return candidates[0]
+    if not candidates:
+        raise SystemExit(
+            "Unable to infer --backlog-target because there are no target directories under "
+            f"{runs_dir}. Provide --backlog-target or --no-refresh-backlog."
+        )
+    raise SystemExit(
+        "Unable to infer --backlog-target because multiple targets exist under "
+        f"{runs_dir}: {', '.join(candidates)}. Provide --backlog-target or --no-refresh-backlog."
+    )
+
+
+def _run_workflow_step(argv: list[str], *, cwd: Path, label: str) -> None:
+    cmd = " ".join(argv)
+    print(f"[workflow] {label}: {cmd}", file=sys.stderr)
+    proc = subprocess.run(argv, cwd=str(cwd), check=False)
+    if proc.returncode != 0:
+        raise SystemExit(proc.returncode)
+
+
+def _refresh_backlog_for_ticket_implementation(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+) -> None:
+    runs_dir = (
+        args.backlog_runs_dir.resolve()
+        if args.backlog_runs_dir is not None
+        else _default_backlog_runs_dir(repo_root)
+    )
+    target = _resolve_backlog_target(runs_dir=runs_dir, target=args.backlog_target)
+
+    backlog_agent = str(args.backlog_agent) if args.backlog_agent else "claude"
+    backlog_model = (
+        str(args.backlog_model).strip()
+        if isinstance(args.backlog_model, str) and args.backlog_model.strip()
+        else None
+    )
+    review_agent = (
+        str(args.review_agent).strip()
+        if isinstance(args.review_agent, str) and args.review_agent.strip()
+        else backlog_agent
+    )
+    review_model = (
+        str(args.review_model).strip()
+        if isinstance(args.review_model, str) and args.review_model.strip()
+        else None
+    )
+
+    base = [sys.executable, "-m", "usertest_backlog.cli"]
+    common = ["--repo-root", str(repo_root), "--runs-dir", str(runs_dir), "--target", target]
+
+    backlog_cmd = base + ["reports", "backlog", *common, "--agent", backlog_agent]
+    if backlog_model is not None:
+        backlog_cmd.extend(["--model", backlog_model])
+    _run_workflow_step(backlog_cmd, cwd=repo_root, label="reports backlog")
+
+    intent_cmd = base + ["reports", "intent-snapshot", *common]
+    _run_workflow_step(intent_cmd, cwd=repo_root, label="reports intent-snapshot")
+
+    review_cmd = base + ["reports", "review-ux", *common, "--agent", review_agent]
+    if review_model is not None:
+        review_cmd.extend(["--model", review_model])
+    _run_workflow_step(review_cmd, cwd=repo_root, label="reports review-ux")
+
+    export_cmd = base + ["reports", "export-tickets", *common]
+    _run_workflow_step(export_cmd, cwd=repo_root, label="reports export-tickets")
+
+
 def _fingerprint_from_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()[:16]
 
@@ -248,6 +344,7 @@ def _select_ticket_from_path(ticket_path: Path) -> SelectedTicket:
     fingerprint = meta.get("fingerprint") or _fingerprint_from_text(text)
     ticket_id = meta.get("ticket_id")
     title = meta.get("title")
+    export_kind = meta.get("export_kind")
 
     owner_root: Path | None = None
     try:
@@ -263,7 +360,7 @@ def _select_ticket_from_path(ticket_path: Path) -> SelectedTicket:
         fingerprint=fingerprint,
         ticket_id=ticket_id,
         title=title,
-        export_kind=None,
+        export_kind=export_kind,
         owner_root=owner_root,
         idea_path=ticket_path,
         ticket_markdown=text,
@@ -340,20 +437,13 @@ def _write_pr_manifest(*, run_dir: Path, selected: SelectedTicket, branch: str) 
     return title, body
 
 
-def _cmd_run(args: argparse.Namespace) -> int:
-    repo_root = _resolve_repo_root(args.repo_root)
-    cfg = _load_runner_config(repo_root)
-
-    selected: SelectedTicket
-    if args.ticket_path is not None:
-        selected = _select_ticket_from_path(args.ticket_path)
-    else:
-        selected = _select_ticket_from_export(
-            tickets_export_path=args.tickets_export,
-            fingerprint=args.fingerprint,
-            ticket_id=args.ticket_id,
-        )
-
+def _run_selected_ticket(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+    cfg: RunnerConfig,
+    selected: SelectedTicket,
+) -> int:
     repo_input: str | None = None
     if isinstance(args.repo, str) and args.repo.strip():
         repo_input = args.repo.strip()
@@ -626,6 +716,23 @@ def _cmd_run(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _cmd_run(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    cfg = _load_runner_config(repo_root)
+
+    selected: SelectedTicket
+    if args.ticket_path is not None:
+        selected = _select_ticket_from_path(args.ticket_path)
+    else:
+        selected = _select_ticket_from_export(
+            tickets_export_path=args.tickets_export,
+            fingerprint=args.fingerprint,
+            ticket_id=args.ticket_id,
+        )
+
+    return _run_selected_ticket(args=args, repo_root=repo_root, cfg=cfg, selected=selected)
+
+
 def _cmd_reports_summarize(args: argparse.Namespace) -> int:
     repo_root = _resolve_repo_root(args.repo_root)
     cfg = _load_runner_config(repo_root)
@@ -691,6 +798,37 @@ def _cmd_tickets_next(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_tickets_run_next(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    cfg = _load_runner_config(repo_root)
+
+    owner_root = args.owner_root.resolve()
+    if bool(args.refresh_backlog):
+        _refresh_backlog_for_ticket_implementation(args=args, repo_root=repo_root)
+
+    index = build_ticket_index(owner_root=owner_root)
+    bucket_priority = list(args.bucket_priority or [])
+    if not bucket_priority:
+        bucket_priority = ["2 - ready", "1.5 - to_plan", "1 - ideas", "0.5 - to_triage"]
+
+    kind_priority = list(args.kind_priority or [])
+    if not kind_priority:
+        kind_priority = ["research", "implementation"]
+
+    selected = select_next_ticket_path(
+        index,
+        bucket_priority=bucket_priority,
+        kind_priority=kind_priority,
+    )
+    if selected is None:
+        print("No tickets found.")
+        return 0
+
+    _, ticket_path = selected
+    ticket = _select_ticket_from_path(ticket_path)
+    return _run_selected_ticket(args=args, repo_root=repo_root, cfg=cfg, selected=ticket)
+
+
 def _cmd_tickets_move(args: argparse.Namespace) -> int:
     owner_root = args.owner_root.resolve()
     dest = move_ticket_file(
@@ -701,6 +839,74 @@ def _cmd_tickets_move(args: argparse.Namespace) -> int:
     )
     print(str(dest))
     return 0
+
+
+def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo", help="Override target repo input (path or git URL).")
+    parser.add_argument("--ref", help="Optional git ref to checkout in the acquired workspace.")
+
+    parser.add_argument("--agent", choices=["claude", "codex", "gemini"], default="codex")
+    parser.add_argument("--model", help="Optional model override.")
+    parser.add_argument("--policy", default="write")
+    parser.add_argument("--persona-id", dest="persona_id")
+    parser.add_argument("--mission-id", dest="mission_id", default="implement_backlog_ticket_v1")
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--agent-config-override",
+        action="append",
+        default=[],
+        help="Repeatable agent config override strings.",
+    )
+    parser.add_argument("--keep-workspace", action="store_true", help="Keep workspace directory after run.")
+
+    parser.add_argument("--exec-backend", choices=["local", "docker"], default="local")
+    run_auth_group = parser.add_mutually_exclusive_group()
+    run_auth_group.add_argument(
+        "--exec-use-host-agent-login",
+        dest="exec_use_host_agent_login",
+        action="store_true",
+        default=True,
+    )
+    run_auth_group.add_argument(
+        "--exec-use-api-key-auth",
+        dest="exec_use_host_agent_login",
+        action="store_false",
+    )
+    parser.add_argument("--exec-use-target-sandbox-cli-install", action="store_true", default=False)
+    parser.add_argument("--exec-keep-container", action="store_true")
+
+    parser.add_argument("--dry-run", action="store_true")
+
+    parser.add_argument("--commit", action="store_true", help="Create branch + commit changes in kept workspace.")
+    parser.add_argument("--branch", help="Branch name override.")
+    parser.add_argument("--commit-message", dest="commit_message", help="Commit message override.")
+
+    parser.add_argument("--push", action="store_true", help="Push branch to remote.")
+    parser.add_argument("--remote-name", default="origin")
+    parser.add_argument("--remote-url")
+    parser.add_argument("--force-push", dest="force_push", action="store_true")
+    parser.add_argument("--pr", action="store_true", help="Best-effort PR creation via gh.")
+
+    parser.add_argument(
+        "--move-on-start",
+        action="store_true",
+        help="Move ticket file to 3 - in_progress if possible.",
+    )
+    parser.add_argument(
+        "--move-on-commit",
+        action="store_true",
+        help="Move ticket file to 4 - for_review after --commit.",
+    )
+    parser.add_argument(
+        "--ledger",
+        nargs="?",
+        const=Path("configs/backlog_implement_actions.yaml"),
+        type=Path,
+        help=(
+            "Optional attempt ledger YAML. If provided without a value, defaults to "
+            "<repo_root>/configs/backlog_implement_actions.yaml."
+        ),
+    )
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -720,72 +926,7 @@ def build_parser() -> argparse.ArgumentParser:
     ticket_group.add_argument("--ticket-path", dest="ticket_path", type=Path, help="Ticket markdown path.")
     run_p.add_argument("--fingerprint", help="Ticket fingerprint selector (requires --tickets-export).")
     run_p.add_argument("--ticket-id", help="Ticket id selector (requires --tickets-export).")
-
-    run_p.add_argument("--repo", help="Override target repo input (path or git URL).")
-    run_p.add_argument("--ref", help="Optional git ref to checkout in the acquired workspace.")
-
-    run_p.add_argument("--agent", choices=["claude", "codex", "gemini"], default="codex")
-    run_p.add_argument("--model", help="Optional model override.")
-    run_p.add_argument("--policy", default="write")
-    run_p.add_argument("--persona-id", dest="persona_id")
-    run_p.add_argument("--mission-id", dest="mission_id", default="implement_backlog_ticket_v1")
-    run_p.add_argument("--seed", type=int, default=0)
-    run_p.add_argument(
-        "--agent-config-override",
-        action="append",
-        default=[],
-        help="Repeatable agent config override strings.",
-    )
-    run_p.add_argument("--keep-workspace", action="store_true", help="Keep workspace directory after run.")
-
-    run_p.add_argument("--exec-backend", choices=["local", "docker"], default="local")
-    run_auth_group = run_p.add_mutually_exclusive_group()
-    run_auth_group.add_argument(
-        "--exec-use-host-agent-login",
-        dest="exec_use_host_agent_login",
-        action="store_true",
-        default=True,
-    )
-    run_auth_group.add_argument(
-        "--exec-use-api-key-auth",
-        dest="exec_use_host_agent_login",
-        action="store_false",
-    )
-    run_p.add_argument("--exec-use-target-sandbox-cli-install", action="store_true", default=False)
-    run_p.add_argument("--exec-keep-container", action="store_true")
-
-    run_p.add_argument("--dry-run", action="store_true")
-
-    run_p.add_argument("--commit", action="store_true", help="Create branch + commit changes in kept workspace.")
-    run_p.add_argument("--branch", help="Branch name override.")
-    run_p.add_argument("--commit-message", dest="commit_message", help="Commit message override.")
-
-    run_p.add_argument("--push", action="store_true", help="Push branch to remote.")
-    run_p.add_argument("--remote-name", default="origin")
-    run_p.add_argument("--remote-url")
-    run_p.add_argument("--force-push", dest="force_push", action="store_true")
-    run_p.add_argument("--pr", action="store_true", help="Best-effort PR creation via gh.")
-
-    run_p.add_argument(
-        "--move-on-start",
-        action="store_true",
-        help="Move ticket file to 3 - in_progress if possible.",
-    )
-    run_p.add_argument(
-        "--move-on-commit",
-        action="store_true",
-        help="Move ticket file to 4 - for_review after --commit.",
-    )
-    run_p.add_argument(
-        "--ledger",
-        nargs="?",
-        const=Path("configs/backlog_implement_actions.yaml"),
-        type=Path,
-        help=(
-            "Optional attempt ledger YAML. If provided without a value, defaults to "
-            "<repo_root>/configs/backlog_implement_actions.yaml."
-        ),
-    )
+    _add_run_execution_args(run_p)
 
     run_p.set_defaults(func=_cmd_run)
 
@@ -815,6 +956,58 @@ def build_parser() -> argparse.ArgumentParser:
     tickets_next_p.add_argument("--owner-root", type=Path, default=Path.cwd())
     tickets_next_p.add_argument("--bucket-priority", action="append", default=[])
     tickets_next_p.set_defaults(func=_cmd_tickets_next)
+
+    tickets_run_next_p = tickets_sub.add_parser(
+        "run-next",
+        help=(
+            "Refresh the backlog + ticket exports, then implement the next local plan ticket "
+            "(research-first)."
+        ),
+    )
+    tickets_run_next_p.add_argument("--owner-root", type=Path, default=Path.cwd())
+    tickets_run_next_p.add_argument("--bucket-priority", action="append", default=[])
+    tickets_run_next_p.add_argument(
+        "--kind-priority",
+        action="append",
+        default=[],
+        help=(
+            "Ticket kind ordering derived from markdown (repeatable). "
+            "Defaults to: research, implementation."
+        ),
+    )
+    tickets_run_next_p.add_argument(
+        "--no-refresh-backlog",
+        action="store_false",
+        dest="refresh_backlog",
+        default=True,
+        help="Skip running usertest-backlog refresh steps before selecting the next ticket.",
+    )
+    tickets_run_next_p.add_argument("--backlog-target", help="Target slug for usertest-backlog refresh.")
+    tickets_run_next_p.add_argument(
+        "--backlog-runs-dir",
+        type=Path,
+        help="Runs directory for usertest-backlog refresh (default: <repo_root>/runs/usertest).",
+    )
+    tickets_run_next_p.add_argument(
+        "--backlog-agent",
+        choices=["claude", "codex", "gemini"],
+        help="Agent CLI used for `usertest-backlog reports backlog`.",
+    )
+    tickets_run_next_p.add_argument(
+        "--backlog-model",
+        help="Optional model override for `usertest-backlog reports backlog`.",
+    )
+    tickets_run_next_p.add_argument(
+        "--review-agent",
+        choices=["claude", "codex", "gemini"],
+        help="Agent CLI used for `usertest-backlog reports review-ux` (default: --backlog-agent).",
+    )
+    tickets_run_next_p.add_argument(
+        "--review-model",
+        help="Optional model override for `usertest-backlog reports review-ux`.",
+    )
+    _add_run_execution_args(tickets_run_next_p)
+    tickets_run_next_p.set_defaults(func=_cmd_tickets_run_next)
 
     tickets_move_p = tickets_sub.add_parser("move", help="Move a ticket file between plan buckets.")
     tickets_move_p.add_argument("--owner-root", type=Path, default=Path.cwd())

@@ -97,6 +97,13 @@ Entry points:
 - `usertest-implement reports summarize`
   - Summarize implementation runs into JSONL for analysis.
 
+### Ticket queue helpers
+
+- `usertest-implement tickets list|next|move`
+  - Work with `.agents/plans/*` ticket queues.
+- `usertest-implement tickets run-next`
+  - Standard flow: refresh backlog exports (including `review-ux`) and implement the next ticket (research-first).
+
 ---
 
 ## Common flags and concepts
