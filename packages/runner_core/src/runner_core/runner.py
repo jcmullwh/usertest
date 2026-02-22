@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 import os
 import platform
+import random
 import re
 import shutil
 import subprocess
 import time
+import traceback
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from json import JSONDecoder
 from pathlib import Path
 from typing import Any
@@ -51,6 +54,7 @@ from runner_core.pip_target import (
     requirements_path as pip_requirements_path,
 )
 from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
+from runner_core.python_interpreter_probe import probe_python_interpreters
 from runner_core.run_spec import resolve_effective_run_inputs
 from runner_core.target_acquire import acquire_target
 
@@ -81,6 +85,8 @@ class RunRequest:
     keep_workspace: bool = False
     preflight_commands: tuple[str, ...] = ()
     preflight_required_commands: tuple[str, ...] = ()
+    verification_commands: tuple[str, ...] = ()
+    verification_timeout_seconds: float | None = None
 
     exec_backend: str = "local"
     exec_docker_context: Path | None = None
@@ -171,6 +177,14 @@ _FAILURE_SUBTYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "transient_network",
+        (
+            re.compile(r"\bEAI_AGAIN\b", re.IGNORECASE),
+            re.compile(r"temporary failure in name resolution", re.IGNORECASE),
+            re.compile(r"\bENOTFOUND\b", re.IGNORECASE),
+        ),
+    ),
+    (
         "disk_full",
         (
             re.compile(r"\bENOSPC\b", re.IGNORECASE),
@@ -189,6 +203,15 @@ _FAILURE_SUBTYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "nested_agent_session",
+        (
+            re.compile(
+                r"claude code cannot be launched inside another claude code session",
+                re.IGNORECASE,
+            ),
+        ),
+    ),
+    (
         "binary_or_command_missing",
         (
             re.compile(r"command not found", re.IGNORECASE),
@@ -198,11 +221,33 @@ _FAILURE_SUBTYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
 )
+_NON_RETRYABLE_PROVIDER_CAPACITY_PATTERNS: tuple[re.Pattern[str], ...] = (
+    re.compile(r"insufficient[_ -]?quota", re.IGNORECASE),
+    re.compile(r"quota exceeded", re.IGNORECASE),
+    re.compile(r"hit your limit", re.IGNORECASE),
+    re.compile(r"billing", re.IGNORECASE),
+    re.compile(r"payment required", re.IGNORECASE),
+    re.compile(r"upgrade (plan|account)", re.IGNORECASE),
+    re.compile(r"trial (has )?ended", re.IGNORECASE),
+)
+_NON_RETRYABLE_TRANSIENT_NETWORK_PATTERNS: tuple[re.Pattern[str], ...] = ()
 
-_GEMINI_STDERR_STRIP_LINES: frozenset[str] = frozenset({"Loaded cached credentials."})
+_GEMINI_STDERR_STRIP_LINES: frozenset[str] = frozenset(
+    {
+        "Loaded cached credentials.",
+        "Hook registry initialized with 0 hook entries.",
+        "Hook registry initialized with 0 hook entries",
+    }
+)
 _CODEX_PERSONALITY_MISSING_MESSAGES_WARNING = (
     "Model personality requested but model_messages is missing"
 )
+_CODEX_SHELL_SNAPSHOT_WARNING = "Shell snapshot not supported yet for PowerShell"
+_CODEX_SHELL_SNAPSHOT_WARNING_CODE = "shell_snapshot_powershell_unsupported"
+_CODEX_TURN_METADATA_TIMEOUT_CODE = "turn_metadata_header_timeout"
+_CODEX_MODEL_REFRESH_TIMEOUT_CODE = "codex_model_refresh_timeout"
+_CODEX_MODEL_REFRESH_TIMEOUT_HINT = "hint=Codex model refresh timed out; model list may be stale."
+_MAX_AGENT_RETRY_DELAY_SECONDS = 60.0
 _READ_FILE_NOT_FOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"Error executing tool read_file:\s*File not found(?::\s*|\s+)(?P<path>\S+)",
@@ -214,6 +259,17 @@ _READ_FILE_NOT_FOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
     ),
 )
 _WINDOWS_POSIX_DRIVE_PATH_RE = re.compile(r"^/([a-zA-Z])/(.*)$")
+_GEMINI_METRICS_RECORDING_LINE_RE = re.compile(
+    (
+        r"^Error recording tool call interactions: .*recordCodeAssistMetrics failed, "
+        r"reason:\s*(?P<reason>.+)$"
+    ),
+    re.IGNORECASE,
+)
+_GEMINI_PROVIDER_CAPACITY_MODEL_RE = re.compile(
+    r"No capacity available for model\s+(?P<model>[A-Za-z0-9_.:-]+)",
+    re.IGNORECASE,
+)
 
 
 def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
@@ -221,28 +277,361 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
         return text
 
     if agent == "gemini":
-        lines = [
-            line for line in text.splitlines() if line.strip() not in _GEMINI_STDERR_STRIP_LINES
-        ]
-        return "\n".join(lines)
+        raw_lines = text.splitlines()
+        lines = [line for line in raw_lines if line.strip() not in _GEMINI_STDERR_STRIP_LINES]
+
+        saw_missing_pgrep_output = any(
+            line.strip().lower() == "missing pgrep output" for line in lines
+        )
+        if saw_missing_pgrep_output:
+            lines = [line for line in lines if line.strip().lower() != "missing pgrep output"]
+
+        metrics_lines: list[str] = []
+        other_lines: list[str] = []
+        for line in lines:
+            if _GEMINI_METRICS_RECORDING_LINE_RE.match(line.strip()):
+                metrics_lines.append(line.strip())
+            else:
+                other_lines.append(line)
+
+        metrics_occurrences = len(metrics_lines)
+        metrics_reason = ""
+        if metrics_lines:
+            match = _GEMINI_METRICS_RECORDING_LINE_RE.match(metrics_lines[0])
+            if match is not None:
+                metrics_reason = match.group("reason").strip()
+
+        other_text = "\n".join(other_lines).strip()
+        lowered = "\n".join(lines).lower()
+        hints: list[str] = []
+        prefix_blocks: list[str] = []
+        body_lines: list[str] = []
+
+        is_policy_denial = "tool execution denied by policy" in lowered
+        is_run_shell_command_denial = "error executing tool run_shell_command" in lowered
+        has_heredoc = bool(re.search(r"<<\s*\w+", other_text))
+
+        if _classify_failure_subtype(other_text) == "provider_capacity":
+            model = ""
+            model_match = _GEMINI_PROVIDER_CAPACITY_MODEL_RE.search(other_text)
+            if model_match is not None:
+                model = model_match.group("model")
+            else:
+                json_model_match = re.search(r"\"model\"\s*:\s*\"(?P<model>[^\"]+)\"", other_text)
+                if json_model_match is not None:
+                    model = json_model_match.group("model")
+
+            retryable = _is_retryable_provider_capacity_failure(other_text)
+            model_clause = f" model={model}" if model else ""
+            classification = "transient_error" if retryable else "account_or_quota_error"
+            prefix_blocks.append(
+                "\n".join(
+                    [
+                        (
+                            "[gemini_error_summary] code=provider_capacity "
+                            f"classification={classification} retryable={str(retryable).lower()}"
+                        ),
+                        (
+                            "detail=Gemini API reported HTTP 429 RESOURCE_EXHAUSTED "
+                            f"(capacity unavailable).{model_clause}"
+                        ),
+                        (
+                            "hint=If this is transient vendor capacity, retry later or pick a "
+                            "different model via `--model`. "
+                            "If this is quota/billing related, retries will not help."
+                        ),
+                    ]
+                )
+            )
+            body_lines = [
+                line
+                for line in other_lines
+                if line.lstrip().startswith("Error executing tool") or line.lstrip().startswith("[")
+            ]
+        elif is_policy_denial:
+            prefix_blocks.append(
+                "\n".join(
+                    [
+                        "[gemini_error_summary] code=policy_denial "
+                        "classification=policy_denial retryable=false",
+                        "detail=Gemini tool execution was denied by policy.",
+                        (
+                            "hint=Rewrite the operation using sandbox-safe tools "
+                            "(read_file/write_file/replace) or simplify the command. "
+                            "Check preflight.json -> capabilities for allowed tools."
+                        ),
+                    ]
+                )
+            )
+            # Keep stderr concise: policy-denial errors sometimes echo huge payloads (for example
+            # heredocs). Prefer only tool-level error lines and brief parser diagnostics.
+            body_lines = [
+                line
+                for line in other_lines
+                if (
+                    line.lstrip().startswith("Error executing tool")
+                    or "tool execution denied by policy" in line.lower()
+                    or "bash command parsing error" in line.lower()
+                    or "syntax errors" in line.lower()
+                    or line.lstrip().startswith("[")
+                )
+            ]
+        else:
+            body_lines = other_lines
+
+        if metrics_occurrences:
+            reason_clause = f" reason={metrics_reason}" if metrics_reason else ""
+            prefix_blocks.append(
+                "\n".join(
+                    [
+                        (
+                            "[gemini_warning_summary] code=metrics_recording_failed "
+                            f"occurrences={metrics_occurrences} classification=transient_warning"
+                        ),
+                        f"detail=Gemini CLI failed to record metrics.{reason_clause}".strip(),
+                        (
+                            "hint=This is best-effort telemetry and typically does not affect the "
+                            "run output. If it persists, check DNS/proxy/network access and retry."
+                        ),
+                    ]
+                )
+            )
+
+        if (
+            "error executing tool grep_search" in lowered
+            and "invalid regular expression" in lowered
+            and "tool=grep_search" not in lowered
+        ):
+            hints.append(
+                "\n".join(
+                    [
+                        "[gemini_tool_hint] tool=grep_search code=invalid_regex "
+                        "classification=user_input_error",
+                        "hint=Gemini grep_search patterns are regular expressions. "
+                        "Escape regex metacharacters "
+                        "(for example `(`, `)`, `[`, `]`) "
+                        "or search for a simpler literal substring.",
+                    ]
+                )
+            )
+
+        if (
+            "error executing tool replace" in lowered
+            and "could not find the string to replace" in lowered
+            and "tool=replace" not in lowered
+        ):
+            hints.append(
+                "\n".join(
+                    [
+                        "[gemini_tool_hint] tool=replace code=string_not_found "
+                        "classification=user_input_error",
+                        "hint=Gemini replace requires an exact match. "
+                        "Re-run grep_search around the intended "
+                        "edit location and copy/paste a longer, unique snippet "
+                        "(watch whitespace/line endings).",
+                    ]
+                )
+            )
+
+        if (
+            "error executing tool read_file" in lowered
+            and "file not found" in lowered
+            and "tool=read_file" not in lowered
+        ):
+            if saw_missing_pgrep_output:
+                hints.append(
+                    "\n".join(
+                        [
+                            "[gemini_tool_hint] tool=read_file code=missing_pgrep_output "
+                            "classification=capability_notice",
+                            "hint=Gemini CLI sometimes emits `missing pgrep output` "
+                            "alongside read_file `File not found` errors. "
+                            "Inspect raw_events.jsonl for the full missing path "
+                            "and re-run with a corrected, workspace-relative path.",
+                        ]
+                    )
+                )
+            else:
+                hints.append(
+                    "\n".join(
+                        [
+                            "[gemini_tool_hint] tool=read_file code=file_not_found "
+                            "classification=user_input_error",
+                            "hint=Confirm the file path exists in the active workspace. "
+                            "If the stderr line omits the missing path, "
+                            "check raw_events.jsonl for the full File not found message.",
+                        ]
+                    )
+                )
+
+        if (
+            is_policy_denial
+            and is_run_shell_command_denial
+            and "tool=run_shell_command" not in lowered
+            and has_heredoc
+        ):
+            hints.append(
+                "\n".join(
+                    [
+                        "[gemini_tool_hint] tool=run_shell_command "
+                        "code=policy_denied_heredoc classification=policy_denial",
+                        (
+                            "hint=This sandbox/policy rejects heredoc syntax "
+                            "(for example `<<EOF`). "
+                            "Use `write_file`/`replace` for multiline content instead of heredocs."
+                        ),
+                    ]
+                )
+            )
+        elif (
+            is_policy_denial
+            and is_run_shell_command_denial
+            and "tool=run_shell_command" not in lowered
+        ):
+            hints.append(
+                "\n".join(
+                    [
+                        "[gemini_tool_hint] tool=run_shell_command "
+                        "code=policy_denied classification=policy_denial",
+                        (
+                            "hint=This command was denied by sandbox/policy. "
+                            "Check preflight.json -> capabilities and adjust the command "
+                            "to use allowed tools."
+                        ),
+                    ]
+                )
+            )
+
+        rendered_blocks: list[str] = []
+        if prefix_blocks:
+            rendered_blocks.append("\n\n".join(prefix_blocks).strip())
+        if body_lines:
+            rendered_blocks.append("\n".join(body_lines).strip())
+        sanitized = "\n\n".join([block for block in rendered_blocks if block]).strip()
+
+        if hints:
+            sanitized = (sanitized + "\n\n" if sanitized else "") + "\n\n".join(hints)
+
+        return sanitized
+
+    if agent == "claude":
+        blocks: list[list[str]] = []
+        current: list[str] = []
+        for line in text.splitlines():
+            if not line.strip():
+                if current:
+                    blocks.append(current)
+                    current = []
+                continue
+            current.append(line)
+        if current:
+            blocks.append(current)
+
+        config_missing_occurrences = 0
+        seen_config_blocks: set[str] = set()
+        rendered_blocks: list[str] = []
+
+        for block in blocks:
+            rendered = "\n".join(block)
+            if block and block[0].startswith("Claude configuration file not found at:"):
+                config_missing_occurrences += 1
+                if rendered in seen_config_blocks:
+                    continue
+                seen_config_blocks.add(rendered)
+            rendered_blocks.append(rendered)
+
+        if config_missing_occurrences > 1:
+            rendered_blocks.append(
+                "[claude_warning_summary] code=claude_config_missing "
+                f"occurrences={config_missing_occurrences} classification=capability_notice"
+            )
+
+        if "Claude Code cannot be launched inside another Claude Code session" in text:
+            rendered_blocks.append(
+                "\n".join(
+                    [
+                        "[claude_error_hint] code=claude_nested_session classification=env_error",
+                        "hint=Claude Code cannot be launched inside another Claude Code session. "
+                        "Run usertest outside Claude Code, or use --agent codex/gemini.",
+                    ]
+                )
+            )
+
+        return "\n\n".join(rendered_blocks)
 
     if agent == "codex":
-        # Codex can emit this warning on every turn; keep one copy for debugging, drop duplicates.
+        # Codex can emit repeated warnings every turn; collapse known noise to one structured note.
         saw_personality_warning = False
+        shell_snapshot_count = 0
+        turn_metadata_timeout_count = 0
+        model_refresh_timeout_count = 0
         lines: list[str] = []
         for line in text.splitlines():
+            lowered = line.lower()
             if _CODEX_PERSONALITY_MISSING_MESSAGES_WARNING in line:
                 if saw_personality_warning:
                     continue
                 saw_personality_warning = True
+            if _CODEX_SHELL_SNAPSHOT_WARNING.lower() in lowered:
+                shell_snapshot_count += 1
+                continue
+            if "turn metadata" in lowered and "timed out" in lowered and "header" in lowered:
+                turn_metadata_timeout_count += 1
+                continue
+            if (
+                "failed to refresh available models" in lowered
+                and "timeout waiting for child process" in lowered
+            ):
+                model_refresh_timeout_count += 1
+                continue
             lines.append(line)
+
+        if shell_snapshot_count > 0:
+            lines.extend(
+                [
+                    (
+                        "[codex_warning_summary] "
+                        f"code={_CODEX_SHELL_SNAPSHOT_WARNING_CODE} "
+                        f"occurrences={shell_snapshot_count} "
+                        "classification=capability_notice"
+                    ),
+                    (
+                        "hint=PowerShell shell snapshot unsupported; "
+                        "continuing without shell snapshot metadata."
+                    ),
+                ]
+            )
+        if turn_metadata_timeout_count > 0:
+            lines.extend(
+                [
+                    (
+                        "[codex_warning_summary] "
+                        f"code={_CODEX_TURN_METADATA_TIMEOUT_CODE} "
+                        f"occurrences={turn_metadata_timeout_count} "
+                        "classification=capability_notice"
+                    ),
+                    "hint=Turn metadata header timed out; continuing without metadata header.",
+                ]
+            )
+        if model_refresh_timeout_count > 0:
+            lines.extend(
+                [
+                    (
+                        "[codex_warning_summary] "
+                        f"code={_CODEX_MODEL_REFRESH_TIMEOUT_CODE} "
+                        f"occurrences={model_refresh_timeout_count} "
+                        "classification=capability_notice"
+                    ),
+                    _CODEX_MODEL_REFRESH_TIMEOUT_HINT,
+                ]
+            )
         return "\n".join(lines)
 
     return text
 
 
 def _sanitize_agent_stderr_file(*, agent: str, path: Path) -> None:
-    if agent not in {"gemini", "codex"} or not path.exists():
+    if agent not in {"gemini", "codex", "claude"} or not path.exists():
         return
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
@@ -414,6 +803,18 @@ def _classify_failure_subtype(text: str) -> str | None:
     return None
 
 
+def _is_retryable_provider_capacity_failure(text: str) -> bool:
+    if not text.strip():
+        return True
+    return not any(pattern.search(text) for pattern in _NON_RETRYABLE_PROVIDER_CAPACITY_PATTERNS)
+
+
+def _is_retryable_transient_network_failure(text: str) -> bool:
+    if not text.strip():
+        return True
+    return not any(pattern.search(text) for pattern in _NON_RETRYABLE_TRANSIENT_NETWORK_PATTERNS)
+
+
 def _agent_binary_for_preflight_probe(*, agent: str, agent_cfg: dict[str, Any]) -> str | None:
     default_binary = {
         "codex": "codex",
@@ -435,13 +836,41 @@ def _agent_binary_for_preflight_probe(*, agent: str, agent_cfg: dict[str, Any]) 
     return binary
 
 
-def _probe_commands_local(commands: list[str]) -> dict[str, bool]:
+def _probe_commands_local(commands: list[str]) -> tuple[dict[str, bool], dict[str, Any]]:
     out: dict[str, bool] = {}
+    probe_details: dict[str, dict[str, Any]] = {}
+    python_commands = [cmd for cmd in commands if cmd in {"python", "python3", "py"}]
+    python_probe = (
+        probe_python_interpreters(candidate_commands=python_commands, timeout_seconds=5.0)
+        if python_commands
+        else None
+    )
+    python_by_command = python_probe.by_command() if python_probe is not None else {}
     for cmd in commands:
         if not isinstance(cmd, str) or not cmd.strip():
             continue
-        out[cmd] = shutil.which(cmd) is not None
-    return out
+        if cmd in python_by_command:
+            candidate = python_by_command[cmd]
+            out[cmd] = bool(candidate.usable)
+            probe_details[cmd] = candidate.to_dict()
+            continue
+
+        resolved = shutil.which(cmd)
+        present = resolved is not None
+        out[cmd] = present
+        probe_details[cmd] = {
+            "command": cmd,
+            "resolved_path": resolved,
+            "present": present,
+            "usable": present,
+            "reason_code": (None if present else "not_found"),
+            "reason": (None if present else f"`{cmd}` was not found on PATH."),
+        }
+
+    meta: dict[str, Any] = {"command_probe_details": probe_details}
+    if python_probe is not None:
+        meta["python_interpreter"] = python_probe.to_dict()
+    return out, meta
 
 
 def _snapshot_workspace_root(workspace_dir: Path, *, max_entries: int = 200) -> dict[str, Any]:
@@ -490,6 +919,21 @@ def _runner_host_os() -> str:
     return platform.system()
 
 
+def _execution_shell_family(*, exec_backend: str, host_os: str) -> str:
+    """
+    Return the intended shell "family" for commands executed via sandboxed shell tools.
+
+    This is used only for prompt metadata / agent guidance, not for selecting an actual
+    interpreter. Keep it coarse and predictable.
+    """
+
+    if exec_backend != "local":
+        return "bash"
+    if host_os.strip().lower().startswith("windows"):
+        return "powershell"
+    return "bash"
+
+
 def _effective_gemini_cli_sandbox(*, policy_value: Any, has_outer_sandbox: bool) -> bool:
     enabled = bool(policy_value) if isinstance(policy_value, bool) else True
     if not enabled:
@@ -499,12 +943,190 @@ def _effective_gemini_cli_sandbox(*, policy_value: Any, has_outer_sandbox: bool)
         # executing inside a Docker sandbox, rely on the outer sandbox and disable Gemini's
         # nested sandbox.
         return False
+    try:
+        if Path("/.dockerenv").exists():
+            # Some environments run the runner inside a container even when the runner's
+            # execution backend is "local". Avoid asking Gemini CLI to create a nested container.
+            return False
+    except OSError:
+        pass
     if os.name == "nt":
         # Gemini CLI's `--sandbox` relies on docker/podman and can hang on Windows hosts in
         # headless/non-interactive runs. For runner use-cases, prefer the runner's own Docker
         # sandbox backend instead.
         return False
     return True
+
+
+def _gemini_include_directories_for_workspace(*, workspace_dir: Path) -> list[str]:
+    """
+    Gemini CLI may apply gitignore-like "ignore patterns" to file tools (read/search), which can
+    hide local-only run artifacts (this repo ignores `runs/`).
+
+    When a workspace contains `runs/usertest/`, explicitly include that directory so agents can
+    read generated `report.md` / `report.json` / `metrics.json` during triage flows.
+    """
+
+    # Gemini CLI runs inside the runner's Docker sandbox (Linux). Always pass POSIX-style
+    # include-directories to avoid `runs\\usertest` being interpreted as a literal path segment.
+    include_rel = (Path("runs") / "usertest").as_posix()
+    candidate = workspace_dir / "runs" / "usertest"
+    if candidate.is_dir():
+        return [include_rel]
+
+    # Some missions run this repo's own CLI inside the workspace and then try to inspect the
+    # resulting artifacts under `runs/usertest/...`. Gemini CLI's file tools may ignore `runs/`
+    # by default, so ensure the directory exists up front for this runner repo so we can pass
+    # `--include-directories runs/usertest` at process start.
+    marker = workspace_dir / "tools" / "scaffold" / "monorepo.toml"
+    if marker.exists():
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return []
+        return [include_rel]
+
+    return []
+
+
+_RUNS_USERTEST_GITIGNORE_MARKER = (
+    "# usertest: allow reading run artifacts under runs/usertest for agent file tools."
+)
+
+
+def _gitignore_ignores_runs(text: str) -> bool:
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("#") or stripped.startswith("!"):
+            continue
+        if stripped == "runs" or stripped == "runs/":
+            return True
+        if stripped.startswith("runs/"):
+            return True
+    return False
+
+
+def _maybe_patch_workspace_gitignore_for_runs_usertest(*, workspace_dir: Path) -> None:
+    """
+    Some agent file tools respect gitignore-style ignore patterns and will refuse to read files
+    under ignored directories. Many repos ignore `runs/` by default, but usertest itself writes
+    run artifacts under `runs/usertest/**` which are important for triage/rerender workflows.
+
+    This helper patches the acquired (ephemeral) workspace `.gitignore` to re-include
+    `runs/usertest/**` while keeping other `runs/*` children ignored.
+    """
+
+    gitignore_path = workspace_dir / ".gitignore"
+    try:
+        existing = gitignore_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return
+
+    if _RUNS_USERTEST_GITIGNORE_MARKER in existing:
+        return
+    if not _gitignore_ignores_runs(existing):
+        return
+
+    # Standard gitignore-compatible pattern sequence to unignore only runs/usertest.
+    patch_lines = [
+        _RUNS_USERTEST_GITIGNORE_MARKER,
+        "!runs/",
+        "runs/*",
+        "!runs/usertest/",
+        "!runs/usertest/**",
+        "",
+    ]
+    prefix = "" if (not existing or existing.endswith("\n")) else "\n"
+    patched = existing + prefix + "\n".join(patch_lines)
+    try:
+        gitignore_path.write_text(patched, encoding="utf-8", newline="\n")
+    except OSError:
+        return
+
+
+def _infer_docker_container_name(command_prefix: list[str]) -> str | None:
+    if (
+        len(command_prefix) >= 3
+        and command_prefix[0] == "docker"
+        and command_prefix[1] == "exec"
+        and isinstance(command_prefix[-1], str)
+        and command_prefix[-1].strip()
+    ):
+        return command_prefix[-1].strip()
+    return None
+
+
+def _render_sandbox_cli_install_hint(agent_cfg: dict[str, Any]) -> str | None:
+    install_cfg = agent_cfg.get("sandbox_cli_install")
+    if not isinstance(install_cfg, dict):
+        return None
+
+    npm_global = install_cfg.get("npm_global")
+    npm_pkgs = (
+        [x.strip() for x in npm_global if isinstance(x, str) and x.strip()]
+        if isinstance(npm_global, list)
+        else []
+    )
+    if npm_pkgs:
+        pkgs = " ".join(npm_pkgs)
+        return f"`npm install -g {pkgs}` (requires Node.js + npm)"
+
+    pip_items = install_cfg.get("pip")
+    pip_pkgs = (
+        [x.strip() for x in pip_items if isinstance(x, str) and x.strip()]
+        if isinstance(pip_items, list)
+        else []
+    )
+    if pip_pkgs:
+        pkgs = " ".join(pip_pkgs)
+        return f"`python -m pip install {pkgs}`"
+
+    return None
+
+
+def _build_binary_missing_hints(
+    *,
+    agent: str,
+    required_binary: str,
+    exec_backend: str,
+    agent_cfg: dict[str, Any],
+    command_prefix: list[str],
+) -> dict[str, str]:
+    hints: dict[str, str] = {}
+
+    hints["verify"] = f"`{required_binary} --version`"
+    hints["config"] = (
+        f"Update `configs/agents.yaml` `agents.{agent}.binary` to a valid path/name."
+    )
+    hints["doctor"] = (
+        "Run `python -m agent_adapters.cli doctor` to check which agent CLIs "
+        "are on PATH."
+    )
+
+    install_hint = _render_sandbox_cli_install_hint(agent_cfg)
+    if exec_backend == "docker":
+        details = f" (expected install: {install_hint})" if install_hint else ""
+        hints["install"] = (
+            "Rebuild the Docker sandbox image so it can install the agent CLI"
+            f"{details}; rerun with `--exec-rebuild-image`."
+        )
+        hints["debug"] = (
+            "See `sandbox/docker_build.log` and "
+            "`sandbox/sandbox_cli_install.json` in the run directory."
+        )
+        container_name = _infer_docker_container_name(command_prefix)
+        if container_name is not None:
+            hints["container"] = (
+                "For interactive debugging, rerun with `--exec-keep-container` and inspect "
+                f"`sandbox/sandbox.json` (container_name={container_name!r})."
+            )
+    else:
+        hints["install"] = (
+            f"Install `{required_binary}` on PATH"
+            + (f"; suggested: {install_hint}." if install_hint else ".")
+        )
+
+    return hints
 
 
 def _infer_shell_policy_status(
@@ -678,7 +1300,7 @@ def _build_followup_prompt(
     schema_dict: dict[str, Any],
     prior_last_message_text: str,
     attempt_number: int,
-) -> str:
+    ) -> str:
     errors = [str(e).strip() for e in report_validation_errors if str(e).strip()]
     error_block = "\n".join(f"- {line}" for line in errors[:20]) or "- (no error details)"
 
@@ -708,9 +1330,216 @@ def _build_followup_prompt(
     )
 
 
+def _build_verification_followup_prompt(
+    *,
+    base_prompt: str,
+    verification_summary: dict[str, Any],
+    schema_dict: dict[str, Any],
+    prior_last_message_text: str,
+    attempt_number: int,
+) -> str:
+    commands = verification_summary.get("commands")
+    command_lines: list[str] = []
+    if isinstance(commands, list):
+        for idx, item in enumerate(commands, start=1):
+            if not isinstance(item, dict):
+                continue
+            cmd = item.get("command")
+            exit_code = item.get("exit_code")
+            wall_seconds = item.get("wall_seconds")
+            timed_out = item.get("timed_out")
+            stdout_tail = item.get("stdout_tail")
+            stderr_tail = item.get("stderr_tail")
+            if not isinstance(cmd, str) or not cmd.strip():
+                continue
+            command_lines.append(f"{idx}) {cmd.strip()}")
+            if isinstance(exit_code, int):
+                command_lines.append(f"   exit_code={exit_code}")
+            if isinstance(wall_seconds, (int, float)):
+                command_lines.append(f"   wall_seconds={wall_seconds:.2f}")
+            if isinstance(timed_out, bool):
+                command_lines.append(f"   timed_out={str(timed_out).lower()}")
+            if isinstance(stdout_tail, str) and stdout_tail.strip():
+                command_lines.extend(["   stdout_tail:", "```", stdout_tail.strip(), "```"])
+            if isinstance(stderr_tail, str) and stderr_tail.strip():
+                command_lines.extend(["   stderr_tail:", "```", stderr_tail.strip(), "```"])
+
+    commands_block = "\n".join(command_lines).strip()
+    if not commands_block:
+        commands_block = "(no verification command details captured)"
+
+    prior_message = prior_last_message_text.strip()
+    if len(prior_message) > 20000:
+        prior_message = prior_message[:20000] + "\n...[truncated]"
+    if not prior_message:
+        prior_message = "(no prior message captured)"
+
+    schema_json = json.dumps(schema_dict, indent=2, ensure_ascii=False)
+
+    artifacts_hint = ""
+    artifacts_dir = verification_summary.get("artifacts_dir")
+    if isinstance(artifacts_dir, str) and artifacts_dir.strip():
+        artifacts_hint = (
+            "\n\nVerification artifacts:\n"
+            f"- Host: {artifacts_dir.strip()}\n"
+            f"- Docker: /run_dir/{artifacts_dir.strip()}\n"
+        )
+
+    return (
+        f"{base_prompt}\n\n"
+        "Follow-up required.\n"
+        f"This is follow-up attempt #{attempt_number} because the required "
+        "verification checks failed.\n\n"
+        "Verification results:\n"
+        f"{commands_block}"
+        f"{artifacts_hint}\n\n"
+        "Previous assistant output:\n"
+        "```\n"
+        f"{prior_message}\n"
+        "```\n\n"
+        "Fix the issues so the verification checks pass, then return ONLY one JSON object that "
+        "validates against this schema.\n"
+        "Do not include markdown fences, prose, or extra keys.\n\n"
+        "Schema:\n"
+        f"{schema_json}\n"
+    )
+
+
+def _verification_shell_argv(*, command_prefix: list[str], command: str) -> list[str]:
+    if command_prefix:
+        return [*command_prefix, "sh", "-lc", command]
+    if os.name == "nt":
+        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
+    return ["sh", "-lc", command]
+
+
+def _tail_text_for_prompt(text: str, *, max_chars: int = 2000) -> str:
+    cleaned = text.strip()
+    if len(cleaned) <= max_chars:
+        return cleaned
+    return cleaned[-max_chars:]
+
+
+def _run_verification_commands(
+    *,
+    run_dir: Path,
+    attempt_number: int,
+    commands: list[str],
+    command_prefix: list[str],
+    cwd: Path,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    attempt_dir_rel = Path("verification") / f"attempt{attempt_number}"
+    attempt_dir = run_dir / attempt_dir_rel
+    attempt_dir.mkdir(parents=True, exist_ok=True)
+
+    started_utc = _utc_now_z()
+    started_monotonic = time.monotonic()
+    results: list[dict[str, Any]] = []
+
+    for idx, raw in enumerate(commands, start=1):
+        cmd = raw.strip()
+        if not cmd:
+            continue
+
+        stdout_path = attempt_dir / f"cmd_{idx:02d}.stdout.txt"
+        stderr_path = attempt_dir / f"cmd_{idx:02d}.stderr.txt"
+
+        argv = _verification_shell_argv(command_prefix=command_prefix, command=cmd)
+        cmd_started_utc = _utc_now_z()
+        cmd_started_monotonic = time.monotonic()
+        timed_out = False
+
+        stdout_text = ""
+        stderr_text = ""
+        exit_code: int = 0
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(cwd),
+                check=False,
+                timeout=timeout_seconds,
+            )
+            exit_code = int(proc.returncode or 0)
+            stdout_text = proc.stdout or ""
+            stderr_text = proc.stderr or ""
+        except subprocess.TimeoutExpired as exc:
+            timed_out = True
+            exit_code = 124
+            if isinstance(exc.stdout, bytes):
+                stdout_text = exc.stdout.decode("utf-8", "replace")
+            else:
+                stdout_text = exc.stdout or ""
+            if isinstance(exc.stderr, bytes):
+                stderr_text = exc.stderr.decode("utf-8", "replace")
+            else:
+                stderr_text = exc.stderr or ""
+            stderr_text = (stderr_text.rstrip() + "\n" if stderr_text else "") + (
+                f"[runner] Verification command timed out after {timeout_seconds} seconds.\n"
+            )
+
+        wall_seconds = max(0.0, time.monotonic() - cmd_started_monotonic)
+        try:
+            stdout_path.write_text(stdout_text, encoding="utf-8", newline="\n")
+        except OSError:
+            pass
+        try:
+            stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
+        except OSError:
+            pass
+
+        result: dict[str, Any] = {
+            "index": idx,
+            "command": cmd,
+            "argv": argv,
+            "exit_code": exit_code,
+            "timed_out": timed_out,
+            "command_started_utc": cmd_started_utc,
+            "wall_seconds": wall_seconds,
+            "stdout_path": stdout_path.name,
+            "stderr_path": stderr_path.name,
+            "stdout_tail": _tail_text_for_prompt(stdout_text),
+            "stderr_tail": _tail_text_for_prompt(stderr_text),
+        }
+        results.append(result)
+
+        if exit_code != 0:
+            break
+
+    finished_utc = _utc_now_z()
+    wall_seconds_total = max(0.0, time.monotonic() - started_monotonic)
+    passed = bool(results) and all(int(r.get("exit_code") or 0) == 0 for r in results)
+
+    summary: dict[str, Any] = {
+        "schema_version": 1,
+        "attempt": attempt_number,
+        "artifacts_dir": attempt_dir_rel.as_posix(),
+        "started_utc": started_utc,
+        "finished_utc": finished_utc,
+        "wall_seconds": wall_seconds_total,
+        "timeout_seconds": timeout_seconds,
+        "passed": passed,
+        "commands": results,
+    }
+    _write_json(attempt_dir / "verification.json", summary)
+    return summary
+
+
+def _utc_now_z() -> str:
+    return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _write_json(path: Path, payload: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    path.write_text(
+        json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 def _git_diff(path: Path) -> str:
@@ -902,6 +1731,16 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
     run_dir = config.runs_dir / target_slug / timestamp / request.agent / str(request.seed)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    run_start_monotonic = time.monotonic()
+    run_meta: dict[str, Any] = {
+        "schema_version": 1,
+        "run_started_utc": _utc_now_z(),
+        "phases": {},
+    }
+    agent_phase_start_monotonic: float | None = None
+    agent_phase_end_monotonic: float | None = None
+    postprocess_phase_start_monotonic: float | None = None
+
     workspace_id = f"{target_slug}_{timestamp}_{request.agent}_{request.seed}"
     try:
         preferred_workspace_dir = config.runs_dir / "_workspaces" / workspace_id
@@ -909,6 +1748,19 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             repo=request.repo,
             dest_dir=preferred_workspace_dir,
             ref=request.ref,
+        )
+
+        _write_json(
+            run_dir / "workspace_ref.json",
+            {
+                "schema_version": 1,
+                "workspace_id": workspace_id,
+                "workspace_dir": str(acquired.workspace_dir),
+                "keep_workspace_requested": bool(request.keep_workspace),
+                "will_cleanup_workspace": not (
+                    request.keep_workspace or request.exec_keep_container
+                ),
+            },
         )
 
         target_ref: dict[str, Any] = {
@@ -920,6 +1772,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             "policy": request.policy,
             "seed": request.seed,
             "obfuscate_agent_docs": bool(request.obfuscate_agent_docs),
+            "requested_persona_id": request.persona_id,
+            "requested_mission_id": request.mission_id,
+            **({"model": request.model} if request.model is not None else {}),
         }
         _write_json(run_dir / "target_ref.json", target_ref)
 
@@ -1010,11 +1865,42 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             has_outer_sandbox=(request.exec_backend == "docker"),
         )
         if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
+            suggested_policy = (
+                "write" if bool(resolved_inputs.mission.requires_edits) else "inspect"
+            )
             message = (
                 f"Mission '{effective_spec.mission_id}' requires shell commands, but "
                 f"policy '{request.policy}' for agent '{request.agent}' blocks shell commands."
             )
-            hint = "Use --policy inspect (read-only + shell) or --policy write."
+            hint = (
+                "Use --policy write (allows edits + shell)."
+                if suggested_policy == "write"
+                else "Use --policy inspect (read-only + shell)."
+            )
+            suggested_command_parts: list[str] = [
+                "python",
+                "-m",
+                "usertest.cli",
+                "run",
+                "--repo-root",
+                ".",
+                "--repo",
+                json.dumps(request.repo, ensure_ascii=False),
+                "--agent",
+                request.agent,
+                "--policy",
+                suggested_policy,
+            ]
+            if request.ref:
+                ref_json = json.dumps(request.ref, ensure_ascii=False)
+                suggested_command_parts.extend(["--ref", ref_json])
+            if effective_spec.persona_id:
+                suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
+            if effective_spec.mission_id:
+                suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
+            if request.exec_backend != "local":
+                suggested_command_parts.extend(["--exec-backend", request.exec_backend])
+            suggested_command = " ".join(suggested_command_parts)
             _write_json(
                 run_dir / "preflight.json",
                 {
@@ -1046,6 +1932,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "capability": "shell_commands",
                     "message": message,
                     "hint": hint,
+                    "suggested_policy": suggested_policy,
+                    "suggested_command": suggested_command,
                     "preflight": {
                         "capabilities": {
                             "shell_commands": {
@@ -1060,7 +1948,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             return RunResult(
                 run_dir=run_dir,
                 exit_code=1,
-                report_validation_errors=[message, "code=mission_requires_shell", f"hint={hint}"],
+                report_validation_errors=[
+                    message,
+                    "code=mission_requires_shell",
+                    f"hint={hint}",
+                    f"suggested_command={suggested_command}",
+                ],
             )
 
         if bool(resolved_inputs.mission.requires_edits) and not allow_edits:
@@ -1382,7 +2275,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         commands=effective_probe_commands,
                     )
                 else:
-                    preflight_commands_present = _probe_commands_local(probe_commands)
+                    preflight_commands_present, preflight_meta = _probe_commands_local(
+                        probe_commands
+                    )
             except Exception as e:  # noqa: BLE001
                 preflight_commands_present = {}
                 preflight_meta = {"error": str(e)}
@@ -1434,6 +2329,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "This runner can't reliably precompute allowlist outcome."
                 )
 
+            probe_details = preflight_meta.get("command_probe_details")
+            probe_details_dict = probe_details if isinstance(probe_details, dict) else {}
+            python_interpreter_meta = preflight_meta.get("python_interpreter")
+            python_interpreter_summary = (
+                python_interpreter_meta if isinstance(python_interpreter_meta, dict) else None
+            )
+
             command_diagnostics: dict[str, Any] = {}
             for cmd in effective_probe_commands:
                 present = preflight_commands_present.get(cmd)
@@ -1442,14 +2344,35 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     status = "present"
                 elif present is False:
                     status = "missing"
+
+                detail = probe_details_dict.get(cmd)
+                detail_dict = detail if isinstance(detail, dict) else {}
+                reason_code = detail_dict.get("reason_code")
+                reason_code_s = reason_code if isinstance(reason_code, str) else None
+                reason = detail_dict.get("reason")
+                reason_s = reason if isinstance(reason, str) else None
+                resolved_path = detail_dict.get("resolved_path")
+                resolved_path_s = resolved_path if isinstance(resolved_path, str) else None
+
                 if shell_status == "blocked" and status == "present":
                     status = "blocked_by_policy"
                 remediation: str | None = None
                 if status == "missing":
-                    remediation = (
-                        f"Install `{cmd}` in the selected execution backend, "
-                        "or switch --exec-backend."
-                    )
+                    if reason_code_s == "windowsapps_alias":
+                        remediation = (
+                            "Install and expose a full CPython interpreter (not WindowsApps "
+                            "alias), then retry."
+                        )
+                    elif reason_code_s == "missing_stdlib":
+                        remediation = (
+                            "Selected Python runtime is incomplete (missing stdlib). "
+                            "Install a full interpreter and retry."
+                        )
+                    else:
+                        remediation = (
+                            f"Install `{cmd}` in the selected execution backend, "
+                            "or switch --exec-backend."
+                        )
                 elif status == "blocked_by_policy":
                     remediation = (
                         "Enable shell commands in policy (recommended: --policy inspect), "
@@ -1458,6 +2381,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 command_diagnostics[cmd] = {
                     "present": present,
                     "status": status,
+                    "resolved_path": resolved_path_s,
+                    "reason_code": reason_code_s,
+                    "reason": reason_s,
                     "remediation": remediation,
                 }
 
@@ -1478,6 +2404,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "probe_commands": effective_probe_commands,
                     "required_agent_binary": required_agent_binary,
                     "required_agent_binary_present": required_agent_binary_present,
+                    "python_interpreter": python_interpreter_summary,
                     "capabilities": {
                         "shell_commands": {
                             "status": shell_status,
@@ -1496,11 +2423,42 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
 
             if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
+                suggested_policy = (
+                    "write" if bool(resolved_inputs.mission.requires_edits) else "inspect"
+                )
                 message = (
                     f"Mission '{effective_spec.mission_id}' requires shell commands, but "
                     f"policy '{request.policy}' for agent '{request.agent}' blocks shell commands."
                 )
-                hint = "Use --policy inspect (read-only + shell) or --policy write."
+                hint = (
+                    "Use --policy write (allows edits + shell)."
+                    if suggested_policy == "write"
+                    else "Use --policy inspect (read-only + shell)."
+                )
+                suggested_command_parts: list[str] = [
+                    "python",
+                    "-m",
+                    "usertest.cli",
+                    "run",
+                    "--repo-root",
+                    ".",
+                    "--repo",
+                    json.dumps(request.repo, ensure_ascii=False),
+                    "--agent",
+                    request.agent,
+                    "--policy",
+                    suggested_policy,
+                ]
+                if request.ref:
+                    ref_json = json.dumps(request.ref, ensure_ascii=False)
+                    suggested_command_parts.extend(["--ref", ref_json])
+                if effective_spec.persona_id:
+                    suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
+                if effective_spec.mission_id:
+                    suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
+                if request.exec_backend != "local":
+                    suggested_command_parts.extend(["--exec-backend", request.exec_backend])
+                suggested_command = " ".join(suggested_command_parts)
                 _write_json(
                     run_dir / "error.json",
                     {
@@ -1513,6 +2471,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "capability": "shell_commands",
                         "message": message,
                         "hint": hint,
+                        "suggested_policy": suggested_policy,
+                        "suggested_command": suggested_command,
                         "preflight": {
                             "capabilities": {
                                 "shell_commands": {
@@ -1531,6 +2491,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         message,
                         "code=mission_requires_shell",
                         f"hint={hint}",
+                        f"suggested_command={suggested_command}",
                     ],
                 )
 
@@ -1601,20 +2562,62 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 and preflight_commands_present
                 and preflight_commands_present.get(required_agent_binary) is False
             ):
-                message = (
-                    f"Required agent binary '{required_agent_binary}' is not available in the "
-                    "execution environment. "
-                    "Install the CLI in the selected backend, or update configs/agents.yaml "
-                    f"for agent '{request.agent}' to a valid binary path."
+                exec_backend = str(getattr(request, "exec_backend", "local") or "local").strip()
+                hints = _build_binary_missing_hints(
+                    agent=request.agent,
+                    required_binary=required_agent_binary,
+                    exec_backend=exec_backend,
+                    agent_cfg=agent_cfg_dict,
+                    command_prefix=command_prefix,
                 )
+                message = (
+                    f"Required agent binary '{required_agent_binary}' is missing for agent "
+                    f"'{request.agent}' (exec_backend={exec_backend})."
+                )
+
+                suggested_command: str | None = None
+                if (
+                    exec_backend == "docker"
+                    and not bool(getattr(request, "exec_rebuild_image", False))
+                ):
+                    suggested_command_parts: list[str] = [
+                        "python",
+                        "-m",
+                        "usertest.cli",
+                        "run",
+                        "--repo-root",
+                        ".",
+                        "--repo",
+                        json.dumps(request.repo, ensure_ascii=False),
+                        "--agent",
+                        request.agent,
+                        "--policy",
+                        request.policy,
+                        "--exec-backend",
+                        "docker",
+                        "--exec-rebuild-image",
+                    ]
+                    if request.ref:
+                        suggested_command_parts.extend(
+                            ["--ref", json.dumps(request.ref, ensure_ascii=False)]
+                        )
+                    if effective_spec.persona_id:
+                        suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
+                    if effective_spec.mission_id:
+                        suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
+                    suggested_command = " ".join(suggested_command_parts)
                 _write_json(
                     run_dir / "error.json",
                     {
                         "type": "AgentPreflightFailed",
                         "subtype": "binary_missing",
+                        "code": "binary_missing",
                         "agent": request.agent,
                         "required_binary": required_agent_binary,
+                        "exec_backend": exec_backend,
                         "message": message,
+                        "hints": hints,
+                        "suggested_command": suggested_command,
                         "preflight": {
                             "commands": preflight_commands_present,
                             "meta": preflight_meta,
@@ -1625,7 +2628,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 return RunResult(
                     run_dir=run_dir,
                     exit_code=1,
-                    report_validation_errors=[message],
+                    report_validation_errors=[
+                        message,
+                        "code=binary_missing",
+                        *[f"{key}={value}" for key, value in hints.items() if value],
+                        *(["suggested_command=" + suggested_command] if suggested_command else []),
+                    ],
                 )
 
             if preflight_required_commands:
@@ -1664,6 +2672,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     artifacts_dir=run_dir / "sandbox",
                 )
 
+            host_os = _runner_host_os()
+            execution_shell = _execution_shell_family(
+                exec_backend=request.exec_backend, host_os=host_os
+            )
+
             policy_json = json.dumps(
                 {
                     "agent": request.agent,
@@ -1685,7 +2698,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
             environment_json = json.dumps(
                 {
-                    "runner_host_os": _runner_host_os(),
+                    "runner_host_os": host_os,
                     "runner_host_python": platform.python_version(),
                     "workspace": {
                         "path": str(workspace_dir_for_agent),
@@ -1694,6 +2707,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     },
                     "execution_backend": {
                         "backend": request.exec_backend,
+                        "shell": execution_shell,
                         "network": request.exec_network,
                         "cache": request.exec_cache,
                         "container_image": getattr(sandbox, "image_tag", None)
@@ -1703,6 +2717,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "preflight": {
                         "commands": preflight_commands_present,
                         "command_diagnostics": command_diagnostics,
+                        "python_interpreter": python_interpreter_summary,
                         "meta": preflight_meta,
                         "probe_commands": effective_probe_commands,
                         "capabilities": {
@@ -1826,6 +2841,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
                 _maybe_codex_login_in_sandbox(command_prefix=command_prefix, run_dir=run_dir)
 
+            agent_phase_start_monotonic = time.monotonic()
+            phases = run_meta.get("phases")
+            if isinstance(phases, dict):
+                phases["setup_seconds"] = max(
+                    0.0, agent_phase_start_monotonic - run_start_monotonic
+                )
+
             def _attempt_paths(attempt: int) -> tuple[Path, Path, Path]:
                 suffix = f"attempt{attempt}"
                 return (
@@ -1888,6 +2910,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     )
                     return claude_result.exit_code, claude_result.argv
 
+                _maybe_patch_workspace_gitignore_for_runs_usertest(
+                    workspace_dir=acquired.workspace_dir
+                )
                 gemini_result = run_gemini(
                     workspace_dir=workspace_dir_for_agent,
                     prompt=prompt_text,
@@ -1900,6 +2925,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     model=request.model,
                     approval_mode=gemini_approval_mode,
                     allowed_tools=gemini_allowed_tools,
+                    include_directories=_gemini_include_directories_for_workspace(
+                        workspace_dir=acquired.workspace_dir
+                    ),
                     command_prefix=command_prefix,
                     env_overrides=gemini_env_overrides,
                 )
@@ -1912,6 +2940,27 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
             followup_attempts = max(0, int(request.agent_followup_attempts))
 
+            verification_commands = [
+                cmd.strip()
+                for cmd in request.verification_commands
+                if isinstance(cmd, str) and cmd.strip()
+            ]
+            verification_timeout_seconds = request.verification_timeout_seconds
+            if (
+                verification_timeout_seconds is not None
+                and float(verification_timeout_seconds) <= 0.0
+            ):
+                verification_timeout_seconds = None
+            if verification_commands:
+                _write_json(
+                    run_dir / "verification_config.json",
+                    {
+                        "schema_version": 1,
+                        "commands": verification_commands,
+                        "timeout_seconds": verification_timeout_seconds,
+                    },
+                )
+
             current_prompt = prompt
             rate_limit_retry_count = 0
             followup_count = 0
@@ -1921,6 +2970,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             selected_stderr_path = stderr_path
             selected_stderr_text = ""
             selected_last_message_text = ""
+            selected_verification_summary_path: Path | None = None
+            selected_verification_errors: list[str] = []
+            verification_seconds_total = 0.0
             report_json = None
             report_validation_errors = []
 
@@ -1932,12 +2984,16 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     stderr_attempt_path,
                 ) = _attempt_paths(attempt_number)
 
+                attempt_started_utc = _utc_now_z()
+                attempt_start_monotonic = time.monotonic()
+                agent_exec_start_monotonic = time.monotonic()
                 agent_exit_code, agent_argv = _run_agent_attempt(
                     prompt_text=current_prompt,
                     raw_events_attempt_path=raw_events_attempt_path,
                     last_message_attempt_path=last_message_attempt_path,
                     stderr_attempt_path=stderr_attempt_path,
                 )
+                agent_exec_wall_seconds = time.monotonic() - agent_exec_start_monotonic
 
                 raw_attempt_stderr_text = ""
                 if stderr_attempt_path.exists():
@@ -1995,44 +3051,156 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             attempt_report_json, effective_spec.report_schema_dict
                         )
 
-                failure_subtype = _classify_failure_subtype(
-                    "\n".join(
-                        [
-                            value
-                            for value in (
-                                attempt_stderr_text,
-                                attempt_last_text.strip() if attempt_last_text else "",
-                            )
-                            if value
-                        ]
+                attempt_verification_summary: dict[str, Any] | None = None
+                attempt_verification_passed = True
+                attempt_verification_errors: list[str] = []
+                attempt_verification_summary_path: Path | None = None
+                if (
+                    agent_exit_code == 0
+                    and not attempt_report_validation_errors
+                    and verification_commands
+                ):
+                    attempt_verification_summary = _run_verification_commands(
+                        run_dir=run_dir,
+                        attempt_number=attempt_number,
+                        commands=verification_commands,
+                        command_prefix=command_prefix,
+                        cwd=acquired.workspace_dir,
+                        timeout_seconds=verification_timeout_seconds,
                     )
+                    attempt_verification_passed = bool(
+                        attempt_verification_summary.get("passed", False)
+                    )
+                    wall_seconds = attempt_verification_summary.get("wall_seconds")
+                    if isinstance(wall_seconds, (int, float)):
+                        verification_seconds_total += max(0.0, float(wall_seconds))
+
+                    artifacts_dir = attempt_verification_summary.get("artifacts_dir")
+                    if isinstance(artifacts_dir, str) and artifacts_dir.strip():
+                        attempt_verification_summary_path = (
+                            run_dir / Path(artifacts_dir) / "verification.json"
+                        )
+
+                    if not attempt_verification_passed:
+                        attempt_verification_errors = [
+                            "verification_failed",
+                            f"artifacts_dir={artifacts_dir}",
+                        ]
+                        commands = attempt_verification_summary.get("commands")
+                        if isinstance(commands, list) and commands:
+                            last = commands[-1] if isinstance(commands[-1], dict) else None
+                            if last is not None:
+                                cmd = last.get("command")
+                                exit_code = last.get("exit_code")
+                                if isinstance(cmd, str) and cmd.strip():
+                                    attempt_verification_errors.append(f"command={cmd.strip()}")
+                                if isinstance(exit_code, int):
+                                    attempt_verification_errors.append(f"exit_code={exit_code}")
+
+                failure_text = "\n".join(
+                    [
+                        value
+                        for value in (
+                            attempt_stderr_text,
+                            attempt_last_text.strip() if attempt_last_text else "",
+                        )
+                        if value
+                    ]
                 )
+                failure_subtype = _classify_failure_subtype(failure_text)
+                attempt_finished_utc = _utc_now_z()
+                attempt_wall_seconds = time.monotonic() - attempt_start_monotonic
+                verification_summary_path: str | None = None
+                if attempt_verification_summary is not None:
+                    artifacts_dir = Path(
+                        str(attempt_verification_summary.get("artifacts_dir", "")).strip()
+                    )
+                    verification_summary_path = str(artifacts_dir / "verification.json")
                 attempt_meta: dict[str, Any] = {
                     "attempt": attempt_number,
+                    "attempt_started_utc": attempt_started_utc,
+                    "attempt_finished_utc": attempt_finished_utc,
+                    "attempt_wall_seconds": attempt_wall_seconds,
+                    "agent_exec_wall_seconds": agent_exec_wall_seconds,
                     "exit_code": agent_exit_code,
                     "argv": agent_argv,
                     "failure_subtype": failure_subtype,
                     "report_validation_errors": attempt_report_validation_errors,
                     "warnings": attempt_warnings,
+                    "verification": {
+                        "status": (
+                            "disabled"
+                            if not verification_commands
+                            else (
+                                "skipped_agent_failed"
+                                if agent_exit_code != 0
+                                else (
+                                    "skipped_report_invalid"
+                                    if attempt_report_validation_errors
+                                    else ("passed" if attempt_verification_passed else "failed")
+                                )
+                            )
+                        ),
+                        "passed": attempt_verification_passed if verification_commands else None,
+                        "summary_path": verification_summary_path,
+                    },
                     "raw_events_path": raw_events_attempt_path.name,
                     "last_message_path": last_message_attempt_path.name,
                     "stderr_path": stderr_attempt_path.name,
                 }
                 attempts_meta.append(attempt_meta)
 
-                if (
-                    agent_exit_code != 0
-                    and failure_subtype == "provider_capacity"
-                    and rate_limit_retry_count < rate_limit_retries
-                ):
-                    delay_seconds = rate_limit_backoff_seconds * (
+                retry_reason: str | None = None
+                if agent_exit_code != 0 and rate_limit_retry_count < rate_limit_retries:
+                    if (
+                        failure_subtype == "provider_capacity"
+                        and _is_retryable_provider_capacity_failure(failure_text)
+                    ):
+                        retry_reason = "provider_capacity"
+                    elif (
+                        failure_subtype == "transient_network"
+                        and _is_retryable_transient_network_failure(failure_text)
+                    ):
+                        retry_reason = "transient_network"
+
+                if retry_reason is not None:
+                    raw_delay_seconds = rate_limit_backoff_seconds * (
                         rate_limit_backoff_multiplier**rate_limit_retry_count
                     )
-                    attempt_meta["retry_reason"] = "provider_capacity"
+                    capped_delay_seconds = min(_MAX_AGENT_RETRY_DELAY_SECONDS, raw_delay_seconds)
+                    delay_seconds = (
+                        random.uniform(0.0, capped_delay_seconds)
+                        if capped_delay_seconds > 0
+                        else 0.0
+                    )
+                    attempt_meta["retry_reason"] = retry_reason
+                    attempt_meta["retry_delay_seconds_raw"] = raw_delay_seconds
                     attempt_meta["retry_delay_seconds"] = delay_seconds
                     rate_limit_retry_count += 1
                     if delay_seconds > 0:
                         time.sleep(delay_seconds)
+                    continue
+
+                if (
+                    agent_exit_code == 0
+                    and not attempt_report_validation_errors
+                    and attempt_verification_summary is not None
+                    and not attempt_verification_passed
+                    and followup_count < followup_attempts
+                    and failure_subtype is None
+                    and attempt_last_text.strip()
+                ):
+                    followup_count += 1
+                    attempt_meta["followup_scheduled"] = True
+                    attempt_meta["followup_reason"] = "verification_failed"
+                    attempt_meta["followup_index"] = followup_count
+                    current_prompt = _build_verification_followup_prompt(
+                        base_prompt=prompt,
+                        verification_summary=attempt_verification_summary,
+                        schema_dict=effective_spec.report_schema_dict,
+                        prior_last_message_text=attempt_last_text,
+                        attempt_number=followup_count,
+                    )
                     continue
 
                 if (
@@ -2059,6 +3227,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 selected_stderr_path = stderr_attempt_path
                 selected_stderr_text = attempt_stderr_text
                 selected_last_message_text = attempt_last_text
+                selected_verification_summary_path = attempt_verification_summary_path
+                selected_verification_errors = list(attempt_verification_errors)
                 report_json = attempt_report_json
                 report_validation_errors = attempt_report_validation_errors
                 break
@@ -2102,6 +3272,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 fallback_text=selected_stderr_text,
             )
 
+            if selected_verification_summary_path is not None:
+                _materialize_attempt_artifact(
+                    selected_verification_summary_path,
+                    run_dir / "verification.json",
+                )
+            phases = run_meta.get("phases")
+            if isinstance(phases, dict) and verification_commands:
+                phases["verification_seconds"] = max(0.0, float(verification_seconds_total))
+
             if agent_exit_code != 0 and not report_validation_errors:
                 if selected_stderr_text:
                     report_validation_errors = selected_stderr_text.splitlines()[:20]
@@ -2111,6 +3290,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     report_validation_errors = [
                         f"{request.agent} exited with code {agent_exit_code}"
                     ]
+            if not report_validation_errors and selected_verification_errors:
+                report_validation_errors = selected_verification_errors
+                _write_json(
+                    run_dir / "verification_errors.json",
+                    {
+                        "schema_version": 1,
+                        "errors": selected_verification_errors,
+                    },
+                )
         finally:
             if sandbox is not None:
                 capture_container_artifacts(
@@ -2118,6 +3306,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     artifacts_dir=run_dir / "sandbox",
                 )
                 sandbox.close()
+
+        agent_phase_end_monotonic = time.monotonic()
+        if agent_phase_start_monotonic is not None:
+            phases = run_meta.get("phases")
+            if isinstance(phases, dict):
+                phases["agent_seconds"] = max(
+                    0.0, agent_phase_end_monotonic - agent_phase_start_monotonic
+                )
+        postprocess_phase_start_monotonic = agent_phase_end_monotonic
 
         run_errors: list[str] = []
         if agent_exit_code != 0:
@@ -2152,10 +3349,60 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             last_message_truncated = False
             if len(last_message_excerpt) > 4000:
                 last_message_excerpt = last_message_excerpt[:4000] + "\n...[truncated]..."
-                last_message_truncated = True
+            last_message_truncated = True
 
             combined_text = "\n".join([x for x in (stderr_text, last_message_text) if x])
             failure_subtype = _classify_failure_subtype(combined_text)
+            if (
+                stderr_text
+                and failure_subtype in {"provider_capacity", "transient_network"}
+                and "[runner_retry_summary]" not in stderr_text
+            ):
+                retryable = True
+                if failure_subtype == "provider_capacity":
+                    retryable = _is_retryable_provider_capacity_failure(combined_text)
+                elif failure_subtype == "transient_network":
+                    retryable = _is_retryable_transient_network_failure(combined_text)
+
+                retry_summary_lines = [
+                    (
+                        "[runner_retry_summary] "
+                        f"code={failure_subtype} "
+                        f"retryable={str(retryable).lower()} "
+                        f"retries_configured={rate_limit_retries} "
+                        f"retries_used={rate_limit_retry_count} "
+                        f"backoff_seconds={rate_limit_backoff_seconds} "
+                        f"backoff_multiplier={rate_limit_backoff_multiplier} "
+                        f"max_delay_seconds={_MAX_AGENT_RETRY_DELAY_SECONDS}"
+                    )
+                ]
+                if not retryable:
+                    retry_summary_lines.append(
+                        "hint=This failure looks non-retryable (quota/billing/account). "
+                        "Fix the account issue and re-run; retries will not help."
+                    )
+                elif rate_limit_retries <= 0:
+                    retry_summary_lines.append(
+                        "hint=Retries are disabled (agent_rate_limit_retries=0). "
+                        "Re-run later or increase agent_rate_limit_retries for transient failures."
+                    )
+                elif rate_limit_retry_count >= rate_limit_retries:
+                    retry_summary_lines.append(
+                        "hint=Runner retries were exhausted. Retry later, reduce concurrency, "
+                        "or switch models."
+                    )
+                else:
+                    retry_summary_lines.append(
+                        "hint=Transient error detected. The runner may retry automatically; "
+                        "see agent_attempts.json."
+                    )
+
+                stderr_text = "\n".join(retry_summary_lines).strip() + "\n\n" + stderr_text
+                if stderr_path.exists():
+                    try:
+                        stderr_path.write_text(stderr_text.rstrip() + "\n", encoding="utf-8")
+                    except OSError:
+                        pass
             stderr_was_empty = not bool(stderr_text)
             raw_events_size_bytes = (
                 raw_events_path.stat().st_size if raw_events_path.exists() else 0
@@ -2264,7 +3511,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         )
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
-        metrics = compute_metrics(iter_events_jsonl(normalized_events_path))
+        try:
+            metrics = compute_metrics(iter_events_jsonl(normalized_events_path))
+        except Exception as metrics_exc:  # noqa: BLE001
+            metrics = {
+                "event_counts": {},
+                "distinct_files_read": [],
+                "distinct_docs_read": [],
+                "distinct_files_written": [],
+                "commands_executed": 0,
+                "commands_failed": 0,
+                "lines_added_total": 0,
+                "lines_removed_total": 0,
+                "step_count": 0,
+                "metrics_error": str(metrics_exc),
+            }
         if allow_edits:
             metrics["diff_numstat"] = diff_numstat
         _write_json(run_dir / "metrics.json", metrics)
@@ -2280,12 +3541,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         if allow_edits:
             patch = _git_diff(acquired.workspace_dir)
             if patch.strip():
-                (run_dir / "patch.diff").write_text(patch, encoding="utf-8")
+                (run_dir / "patch.diff").write_text(patch, encoding="utf-8", newline="\n")
 
         md = render_report_markdown(
             report=report_json or {}, metrics=metrics, target_ref=target_ref
         )
-        (run_dir / "report.md").write_text(md, encoding="utf-8")
+        (run_dir / "report.md").write_text(md, encoding="utf-8", newline="\n")
 
         return RunResult(
             run_dir=run_dir,
@@ -2311,6 +3572,44 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             hint_s = hint.strip()
             extra["hint"] = hint_s
             user_errors.append(f"hint={hint_s}")
+        if isinstance(e, OSError):
+            if e.errno is not None:
+                extra["errno"] = e.errno
+                user_errors.append(f"errno={e.errno}")
+            winerror = getattr(e, "winerror", None)
+            if winerror is not None:
+                extra["winerror"] = winerror
+                user_errors.append(f"winerror={winerror}")
+            if e.strerror is not None:
+                extra["strerror"] = e.strerror
+                user_errors.append(f"strerror={e.strerror}")
+            if e.filename is not None:
+                extra["filename"] = e.filename
+                user_errors.append(f"filename={e.filename}")
+            filename2 = getattr(e, "filename2", None)
+            if filename2 is not None:
+                extra["filename2"] = filename2
+                user_errors.append(f"filename2={filename2}")
+
+            traceback_path = run_dir / "error_traceback.txt"
+            try:
+                traceback_path.write_text(traceback.format_exc(), encoding="utf-8")
+            except OSError:
+                traceback_path = None
+            if traceback_path is not None:
+                extra["traceback_artifact"] = traceback_path.name
+                user_errors.append(f"traceback={traceback_path.name}")
+
+            derived_hint = (
+                "Common causes on Windows: invalid filename characters (< > : \" / \\\\ | ? *), "
+                "overly long paths, or output streams that reject writes. "
+                "See error_traceback.txt for the failing operation."
+            )
+            if "hint" in extra and isinstance(extra["hint"], str) and extra["hint"].strip():
+                extra["hint"] = extra["hint"].strip() + "\n" + derived_hint
+            else:
+                extra["hint"] = derived_hint
+            user_errors.append(f"hint={derived_hint}")
         _write_json(
             run_dir / "error.json",
             {
@@ -2322,9 +3621,53 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         )
         return RunResult(run_dir=run_dir, exit_code=1, report_validation_errors=user_errors)
     finally:
+        cleanup_start_monotonic = time.monotonic()
+        try:
+            phases = run_meta.get("phases")
+            if not isinstance(phases, dict):
+                phases = {}
+                run_meta["phases"] = phases
+
+            if "setup_seconds" not in phases:
+                if agent_phase_start_monotonic is not None:
+                    phases["setup_seconds"] = max(
+                        0.0, agent_phase_start_monotonic - run_start_monotonic
+                    )
+                else:
+                    phases["setup_seconds"] = max(
+                        0.0, cleanup_start_monotonic - run_start_monotonic
+                    )
+
+            if agent_phase_start_monotonic is not None and "agent_seconds" not in phases:
+                end = agent_phase_end_monotonic or cleanup_start_monotonic
+                phases["agent_seconds"] = max(0.0, end - agent_phase_start_monotonic)
+
+            if (
+                postprocess_phase_start_monotonic is not None
+                and "postprocess_seconds" not in phases
+            ):
+                phases["postprocess_seconds"] = max(
+                    0.0, cleanup_start_monotonic - postprocess_phase_start_monotonic
+                )
+        except Exception:  # noqa: BLE001
+            pass
+
+        cleanup_seconds: float | None = None
         if (
             acquired is not None
             and not (request.keep_workspace or request.exec_keep_container)
             and acquired.workspace_dir.exists()
         ):
+            cleanup_wall_start = time.monotonic()
             shutil.rmtree(acquired.workspace_dir, ignore_errors=True)
+            cleanup_seconds = time.monotonic() - cleanup_wall_start
+
+        try:
+            phases = run_meta.get("phases")
+            if isinstance(phases, dict) and cleanup_seconds is not None:
+                phases["cleanup_seconds"] = max(0.0, cleanup_seconds)
+            run_meta["run_finished_utc"] = _utc_now_z()
+            run_meta["run_wall_seconds"] = max(0.0, time.monotonic() - run_start_monotonic)
+            _write_json(run_dir / "run_meta.json", run_meta)
+        except Exception:  # noqa: BLE001
+            pass

@@ -9,19 +9,36 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import warnings
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-import yaml
+try:
+    import yaml
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Missing dependency `pyyaml` (import name: `yaml`). "
+        "Fix: `python -m pip install -r requirements-dev.txt`."
+    ) from exc
+try:
+    import jsonschema  # noqa: F401
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Missing dependency `jsonschema`. "
+        "Fix: `python -m pip install -r requirements-dev.txt`."
+    ) from exc
+
 from backlog_core import (
+    add_atom_links,
     build_backlog_document,
     extract_backlog_atoms,
     write_backlog,
     write_backlog_atoms,
 )
+from backlog_core.aggregate_metrics import build_aggregate_metrics_atoms
 from backlog_core.backlog_policy import BacklogPolicyConfig, apply_backlog_policy
 from backlog_miner import (
     load_prompt_manifest,
@@ -59,25 +76,38 @@ from backlog_repo import (
 from backlog_repo.export import ticket_export_fingerprint
 from reporter import (
     analyze_report_history,
+    build_window_summary,
     write_issue_analysis,
+    write_window_summary,
 )
-from run_artifacts.history import iter_report_history, write_report_history_jsonl
-from runner_core import RunnerConfig, RunRequest, find_repo_root
-from runner_core.catalog import (
-    CatalogError,
-    load_catalog_config,
+from run_artifacts.history import (
+    iter_report_history,
+    load_run_record,
+    select_recent_run_dirs,
+    write_report_history_jsonl,
 )
+from runner_core import RunnerConfig, find_repo_root
 from runner_core.pathing import slugify
-from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
+from runner_core.target_acquire import acquire_target
 from triage_engine import cluster_items, extract_path_anchors_from_chunks
 
-_LEGACY_RUN_TIMESTAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+from usertest_backlog.triage_backlog import (
+    load_issue_items,
+    triage_issues,
+    write_triage_xlsx,
+)
+from usertest_backlog.triage_backlog import (
+    render_triage_markdown as render_backlog_triage_markdown,
+)
+
 _EXPORT_SEVERITY_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "blocker": 3}
-_EXPORT_PATH_LIKE_RE = re.compile(r"(?:[A-Za-z]:[\\/])?[A-Za-z0-9_.-]+(?:[\\/][A-Za-z0-9_.-]+){1,}")
-_EXPORT_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 _MONOREPO_OWNER_COMPONENTS: set[str] = {"runner_core", "agent_adapters", "sandbox_runner"}
 _ATOM_STATUS_ORDER: dict[str, int] = {"new": 0, "ticketed": 1, "queued": 2, "actioned": 3}
 _WINDOWS_ABS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+try:
+    from runner_core.python_interpreter_probe import probe_python_interpreters
+except ModuleNotFoundError:
+    probe_python_interpreters = None  # type: ignore[assignment]
 
 
 def _enable_console_backslashreplace(stream: Any) -> None:
@@ -262,6 +292,23 @@ def _probe_command_responsive(*, command: str, timeout_seconds: float) -> str | 
     str | None
         Computed return value.
     """
+    if command in {"python", "python3", "py"} and callable(probe_python_interpreters):
+        probe = probe_python_interpreters(
+            candidate_commands=[command],
+            timeout_seconds=max(0.1, timeout_seconds),
+        )
+        candidate = probe.by_command().get(command)
+        if candidate is None or not candidate.present:
+            return None
+        if candidate.usable:
+            return None
+        code = candidate.reason_code or "probe_failed"
+        reason = candidate.reason or "interpreter health probe failed"
+        return (
+            f"command {command!r} resolves to an unusable Python interpreter "
+            f"({code}): {reason}"
+        )
+
     resolved = shutil.which(command)
     if resolved is None:
         return None
@@ -283,172 +330,6 @@ def _probe_command_responsive(*, command: str, timeout_seconds: float) -> str | 
     except OSError as e:
         return f"command {command!r} probe failed: {e}"
     return None
-
-
-def _prevalidate_batch_requests(
-    *,
-    cfg: RunnerConfig,
-    repo_root: Path,
-    targets_path: Path,
-    requests: list[tuple[int, RunRequest]],
-    probe_timeout_seconds: float,
-    skip_command_responsiveness_probes: bool,
-) -> list[str]:
-    """Handle prevalidate batch requests processing.
-
-    Parameters
-    ----------
-    cfg:
-        Input parameter.
-    repo_root:
-        Repository root path.
-    targets_path:
-        Filesystem path input.
-    requests:
-        Input parameter.
-    probe_timeout_seconds:
-        Input parameter.
-    skip_command_responsiveness_probes:
-        Input parameter.
-
-    Returns
-    -------
-    list[str]
-        Normalized list result.
-    """
-    errors: list[str] = []
-    local_repos: list[Path] = []
-
-    for idx, req in requests:
-        if req.agent not in cfg.agents:
-            errors.append(
-                f"targets[{idx}]: unknown agent {req.agent!r} (defined in configs/agents.yaml)."
-            )
-        if req.policy not in cfg.policies:
-            errors.append(
-                f"targets[{idx}]: unknown policy {req.policy!r} (defined in configs/policies.yaml)."
-            )
-
-        local_repo_root = _resolve_local_repo_root(repo_root, req.repo)
-        if local_repo_root is None:
-            if _looks_like_local_repo_input(req.repo):
-                errors.append(
-                    f"targets[{idx}]: repo looks like a local path but does not exist: "
-                    f"{req.repo!r} (from {targets_path})"
-                )
-            continue
-        if not local_repo_root.is_dir():
-            errors.append(
-                f"targets[{idx}]: repo must be a directory (got file): {local_repo_root} "
-                f"(from {targets_path})"
-            )
-            continue
-
-        local_repos.append(local_repo_root)
-
-        try:
-            catalog_config = load_catalog_config(repo_root, local_repo_root)
-            resolved_inputs = resolve_effective_run_inputs(
-                runner_repo_root=repo_root,
-                target_repo_root=local_repo_root,
-                catalog_config=catalog_config,
-                persona_id=req.persona_id,
-                mission_id=req.mission_id,
-            )
-            effective_spec = resolved_inputs.effective
-            requires_shell = bool(getattr(resolved_inputs.mission, "requires_shell", False))
-            requires_edits = bool(getattr(resolved_inputs.mission, "requires_edits", False))
-
-            policy_cfg = cfg.policies.get(req.policy, {})
-            policy_cfg = policy_cfg if isinstance(policy_cfg, dict) else {}
-            codex_policy = policy_cfg.get("codex", {})
-            codex_policy = codex_policy if isinstance(codex_policy, dict) else {}
-            claude_policy = policy_cfg.get("claude", {})
-            claude_policy = claude_policy if isinstance(claude_policy, dict) else {}
-            gemini_policy = policy_cfg.get("gemini", {})
-            gemini_policy = gemini_policy if isinstance(gemini_policy, dict) else {}
-
-            allow_edits = False
-            if req.agent == "codex":
-                allow_edits = bool(codex_policy.get("allow_edits", False))
-            elif req.agent == "claude":
-                allow_edits = bool(claude_policy.get("allow_edits", False))
-            elif req.agent == "gemini":
-                allow_edits = bool(gemini_policy.get("allow_edits", False))
-
-            shell_status = "unknown"
-            if req.agent == "claude":
-                allowed_tools = claude_policy.get("allowed_tools")
-                allowed_tools = allowed_tools if isinstance(allowed_tools, list) else []
-                shell_status = "allowed" if "Bash" in allowed_tools else "blocked"
-            elif req.agent == "gemini":
-                allowed_tools = gemini_policy.get("allowed_tools")
-                allowed_tools = allowed_tools if isinstance(allowed_tools, list) else []
-                shell_enabled = "run_shell_command" in allowed_tools
-                has_outer_sandbox = str(req.exec_backend) == "docker"
-                gemini_sandbox_enabled = (
-                    bool(gemini_policy.get("sandbox", True))
-                    if isinstance(gemini_policy.get("sandbox", True), bool)
-                    else True
-                )
-                if has_outer_sandbox:
-                    gemini_sandbox_enabled = False
-                if os.name == "nt":
-                    gemini_sandbox_enabled = False
-                shell_available = has_outer_sandbox or gemini_sandbox_enabled
-                if shell_enabled and not shell_available:
-                    shell_status = "blocked"
-                else:
-                    shell_status = "allowed" if shell_enabled else "blocked"
-
-            if requires_shell and shell_status == "blocked":
-                errors.append(
-                    f"targets[{idx}]: mission {effective_spec.mission_id!r} requires shell "
-                    f"commands, but policy {req.policy!r} for agent {req.agent!r} blocks shell "
-                    "commands (use policy=inspect or policy=write)."
-                )
-            if requires_edits and not allow_edits:
-                errors.append(
-                    f"targets[{idx}]: mission {effective_spec.mission_id!r} requires edits, but "
-                    f"policy {req.policy!r} for agent {req.agent!r} has allow_edits=false "
-                    "(use policy=write)."
-                )
-            if (
-                (not requires_shell)
-                and req.policy in {"inspect", "write"}
-                and shell_status == "blocked"
-            ):
-                errors.append(
-                    f"targets[{idx}]: policy {req.policy!r} for agent {req.agent!r} blocks shell "
-                    "commands for this backend (use --exec-backend docker for gemini on Windows, "
-                    "or fix configs/policies.yaml)."
-                )
-        except RunSpecError as e:
-            parts = [str(e)]
-            if isinstance(e.code, str) and e.code.strip():
-                parts.append(f"code={e.code.strip()}")
-            if isinstance(e.details, dict) and e.details:
-                parts.append(f"details={json.dumps(e.details, ensure_ascii=False)}")
-            if isinstance(e.hint, str) and e.hint.strip():
-                parts.append(f"hint={e.hint.strip()}")
-            errors.append(f"targets[{idx}]: {' | '.join(parts)}")
-        except (CatalogError, OSError, RuntimeError, ValueError) as e:
-            errors.append(f"targets[{idx}]: failed to resolve persona/mission: {e}")
-
-    if skip_command_responsiveness_probes:
-        return errors
-
-    commands_to_probe: set[str] = set()
-    for repo_dir in local_repos:
-        commands_to_probe.update(_infer_responsiveness_probe_commands(repo_dir))
-    for cmd in sorted(commands_to_probe):
-        probe_error = _probe_command_responsive(
-            command=cmd, timeout_seconds=max(0.1, probe_timeout_seconds)
-        )
-        if probe_error:
-            errors.append(f"env: {probe_error}")
-
-    return errors
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -529,6 +410,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Runs directory (defaults to <repo_root>/runs/usertest).",
     )
     reports_analyze_p.add_argument(
+        "--history",
+        type=Path,
+        help="Path to a compiled report history JSONL (from `reports compile`).",
+    )
+    reports_analyze_p.add_argument(
         "--out-json",
         type=Path,
         help=(
@@ -550,6 +436,61 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     reports_analyze_p.add_argument(
+        "--repo-root",
+        type=Path,
+        help="Path to monorepo root (auto-detected by default).",
+    )
+
+    reports_window_p = reports_sub.add_parser(
+        "window",
+        help="Summarize the last N runs vs the previous N runs (timing + outcomes + regressions).",
+    )
+    reports_window_p.add_argument(
+        "--target",
+        help="Optional target slug under runs/usertest (e.g. tiktok_vids).",
+    )
+    reports_window_p.add_argument(
+        "--repo-input",
+        help="Optional match for target_ref.repo_input (path or git URL).",
+    )
+    reports_window_p.add_argument(
+        "--runs-dir",
+        type=Path,
+        help="Runs directory (defaults to <repo_root>/runs/usertest).",
+    )
+    reports_window_p.add_argument(
+        "--last",
+        type=int,
+        default=12,
+        help="Number of most recent runs to summarize.",
+    )
+    reports_window_p.add_argument(
+        "--baseline",
+        type=int,
+        help="Number of prior runs to use as a baseline window (defaults to --last).",
+    )
+    reports_window_p.add_argument(
+        "--out-json",
+        type=Path,
+        help=(
+            "Output summary JSON path (defaults under runs/usertest/<target>/_compiled/ "
+            "or runs/usertest/_compiled/ when --target is omitted)."
+        ),
+    )
+    reports_window_p.add_argument(
+        "--out-md",
+        type=Path,
+        help=("Output markdown summary path (defaults next to --out-json with .md extension)."),
+    )
+    reports_window_p.add_argument(
+        "--actions",
+        type=Path,
+        help=(
+            "Optional JSON action registry for addressed comments (date/plan metadata). "
+            "Defaults to configs/issue_actions.json when present."
+        ),
+    )
+    reports_window_p.add_argument(
         "--repo-root",
         type=Path,
         help="Path to monorepo root (auto-detected by default).",
@@ -664,6 +605,23 @@ def build_parser() -> argparse.ArgumentParser:
         help="Skip merge-judge passes.",
     )
     reports_backlog_p.add_argument(
+        "--merge-candidate-threshold",
+        type=float,
+        default=0.65,
+        help=(
+            "Minimum overall semantic similarity (in [0,1]) required for merge-candidate pairs. "
+            "Default: 0.65."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--merge-keep-anchor-pairs",
+        action="store_true",
+        help=(
+            "Keep merge-candidate pairs based on anchor overlap (anchor_jaccard > 0) even when "
+            "below the overall similarity threshold. Default: disabled."
+        ),
+    )
+    reports_backlog_p.add_argument(
         "--orphan-pass",
         type=int,
         default=1,
@@ -677,10 +635,11 @@ def build_parser() -> argparse.ArgumentParser:
     reports_backlog_p.add_argument(
         "--labelers",
         type=int,
-        default=0,
+        default=3,
         help=(
-            "Run N labeler passes per ticket to classify change surface (default: 0 disables). "
-            "Labeling requires an agent CLI unless cached outputs exist."
+            "Run N labeler passes per ticket to classify change surface "
+            "(default: 3; use 0 to disable). Labeling requires an agent CLI unless "
+            "cached outputs exist."
         ),
     )
     reports_backlog_p.add_argument(
@@ -1047,6 +1006,62 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.55,
         help="Title token Jaccard threshold for similarity edges.",
+    )
+
+    triage_backlog_p = sub.add_parser(
+        "triage-backlog",
+        help="Cluster issue-like backlog items by dedupe + functional theme similarity.",
+    )
+    triage_backlog_p.add_argument(
+        "--in",
+        dest="input_json",
+        type=Path,
+        required=True,
+        help="Path to issue JSON input (list, or object with a `tickets` list).",
+    )
+    triage_backlog_p.add_argument(
+        "--group-key",
+        type=str,
+        help="Optional field name used to compute cross-group coverage (defaults to `package`).",
+    )
+    triage_backlog_p.add_argument(
+        "--out-json",
+        type=Path,
+        help="Output JSON path (default: <input>.triage_backlog.json).",
+    )
+    triage_backlog_p.add_argument(
+        "--out-md",
+        type=Path,
+        help="Output markdown path (default: <input>.triage_backlog.md).",
+    )
+    triage_backlog_p.add_argument(
+        "--out-xlsx",
+        type=Path,
+        help="Optional XLSX output path.",
+    )
+    triage_backlog_p.add_argument(
+        "--dedupe-overall-threshold",
+        type=float,
+        default=0.90,
+        help="Overall similarity threshold used for strict dedupe clustering.",
+    )
+    triage_backlog_p.add_argument(
+        "--theme-overall-threshold",
+        type=float,
+        default=0.78,
+        help="Overall similarity threshold used for theme clustering edges.",
+    )
+    triage_backlog_p.add_argument(
+        "--theme-k",
+        type=int,
+        default=10,
+        help="Top-K neighbor count per item in the theme graph.",
+    )
+    triage_backlog_p.add_argument(
+        "--theme-representative-threshold",
+        type=float,
+        default=0.75,
+        help="Minimum similarity to theme representative during refinement.",
     )
 
     return parser
@@ -1692,75 +1707,6 @@ def _parse_first_json_object(raw_text: str) -> dict[str, Any] | None:
     return None
 
 
-def _ticket_export_anchors(ticket: dict[str, Any]) -> set[str]:
-    """Return ticket export anchors data.
-
-    Parameters
-    ----------
-    ticket:
-        Ticket payload mapping.
-
-    Returns
-    -------
-    set[str]
-        Computed return value.
-    """
-    chunks: list[str] = []
-    for key in ("title", "problem", "user_impact", "proposed_fix"):
-        value = _coerce_string(ticket.get(key))
-        if value:
-            chunks.append(value)
-    for item in _coerce_string_list(ticket.get("investigation_steps")):
-        chunks.append(item)
-
-    anchors: set[str] = set()
-    for chunk in chunks:
-        for match in _EXPORT_PATH_LIKE_RE.findall(chunk):
-            anchors.add(match.lower().replace("\\", "/"))
-    return anchors
-
-
-def _ticket_export_fingerprint(ticket: dict[str, Any]) -> str:
-    """
-    Compute a stable fingerprint for action-ledger tracking.
-
-    The fingerprint is intentionally derived from normalized title tokens and "evidence anchors"
-    (path-like strings found in ticket text), plus stable structured labels such as
-    `change_surface.kinds` and `suggested_owner` / `component` when present.
-
-    Parameters
-    ----------
-    ticket:
-        Backlog ticket object.
-
-    Returns
-    -------
-    str
-        A short hex fingerprint suitable for use as a key in `configs/backlog_actions.yaml`.
-    """
-
-    title = _coerce_string(ticket.get("title")) or ""
-    title_tokens = sorted(set(_EXPORT_TOKEN_RE.findall(title.lower())))
-    anchors = sorted(_ticket_export_anchors(ticket))
-
-    change_surface_raw = ticket.get("change_surface")
-    change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
-    kinds = sorted(set(_coerce_string_list(change_surface.get("kinds"))))
-
-    owner = (
-        _coerce_string(ticket.get("suggested_owner"))
-        or _coerce_string(ticket.get("component"))
-        or "unknown"
-    )
-
-    payload = {
-        "title_tokens": title_tokens[:24],
-        "anchors": anchors[:24],
-        "kinds": kinds[:24],
-        "owner": owner,
-    }
-    blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
-    return sha256(blob).hexdigest()[:16]
 def _summarize_atoms_for_totals(atoms: list[dict[str, Any]]) -> dict[str, Any]:
     """Summarize atoms for totals into aggregate counters.
 
@@ -1779,7 +1725,7 @@ def _summarize_atoms_for_totals(atoms: list[dict[str, Any]]) -> dict[str, Any]:
     runs: set[str] = set()
     for atom in atoms:
         run_rel = _coerce_string(atom.get("run_rel"))
-        if run_rel is not None:
+        if run_rel is not None and not run_rel.startswith("__aggregate__/"):
             runs.add(run_rel)
         source = _coerce_string(atom.get("source"))
         if source is not None:
@@ -1878,7 +1824,7 @@ def _update_atom_actions_from_backlog(
             # Blocked tickets are intentionally not treated as "ticket outcomes" for the
             # atom ledger so evidence can accumulate across runs/models and be re-mined.
             continue
-        ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+        ticket_id = f"TKT-{ticket_export_fingerprint(ticket)}"
         for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
             bucket = ticket_ids_by_atom.setdefault(atom_id, set())
             bucket.add(ticket_id)
@@ -1892,6 +1838,10 @@ def _update_atom_actions_from_backlog(
     for atom in atoms:
         atom_id = _coerce_string(atom.get("atom_id"))
         if atom_id is None:
+            continue
+        if atom_id.startswith("__aggregate__/"):
+            # Synthetic aggregates are regenerated every time and should not be tracked
+            # in the lifecycle ledger.
             continue
         observed += 1
         desired = "ticketed" if atom_id in ticket_ids_by_atom else "new"
@@ -1977,6 +1927,8 @@ def _update_atom_actions_from_exports(
     for ref in queued_refs:
         atom_id_raw = _coerce_string(ref.get("atom_id"))
         if atom_id_raw is None:
+            continue
+        if atom_id_raw.startswith("__aggregate__/"):
             continue
         derived_from_atom_id: str | None = None
         atom_id = atom_id_raw
@@ -2141,87 +2093,6 @@ def _render_intent_snapshot_markdown(snapshot: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
-def _looks_like_run_timestamp_dirname(name: str) -> bool:
-    """
-    Check whether `name` looks like a UTC run timestamp directory.
-
-    Format: YYYYMMDDTHHMMSSZ (e.g., 20260126T183234Z)
-    """
-
-    return bool(_LEGACY_RUN_TIMESTAMP_RE.match(name))
-
-
-def _looks_like_legacy_target_runs_dir(path: Path) -> bool:
-    """
-    Heuristic for detecting a legacy `runs/<target>/...` directory.
-
-    The legacy layout uses `runs/<target>/<timestamp>/<agent>/<seed>/...` where `timestamp`
-    is the compact UTC form YYYYMMDDTHHMMSSZ.
-    """
-
-    if not path.exists() or not path.is_dir():
-        return False
-
-    try:
-        for child in path.iterdir():
-            if child.is_dir() and _looks_like_run_timestamp_dirname(child.name):
-                return True
-    except OSError:
-        return False
-    return False
-
-
-def _warn_legacy_runs_layout(repo_root: Path) -> None:
-    """
-    Warn (to stderr) when legacy run output directories are present.
-
-    This does not move anything automatically. It only nudges the user to run the explicit
-    migration script.
-    """
-
-    legacy_app_local = repo_root / "usertest" / "runs"
-    legacy_root_runs = repo_root / "runs"
-
-    has_legacy = False
-    legacy_notes: list[str] = []
-
-    if legacy_app_local.exists() and legacy_app_local.is_dir():
-        try:
-            if any(True for _ in legacy_app_local.iterdir()):
-                has_legacy = True
-                legacy_notes.append(f"- legacy dir present: {legacy_app_local}")
-        except OSError:
-            has_legacy = True
-            legacy_notes.append(f"- legacy dir present (unreadable): {legacy_app_local}")
-
-    if legacy_root_runs.exists() and legacy_root_runs.is_dir():
-        try:
-            for child in legacy_root_runs.iterdir():
-                if not child.is_dir():
-                    continue
-                if child.name in {"usertest", "_cache"}:
-                    continue
-                if child.name == "_workspaces" or _looks_like_legacy_target_runs_dir(child):
-                    has_legacy = True
-                    legacy_notes.append(f"- legacy dir present: {child}")
-        except OSError:
-            # If we can't inspect, keep this quiet to avoid spamming unrelated commands.
-            pass
-
-    if not has_legacy:
-        return
-
-    print(
-        "WARNING: Legacy run layout detected. New runs go to runs/usertest/.\n"
-        "To migrate existing runs (dry-run by default):\n"
-        "  python tools/migrations/migrate_runs_layout.py\n"
-        "To apply moves:\n"
-        "  python tools/migrations/migrate_runs_layout.py --apply\n"
-        "Detected:\n" + "\n".join(legacy_notes),
-        file=sys.stderr,
-    )
-
-
 def _cmd_reports_compile(args: argparse.Namespace) -> int:
     """Execute the `reports compile` command handler.
 
@@ -2289,6 +2160,12 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     cfg = _load_runner_config(repo_root)
 
     runs_dir = args.runs_dir.resolve() if args.runs_dir is not None else cfg.runs_dir
+    history_path: Path | None
+    if args.history is not None:
+        history_path = _resolve_optional_path(repo_root, args.history) or args.history.resolve()
+    else:
+        history_path = None
+
     target_slug: str | None = None
     if isinstance(args.target, str) and args.target.strip():
         target_slug = str(args.target).strip()
@@ -2303,7 +2180,9 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     if args.out_json is not None:
         out_json = _resolve_optional_path(repo_root, args.out_json) or args.out_json.resolve()
     else:
-        if target_slug is not None:
+        if history_path is not None:
+            out_json = history_path.with_name(f"{history_path.stem}.issue_analysis.json")
+        elif target_slug is not None:
             out_json = runs_dir / target_slug / "_compiled" / f"{default_name}.issue_analysis.json"
         else:
             out_json = runs_dir / "_compiled" / f"{default_name}.issue_analysis.json"
@@ -2320,9 +2199,10 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
         default_actions = repo_root / "configs" / "issue_actions.json"
         actions_path = default_actions if default_actions.exists() else None
 
+    history_source = history_path if history_path is not None else runs_dir
     records = list(
         iter_report_history(
-            runs_dir,
+            history_source,
             target_slug=target_slug,
             repo_input=repo_input,
             embed="none",
@@ -2350,6 +2230,144 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     print(str(out_json))
     print(str(out_md))
     print(json.dumps(summary.get("totals", {}), indent=2, ensure_ascii=False))
+    return 0
+
+
+def _cmd_reports_window(args: argparse.Namespace) -> int:
+    """Execute the `reports window` command handler.
+
+    Parameters
+    ----------
+    args:
+        Parsed command-line arguments namespace.
+
+    Returns
+    -------
+    int
+        Process exit code.
+    """
+    repo_root = _resolve_repo_root(args.repo_root)
+    cfg = _load_runner_config(repo_root)
+
+    runs_dir = args.runs_dir.resolve() if args.runs_dir is not None else cfg.runs_dir
+
+    target_slug: str | None = None
+    if isinstance(args.target, str) and args.target.strip():
+        target_slug = str(args.target).strip()
+    repo_input = (
+        str(args.repo_input).strip()
+        if isinstance(args.repo_input, str) and args.repo_input.strip()
+        else None
+    )
+
+    window_size = int(args.last)
+    if window_size <= 0:
+        print("--last must be > 0", file=sys.stderr)
+        return 2
+
+    baseline_size = window_size if args.baseline is None else int(args.baseline)
+    if baseline_size < 0:
+        print("--baseline must be >= 0", file=sys.stderr)
+        return 2
+
+    default_name = slugify(repo_input) if repo_input is not None else (target_slug or "all")
+
+    if args.out_json is not None:
+        out_json = _resolve_optional_path(repo_root, args.out_json) or args.out_json.resolve()
+    else:
+        if target_slug is not None:
+            out_json = runs_dir / target_slug / "_compiled" / f"{default_name}.window_summary.json"
+        else:
+            out_json = runs_dir / "_compiled" / f"{default_name}.window_summary.json"
+
+    if args.out_md is not None:
+        out_md = _resolve_optional_path(repo_root, args.out_md) or args.out_md.resolve()
+    else:
+        out_md = out_json.with_suffix(".md")
+
+    actions_path: Path | None
+    if args.actions is not None:
+        actions_path = _resolve_optional_path(repo_root, args.actions) or args.actions.resolve()
+    else:
+        default_actions = repo_root / "configs" / "issue_actions.json"
+        actions_path = default_actions if default_actions.exists() else None
+
+    limit = window_size + baseline_size
+    run_dirs = select_recent_run_dirs(
+        runs_dir,
+        target_slug=target_slug,
+        repo_input=repo_input,
+        limit=limit,
+    )
+    if not run_dirs:
+        print(
+            f"No runs found under {runs_dir} "
+            f"(target={target_slug or 'all'}, repo_input={repo_input or 'any'}).",
+            file=sys.stderr,
+        )
+        return 1
+
+    records: list[dict[str, Any]] = []
+    for run_dir in run_dirs:
+        record = load_run_record(run_dir, runs_dir=runs_dir)
+        if record is None:
+            continue
+        records.append(record)
+
+    if not records:
+        print("No readable run records found.", file=sys.stderr)
+        return 1
+
+    if baseline_size <= 0 or window_size >= len(records):
+        baseline_records: list[dict[str, Any]] = []
+        current_records = records
+    else:
+        current_records = records[-window_size:]
+        baseline_records = records[: len(records) - window_size]
+        if len(baseline_records) > baseline_size:
+            baseline_records = baseline_records[-baseline_size:]
+
+    summary = build_window_summary(
+        current_records=current_records,
+        baseline_records=baseline_records,
+        repo_root=repo_root,
+        issue_actions_path=actions_path,
+        window_size=window_size,
+        baseline_size=baseline_size,
+    )
+
+    scope_bits = []
+    if target_slug is not None:
+        scope_bits.append(f"target={target_slug}")
+    if repo_input is not None:
+        scope_bits.append(f"repo_input={repo_input}")
+    title_suffix = f" ({', '.join(scope_bits)})" if scope_bits else ""
+    title = f"Usertest Window Summary (last={window_size}, baseline={baseline_size}){title_suffix}"
+    write_window_summary(
+        summary,
+        out_json_path=out_json,
+        out_md_path=out_md,
+        title=title,
+    )
+
+    print(str(out_json))
+    print(str(out_md))
+    current_summary: dict[str, Any] = {}
+    summary_obj = summary.get("summary")
+    if isinstance(summary_obj, dict):
+        cur = summary_obj.get("current")
+        if isinstance(cur, dict):
+            for key in (
+                "runs",
+                "ok_rate",
+                "timing_coverage_runs",
+                "median_run_wall_seconds",
+                "median_attempts_per_run",
+            ):
+                value = cur.get(key)
+                if value is not None:
+                    current_summary[key] = value
+    print(json.dumps(current_summary, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -2695,6 +2713,199 @@ def _render_ux_review_markdown(doc: dict[str, Any]) -> str:
     return "\n".join(lines) + "\n"
 
 
+_UX_REVIEW_SECTION_START = "<!-- usertest:ux_review:start -->"
+_UX_REVIEW_SECTION_END = "<!-- usertest:ux_review:end -->"
+
+
+def _load_optional_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _index_ux_recommendations(doc: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+    review_raw = doc.get("review")
+    review = review_raw if isinstance(review_raw, dict) else {}
+    recs_raw = review.get("recommendations")
+    recs = [item for item in recs_raw if isinstance(item, dict)] if isinstance(recs_raw, list) else []
+    out: dict[str, list[dict[str, Any]]] = {}
+    for rec in recs:
+        ticket_ids_raw = rec.get("ticket_ids")
+        ticket_ids = (
+            [tid for tid in ticket_ids_raw if isinstance(tid, str) and tid.strip()]
+            if isinstance(ticket_ids_raw, list)
+            else []
+        )
+        for ticket_id in ticket_ids:
+            out.setdefault(ticket_id.strip(), []).append(rec)
+    return out
+
+
+def _pick_ux_recommended_approach(recs: list[dict[str, Any]]) -> str | None:
+    approaches = [
+        _coerce_string(rec.get("recommended_approach")) or ""
+        for rec in recs
+        if isinstance(rec, dict)
+    ]
+    normalized = {a.strip() for a in approaches if a.strip()}
+    for choice in ("defer", "new_surface", "parameterize_existing", "docs"):
+        if choice in normalized:
+            return choice
+    return next(iter(sorted(normalized)), None)
+
+
+def _render_ux_review_section_for_ticket(
+    *,
+    ux_review_doc: dict[str, Any],
+    ux_review_json_path: Path,
+    ux_review_md_path: Path,
+    ticket_id: str,
+    recs: list[dict[str, Any]],
+) -> str:
+    lines: list[str] = []
+    lines.append(_UX_REVIEW_SECTION_START)
+    lines.append("## UX review")
+    lines.append("")
+    lines.append(f"- ux_review.json: `{ux_review_json_path}`")
+    lines.append(f"- ux_review.md: `{ux_review_md_path}`")
+
+    status = _coerce_string(ux_review_doc.get("status"))
+    if status:
+        lines.append(f"- reviewer_status: `{status}`")
+    generated_at = _coerce_string(ux_review_doc.get("generated_at"))
+    if generated_at:
+        lines.append(f"- reviewer_generated_at: `{generated_at}`")
+    prompt_hash = _coerce_string(ux_review_doc.get("prompt_hash"))
+    if prompt_hash:
+        lines.append(f"- reviewer_prompt_hash: `{prompt_hash}`")
+
+    review_raw = ux_review_doc.get("review")
+    review = review_raw if isinstance(review_raw, dict) else {}
+    conf_raw = review.get("confidence")
+    if isinstance(conf_raw, (int, float)):
+        lines.append(f"- reviewer_confidence: `{float(conf_raw):.2f}`")
+
+    lines.append("")
+
+    for rec in recs[:5]:
+        rec_id = _coerce_string(rec.get("recommendation_id")) or "UX-???"
+        approach = _coerce_string(rec.get("recommended_approach")) or "unknown"
+        lines.append(f"### {rec_id}: {approach} ({ticket_id})")
+        lines.append("")
+
+        rationale = _coerce_string(rec.get("rationale"))
+        if rationale:
+            lines.append(rationale.strip())
+            lines.append("")
+
+        next_steps_raw = rec.get("next_steps")
+        next_steps = (
+            [step for step in next_steps_raw if isinstance(step, str) and step.strip()]
+            if isinstance(next_steps_raw, list)
+            else []
+        )
+        if next_steps:
+            lines.append("Next steps:")
+            for step in next_steps[:10]:
+                lines.append(f"- {step}")
+            lines.append("")
+
+        breadth_raw = rec.get("evidence_breadth_summary")
+        breadth = breadth_raw if isinstance(breadth_raw, dict) else {}
+        breadth_bits: list[str] = []
+        for key in ("missions", "targets", "repo_inputs", "agents", "runs"):
+            val = breadth.get(key)
+            if isinstance(val, (int, float)):
+                breadth_bits.append(f"{key}={int(val)}")
+        if breadth_bits:
+            lines.append(f"Evidence breadth: `{', '.join(breadth_bits)}`")
+            lines.append("")
+
+        lines.append("Raw recommendation JSON:")
+        lines.append("")
+        lines.append("```json")
+        lines.append(json.dumps(rec, indent=2, ensure_ascii=False))
+        lines.append("```")
+        lines.append("")
+
+    lines.append(_UX_REVIEW_SECTION_END)
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _replace_markdown_ticket_field(markdown: str, *, label: str, value: str) -> str:
+    pattern = rf"(?m)^-\s*{re.escape(label)}:\s*`[^`]*`\s*$"
+    replacement = f"- {label}: `{value}`"
+    if re.search(pattern, markdown) is None:
+        return markdown
+    return re.sub(pattern, replacement, markdown, count=1)
+
+
+def _upsert_ux_review_section(markdown: str, *, section: str) -> str:
+    start = markdown.find(_UX_REVIEW_SECTION_START)
+    end = markdown.find(_UX_REVIEW_SECTION_END)
+    if start != -1 and end != -1 and end > start:
+        end_idx = end + len(_UX_REVIEW_SECTION_END)
+        prefix = markdown[:start].rstrip()
+        suffix = markdown[end_idx:].lstrip("\n")
+        out = prefix + "\n\n" + section.strip() + "\n"
+        if suffix:
+            out += suffix
+        return out
+    return markdown.rstrip() + "\n\n" + section.strip() + "\n"
+
+
+def _apply_ux_review_to_plan_ticket(
+    *,
+    path: Path,
+    ux_section: str,
+    stage_override: str | None,
+    export_kind_override: str | None,
+) -> bool:
+    try:
+        original = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+    updated = original
+    if export_kind_override:
+        updated = _replace_markdown_ticket_field(
+            updated,
+            label="Export kind",
+            value=export_kind_override,
+        )
+    if stage_override:
+        updated = _replace_markdown_ticket_field(updated, label="Stage", value=stage_override)
+    updated = _upsert_ux_review_section(updated, section=ux_section)
+
+    if updated == original:
+        return False
+    try:
+        path.write_text(updated, encoding="utf-8")
+    except OSError:
+        return False
+    return True
+
+
+def _move_plan_ticket_to_bucket(*, path: Path, owner_repo_root: Path, bucket: str) -> Path | None:
+    plans_dir = owner_repo_root / ".agents" / "plans"
+    dest_dir = plans_dir / bucket
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        return None
+    dest_path = dest_dir / path.name
+    try:
+        path.replace(dest_path)
+    except OSError:
+        return None
+    return dest_path
+
+
 def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
     """Execute the `reports review ux` command handler.
 
@@ -2856,6 +3067,36 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         print(f"Failed reading repo intent doc: {repo_intent_path}: {e}", file=sys.stderr)
         return 2
 
+    repo_head_sha: str | None = None
+    repo_dirty = False
+    try:
+        proc = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode == 0:
+            sha = proc.stdout.strip()
+            if sha:
+                repo_head_sha = sha
+    except OSError:
+        repo_head_sha = None
+    if repo_head_sha is not None:
+        try:
+            status_proc = subprocess.run(
+                ["git", "status", "--porcelain"],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if status_proc.returncode == 0 and status_proc.stdout.strip():
+                repo_dirty = True
+        except OSError:
+            repo_dirty = False
+
     template = template_path.read_text(encoding="utf-8")
     tickets_payload: list[dict[str, Any]] = []
     for ticket in review_tickets:
@@ -2884,6 +3125,8 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         template,
         {
             "REPO_INTENT_MD": repo_intent_text,
+            "REPO_HEAD_SHA": repo_head_sha or "unknown",
+            "REPO_DIRTY": "true" if repo_dirty else "false",
             "INTENT_SNAPSHOT_JSON": json.dumps(intent_snapshot_obj, indent=2, ensure_ascii=False)
             if intent_snapshot_obj is not None
             else "null",
@@ -2907,6 +3150,15 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
     review_obj: dict[str, Any] | None = None
     status = "ok"
     used_cached = False
+    workspace_meta: dict[str, Any] = {
+        "repo_root": str(repo_root),
+        "repo_head_sha": repo_head_sha,
+        "repo_dirty": repo_dirty,
+        "acquired_mode": None,
+        "acquired_commit_sha": None,
+        "provided": False,
+        "error": None,
+    }
 
     if resume and not force and cached_path.exists():
         try:
@@ -2942,14 +3194,28 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             (artifacts_dir / f"{tag}.dry_run.prompt.txt").write_text(prompt, encoding="utf-8")
             status = "dry_run"
         else:
-            raw_text = run_backlog_prompt(
-                agent=agent,
-                prompt=prompt,
-                out_dir=artifacts_dir,
-                tag=tag,
-                model=model,
-                cfg=cfg,
-            )
+            with tempfile.TemporaryDirectory(prefix="usertest_ux_review_") as temp_dir:
+                dest_dir = Path(temp_dir) / "repo"
+                workspace_dir = Path(temp_dir)
+                try:
+                    acquired = acquire_target(repo=str(repo_root), dest_dir=dest_dir, ref=None)
+                except Exception as e:
+                    workspace_meta["error"] = str(e)
+                else:
+                    workspace_meta["provided"] = True
+                    workspace_meta["acquired_mode"] = acquired.mode
+                    workspace_meta["acquired_commit_sha"] = acquired.commit_sha
+                    workspace_dir = acquired.workspace_dir
+
+                raw_text = run_backlog_prompt(
+                    agent=agent,
+                    prompt=prompt,
+                    out_dir=artifacts_dir,
+                    tag=tag,
+                    model=model,
+                    cfg=cfg,
+                    workspace_dir=workspace_dir,
+                )
             parsed = _parse_first_json_object(raw_text)
             if not isinstance(parsed, dict):
                 (artifacts_dir / f"{tag}.parse_error.txt").write_text(
@@ -2986,6 +3252,7 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "model": model,
             "cached": used_cached,
             "template_path": _safe_relpath(template_path, repo_root),
+            "workspace": workspace_meta,
         },
         "tickets_meta": {
             "tickets_total": len(tickets),
@@ -3052,7 +3319,7 @@ def _render_export_issue_body(
     str
         Normalized string result.
     """
-    ticket_id = _coerce_string(ticket.get("ticket_id")) or "BLG-???"
+    ticket_id = _coerce_string(ticket.get("ticket_id")) or "TKT-unknown"
     title = _coerce_string(ticket.get("title")) or ""
     problem = _coerce_string(ticket.get("problem")) or ""
     user_impact = _coerce_string(ticket.get("user_impact")) or ""
@@ -3358,6 +3625,13 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         else []
     )
 
+    ux_review_json_path = compiled_dir / f"{default_name}.ux_review.json"
+    ux_review_md_path = ux_review_json_path.with_suffix(".md")
+    ux_review_doc = _load_optional_json_object(ux_review_json_path)
+    ux_recommendations_by_ticket_id = (
+        _index_ux_recommendations(ux_review_doc) if ux_review_doc is not None else {}
+    )
+
     stage_filters = [s.strip() for s in args.stage if isinstance(s, str) and s.strip()]
     stages = stage_filters if stage_filters else ["triage", "ready_for_ticket", "research_required"]
     min_severity = str(args.min_severity)
@@ -3380,10 +3654,37 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     idea_files_written: list[str] = []
     plan_index_cache: dict[Path, dict[str, dict[str, Any]]] = {}
     skip_plan_folder_dedupe = bool(getattr(args, "skip_plan_folder_dedupe", False))
+    ux_plan_tickets_updated = 0
+    ux_idea_files_updated = 0
+    ux_tickets_deferred = 0
 
     for ticket in tickets:
         stage = (_coerce_string(ticket.get("stage")) or "triage").strip()
-        if stage not in stages:
+        ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+        ux_recs = ux_recommendations_by_ticket_id.get(ticket_id) or []
+
+        stage_override: str | None = None
+        export_kind_override: str | None = None
+        defer_to_bucket: str | None = None
+        ux_section: str | None = None
+        ux_approach = _pick_ux_recommended_approach(ux_recs) if ux_recs else None
+        if ux_recs and ux_review_doc is not None:
+            ux_section = _render_ux_review_section_for_ticket(
+                ux_review_doc=ux_review_doc,
+                ux_review_json_path=ux_review_json_path,
+                ux_review_md_path=ux_review_md_path,
+                ticket_id=ticket_id,
+                recs=ux_recs,
+            )
+            if stage == "research_required" and ux_approach in ("docs", "parameterize_existing"):
+                stage_override = "ready_for_ticket"
+                export_kind_override = "implementation"
+            elif stage == "research_required" and ux_approach == "defer":
+                defer_to_bucket = "0.1 - deferred"
+
+        stage_effective = stage_override or stage
+
+        if stage_effective not in stages:
             skipped_stage += 1
             continue
         severity = (_coerce_string(ticket.get("severity")) or "medium").strip().lower()
@@ -3402,28 +3703,36 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         user_visible = bool(change_surface.get("user_visible"))
 
         export_kind = "implementation"
-        if stage == "research_required":
+        if stage_effective == "research_required":
             export_kind = "research"
         elif user_visible and bool(kinds & surface_area_high):
             export_kind = "research"
+        if export_kind_override is not None:
+            export_kind = export_kind_override
 
         title = _coerce_string(ticket.get("title")) or "Untitled"
         issue_title = f"[Research] {title}" if export_kind == "research" else title
 
+        ticket_for_body = dict(ticket)
+        ticket_for_body["stage"] = stage_effective
         body = _render_export_issue_body(
-            ticket=ticket,
+            ticket=ticket_for_body,
             fingerprint=fingerprint,
             export_kind=export_kind,
             surface_area_high=surface_area_high,
         )
+        if ux_section is not None:
+            body = body.rstrip() + "\n\n" + ux_section
 
         labels: list[str] = []
-        labels.append(f"stage:{stage}")
+        labels.append(f"stage:{stage_effective}")
         labels.append(f"severity:{severity}")
         if export_kind == "research":
             labels.append("type:research")
         else:
             labels.append("type:implementation")
+        if ux_approach:
+            labels.append(f"ux:{ux_approach}")
         owner = _coerce_string(ticket.get("suggested_owner")) or _coerce_string(
             ticket.get("component")
         )
@@ -3452,7 +3761,26 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 queue_paths = [
                     item for item in existing.get("paths", []) if isinstance(item, str) and item
                 ]
-                ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+                if ux_section is not None and queue_paths:
+                    for path_s in queue_paths:
+                        if _apply_ux_review_to_plan_ticket(
+                            path=Path(path_s),
+                            ux_section=ux_section,
+                            stage_override=stage_override,
+                            export_kind_override=export_kind_override,
+                        ):
+                            ux_plan_tickets_updated += 1
+                    if defer_to_bucket is not None:
+                        primary_path = Path(queue_paths[0])
+                        moved = _move_plan_ticket_to_bucket(
+                            path=primary_path,
+                            owner_repo_root=owner_repo_root,
+                            bucket=defer_to_bucket,
+                        )
+                        if moved is not None:
+                            queue_paths[0] = str(moved)
+                            desired_status = "actioned"
+                            ux_tickets_deferred += 1
                 for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
                     ref: dict[str, str] = {
                         "atom_id": atom_id,
@@ -3482,8 +3810,21 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             cli_repo_input=repo_input,
             keep_path=idea_path,
         )
+        if ux_section is not None:
+            ux_idea_files_updated += 1
+        deferred_moved = False
+        if defer_to_bucket is not None:
+            moved = _move_plan_ticket_to_bucket(
+                path=idea_path,
+                owner_repo_root=owner_repo_root,
+                bucket=defer_to_bucket,
+            )
+            if moved is not None:
+                idea_path = moved
+                deferred_moved = True
+                ux_tickets_deferred += 1
+
         idea_files_written.append(str(idea_path))
-        ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
         for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
             queued_refs.append(
                 {
@@ -3492,6 +3833,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                     "fingerprint": fingerprint,
                     "idea_path": str(idea_path),
                     "owner_root": str(owner_repo_root),
+                    "desired_status": "actioned" if deferred_moved else "queued",
                 }
             )
 
@@ -3504,7 +3846,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 "body_markdown": body,
                 "source_ticket": {
                     "ticket_id": ticket.get("ticket_id"),
-                    "stage": stage,
+                    "stage": stage_effective,
                     "severity": severity,
                 },
                 "owner_repo": {
@@ -3539,6 +3881,8 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             "actions_yaml": str(actions_path),
             "atom_actions_yaml": str(atom_actions_path),
             "policy_config": str(policy_config_path),
+            "ux_review_json": str(ux_review_json_path) if ux_review_json_path.exists() else None,
+            "ux_review_md": str(ux_review_md_path) if ux_review_md_path.exists() else None,
         },
         "filters": {
             "stages": stages,
@@ -3557,6 +3901,10 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             "skipped_severity": skipped_severity,
             "actioned_total": len(actions),
             "idea_files_written": len(idea_files_written),
+            "ux_recommendations_loaded": len(ux_recommendations_by_ticket_id),
+            "ux_plan_tickets_updated": ux_plan_tickets_updated,
+            "ux_idea_files_updated": ux_idea_files_updated,
+            "ux_tickets_deferred": ux_tickets_deferred,
             "atom_status_updates": atom_status_meta,
         },
         "idea_files": idea_files_written,
@@ -3737,6 +4085,27 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             continue
         atoms.append(atom)
 
+    eligible_atoms_trackable = len(atoms)
+    eligible_run_rels = {
+        run_rel
+        for atom in atoms
+        for run_rel in [_coerce_string(atom.get("run_rel"))]
+        if run_rel is not None
+    }
+    aggregate_run_id_prefix = (
+        "__aggregate__/"
+        + (target_slug or "all")
+        + "/"
+        + (slugify(repo_input) if repo_input is not None else "all")
+    )
+    aggregate_atoms = build_aggregate_metrics_atoms(
+        records,
+        eligible_run_rels,
+        run_id_prefix=aggregate_run_id_prefix,
+    )
+    atoms.extend(aggregate_atoms)
+    atoms = add_atom_links(atoms)
+
     atom_totals = _summarize_atoms_for_totals(atoms)
     atoms_doc = dict(atoms_doc_raw)
     atoms_doc["atoms"] = atoms
@@ -3747,6 +4116,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     atoms_doc["atom_filter"] = {
         "exclude_statuses": sorted(exclude_atom_status_set),
         "eligible_atoms": len(atoms),
+        "eligible_atoms_trackable": eligible_atoms_trackable,
+        "synthetic_atoms_added": len(aggregate_atoms),
         "excluded_atoms": len(excluded_atoms),
         "excluded_status_counts": excluded_status_counts,
         "plan_folder_sync": plan_sync_meta,
@@ -3777,9 +4148,19 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     force = bool(args.force)
     dry_run = bool(args.dry_run)
     no_merge = bool(args.no_merge)
+    merge_candidate_threshold = float(args.merge_candidate_threshold)
+    if not (0.0 <= merge_candidate_threshold <= 1.0):
+        raise ValueError("--merge-candidate-threshold must be in [0, 1]")
+    merge_keep_anchor_pairs = bool(args.merge_keep_anchor_pairs)
     agent = str(args.agent)
     model = str(args.model) if isinstance(args.model, str) and args.model.strip() else None
     labelers = max(0, int(args.labelers))
+    if labelers == 0:
+        print(
+            "WARNING: --labelers=0 disables ticket labeling; tickets keep "
+            "change_surface.kinds=['unknown'] and policy stage promotion will not run.",
+            file=sys.stderr,
+        )
 
     policy_cfg: BacklogPolicyConfig | None = None
     policy_config_path: Path | None
@@ -3819,6 +4200,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         force=force,
         dry_run=dry_run,
         no_merge=no_merge,
+        merge_candidate_overall_threshold=merge_candidate_threshold,
+        merge_keep_anchor_pairs=merge_keep_anchor_pairs,
         orphan_pass=orphan_pass,
     )
 
@@ -3901,6 +4284,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             "force": force,
             "seed": seed,
             "no_merge": no_merge,
+            "merge_candidate_overall_threshold": merge_candidate_threshold,
+            "merge_keep_anchor_pairs": merge_keep_anchor_pairs,
             "orphan_pass": orphan_pass,
             "dry_run": dry_run,
             "labelers": labelers,
@@ -3990,6 +4375,21 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     print(str(atoms_jsonl))
     print(json.dumps(summary.get("totals", {}), indent=2, ensure_ascii=False))
     print(json.dumps(summary.get("coverage", {}), indent=2, ensure_ascii=False))
+
+    miners_meta = summary.get("miners_meta") if isinstance(summary, dict) else None
+    miners_failed = 0
+    if isinstance(miners_meta, dict):
+        try:
+            miners_failed = int(miners_meta.get("miners_failed") or 0)
+        except (TypeError, ValueError):
+            miners_failed = 0
+    if miners_failed:
+        print(
+            f"[backlog] WARNING: {miners_failed} miner job(s) failed to parse. "
+            f"See: {artifacts_dir / 'miners'}",
+            file=sys.stderr,
+        )
+        return 2
     return 0
 
 
@@ -4010,6 +4410,57 @@ def _default_triage_output_path(input_json: Path, *, suffix: str) -> Path:
     """
 
     return input_json.with_name(f"{input_json.stem}{suffix}")
+
+
+def _cmd_triage_backlog(args: argparse.Namespace) -> int:
+    """Execute the ``triage-backlog`` command."""
+
+    input_json = args.input_json.resolve()
+    if not input_json.exists():
+        raise FileNotFoundError(f"Input file not found: {input_json}")
+
+    issues, input_metadata = load_issue_items(input_json)
+    report = triage_issues(
+        issues,
+        group_key=args.group_key,
+        dedupe_overall_threshold=float(args.dedupe_overall_threshold),
+        theme_overall_threshold=float(args.theme_overall_threshold),
+        theme_k=int(args.theme_k),
+        theme_representative_threshold=float(args.theme_representative_threshold),
+    )
+    report["input_json"] = str(input_json)
+    if input_metadata:
+        report["input_metadata"] = input_metadata
+
+    out_json = (
+        args.out_json.resolve()
+        if args.out_json is not None
+        else _default_triage_output_path(input_json, suffix=".triage_backlog.json")
+    )
+    out_md = (
+        args.out_md.resolve()
+        if args.out_md is not None
+        else _default_triage_output_path(input_json, suffix=".triage_backlog.md")
+    )
+    out_xlsx = args.out_xlsx.resolve() if args.out_xlsx is not None else None
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(report, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    out_md.write_text(
+        render_backlog_triage_markdown(report, title="Backlog Triage Report"),
+        encoding="utf-8",
+    )
+
+    if out_xlsx is not None:
+        write_triage_xlsx(report, out_xlsx)
+
+    print(str(out_json))
+    print(str(out_md))
+    if out_xlsx is not None:
+        print(str(out_xlsx))
+    print(json.dumps(report.get("totals", {}), indent=2, ensure_ascii=False))
+    return 0
 
 
 def _coerce_pr_items(raw_payload: Any) -> list[dict[str, Any]]:
@@ -4287,6 +4738,8 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_cmd_reports_compile(args))
         if args.reports_cmd == "analyze":
             raise SystemExit(_cmd_reports_analyze(args))
+        if args.reports_cmd == "window":
+            raise SystemExit(_cmd_reports_window(args))
         if args.reports_cmd == "intent-snapshot":
             raise SystemExit(_cmd_reports_intent_snapshot(args))
         if args.reports_cmd == "review-ux":
@@ -4298,6 +4751,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(2)
     if args.cmd == "triage-prs":
         raise SystemExit(_cmd_triage_prs(args))
+    if args.cmd == "triage-backlog":
+        raise SystemExit(_cmd_triage_backlog(args))
     raise SystemExit(2)
 
 

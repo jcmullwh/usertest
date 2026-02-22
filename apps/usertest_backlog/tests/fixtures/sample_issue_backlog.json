@@ -1,0 +1,73 @@
+{
+  "tickets": [
+    {
+      "ticket_id": "A-1",
+      "package": "pkg_a",
+      "title": "Parser fails on malformed JSON payload",
+      "problem": "Backlog parser crashes when malformed JSON appears in report text.",
+      "investigation_steps": [
+        "Run parser over malformed report payload",
+        "Observe parse exception"
+      ],
+      "files": [
+        "packages/backlog_core/src/backlog_core/parser.py"
+      ]
+    },
+    {
+      "ticket_id": "A-2",
+      "package": "pkg_a",
+      "title": "Parser fails on malformed JSON payload",
+      "problem": "Backlog parser crashes when malformed JSON appears in report text.",
+      "investigation_steps": [
+        "Run parser over malformed report payload",
+        "Observe parse exception"
+      ],
+      "files": [
+        "packages/backlog_core/src/backlog_core/parser.py"
+      ]
+    },
+    {
+      "ticket_id": "B-1",
+      "package": "pkg_b",
+      "title": "Malformed JSON crashes backlog parser in triage",
+      "problem": "Parser should recover from malformed JSON in issue body.",
+      "success_criteria": [
+        "Malformed JSON does not crash parser"
+      ],
+      "files": [
+        "packages/backlog_core/src/backlog_core/parser.py"
+      ]
+    },
+    {
+      "ticket_id": "A-3",
+      "package": "pkg_a",
+      "title": "README install steps unclear on Windows",
+      "user_impact": "Developers cannot run install commands from docs.",
+      "body": "Docs should include a clear Windows install command sequence.",
+      "paths": [
+        "README.md",
+        "docs/setup/windows.md"
+      ]
+    },
+    {
+      "ticket_id": "B-2",
+      "package": "pkg_b",
+      "title": "Docs install command unclear for Windows setup",
+      "user_impact": "Windows onboarding fails because install docs are ambiguous.",
+      "notes": "Clarify install command flow in docs and README.",
+      "paths": [
+        "README.md",
+        "docs/setup/windows.md"
+      ]
+    },
+    {
+      "ticket_id": "B-3",
+      "package": "pkg_b",
+      "title": "Shell snapshot warning is too noisy",
+      "notes": "PowerShell shell snapshot warning repeats and obscures true errors.",
+      "files": [
+        "packages/runner_core/src/runner_core/runner.py"
+      ]
+    }
+  ]
+}

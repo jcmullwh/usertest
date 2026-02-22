@@ -5,7 +5,17 @@ import json
 from collections.abc import Callable, Iterable, Iterator
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, Protocol, cast
+
+
+class MakeEvent(Protocol):
+    def __call__(
+        self,
+        event_type: str,
+        data: dict[str, Any],
+        *,
+        ts: str | None = None,
+    ) -> dict[str, Any]: ...
 
 
 def _fallback_utc_now_iso() -> str:
@@ -45,10 +55,7 @@ except Exception:
 
 if _normalized_events_module is not None:
     utc_now_iso = cast(Callable[[], str], _normalized_events_module.utc_now_iso)
-    make_event = cast(
-        Callable[[str, dict[str, Any]], dict[str, Any]],
-        _normalized_events_module.make_event,
-    )
+    make_event = cast(MakeEvent, _normalized_events_module.make_event)
     iter_events_jsonl = cast(
         Callable[[Path], Iterator[dict[str, Any]]],
         _normalized_events_module.iter_events_jsonl,

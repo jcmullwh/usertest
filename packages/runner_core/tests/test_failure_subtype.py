@@ -43,6 +43,21 @@ def test_classify_failure_subtype_disk_full() -> None:
     assert _classify_failure_subtype(text) == "disk_full"
 
 
+def test_classify_failure_subtype_nested_agent_session() -> None:
+    text = "Error: Claude Code cannot be launched inside another Claude Code session."
+    assert _classify_failure_subtype(text) == "nested_agent_session"
+
+
+def test_classify_failure_subtype_transient_network() -> None:
+    text = "request failed: getaddrinfo EAI_AGAIN cloudcode-pa.googleapis.com"
+    assert _classify_failure_subtype(text) == "transient_network"
+
+
+def test_classify_failure_subtype_provider_capacity_precedes_transient_network() -> None:
+    text = "Attempt failed with status 429 RESOURCE_EXHAUSTED; also saw getaddrinfo EAI_AGAIN"
+    assert _classify_failure_subtype(text) == "provider_capacity"
+
+
 def test_augment_tool_file_not_found_diagnostics_includes_drive_letter_path() -> None:
     text = "Error executing tool read_file: File not found: C:\\Temp\\missing.py"
     augmented = _augment_tool_file_not_found_diagnostics(

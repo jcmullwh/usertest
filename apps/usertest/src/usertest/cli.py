@@ -9,34 +9,94 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, cast
 
-import yaml
-from agent_adapters import (
-    normalize_claude_events,
-    normalize_codex_events,
-    normalize_gemini_events,
-)
-from reporter import (
-    analyze_report_history,
-    compute_metrics,
-    iter_events_jsonl,
-    make_event,
-    render_report_markdown,
-    validate_report,
-    write_issue_analysis,
-)
-from run_artifacts.history import iter_report_history, write_report_history_jsonl
-from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
-from runner_core.catalog import discover_missions, discover_personas, load_catalog_config
-from runner_core.pathing import slugify
-from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
-from runner_core.target_acquire import acquire_target
+try:
+    import yaml
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Missing dependency `pyyaml` (import name: `yaml`). "
+        "Fix: `python -m pip install -r requirements-dev.txt`."
+    ) from exc
+try:
+    import jsonschema  # noqa: F401
+except ModuleNotFoundError as exc:
+    raise SystemExit(
+        "Missing dependency `jsonschema`. "
+        "Fix: `python -m pip install -r requirements-dev.txt`."
+    ) from exc
+
+
+def _from_source_import_remediation(*, missing_module: str) -> str:
+    return (
+        f"Missing import `{missing_module}`.\n"
+        "This usually means you're running from source without editable installs or PYTHONPATH.\n"
+        "\n"
+        "Fix (from repo root):\n"
+        "  python -m pip install -r requirements-dev.txt\n"
+        "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
+        "  macOS/Linux: source scripts/set_pythonpath.sh\n"
+        "\n"
+        "Or install editables (recommended):\n"
+        "  python -m pip install -e apps/usertest\n"
+    )
+
+
+try:
+    from agent_adapters import (
+        normalize_claude_events,
+        normalize_codex_events,
+        normalize_gemini_events,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name == "agent_adapters":
+        raise SystemExit(_from_source_import_remediation(missing_module="agent_adapters")) from exc
+    raise
+
+try:
+    from reporter import (
+        analyze_report_history,
+        compute_metrics,
+        iter_events_jsonl,
+        make_event,
+        render_report_markdown,
+        validate_report,
+        write_issue_analysis,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name == "reporter":
+        raise SystemExit(_from_source_import_remediation(missing_module="reporter")) from exc
+    raise
+
+try:
+    from run_artifacts.history import iter_report_history, write_report_history_jsonl
+except ModuleNotFoundError as exc:
+    if exc.name == "run_artifacts":
+        raise SystemExit(_from_source_import_remediation(missing_module="run_artifacts")) from exc
+    raise
+
+try:
+    from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
+    from runner_core.catalog import discover_missions, discover_personas, load_catalog_config
+    from runner_core.pathing import slugify
+    from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
+    from runner_core.target_acquire import acquire_target
+except ModuleNotFoundError as exc:
+    if exc.name == "runner_core":
+        raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
+    raise
 
 _LEGACY_RUN_TIMESTAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 _WINDOWS_ABS_PATH_RE = re.compile(r"^[A-Za-z]:[\\/]")
+try:
+    from runner_core.python_interpreter_probe import probe_python_interpreters
+except ModuleNotFoundError:
+    probe_python_interpreters = None  # type: ignore[assignment]
+
+
 def _enable_console_backslashreplace(stream: Any) -> None:
     """Configure stream error handling to backslash escapes when supported."""
     reconfigure = getattr(stream, "reconfigure", None)
@@ -132,6 +192,23 @@ def _infer_responsiveness_probe_commands(repo_dir: Path) -> set[str]:
 
 def _probe_command_responsive(*, command: str, timeout_seconds: float) -> str | None:
     """Run a quick command probe and return an error message on failure."""
+    if command in {"python", "python3", "py"} and callable(probe_python_interpreters):
+        probe = probe_python_interpreters(
+            candidate_commands=[command],
+            timeout_seconds=max(0.1, timeout_seconds),
+        )
+        candidate = probe.by_command().get(command)
+        if candidate is None or not candidate.present:
+            return None
+        if candidate.usable:
+            return None
+        code = candidate.reason_code or "probe_failed"
+        reason = candidate.reason or "interpreter health probe failed"
+        return (
+            f"command {command!r} resolves to an unusable Python interpreter "
+            f"({code}): {reason}"
+        )
+
     resolved = shutil.which(command)
     if resolved is None:
         return None
@@ -163,16 +240,42 @@ def _prevalidate_batch_requests(
     requests: list[tuple[int, RunRequest]],
     probe_timeout_seconds: float,
     skip_command_responsiveness_probes: bool,
+    validate_only: bool,
 ) -> list[str]:
     """Validate batch requests against catalog and policy constraints."""
     errors: list[str] = []
     local_repos: list[Path] = []
+    missing_agent_binaries: dict[tuple[str, str, str], list[int]] = {}
 
     for idx, req in requests:
         if req.agent not in cfg.agents:
             errors.append(
                 f"targets[{idx}]: unknown agent {req.agent!r} (defined in configs/agents.yaml)."
             )
+        else:
+            agent_cfg = cfg.agents.get(req.agent, {})
+            binary = req.agent
+            if isinstance(agent_cfg, dict):
+                binary_raw = agent_cfg.get("binary")
+                if isinstance(binary_raw, str) and binary_raw.strip():
+                    binary = binary_raw.strip()
+            if binary:
+                p = Path(binary)
+                is_pathish = (
+                    p.is_absolute()
+                    or any(sep in binary for sep in ("/", "\\"))
+                    or (os.name == "nt" and ":" in binary)
+                )
+                if is_pathish:
+                    if not p.exists():
+                        missing_agent_binaries.setdefault(
+                            (req.agent, binary, "path_missing"), []
+                        ).append(idx)
+                elif shutil.which(binary) is None:
+                    missing_agent_binaries.setdefault((req.agent, binary, "not_on_path"), []).append(
+                        idx
+                    )
+
         if req.policy not in cfg.policies:
             errors.append(
                 f"targets[{idx}]: unknown policy {req.policy!r} (defined in configs/policies.yaml)."
@@ -251,10 +354,16 @@ def _prevalidate_batch_requests(
                     shell_status = "allowed" if shell_enabled else "blocked"
 
             if requires_shell and shell_status == "blocked":
+                hint = "use policy=inspect or policy=write"
+                if req.agent == "gemini" and os.name == "nt" and str(req.exec_backend) != "docker":
+                    hint = (
+                        "use --exec-backend docker (Gemini shell is blocked on Windows local backend) "
+                        "and policy=write"
+                    )
                 errors.append(
                     f"targets[{idx}]: mission {effective_spec.mission_id!r} requires shell "
                     f"commands, but policy {req.policy!r} for agent {req.agent!r} blocks shell "
-                    "commands (use policy=inspect or policy=write)."
+                    f"commands ({hint})."
                 )
             if requires_edits and not allow_edits:
                 errors.append(
@@ -283,6 +392,18 @@ def _prevalidate_batch_requests(
             errors.append(f"targets[{idx}]: {' | '.join(parts)}")
         except Exception as e:  # noqa: BLE001
             errors.append(f"targets[{idx}]: failed to resolve persona/mission: {e}")
+
+    if not validate_only:
+        for (agent, binary, kind), indices in sorted(missing_agent_binaries.items()):
+            rendered = ", ".join(f"targets[{idx}]" for idx in sorted(indices))
+            if kind == "path_missing":
+                errors.append(
+                    f"env: agent binary path not found: {binary!r} for agent {agent!r} (used by {rendered})."
+                )
+            else:
+                errors.append(
+                    f"env: agent binary not on PATH: {binary!r} for agent {agent!r} (used by {rendered})."
+                )
 
     if skip_command_responsiveness_probes:
         return errors
@@ -428,6 +549,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_p.add_argument(
+        "--verify-command",
+        action="append",
+        dest="verification_commands",
+        default=[],
+        help=(
+            "Repeatable shell command to run as a required verification gate before handing off "
+            "(e.g., --verify-command \"python -m pytest -q\"). Fails the run (and may trigger "
+            "agent follow-ups) if any command exits non-zero."
+        ),
+    )
+    run_p.add_argument(
+        "--verify-timeout-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Optional per-command timeout for --verify-command checks. "
+            "Non-positive values disable the timeout."
+        ),
+    )
+    run_p.add_argument(
         "--exec-backend",
         choices=["local", "docker"],
         default="local",
@@ -439,7 +580,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Docker image build context directory. "
             "If omitted with --exec-backend docker, defaults to "
-            "packages/sandbox_runner/builtins/docker/contexts/sandbox_cli."
+            "the built-in sandbox_cli context shipped with sandbox_runner."
         ),
     )
     run_p.add_argument(
@@ -480,7 +621,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--exec-network",
         choices=["open", "none"],
         default="open",
-        help="Docker container network mode.",
+        help=(
+            "Docker container network mode. Note: the agent CLI runs inside the container in this repo; "
+            "`none` will prevent hosted agent CLIs (codex/claude/gemini) from reaching their APIs."
+        ),
     )
     run_p.add_argument(
         "--exec-cache",
@@ -533,6 +677,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     batch_p = sub.add_parser("batch", help="Run multiple targets from a YAML file.")
     batch_p.add_argument("--targets", required=True, type=Path, help="YAML file with targets list.")
+    batch_p.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="Validate targets.yaml and exit (do not create run dirs or execute targets).",
+    )
     batch_p.add_argument("--agent", default="codex")
     batch_p.add_argument("--policy", default="write")
     batch_p.add_argument("--seed", type=int, default=0)
@@ -589,6 +738,19 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     batch_p.add_argument(
+        "--verify-command",
+        action="append",
+        dest="verification_commands",
+        default=[],
+        help="Repeatable verification command applied to all targets (overridable per target).",
+    )
+    batch_p.add_argument(
+        "--verify-timeout-seconds",
+        type=float,
+        default=None,
+        help="Optional per-command timeout for --verify-command checks (applied to all targets).",
+    )
+    batch_p.add_argument(
         "--agent-system-prompt-file",
         type=Path,
         help="Default agent system prompt override file for all targets (see `run --help`).",
@@ -616,7 +778,15 @@ def build_parser() -> argparse.ArgumentParser:
             "overlay manifests."
         ),
     )
-    batch_p.add_argument("--exec-network", choices=["open", "none"], default="open")
+    batch_p.add_argument(
+        "--exec-network",
+        choices=["open", "none"],
+        default="open",
+        help=(
+            "Docker container network mode. Note: the agent CLI runs inside the container in this repo; "
+            "`none` will prevent hosted agent CLIs (codex/claude/gemini) from reaching their APIs."
+        ),
+    )
     batch_p.add_argument("--exec-cache", choices=["cold", "warm"], default="cold")
     batch_p.add_argument("--exec-cache-dir", type=Path)
     batch_p.add_argument("--exec-env", action="append", default=[])
@@ -712,7 +882,15 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--exec-docker-timeout-seconds", type=float, default=None)
         p.add_argument("--exec-use-target-sandbox-cli-install", action="store_true")
         p.add_argument("--exec-use-host-agent-login", action="store_true")
-        p.add_argument("--exec-network", choices=["open", "none"], default="open")
+        p.add_argument(
+            "--exec-network",
+            choices=["open", "none"],
+            default="open",
+            help=(
+                "Docker container network mode. Note: the agent CLI runs inside the container in this repo; "
+                "`none` will prevent hosted agent CLIs (codex/claude/gemini) from reaching their APIs."
+            ),
+        )
         p.add_argument("--exec-cache", choices=["cold", "warm"], default="cold")
         p.add_argument("--exec-cache-dir", type=Path)
         p.add_argument(
@@ -886,6 +1064,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--runs-dir",
         type=Path,
         help="Runs directory (defaults to <repo_root>/runs/usertest).",
+    )
+    reports_analyze_p.add_argument(
+        "--history",
+        type=Path,
+        help="Path to a compiled report history JSONL (from `reports compile`).",
     )
     reports_analyze_p.add_argument(
         "--out-json",
@@ -1088,6 +1271,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
             )
         preflight_required_commands.append(cmd.strip())
 
+    verification_commands: list[str] = []
+    for cmd in getattr(args, "verification_commands", None) or []:
+        if not isinstance(cmd, str) or not cmd.strip():
+            raise ValueError(f"--verify-command entries must be non-empty strings; got {cmd!r}.")
+        verification_commands.append(cmd.strip())
+
+    verification_timeout_seconds = getattr(args, "verification_timeout_seconds", None)
+    if verification_timeout_seconds is not None and verification_timeout_seconds <= 0:
+        verification_timeout_seconds = None
+
     result = run_once(
         cfg,
         RunRequest(
@@ -1107,6 +1300,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             keep_workspace=bool(args.keep_workspace),
             preflight_commands=tuple(preflight_commands),
             preflight_required_commands=tuple(preflight_required_commands),
+            verification_commands=tuple(verification_commands),
+            verification_timeout_seconds=verification_timeout_seconds,
             exec_backend=str(args.exec_backend),
             exec_docker_context=exec_docker_context,
             exec_dockerfile=args.exec_dockerfile,
@@ -1183,15 +1378,112 @@ def _cmd_batch(args: argparse.Namespace) -> int:
     targets_path: Path = args.targets
     if not targets_path.is_absolute() and not targets_path.exists():
         targets_path = repo_root / targets_path
-    data = _load_yaml(targets_path)
-    targets = data.get("targets", [])
-    if not isinstance(targets, list):
-        raise ValueError(f"Expected targets: [] in {targets_path}")
+    try:
+        data = _load_yaml(targets_path)
+    except yaml.YAMLError as e:
+        mark = getattr(e, "problem_mark", None) or getattr(e, "context_mark", None)
+        location = str(targets_path)
+        if mark is not None and hasattr(mark, "line") and hasattr(mark, "column"):
+            try:
+                line = int(mark.line) + 1
+                col = int(mark.column) + 1
+            except Exception:  # noqa: BLE001
+                line = None
+                col = None
+            if line is not None and col is not None:
+                location = f"{targets_path}:{line}:{col}"
+        summary = str(e).splitlines()[0].strip() or type(e).__name__
+        print("Batch validation failed; no targets were executed.", file=sys.stderr)
+        print(f"- YAML parse error in {location}: {summary}", file=sys.stderr)
+        return 2
+    except ValueError as e:
+        print("Batch validation failed; no targets were executed.", file=sys.stderr)
+        print(f"- Invalid targets YAML {targets_path}: {e}", file=sys.stderr)
+        return 2
+    except OSError as e:
+        print("Batch validation failed; no targets were executed.", file=sys.stderr)
+        print(f"- Failed to read targets YAML {targets_path}: {e}", file=sys.stderr)
+        return 2
+    parse_errors: list[str] = []
 
+    def _append_arg_list_errors(values: Any, *, flag: str) -> list[str]:
+        if values is None:
+            return []
+        if not isinstance(values, list):
+            parse_errors.append(f"args: {flag} must be repeatable strings; got {type(values).__name__}.")
+            return []
+        normalized: list[str] = []
+        for vidx, value in enumerate(values):
+            if not isinstance(value, str) or not value.strip():
+                parse_errors.append(
+                    f"args: {flag}[{vidx}] must be a non-empty string; got {value!r}."
+                )
+                continue
+            normalized.append(value.strip())
+        return normalized
+
+    base_preflight_commands = _append_arg_list_errors(
+        getattr(args, "preflight_commands", None),
+        flag="--preflight-command",
+    )
+    base_preflight_required_commands = _append_arg_list_errors(
+        getattr(args, "preflight_required_commands", None),
+        flag="--require-preflight-command",
+    )
+    base_verification_commands = _append_arg_list_errors(
+        getattr(args, "verification_commands", None),
+        flag="--verify-command",
+    )
+    base_verification_timeout_seconds = getattr(args, "verification_timeout_seconds", None)
+    if base_verification_timeout_seconds is not None and base_verification_timeout_seconds <= 0:
+        base_verification_timeout_seconds = None
+    base_agent_config_overrides = _append_arg_list_errors(
+        getattr(args, "agent_config", None),
+        flag="--agent-config",
+    )
+
+    targets_raw = data.get("targets", [])
+    if targets_raw is None:
+        targets_raw = []
+    if not isinstance(targets_raw, list):
+        parse_errors.append(
+            f"targets: expected a list (YAML sequence) in {targets_path}; got {type(targets_raw).__name__}."
+        )
+        targets: list[Any] = []
+    else:
+        targets = targets_raw
     requests: list[tuple[int, RunRequest]] = []
     for idx, item in enumerate(targets):
-        if not isinstance(item, dict) or "repo" not in item:
-            raise ValueError(f"targets[{idx}] must be a mapping with repo.")
+        target_errors: list[str] = []
+
+        if not isinstance(item, dict):
+            parse_errors.append(
+                f"targets[{idx}]: must be a mapping (YAML object); got {type(item).__name__}."
+            )
+            continue
+
+        def _require_non_empty_str(
+            field: str,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> str | None:
+            raw = _item.get(field)
+            if raw is None:
+                _target_errors.append(f"targets[{_idx}].{field} is required.")
+                return None
+            if not isinstance(raw, str) or not raw.strip():
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a non-empty string; got {raw!r}."
+                )
+                return None
+            return raw
+
+        repo_value = _require_non_empty_str("repo")
+        if repo_value is None:
+            parse_errors.extend(target_errors)
+            continue
 
         legacy_keys = {
             "persona",
@@ -1202,100 +1494,239 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         } & set(item)
         if legacy_keys:
             legacy_list = ", ".join(sorted(legacy_keys))
-            raise ValueError(
-                f"targets[{idx}] uses legacy keys ({legacy_list}). "
+            parse_errors.append(
+                f"targets[{idx}]: uses legacy keys ({legacy_list}). "
                 "Update to persona_id / mission_id and remove legacy fields."
             )
 
-        preflight_commands: list[str] = []
-        for cmd in args.preflight_commands or []:
-            if not isinstance(cmd, str) or not cmd.strip():
-                raise ValueError(
-                    f"--preflight-command entries must be non-empty strings; got {cmd!r}."
+        def _optional_str(
+            field: str,
+            default: str | None,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> str | None:
+            if field not in _item:
+                return default
+            raw = _item.get(field)
+            if raw is None:
+                return None
+            if not isinstance(raw, str):
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a string if present; got {type(raw).__name__}."
                 )
-            preflight_commands.append(cmd.strip())
+                return None
+            return raw
 
-        preflight_required_commands: list[str] = []
-        for cmd in args.preflight_required_commands or []:
-            if not isinstance(cmd, str) or not cmd.strip():
-                raise ValueError(
-                    f"--require-preflight-command entries must be non-empty strings; got {cmd!r}."
+        def _optional_int(
+            field: str,
+            default: int,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> int | None:
+            raw = _item.get(field, default)
+            if raw is None:
+                return default
+            if isinstance(raw, bool):
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be an integer; got bool."
                 )
-            preflight_required_commands.append(cmd.strip())
+                return None
+            if isinstance(raw, int):
+                return raw
+            if isinstance(raw, str):
+                try:
+                    return int(raw.strip())
+                except ValueError:
+                    _target_errors.append(
+                        f"targets[{_idx}].{field} must be an integer; got {raw!r}."
+                    )
+                    return None
+            _target_errors.append(
+                f"targets[{_idx}].{field} must be an integer; got {type(raw).__name__}."
+            )
+            return None
 
-        agent_config_overrides: list[str] = []
-        for override in getattr(args, "agent_config", []) or []:
-            if not isinstance(override, str) or not override.strip():
-                raise ValueError(
-                    f"--agent-config entries must be non-empty strings; got {override!r}."
+        def _optional_float(
+            field: str,
+            default: float,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> float | None:
+            raw = _item.get(field, default)
+            if raw is None:
+                return default
+            if isinstance(raw, bool):
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a number; got bool."
                 )
-            agent_config_overrides.append(override.strip())
+                return None
+            if isinstance(raw, (int, float)):
+                return float(raw)
+            if isinstance(raw, str):
+                try:
+                    return float(raw.strip())
+                except ValueError:
+                    _target_errors.append(
+                        f"targets[{_idx}].{field} must be a number; got {raw!r}."
+                    )
+                    return None
+            _target_errors.append(
+                f"targets[{_idx}].{field} must be a number; got {type(raw).__name__}."
+            )
+            return None
+
+        def _optional_nullable_float(
+            field: str,
+            default: float | None,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> float | None:
+            raw = _item.get(field, default)
+            if raw is None:
+                return default
+            if isinstance(raw, bool):
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a number; got bool."
+                )
+                return None
+            if isinstance(raw, (int, float)):
+                return float(raw)
+            if isinstance(raw, str):
+                try:
+                    return float(raw.strip())
+                except ValueError:
+                    _target_errors.append(
+                        f"targets[{_idx}].{field} must be a number; got {raw!r}."
+                    )
+                    return None
+            _target_errors.append(
+                f"targets[{_idx}].{field} must be a number; got {type(raw).__name__}."
+            )
+            return None
+
+        preflight_commands: list[str] = list(base_preflight_commands)
+        preflight_required_commands: list[str] = list(base_preflight_required_commands)
+        verification_commands: list[str] = list(base_verification_commands)
+        verification_timeout_seconds = base_verification_timeout_seconds
+        agent_config_overrides: list[str] = list(base_agent_config_overrides)
 
         raw_agent_config = item.get("agent_config")
         if raw_agent_config is None:
             raw_agent_config = item.get("agent_config_overrides")
         if raw_agent_config is not None:
             if not isinstance(raw_agent_config, list):
-                raise ValueError(
+                target_errors.append(
                     f"targets[{idx}].agent_config must be a list of strings if present."
                 )
             for jdx, override in enumerate(raw_agent_config):
                 if not isinstance(override, str) or not override.strip():
-                    raise ValueError(
+                    target_errors.append(
                         f"targets[{idx}].agent_config[{jdx}] must be a non-empty string; got {override!r}."
                     )
-                agent_config_overrides.append(override.strip())
+                else:
+                    agent_config_overrides.append(override.strip())
         raw_preflight_commands = item.get("preflight_commands")
         if raw_preflight_commands is not None:
             if not isinstance(raw_preflight_commands, list):
-                raise ValueError(
+                target_errors.append(
                     f"targets[{idx}].preflight_commands must be a list of strings if present."
                 )
             for jdx, cmd in enumerate(raw_preflight_commands):
                 if not isinstance(cmd, str) or not cmd.strip():
-                    raise ValueError(
+                    target_errors.append(
                         f"targets[{idx}].preflight_commands[{jdx}] must be a non-empty string; "
                         f"got {cmd!r}."
                     )
-                preflight_commands.append(cmd.strip())
+                else:
+                    preflight_commands.append(cmd.strip())
 
         raw_preflight_required = item.get("preflight_required_commands")
         if raw_preflight_required is not None:
             if not isinstance(raw_preflight_required, list):
-                raise ValueError(
+                target_errors.append(
                     f"targets[{idx}].preflight_required_commands must be a list of strings "
                     f"if present."
                 )
             for jdx, cmd in enumerate(raw_preflight_required):
                 if not isinstance(cmd, str) or not cmd.strip():
-                    raise ValueError(
+                    target_errors.append(
                         f"targets[{idx}].preflight_required_commands[{jdx}] "
                         f"must be a non-empty string; got {cmd!r}."
                     )
-                preflight_required_commands.append(cmd.strip())
+                else:
+                    preflight_required_commands.append(cmd.strip())
+
+        raw_verification_commands = item.get("verification_commands")
+        if raw_verification_commands is not None:
+            if not isinstance(raw_verification_commands, list):
+                target_errors.append(
+                    f"targets[{idx}].verification_commands must be a list of strings if present."
+                )
+            for jdx, cmd in enumerate(raw_verification_commands):
+                if not isinstance(cmd, str) or not cmd.strip():
+                    target_errors.append(
+                        f"targets[{idx}].verification_commands[{jdx}] must be a non-empty string; "
+                        f"got {cmd!r}."
+                    )
+                else:
+                    verification_commands.append(cmd.strip())
+
+        verification_timeout_seconds = _optional_nullable_float(
+            "verification_timeout_seconds", verification_timeout_seconds
+        )
+        if verification_timeout_seconds is not None and verification_timeout_seconds <= 0:
+            verification_timeout_seconds = None
+
+        ref_value = _optional_str("ref", None)
+        agent_value = _optional_str("agent", str(args.agent))
+        policy_value = _optional_str("policy", str(args.policy))
+        persona_id_value = _optional_str("persona_id", args.persona_id)
+        mission_id_value = _optional_str("mission_id", args.mission_id)
+        model_value = _optional_str(
+            "model",
+            str(args.model) if getattr(args, "model", None) else None,
+        )
+
+        seed_value = _optional_int("seed", int(args.seed))
+        retries_value = _optional_int(
+            "agent_rate_limit_retries",
+            int(args.agent_rate_limit_retries),
+        )
+        backoff_seconds_value = _optional_float(
+            "agent_rate_limit_backoff_seconds",
+            float(args.agent_rate_limit_backoff_seconds),
+        )
+        backoff_multiplier_value = _optional_float(
+            "agent_rate_limit_backoff_multiplier",
+            float(args.agent_rate_limit_backoff_multiplier),
+        )
+        followup_attempts_value = _optional_int(
+            "agent_followup_attempts",
+            int(args.agent_followup_attempts),
+        )
+
+        if target_errors:
+            parse_errors.extend(target_errors)
+            continue
 
         req = RunRequest(
-            repo=str(item["repo"]),
-            ref=str(item["ref"]) if "ref" in item and item["ref"] is not None else None,
-            agent=str(item.get("agent", args.agent)),
-            policy=str(item.get("policy", args.policy)),
-            persona_id=(
-                str(item["persona_id"])
-                if "persona_id" in item and item["persona_id"] is not None
-                else args.persona_id
-            ),
-            mission_id=(
-                str(item["mission_id"])
-                if "mission_id" in item and item["mission_id"] is not None
-                else args.mission_id
-            ),
+            repo=repo_value,
+            ref=ref_value,
+            agent=agent_value if agent_value is not None else str(args.agent),
+            policy=policy_value if policy_value is not None else str(args.policy),
+            persona_id=persona_id_value,
+            mission_id=mission_id_value,
             obfuscate_agent_docs=bool(args.obfuscate_agent_docs),
-            seed=int(item.get("seed", args.seed)),
-            model=(
-                str(item["model"])
-                if "model" in item and item["model"] is not None
-                else (str(args.model) if getattr(args, "model", None) else None)
-            ),
+            seed=seed_value if seed_value is not None else int(args.seed),
+            model=model_value,
             agent_config_overrides=tuple(agent_config_overrides),
             agent_system_prompt_file=args.agent_system_prompt_file,
             agent_append_system_prompt=args.agent_append_system_prompt,
@@ -1303,6 +1734,8 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             keep_workspace=bool(args.keep_workspace),
             preflight_commands=tuple(preflight_commands),
             preflight_required_commands=tuple(preflight_required_commands),
+            verification_commands=tuple(verification_commands),
+            verification_timeout_seconds=verification_timeout_seconds,
             exec_backend=str(args.exec_backend),
             exec_docker_context=exec_docker_context,
             exec_dockerfile=args.exec_dockerfile,
@@ -1316,23 +1749,25 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             exec_env=tuple(str(x) for x in (args.exec_env or []) if str(x).strip()),
             exec_keep_container=bool(args.exec_keep_container),
             exec_rebuild_image=bool(args.exec_rebuild_image),
-            agent_rate_limit_retries=int(
-                item.get("agent_rate_limit_retries", args.agent_rate_limit_retries)
+            agent_rate_limit_retries=(
+                retries_value
+                if retries_value is not None
+                else int(args.agent_rate_limit_retries)
             ),
-            agent_rate_limit_backoff_seconds=float(
-                item.get(
-                    "agent_rate_limit_backoff_seconds",
-                    args.agent_rate_limit_backoff_seconds,
-                )
+            agent_rate_limit_backoff_seconds=(
+                backoff_seconds_value
+                if backoff_seconds_value is not None
+                else float(args.agent_rate_limit_backoff_seconds)
             ),
-            agent_rate_limit_backoff_multiplier=float(
-                item.get(
-                    "agent_rate_limit_backoff_multiplier",
-                    args.agent_rate_limit_backoff_multiplier,
-                )
+            agent_rate_limit_backoff_multiplier=(
+                backoff_multiplier_value
+                if backoff_multiplier_value is not None
+                else float(args.agent_rate_limit_backoff_multiplier)
             ),
-            agent_followup_attempts=int(
-                item.get("agent_followup_attempts", args.agent_followup_attempts)
+            agent_followup_attempts=(
+                followup_attempts_value
+                if followup_attempts_value is not None
+                else int(args.agent_followup_attempts)
             ),
         )
 
@@ -1345,12 +1780,18 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         requests=requests,
         probe_timeout_seconds=float(args.command_probe_timeout_seconds),
         skip_command_responsiveness_probes=bool(args.skip_command_probes),
+        validate_only=bool(getattr(args, "validate_only", False)),
     )
-    if validation_errors:
+    all_errors = [*parse_errors, *validation_errors]
+    if all_errors:
         print("Batch validation failed; no targets were executed.", file=sys.stderr)
-        for e in validation_errors:
+        for e in all_errors:
             print(f"- {e}", file=sys.stderr)
+        print("- See docs/reference/targets-yaml.md for targets.yaml format.", file=sys.stderr)
         return 2
+    if bool(getattr(args, "validate_only", False)):
+        print("Batch validation passed; no targets were executed (validate-only).", file=sys.stderr)
+        return 0
 
     exit_code = 0
     for _idx, req in requests:
@@ -2075,6 +2516,7 @@ def _cmd_matrix(args: argparse.Namespace, *, execute: bool) -> int:
         requests=requests,
         probe_timeout_seconds=float(getattr(args, "command_probe_timeout_seconds", 0.25)),
         skip_command_responsiveness_probes=bool(getattr(args, "skip_command_probes", False)),
+        validate_only=not execute,
     )
     if batch_errors:
         print("Matrix environment validation failed; no runs were executed.", file=sys.stderr)
@@ -2641,22 +3083,37 @@ def _cmd_report(args: argparse.Namespace) -> int:
                 workspace_root = None
 
         normalized_events_path = run_dir / "normalized_events.jsonl"
+        ts_iter: Iterator[str] | None = None
+        if normalized_events_path.exists():
+            try:
+                ts_values: list[str] = []
+                for event in iter_events_jsonl(normalized_events_path):
+                    ts = event.get("ts")
+                    if isinstance(ts, str) and ts.strip():
+                        ts_values.append(ts.strip())
+                if ts_values:
+                    ts_iter = iter(ts_values)
+            except Exception:  # noqa: BLE001
+                ts_iter = None
         if agent_name == "codex":
             normalize_codex_events(
                 raw_events_path=raw_events_path,
                 normalized_events_path=normalized_events_path,
+                ts_iter=ts_iter,
                 workspace_root=workspace_root,
             )
         elif agent_name == "claude":
             normalize_claude_events(
                 raw_events_path=raw_events_path,
                 normalized_events_path=normalized_events_path,
+                ts_iter=ts_iter,
                 workspace_root=workspace_root,
             )
         elif agent_name == "gemini":
             normalize_gemini_events(
                 raw_events_path=raw_events_path,
                 normalized_events_path=normalized_events_path,
+                ts_iter=ts_iter,
                 workspace_root=workspace_root,
             )
         else:
@@ -2695,6 +3152,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
                                             "lines_added": lines_added,
                                             "lines_removed": lines_removed,
                                         },
+                                        ts=next(ts_iter, None) if ts_iter is not None else None,
                                     ),
                                     ensure_ascii=False,
                                 )
@@ -2708,6 +3166,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
         metrics_path.write_text(
             json.dumps(recomputed_metrics, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
+            newline="\n",
         )
 
     report_path = run_dir / "report.json"
@@ -2750,15 +3209,16 @@ def _cmd_report(args: argparse.Namespace) -> int:
         target_ref = target_ref_raw if isinstance(target_ref_raw, dict) else None
 
     md = render_report_markdown(report=report_raw, metrics=metrics, target_ref=target_ref)
-    (run_dir / "report.md").write_text(md, encoding="utf-8")
+    (run_dir / "report.md").write_text(md, encoding="utf-8", newline="\n")
 
     if errors:
         (run_dir / "report_validation_errors.json").write_text(
             json.dumps(errors, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
+            newline="\n",
         )
 
-    print(str(run_dir))
+    print(str(run_dir / "report.md"))
     if errors:
         print("Report validation errors:")
         for e in errors:
@@ -2773,13 +3233,27 @@ def _render_target_catalog_yaml(*, persona_id: str | None, mission_id: str | Non
     return "\n".join(
         [
             "version: 1",
+            "",
+            "# Target-local usertest overrides.",
+            "#",
+            "# Path semantics:",
+            "# - `personas_dirs` / `missions_dirs` entries are resolved relative to the *target repo root*",
+            "#   (the directory passed to `init-usertest --repo`), not relative to this file.",
+            "# - These lists are additive: they are appended to the base catalog's directories.",
+            "# - Duplicate persona/mission ids across directories are an error; use unique ids or `extends`.",
+            "",
             "defaults:",
             f"  persona_id: {resolved_persona}",
             f"  mission_id: {resolved_mission}",
             "",
+            "personas_dirs:",
+            "  - .usertest/personas",
+            "",
+            "missions_dirs:",
+            "  - .usertest/missions",
+            "",
             "meta:",
-            "  note: Target-local usertest overrides. Add personas_dirs/missions_dirs here as "
-            "needed.",
+            "  note: Put local `*.persona.md` and `*.mission.md` files under the directories above.",
             "",
         ]
     )
@@ -2809,6 +3283,14 @@ def _cmd_init_users(args: argparse.Namespace) -> int:
         return 2
 
     usertest_dir.mkdir(parents=True, exist_ok=True)
+    personas_dir = usertest_dir / "personas"
+    missions_dir = usertest_dir / "missions"
+    personas_dir.mkdir(parents=True, exist_ok=True)
+    missions_dir.mkdir(parents=True, exist_ok=True)
+
+    # Ensure empty directories survive a git commit when the scaffold is checked in.
+    (personas_dir / ".gitkeep").write_text("", encoding="utf-8", newline="\n")
+    (missions_dir / ".gitkeep").write_text("", encoding="utf-8", newline="\n")
 
     catalog_dest.write_text(
         _render_target_catalog_yaml(
@@ -2938,6 +3420,12 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     cfg = _load_runner_config(repo_root)
 
     runs_dir = args.runs_dir.resolve() if args.runs_dir is not None else cfg.runs_dir
+    history_path: Path | None
+    if args.history is not None:
+        history_path = _resolve_optional_path(repo_root, args.history) or args.history.resolve()
+    else:
+        history_path = None
+
     target_slug: str | None = None
     if isinstance(args.target, str) and args.target.strip():
         target_slug = str(args.target).strip()
@@ -2952,7 +3440,9 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     if args.out_json is not None:
         out_json = _resolve_optional_path(repo_root, args.out_json) or args.out_json.resolve()
     else:
-        if target_slug is not None:
+        if history_path is not None:
+            out_json = history_path.with_name(f"{history_path.stem}.issue_analysis.json")
+        elif target_slug is not None:
             out_json = runs_dir / target_slug / "_compiled" / f"{default_name}.issue_analysis.json"
         else:
             out_json = runs_dir / "_compiled" / f"{default_name}.issue_analysis.json"
@@ -2969,9 +3459,10 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
         default_actions = repo_root / "configs" / "issue_actions.json"
         actions_path = default_actions if default_actions.exists() else None
 
+    history_source = history_path if history_path is not None else runs_dir
     records = list(
         iter_report_history(
-            runs_dir,
+            history_source,
             target_slug=target_slug,
             repo_input=repo_input,
             embed="none",

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import random
 import re
 from collections.abc import Callable, Iterable, Sequence
@@ -23,6 +25,7 @@ __all__ = [
     "PairSimilarity",
     "build_item_vectors",
     "compute_pair_similarity",
+    "get_similarity_weights",
     "generate_candidate_pairs",
 ]
 
@@ -94,6 +97,110 @@ class PairSimilarity:
     overall_similarity: float
 
 
+
+
+@dataclass(frozen=True)
+class SimilarityWeights:
+    """Weights used by :func:`compute_pair_similarity`.
+
+    You can override these at runtime via environment variables:
+
+    - TRIAGE_ENGINE_SIM_WEIGHTS:
+        Either a JSON object like {"embedding": 0.8, "title": 0.1, ...}
+        or a comma-separated list "0.8,0.1,0.06,0.04" in the order:
+        embedding,title,anchor,evidence.
+    - TRIAGE_ENGINE_SIM_WEIGHT_EMBEDDING
+    - TRIAGE_ENGINE_SIM_WEIGHT_TITLE
+    - TRIAGE_ENGINE_SIM_WEIGHT_ANCHOR
+    - TRIAGE_ENGINE_SIM_WEIGHT_EVIDENCE
+
+    Weights are normalized to sum to 1.0 when possible.
+    """
+
+    embedding: float = 0.82
+    title: float = 0.10
+    anchor: float = 0.06
+    evidence: float = 0.02
+
+    def normalized(self) -> SimilarityWeights:
+        total = float(self.embedding + self.title + self.anchor + self.evidence)
+        if total <= 0.0:
+            return self
+        return SimilarityWeights(
+            embedding=self.embedding / total,
+            title=self.title / total,
+            anchor=self.anchor / total,
+            evidence=self.evidence / total,
+        )
+
+
+def _parse_float_env(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    try:
+        return float(str(raw).strip())
+    except ValueError:
+        return None
+
+
+def get_similarity_weights() -> SimilarityWeights:
+    """Return similarity weights, potentially overridden by environment."""
+
+    weights = SimilarityWeights()
+
+    raw = os.getenv("TRIAGE_ENGINE_SIM_WEIGHTS")
+    if raw:
+        raw = raw.strip()
+        parsed: dict[str, float] | None = None
+        if raw.startswith("{"):
+            try:
+                obj = json.loads(raw)
+                if isinstance(obj, dict):
+                    parsed = {
+                        str(k): float(v)
+                        for k, v in obj.items()
+                        if k in {"embedding", "title", "anchor", "evidence"}
+                    }
+            except Exception:
+                parsed = None
+        else:
+            parts = [p.strip() for p in raw.split(",") if p.strip()]
+            if len(parts) == 4:
+                try:
+                    parsed = {
+                        "embedding": float(parts[0]),
+                        "title": float(parts[1]),
+                        "anchor": float(parts[2]),
+                        "evidence": float(parts[3]),
+                    }
+                except ValueError:
+                    parsed = None
+
+        if parsed:
+            weights = SimilarityWeights(
+                embedding=parsed.get("embedding", weights.embedding),
+                title=parsed.get("title", weights.title),
+                anchor=parsed.get("anchor", weights.anchor),
+                evidence=parsed.get("evidence", weights.evidence),
+            )
+
+    # Per-field overrides win.
+    emb = _parse_float_env("TRIAGE_ENGINE_SIM_WEIGHT_EMBEDDING")
+    title = _parse_float_env("TRIAGE_ENGINE_SIM_WEIGHT_TITLE")
+    anchor = _parse_float_env("TRIAGE_ENGINE_SIM_WEIGHT_ANCHOR")
+    evidence = _parse_float_env("TRIAGE_ENGINE_SIM_WEIGHT_EVIDENCE")
+
+    if emb is not None or title is not None or anchor is not None or evidence is not None:
+        weights = SimilarityWeights(
+            embedding=weights.embedding if emb is None else emb,
+            title=weights.title if title is None else title,
+            anchor=weights.anchor if anchor is None else anchor,
+            evidence=weights.evidence if evidence is None else evidence,
+        )
+
+    return weights.normalized()
+
 def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
     if not a or not b:
         return 0.0
@@ -125,11 +232,12 @@ def compute_pair_similarity(left: ItemVector, right: ItemVector) -> PairSimilari
         overall = 1.0
     else:
         # Titles are treated as an auxiliary signal (useful for very short items).
+        w = get_similarity_weights()
         overall = (
-            0.82 * emb_sim
-            + 0.10 * title_sim
-            + 0.06 * anchor_sim
-            + 0.02 * evidence_signal
+            w.embedding * emb_sim
+            + w.title * title_sim
+            + w.anchor * anchor_sim
+            + w.evidence * evidence_signal
         )
         overall = max(0.0, min(1.0, overall))
 

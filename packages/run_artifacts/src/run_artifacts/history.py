@@ -8,7 +8,17 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from run_artifacts.capture import TextCapturePolicy, TextExcerpt, capture_text_artifact
+
 _TIMESTAMP_DIR_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
+_EMBED_DEFINITION_KEYS = {
+    "persona_source_md",
+    "persona_resolved_md",
+    "mission_source_md",
+    "mission_resolved_md",
+    "prompt_template_md",
+    "report_schema_json",
+}
 
 
 def _parse_timestamp_dirname(name: str) -> str | None:
@@ -76,6 +86,63 @@ def iter_run_dirs(runs_dir: Path, *, target_slug: str | None = None) -> Iterator
                         yield seed_dir
 
 
+def select_recent_run_dirs(
+    runs_dir: Path,
+    *,
+    target_slug: str | None = None,
+    repo_input: str | None = None,
+    limit: int,
+) -> list[Path]:
+    """
+    Select the most recent run directories under `runs_dir`.
+
+    Returns run directories in chronological order (oldest-to-newest within the selection).
+    """
+
+    if limit <= 0:
+        return []
+
+    normalized_repo_input: str | None = None
+    if isinstance(repo_input, str) and repo_input.strip():
+        normalized_repo_input = _normalize_repo_input(repo_input)
+
+    candidates: list[tuple[datetime, str, Path]] = []
+    for run_dir in iter_run_dirs(runs_dir, target_slug=target_slug):
+        try:
+            parts = run_dir.relative_to(runs_dir).parts
+        except Exception:  # noqa: BLE001
+            continue
+        if len(parts) < 4:
+            continue
+        ts_dir = parts[1]
+        if not isinstance(ts_dir, str) or not _TIMESTAMP_DIR_RE.match(ts_dir):
+            continue
+        try:
+            ts_dt = datetime.strptime(ts_dir, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+
+        if normalized_repo_input is not None:
+            target_ref = _read_json(run_dir / "target_ref.json")
+            candidate = None
+            if isinstance(target_ref, dict):
+                raw = target_ref.get("repo_input")
+                candidate = raw if isinstance(raw, str) else None
+            if candidate is None or _normalize_repo_input(candidate) != normalized_repo_input:
+                continue
+
+        try:
+            run_rel = str(run_dir.relative_to(runs_dir)).replace("\\", "/")
+        except Exception:  # noqa: BLE001
+            run_rel = str(run_dir)
+
+        candidates.append((ts_dt, run_rel, run_dir))
+
+    candidates.sort(key=lambda item: (item[0], item[1]))
+    selected = candidates[-limit:] if len(candidates) > limit else candidates
+    return [item[2] for item in selected]
+
+
 def _read_json(path: Path) -> Any | None:
     try:
         return json.loads(path.read_text(encoding="utf-8"))
@@ -85,19 +152,122 @@ def _read_json(path: Path) -> Any | None:
         return None
 
 
-def _read_text(path: Path, *, max_bytes: int) -> str | None:
+def _history_text_policy(max_embed_bytes: int) -> TextCapturePolicy:
+    head_bytes = max_embed_bytes // 2
+    tail_bytes = max_embed_bytes - head_bytes
+    return TextCapturePolicy(
+        max_excerpt_bytes=max_embed_bytes,
+        head_bytes=head_bytes,
+        tail_bytes=tail_bytes,
+        binary_detection_bytes=2_048,
+    )
+
+
+def _compose_history_excerpt(excerpt: TextExcerpt) -> str:
+    if not excerpt.truncated:
+        return excerpt.head
+    marker = "\n...[truncated; see embedded_capture_manifest]...\n"
+    return f"{excerpt.head}{marker}{excerpt.tail}"
+
+
+def _capture_embedded_text(
+    run_dir: Path,
+    rel_path: str,
+    *,
+    policy: TextCapturePolicy,
+) -> tuple[str | None, dict[str, Any]]:
+    result = capture_text_artifact(run_dir / rel_path, policy=policy, root=run_dir)
+    manifest: dict[str, Any] = {
+        "path": result.artifact.path,
+        "exists": result.artifact.exists,
+        "size_bytes": result.artifact.size_bytes,
+        "sha256": result.artifact.sha256,
+        "truncated": bool(result.excerpt.truncated) if result.excerpt is not None else False,
+        "error": result.error,
+    }
+
+    if not result.artifact.exists:
+        return None, manifest
+    if result.excerpt is not None:
+        return _compose_history_excerpt(result.excerpt), manifest
+    if isinstance(result.error, str) and result.error.strip():
+        return f"[capture_error] {result.error}", manifest
+    return "[capture_error] capture_unavailable", manifest
+
+
+def _embed_allowed_keys(embed_rank: int) -> set[str]:
+    if embed_rank <= 0:
+        return set()
+    keys = set(_EMBED_DEFINITION_KEYS)
+    if embed_rank >= 2:
+        keys.add("prompt_txt")
+    if embed_rank >= 3:
+        keys.add("users_md")
+    return keys
+
+
+def _prune_embedded_map(raw: Any, *, allowed_keys: set[str]) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: value
+        for key, value in raw.items()
+        if isinstance(key, str) and key in allowed_keys
+    }
+
+
+def _iter_report_history_jsonl(
+    source_path: Path,
+    *,
+    target_slug: str | None,
+    normalized_repo_input: str | None,
+    embed_rank: int,
+) -> Iterator[dict[str, Any]]:
+    allowed_embed_keys = _embed_allowed_keys(embed_rank)
+
     try:
-        if path.stat().st_size > max_bytes:
-            return None
-        return path.read_text(encoding="utf-8", errors="replace")
-    except FileNotFoundError:
-        return None
+        with source_path.open("r", encoding="utf-8") as f:
+            for raw_line in f:
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    item = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(item, dict):
+                    continue
+                item_target_slug = item.get("target_slug")
+                if target_slug is not None and item_target_slug != target_slug:
+                    continue
+
+                if normalized_repo_input is not None:
+                    target_ref = item.get("target_ref")
+                    candidate: str | None = None
+                    if isinstance(target_ref, dict):
+                        repo_raw = target_ref.get("repo_input")
+                        candidate = repo_raw if isinstance(repo_raw, str) else None
+                    if (
+                        candidate is None
+                        or _normalize_repo_input(candidate) != normalized_repo_input
+                    ):
+                        continue
+
+                item["embedded"] = _prune_embedded_map(
+                    item.get("embedded"),
+                    allowed_keys=allowed_embed_keys,
+                )
+                item["embedded_capture_manifest"] = _prune_embedded_map(
+                    item.get("embedded_capture_manifest"),
+                    allowed_keys=allowed_embed_keys,
+                )
+                yield item
     except OSError:
-        return None
+        return
 
 
 def iter_report_history(
-    runs_dir: Path,
+    source: Path | str,
     *,
     target_slug: str | None = None,
     repo_input: str | None = None,
@@ -123,7 +293,19 @@ def iter_report_history(
     if isinstance(repo_input, str) and repo_input.strip():
         normalized_repo_input = _normalize_repo_input(repo_input)
 
-    for run_dir in iter_run_dirs(runs_dir, target_slug=target_slug):
+    source_path = Path(source)
+
+    if source_path.is_file():
+        yield from _iter_report_history_jsonl(
+            source_path,
+            target_slug=target_slug,
+            normalized_repo_input=normalized_repo_input,
+            embed_rank=embed_rank,
+        )
+        return
+
+    policy = _history_text_policy(max_embed_bytes)
+    for run_dir in iter_run_dirs(source_path, target_slug=target_slug):
         run_rel = None
         target = None
         ts_dir = None
@@ -131,8 +313,8 @@ def iter_report_history(
         seed = None
 
         try:
-            run_rel = str(run_dir.relative_to(runs_dir)).replace("\\", "/")
-            parts = run_dir.relative_to(runs_dir).parts
+            run_rel = str(run_dir.relative_to(source_path)).replace("\\", "/")
+            parts = run_dir.relative_to(source_path).parts
             if len(parts) >= 4:
                 target, ts_dir, agent, seed = parts[0], parts[1], parts[2], parts[3]
         except Exception:  # noqa: BLE001
@@ -153,6 +335,10 @@ def iter_report_history(
         preflight = _read_json(run_dir / "preflight.json")
         error = _read_json(run_dir / "error.json")
         report_validation_errors = _read_json(run_dir / "report_validation_errors.json")
+        run_meta = _read_json(run_dir / "run_meta.json")
+        agent_attempts = _read_json(run_dir / "agent_attempts.json")
+        ticket_ref = _read_json(run_dir / "ticket_ref.json")
+        timing = _read_json(run_dir / "timing.json")
 
         agent_exit_code: int | None = None
         if isinstance(error, dict):
@@ -169,27 +355,58 @@ def iter_report_history(
             status = "ok"
 
         embedded: dict[str, Any] = {}
+        embedded_capture_manifest: dict[str, Any] = {}
         if embed_rank >= 1:
-            embedded["persona_source_md"] = _read_text(
-                run_dir / "persona.source.md", max_bytes=max_embed_bytes
+            embedded["persona_source_md"], embedded_capture_manifest["persona_source_md"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "persona.source.md",
+                    policy=policy,
+                )
             )
-            embedded["persona_resolved_md"] = _read_text(
-                run_dir / "persona.resolved.md", max_bytes=max_embed_bytes
+            embedded["persona_resolved_md"], embedded_capture_manifest["persona_resolved_md"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "persona.resolved.md",
+                    policy=policy,
+                )
             )
-            embedded["mission_source_md"] = _read_text(
-                run_dir / "mission.source.md", max_bytes=max_embed_bytes
+            embedded["mission_source_md"], embedded_capture_manifest["mission_source_md"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "mission.source.md",
+                    policy=policy,
+                )
             )
-            embedded["mission_resolved_md"] = _read_text(
-                run_dir / "mission.resolved.md", max_bytes=max_embed_bytes
+            embedded["mission_resolved_md"], embedded_capture_manifest["mission_resolved_md"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "mission.resolved.md",
+                    policy=policy,
+                )
             )
-            embedded["prompt_template_md"] = _read_text(
-                run_dir / "prompt.template.md", max_bytes=max_embed_bytes
+            embedded["prompt_template_md"], embedded_capture_manifest["prompt_template_md"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "prompt.template.md",
+                    policy=policy,
+                )
             )
             embedded["report_schema_json"] = _read_json(run_dir / "report.schema.json")
         if embed_rank >= 2:
-            embedded["prompt_txt"] = _read_text(run_dir / "prompt.txt", max_bytes=max_embed_bytes)
+            embedded["prompt_txt"], embedded_capture_manifest["prompt_txt"] = (
+                _capture_embedded_text(
+                    run_dir,
+                    "prompt.txt",
+                    policy=policy,
+                )
+            )
         if embed_rank >= 3:
-            embedded["users_md"] = _read_text(run_dir / "users.md", max_bytes=max_embed_bytes)
+            embedded["users_md"], embedded_capture_manifest["users_md"] = _capture_embedded_text(
+                run_dir,
+                "users.md",
+                policy=policy,
+            )
 
         ts_utc = _parse_timestamp_dirname(ts_dir) if isinstance(ts_dir, str) else None
 
@@ -210,7 +427,12 @@ def iter_report_history(
             "preflight": preflight,
             "error": error,
             "report_validation_errors": report_validation_errors,
+            "run_meta": run_meta,
+            "agent_attempts": agent_attempts,
+            "ticket_ref": ticket_ref if isinstance(ticket_ref, dict) else None,
+            "timing": timing if isinstance(timing, dict) else None,
             "embedded": embedded,
+            "embedded_capture_manifest": embedded_capture_manifest,
         }
 
 
@@ -248,3 +470,78 @@ def write_report_history_jsonl(
 
     counts["total"] = total
     return counts
+
+
+def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
+    """
+    Load a single run record from a run directory.
+
+    This is a low-overhead alternative to `iter_report_history` when the caller already selected
+    which run directories to inspect (for example, a "last N runs" view).
+    """
+
+    if not (run_dir / "target_ref.json").exists():
+        return None
+
+    run_rel = None
+    target = None
+    ts_dir = None
+    agent = None
+    seed = None
+
+    try:
+        run_rel = str(run_dir.relative_to(runs_dir)).replace("\\", "/")
+        parts = run_dir.relative_to(runs_dir).parts
+        if len(parts) >= 4:
+            target, ts_dir, agent, seed = parts[0], parts[1], parts[2], parts[3]
+    except Exception:  # noqa: BLE001
+        run_rel = None
+
+    target_ref = _read_json(run_dir / "target_ref.json")
+    effective_run_spec = _read_json(run_dir / "effective_run_spec.json")
+    report = _read_json(run_dir / "report.json")
+    metrics = _read_json(run_dir / "metrics.json")
+    preflight = _read_json(run_dir / "preflight.json")
+    error = _read_json(run_dir / "error.json")
+    report_validation_errors = _read_json(run_dir / "report_validation_errors.json")
+    run_meta = _read_json(run_dir / "run_meta.json")
+    agent_attempts = _read_json(run_dir / "agent_attempts.json")
+
+    agent_exit_code: int | None = None
+    if isinstance(error, dict):
+        exit_code_raw = error.get("exit_code")
+        agent_exit_code = exit_code_raw if isinstance(exit_code_raw, int) else None
+
+    if isinstance(error, dict):
+        status = "error"
+    elif report_validation_errors is not None:
+        status = "report_validation_error"
+    elif report is None:
+        status = "missing_report"
+    else:
+        status = "ok"
+
+    ts_utc = _parse_timestamp_dirname(ts_dir) if isinstance(ts_dir, str) else None
+
+    return {
+        "run_dir": str(run_dir),
+        "run_rel": run_rel,
+        "target_slug": target,
+        "timestamp_dir": ts_dir,
+        "timestamp_utc": ts_utc,
+        "agent": agent,
+        "seed": int(seed) if isinstance(seed, str) and seed.isdigit() else seed,
+        "status": status,
+        "agent_exit_code": agent_exit_code,
+        "target_ref": target_ref,
+        "effective_run_spec": effective_run_spec,
+        "report": report,
+        "metrics": metrics,
+        "preflight": preflight,
+        "error": error,
+        "report_validation_errors": report_validation_errors,
+        "run_meta": run_meta,
+        "agent_attempts": agent_attempts,
+        "embedded": {},
+        "embedded_capture_manifest": {},
+    }

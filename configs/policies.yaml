@@ -48,4 +48,4 @@ policies:
       allow_edits: true
       sandbox: true
       approval_mode: "auto_edit"
-      allowed_tools: ["read_file", "search_file_content", "write_file", "replace", "run_shell_command"]
+      allowed_tools: ["read_file", "search_file_content", "write_file", "replace", "write_todos", "run_shell_command"]

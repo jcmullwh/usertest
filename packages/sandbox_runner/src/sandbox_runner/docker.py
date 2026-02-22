@@ -399,10 +399,38 @@ def _docker_build_streaming(*, argv: list[str], cwd: Path, log_path: Path) -> in
             errors="replace",
         )
 
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            log.write(line)
-            log.flush()
-            print(line, end="", flush=True)
+        log_enabled = True
+        print_enabled = True
+
+        try:
+            assert proc.stdout is not None
+            for line in proc.stdout:
+                if log_enabled:
+                    try:
+                        log.write(line)
+                        log.flush()
+                    except OSError:
+                        log_enabled = False
+
+                if print_enabled:
+                    try:
+                        print(line, end="", flush=True)
+                    except OSError:
+                        print_enabled = False
+        except Exception as exc:  # noqa: BLE001
+            try:
+                proc.kill()
+            except Exception:
+                pass
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            raise RuntimeError(
+                "Failed while streaming Docker build output.\n"
+                f"cwd={cwd}\n"
+                f"log_path={log_path}\n"
+                f"argv={' '.join(argv)}\n"
+            ) from exc
 
         return proc.wait()

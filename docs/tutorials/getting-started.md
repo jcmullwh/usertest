@@ -78,12 +78,66 @@ To understand what a run produces without installing anything, open the checked-
 
 You can also re-render that fixture from raw events:
 
-```bash
-python -m usertest.cli report \
-  --repo-root . \
-  --run-dir examples/golden_runs/minimal_codex_run \
-  --recompute-metrics
+```text
+python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics
 ```
+
+If you haven't set up a Python environment for this repo yet, use the one-command scripts (creates `.venv`, installs minimal deps, sets `PYTHONPATH`, renders a scratch copy). These scripts do **not** execute any agents:
+
+- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_fixture_rerender.ps1`
+- macOS/Linux: `bash ./scripts/offline_fixture_rerender.sh`
+
+---
+
+## One-command smoke (recommended)
+
+For a fast, deterministic end-to-end sanity check (doctor -> deps -> CLI help -> smoke tests), use the OS-specific smoke script:
+
+Windows PowerShell:
+
+```text
+powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1
+```
+
+macOS/Linux:
+
+```text
+bash ./scripts/smoke.sh
+```
+
+---
+
+## Offline / air-gapped workflows
+
+This repo supports some offline-safe workflows, but it's important to distinguish:
+
+- **Offline-safe:** rendering reports from existing run artifacts (including the checked-in golden fixtures).
+- **Not offline-safe:** running hosted agents (Codex/Claude/Gemini) requires outbound network access to the model provider APIs.
+
+### Offline-safe: render reports and run smoke/tests
+
+To run the **non-agent** parts offline, pre-download Python wheels while you still have network access, then install from a local wheelhouse.
+
+1) While online (from repo root):
+
+   ```bash
+   python -m pip download -r requirements-dev.txt -d wheelhouse
+   ```
+
+2) Later, while offline (fresh virtualenv recommended):
+
+   ```bash
+   python -m pip install --no-index --find-links wheelhouse -r requirements-dev.txt
+   ```
+
+After that, you can run:
+
+- `python -m usertest.cli report ...` (report re-rendering)
+- `python -m pytest -q apps/usertest/tests/test_smoke.py` (smoke tests)
+
+### Docker note
+
+The Docker execution backend builds a sandbox image that installs tools (APT) and agent CLIs (often via npm). If you need reproducible behavior in restricted environments, build the image ahead of time and avoid rebuilds (do not pass `--exec-rebuild-image`).
 
 ---
 
@@ -101,8 +155,8 @@ python -m pip install -e apps/usertest
 Sanity check:
 
 ```bash
-usertest --help
-# or: python -m usertest.cli --help
+python -m usertest.cli --help
+# If you installed the console script: usertest --help
 ```
 
 > Monorepo note
@@ -134,14 +188,8 @@ and what “success” means. If present, it is snapshotted into the run directo
 
 For a first attempt, use `inspect` (read-only + allows shell commands):
 
-```bash
-usertest run \
-  --repo-root . \
-  --repo "PATH_OR_GIT_URL" \
-  --agent codex \
-  --policy inspect \
-  --persona-id quickstart_sprinter \
-  --mission-id first_output_smoke
+```text
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke
 ```
 
 Strictest mode (no shell, no writes):

@@ -5,6 +5,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 from backlog_core.backlog import (
+    add_atom_links,
     build_backlog_document,
     build_merge_candidates,
     dedupe_tickets,
@@ -123,6 +124,180 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
     assert totals["source_counts"].get("agent_last_message_artifact", 0) == 0
 
 
+def test_extract_backlog_atoms_extracts_task_run_v1_report_blocks(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "task_run_v1",
+                "status": "success",
+                "goal": "Do the thing",
+                "summary": "Done",
+                "steps": [{"name": "step", "attempts": [{"action": "a"}], "outcome": "ok"}],
+                "outputs": [],
+                "issues": [
+                    {
+                        "severity": "error",
+                        "title": "README quickstart missing",
+                        "details": "No copy/paste install commands.",
+                        "evidence": "README.md",
+                        "suggested_fix": "Add a quickstart section to README.md.",
+                    }
+                ],
+                "user_experience": {
+                    "unclear_points": ["Not sure how to run tests."],
+                },
+                "next_actions": ["Run pytest -q apps/usertest/tests/test_smoke.py"],
+            },
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    atoms = atoms_doc["atoms"]
+    assert atoms
+
+    assert any(
+        atom.get("source") == "confusion_point"
+        and atom.get("report_kind") == "task_run_v1"
+        and atom.get("issue_severity") == "error"
+        and atom.get("text") == "README quickstart missing"
+        for atom in atoms
+    )
+    assert any(
+        atom.get("source") == "suggested_change"
+        and atom.get("report_kind") == "task_run_v1"
+        and atom.get("issue_title") == "README quickstart missing"
+        and "quickstart" in str(atom.get("text", "")).lower()
+        for atom in atoms
+    )
+    assert any(
+        atom.get("source") == "confidence_missing"
+        and atom.get("report_kind") == "task_run_v1"
+        and atom.get("report_ux_block") == "unclear_points"
+        for atom in atoms
+    )
+
+
+def test_extract_backlog_atoms_extracts_boundary_v1_risks_and_recommendations(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "boundary_v1",
+                "status": "success",
+                "constraints": ["No network"],
+                "observations": [],
+                "risks": [
+                    {
+                        "severity": "warn",
+                        "title": "Potentially unsafe default",
+                        "details": "This might leak data.",
+                        "evidence": "README.md",
+                        "suggested_fix": "Document the safe default in README.md.",
+                    }
+                ],
+                "recommendations": ["Add a safety note to README.md."],
+            },
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    atoms = atoms_doc["atoms"]
+    assert any(
+        atom.get("source") == "confusion_point"
+        and atom.get("report_kind") == "boundary_v1"
+        and atom.get("report_issue_block") == "risks"
+        and atom.get("text") == "Potentially unsafe default"
+        for atom in atoms
+    )
+    assert any(
+        atom.get("source") == "suggested_change"
+        and atom.get("report_kind") == "boundary_v1"
+        and atom.get("report_block") == "recommendations"
+        for atom in atoms
+    )
+
+
+def test_add_atom_links_links_suggestions_to_evidence_by_path_anchor() -> None:
+    atoms = [
+        {
+            "atom_id": "run:confusion_point:1",
+            "run_rel": "target/20260101T000000Z/codex/0",
+            "source": "confusion_point",
+            "text": "README.md is missing a quickstart section.",
+        },
+        {
+            "atom_id": "run:suggested_change:1",
+            "run_rel": "target/20260101T000000Z/codex/0",
+            "source": "suggested_change",
+            "text": "Add a quickstart to README.md.",
+        },
+    ]
+
+    linked = add_atom_links(atoms)
+    suggested = next(item for item in linked if item["source"] == "suggested_change")
+    assert "readme.md" in suggested.get("path_anchors", [])
+    assert suggested.get("linked_atom_ids") == ["run:confusion_point:1"]
+
+
+def test_extract_backlog_atoms_omits_missing_agent_artifact_attachments_on_failure(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "gemini" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/gemini/0",
+            "agent": "gemini",
+            "status": "error",
+            "report": None,
+            "report_validation_errors": None,
+            "error": {
+                "type": "AgentPreflightFailed",
+                "message": "Mission requires edits, but policy has allow_edits=false.",
+            },
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    failure_atom = next(
+        item for item in atoms_doc["atoms"] if item["source"] == "run_failure_event"
+    )
+    assert failure_atom["attachments"] == []
+
+    run_manifest = atoms_doc["capture_manifest"]["target_a/20260101T000000Z/gemini/0"]
+    assert any(
+        item.get("path") == "agent_stderr.txt" and item.get("exists") is False
+        for item in run_manifest
+    )
+    assert any(
+        item.get("path") == "agent_last_message.txt" and item.get("exists") is False
+        for item in run_manifest
+    )
+
+
 def test_extract_backlog_atoms_handles_missing_files(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -208,6 +383,104 @@ def test_extract_backlog_atoms_skips_empty_stderr_on_success(tmp_path: Path) -> 
     sources = {item["source"] for item in atoms_doc["atoms"]}
     assert "agent_stderr_artifact" not in sources
     assert "agent_last_message_artifact" in sources
+
+
+def test_extract_backlog_atoms_reclassifies_known_warning_only_stderr(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "agent_stderr.txt").write_text(
+        "\n".join(
+            [
+                "[codex_warning_summary] code=shell_snapshot_powershell_unsupported "
+                "occurrences=4 classification=capability_notice",
+                "hint=PowerShell shell snapshot unsupported; "
+                "continuing without shell snapshot metadata.",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "agent_last_message.txt").write_text("ok\n", encoding="utf-8")
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    sources = {item["source"] for item in atoms_doc["atoms"]}
+    assert "agent_stderr_artifact" not in sources
+    assert "capability_warning_artifact" in sources
+    warning_atom = next(
+        atom for atom in atoms_doc["atoms"] if atom.get("source") == "capability_warning_artifact"
+    )
+    assert warning_atom.get("severity_hint") == "low"
+    assert "shell_snapshot_powershell_unsupported" in warning_atom.get("warning_codes", [])
+
+
+def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+            "metrics": {
+                "commands_executed": 3,
+                "commands_failed": 2,
+                "failed_commands": [
+                    {
+                        "command": "python -m pip install -e .",
+                        "exit_code": 1,
+                        "cwd": "C:/ws",
+                        "output_excerpt": (
+                            "ERROR: Could not find a version that satisfies the requirement ..."
+                        ),
+                        "output_excerpt_truncated": True,
+                    },
+                    {
+                        "command": "python -m pytest -q",
+                        "exit_code": 2,
+                        "output_excerpt": "ImportError: No module named foo",
+                    },
+                ],
+                "failed_commands_truncated": True,
+                "failed_commands_omitted_count": 3,
+            },
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    failures = [atom for atom in atoms_doc["atoms"] if atom.get("source") == "command_failure"]
+    assert len(failures) == 2
+
+    first = failures[0]
+    assert first.get("from_metrics") is True
+    assert first.get("command") == "python -m pip install -e ."
+    assert first.get("exit_code") == 1
+    assert first.get("cwd") == "C:/ws"
+    assert first.get("output_excerpt_truncated") is True
+
+    trunc = next(
+        atom
+        for atom in atoms_doc["atoms"]
+        if atom.get("source") == "command_failure_truncated"
+    )
+    assert trunc.get("omitted_count") == 3
 
 
 def test_parse_ticket_list_recovers_array_and_normalizes() -> None:

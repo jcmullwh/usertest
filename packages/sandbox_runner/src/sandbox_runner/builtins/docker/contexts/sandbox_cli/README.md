@@ -29,7 +29,7 @@ editing text files rather than rewriting the Dockerfile.
 From the repo root:
 
 ```sh
-docker build -t sandbox-cli-test -f packages/sandbox_runner/builtins/docker/contexts/sandbox_cli/Dockerfile packages/sandbox_runner/builtins/docker/contexts/sandbox_cli
+docker build -t sandbox-cli-test -f packages/sandbox_runner/src/sandbox_runner/builtins/docker/contexts/sandbox_cli/Dockerfile packages/sandbox_runner/src/sandbox_runner/builtins/docker/contexts/sandbox_cli
 ```
 
 ## Use with usertest

@@ -17,7 +17,17 @@ if [ -f "$apt_manifest" ]; then
             #
             # Note: this is executed during Docker image build; it does not run at usertest runtime.
             apt-get install -y --no-install-recommends bash ca-certificates curl gnupg
-            curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+            # Avoid `curl | bash` so we can detect download failures and keep logs intelligible.
+            tmp="/tmp/nodesource_setup.sh"
+            rm -f "$tmp"
+            if curl -fsSL https://deb.nodesource.com/setup_20.x -o "$tmp"; then
+                if ! bash "$tmp"; then
+                    echo "Warning: NodeSource setup script failed; falling back to Debian nodejs." >&2
+                fi
+            else
+                echo "Warning: Failed to download NodeSource setup script; falling back to Debian nodejs." >&2
+            fi
+            rm -f "$tmp"
         fi
         apt-get install -y --no-install-recommends $apt_packages
     fi
@@ -30,9 +40,18 @@ if command -v python >/dev/null 2>&1 && [ -f "$pip_manifest" ]; then
     fi
 fi
 
-if command -v npm >/dev/null 2>&1 && [ -f "$npm_manifest" ]; then
+if [ -f "$npm_manifest" ]; then
     npm_packages="$(grep -Ev '^[[:space:]]*(#|$)' "$npm_manifest" | tr '\n' ' ' | tr -s ' ')"
     if [ -n "${npm_packages:-}" ]; then
+        if ! command -v npm >/dev/null 2>&1; then
+            echo "npm is required to install npm-global packages but was not found; attempting to install it via apt." >&2
+            apt-get update
+            apt-get install -y --no-install-recommends npm
+        fi
+        if ! command -v npm >/dev/null 2>&1; then
+            echo "Error: npm is still unavailable; cannot install: $npm_packages" >&2
+            exit 1
+        fi
         npm install -g $npm_packages
     fi
 fi

@@ -25,6 +25,29 @@ READLIKE_COMMANDS = {
 }
 CHAIN_OPERATORS = {"&&", ";", "||", "|"}
 _WINDOWS_DRIVE_POSIX_RE = re.compile(r"^/([a-zA-Z])/(.*)$")
+_WINDOWS_DRIVE_CLEAN_RE = re.compile(r"^([a-zA-Z]):/{2,}")
+_MAX_OUTPUT_EXCERPT_CHARS = 2_000
+
+
+def _excerpt_text(text: str, *, max_chars: int = _MAX_OUTPUT_EXCERPT_CHARS) -> tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    marker = "\n...[truncated_output]...\n"
+    available = max_chars - len(marker)
+    if available <= 0:
+        return text[:max_chars], True
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return text[:head_chars] + marker + text[-tail_chars:], True
+
+
+def _join_streams(stdout: Any, stderr: Any) -> str:
+    parts: list[str] = []
+    if isinstance(stdout, str) and stdout.strip():
+        parts.append("[stdout]\n" + stdout.rstrip())
+    if isinstance(stderr, str) and stderr.strip():
+        parts.append("[stderr]\n" + stderr.rstrip())
+    return "\n".join(parts).strip()
 
 
 def _format_argv(argv: list[str]) -> str:
@@ -35,6 +58,11 @@ def _format_argv(argv: list[str]) -> str:
 
 def _strip_windows_extended_prefix(path_str: str) -> str:
     return path_str[4:] if path_str.startswith("\\\\?\\") else path_str
+
+
+def _render_path(path: Path) -> str:
+    rendered = str(path).replace("\\", "/")
+    return _WINDOWS_DRIVE_CLEAN_RE.sub(r"\1:/", rendered)
 
 
 def _maybe_windows_drive_posix_path(path_str: str) -> Path | None:
@@ -246,10 +274,19 @@ def _maybe_emit_read_events(
     cwd: Path | None,
     workspace_root: Path | None,
     workspace_mount: str | None,
+    ts_iter: Iterator[str] | None,
 ) -> Iterable[dict[str, Any]]:
     if workspace_root is None:
         return []
     out: list[dict[str, Any]] = []
+
+    def _next_ts() -> str | None:
+        if ts_iter is None:
+            return None
+        try:
+            return next(ts_iter)
+        except StopIteration:
+            return None
 
     for candidate in _infer_read_candidate_paths(
         argv=argv,
@@ -266,6 +303,7 @@ def _maybe_emit_read_events(
                     "path": _safe_relpath(candidate, workspace_root),
                     "bytes": candidate.stat().st_size,
                 },
+                ts=_next_ts(),
             )
         )
     return out
@@ -275,16 +313,29 @@ def normalize_codex_events(
     *,
     raw_events_path: Path,
     normalized_events_path: Path,
+    ts_iter: Iterator[str] | None = None,
     workspace_root: Path | None = None,
     workspace_mount: str | None = None,
 ) -> None:
     normalized_events_path.parent.mkdir(parents=True, exist_ok=True)
 
+    def _next_ts() -> str | None:
+        if ts_iter is None:
+            return None
+        try:
+            return next(ts_iter)
+        except StopIteration:
+            return None
+
     with normalized_events_path.open("w", encoding="utf-8", newline="\n") as out_f:
         call_ctx: dict[str, dict[str, Any]] = {}
         for raw_line, payload in _iter_codex_raw_lines(raw_events_path):
             if payload is None:
-                event = make_event("error", {"category": "raw_non_json_line", "message": raw_line})
+                event = make_event(
+                    "error",
+                    {"category": "raw_non_json_line", "message": raw_line},
+                    ts=_next_ts(),
+                )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
@@ -294,14 +345,22 @@ def normalize_codex_events(
                 if msg_type == "agent_message":
                     message = msg.get("message")
                     if isinstance(message, str):
-                        event = make_event("agent_message", {"kind": "message", "text": message})
+                        event = make_event(
+                            "agent_message",
+                            {"kind": "message", "text": message},
+                            ts=_next_ts(),
+                        )
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
                 if msg_type == "agent_reasoning":
                     text = msg.get("text")
                     if isinstance(text, str):
-                        event = make_event("agent_message", {"kind": "observation", "text": text})
+                        event = make_event(
+                            "agent_message",
+                            {"kind": "observation", "text": text},
+                            ts=_next_ts(),
+                        )
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
@@ -370,13 +429,27 @@ def normalize_codex_events(
                 if not isinstance(exit_code, int):
                     exit_code = -1
 
+                data: dict[str, Any] = {
+                    "argv": argv,
+                    "command": _format_argv(argv),
+                    "exit_code": exit_code,
+                }
+
+                if cwd is not None:
+                    data["cwd"] = _render_path(cwd)
+
+                if exit_code != 0:
+                    output_text = _join_streams(msg.get("stdout"), msg.get("stderr"))
+                    if output_text:
+                        excerpt, truncated = _excerpt_text(output_text)
+                        data["output_excerpt"] = excerpt
+                        if truncated:
+                            data["output_excerpt_truncated"] = True
+
                 event = make_event(
                     "run_command",
-                    {
-                        "argv": argv,
-                        "command": _format_argv(argv),
-                        "exit_code": exit_code,
-                    },
+                    data,
+                    ts=_next_ts(),
                 )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
@@ -385,6 +458,7 @@ def normalize_codex_events(
                     cwd=cwd,
                     workspace_root=workspace_root,
                     workspace_mount=workspace_mount,
+                    ts_iter=ts_iter,
                 ):
                     out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")
                 continue
@@ -401,14 +475,20 @@ def normalize_codex_events(
             if item_type == "reasoning":
                 text = item.get("text")
                 if isinstance(text, str) and text:
-                    event = make_event("agent_message", {"kind": "observation", "text": text})
+                    event = make_event(
+                        "agent_message",
+                        {"kind": "observation", "text": text},
+                        ts=_next_ts(),
+                    )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
             if item_type == "agent_message":
                 text = item.get("text")
                 if isinstance(text, str) and text:
-                    event = make_event("agent_message", {"kind": "message", "text": text})
+                    event = make_event(
+                        "agent_message", {"kind": "message", "text": text}, ts=_next_ts()
+                    )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
@@ -427,9 +507,26 @@ def normalize_codex_events(
                 status = item.get("status")
                 exit_code = 1 if isinstance(status, str) and status.lower() == "failed" else -1
 
+            data: dict[str, Any] = {
+                "argv": argv,
+                "command": _format_argv(argv),
+                "exit_code": exit_code,
+            }
+            if exit_code != 0:
+                output_text = _join_streams(
+                    item.get("stdout") or item.get("output"),
+                    item.get("stderr"),
+                )
+                if output_text:
+                    excerpt, truncated = _excerpt_text(output_text)
+                    data["output_excerpt"] = excerpt
+                    if truncated:
+                        data["output_excerpt_truncated"] = True
+
             event = make_event(
                 "run_command",
-                {"argv": argv, "command": _format_argv(argv), "exit_code": exit_code},
+                data,
+                ts=_next_ts(),
             )
             out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
@@ -438,5 +535,6 @@ def normalize_codex_events(
                 cwd=None,
                 workspace_root=workspace_root,
                 workspace_mount=workspace_mount,
+                ts_iter=ts_iter,
             ):
                 out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")

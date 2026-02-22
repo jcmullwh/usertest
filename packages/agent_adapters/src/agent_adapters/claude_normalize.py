@@ -10,6 +10,29 @@ from typing import Any
 
 from agent_adapters.events import make_event
 
+_MAX_OUTPUT_EXCERPT_CHARS = 2_000
+
+
+def _excerpt_text(text: str, *, max_chars: int = _MAX_OUTPUT_EXCERPT_CHARS) -> tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    marker = "\n...[truncated_output]...\n"
+    available = max_chars - len(marker)
+    if available <= 0:
+        return text[:max_chars], True
+    head_chars = available // 2
+    tail_chars = available - head_chars
+    return text[:head_chars] + marker + text[-tail_chars:], True
+
+
+def _coerce_tool_result_text(value: Any) -> str | None:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        chunks = [item for item in value if isinstance(item, str) and item]
+        return "\n".join(chunks) if chunks else None
+    return None
+
 
 def _format_argv(argv: list[str]) -> str:
     if os.name == "nt":
@@ -78,17 +101,30 @@ def normalize_claude_events(
     *,
     raw_events_path: Path,
     normalized_events_path: Path,
+    ts_iter: Iterator[str] | None = None,
     workspace_root: Path | None = None,
     workspace_mount: str | None = None,
 ) -> None:
     normalized_events_path.parent.mkdir(parents=True, exist_ok=True)
+
+    def _next_ts() -> str | None:
+        if ts_iter is None:
+            return None
+        try:
+            return next(ts_iter)
+        except StopIteration:
+            return None
 
     tool_uses: dict[str, dict[str, Any]] = {}
 
     with normalized_events_path.open("w", encoding="utf-8", newline="\n") as out_f:
         for raw_line, payload in _iter_raw_lines(raw_events_path):
             if payload is None:
-                event = make_event("error", {"category": "raw_non_json_line", "message": raw_line})
+                event = make_event(
+                    "error",
+                    {"category": "raw_non_json_line", "message": raw_line},
+                    ts=_next_ts(),
+                )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
@@ -111,7 +147,9 @@ def normalize_claude_events(
                 if obj_type == "assistant" and role == "assistant" and block_type == "text":
                     text = block.get("text")
                     if isinstance(text, str) and text:
-                        event = make_event("agent_message", {"kind": "message", "text": text})
+                        event = make_event(
+                            "agent_message", {"kind": "message", "text": text}, ts=_next_ts()
+                        )
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
@@ -141,6 +179,7 @@ def normalize_claude_events(
                             "category": "tool_result_missing_use",
                             "message": f"tool_use_id={tool_use_id}",
                         },
+                        ts=_next_ts(),
                     )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
@@ -156,14 +195,24 @@ def normalize_claude_events(
                     cmd = tool_input.get("command") or tool_input.get("cmd")
                     if isinstance(cmd, str) and cmd.strip():
                         argv = _split_command(cmd)
-                        event = make_event(
-                            "run_command",
-                            {
-                                "argv": argv,
-                                "command": _format_argv(argv),
-                                "exit_code": 1 if is_error else 0,
-                            },
-                        )
+                        output_excerpt = None
+                        output_truncated = False
+                        if is_error:
+                            output_text = _coerce_tool_result_text(block.get("content"))
+                            if isinstance(output_text, str) and output_text.strip():
+                                excerpt, truncated = _excerpt_text(output_text.strip())
+                                output_excerpt = excerpt
+                                output_truncated = truncated
+                        data: dict[str, Any] = {
+                            "argv": argv,
+                            "command": _format_argv(argv),
+                            "exit_code": 1 if is_error else 0,
+                        }
+                        if output_excerpt is not None:
+                            data["output_excerpt"] = output_excerpt
+                            if output_truncated:
+                                data["output_excerpt_truncated"] = True
+                        event = make_event("run_command", data, ts=_next_ts())
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
@@ -187,7 +236,11 @@ def normalize_claude_events(
                             if candidate.exists() and candidate.is_file():
                                 bytes_read = candidate.stat().st_size
                                 out_path = _safe_relpath(candidate, workspace_root)
-                        event = make_event("read_file", {"path": out_path, "bytes": bytes_read})
+                        event = make_event(
+                            "read_file",
+                            {"path": out_path, "bytes": bytes_read},
+                            ts=_next_ts(),
+                        )
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
@@ -199,6 +252,7 @@ def normalize_claude_events(
                             "input": tool_input,
                             "is_error": is_error,
                         },
+                        ts=_next_ts(),
                     )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
@@ -206,7 +260,7 @@ def normalize_claude_events(
                 if name in {"websearch", "web_search"}:
                     query = tool_input.get("query") or tool_input.get("text")
                     if isinstance(query, str) and query.strip():
-                        event = make_event("web_search", {"query": query.strip()})
+                        event = make_event("web_search", {"query": query.strip()}, ts=_next_ts())
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
 
@@ -218,6 +272,7 @@ def normalize_claude_events(
                             "input": tool_input,
                             "is_error": is_error,
                         },
+                        ts=_next_ts(),
                     )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
@@ -225,5 +280,6 @@ def normalize_claude_events(
                 event = make_event(
                     "error",
                     {"category": "unhandled_tool", "message": str(tool_use.get("name", ""))},
+                    ts=_next_ts(),
                 )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")

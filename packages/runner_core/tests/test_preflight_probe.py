@@ -52,6 +52,51 @@ def _install_no_requirements_mission(target_repo: Path) -> None:
     )
 
 
+def _install_requires_shell_mission(
+    target_repo: Path,
+    *,
+    mission_id: str,
+    requires_edits: bool,
+) -> None:
+    usertest_dir = target_repo / ".usertest"
+    missions_dir = usertest_dir / "missions"
+    missions_dir.mkdir(parents=True, exist_ok=True)
+
+    (usertest_dir / "catalog.yaml").write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "missions_dirs:",
+                "  - .usertest/missions",
+                "defaults:",
+                f"  mission_id: {mission_id}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    (missions_dir / f"{mission_id}.mission.md").write_text(
+        "\n".join(
+            [
+                "---",
+                f"id: {mission_id}",
+                "name: Test Requires-Shell Mission",
+                "extends: null",
+                "execution_mode: single_pass_inline_report",
+                "prompt_template: default_inline_report.prompt.md",
+                "report_schema: default_report.schema.json",
+                "requires_shell: true",
+                f"requires_edits: {'true' if requires_edits else 'false'}",
+                "---",
+                "Mission used by tests that exercise shell-required preflight flows.",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
 def _make_dummy_codex_binary(tmp_path: Path) -> str:
     script = tmp_path / "dummy_codex.py"
     script.write_text(
@@ -203,6 +248,13 @@ def test_run_once_writes_preflight_probe_commands(
     diagnostics = payload.get("command_diagnostics", {})
     assert isinstance(diagnostics, dict)
     assert diagnostics.get("dummycmd", {}).get("status") == "present"
+    python_probe = payload.get("python_interpreter")
+    assert isinstance(python_probe, dict)
+    assert isinstance(python_probe.get("candidates"), list)
+    python_diag = diagnostics.get("python", {})
+    assert isinstance(python_diag, dict)
+    assert "reason_code" in python_diag
+    assert "resolved_path" in python_diag
     caps = payload.get("capabilities", {})
     assert isinstance(caps, dict)
     assert caps.get("shell_commands", {}).get("status") == "unknown"
@@ -239,7 +291,14 @@ def test_run_once_fails_fast_when_required_agent_binary_missing(tmp_path: Path) 
     payload = json.loads(error_path.read_text(encoding="utf-8"))
     assert payload.get("type") == "AgentPreflightFailed"
     assert payload.get("subtype") == "binary_missing"
+    assert payload.get("code") == "binary_missing"
+    assert payload.get("exec_backend") == "local"
     assert payload.get("required_binary") == missing_binary
+    hints = payload.get("hints", {})
+    assert isinstance(hints, dict)
+    assert "configs/agents.yaml" in str(hints.get("config", ""))
+    assert "agent_adapters.cli doctor" in str(hints.get("doctor", ""))
+    assert "--version" in str(hints.get("verify", ""))
 
 
 def test_run_once_warns_when_codex_personality_missing_model_messages(tmp_path: Path) -> None:
@@ -305,6 +364,90 @@ def test_run_once_fails_fast_when_shell_blocked_in_inspect_policy(tmp_path: Path
     payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
     assert payload.get("type") == "AgentPreflightFailed"
     assert payload.get("subtype") == "policy_block"
+
+
+def test_run_once_emits_suggested_command_when_mission_requires_shell(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_requires_shell_mission(
+        target,
+        mission_id="test_requires_shell_no_edits",
+        requires_edits=False,
+    )
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"gemini": {"binary": "gemini"}},
+        policies={
+            "safe": {
+                "gemini": {
+                    "allow_edits": False,
+                    "sandbox": True,
+                    "approval_mode": "default",
+                    "allowed_tools": ["read_file"],
+                }
+            }
+        },
+    )
+
+    result = run_once(cfg, RunRequest(repo=str(target), agent="gemini", policy="safe"))
+
+    assert result.exit_code != 0
+    payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert payload.get("type") == "AgentPreflightFailed"
+    assert payload.get("subtype") == "mission_requires_shell"
+    assert payload.get("suggested_policy") == "inspect"
+    suggested_command = payload.get("suggested_command")
+    assert isinstance(suggested_command, str)
+    assert "--policy inspect" in suggested_command
+    assert "--mission-id test_requires_shell_no_edits" in suggested_command
+    assert any(
+        isinstance(line, str) and line.startswith("suggested_command=")
+        for line in result.report_validation_errors
+    )
+
+
+def test_run_once_suggests_write_when_shell_required_and_edits_required(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_requires_shell_mission(
+        target,
+        mission_id="test_requires_shell_with_edits",
+        requires_edits=True,
+    )
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"gemini": {"binary": "gemini"}},
+        policies={
+            "safe": {
+                "gemini": {
+                    "allow_edits": False,
+                    "sandbox": True,
+                    "approval_mode": "default",
+                    "allowed_tools": ["read_file"],
+                }
+            }
+        },
+    )
+
+    result = run_once(cfg, RunRequest(repo=str(target), agent="gemini", policy="safe"))
+
+    assert result.exit_code != 0
+    payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert payload.get("type") == "AgentPreflightFailed"
+    assert payload.get("subtype") == "mission_requires_shell"
+    assert payload.get("suggested_policy") == "write"
+    suggested_command = payload.get("suggested_command")
+    assert isinstance(suggested_command, str)
+    assert "--policy write" in suggested_command
+    assert "--mission-id test_requires_shell_with_edits" in suggested_command
 
 
 def test_run_once_marks_present_commands_as_blocked_by_policy_when_shell_is_disabled(

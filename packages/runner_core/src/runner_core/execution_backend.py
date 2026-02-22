@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.resources
 import json
 import re
 import shutil
@@ -36,6 +37,40 @@ _SANDBOX_CLI_PYTHON_VERSION_CANDIDATES: tuple[str, ...] = (
     "3.12",
     "3.13",
 )
+_DEFAULT_DOCKER_CONTEXT_REL = Path(
+    "packages/sandbox_runner/src/sandbox_runner/builtins/docker/contexts/sandbox_cli"
+)
+
+
+def _copy_builtin_sandbox_cli_context_from_resources(*, run_dir: Path) -> Path | None:
+    """
+    Copy the built-in sandbox_cli Docker context shipped with the `sandbox_runner` package into
+    `run_dir/sandbox/` and return the copied directory.
+
+    Rationale: Docker build contexts must be real filesystem directories, but Python package
+    resources are not guaranteed to be directly addressable as a directory path in all
+    distribution modes. Copying to the run directory guarantees an on-disk context.
+    """
+
+    try:
+        ctx = importlib.resources.files("sandbox_runner")
+    except Exception:
+        return None
+
+    ctx = ctx / "builtins" / "docker" / "contexts" / "sandbox_cli"
+    if not ctx.is_dir():
+        return None
+
+    sandbox_dir = run_dir / "sandbox"
+    sandbox_dir.mkdir(parents=True, exist_ok=True)
+    dest = sandbox_dir / "builtin_context"
+    if dest.exists():
+        shutil.rmtree(dest)
+
+    with importlib.resources.as_file(ctx) as src_dir:
+        shutil.copytree(src_dir, dest)
+
+    return dest
 
 
 def prepare_execution_backend(
@@ -61,10 +96,20 @@ def prepare_execution_backend(
 
     context_dir: Path | None = getattr(request, "exec_docker_context", None)
     if context_dir is None:
-        raise ValueError(
-            "exec_backend='docker' requires exec_docker_context "
-            "(CLI: --exec-docker-context PATH)."
-        )
+        default_context = (repo_root / _DEFAULT_DOCKER_CONTEXT_REL).resolve()
+        if default_context.exists() and default_context.is_dir():
+            context_dir = default_context
+        else:
+            copied = _copy_builtin_sandbox_cli_context_from_resources(run_dir=run_dir)
+            if copied is None:
+                raise ValueError(
+                    "exec_backend='docker' requires exec_docker_context "
+                    "(CLI: --exec-docker-context PATH).\n"
+                    f"default_context_checked={default_context}\n"
+                    "default_context_resource="
+                    "sandbox_runner:builtins/docker/contexts/sandbox_cli (missing)"
+                )
+            context_dir = copied
     context_dir = context_dir.resolve()
     if not context_dir.exists() or not context_dir.is_dir():
         raise FileNotFoundError(f"Missing Docker image context directory: {context_dir}")
@@ -122,6 +167,20 @@ def prepare_execution_backend(
     ]
     if bool(getattr(request, "exec_use_host_agent_login", False)):
         extra_mounts.append(_resolve_host_agent_login_mount(agent=request.agent))
+        if (request.agent or "").strip().lower() == "claude":
+            host_claude_json = Path.home() / ".claude.json"
+            if host_claude_json.exists() and host_claude_json.is_file():
+                try:
+                    host_claude_json = host_claude_json.resolve()
+                except OSError:
+                    pass
+                extra_mounts.append(
+                    MountSpec(
+                        host_path=host_claude_json,
+                        container_path="/root/.claude.json",
+                        read_only=False,
+                    )
+                )
 
     spec = SandboxSpec(
         backend="docker",

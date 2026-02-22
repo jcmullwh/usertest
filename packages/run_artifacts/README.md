@@ -18,10 +18,21 @@ It is shared by:
 
 Distribution name: `run_artifacts`
 
-From this monorepo (editable):
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
 
 ```bash
-pip install -e packages/run_artifacts
+pdm install
+pdm run smoke
+pdm run test
+pdm run lint
+```
+
+If you need only a runtime install (without dev tooling commands), use:
+
+```bash
+python -m pip install -e .
 ```
 
 From a private GitLab PyPI registry (if you publish it):
@@ -40,6 +51,20 @@ pip install \
 
 ---
 
+## Canonical smoke
+
+Run from this package directory:
+
+```bash
+pdm run smoke
+pdm run smoke_extended
+```
+
+`pdm run smoke` is the deterministic first-success check. `pdm run smoke_extended` keeps a second
+tier for broader validation passes.
+
+---
+
 ## Quickstart
 
 Capture a text artifact with explicit truncation metadata:
@@ -50,7 +75,7 @@ from pathlib import Path
 from run_artifacts import TextCapturePolicy, capture_text_artifact
 
 policy = TextCapturePolicy(max_excerpt_bytes=10_000, head_bytes=5_000, tail_bytes=5_000)
-result = capture_text_artifact(Path("runs/.../agent_stderr.txt"), capture_policy=policy)
+result = capture_text_artifact(Path("runs/.../agent_stderr.txt"), policy=policy)
 
 print(result.artifact.path, result.artifact.exists, result.excerpt.truncated if result.excerpt else None)
 ```
@@ -64,6 +89,22 @@ for record in iter_report_history("runs/usertest/report_history.jsonl"):
     print(record.get("run_rel"), record.get("status"))
 ```
 
+Compile run directories into JSONL history (large text embeddings are truncated, not dropped):
+
+```python
+from pathlib import Path
+
+from run_artifacts import write_report_history_jsonl
+
+counts = write_report_history_jsonl(
+    Path("runs/usertest"),
+    out_path=Path("runs/usertest/_compiled/all.report_history.jsonl"),
+    embed="definitions",
+    max_embed_bytes=200_000,
+)
+print(counts)
+```
+
 ---
 
 ## Public API
@@ -71,13 +112,13 @@ for record in iter_report_history("runs/usertest/report_history.jsonl"):
 ### Artifact capture
 
 - `TextCapturePolicy`
-- `capture_text_artifact(path, capture_policy=...)`
+- `capture_text_artifact(path, policy=...)`
 - `CaptureResult`, `ArtifactRef`, `TextExcerpt`
 
 ### Run history
 
-- `iter_report_history(path)`
-- `write_report_history_jsonl(path, records)`
+- `iter_report_history(source, target_slug=..., repo_input=..., embed=..., max_embed_bytes=...)`
+- `write_report_history_jsonl(runs_dir, out_path=..., target_slug=..., repo_input=..., embed=..., max_embed_bytes=...)`
 
 ### Failure shaping
 
@@ -103,7 +144,21 @@ Related design doc:
 
 ## Development
 
-Run from the repo root:
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
+
+```bash
+pdm install
+pdm run smoke
+pdm run smoke_extended
+pdm run test
+pdm run lint
+```
+
+### Monorepo contributor workflow
+
+Run from the monorepo root:
 
 ```bash
 python tools/scaffold/scaffold.py run install --project run_artifacts

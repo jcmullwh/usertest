@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -92,7 +93,7 @@ def test_run_once_claude_empty_stderr_writes_structured_synthetic_diagnostics(
     cfg = RunnerConfig(
         repo_root=runner_root,
         runs_dir=tmp_path / "runs",
-        agents={"claude": {"binary": "python", "output_format": "stream-json"}},
+        agents={"claude": {"binary": sys.executable, "output_format": "stream-json"}},
         policies={"safe": {"claude": {"allow_edits": False, "allowed_tools": ["Read"]}}},
     )
 

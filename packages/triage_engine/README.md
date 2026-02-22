@@ -17,10 +17,21 @@ It is used by backlog tooling to merge/cluster tickets, but can be used independ
 
 Distribution name: `triage_engine`
 
-From this monorepo (editable):
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
 
 ```bash
-pip install -e packages/triage_engine
+pdm install
+pdm run smoke
+pdm run test
+pdm run lint
+```
+
+If you need only a runtime install (without dev tooling commands), use:
+
+```bash
+python -m pip install -e .
 ```
 
 From a private GitLab PyPI registry (if you publish it):
@@ -48,10 +59,24 @@ Required environment variables:
 Optional environment variables:
 
 - `OPENAI_BASE_URL`
-- `TRIAGE_ENGINE_OPENAI_MODEL` (default: `text-embedding-3-small`)
+- `TRIAGE_ENGINE_OPENAI_MODEL` (default: `text-embedding-3-large`)
 - `TRIAGE_ENGINE_EMBEDDER` with values `openai` or `openai:<model>`
 
 There is no offline/local fallback in the default embedder path.
+
+---
+
+## Canonical smoke
+
+Run from this package directory:
+
+```bash
+pdm run smoke
+pdm run smoke_extended
+```
+
+`pdm run smoke` is the deterministic first-success check. `pdm run smoke_extended` performs a live
+OpenAI embedding call when `OPENAI_API_KEY` is configured, otherwise it skips with a reason.
 
 ---
 
@@ -103,7 +128,23 @@ Top-level exports:
 
 ## Development
 
-Run from the repo root:
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
+
+```bash
+pdm install
+pdm run smoke
+pdm run smoke_extended
+pdm run test
+pdm run lint
+```
+
+`pdm run smoke_extended` runs a live OpenAI embedding smoke test and skips with an explicit reason when `OPENAI_API_KEY` is missing.
+
+### Monorepo contributor workflow
+
+Run from the monorepo root:
 
 ```bash
 python tools/scaffold/scaffold.py run install --project triage_engine

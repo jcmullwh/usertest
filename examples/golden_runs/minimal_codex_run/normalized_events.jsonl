@@ -1,2 +1,2 @@
-{"ts":"2026-01-01T00:00:00Z","type":"agent_message","data":{"kind":"message","text":"Hello"}}
-{"ts":"2026-01-01T00:00:01Z","type":"run_command","data":{"argv":["echo","README.md"],"command":"echo README.md","exit_code":0}}
+{"ts": "2026-01-01T00:00:00Z", "type": "agent_message", "data": {"kind": "message", "text": "Hello"}}
+{"ts": "2026-01-01T00:00:01Z", "type": "run_command", "data": {"argv": ["echo", "README.md"], "command": "echo README.md", "exit_code": 0, "cwd": "C:/ws"}}

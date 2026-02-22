@@ -18,6 +18,16 @@ These run a deterministic checklist used in onboarding and CI verification:
 - CLI help
 - smoke tests
 
+If `pdm` is not installed, the smoke scripts still run doctor in “tool checks skipped” mode
+(`python tools/scaffold/scaffold.py doctor --skip-tool-checks`).
+
+Use strict preflight mode when needed:
+
+- `smoke.sh --require-doctor`
+- `smoke.ps1 -RequireDoctor`
+
+In strict mode, missing `pdm` is treated as a failure instead of a skip.
+
 See the repo root `README.md` for copy/paste invocations.
 
 ---
@@ -28,6 +38,32 @@ See the repo root `README.md` for copy/paste invocations.
 - `set_pythonpath.ps1`
 
 These configure `PYTHONPATH` so you can run CLIs from source without editable installs.
+
+### One-command fixture rerender (offline-safe)
+
+- `offline_fixture_rerender.sh`
+- `offline_fixture_rerender.ps1`
+
+These scripts create/use a local `.venv`, install `requirements-dev.txt`, set `PYTHONPATH`, and
+re-render a golden fixture report in a scratch directory.
+
+They are a quick way to verify that the repo can render reports *from source* without calling any
+agents. They do **not** validate agent quality or end-to-end runtime behavior.
+
+### From-source pytest example
+
+In an activated virtual environment:
+
+`python -m pip install -r requirements-dev.txt`
+
+Then run a minimal smoke test from source:
+
+- PowerShell:
+  - `. .\scripts\set_pythonpath.ps1`
+  - `python -m pytest -q apps/usertest/tests/test_smoke.py`
+- bash:
+  - `source scripts/set_pythonpath.sh`
+  - `python -m pytest -q apps/usertest/tests/test_smoke.py`
 
 ---
 

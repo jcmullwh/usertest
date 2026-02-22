@@ -482,8 +482,16 @@ def run_codex_exec(
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
-            proc.kill()
-            proc.wait(timeout=5)
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    # Keep moving and return a failure result; avoid hanging here.
+                    pass
 
         try:
             reader.join(timeout=5)

@@ -4,7 +4,9 @@ import argparse
 import os
 import shutil
 import sys
+import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
 
 import tomllib
@@ -25,6 +27,17 @@ from tools.monorepo_publish.versioning import VersioningError, compute_snapshot_
 
 class PublishSnapshotsError(RuntimeError):
     pass
+
+
+_FORBIDDEN_DIST_BASENAMES = {
+    ".env",
+    ".netrc",
+    ".pypirc",
+    "id_dsa",
+    "id_ed25519",
+    "id_rsa",
+}
+_FORBIDDEN_DIST_EXTS = {".key", ".p12", ".pem", ".pfx"}
 
 
 def _find_repo_root(start: Path) -> Path:
@@ -264,8 +277,76 @@ def build_parser() -> argparse.ArgumentParser:
             "refuse to publish. Use --dry-run to preview."
         ),
     )
+    parser.add_argument(
+        "--validate-dists",
+        action="store_true",
+        help=(
+            "Build sdists/wheels and validate their contents (no upload). This is intended to be "
+            "safe to run in CI on every push."
+        ),
+    )
     parser.add_argument("--self-test", action="store_true", help="Run local self-test and exit.")
     return parser
+
+
+def _iter_dist_members(dist_path: Path) -> list[str]:
+    name = dist_path.name
+    if name.endswith(".whl"):
+        with zipfile.ZipFile(dist_path) as zf:
+            return [str(n) for n in zf.namelist()]
+
+    if name.endswith(".tar.gz"):
+        try:
+            with tarfile.open(dist_path, mode="r:gz") as tf:
+                return [m.name for m in tf.getmembers() if isinstance(m.name, str)]
+        except tarfile.TarError as e:
+            raise PublishSnapshotsError(f"Failed to read sdist archive {dist_path}: {e}") from e
+
+    raise PublishSnapshotsError(f"Unsupported distribution type for validation: {dist_path}")
+
+
+def _is_forbidden_dist_member(member_path: str) -> bool:
+    normalized = member_path.replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("/")
+    lower = normalized.lower()
+    if lower.endswith("/"):
+        return False
+    base = lower.rsplit("/", 1)[-1]
+    if base in _FORBIDDEN_DIST_BASENAMES:
+        return True
+    return any(base.endswith(ext) for ext in _FORBIDDEN_DIST_EXTS)
+
+
+def _validate_dist_file_contents(dist_path: Path) -> None:
+    forbidden: list[str] = []
+    for member in _iter_dist_members(dist_path):
+        if _is_forbidden_dist_member(member):
+            forbidden.append(member)
+
+    if not forbidden:
+        return
+
+    sample = forbidden[:25]
+    extra = f" (+{len(forbidden) - len(sample)} more)" if len(forbidden) > len(sample) else ""
+    pretty = "\n".join(f"- {p}" for p in sample)
+    raise PublishSnapshotsError(
+        "Built distribution contains forbidden file(s); refusing to continue.\n"
+        f"dist={dist_path.name}\n"
+        f"forbidden_members:\n{pretty}{extra}\n"
+        "Tip: remove the file(s) from the package source tree or adjust packaging excludes so they "
+        "do not land in sdists/wheels."
+    )
+
+
+def _validate_dist_dir(dist_dir: Path) -> None:
+    dists = sorted([p for p in dist_dir.iterdir() if p.is_file()])
+    if not dists:
+        raise PublishSnapshotsError(f"No built distributions found to validate in: {dist_dir}")
+
+    for dist in dists:
+        _validate_dist_file_contents(dist)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -276,6 +357,9 @@ def main(argv: list[str] | None = None) -> int:
         snapshot_id = compute_snapshot_id(os.environ)
         print(f"self-test: ok (snapshot_id={snapshot_id})")
         return 0
+
+    if bool(args.dry_run) and bool(args.validate_dists):
+        raise PublishSnapshotsError("Choose one: --dry-run or --validate-dists (they are mutually exclusive).")
 
     repo_root = args.repo_root.resolve() if args.repo_root is not None else _find_repo_root(Path.cwd())
     packages = discover_python_packages(repo_root)
@@ -313,10 +397,10 @@ def main(argv: list[str] | None = None) -> int:
         pkg = all_packages[key]
         print(f"  - {pkg.name} ({pkg.status}) base={pkg.base_version} snapshot={eligible_versions[key]}")
 
-    if not args.dry_run and not args.confirm_live_publish:
+    if not args.dry_run and not args.validate_dists and not args.confirm_live_publish:
         raise PublishSnapshotsError(
             "Refusing to publish snapshots without explicit confirmation. "
-            "Pass --confirm-live-publish to upload, or --dry-run to preview."
+            "Pass --confirm-live-publish to upload, or --dry-run/--validate-dists for safe CI checks."
         )
 
     with tempfile.TemporaryDirectory(prefix="monorepo_publish_") as td:
@@ -336,6 +420,23 @@ def main(argv: list[str] | None = None) -> int:
             print("dry-run: validated rewrites; would publish:")
             for key in order:
                 print(f"  - {all_packages[key].name}=={eligible_versions[key]}")
+            return 0
+
+        if args.validate_dists:
+            validated: list[str] = []
+            for key in order:
+                pkg = all_packages[key]
+                pkg_dir = temp_packages[key]
+                print("")
+                print(f"validating: {pkg.name}=={eligible_versions[key]}")
+                dist_dir = build_dist(pkg_dir)
+                _validate_dist_dir(dist_dir)
+                validated.append(f"{pkg.name}=={eligible_versions[key]}")
+
+            print("")
+            print("validate-dists: ok")
+            for line in validated:
+                print(f"  - {line}")
             return 0
 
         base_url = os.environ.get("GITLAB_BASE_URL") or "https://gitlab.com"
@@ -358,6 +459,7 @@ def main(argv: list[str] | None = None) -> int:
             print("")
             print(f"publishing: {pkg.name}=={eligible_versions[key]}")
             dist_dir = build_dist(pkg_dir)
+            _validate_dist_dir(dist_dir)
             twine_upload(dist_dir, repository_url, username=username, password=password)
             published[pkg.name] = eligible_versions[key]
 

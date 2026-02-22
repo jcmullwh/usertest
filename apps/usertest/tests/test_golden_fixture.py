@@ -49,8 +49,12 @@ def test_golden_fixture_renders_and_recomputes_metrics(
     assert expected_doc in metrics["distinct_docs_read"]
 
     md = (fixture_dst / "report.md").read_text(encoding="utf-8")
-    assert "# Report" in md
+    assert "# Persona exploration report" in md
+    assert "## Summary" in md
     assert "## Metrics" in md
+
+    for rel in ["report.md", "normalized_events.jsonl", "metrics.json"]:
+        assert (fixture_dst / rel).read_bytes() == (fixture_src / rel).read_bytes()
 
 
 def test_golden_fixtures_follow_minimal_contract_and_schema() -> None:

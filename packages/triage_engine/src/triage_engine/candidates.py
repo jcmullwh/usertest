@@ -20,7 +20,9 @@ def build_merge_candidates(
     get_evidence_ids: Callable[[T], Sequence[str]],
     get_text_chunks: Callable[[T], Iterable[str]],
     max_candidates: int = 200,
+    overall_similarity_threshold: float | None = None,
     title_overlap_threshold: float = 0.55,
+    keep_anchor_pairs: bool = False,
     embedder: Embedder | None = None,
 ) -> list[tuple[int, int]]:
     """Build candidate index pairs likely describing the same underlying issue.
@@ -33,11 +35,24 @@ def build_merge_candidates(
 
     Parameters
     ----------
+    overall_similarity_threshold:
+        Minimum overall semantic similarity score (in ``[0, 1]``) required for a pair
+        to be considered a merge candidate.
+
+        This is the preferred threshold knob.
+
     title_overlap_threshold:
-        Compatibility parameter from the initial implementation.
+        Deprecated compatibility parameter from the initial implementation.
 
         The engine now uses a semantic similarity score in [0, 1]. This parameter acts as a
         conservative lower-bound filter on that score to avoid emitting clearly unrelated pairs.
+        Use ``overall_similarity_threshold`` instead.
+    keep_anchor_pairs:
+        When ``True``, allow shared path-anchor overlap (``anchor_jaccard > 0``) to keep a
+        pair even when the overall similarity threshold is not met.
+
+        Default is ``False`` because anchor extraction is intentionally broad and may match
+        generic slash-phrases (e.g. ``"flag/config"``) that are not actual repo paths.
     embedder:
         Optional embedding backend.
 
@@ -61,7 +76,11 @@ def build_merge_candidates(
     candidate_pairs = generate_candidate_pairs(vectors)
 
     scored: list[tuple[float, int, int]] = []
-    min_score = float(title_overlap_threshold)
+    min_score = float(
+        title_overlap_threshold
+        if overall_similarity_threshold is None
+        else overall_similarity_threshold
+    )
 
     for i, j in sorted(candidate_pairs):
         sim = compute_pair_similarity(vectors[i], vectors[j])
@@ -69,7 +88,7 @@ def build_merge_candidates(
         keep = (
             sim.exact_duplicate
             or sim.evidence_overlap > 0
-            or sim.anchor_jaccard > 0.0
+            or (keep_anchor_pairs and sim.anchor_jaccard > 0.0)
             or sim.title_jaccard >= 0.5
             or sim.overall_similarity >= min_score
         )

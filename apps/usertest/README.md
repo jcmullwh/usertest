@@ -82,7 +82,7 @@ This is the recommended way to store repo-specific personas/missions in the repo
 Post-process existing runs into compiled artifacts:
 
 - `compile`: build a JSONL report history
-- `analyze`: summarize outcomes and write an issue analysis
+- `analyze`: summarize outcomes and write an issue analysis (optionally from `--history <jsonl>`)
 
 Most backlog mining/review/export workflows live in `usertest-backlog`.
 

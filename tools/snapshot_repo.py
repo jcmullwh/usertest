@@ -43,6 +43,28 @@ class SnapshotPlan:
     excluded_outputs: tuple[str, ...]
 
 
+def _validate_out_path(out_path: Path, *, overwrite: bool) -> None:
+    """
+    Validate the `--out` path before doing any expensive work.
+
+    This is intentionally strict so overwrite-guard failures do not print a full
+    "SNAPSHOT PLAN" block that can be mistaken for success in logs.
+    """
+
+    if out_path.exists():
+        if out_path.is_dir():
+            raise SnapshotError(f"Output path is a directory (pass a .zip file path): {out_path}")
+        if not overwrite:
+            raise SnapshotError(f"Output already exists (pass --overwrite to replace): {out_path}")
+
+    if out_path.suffix.lower() != ".zip":
+        raise SnapshotError(f"Output path must be a .zip file path: {out_path}")
+
+    parent = out_path.parent
+    if parent.exists() and not parent.is_dir():
+        raise SnapshotError(f"Output directory is not a directory: {parent}")
+
+
 def _find_repo_root(start: Path) -> Path:
     """
     Find the monorepo root by walking upward looking for `tools/scaffold/monorepo.toml`.
@@ -77,16 +99,28 @@ def _run_git(args: list[str], *, cwd: Path) -> bytes:
     fails, we raise with a clear error so the operator can decide how to proceed.
     """
 
-    proc = subprocess.run(
-        ["git", "-C", str(cwd), *args],
-        capture_output=True,
-        check=False,
-    )
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(cwd), *args],
+            capture_output=True,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        raise SnapshotError("git not found on PATH (required for snapshot_repo).") from e
+    except OSError as e:
+        raise SnapshotError(f"Failed to run git: {e}") from e
     if proc.returncode == 0:
         return proc.stdout
     msg = (proc.stderr or proc.stdout).decode("utf-8", errors="replace").strip()
     if not msg:
         msg = f"git failed (exit {proc.returncode}): {' '.join(args)}"
+    lowered = msg.lower()
+    if "not a git repository" in lowered:
+        raise SnapshotError(
+            "Not a git repository.\n"
+            f"- repo_root: {cwd}\n"
+            "Hint: pass --repo-root pointing at a git checkout (a directory containing `.git`)."
+        )
     raise SnapshotError(msg)
 
 
@@ -166,7 +200,7 @@ def _git_check_ignore(*, repo_root: Path, paths: list[str]) -> set[str]:
 
     payload = ("\0".join(paths) + "\0").encode("utf-8")
     proc = subprocess.run(
-        ["git", "-C", str(repo_root), "check-ignore", "-z", "--stdin"],
+        ["git", "-C", str(repo_root), "check-ignore", "--no-index", "-z", "--stdin"],
         input=payload,
         capture_output=True,
         check=False,
@@ -201,11 +235,11 @@ def _plan_snapshot(
         include_ignored=include_ignored,
     )
 
-    excluded_outputs: list[str] = []
+    excluded_output_candidates: set[str] = set()
     try:
         out_rel = out_path.resolve().relative_to(repo_root.resolve()).as_posix()
-        excluded_outputs.append(out_rel)
-        excluded_outputs.append(out_rel + ".tmp")
+        excluded_output_candidates.add(out_rel)
+        excluded_output_candidates.add(out_rel + ".tmp")
     except Exception:
         pass
 
@@ -214,11 +248,13 @@ def _plan_snapshot(
     included: list[str] = []
     excluded_gitignores: list[str] = []
     excluded_ignored: list[str] = []
+    excluded_outputs: list[str] = []
     for rel in all_files:
         if rel in ignored_set:
             excluded_ignored.append(rel)
             continue
-        if rel in excluded_outputs:
+        if rel in excluded_output_candidates:
+            excluded_outputs.append(rel)
             continue
         if not include_gitignore_files and _posix_basename(rel).lower() == ".gitignore":
             excluded_gitignores.append(rel)
@@ -251,20 +287,22 @@ def _write_zip(plan: SnapshotPlan, *, overwrite: bool) -> None:
     """
 
     out_path = plan.out_path
-    if out_path.exists():
-        if not overwrite:
-            raise SnapshotError(f"Output already exists (pass --overwrite to replace): {out_path}")
-        if out_path.is_dir():
-            raise SnapshotError(f"Output path is a directory: {out_path}")
+    _validate_out_path(out_path, overwrite=overwrite)
 
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise SnapshotError(f"Failed to create output directory: {out_path.parent}: {e}") from e
 
     compression = zipfile.ZIP_DEFLATED
     compresslevel = 9
 
     tmp_out = out_path.with_suffix(out_path.suffix + ".tmp")
-    if tmp_out.exists():
-        tmp_out.unlink()
+    try:
+        if tmp_out.exists():
+            tmp_out.unlink()
+    except OSError as e:
+        raise SnapshotError(f"Failed to remove pre-existing temp file: {tmp_out}: {e}") from e
 
     try:
         with zipfile.ZipFile(
@@ -278,15 +316,37 @@ def _write_zip(plan: SnapshotPlan, *, overwrite: bool) -> None:
                 if not abs_path.is_file():
                     raise SnapshotError(f"Missing expected file: {abs_path}")
                 zf.write(abs_path, arcname=rel)
-    except Exception:
+    except SnapshotError:
         try:
             if tmp_out.exists():
                 tmp_out.unlink()
         except OSError:
             pass
         raise
+    except OSError as e:
+        try:
+            if tmp_out.exists():
+                tmp_out.unlink()
+        except OSError:
+            pass
+        raise SnapshotError(f"Failed to write archive: {tmp_out}: {e}") from e
+    except Exception as e:
+        try:
+            if tmp_out.exists():
+                tmp_out.unlink()
+        except OSError:
+            pass
+        raise SnapshotError(f"Failed to write archive: {tmp_out}: {e}") from e
 
-    os.replace(tmp_out, out_path)
+    try:
+        os.replace(tmp_out, out_path)
+    except OSError as e:
+        try:
+            if tmp_out.exists():
+                tmp_out.unlink()
+        except OSError:
+            pass
+        raise SnapshotError(f"Failed to finalize archive: {out_path}: {e}") from e
 
 
 def _verify_zip(
@@ -334,10 +394,21 @@ def _verify_zip(
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="snapshot_repo",
+        prog="python tools/snapshot_repo.py",
         description=(
             "Create a zip snapshot of the repo using git's standard excludes (.gitignore, etc). "
             "By default, `.gitignore` files themselves are excluded from the archive."
+        ),
+        formatter_class=argparse.RawTextHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  python tools/snapshot_repo.py --out repo_snapshot.zip\n"
+            "  python tools/snapshot_repo.py --out repo_snapshot.zip --overwrite\n"
+            "  python tools/snapshot_repo.py --out repo_snapshot.zip --include-gitignore-files\n"
+            "\n"
+            "Notes:\n"
+            "  - `--out` must be a .zip file path.\n"
+            "  - `.gitignore` files are excluded by default; pass --include-gitignore-files to include them.\n"
         ),
     )
     parser.add_argument(
@@ -379,6 +450,11 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--plan-only",
+        action="store_true",
+        help="Print the snapshot plan and exit (do not write the archive).",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite --out if it already exists.",
@@ -391,6 +467,7 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = args.repo_root.resolve() if args.repo_root is not None else _find_repo_root(Path.cwd())
     out_path = args.out.resolve()
+    _validate_out_path(out_path, overwrite=bool(args.overwrite))
 
     plan = _plan_snapshot(
         repo_root=repo_root,
@@ -410,11 +487,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"- include_ignored: {bool(args.include_ignored)}")
     print(f"- include_gitignore_files: {bool(args.include_gitignore_files)}")
     print(f"- verify: {bool(args.verify)}")
+    print(f"- plan_only: {bool(args.plan_only)}")
     print(f"- files: {len(plan.files)}")
     print(f"- excluded_gitignores: {len(plan.excluded_gitignores)}")
     print(f"- excluded_ignored: {len(plan.excluded_ignored)}")
     print(f"- excluded_outputs: {len(plan.excluded_outputs)}")
     print("")
+
+    if bool(args.plan_only):
+        print("Plan-only: no archive written.")
+        return 0
 
     _write_zip(plan, overwrite=bool(args.overwrite))
     if bool(args.verify):

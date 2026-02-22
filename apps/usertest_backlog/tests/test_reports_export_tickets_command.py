@@ -299,3 +299,240 @@ def test_reports_export_tickets_skips_when_plan_ticket_fingerprint_exists(tmp_pa
     canonical_failure_atom_id = "target_a/20260102T000000Z/claude/0:run_failure_event:1"
     assert atoms[canonical_failure_atom_id]["status"] == "actioned"
     assert legacy_failure_atom_id in atoms[canonical_failure_atom_id]["derived_from_atom_ids"]
+
+
+def test_reports_export_tickets_attaches_ux_review_and_promotes_docs(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    ticket = {
+        "ticket_id": "BLG-001",
+        "title": "Add `usertest smoke` shortcut command",
+        "problem": "Operators want a single obvious entry point.",
+        "severity": "medium",
+        "confidence": 0.6,
+        "stage": "research_required",
+        "evidence_atom_ids": ["target_a/20260101T000000Z/codex/0:confusion_point:1"],
+        "change_surface": {
+            "user_visible": True,
+            "kinds": ["new_command"],
+            "notes": "New command proposed.",
+        },
+        "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
+        "suggested_owner": "docs",
+    }
+
+    backlog_path = compiled_dir / "target_a.backlog.json"
+    _write_json(
+        backlog_path,
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [ticket],
+        },
+    )
+    _write_json(
+        compiled_dir / "target_a.ux_review.json",
+        {
+            "schema_version": 1,
+            "generated_at": "2026-02-21T00:00:00Z",
+            "scope": {"target": "target_a", "repo_input": None},
+            "status": "ok",
+            "prompt_hash": "deadbeefdeadbeef",
+            "review": {
+                "command_surface_budget": {
+                    "max_new_commands_per_quarter": 0,
+                    "notes": "Keep it tight.",
+                },
+                "recommendations": [
+                    {
+                        "recommendation_id": "UX-001",
+                        "ticket_ids": ["BLG-001"],
+                        "recommended_approach": "docs",
+                        "proposed_change_surface": {
+                            "user_visible": True,
+                            "kinds": ["docs_change"],
+                            "notes": "Document existing commands instead of adding a new one.",
+                        },
+                        "rationale": "A new command isn't necessary; docs can remove friction.",
+                        "next_steps": ["Update README quickstart with a clear entrypoint."],
+                        "evidence_breadth_summary": {
+                            "missions": 1,
+                            "targets": 1,
+                            "repo_inputs": 1,
+                            "agents": 1,
+                            "runs": 1,
+                        },
+                    }
+                ],
+                "notes": "",
+                "confidence": 0.8,
+            },
+        },
+    )
+
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-dedupe",
+            ]
+        )
+    assert exc.value.code == 0
+
+    out_json = compiled_dir / "target_a.tickets_export.json"
+    export_doc = json.loads(out_json.read_text(encoding="utf-8"))
+    assert export_doc["stats"]["ux_recommendations_loaded"] == 1
+    assert export_doc["stats"]["ux_idea_files_updated"] == 1
+    assert export_doc["stats"]["exports_total"] == 1
+
+    export = export_doc["exports"][0]
+    assert export["export_kind"] == "implementation"
+    assert export["source_ticket"]["stage"] == "ready_for_ticket"
+    assert "ux:docs" in export["labels"]
+    assert "## UX review" in export["body_markdown"]
+    assert "Raw recommendation JSON" in export["body_markdown"]
+
+    idea_path = Path(export["owner_repo"]["idea_path"])
+    assert idea_path.exists()
+    idea_text = idea_path.read_text(encoding="utf-8")
+    assert "## UX review" in idea_text
+    assert "- Export kind: `implementation`" in idea_text
+    assert "- Stage: `ready_for_ticket`" in idea_text
+
+
+def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    ticket = {
+        "ticket_id": "BLG-001",
+        "title": "Add `usertest smoke` shortcut command",
+        "problem": "Operators want a single obvious entry point.",
+        "severity": "medium",
+        "confidence": 0.6,
+        "stage": "research_required",
+        "evidence_atom_ids": ["target_a/20260101T000000Z/codex/0:confusion_point:1"],
+        "change_surface": {
+            "user_visible": True,
+            "kinds": ["new_command"],
+            "notes": "New command proposed.",
+        },
+        "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
+        "suggested_owner": "docs",
+    }
+
+    fingerprint = ticket_export_fingerprint(ticket)
+    ready_dir = owner_repo / ".agents" / "plans" / "2 - ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
+    plan_path = ready_dir / f"20260221_BLG-001_{fingerprint}_existing.md"
+    plan_path.write_text(
+        "\n".join(
+            [
+                "# [Research] Existing ticket",
+                "",
+                f"- Fingerprint: `{fingerprint}`",
+                "- Source ticket: `BLG-001`",
+                "",
+                "- Export kind: `research`",
+                "- Stage: `research_required`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    backlog_path = compiled_dir / "target_a.backlog.json"
+    _write_json(
+        backlog_path,
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [ticket],
+        },
+    )
+    _write_json(
+        compiled_dir / "target_a.ux_review.json",
+        {
+            "schema_version": 1,
+            "generated_at": "2026-02-21T00:00:00Z",
+            "scope": {"target": "target_a", "repo_input": None},
+            "status": "ok",
+            "review": {
+                "recommendations": [
+                    {
+                        "recommendation_id": "UX-001",
+                        "ticket_ids": ["BLG-001"],
+                        "recommended_approach": "docs",
+                        "rationale": "A new command isn't necessary.",
+                        "next_steps": ["Update docs instead."],
+                        "evidence_breadth_summary": {
+                            "missions": 1,
+                            "targets": 1,
+                            "repo_inputs": 1,
+                            "agents": 1,
+                            "runs": 1,
+                        },
+                    }
+                ],
+                "confidence": 0.7,
+            },
+        },
+    )
+
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+            ]
+        )
+    assert exc.value.code == 0
+
+    out_json = compiled_dir / "target_a.tickets_export.json"
+    export_doc = json.loads(out_json.read_text(encoding="utf-8"))
+    assert export_doc["stats"]["exports_total"] == 0
+    assert export_doc["stats"]["skipped_existing_plan"] == 1
+    assert export_doc["stats"]["ux_plan_tickets_updated"] == 1
+
+    updated = plan_path.read_text(encoding="utf-8")
+    assert "- Export kind: `implementation`" in updated
+    assert "- Stage: `ready_for_ticket`" in updated
+    assert "## UX review" in updated

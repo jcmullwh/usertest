@@ -30,6 +30,14 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
   mission.source.md
   mission.resolved.md
   preflight.json
+  verification_config.json            # only when --verify-command is configured
+  verification.json                   # only when verification ran (schema-valid attempt)
+  verification_errors.json            # only when verification failed
+  verification/                       # only when verification ran
+    attempt1/
+      verification.json
+      cmd_01.stdout.txt
+      cmd_01.stderr.txt
   raw_events.jsonl
   normalized_events.jsonl
   metrics.json
@@ -38,6 +46,7 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
   agent_last_message.txt
   agent_stderr.txt
   agent_attempts.json
+  run_meta.json
   error.json                          # only when run fails
   report_validation_errors.json       # only when schema validation fails
   patch.diff                          # only when write policy allows edits and edits occurred
@@ -49,18 +58,25 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
     append_system_prompt.md
   sandbox/                            # only for docker backend
     sandbox.json
-    docker_logs.txt
-    docker_inspect.json
+    container_logs.txt
+    container_inspect.json
     dns_snapshot.txt
 ```
 
-Offline reference fixture:
+Offline reference fixtures (minimal / synthetic):
 
-- `examples/golden_runs/minimal_codex_run/` provides a minimal sanitized artifact set used in tests.
+- `examples/golden_runs/minimal_*_run/` provides minimal sanitized run directories used in tests.
+  These fixtures are **not** full “normal operation” runs; they intentionally omit many artifacts
+  that exist in real runs (for example `effective_run_spec.json`, persona/mission markdown,
+  `preflight.json`, sandbox diagnostics, and per-attempt artifacts). Each fixture directory
+  includes `FIXTURE_NOTICE.md` describing what is intentionally missing.
 
 ## File-level contract
 
 Files that are expected for successful runs in normal operation:
+
+Note: The golden fixtures are minimal/synthetic and may omit some of these files; see
+`examples/golden_runs/` and each fixture’s `FIXTURE_NOTICE.md`.
 
 - `target_ref.json`: normalized target metadata (`repo_input`, git/ref context, target slug).
 - `effective_run_spec.json`: resolved persona/mission/template/schema identifiers and paths.
@@ -73,7 +89,8 @@ Files that are expected for successful runs in normal operation:
 - `report.md`: rendered markdown report (written even when `report.json` is absent).
 - `agent_last_message.txt`: last agent textual output.
 - `agent_stderr.txt`: stderr captured from adapter process (may be synthesized on non-zero exit).
-- `agent_attempts.json`: per-attempt metadata for retries/follow-ups.
+- `agent_attempts.json`: per-attempt metadata for retries/follow-ups (including attempt timing fields).
+- `run_meta.json`: run-level timing metadata (wall-clock duration + coarse phase timings).
 
 Files that are conditionally present:
 
@@ -81,6 +98,10 @@ Files that are conditionally present:
 - `report_validation_errors.json`: present when report parsing/validation produced errors.
 - `error.json`: present when run failed (preflight, adapter execution, or other fatal error path).
 - `preflight.json`: present when preflight phase executed (normal path before adapter run).
+- `verification_config.json`: present when verification commands are configured.
+- `verification.json`: present when verification ran for the selected attempt (schema-valid agent output).
+- `verification_errors.json`: present when verification failed (even if agent exit code is zero).
+- `verification/*`: per-attempt verification logs (`cmd_*.stdout.txt` / `cmd_*.stderr.txt`).
 - `patch.diff` and `diff_numstat.json`: present only when edits are allowed and edits occurred.
 - `persona.source.md`, `persona.resolved.md`, `mission.source.md`, `mission.resolved.md`:
   present when catalog resolution succeeds.
@@ -99,8 +120,11 @@ Files that are conditionally present:
   - `error.json`
   - `agent_stderr.txt`
   - `agent_last_message.txt`
+  - `verification.json`
+  - `verification_errors.json`
   - `preflight.json`
   - `agent_attempts.json`
+  - `run_meta.json`
 
 ## Verification commands
 

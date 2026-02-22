@@ -2,3 +2,6 @@
 # Example:
 #   openai
 #   anthropic
+
+# Monorepo tooling (pinned to CI version for determinism).
+pdm==2.26.2

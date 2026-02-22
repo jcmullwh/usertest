@@ -30,17 +30,36 @@ The backlog CLI provides tools to mine and analyze data produced by usertest, ge
 - **Docs hub:** `docs/README.md`
 - **Tutorial:** `docs/tutorials/getting-started.md`
 - **Monorepo setup + scaffold workflow:** `docs/tutorials/monorepo-setup.md`
+- **One-command smoke (per OS):** `scripts/smoke.ps1` (Windows) / `scripts/smoke.sh` (macOS/Linux)
 
 ## Fastest output (no setup)
 
-Open the checked-in golden fixture artifacts directly:
+Open the checked-in golden fixture artifacts directly (no Python deps required):
 
 - `examples/golden_runs/minimal_codex_run/report.md`
 - `examples/golden_runs/minimal_codex_run/metrics.json`
 
-Re-render that fixture from raw events:
+Re-render that fixture from raw events (requires minimal Python deps + import-path setup):
+
+**Note:** this does not execute any agent runs; it just re-renders an existing golden fixture.
+
+One-command (recommended):
+
+- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_fixture_rerender.ps1`
+- macOS/Linux: `bash ./scripts/offline_fixture_rerender.sh`
+
+Manual steps (if you want to control an existing env):
+
+- Install minimal deps:
+  `python -m pip install -r requirements-dev.txt`
+- Configure `PYTHONPATH`:
+  - PowerShell: `. .\scripts\set_pythonpath.ps1`
+  - macOS/Linux: `source scripts/set_pythonpath.sh`
+- Re-render:
 
 `python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics`
+
+Success signal: the command prints the exact `report.md` output path.
 
 ## Repo structure
 
@@ -61,8 +80,9 @@ The monorepo is managed by `tools/scaffold/scaffold.py` (manifest-driven task ru
 
 ### Requirements
 
-- Python 3.11+
+- Python 3.11+ (CI currently runs 3.11; newer versions are best-effort)
 - `git`
+- Optional: GitHub CLI (`gh`) (needed for `usertest-implement run --pr`)
 - At least one of: agent CLIs on PATH + credentials
   - `codex` CLI (logged in via `codex login` / subscription)
   - `claude` CLI (Claude Code)
@@ -97,12 +117,23 @@ The smoke scripts run:
 4. `python -m usertest_backlog.cli --help`
 5. `python -m pytest -q apps/usertest/tests/test_smoke.py apps/usertest/tests/test_golden_fixture.py apps/usertest_backlog/tests/test_smoke.py`
 
-If `pdm` is not installed, the scripts skip the doctor step and continue with the pip-based flow.
+If `pdm` is not installed, the scripts run doctor with tool checks skipped (`scaffold.py doctor --skip-tool-checks`)
+and continue with the pip-based flow. For CI or strict preflight runs, require doctor explicitly:
+
+- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -RequireDoctor`
+- macOS/Linux: `bash ./scripts/smoke.sh --require-doctor`
 
 Fallback mode if you want PYTHONPATH-based execution instead of editable installs:
 
 - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -UsePythonPath`
 - macOS/Linux: `bash ./scripts/smoke.sh --use-pythonpath`
+
+Restricted environments (no editable installs / pre-provisioned deps):
+
+- No editable installs (still installs `requirements-dev.txt`): use the PYTHONPATH modes above.
+- No installs at runtime (deps already provisioned, e.g., offline wheelhouse): run smoke with both flags:
+  - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -SkipInstall -UsePythonPath`
+  - macOS/Linux: `bash ./scripts/smoke.sh --skip-install --use-pythonpath`
 
 ### Manual editable install (no PYTHONPATH)
 
@@ -116,7 +147,7 @@ Primary path (plain editable app install):
 
 Fallback path (explicit local editable bootstrap):
 
-`python -m pip install --no-deps -e packages/normalized_events -e packages/agent_adapters -e packages/reporter -e packages/sandbox_runner -e packages/runner_core -e packages/triage_engine -e packages/backlog_core -e packages/backlog_miner -e packages/backlog_repo -e apps/usertest -e apps/usertest_backlog`
+`python -m pip install --no-deps -e packages/normalized_events -e packages/agent_adapters -e packages/run_artifacts -e packages/reporter -e packages/sandbox_runner -e packages/runner_core -e packages/triage_engine -e packages/backlog_core -e packages/backlog_miner -e packages/backlog_repo -e apps/usertest -e apps/usertest_backlog`
 
 Why both paths exist:
 
@@ -139,7 +170,7 @@ macOS/Linux:
 
 After install (editable or PYTHONPATH), run:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy safe --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 Local directory example (initializes `.usertest/` scaffold):
 
@@ -147,7 +178,7 @@ Local directory example (initializes `.usertest/` scaffold):
 
 Then run against that directory (requires an agent CLI + credentials):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy safe --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 List built-in personas/missions:
 
@@ -165,26 +196,26 @@ Defaults are configured in `configs/catalog.yaml`.
 
 Example: quick output with defaults-first mission:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy safe --persona-id burst_user --mission-id produce_default_output`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id burst_user --mission-id produce_default_output`
 
 Claude Code variant:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent claude --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent claude --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 Gemini variant:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent gemini --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent gemini --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 ### Evaluate a published Python package (fresh install)
 
 To usertest a deployed Python package (fresh install into an isolated virtualenv before the agent
 runs), pass a pip target:
 
-`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy safe --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker`
+`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker`
 
 This repo provides support for private registries(GitLab PyPI in particular); in that case also set the additionaly flags below with environment variables and optionally `GITLAB_BASE_URL`. For details, see `docs/monorepo-packages.md`.`
 
-`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy safe --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
+`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
 
 Notes:
 
@@ -200,8 +231,19 @@ Execution-policy notes:
 - `--policy safe` is strictest (no writes; and for Claude/Gemini, no shell commands).
 - `--policy inspect` is read-only but allows shell commands (recommended for first-success probing
   workflows on Claude/Gemini).
+- Built-in `first_output_smoke` / `produce_default_output` missions require edits; use `--policy write` for those runs.
+- Which policy should I use?
+  - Read-only + shell (no edits): `--policy inspect`
+  - Any workflow that requires edits: `--policy write`
+  - Claude/Gemini with *no shell commands at all*: `--policy safe`
+  - Common missions:
+    - `privacy_locked_run`: `--policy inspect`
+    - `first_output_smoke`: `--policy write`
+    - `produce_default_output`: `--policy write`
 - If you need repo-specific tool probes, add `--preflight-command <CMD>` (repeatable) and optional
   `--require-preflight-command <CMD>`.
+- If you want a required “pre-handoff” CI/test gate, add `--verify-command "<SHELL_CMD>"` (repeatable) and optional
+  `--verify-timeout-seconds <SECONDS>`. The runner can schedule follow-up attempts to fix failures before handing off.
 - `preflight.json` includes per-command diagnostics with status values: `present`, `missing`, and
   `blocked_by_policy`.
 - `USERS.md` is optional context; built-in prompt templates no longer require it.
@@ -214,6 +256,7 @@ Artifacts land under `runs/usertest/<target>/<timestamp>/<agent>/<seed>/`:
 - `raw_events.jsonl`, `normalized_events.jsonl`
 - `metrics.json`
 - `report.json`, `report.md`
+- `verification.json` (when `--verify-command` is used)
 - `patch.diff` (only if writes were allowed and edits occurred)
 
 For the full file-level contract (required vs optional files, semantics, and a redacted sample
@@ -221,17 +264,24 @@ layout), see `docs/design/run-artifacts.md`. For offline fixtures, see `examples
 
 ### Docker execution backend (optional)
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker`
 
-Host agent login reuse is enabled by default for Docker runs (`~/.codex`, `~/.claude`,
-`~/.gemini` mounts).
+Docker runs default to:
+
+- outbound network enabled (`--exec-network open`)
+- host agent login reuse enabled (`~/.codex`, `~/.claude`, `~/.gemini` mounts via `--exec-use-host-agent-login`)
 
 If you want API-key auth instead, opt in explicitly with:
 
 `--exec-use-api-key-auth --exec-env OPENAI_API_KEY`
 
+Note: the agent CLI itself runs *inside* the Docker container in this repo. Setting
+`--exec-network none` will prevent Codex/Claude/Gemini from reaching their hosted APIs, so it is
+not a “privacy-locked agent run” mode. For a no-network / no-credentials first success signal, use
+the golden fixtures in “Fastest output (no setup)” above.
+
 If you need to override the Docker build context, pass `--exec-docker-context` explicitly (default:
-`packages/sandbox_runner/builtins/docker/contexts/sandbox_cli`).
+the built-in sandbox_cli context shipped with `sandbox_runner`).
 
 Optional flags:
 
@@ -269,10 +319,17 @@ Golden fixture verification command:
 
 ## Troubleshooting
 
+- If `usertest` is "command not found" / not on PATH, either:
+  - run via module invocation (after installing deps): `python -m usertest.cli --help`, or
+  - install the console script: `python -m pip install -e apps/usertest`
 - If Codex fails with `model_reasoning_effort` enum errors, use one of
   `minimal|low|medium|high` (example: `--agent-config model_reasoning_effort=high`).
 - If preflight reports `blocked_by_policy`, switch to `--policy inspect` (read-only + shell) or
   update `configs/policies.yaml`.
+- If you use a Windows-host checkout inside WSL or a Linux container and `git status` shows
+  widespread unrelated modifications, it is usually a CRLF/LF line ending mismatch. Mitigations:
+  - For new clones: `git config --global core.autocrlf input`
+  - For existing clones (after stashing real edits): `git add --renormalize .`
 - Windows workaround for bash assumptions:
   - Prefer Docker backend for shell-capable runs:
     `python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent gemini --policy inspect --exec-backend docker`
@@ -287,8 +344,10 @@ Golden fixture verification command:
 - Runner outputs default to `runs/usertest/` (legacy paths are not auto-deleted). To migrate:
   `python tools/migrations/migrate_runs_layout.py` then
   `python tools/migrations/migrate_runs_layout.py --apply`.
-- To create a shareable snapshot of this repo, run
-  `python tools/snapshot_repo.py --out repo_snapshot.zip`.
+- To create a shareable snapshot ZIP of this repo:
+  `python tools/snapshot_repo.py --out repo_snapshot.zip`
+  - `.gitignore` files are excluded by default; pass `--include-gitignore-files` to include them.
+  - If the output already exists, pass `--overwrite`.
 - If a run fails mid-acquisition or disk usage grows, delete `runs/usertest/_workspaces/`.
 - If you change `packages/runner_core`, `packages/agent_adapters`, or `packages/reporter` and the
   CLI still behaves like old code, refresh the CLI env:

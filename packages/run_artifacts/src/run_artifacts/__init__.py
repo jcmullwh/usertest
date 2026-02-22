@@ -8,6 +8,7 @@ from run_artifacts.capture import (
 from run_artifacts.history import iter_report_history, write_report_history_jsonl
 from run_artifacts.run_failure_event import (
     classify_failure_kind,
+    classify_known_stderr_warnings,
     coerce_validation_errors,
     extract_error_artifacts,
     render_failure_text,
@@ -21,6 +22,7 @@ __all__ = [
     "TextExcerpt",
     "capture_text_artifact",
     "classify_failure_kind",
+    "classify_known_stderr_warnings",
     "coerce_validation_errors",
     "extract_error_artifacts",
     "iter_report_history",

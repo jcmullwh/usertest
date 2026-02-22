@@ -8,6 +8,7 @@
 bash
 ca-certificates
 curl
+file
 git
 openssh-client
 procps

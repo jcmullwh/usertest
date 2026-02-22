@@ -1,8 +1,10 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 import yaml
@@ -21,6 +23,35 @@ def _write_yaml(path: Path, obj: object) -> None:
     path.write_text(yaml.safe_dump(obj, sort_keys=False), encoding="utf-8")
 
 
+def _ticket_labeler_fingerprint(ticket: dict[str, Any]) -> str:
+    title_raw = ticket.get("title")
+    title = str(title_raw).strip().lower() if isinstance(title_raw, str) else ""
+    evidence = sorted(item for item in ticket.get("evidence_atom_ids", []) if isinstance(item, str))
+    anchor = json.dumps({"title": title, "evidence": evidence}, ensure_ascii=False).encode("utf-8")
+    return hashlib.sha256(anchor).hexdigest()[:16]
+
+
+def _seed_labeler_cache(artifacts_dir: Path, ticket: dict[str, Any], *, labelers: int = 3) -> None:
+    fingerprint = _ticket_labeler_fingerprint(ticket)
+    labeler_dir = artifacts_dir / "labeler" / fingerprint
+    labeler_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "change_surface": {"user_visible": True, "kinds": ["docs_change"], "notes": "docs"},
+        "component": "docs",
+        "intent_risk": "low",
+        "confidence": 0.75,
+        "evidence_atom_ids_used": [
+            item for item in ticket.get("evidence_atom_ids", []) if isinstance(item, str)
+        ],
+    }
+    for idx in range(1, labelers + 1):
+        (labeler_dir / f"labeler_{idx:02d}.label.json").write_text(
+            json.dumps(payload, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+
+
 def _seed_runs_fixture(runs_dir: Path) -> None:
     run_a = runs_dir / "target_a" / "20260101T000000Z" / "codex" / "0"
     run_b = runs_dir / "target_a" / "20260102T000000Z" / "claude" / "0"
@@ -37,6 +68,20 @@ def _seed_runs_fixture(runs_dir: Path) -> None:
         },
     )
     _write_json(run_a / "effective_run_spec.json", {})
+    _write_json(
+        run_a / "metrics.json",
+        {
+            "commands_executed": 7,
+            "commands_failed": 0,
+            "step_count": 11,
+            "event_counts": {},
+            "distinct_files_read": [],
+            "distinct_docs_read": [],
+            "distinct_files_written": [],
+            "lines_added_total": 0,
+            "lines_removed_total": 0,
+        },
+    )
     _write_json(
         run_a / "report.json",
         {
@@ -66,6 +111,27 @@ def _seed_runs_fixture(runs_dir: Path) -> None:
         },
     )
     _write_json(run_b / "effective_run_spec.json", {})
+    _write_json(
+        run_b / "metrics.json",
+        {
+            "commands_executed": 3,
+            "commands_failed": 1,
+            "failed_commands": [
+                {
+                    "command": "python -m pip install -r requirements-dev.txt",
+                    "exit_code": 1,
+                    "output_excerpt": "Temporary failure in name resolution",
+                }
+            ],
+            "step_count": 6,
+            "event_counts": {},
+            "distinct_files_read": [],
+            "distinct_docs_read": [],
+            "distinct_files_written": [],
+            "lines_added_total": 0,
+            "lines_removed_total": 0,
+        },
+    )
     _write_json(
         run_b / "report_validation_errors.json",
         ["$: failed to parse JSON from agent output"],
@@ -136,6 +202,8 @@ def test_reports_backlog_dry_run_writes_outputs(tmp_path: Path) -> None:
     summary = json.loads(out_json.read_text(encoding="utf-8"))
     assert summary["totals"]["runs"] == 2
     assert summary["totals"]["miners_total"] == 2
+    assert summary["totals"]["source_counts"].get("aggregate_metrics", 0) == 2
+    assert summary["totals"]["source_counts"].get("command_failure", 0) == 1
 
     markdown = out_md.read_text(encoding="utf-8")
     assert "Untriaged Tail" in markdown
@@ -247,6 +315,7 @@ def test_reports_backlog_uses_cached_miner_outputs(tmp_path: Path) -> None:
     assert exc.value.code == 0
 
     _write_json(miner_dir / "tickets.json", cached_ticket)
+    _seed_labeler_cache(artifacts_dir, cached_ticket[0])
 
     with pytest.raises(SystemExit) as exc:
         main(
@@ -282,6 +351,8 @@ def test_reports_backlog_uses_cached_miner_outputs(tmp_path: Path) -> None:
     summary = json.loads(out_json.read_text(encoding="utf-8"))
     assert summary["totals"]["tickets"] == 1
     assert summary["tickets"][0]["title"] == "Add quickstart docs"
+    assert summary["tickets"][0]["change_surface"]["kinds"] == ["docs_change"]
+    assert summary["tickets"][0]["stage"] == "ready_for_ticket"
     assert summary["artifacts"]["atom_actions"]["path"] == str(atom_actions_path)
 
     atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
@@ -293,7 +364,7 @@ def test_reports_backlog_uses_cached_miner_outputs(tmp_path: Path) -> None:
         if item["atom_id"] == "target_a/20260101T000000Z/codex/0:confusion_point:1"
     )
     assert entry["status"] == "ticketed"
-    assert "BLG-001" in entry["ticket_ids"]
+    assert any(isinstance(tid, str) and tid.startswith("TKT-") for tid in entry["ticket_ids"])
 
 
 def test_reports_backlog_does_not_ticket_atoms_for_blocked_tickets(tmp_path: Path) -> None:
@@ -356,6 +427,7 @@ def test_reports_backlog_does_not_ticket_atoms_for_blocked_tickets(tmp_path: Pat
         }
     ]
     _write_json(miner_dir / "tickets.json", cached_ticket)
+    _seed_labeler_cache(artifacts_dir, cached_ticket[0])
 
     with pytest.raises(SystemExit) as exc:
         main(

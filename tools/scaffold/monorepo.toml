@@ -169,6 +169,21 @@ tasks.test = ["pdm", "run", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
+id = "usertest_implement"
+kind = "app"
+path = "apps/usertest_implement"
+generator = "python_pdm_app"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.depcheck = ["pdm", "run", "deptry", "."]
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
 id = "run_artifacts"
 kind = "lib"
 path = "packages/run_artifacts"

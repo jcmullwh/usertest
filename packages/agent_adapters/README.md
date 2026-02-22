@@ -13,16 +13,27 @@ This package is designed to be reusable outside this repo: if you can invoke an 
 Distribution name: `agent-adapters`
 Import package: `agent_adapters`
 
-From this monorepo (editable):
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
 
 ```bash
-pip install -e packages/agent_adapters
+pdm install
+pdm run smoke
+pdm run test
+pdm run lint
 ```
 
 Notes:
 - `normalized_events` integration is optional for this package; `agent_adapters.events` provides a
   built-in fallback implementation so standalone installs work in isolated environments.
 - The `examples/mcp_with_sandbox_runner.md` flow additionally requires `sandbox_runner`.
+
+If you need only a runtime install (without dev tooling commands), use:
+
+```bash
+python -m pip install -e .
+```
 
 From a private GitLab PyPI registry (snapshot publishing):
 
@@ -33,12 +44,15 @@ pip install \
   "agent-adapters==<version>"
 ```
 
-## Quick smoke
+## Canonical smoke
 
 ```bash
-python -c "import agent_adapters as aa; print(aa.__version__)"
-agent-adapters doctor
+pdm run smoke
+pdm run smoke_extended
 ```
+
+`pdm run smoke` is the deterministic first-success check. `pdm run smoke_extended` adds the
+fixture-heavy normalization smoke pass.
 
 ---
 
@@ -86,7 +100,21 @@ See `examples/mcp_with_sandbox_runner.md`.
 
 ## Development
 
-Run from the repo root:
+### Standalone package checkout (recommended first path)
+
+Run from this package directory:
+
+```bash
+pdm install
+pdm run smoke
+pdm run smoke_extended
+pdm run test
+pdm run lint
+```
+
+### Monorepo contributor workflow
+
+Run from the monorepo root:
 
 ```bash
 python tools/scaffold/scaffold.py run install --project agent_adapters

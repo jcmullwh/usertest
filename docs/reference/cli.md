@@ -1,9 +1,10 @@
 # CLI reference
 
-This repo ships two end-user CLIs:
+This repo ships three end-user CLIs:
 
 - `usertest` (app: `apps/usertest`) – run usertests and render run artifacts
 - `usertest-backlog` (app: `apps/usertest_backlog`) – compile/analyze/export run history and triage PRs
+- `usertest-implement` (app: `apps/usertest_implement`) – implement one exported backlog ticket in a target repo
 
 If you’re unsure where to start, read `docs/tutorials/getting-started.md`.
 
@@ -74,6 +75,37 @@ Commands are grouped under `usertest-backlog reports`:
 
 ---
 
+## `usertest-implement`
+
+Entry points:
+
+- `usertest-implement …` (installed script)
+- `python -m usertest_implement.cli …` (module invocation)
+
+### Core command
+
+- `usertest-implement run`
+  - Implement a single exported backlog ticket in a target repo.
+  - Writes a run directory under `runs/usertest_implement/…` with ticket linkage artifacts.
+  - Optional git finalization:
+    - `--commit` creates a branch + commit in the kept workspace.
+    - `--push` pushes the branch to the configured remote.
+    - `--pr` attempts best-effort PR creation using GitHub CLI (`gh`). (`gh` must be on `PATH` and authenticated.)
+
+### Reports utilities
+
+- `usertest-implement reports summarize`
+  - Summarize implementation runs into JSONL for analysis.
+
+### Ticket queue helpers
+
+- `usertest-implement tickets list|next|move`
+  - Work with `.agents/plans/*` ticket queues.
+- `usertest-implement tickets run-next`
+  - Standard flow: refresh backlog exports (including `review-ux`) and implement the next ticket (research-first).
+
+---
+
 ## Common flags and concepts
 
 ### `--repo-root`
@@ -105,7 +137,13 @@ These CLIs evolve quickly.
 Use:
 
 ```bash
+python -m usertest.cli --help
+python -m usertest.cli run --help
+python -m usertest_backlog.cli --help
+python -m usertest_implement.cli --help
+
+# If you installed the console scripts:
 usertest --help
-usertest run --help
 usertest-backlog --help
+usertest-implement --help
 ```

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -111,3 +114,30 @@ def test_parser_smoke() -> None:
         parser.parse_args(["init-users", "--repo", "C:\\tmp\\x"])
     with pytest.raises(SystemExit):
         parser.parse_args(["run", "--repo", "C:\\tmp\\x", "--use-builtin-context"])
+
+
+def test_scaffold_doctor_skip_tool_checks_allows_missing_binaries_on_path() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    scaffold_py = repo_root / "tools" / "scaffold" / "scaffold.py"
+    assert scaffold_py.exists()
+
+    env = dict(os.environ)
+    env["PATH"] = ""
+
+    without_flag = subprocess.run(
+        [sys.executable, str(scaffold_py), "doctor"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert without_flag.returncode != 0
+
+    with_flag = subprocess.run(
+        [sys.executable, str(scaffold_py), "doctor", "--skip-tool-checks"],
+        cwd=str(repo_root),
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert with_flag.returncode == 0, with_flag.stderr or with_flag.stdout

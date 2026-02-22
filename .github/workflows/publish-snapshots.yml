@@ -27,7 +27,11 @@ jobs:
       - name: Self-test publisher
         run: python tools/monorepo_publish/publish_snapshots.py --self-test
 
+      - name: Validate snapshot dists (no upload)
+        run: python tools/monorepo_publish/publish_snapshots.py --validate-dists
+
       - name: Publish snapshots
+        if: github.event_name == 'workflow_dispatch'
         env:
           GITLAB_BASE_URL: ${{ secrets.GITLAB_BASE_URL }}
           GITLAB_PYPI_PROJECT_ID: ${{ secrets.GITLAB_PYPI_PROJECT_ID }}
