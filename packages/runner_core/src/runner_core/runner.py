@@ -1544,14 +1544,24 @@ def _write_json(path: Path, payload: Any) -> None:
 
 def _git_diff(path: Path) -> str:
     proc = subprocess.run(
-        ["git", "-C", str(path), "diff"], capture_output=True, text=True, check=False
+        ["git", "-C", str(path), "diff"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     )
     return proc.stdout
 
 
 def _git_numstat(path: Path) -> list[dict[str, Any]]:
     proc = subprocess.run(
-        ["git", "-C", str(path), "diff", "--numstat"], capture_output=True, text=True, check=False
+        ["git", "-C", str(path), "diff", "--numstat"],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
     )
     out: list[dict[str, Any]] = []
     for line in proc.stdout.splitlines():
@@ -1573,6 +1583,8 @@ def _git_status_porcelain(path: Path) -> str:
         ["git", "-C", str(path), "status", "--porcelain"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
     return proc.stdout
@@ -1583,12 +1595,16 @@ def _ensure_git_user_config(path: Path) -> None:
         ["git", "-C", str(path), "config", "user.email"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     ).stdout.strip()
     name = subprocess.run(
         ["git", "-C", str(path), "config", "user.name"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     ).stdout.strip()
 
@@ -1597,6 +1613,8 @@ def _ensure_git_user_config(path: Path) -> None:
             ["git", "-C", str(path), "config", "user.email", "usertest@local"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
         )
     if not name:
@@ -1604,6 +1622,8 @@ def _ensure_git_user_config(path: Path) -> None:
             ["git", "-C", str(path), "config", "user.name", "usertest"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             check=True,
         )
 
@@ -1618,6 +1638,8 @@ def _maybe_commit_preprocess_workspace(path: Path, *, message: str) -> str | Non
         ["git", "-C", str(path), "add", "-A"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
     subprocess.run(
@@ -1632,12 +1654,16 @@ def _maybe_commit_preprocess_workspace(path: Path, *, message: str) -> str | Non
         ],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     )
     return subprocess.run(
         ["git", "-C", str(path), "rev-parse", "HEAD"],
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         check=True,
     ).stdout.strip()
 
@@ -2162,35 +2188,70 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         append_system_prompt_path_for_agent: str | None = None
         if request.agent_append_system_prompt_file is not None or append_text is not None:
             if request.agent == "gemini":
-                raise ValueError(
-                    "Gemini system prompt append is not supported. "
-                    "Use --agent-system-prompt-file to replace the system prompt instead."
-                )
+                # Gemini CLI doesn't support an explicit "append to system prompt" mechanism.
+                # Emulate append by concatenating the requested append content into the effective
+                # system prompt file, then pass that file as the Gemini system prompt.
+                if request.agent_append_system_prompt_file is not None:
+                    src_path = _resolve_agent_prompt_input_path(
+                        raw=request.agent_append_system_prompt_file,
+                        repo_root=config.repo_root,
+                        workspace_dir=acquired.workspace_dir,
+                    )
+                    append_payload = src_path.read_text(encoding="utf-8")
+                else:
+                    assert append_text is not None
+                    append_payload = append_text
 
-            if request.agent_append_system_prompt_file is not None:
-                src_path = _resolve_agent_prompt_input_path(
-                    raw=request.agent_append_system_prompt_file,
-                    repo_root=config.repo_root,
-                    workspace_dir=acquired.workspace_dir,
-                )
-                staged_append_system_prompt = _stage_agent_prompt_file(
+                base_payload = ""
+                if staged_system_prompt is not None:
+                    base_payload = staged_system_prompt.read_text(encoding="utf-8")
+
+                merged_parts: list[str] = []
+                if base_payload.strip():
+                    merged_parts.append(base_payload.rstrip())
+                if append_payload.strip():
+                    merged_parts.append(append_payload.strip())
+                merged_payload = "\n\n".join(merged_parts).rstrip() + "\n"
+
+                if staged_system_prompt is None:
+                    staged_system_prompt = _stage_agent_prompt_text(
+                        run_dir=run_dir,
+                        name="system_prompt.md",
+                        text=merged_payload,
+                    )
+                else:
+                    staged_system_prompt.write_text(merged_payload, encoding="utf-8")
+
+                system_prompt_path_for_agent = _agent_path_for_staged_file(
+                    staged_system_prompt,
                     run_dir=run_dir,
-                    name="append_system_prompt.md",
-                    src_path=src_path,
+                    run_dir_mount=backend.run_dir_mount,
                 )
             else:
-                assert append_text is not None
-                staged_append_system_prompt = _stage_agent_prompt_text(
-                    run_dir=run_dir,
-                    name="append_system_prompt.md",
-                    text=append_text,
-                )
+                if request.agent_append_system_prompt_file is not None:
+                    src_path = _resolve_agent_prompt_input_path(
+                        raw=request.agent_append_system_prompt_file,
+                        repo_root=config.repo_root,
+                        workspace_dir=acquired.workspace_dir,
+                    )
+                    staged_append_system_prompt = _stage_agent_prompt_file(
+                        run_dir=run_dir,
+                        name="append_system_prompt.md",
+                        src_path=src_path,
+                    )
+                else:
+                    assert append_text is not None
+                    staged_append_system_prompt = _stage_agent_prompt_text(
+                        run_dir=run_dir,
+                        name="append_system_prompt.md",
+                        text=append_text,
+                    )
 
-            append_system_prompt_path_for_agent = _agent_path_for_staged_file(
-                staged_append_system_prompt,
-                run_dir=run_dir,
-                run_dir_mount=backend.run_dir_mount,
-            )
+                append_system_prompt_path_for_agent = _agent_path_for_staged_file(
+                    staged_append_system_prompt,
+                    run_dir=run_dir,
+                    run_dir_mount=backend.run_dir_mount,
+                )
 
         if staged_system_prompt is not None:
             try:
