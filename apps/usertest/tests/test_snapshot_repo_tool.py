@@ -256,5 +256,6 @@ def test_snapshot_repo_repo_root_file_is_flag_aware(tmp_path: Path) -> None:
     assert "ERROR:" in proc.stderr
     assert "--repo-root" in proc.stderr
     assert "not a directory" in proc.stderr.lower()
+    assert "fatal:" not in proc.stderr.lower()
     assert "Traceback" not in proc.stderr
     assert "SNAPSHOT PLAN" not in proc.stdout
