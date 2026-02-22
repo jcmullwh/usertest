@@ -2,12 +2,12 @@
 set -euo pipefail
 
 echo "NOTE: This script does NOT execute any agents. It copies a golden fixture run and rerenders artifacts."
-echo "      It is a smoke check for offline-safe/report rendering workflows."
+echo "      It is a smoke check for agent-offline/report rendering workflows (no model providers are called)."
 
 echo ""
 
-# One-command "from source" verification for offline-safe workflows.
-#
+# One-command "from source" verification for agent-offline workflows.
+# Note: It may still need network access to install Python dependencies unless wheels are cached or provided locally.
 # What it does:
 # - Creates/uses a local `.venv`
 # - Installs minimal deps from `requirements-dev.txt`
