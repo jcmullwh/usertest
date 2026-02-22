@@ -9,7 +9,6 @@ from typing import Any
 
 from run_artifacts.history import iter_report_history
 
-
 _DEFAULT_TEST_COMMAND_PATTERNS = (
     r"(^|\s)pytest(\s|$)",
     r"(^|\s)python\s+-m\s+pytest(\s|$)",
@@ -81,7 +80,9 @@ def _compute_test_heuristics(
     test_command_regexes: list[str] | None = None,
 ) -> TestHeuristics:
     patterns = (
-        test_command_regexes if test_command_regexes is not None else list(_DEFAULT_TEST_COMMAND_PATTERNS)
+        list(test_command_regexes)
+        if test_command_regexes is not None
+        else list(_DEFAULT_TEST_COMMAND_PATTERNS)
     )
     combined = re.compile("|".join(f"(?:{p})" for p in patterns), flags=re.IGNORECASE)
 
@@ -110,7 +111,9 @@ def _compute_test_heuristics(
     if first_success_idx is None:
         failures_before_success = sum(1 for code in test_exit_codes if code != 0)
     else:
-        failures_before_success = sum(1 for code in test_exit_codes[:first_success_idx] if code != 0)
+        failures_before_success = sum(
+            1 for code in test_exit_codes[:first_success_idx] if code != 0
+        )
 
     return TestHeuristics(
         test_runs_total=len(test_exit_codes),
@@ -140,10 +143,14 @@ def iter_implementation_rows(
         timing_dict = timing if isinstance(timing, dict) else {}
 
         started_at = (
-            timing_dict.get("started_at") if isinstance(timing_dict.get("started_at"), str) else None
+            timing_dict.get("started_at")
+            if isinstance(timing_dict.get("started_at"), str)
+            else None
         )
         finished_at = (
-            timing_dict.get("finished_at") if isinstance(timing_dict.get("finished_at"), str) else None
+            timing_dict.get("finished_at")
+            if isinstance(timing_dict.get("finished_at"), str)
+            else None
         )
         duration_seconds = _coerce_float(timing_dict.get("duration_seconds"))
 
@@ -160,7 +167,9 @@ def iter_implementation_rows(
         )
 
         distinct_files_written = metrics_dict.get("distinct_files_written")
-        files_written = len(distinct_files_written) if isinstance(distinct_files_written, list) else None
+        files_written = (
+            len(distinct_files_written) if isinstance(distinct_files_written, list) else None
+        )
 
         yield {
             "schema_version": 1,

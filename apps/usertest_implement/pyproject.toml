@@ -5,10 +5,14 @@ description = "Implement exported backlog tickets with a coding agent"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+  "agent-adapters @ file:///${PROJECT_ROOT}/../../packages/agent_adapters",
   "backlog_repo @ file:///${PROJECT_ROOT}/../../packages/backlog_repo",
+  "normalized_events @ file:///${PROJECT_ROOT}/../../packages/normalized_events",
   "pyyaml>=6.0.3",
+  "reporter @ file:///${PROJECT_ROOT}/../../packages/reporter",
   "run_artifacts @ file:///${PROJECT_ROOT}/../../packages/run_artifacts",
   "runner_core @ file:///${PROJECT_ROOT}/../../packages/runner_core",
+  "sandbox_runner @ file:///${PROJECT_ROOT}/../../packages/sandbox_runner",
 ]
 
 [project.scripts]
@@ -52,4 +56,3 @@ dev = [
   "ruff>=0.14.0",
   "types-PyYAML>=6.0.0.0",
 ]
-

@@ -24,41 +24,49 @@ except ModuleNotFoundError as exc:
         "Fix: `python -m pip install -r requirements-dev.txt`."
     ) from exc
 
-
-def _from_source_import_remediation(*, missing_module: str) -> str:
-    return (
-        f"Missing import `{missing_module}`.\n"
-        "This usually means you're running from source without editable installs or PYTHONPATH.\n"
-        "\n"
-        "Fix (from repo root):\n"
-        "  python -m pip install -r requirements-dev.txt\n"
-        "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
-        "  macOS/Linux: source scripts/set_pythonpath.sh\n"
-        "\n"
-        "Or install editables (recommended):\n"
-        "  python -m pip install -e apps/usertest_implement\n"
-    )
-
-
 try:
     from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
     from runner_core.pathing import slugify
+
+    from usertest_implement.finalize import finalize_commit, finalize_push
+    from usertest_implement.ledger import update_ledger_file
+    from usertest_implement.model_detect import infer_observed_model
+    from usertest_implement.summarize import iter_implementation_rows, write_jsonl
+    from usertest_implement.tickets import (
+        build_ticket_index,
+        move_ticket_file,
+        parse_ticket_markdown_metadata,
+        select_next_ticket,
+        select_next_ticket_path,
+    )
 except ModuleNotFoundError as exc:
     if exc.name == "runner_core":
-        raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
+        raise SystemExit(
+            "Missing import `runner_core`.\n"
+            "This usually means you're running from source without editable installs or PYTHONPATH.\n"
+            "\n"
+            "Fix (from repo root):\n"
+            "  python -m pip install -r requirements-dev.txt\n"
+            "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
+            "  macOS/Linux: source scripts/set_pythonpath.sh\n"
+            "\n"
+            "Or install editables (recommended):\n"
+            "  python -m pip install -e packages/runner_core\n"
+        ) from exc
+    if exc.name == "usertest_implement":
+        raise SystemExit(
+            "Missing import `usertest_implement`.\n"
+            "This usually means you're running from source without editable installs or PYTHONPATH.\n"
+            "\n"
+            "Fix (from repo root):\n"
+            "  python -m pip install -r requirements-dev.txt\n"
+            "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
+            "  macOS/Linux: source scripts/set_pythonpath.sh\n"
+            "\n"
+            "Or install editables (recommended):\n"
+            "  python -m pip install -e apps/usertest_implement\n"
+        ) from exc
     raise
-
-from usertest_implement.finalize import finalize_commit, finalize_push
-from usertest_implement.ledger import update_ledger_file
-from usertest_implement.model_detect import infer_observed_model
-from usertest_implement.summarize import iter_implementation_rows, write_jsonl
-from usertest_implement.tickets import (
-    build_ticket_index,
-    move_ticket_file,
-    parse_ticket_markdown_metadata,
-    select_next_ticket,
-    select_next_ticket_path,
-)
 
 
 @dataclass(frozen=True)
@@ -137,6 +145,202 @@ def _read_json(path: Path) -> Any | None:
 
 def _write_json(path: Path, obj: object) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _git_head_sha(workspace_dir: Path) -> str | None:
+    proc = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        cwd=str(workspace_dir),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return None
+    sha = proc.stdout.strip()
+    return sha if sha else None
+
+
+def _wait_for_ci_success(
+    *,
+    run_dir: Path,
+    workspace_dir: Path,
+    branch: str,
+    head_sha: str,
+    workflow: str,
+    timeout_seconds: float,
+) -> dict[str, Any]:
+    """
+    Wait for GitHub Actions CI to pass for the current branch HEAD before opening a PR.
+
+    This relies on CI being triggered for `push` events on the branch.
+    """
+
+    started_utc = _utc_now_z()
+    started_monotonic = time.monotonic()
+    summary: dict[str, Any] = {
+        "schema_version": 1,
+        "workflow": workflow,
+        "branch": branch,
+        "head_sha": head_sha,
+        "run_id": None,
+        "run_url": None,
+        "status": None,
+        "conclusion": None,
+        "passed": False,
+        "error": None,
+        "started_at_utc": started_utc,
+        "finished_at_utc": None,
+        "timeout_seconds": timeout_seconds,
+    }
+
+    def _gh_json(argv: list[str]) -> Any:
+        proc = subprocess.run(
+            argv,
+            cwd=str(workspace_dir),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if proc.returncode != 0:
+            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "gh failed")
+        try:
+            return json.loads(proc.stdout or "null")
+        except json.JSONDecodeError as e:
+            raise RuntimeError(f"gh returned invalid JSON: {e}") from e
+
+    def _pick_run(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
+        matches = [
+            r
+            for r in runs
+            if isinstance(r, dict) and r.get("headSha") == head_sha and r.get("event") == "push"
+        ]
+        if not matches:
+            matches = [
+                r for r in runs if isinstance(r, dict) and r.get("headSha") == head_sha
+            ]
+        if not matches:
+            return None
+        matches.sort(key=lambda r: str(r.get("createdAt") or ""), reverse=True)
+        return matches[0]
+
+    run_id: int | None = None
+    poll_interval_seconds = 5.0
+    limit = 50
+    while True:
+        elapsed = time.monotonic() - started_monotonic
+        if elapsed > timeout_seconds:
+            summary["error"] = (
+                f"Timed out waiting to find a GitHub Actions run for {workflow} "
+                f"(branch={branch}, head_sha={head_sha})."
+            )
+            summary["finished_at_utc"] = _utc_now_z()
+            _write_json(run_dir / "ci_gate.json", summary)
+            return summary
+
+        try:
+            runs_raw = _gh_json(
+                [
+                    "gh",
+                    "run",
+                    "list",
+                    "--workflow",
+                    workflow,
+                    "--branch",
+                    branch,
+                    "--limit",
+                    str(limit),
+                    "--json",
+                    "databaseId,headSha,event,status,conclusion,createdAt,url",
+                ]
+            )
+        except Exception as e:  # noqa: BLE001
+            summary["error"] = f"Failed to list GitHub Actions runs: {e}"
+            summary["finished_at_utc"] = _utc_now_z()
+            _write_json(run_dir / "ci_gate.json", summary)
+            return summary
+
+        runs_list = runs_raw if isinstance(runs_raw, list) else []
+        picked = _pick_run([r for r in runs_list if isinstance(r, dict)])
+        if picked is not None:
+            run_id_raw = picked.get("databaseId")
+            run_id_parsed: int | None = None
+            if isinstance(run_id_raw, int):
+                run_id_parsed = run_id_raw
+            elif isinstance(run_id_raw, str) and run_id_raw.strip().isdigit():
+                run_id_parsed = int(run_id_raw.strip())
+
+            if run_id_parsed is not None:
+                run_id = run_id_parsed
+                summary["run_id"] = run_id
+                summary["run_url"] = picked.get("url")
+                summary["status"] = picked.get("status")
+                summary["conclusion"] = picked.get("conclusion")
+                _write_json(run_dir / "ci_gate.json", summary)
+                break
+
+        time.sleep(poll_interval_seconds)
+
+    assert run_id is not None
+
+    remaining = max(1.0, timeout_seconds - (time.monotonic() - started_monotonic))
+    try:
+        watch_proc = subprocess.run(
+            [
+                "gh",
+                "run",
+                "watch",
+                str(run_id),
+                "--compact",
+                "--exit-status",
+                "--interval",
+                "10",
+            ],
+            cwd=str(workspace_dir),
+            check=False,
+            timeout=remaining,
+        )
+    except subprocess.TimeoutExpired:
+        summary["error"] = f"Timed out waiting for GitHub Actions run {run_id} to complete."
+        summary["finished_at_utc"] = _utc_now_z()
+        _write_json(run_dir / "ci_gate.json", summary)
+        return summary
+
+    try:
+        view_raw = _gh_json(
+            [
+                "gh",
+                "run",
+                "view",
+                str(run_id),
+                "--json",
+                "status,conclusion,url,headSha,event,createdAt,updatedAt",
+            ]
+        )
+        if isinstance(view_raw, dict):
+            summary["status"] = view_raw.get("status")
+            summary["conclusion"] = view_raw.get("conclusion")
+            summary["run_url"] = view_raw.get("url") or summary.get("run_url")
+    except Exception:
+        pass
+
+    summary["watch_returncode"] = int(watch_proc.returncode)
+    passed = bool(watch_proc.returncode == 0)
+    summary["passed"] = passed
+    if passed:
+        if summary.get("conclusion") is None:
+            summary["conclusion"] = "success"
+        if summary.get("status") is None:
+            summary["status"] = "completed"
+    elif not summary.get("error"):
+        summary["error"] = (
+            f"GitHub Actions CI did not pass (run_id={run_id}, "
+            f"returncode={watch_proc.returncode}, conclusion={summary.get('conclusion')!r})."
+        )
+
+    summary["finished_at_utc"] = _utc_now_z()
+    _write_json(run_dir / "ci_gate.json", summary)
+    return summary
 
 
 def _looks_like_local_path(value: str) -> bool:
@@ -659,22 +863,50 @@ def _run_selected_ticket(
                 if workspace_dir is None:
                     pr_ref["error"] = "Missing workspace_ref.json; cannot locate workspace"
                 else:
-                    proc = subprocess.run(
-                        ["gh", "pr", "create", "--title", title, "--body", body],
-                        cwd=str(workspace_dir),
-                        capture_output=True,
-                        text=True,
-                        check=False,
-                    )
-                    if proc.returncode == 0:
-                        pr_ref["created"] = True
-                        pr_ref["url"] = proc.stdout.strip() or None
+                    if not bool(args.skip_ci_wait):
+                        if not (push_ref is not None and push_ref.get("pushed") is True):
+                            pr_ref["error"] = (
+                                "Refusing to create PR before CI: branch was not pushed successfully "
+                                "(rerun with --push or pass --skip-ci-wait)."
+                            )
+                        else:
+                            head_sha = _git_head_sha(workspace_dir)
+                            if head_sha is None:
+                                pr_ref["error"] = "Unable to determine HEAD SHA for CI gating."
+                            else:
+                                ci_timeout = float(args.ci_timeout_seconds or 0)
+                                if ci_timeout <= 0:
+                                    ci_timeout = 3600
+                                ci_ref = _wait_for_ci_success(
+                                    run_dir=run_dir,
+                                    workspace_dir=workspace_dir,
+                                    branch=branch,
+                                    head_sha=head_sha,
+                                    workflow="CI",
+                                    timeout_seconds=ci_timeout,
+                                )
+                                if ci_ref.get("passed") is not True:
+                                    pr_ref["error"] = ci_ref.get("error") or "CI gate failed."
+
+                    if pr_ref.get("error"):
+                        pass
                     else:
-                        pr_ref["error"] = (
-                            proc.stderr.strip()
-                            or proc.stdout.strip()
-                            or f"gh failed ({proc.returncode})"
+                        proc = subprocess.run(
+                            ["gh", "pr", "create", "--title", title, "--body", body],
+                            cwd=str(workspace_dir),
+                            capture_output=True,
+                            text=True,
+                            check=False,
                         )
+                        if proc.returncode == 0:
+                            pr_ref["created"] = True
+                            pr_ref["url"] = proc.stdout.strip() or None
+                        else:
+                            pr_ref["error"] = (
+                                proc.stderr.strip()
+                                or proc.stdout.strip()
+                                or f"gh failed ({proc.returncode})"
+                            )
         _write_json(run_dir / "pr_ref.json", pr_ref)
 
     if args.move_on_commit and selected.owner_root is not None and selected.idea_path is not None and args.commit:
@@ -949,6 +1181,17 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         "--skip-verify",
         action="store_true",
         help="Disable default verification gate (useful for debugging).",
+    )
+    parser.add_argument(
+        "--ci-timeout-seconds",
+        type=float,
+        default=3600,
+        help="Timeout waiting for GitHub Actions CI before creating a PR.",
+    )
+    parser.add_argument(
+        "--skip-ci-wait",
+        action="store_true",
+        help="Skip waiting for GitHub Actions CI before creating a PR (not recommended).",
     )
 
     parser.add_argument("--commit", action="store_true", help="Create branch + commit changes in kept workspace.")

@@ -27,6 +27,13 @@ Verification gate:
 - Override the gate with `--verify-command "<cmd>"` (repeatable) and optional `--verify-timeout-seconds`.
 - Disable the default gate with `--skip-verify` (debugging only; expect CI failures).
 
+CI gate (before PR creation):
+
+- When using `--pr`, `usertest-implement` waits for GitHub Actions workflow `CI` to pass on the pushed branch
+  before running `gh pr create`.
+- Override with `--skip-ci-wait` (debugging only; expect PR checks to fail) and `--ci-timeout-seconds`.
+- CI wait metadata is written to `ci_gate.json` in the run directory.
+
 Quick checks:
 
 ```bash

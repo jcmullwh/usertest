@@ -23,15 +23,23 @@ def load_ledger(path: Path) -> dict[str, Any]:
     actions = raw.get("actions")
     actions_dict = actions if isinstance(actions, dict) else {}
     updated_at_raw = raw.get("updated_at")
-    updated_at = updated_at_raw if isinstance(updated_at_raw, str) and updated_at_raw.strip() else None
+    updated_at = (
+        updated_at_raw
+        if isinstance(updated_at_raw, str) and updated_at_raw.strip()
+        else None
+    )
     return {
         "schema_version": 1,
         "updated_at": updated_at,
         "actions": actions_dict,
     }
 
-
-def update_ledger_doc(doc: dict[str, Any], *, fingerprint: str, updates: dict[str, Any]) -> dict[str, Any]:
+def update_ledger_doc(
+    doc: dict[str, Any],
+    *,
+    fingerprint: str,
+    updates: dict[str, Any],
+) -> dict[str, Any]:
     now = _utc_now_z()
     actions_raw = doc.get("actions")
     actions: dict[str, Any] = actions_raw if isinstance(actions_raw, dict) else {}
