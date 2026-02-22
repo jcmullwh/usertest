@@ -21,7 +21,7 @@ agents (Codex/Claude/Gemini) from running.
 
 ## Approach
 
-1) Identify any documented â€œoffline,â€ â€œlocal-only,â€ or â€œno-telemetryâ€ modes.
+1) Identify any documented “offline,” “local-only,” or “no-telemetry” modes.
 2) Prefer workflows that can run fully locally.
 3) If a network call appears necessary, describe what, why, and how to disable it. Do not proceed unless the mission constraints allow it.
 
