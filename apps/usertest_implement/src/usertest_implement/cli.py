@@ -49,6 +49,7 @@ except ModuleNotFoundError as exc:
 
 from usertest_implement.finalize import finalize_commit, finalize_push
 from usertest_implement.ledger import update_ledger_file
+from usertest_implement.model_detect import infer_observed_model
 from usertest_implement.summarize import iter_implementation_rows, write_jsonl
 from usertest_implement.tickets import (
     build_ticket_index,
@@ -400,7 +401,14 @@ def _default_branch_name(selected: SelectedTicket) -> str:
     return f"backlog/{ticket_part}-{fp_part}"
 
 
-def _write_pr_manifest(*, run_dir: Path, selected: SelectedTicket, branch: str) -> tuple[str, str]:
+def _write_pr_manifest(
+    *,
+    run_dir: Path,
+    selected: SelectedTicket,
+    branch: str,
+    agent: str,
+    model: str | None,
+) -> tuple[str, str]:
     title = f"{selected.ticket_id or selected.fingerprint}: {selected.title or 'Implement backlog ticket'}"
     excerpt_lines = selected.ticket_markdown.strip().splitlines()
     excerpt_text = "\n".join(excerpt_lines[:20]).strip()
@@ -411,6 +419,8 @@ def _write_pr_manifest(*, run_dir: Path, selected: SelectedTicket, branch: str) 
     body_lines.append(f"Fingerprint: `{selected.fingerprint}`")
     if selected.ticket_id:
         body_lines.append(f"Source ticket: `{selected.ticket_id}`")
+    body_lines.append(f"Agent: `{agent}`")
+    body_lines.append(f"Model: `{model or 'unknown'}`")
     body_lines.append("")
     body_lines.append("## Ticket excerpt")
     body_lines.append("")
@@ -571,6 +581,8 @@ def _run_selected_ticket(
     push_ref: dict[str, Any] | None = None
     pr_ref: dict[str, Any] | None = None
 
+    observed_model = infer_observed_model(run_dir=run_dir)
+
     if args.commit:
         git_ref = finalize_commit(
             run_dir=run_dir,
@@ -596,7 +608,13 @@ def _run_selected_ticket(
         )
 
     if args.push or args.pr:
-        title, body = _write_pr_manifest(run_dir=run_dir, selected=selected, branch=branch)
+        title, body = _write_pr_manifest(
+            run_dir=run_dir,
+            selected=selected,
+            branch=branch,
+            agent=str(args.agent),
+            model=observed_model,
+        )
         pr_ref = {
             "schema_version": 1,
             "requested": bool(args.pr),
@@ -604,6 +622,8 @@ def _run_selected_ticket(
             "url": None,
             "title": title,
             "body": body,
+            "agent": str(args.agent),
+            "model": observed_model,
             "error": None,
         }
         if args.pr:
