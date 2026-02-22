@@ -33,10 +33,26 @@ def _run(argv: list[str], *, cwd: Path, check: bool) -> CommandResult:
     return result
 
 
-def ensure_git_identity(workspace_dir: Path) -> None:
-    _run(["git", "config", "user.name", "usertest-implement"], cwd=workspace_dir, check=True)
+DEFAULT_GIT_USER_NAME = "usertest-implement"
+DEFAULT_GIT_USER_EMAIL = "usertest-implement@local"
+
+
+def ensure_git_identity(
+    workspace_dir: Path,
+    *,
+    user_name: str = DEFAULT_GIT_USER_NAME,
+    user_email: str = DEFAULT_GIT_USER_EMAIL,
+) -> None:
+    user_name = user_name.strip()
+    user_email = user_email.strip()
+    if not user_name:
+        raise ValueError("git user.name must be non-empty")
+    if not user_email:
+        raise ValueError("git user.email must be non-empty")
+
+    _run(["git", "config", "user.name", user_name], cwd=workspace_dir, check=True)
     _run(
-        ["git", "config", "user.email", "usertest-implement@local"],
+        ["git", "config", "user.email", user_email],
         cwd=workspace_dir,
         check=True,
     )
@@ -93,4 +109,3 @@ def push_branch(
     if force_with_lease:
         argv.insert(2, "--force-with-lease")
     return _run(argv, cwd=workspace_dir, check=True)
-

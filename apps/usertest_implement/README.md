@@ -15,6 +15,11 @@ preserving the standard `runner_core` run artifacts plus ticket linkage artifact
   - Ensure `gh` is on `PATH` and authenticated (`gh auth login`).
 - Optional: `docker` (required for `--exec-backend docker`)
 
+Commit identity:
+
+- By default, `--commit` uses `usertest-implement <usertest-implement@local>` so agent commits are easy to spot.
+- Override via `--git-user-name` / `--git-user-email` (for example, to use a bot identity or a GitHub noreply email).
+
 Quick checks:
 
 ```bash

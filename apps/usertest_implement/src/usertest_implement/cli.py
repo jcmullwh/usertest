@@ -572,7 +572,13 @@ def _run_selected_ticket(
     pr_ref: dict[str, Any] | None = None
 
     if args.commit:
-        git_ref = finalize_commit(run_dir=run_dir, branch=branch, commit_message=commit_message)
+        git_ref = finalize_commit(
+            run_dir=run_dir,
+            branch=branch,
+            commit_message=commit_message,
+            git_user_name=args.git_user_name,
+            git_user_email=args.git_user_email,
+        )
 
     if args.push:
         candidates: list[Path] = []
@@ -880,6 +886,16 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--commit", action="store_true", help="Create branch + commit changes in kept workspace.")
     parser.add_argument("--branch", help="Branch name override.")
     parser.add_argument("--commit-message", dest="commit_message", help="Commit message override.")
+    parser.add_argument(
+        "--git-user-name",
+        dest="git_user_name",
+        help="Git user.name used for commits (default: usertest-implement).",
+    )
+    parser.add_argument(
+        "--git-user-email",
+        dest="git_user_email",
+        help="Git user.email used for commits (default: usertest-implement@local).",
+    )
 
     parser.add_argument("--push", action="store_true", help="Push branch to remote.")
     parser.add_argument("--remote-name", default="origin")

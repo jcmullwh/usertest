@@ -56,6 +56,42 @@ def test_finalize_commit_writes_git_ref(tmp_path: Path) -> None:
     ref_path = run_dir / "git_ref.json"
     assert ref_path.exists()
 
+@pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
+def test_finalize_commit_respects_git_identity_override(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    assert _run(["git", "init"], cwd=workspace).returncode == 0
+    assert _run(["git", "config", "user.name", "test"], cwd=workspace).returncode == 0
+    assert _run(["git", "config", "user.email", "test@example.com"], cwd=workspace).returncode == 0
+    (workspace / "README.md").write_text("hello\n", encoding="utf-8")
+    assert _run(["git", "add", "-A"], cwd=workspace).returncode == 0
+    assert _run(["git", "commit", "-m", "init"], cwd=workspace).returncode == 0
+    base_sha = _run(["git", "rev-parse", "HEAD"], cwd=workspace).stdout.strip()
+    assert base_sha
+
+    (workspace / "README.md").write_text("hello world\n", encoding="utf-8")
+
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    _write_json(
+        run_dir / "workspace_ref.json",
+        {"schema_version": 1, "workspace_dir": str(workspace)},
+    )
+    _write_json(run_dir / "target_ref.json", {"commit_sha": base_sha})
+
+    git_ref = finalize_commit(
+        run_dir=run_dir,
+        branch="backlog/blg-009-deadbeef",
+        commit_message="BLG-009: update",
+        git_user_name="agent-bot",
+        git_user_email="agent-bot@example.com",
+    )
+    assert git_ref["commit_attempted"] is True
+    assert git_ref["commit_performed"] is True
+
+    ident = _run(["git", "show", "-s", "--format=%an <%ae>", "HEAD"], cwd=workspace).stdout.strip()
+    assert ident == "agent-bot <agent-bot@example.com>"
+
 
 @pytest.mark.skipif(shutil.which("git") is None, reason="git not available")
 def test_finalize_push_pushes_to_bare_remote(tmp_path: Path) -> None:
@@ -100,4 +136,3 @@ def test_finalize_push_pushes_to_bare_remote(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
     assert verify.returncode == 0, verify.stderr or verify.stdout
-

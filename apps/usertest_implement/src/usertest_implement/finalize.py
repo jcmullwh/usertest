@@ -8,6 +8,8 @@ from typing import Any
 from usertest_implement.git_ops import (
     checkout_branch,
     commit_all,
+    DEFAULT_GIT_USER_EMAIL,
+    DEFAULT_GIT_USER_NAME,
     ensure_git_identity,
     ensure_remote,
     head_sha,
@@ -39,7 +41,14 @@ def _workspace_dir_from_run_dir(run_dir: Path) -> Path | None:
     return Path(raw)
 
 
-def finalize_commit(*, run_dir: Path, branch: str, commit_message: str) -> dict[str, Any]:
+def finalize_commit(
+    *,
+    run_dir: Path,
+    branch: str,
+    commit_message: str,
+    git_user_name: str | None = None,
+    git_user_email: str | None = None,
+) -> dict[str, Any]:
     git_ref: dict[str, Any] = {
         "schema_version": 1,
         "branch": branch,
@@ -63,7 +72,9 @@ def finalize_commit(*, run_dir: Path, branch: str, commit_message: str) -> dict[
         return git_ref
 
     try:
-        ensure_git_identity(workspace_dir)
+        user_name = git_user_name if git_user_name is not None else DEFAULT_GIT_USER_NAME
+        user_email = git_user_email if git_user_email is not None else DEFAULT_GIT_USER_EMAIL
+        ensure_git_identity(workspace_dir, user_name=user_name, user_email=user_email)
         checkout_branch(workspace_dir, branch)
         if git_ref.get("base_commit") is None:
             git_ref["base_commit"] = head_sha(workspace_dir)
@@ -152,4 +163,3 @@ def finalize_push(
 
     _write_json(run_dir / "push_ref.json", push_ref)
     return push_ref
-
