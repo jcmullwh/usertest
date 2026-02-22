@@ -18,10 +18,34 @@ def test_iter_implementation_rows_includes_ticket_and_heuristics(tmp_path: Path)
 
     _write_json(
         run_dir / "target_ref.json",
-        {"repo_input": "C:/repo/x", "commit_sha": "abc123", "agent": "codex", "policy": "write", "seed": 0},
+        {
+            "repo_input": "C:/repo/x",
+            "commit_sha": "abc123",
+            "agent": "codex",
+            "policy": "write",
+            "seed": 0,
+        },
     )
     _write_json(run_dir / "effective_run_spec.json", {})
-    _write_json(run_dir / "report.json", {"schema_version": 1, "kind": "task_run_v1", "status": "success", "goal": "g", "summary": "s", "steps": [{"name": "n", "attempts": [{"action": "a"}], "outcome": "o"}], "outputs": [], "next_actions": ["x"]})
+    _write_json(
+        run_dir / "report.json",
+        {
+            "schema_version": 1,
+            "kind": "task_run_v1",
+            "status": "success",
+            "goal": "g",
+            "summary": "s",
+            "steps": [
+                {
+                    "name": "n",
+                    "attempts": [{"action": "a"}],
+                    "outcome": "o",
+                }
+            ],
+            "outputs": [],
+            "next_actions": ["x"],
+        },
+    )
     _write_json(
         run_dir / "metrics.json",
         {
@@ -34,17 +58,37 @@ def test_iter_implementation_rows_includes_ticket_and_heuristics(tmp_path: Path)
     )
     _write_json(
         run_dir / "ticket_ref.json",
-        {"schema_version": 1, "fingerprint": "deadbeefdeadbeef", "ticket_id": "BLG-003", "title": "Do thing"},
+        {
+            "schema_version": 1,
+            "fingerprint": "deadbeefdeadbeef",
+            "ticket_id": "BLG-003",
+            "title": "Do thing",
+        },
     )
     _write_json(
         run_dir / "timing.json",
-        {"schema_version": 1, "started_at": "2026-02-20T01:02:03Z", "finished_at": "2026-02-20T01:02:13Z", "duration_seconds": 10.0},
+        {
+            "schema_version": 1,
+            "started_at": "2026-02-20T01:02:03Z",
+            "finished_at": "2026-02-20T01:02:13Z",
+            "duration_seconds": 10.0,
+        },
     )
     (run_dir / "normalized_events.jsonl").write_text(
         "\n".join(
             [
-                json.dumps({"type": "run_command", "data": {"command": "pytest -q", "exit_code": 1}}),
-                json.dumps({"type": "run_command", "data": {"command": "pytest -q", "exit_code": 0}}),
+                json.dumps(
+                    {
+                        "type": "run_command",
+                        "data": {"command": "pytest -q", "exit_code": 1},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "run_command",
+                        "data": {"command": "pytest -q", "exit_code": 0},
+                    }
+                ),
             ]
         )
         + "\n",
@@ -60,4 +104,3 @@ def test_iter_implementation_rows_includes_ticket_and_heuristics(tmp_path: Path)
     assert row["metrics"]["files_written"] == 2
     assert row["heuristics"]["test_runs_total"] == 2
     assert row["heuristics"]["test_runs_failed_before_success"] == 1
-

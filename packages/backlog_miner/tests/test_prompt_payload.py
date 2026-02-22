@@ -24,7 +24,11 @@ def test_build_miner_prompt_includes_report_metadata_fields() -> None:
             "linked_atom_ids": [],
         }
     ]
-    rendered = _build_miner_prompt(template_text="{{ATOMS_JSON}}", atoms=atoms, max_tickets_per_miner=3)
+    rendered = _build_miner_prompt(
+        template_text="{{ATOMS_JSON}}",
+        atoms=atoms,
+        max_tickets_per_miner=3,
+    )
     payload = json.loads(rendered)
     atom = payload["atoms"][0]
 

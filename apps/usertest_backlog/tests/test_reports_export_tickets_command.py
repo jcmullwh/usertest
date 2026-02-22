@@ -343,7 +343,10 @@ def test_reports_export_tickets_attaches_ux_review_and_promotes_docs(tmp_path: P
             "status": "ok",
             "prompt_hash": "deadbeefdeadbeef",
             "review": {
-                "command_surface_budget": {"max_new_commands_per_quarter": 0, "notes": "Keep it tight."},
+                "command_surface_budget": {
+                    "max_new_commands_per_quarter": 0,
+                    "notes": "Keep it tight.",
+                },
                 "recommendations": [
                     {
                         "recommendation_id": "UX-001",
@@ -485,7 +488,13 @@ def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_
                         "recommended_approach": "docs",
                         "rationale": "A new command isn't necessary.",
                         "next_steps": ["Update docs instead."],
-                        "evidence_breadth_summary": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
+                        "evidence_breadth_summary": {
+                            "missions": 1,
+                            "targets": 1,
+                            "repo_inputs": 1,
+                            "agents": 1,
+                            "runs": 1,
+                        },
                     }
                 ],
                 "confidence": 0.7,

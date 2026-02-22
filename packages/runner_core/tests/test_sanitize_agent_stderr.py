@@ -125,7 +125,11 @@ def test_sanitize_agent_stderr_file_dedupes_claude_missing_config_warning(tmp_pa
         [
             "Claude configuration file not found at: /root/.claude.json",
             "A backup file exists at: /root/.claude/backups/.claude.json.backup.1771509292967",
-            'You can manually restore it by running: cp "/root/.claude/backups/.claude.json.backup.1771509292967" "/root/.claude.json"',
+            (
+                'You can manually restore it by running: cp '
+                '"/root/.claude/backups/.claude.json.backup.1771509292967" '
+                '"/root/.claude.json"'
+            ),
         ]
     )
     slow_warning = (
@@ -179,10 +183,15 @@ def test_sanitize_agent_stderr_file_appends_hint_for_gemini_invalid_regex(tmp_pa
     assert "hint=Gemini grep_search patterns are regular expressions" in text
 
 
-def test_sanitize_agent_stderr_file_appends_hint_for_gemini_replace_not_found(tmp_path: Path) -> None:
+def test_sanitize_agent_stderr_file_appends_hint_for_gemini_replace_not_found(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "agent_stderr.txt"
     path.write_text(
-        "Error executing tool replace: Error: Failed to edit, could not find the string to replace.\n",
+        (
+            "Error executing tool replace: Error: Failed to edit, could not find the string "
+            "to replace.\n"
+        ),
         encoding="utf-8",
     )
 
@@ -256,11 +265,17 @@ def test_sanitize_agent_stderr_file_collapses_gemini_provider_capacity_stack_tra
                 "Attempt 1 failed with status 429. Retrying with backoff... GaxiosError: [{",
                 '  "error": {',
                 '    "code": 429,',
-                '    "message": "No capacity available for model gemini-3-flash-preview on the server",',
+                (
+                    '    "message": "No capacity available for model '
+                    'gemini-3-flash-preview on the server",'
+                ),
                 '    "status": "RESOURCE_EXHAUSTED",',
                 "  }",
                 "}]",
-                "    at Gaxios._request (/usr/lib/node_modules/@google/gemini-cli/node_modules/gaxios/build/src/gaxios.js:142:23)",
+                (
+                    "    at Gaxios._request "
+                    "(/usr/lib/node_modules/@google/gemini-cli/node_modules/gaxios/build/src/gaxios.js:142:23)"
+                ),
                 "",
             ]
         ),

@@ -108,24 +108,31 @@ def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
                         if data.get("output_excerpt_truncated") is True:
                             entry["output_excerpt_truncated"] = True
                         lowered_excerpt = excerpt.lower()
-                        if "tool execution denied by policy" in lowered_excerpt or "denied by policy" in lowered_excerpt:
+                        if (
+                            "tool execution denied by policy" in lowered_excerpt
+                            or "denied by policy" in lowered_excerpt
+                        ):
                             entry["failure_category"] = "policy_denial"
                             argv = data.get("argv")
                             argv_list = argv if isinstance(argv, list) else []
                             has_heredoc = "<<" in command or any(
-                                isinstance(tok, str) and tok.strip().startswith("<<") for tok in argv_list
+                                isinstance(tok, str) and tok.strip().startswith("<<")
+                                for tok in argv_list
                             )
                             if has_heredoc:
                                 entry["policy_category"] = "bash_heredoc_unsupported"
                                 entry["hint"] = (
-                                    "Avoid heredocs (for example `<<EOF`) in sandboxed shell commands. "
-                                    "Use file tools like write_file/replace for multiline content."
+                                    "Avoid heredocs (for example `<<EOF`) in "
+                                    "sandboxed shell commands. "
+                                    "Use file tools like write_file/replace "
+                                    "for multiline content."
                                 )
                             else:
                                 entry["policy_category"] = "policy_denied"
                                 entry["hint"] = (
                                     "This command was blocked by sandbox/policy. "
-                                    "Consult preflight.json for allowed capabilities or rewrite using file tools."
+                                    "Consult preflight.json for allowed capabilities "
+                                    "or rewrite using file tools."
                                 )
                     failed_commands.append(entry)
             for inferred in _infer_files_from_run_command(event):

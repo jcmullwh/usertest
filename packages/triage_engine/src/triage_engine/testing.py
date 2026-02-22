@@ -1,19 +1,20 @@
-from __future__ import annotations
-
 """Test-only utilities for triage_engine.
 
 This module intentionally contains *offline* / deterministic embedder backends that are
 useful for unit tests and local experiments.
 
-Production triage runs should use real embedding models (see :func:`triage_engine.embeddings.get_default_embedder`).
+Production triage runs should use real embedding models (see
+:func:`triage_engine.embeddings.get_default_embedder`).
 """
+
+from __future__ import annotations
 
 import hashlib
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from triage_engine.embeddings import Embedder, l2_normalize
+from triage_engine.embeddings import l2_normalize
 from triage_engine.text import tokenize
 
 __all__ = [

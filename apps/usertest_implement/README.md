@@ -20,6 +20,20 @@ Commit identity:
 - By default, `--commit` uses `usertest-implement <usertest-implement@local>` so agent commits are easy to spot.
 - Override via `--git-user-name` / `--git-user-email` (for example, to use a bot identity or a GitHub noreply email).
 
+Verification gate:
+
+- When using `--commit/--push/--pr`, `usertest-implement` configures a required verification step before handing off
+  (default: `scripts/smoke.ps1` on Windows local runs, `scripts/smoke.sh` otherwise).
+- Override the gate with `--verify-command "<cmd>"` (repeatable) and optional `--verify-timeout-seconds`.
+- Disable the default gate with `--skip-verify` (debugging only; expect CI failures).
+
+CI gate (before PR creation):
+
+- When using `--pr`, `usertest-implement` waits for GitHub Actions workflow `CI` to pass on the pushed branch
+  before running `gh pr create`.
+- Override with `--skip-ci-wait` (debugging only; expect PR checks to fail) and `--ci-timeout-seconds`.
+- CI wait metadata is written to `ci_gate.json` in the run directory.
+
 Quick checks:
 
 ```bash

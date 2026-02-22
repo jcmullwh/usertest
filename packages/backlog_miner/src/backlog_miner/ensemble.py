@@ -829,6 +829,7 @@ def _consensus_labeler_payload(payloads: list[dict[str, Any]]) -> tuple[dict[str
             notes = candidate
             break
 
+    max_evidence_ids_used = _env_int("BACKLOG_LABELER_MAX_EVIDENCE_IDS_USED", 32)
     return (
         {
             "change_surface": {
@@ -839,7 +840,7 @@ def _consensus_labeler_payload(payloads: list[dict[str, Any]]) -> tuple[dict[str
             "component": consensus_component,
             "intent_risk": consensus_intent,
             "confidence": max(0.0, min(1.0, confidence_avg)),
-            "evidence_atom_ids_used": evidence_used_deduped[: _env_int("BACKLOG_LABELER_MAX_EVIDENCE_IDS_USED", 32)],
+            "evidence_atom_ids_used": evidence_used_deduped[:max_evidence_ids_used],
         },
         disagreement,
     )
@@ -1016,8 +1017,9 @@ def run_labeler_jobs(
                         run_statuses.append("cached")
                         continue
                 elif cached_manifest is None:
-                    # Legacy cache: output exists but no (or invalid) manifest. Use the cached output
-                    # (best-effort) and upgrade by writing a manifest for future resume runs.
+                    # Legacy cache: output exists but no (or invalid) manifest.
+                    # Use the cached output (best-effort) and upgrade by writing a manifest
+                    # for future resume runs.
                     try:
                         cached = json.loads(cached_path.read_text(encoding="utf-8"))
                     except json.JSONDecodeError:

@@ -6,10 +6,10 @@ from pathlib import Path
 from typing import Any
 
 from usertest_implement.git_ops import (
-    checkout_branch,
-    commit_all,
     DEFAULT_GIT_USER_EMAIL,
     DEFAULT_GIT_USER_NAME,
+    checkout_branch,
+    commit_all,
     ensure_git_identity,
     ensure_remote,
     head_sha,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 import sandbox_runner.docker as docker
 from sandbox_runner.spec import SandboxSpec
 
@@ -39,4 +40,3 @@ def test_docker_sandbox_fails_before_build_when_docker_unavailable(
         sandbox.start()
 
     assert build_called is False
-

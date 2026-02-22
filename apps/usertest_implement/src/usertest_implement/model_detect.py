@@ -5,7 +5,6 @@ import re
 from pathlib import Path
 from typing import Any
 
-
 _MODEL_PATTERNS = (
     re.compile(r"\bmodel=([A-Za-z0-9_.:-]+)\b"),
     re.compile(r"\bmodel:\s*([A-Za-z0-9_.:-]+)\b"),
@@ -70,4 +69,3 @@ def infer_observed_model(*, run_dir: Path) -> str | None:
         stderr_text = ""
 
     return _extract_model_from_text(stderr_text) if stderr_text else None
-

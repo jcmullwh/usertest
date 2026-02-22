@@ -102,7 +102,10 @@ def test_prepare_execution_backend_requires_context_when_default_missing(
 
     import runner_core.execution_backend as backend_mod
 
-    monkeypatch.setattr(backend_mod, "_copy_builtin_sandbox_cli_context_from_resources", lambda **_kwargs: None)
+    def _noop_copy(**_kwargs):  # noqa: ARG001
+        return None
+
+    monkeypatch.setattr(backend_mod, "_copy_builtin_sandbox_cli_context_from_resources", _noop_copy)
 
     req = RunRequest(
         repo=".",
