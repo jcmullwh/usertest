@@ -30,6 +30,7 @@ except ModuleNotFoundError as exc:
         "Missing dependency `jsonschema`. "
         "Fix: `python -m pip install -r requirements-dev.txt`."
     ) from exc
+
 from backlog_core import (
     add_atom_links,
     build_backlog_document,
@@ -76,8 +77,8 @@ from backlog_repo.export import ticket_export_fingerprint
 from reporter import (
     analyze_report_history,
     build_window_summary,
-    write_window_summary,
     write_issue_analysis,
+    write_window_summary,
 )
 from run_artifacts.history import (
     iter_report_history,
@@ -85,13 +86,8 @@ from run_artifacts.history import (
     select_recent_run_dirs,
     write_report_history_jsonl,
 )
-from runner_core import RunnerConfig, RunRequest, find_repo_root
-from runner_core.catalog import (
-    CatalogError,
-    load_catalog_config,
-)
+from runner_core import RunnerConfig, find_repo_root
 from runner_core.pathing import slugify
-from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
 from runner_core.target_acquire import acquire_target
 from triage_engine import cluster_items, extract_path_anchors_from_chunks
 

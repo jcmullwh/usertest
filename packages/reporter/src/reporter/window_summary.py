@@ -123,7 +123,13 @@ def _scoreboard(records: list[dict[str, Any]]) -> dict[str, Any]:
 
 def _delta(current: dict[str, Any], baseline: dict[str, Any]) -> dict[str, Any]:
     delta: dict[str, Any] = {}
-    for key in ("runs", "ok_rate", "timing_coverage_runs", "median_run_wall_seconds", "median_attempts_per_run"):
+    for key in (
+        "runs",
+        "ok_rate",
+        "timing_coverage_runs",
+        "median_run_wall_seconds",
+        "median_attempts_per_run",
+    ):
         cur = current.get(key)
         base = baseline.get(key)
         if isinstance(cur, (int, float)) and isinstance(base, (int, float)):
@@ -167,7 +173,9 @@ def build_window_summary(
 
     notes: list[str] = []
     if len(current_records) < window_size:
-        notes.append(f"current window smaller than requested: {len(current_records)} < {window_size}")
+        notes.append(
+            f"current window smaller than requested: {len(current_records)} < {window_size}"
+        )
     if len(baseline_records) < baseline_size:
         notes.append(
             f"baseline window smaller than requested: {len(baseline_records)} < {baseline_size}"
@@ -209,7 +217,9 @@ def build_window_summary(
         current_runs.append(digest)
         current_run_rels.append(str(digest["run_rel"]))
 
-    def _persona_mission_breakdown(records: list[dict[str, Any]]) -> dict[tuple[str, str], dict[str, Any]]:
+    def _persona_mission_breakdown(
+        records: list[dict[str, Any]],
+    ) -> dict[tuple[str, str], dict[str, Any]]:
         grouped: dict[tuple[str, str], list[dict[str, Any]]] = defaultdict(list)
         for record in records:
             grouped[_resolve_persona_mission(record)].append(record)
@@ -283,7 +293,11 @@ def build_window_summary(
     for theme_id in theme_ids:
         cur_item = cur_themes.get(theme_id, {})
         base_item = base_themes.get(theme_id, {})
-        title = _coerce_str(cur_item.get("title")) or _coerce_str(base_item.get("title")) or theme_id
+        title = (
+            _coerce_str(cur_item.get("title"))
+            or _coerce_str(base_item.get("title"))
+            or theme_id
+        )
 
         def _theme_metrics(item: dict[str, Any]) -> dict[str, Any]:
             return {
@@ -416,7 +430,10 @@ def render_window_summary_markdown(summary: dict[str, Any], *, title: str) -> st
     pm = pm_raw if isinstance(pm_raw, list) else []
     if pm:
         lines.append("## Persona/Mission Breakdown")
-        lines.append("| persona_id | mission_id | runs (cur/base) | ok_rate (cur/base) | median_seconds (cur/base) |")
+        lines.append(
+            "| persona_id | mission_id | runs (cur/base) | ok_rate (cur/base) | "
+            "median_seconds (cur/base) |"
+        )
         lines.append("| --- | --- | --- | --- | --- |")
 
         def _pm_sort_key(item: dict[str, Any]) -> tuple[int, str, str]:
@@ -440,7 +457,8 @@ def render_window_summary_markdown(summary: dict[str, Any], *, title: str) -> st
                 f"| `{persona_id}` | `{mission_id}` | "
                 f"{cur_dict.get('runs')}/{base_dict.get('runs')} | "
                 f"{_fmt_rate(cur_dict.get('ok_rate'))}/{_fmt_rate(base_dict.get('ok_rate'))} | "
-                f"{_fmt_seconds(cur_dict.get('median_run_wall_seconds'))}/{_fmt_seconds(base_dict.get('median_run_wall_seconds'))} |"
+                f"{_fmt_seconds(cur_dict.get('median_run_wall_seconds'))}/"
+                f"{_fmt_seconds(base_dict.get('median_run_wall_seconds'))} |"
             )
         if omitted:
             lines.append("")
@@ -481,10 +499,13 @@ def render_window_summary_markdown(summary: dict[str, Any], *, title: str) -> st
             base_unaddr = _theme_get(item, "baseline", "unaddressed_mentions")
             cur_breadth = _theme_get(item, "current", "persona_mission_breadth")
             base_breadth = _theme_get(item, "baseline", "persona_mission_breadth")
+            delta_runs = cur_runs - base_runs
+            delta_unaddr = cur_unaddr - base_unaddr
+            delta_breadth = cur_breadth - base_breadth
             lines.append(
-                f"- {title}: runs_citing {base_runs} -> {cur_runs} (+{cur_runs - base_runs}), "
-                f"unaddressed_mentions {base_unaddr} -> {cur_unaddr} (+{cur_unaddr - base_unaddr}), "
-                f"breadth {base_breadth} -> {cur_breadth} (+{cur_breadth - base_breadth})"
+                f"- {title}: runs_citing {base_runs} -> {cur_runs} (+{delta_runs}), "
+                f"unaddressed_mentions {base_unaddr} -> {cur_unaddr} (+{delta_unaddr}), "
+                f"breadth {base_breadth} -> {cur_breadth} (+{delta_breadth})"
             )
         lines.append("")
 
@@ -508,7 +529,11 @@ def render_window_summary_markdown(summary: dict[str, Any], *, title: str) -> st
             breadth = _theme_get(item, "current", "persona_mission_breadth")
             unaddr = _theme_get(item, "current", "unaddressed_mentions")
             runs = _theme_get(item, "current", "runs_citing")
-            lines.append(f"- {title}: breadth={breadth}, unaddressed_mentions={unaddr}, runs_citing={runs}")
+            lines.append(
+                f"- {title}: breadth={breadth}, "
+                f"unaddressed_mentions={unaddr}, "
+                f"runs_citing={runs}"
+            )
         lines.append("")
 
     current_runs_raw = selection_dict.get("current_runs")
@@ -559,4 +584,3 @@ def write_window_summary(
         encoding="utf-8",
         newline="\n",
     )
-

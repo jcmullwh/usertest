@@ -1,9 +1,9 @@
 from __future__ import annotations
 
+import builtins
 from pathlib import Path
 
 import sandbox_runner.docker as docker
-import builtins
 
 
 class _DummyProc:

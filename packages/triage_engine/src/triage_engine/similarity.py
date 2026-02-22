@@ -1,9 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
-
-import hashlib
 import random
 import re
 from collections.abc import Callable, Iterable, Sequence
@@ -123,7 +122,7 @@ class SimilarityWeights:
     anchor: float = 0.06
     evidence: float = 0.02
 
-    def normalized(self) -> "SimilarityWeights":
+    def normalized(self) -> SimilarityWeights:
         total = float(self.embedding + self.title + self.anchor + self.evidence)
         if total <= 0.0:
             return self

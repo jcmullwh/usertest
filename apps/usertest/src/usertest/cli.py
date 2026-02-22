@@ -392,16 +392,17 @@ def _prevalidate_batch_requests(
         except Exception as e:  # noqa: BLE001
             errors.append(f"targets[{idx}]: failed to resolve persona/mission: {e}")
 
-    for (agent, binary, kind), indices in sorted(missing_agent_binaries.items()):
-        rendered = ", ".join(f"targets[{idx}]" for idx in sorted(indices))
-        if kind == "path_missing":
-            errors.append(
-                f"env: agent binary path not found: {binary!r} for agent {agent!r} (used by {rendered})."
-            )
-        else:
-            errors.append(
-                f"env: agent binary not on PATH: {binary!r} for agent {agent!r} (used by {rendered})."
-            )
+    if not skip_command_responsiveness_probes:
+        for (agent, binary, kind), indices in sorted(missing_agent_binaries.items()):
+            rendered = ", ".join(f"targets[{idx}]" for idx in sorted(indices))
+            if kind == "path_missing":
+                errors.append(
+                    f"env: agent binary path not found: {binary!r} for agent {agent!r} (used by {rendered})."
+                )
+            else:
+                errors.append(
+                    f"env: agent binary not on PATH: {binary!r} for agent {agent!r} (used by {rendered})."
+                )
 
     if skip_command_responsiveness_probes:
         return errors
@@ -1460,14 +1461,20 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             )
             continue
 
-        def _require_non_empty_str(field: str) -> str | None:
-            raw = item.get(field)
+        def _require_non_empty_str(
+            field: str,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> str | None:
+            raw = _item.get(field)
             if raw is None:
-                target_errors.append(f"targets[{idx}].{field} is required.")
+                _target_errors.append(f"targets[{_idx}].{field} is required.")
                 return None
             if not isinstance(raw, str) or not raw.strip():
-                target_errors.append(
-                    f"targets[{idx}].{field} must be a non-empty string; got {raw!r}."
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a non-empty string; got {raw!r}."
                 )
                 return None
             return raw
@@ -1491,25 +1498,41 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 "Update to persona_id / mission_id and remove legacy fields."
             )
 
-        def _optional_str(field: str, default: str | None) -> str | None:
-            if field not in item:
+        def _optional_str(
+            field: str,
+            default: str | None,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> str | None:
+            if field not in _item:
                 return default
-            raw = item.get(field)
+            raw = _item.get(field)
             if raw is None:
                 return None
             if not isinstance(raw, str):
-                target_errors.append(
-                    f"targets[{idx}].{field} must be a string if present; got {type(raw).__name__}."
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a string if present; got {type(raw).__name__}."
                 )
                 return None
             return raw
 
-        def _optional_int(field: str, default: int) -> int | None:
-            raw = item.get(field, default)
+        def _optional_int(
+            field: str,
+            default: int,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> int | None:
+            raw = _item.get(field, default)
             if raw is None:
                 return default
             if isinstance(raw, bool):
-                target_errors.append(f"targets[{idx}].{field} must be an integer; got bool.")
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be an integer; got bool."
+                )
                 return None
             if isinstance(raw, int):
                 return raw
@@ -1517,21 +1540,30 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 try:
                     return int(raw.strip())
                 except ValueError:
-                    target_errors.append(
-                        f"targets[{idx}].{field} must be an integer; got {raw!r}."
+                    _target_errors.append(
+                        f"targets[{_idx}].{field} must be an integer; got {raw!r}."
                     )
                     return None
-            target_errors.append(
-                f"targets[{idx}].{field} must be an integer; got {type(raw).__name__}."
+            _target_errors.append(
+                f"targets[{_idx}].{field} must be an integer; got {type(raw).__name__}."
             )
             return None
 
-        def _optional_float(field: str, default: float) -> float | None:
-            raw = item.get(field, default)
+        def _optional_float(
+            field: str,
+            default: float,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> float | None:
+            raw = _item.get(field, default)
             if raw is None:
                 return default
             if isinstance(raw, bool):
-                target_errors.append(f"targets[{idx}].{field} must be a number; got bool.")
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a number; got bool."
+                )
                 return None
             if isinstance(raw, (int, float)):
                 return float(raw)
@@ -1539,21 +1571,30 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 try:
                     return float(raw.strip())
                 except ValueError:
-                    target_errors.append(
-                        f"targets[{idx}].{field} must be a number; got {raw!r}."
+                    _target_errors.append(
+                        f"targets[{_idx}].{field} must be a number; got {raw!r}."
                     )
                     return None
-            target_errors.append(
-                f"targets[{idx}].{field} must be a number; got {type(raw).__name__}."
+            _target_errors.append(
+                f"targets[{_idx}].{field} must be a number; got {type(raw).__name__}."
             )
             return None
 
-        def _optional_nullable_float(field: str, default: float | None) -> float | None:
-            raw = item.get(field, default)
+        def _optional_nullable_float(
+            field: str,
+            default: float | None,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> float | None:
+            raw = _item.get(field, default)
             if raw is None:
                 return default
             if isinstance(raw, bool):
-                target_errors.append(f"targets[{idx}].{field} must be a number; got bool.")
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a number; got bool."
+                )
                 return None
             if isinstance(raw, (int, float)):
                 return float(raw)
@@ -1561,10 +1602,12 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 try:
                     return float(raw.strip())
                 except ValueError:
-                    target_errors.append(f"targets[{idx}].{field} must be a number; got {raw!r}.")
+                    _target_errors.append(
+                        f"targets[{_idx}].{field} must be a number; got {raw!r}."
+                    )
                     return None
-            target_errors.append(
-                f"targets[{idx}].{field} must be a number; got {type(raw).__name__}."
+            _target_errors.append(
+                f"targets[{_idx}].{field} must be a number; got {type(raw).__name__}."
             )
             return None
 

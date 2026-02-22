@@ -3,7 +3,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from run_artifacts.history import iter_report_history, select_recent_run_dirs, write_report_history_jsonl
+from run_artifacts.history import (
+    iter_report_history,
+    select_recent_run_dirs,
+    write_report_history_jsonl,
+)
 
 
 def _write_json(path: Path, obj: object) -> None:

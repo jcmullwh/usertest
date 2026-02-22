@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import json
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 _MAX_TOP_FAILED_COMMANDS = 5
 _MAX_FAILED_COMMANDS_PER_RUN = 25
@@ -393,7 +394,8 @@ def build_aggregate_metrics_atoms(
                 f"persona={workflow_key['persona_id']}: "
                 f"failure_rate={wf_failure_rate:.3f} vs baseline={baseline_failure_rate:.3f} "
                 f"({wf_metrics['failure_rate_ratio_vs_baseline']:.2f}x); "
-                f"avg_failed_per_run={wf_avg_failed_per_run:.2f} vs baseline={baseline_avg_failed_per_run:.2f} "
+                f"avg_failed_per_run={wf_avg_failed_per_run:.2f} "
+                f"vs baseline={baseline_avg_failed_per_run:.2f} "
                 f"({wf_metrics['avg_failed_per_run_ratio_vs_baseline']:.2f}x)"
             ),
         }

@@ -51,17 +51,16 @@ def test_classify_known_stderr_warnings_detects_codex_model_refresh_timeout_warn
     assert meta["unknown_lines"] == []
 
 
-def test_classify_known_stderr_warnings_detects_claude_bashtool_preflight_slow_warning_only() -> None:
+def test_classify_known_stderr_warnings_detects_claude_bashtool_preflight_slow_warning_only(
+) -> None:
+    line = (
+        '{"level":"warn","message":"[BashTool] Pre-flight check is taking longer than expected. '
+        'Run with ANTHROPIC_LOG=debug to check for failed or slow API requests."}'
+    )
     text = "\n".join(
         [
-            (
-                '{"level":"warn","message":"[BashTool] Pre-flight check is taking longer than expected. '
-                'Run with ANTHROPIC_LOG=debug to check for failed or slow API requests."}'
-            ),
-            (
-                '{"level":"warn","message":"[BashTool] Pre-flight check is taking longer than expected. '
-                'Run with ANTHROPIC_LOG=debug to check for failed or slow API requests."}'
-            ),
+            line,
+            line,
         ]
     )
     meta = classify_known_stderr_warnings(text)

@@ -187,7 +187,9 @@ def test_extract_backlog_atoms_extracts_task_run_v1_report_blocks(tmp_path: Path
     )
 
 
-def test_extract_backlog_atoms_extracts_boundary_v1_risks_and_recommendations(tmp_path: Path) -> None:
+def test_extract_backlog_atoms_extracts_boundary_v1_risks_and_recommendations(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
     run_dir.mkdir(parents=True, exist_ok=True)
 
@@ -280,11 +282,16 @@ def test_extract_backlog_atoms_omits_missing_agent_artifact_attachments_on_failu
     ]
 
     atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
-    failure_atom = next(item for item in atoms_doc["atoms"] if item["source"] == "run_failure_event")
+    failure_atom = next(
+        item for item in atoms_doc["atoms"] if item["source"] == "run_failure_event"
+    )
     assert failure_atom["attachments"] == []
 
     run_manifest = atoms_doc["capture_manifest"]["target_a/20260101T000000Z/gemini/0"]
-    assert any(item.get("path") == "agent_stderr.txt" and item.get("exists") is False for item in run_manifest)
+    assert any(
+        item.get("path") == "agent_stderr.txt" and item.get("exists") is False
+        for item in run_manifest
+    )
     assert any(
         item.get("path") == "agent_last_message.txt" and item.get("exists") is False
         for item in run_manifest
@@ -440,7 +447,9 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
                         "command": "python -m pip install -e .",
                         "exit_code": 1,
                         "cwd": "C:/ws",
-                        "output_excerpt": "ERROR: Could not find a version that satisfies the requirement ...",
+                        "output_excerpt": (
+                            "ERROR: Could not find a version that satisfies the requirement ..."
+                        ),
                         "output_excerpt_truncated": True,
                     },
                     {
@@ -466,7 +475,11 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
     assert first.get("cwd") == "C:/ws"
     assert first.get("output_excerpt_truncated") is True
 
-    trunc = next(atom for atom in atoms_doc["atoms"] if atom.get("source") == "command_failure_truncated")
+    trunc = next(
+        atom
+        for atom in atoms_doc["atoms"]
+        if atom.get("source") == "command_failure_truncated"
+    )
     assert trunc.get("omitted_count") == 3
 
 

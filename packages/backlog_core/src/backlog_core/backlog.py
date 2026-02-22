@@ -677,6 +677,9 @@ def extract_backlog_atoms(
                 if command is None or not isinstance(exit_code, int) or exit_code == 0:
                     continue
                 output_excerpt = _coerce_string(entry.get("output_excerpt"))
+                output_excerpt_truncated = (
+                    True if entry.get("output_excerpt_truncated") is True else None
+                )
                 _emit(
                     "command_failure",
                     f"Command failed: exit_code={exit_code}; command={command}",
@@ -684,7 +687,7 @@ def extract_backlog_atoms(
                     exit_code=exit_code,
                     cwd=_coerce_string(entry.get("cwd")),
                     output_excerpt=output_excerpt,
-                    output_excerpt_truncated=True if entry.get("output_excerpt_truncated") is True else None,
+                    output_excerpt_truncated=output_excerpt_truncated,
                     from_events=True if entry.get("from_events") else None,
                     from_metrics=True if entry.get("from_metrics") else None,
                 )
@@ -775,7 +778,9 @@ def extract_backlog_atoms(
                     continue
                 excerpt_head = capture.excerpt.head if capture.excerpt is not None else None
                 excerpt_tail = capture.excerpt.tail if capture.excerpt is not None else None
-                truncated = bool(capture.excerpt.truncated) if capture.excerpt is not None else False
+                truncated = (
+                    bool(capture.excerpt.truncated) if capture.excerpt is not None else False
+                )
                 attachments.append(
                     {
                         "path": capture.artifact.path,
@@ -797,7 +802,9 @@ def extract_backlog_atoms(
                 continue
             excerpt_head = capture.excerpt.head if capture.excerpt is not None else None
             excerpt_tail = capture.excerpt.tail if capture.excerpt is not None else None
-            truncated = bool(capture.excerpt.truncated) if capture.excerpt is not None else False
+            truncated = (
+                bool(capture.excerpt.truncated) if capture.excerpt is not None else False
+            )
             artifact_text = _clean_atom_text(_compose_artifact_text(capture))
             if not artifact_text:
                 artifact_text = "[empty artifact]"
@@ -931,7 +938,7 @@ def add_atom_links(atoms: list[dict[str, Any]]) -> list[dict[str, Any]]:
             return False
         return _jaccard(a, b) >= 0.2
 
-    for run_rel, run_atoms in atoms_by_run.items():
+    for _run_rel, run_atoms in atoms_by_run.items():
         evidence_atoms = [
             atom
             for atom in run_atoms

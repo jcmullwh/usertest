@@ -106,7 +106,8 @@ def prepare_execution_backend(
                     "exec_backend='docker' requires exec_docker_context "
                     "(CLI: --exec-docker-context PATH).\n"
                     f"default_context_checked={default_context}\n"
-                    "default_context_resource=sandbox_runner:builtins/docker/contexts/sandbox_cli (missing)"
+                    "default_context_resource="
+                    "sandbox_runner:builtins/docker/contexts/sandbox_cli (missing)"
                 )
             context_dir = copied
     context_dir = context_dir.resolve()

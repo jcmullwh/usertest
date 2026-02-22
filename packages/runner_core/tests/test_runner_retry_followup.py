@@ -124,12 +124,18 @@ def _make_dummy_codex_retry_binary(tmp_path: Path) -> str:
                 "            Path('marker.txt').write_text('ok\\n', encoding='utf-8')",
                 "        report = {'ok': 'yes'}",
                 "        if out_path is not None:",
-                "            Path(out_path).write_text(json.dumps(report) + '\\n', encoding='utf-8')",
+                (
+                    "            Path(out_path).write_text("
+                    "json.dumps(report) + '\\n', encoding='utf-8')"
+                ),
                 "        return 0",
                 "",
                 "    report = {'ok': 'yes'}",
                 "    if out_path is not None:",
-                "        Path(out_path).write_text(json.dumps(report) + '\\n', encoding='utf-8')",
+                (
+                    "        Path(out_path).write_text("
+                    "json.dumps(report) + '\\n', encoding='utf-8')"
+                ),
                 "    return 0",
                 "",
                 "",

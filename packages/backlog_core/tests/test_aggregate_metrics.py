@@ -73,6 +73,6 @@ def test_build_aggregate_metrics_atoms_emits_breakdowns(tmp_path: Path) -> None:
     breakdown = baseline["command_failure_breakdown"]
     assert breakdown["total_failed_commands"] == 2
     assert breakdown["failure_kind_counts"]["network_name_resolution"] == 2
-    assert breakdown["top_failed_commands"][0]["command"] == "python -m pip install -r requirements-dev.txt"
+    expected_command = "python -m pip install -r requirements-dev.txt"
+    assert breakdown["top_failed_commands"][0]["command"] == expected_command
     assert breakdown["top_failed_commands"][0]["failures"] == 2
-
