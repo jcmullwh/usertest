@@ -803,3 +803,126 @@ def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_
     assert "- Export kind: `implementation`" in updated
     assert "- Stage: `ready_for_ticket`" in updated
     assert "## UX review" in updated
+
+
+def test_reports_export_tickets_defer_moves_bucket_and_skips_export(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    ticket = {
+        "ticket_id": "BLG-008",
+        "title": "Batch validation UX: aggregate and print all validation errors",
+        "problem": "Output is unclear.",
+        "severity": "high",
+        "confidence": 0.8,
+        "stage": "research_required",
+        "evidence_atom_ids": ["target_a/20260101T000000Z/codex/0:confusion_point:1"],
+        "change_surface": {
+            "user_visible": True,
+            "kinds": ["behavior_change"],
+            "notes": "",
+        },
+        "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
+        "suggested_owner": "docs",
+    }
+
+    fingerprint = ticket_export_fingerprint(ticket)
+
+    backlog_path = compiled_dir / "target_a.backlog.json"
+    _write_json(
+        backlog_path,
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [ticket],
+        },
+    )
+    _write_json(
+        compiled_dir / "target_a.ux_review.json",
+        {
+            "schema_version": 1,
+            "generated_at": "2026-02-21T00:00:00Z",
+            "scope": {"target": "target_a", "repo_input": None},
+            "status": "ok",
+            "review": {
+                "recommendations": [
+                    {
+                        "recommendation_id": "UX-001",
+                        "ticket_ids": ["BLG-008"],
+                        "recommended_approach": "defer",
+                        "rationale": "Already implemented; defer.",
+                        "next_steps": ["Re-triage as already implemented."],
+                        "evidence_breadth_summary": {
+                            "missions": 1,
+                            "targets": 1,
+                            "repo_inputs": 1,
+                            "agents": 1,
+                            "runs": 1,
+                        },
+                    }
+                ],
+                "confidence": 0.7,
+            },
+        },
+    )
+
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(
+        atom_actions_path,
+        {
+            "version": 1,
+            "atoms": [
+                {
+                    "atom_id": "target_a/20260101T000000Z/codex/0:confusion_point:1",
+                    "status": "ticketed",
+                    "ticket_ids": ["BLG-008"],
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-dedupe",
+            ]
+        )
+    assert exc.value.code == 0
+
+    out_json = compiled_dir / "target_a.tickets_export.json"
+    export_doc = json.loads(out_json.read_text(encoding="utf-8"))
+    assert export_doc["stats"]["ux_tickets_deferred"] == 1
+    assert export_doc["stats"]["exports_total"] == 0
+    assert export_doc["stats"]["idea_files_written"] == 1
+    assert export_doc["exports"] == []
+
+    deferred_dir = owner_repo / ".agents" / "plans" / "0.1 - deferred"
+    deferred_matches = list(deferred_dir.glob(f"*{fingerprint}*.md"))
+    assert deferred_matches
+
+    actions_doc = yaml.safe_load(actions_path.read_text(encoding="utf-8"))
+    assert actions_doc["version"] == 1
+    actions_by_fp = {item["fingerprint"]: item for item in actions_doc["actions"]}
+    assert actions_by_fp[fingerprint]["status"] == "deferred"
+
+    atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
+    atoms = {item["atom_id"]: item for item in atom_actions_doc["atoms"]}
+    assert atoms["target_a/20260101T000000Z/codex/0:confusion_point:1"]["status"] == "actioned"

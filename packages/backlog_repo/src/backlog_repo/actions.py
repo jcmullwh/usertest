@@ -177,6 +177,28 @@ def load_backlog_actions_yaml(actions_path: Path) -> dict[str, dict[str, Any]]:
     return actions
 
 
+def write_backlog_actions_yaml(actions_path: Path, actions: dict[str, dict[str, Any]]) -> None:
+    """Persist backlog action ledger with deterministic ordering.
+
+    Parameters
+    ----------
+    actions_path:
+        Destination YAML path.
+    actions:
+        Action entries keyed by ticket fingerprint.
+    """
+
+    payload_actions: list[dict[str, Any]] = []
+    for fingerprint in sorted(actions.keys()):
+        entry = dict(actions[fingerprint])
+        entry["fingerprint"] = fingerprint
+        payload_actions.append(entry)
+
+    doc = {"version": 1, "actions": payload_actions}
+    actions_path.parent.mkdir(parents=True, exist_ok=True)
+    actions_path.write_text(yaml.safe_dump(doc, sort_keys=False), encoding="utf-8")
+
+
 def load_atom_actions_yaml(path: Path) -> dict[str, dict[str, Any]]:
     """Load atom action ledger keyed by atom ID.
 

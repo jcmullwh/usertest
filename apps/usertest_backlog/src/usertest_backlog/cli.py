@@ -31,7 +31,6 @@ except ModuleNotFoundError as exc:
         "Fix: `python -m pip install -r requirements-dev.txt`."
     ) from exc
 
-
 def _from_source_import_remediation(*, missing_module: str) -> str:
     return (
         f"Missing import `{missing_module}`.\n"
@@ -3770,8 +3769,12 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     ux_plan_tickets_updated = 0
     ux_idea_files_updated = 0
     ux_tickets_deferred = 0
+<<<<<<< HEAD
     swept_actioned_queue_dupes_removed = 0
     swept_actioned_bucket_dupes_removed = 0
+=======
+    actions_mutated = False
+>>>>>>> 994af62 (backlog: skip deferred exports, write action ledger)
 
     for ticket in tickets:
         stage = (_coerce_string(ticket.get("stage")) or "triage").strip()
@@ -3956,6 +3959,15 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 deferred_moved = True
                 ux_tickets_deferred += 1
 
+                if fingerprint not in actions:
+                    actions[fingerprint] = {
+                        "fingerprint": fingerprint,
+                        "status": "deferred",
+                        "ticket_id": ticket_id,
+                        "notes": "Deferred by UX review recommendation.",
+                    }
+                    actions_mutated = True
+
         idea_files_written.append(str(idea_path))
         for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
             queued_refs.append(
@@ -3968,6 +3980,9 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                     "desired_status": "actioned" if deferred_moved else "queued",
                 }
             )
+
+        if deferred_moved:
+            continue
 
         exports.append(
             {
@@ -4003,6 +4018,9 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         export_json_path=out_json,
     )
     _write_atom_actions_yaml(atom_actions_path, atom_actions)
+
+    if actions_mutated:
+        _write_backlog_actions_yaml(actions_path, actions)
 
     export_doc: dict[str, Any] = {
         "schema_version": 1,
