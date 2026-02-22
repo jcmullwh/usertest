@@ -39,27 +39,32 @@ Open the checked-in golden fixture artifacts directly (no Python deps required):
 - `examples/golden_runs/minimal_codex_run/report.md`
 - `examples/golden_runs/minimal_codex_run/metrics.json`
 
-Re-render that fixture from raw events (requires minimal Python deps + import-path setup):
+### One-command "from source" verification
 
-**Note:** this does not execute any agent runs; it just re-renders an existing golden fixture.
+If you haven't set up a Python environment for this repo yet, use the one-command scripts to verify everything is working. They create a local `.venv`, install minimal dependencies, configure `PYTHONPATH`, and render a report from a golden fixture. These scripts do **not** execute any agents or make network calls:
 
-One-command (recommended):
+- **Windows PowerShell:**
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1
+  ```
+- **macOS / Linux:**
+  ```bash
+  bash ./scripts/offline_first_success.sh
+  ```
 
-- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_fixture_rerender.ps1`
-- macOS/Linux: `bash ./scripts/offline_fixture_rerender.sh`
+### Running from source (manual)
 
-Manual steps (if you want to control an existing env):
+If you prefer to manage your environment manually, you must install dependencies and configure `PYTHONPATH` for this monorepo.
 
-- Install minimal deps:
-  `python -m pip install -r requirements-dev.txt`
-- Configure `PYTHONPATH`:
-  - PowerShell: `. .\scripts\set_pythonpath.ps1`
-  - macOS/Linux: `source scripts/set_pythonpath.sh`
-- Re-render:
+1. **Install minimal dependencies:**
+   `python -m pip install -r requirements-dev.txt`
+2. **Set PYTHONPATH:**
+   - **Windows PowerShell:** `. .\scripts\set_pythonpath.ps1`
+   - **macOS / Linux:** `source scripts/set_pythonpath.sh`
+3. **Verify:**
+   `python -m usertest.cli --help`
 
-`python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics`
-
-Success signal: the command prints the exact `report.md` output path.
+Success signal: the command prints help output.
 
 ## Repo structure
 

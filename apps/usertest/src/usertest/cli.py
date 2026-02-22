@@ -87,6 +87,8 @@ try:
 except ModuleNotFoundError as exc:
     if exc.name == "runner_core":
         raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
+    if exc.name == "sandbox_runner":
+        raise SystemExit(_from_source_import_remediation(missing_module="sandbox_runner")) from exc
     raise
 
 _LEGACY_RUN_TIMESTAMP_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")

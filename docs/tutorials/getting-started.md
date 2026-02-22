@@ -76,20 +76,42 @@ To understand what a run produces without installing anything, open the checked-
 - `examples/golden_runs/minimal_codex_run/report.md`
 - `examples/golden_runs/minimal_codex_run/metrics.json`
 
-You can also re-render that fixture from raw events:
+### One-command "from source" verification
 
-```text
-python -m usertest.cli report --repo-root . --run-dir examples/golden_runs/minimal_codex_run --recompute-metrics
-```
+If you haven't set up a Python environment for this repo yet, use the one-command scripts to verify everything is working. They create a local `.venv`, install minimal dependencies, configure `PYTHONPATH`, and render a report from a golden fixture. These scripts do **not** execute any agents or make network calls:
 
-If you haven't set up a Python environment for this repo yet, use the one-command scripts (creates `.venv`, installs minimal deps, sets `PYTHONPATH`, renders a scratch copy). These scripts do **not** execute any agents:
-
-- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_fixture_rerender.ps1`
-- macOS/Linux: `bash ./scripts/offline_fixture_rerender.sh`
+- **Windows PowerShell:**
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1
+  ```
+- **macOS / Linux:**
+  ```bash
+  bash ./scripts/offline_first_success.sh
+  ```
 
 ---
 
-## One-command smoke (recommended)
+## Running from source (manual)
+
+If you prefer to manage your environment manually, you must install dependencies and configure `PYTHONPATH` for this monorepo.
+
+1. **Install minimal dependencies:**
+   ```bash
+   python -m pip install -r requirements-dev.txt
+   ```
+
+2. **Set PYTHONPATH:**
+   - **Windows PowerShell:** `. .\scripts\set_pythonpath.ps1`
+   - **macOS / Linux:** `source scripts/set_pythonpath.sh`
+
+3. **Verify:**
+   ```bash
+   python -m usertest.cli --help
+   ```
+
+---
+
+## One-command smoke (recommended for developers)
 
 For a fast, deterministic end-to-end sanity check (doctor -> deps -> CLI help -> smoke tests), use the OS-specific smoke script:
 
