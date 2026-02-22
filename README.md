@@ -25,6 +25,13 @@ The backlog CLI provides tools to mine and analyze data produced by usertest, ge
 - merges and deduplicates those items into a structured backlog.
 - optionally exports those items into a target issue tracker.
 
+**usertest-implement**
+
+Once we have all of those target issues, we need to implement them.
+
+- Use the same mechanisms as usertest and usertest-backlog to generate a PR.
+- Track metrics on the implementers to identify rising complexity and tech debt.
+
 ## Start here
 
 - **Docs hub:** `docs/README.md`
