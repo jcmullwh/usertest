@@ -240,6 +240,7 @@ def _prevalidate_batch_requests(
     requests: list[tuple[int, RunRequest]],
     probe_timeout_seconds: float,
     skip_command_responsiveness_probes: bool,
+    validate_only: bool,
 ) -> list[str]:
     """Validate batch requests against catalog and policy constraints."""
     errors: list[str] = []
@@ -392,7 +393,7 @@ def _prevalidate_batch_requests(
         except Exception as e:  # noqa: BLE001
             errors.append(f"targets[{idx}]: failed to resolve persona/mission: {e}")
 
-    if not skip_command_responsiveness_probes:
+    if not validate_only:
         for (agent, binary, kind), indices in sorted(missing_agent_binaries.items()):
             rendered = ", ".join(f"targets[{idx}]" for idx in sorted(indices))
             if kind == "path_missing":
@@ -1779,6 +1780,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         requests=requests,
         probe_timeout_seconds=float(args.command_probe_timeout_seconds),
         skip_command_responsiveness_probes=bool(args.skip_command_probes),
+        validate_only=bool(getattr(args, "validate_only", False)),
     )
     all_errors = [*parse_errors, *validation_errors]
     if all_errors:
@@ -2514,6 +2516,7 @@ def _cmd_matrix(args: argparse.Namespace, *, execute: bool) -> int:
         requests=requests,
         probe_timeout_seconds=float(getattr(args, "command_probe_timeout_seconds", 0.25)),
         skip_command_responsiveness_probes=bool(getattr(args, "skip_command_probes", False)),
+        validate_only=not execute,
     )
     if batch_errors:
         print("Matrix environment validation failed; no runs were executed.", file=sys.stderr)
