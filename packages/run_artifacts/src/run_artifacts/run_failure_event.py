@@ -114,7 +114,10 @@ def classify_known_stderr_warnings(text: str) -> dict[str, Any]:
             continue
 
         if (
-            ("failed to refresh available models" in lowered and "timeout waiting for child process" in lowered)
+            (
+                "failed to refresh available models" in lowered
+                and "timeout waiting for child process" in lowered
+            )
             or f"code={_CODEX_MODEL_REFRESH_TIMEOUT_WARNING_CODE}" in lowered
             or lowered == _CODEX_MODEL_REFRESH_TIMEOUT_HINT.lower()
         ):

@@ -17,6 +17,7 @@ $RepoRoot = if ($RepoRoot) { $RepoRoot } else { (Resolve-Path (Join-Path $PSScri
 $paths = @(
     (Join-Path $RepoRoot "apps/usertest/src"),
     (Join-Path $RepoRoot "apps/usertest_backlog/src"),
+    (Join-Path $RepoRoot "apps/usertest_implement/src"),
     (Join-Path $RepoRoot "packages/runner_core/src"),
     (Join-Path $RepoRoot "packages/agent_adapters/src"),
     (Join-Path $RepoRoot "packages/normalized_events/src"),

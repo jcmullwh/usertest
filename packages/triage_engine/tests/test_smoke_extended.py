@@ -15,7 +15,7 @@ def test_openai_embedding_live_smoke() -> None:
     if importlib.util.find_spec("openai") is None:
         pytest.skip("openai package is not installed in this environment")
 
-    model = (os.getenv("TRIAGE_ENGINE_OPENAI_MODEL") or "text-embedding-3-small").strip()
+    model = (os.getenv("TRIAGE_ENGINE_OPENAI_MODEL") or "text-embedding-3-large").strip()
     base_url = (os.getenv("OPENAI_BASE_URL") or "").strip() or None
 
     embedder = OpenAIEmbedder(model=model, api_key=api_key, base_url=base_url)

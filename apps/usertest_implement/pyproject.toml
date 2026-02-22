@@ -1,0 +1,58 @@
+[project]
+name = "usertest_implement"
+version = "0.1.0"
+description = "Implement exported backlog tickets with a coding agent"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "agent-adapters @ file:///${PROJECT_ROOT}/../../packages/agent_adapters",
+  "backlog_repo @ file:///${PROJECT_ROOT}/../../packages/backlog_repo",
+  "normalized_events @ file:///${PROJECT_ROOT}/../../packages/normalized_events",
+  "pyyaml>=6.0.3",
+  "reporter @ file:///${PROJECT_ROOT}/../../packages/reporter",
+  "run_artifacts @ file:///${PROJECT_ROOT}/../../packages/run_artifacts",
+  "runner_core @ file:///${PROJECT_ROOT}/../../packages/runner_core",
+  "sandbox_runner @ file:///${PROJECT_ROOT}/../../packages/sandbox_runner",
+]
+
+[project.scripts]
+usertest-implement = "usertest_implement.cli:main"
+
+[build-system]
+requires = ["pdm-backend>=2.0.0"]
+build-backend = "pdm.backend"
+
+[tool.pdm]
+distribution = true
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "B",
+  "E",
+  "F",
+  "I",
+  "UP",
+]
+ignore = ["UP017"]
+
+[dependency-groups]
+dev = [
+  "deptry>=0.20.0",
+  "mypy>=1.8.0",
+  "pytest>=8.0.0",
+  "ruff>=0.14.0",
+  "types-PyYAML>=6.0.0.0",
+]

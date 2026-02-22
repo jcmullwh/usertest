@@ -242,8 +242,13 @@ def normalize_gemini_events(
                         "exit_code": 1 if is_error else 0,
                     }
                     if is_error:
+                        primary_stream = (
+                            payload.get("stdout")
+                            or payload.get("output")
+                            or payload.get("content")
+                        )
                         output_text = _join_streams(
-                            payload.get("stdout") or payload.get("output") or payload.get("content"),
+                            primary_stream,
                             payload.get("stderr"),
                         )
                         if output_text:

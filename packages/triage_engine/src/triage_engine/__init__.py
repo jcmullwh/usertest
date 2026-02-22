@@ -5,9 +5,7 @@ from triage_engine.embeddings import (
     CachedEmbedder,
     DiskCachedEmbedder,
     Embedder,
-    HashingEmbedder,
     OpenAIEmbedder,
-    SentenceTransformersEmbedder,
     get_default_embedder,
 )
 from triage_engine.similarity import PairSimilarity, compute_pair_similarity
@@ -37,8 +35,6 @@ __all__ = [
     "Embedder",
     "CachedEmbedder",
     "DiskCachedEmbedder",
-    "HashingEmbedder",
-    "SentenceTransformersEmbedder",
     "OpenAIEmbedder",
     "get_default_embedder",
 ]

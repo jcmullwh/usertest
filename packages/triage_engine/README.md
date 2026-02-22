@@ -59,7 +59,7 @@ Required environment variables:
 Optional environment variables:
 
 - `OPENAI_BASE_URL`
-- `TRIAGE_ENGINE_OPENAI_MODEL` (default: `text-embedding-3-small`)
+- `TRIAGE_ENGINE_OPENAI_MODEL` (default: `text-embedding-3-large`)
 - `TRIAGE_ENGINE_EMBEDDER` with values `openai` or `openai:<model>`
 
 There is no offline/local fallback in the default embedder path.

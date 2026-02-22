@@ -15,11 +15,17 @@ def _force_local_triage_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
         # Older/alternate triage_engine installations may not expose these modules.
         return
 
-    if not hasattr(triage_embeddings, "HashingEmbedder") or not hasattr(
-        triage_embeddings, "CachedEmbedder"
-    ):
+    hashing_cls = None
+    try:
+        triage_testing = importlib.import_module("triage_engine.testing")
+        hashing_cls = getattr(triage_testing, "HashingEmbedder", None)
+    except ModuleNotFoundError:
+        hashing_cls = getattr(triage_embeddings, "HashingEmbedder", None)
+
+    cached_cls = getattr(triage_embeddings, "CachedEmbedder", None)
+    if hashing_cls is None or cached_cls is None:
         return
 
-    embedder = triage_embeddings.CachedEmbedder(triage_embeddings.HashingEmbedder())
+    embedder = cached_cls(hashing_cls())
     monkeypatch.setattr(triage_embeddings, "get_default_embedder", lambda: embedder)
     monkeypatch.setattr(triage_similarity, "get_default_embedder", lambda: embedder)

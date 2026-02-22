@@ -6,6 +6,7 @@ In this repo they are primarily CLIs:
 
 - `apps/usertest` → `usertest` (run usertests)
 - `apps/usertest_backlog` → `usertest-backlog` (compile/analyze/export backlog)
+- `apps/usertest_implement` → `usertest-implement` (implement one exported ticket)
 
 Each app is an independent Python project with its own `pyproject.toml`.
 

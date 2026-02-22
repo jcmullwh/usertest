@@ -278,6 +278,89 @@ def _json_digest(payload: Any) -> str:
     return sha256(stable.encode("utf-8")).hexdigest()
 
 
+
+
+def _sha256_text(text: str) -> str:
+    return sha256(text.encode("utf-8")).hexdigest()
+
+
+def _sha256_file(path: Path) -> str:
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return ""
+    return sha256(data).hexdigest()
+
+
+def _atoms_content_digest(atoms: list[dict[str, Any]]) -> str:
+    """Digest atoms by (atom_id, text_hash) in *prompt order*.
+
+    This is intentionally order-sensitive because prompt ordering can change model output.
+    """
+
+    pairs: list[list[str]] = []
+    for atom in atoms:
+        if not isinstance(atom, dict):
+            continue
+        atom_id = _coerce_string(atom.get("atom_id")) or ""
+        text = atom.get("text")
+        text_s = text if isinstance(text, str) else ""
+        pairs.append([atom_id, sha256(text_s.encode("utf-8")).hexdigest()])
+    stable = json.dumps(pairs, ensure_ascii=False, separators=(",", ":"))
+    return sha256(stable.encode("utf-8")).hexdigest()
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.getenv(name)
+    if raw is None:
+        return int(default)
+    try:
+        return int(str(raw).strip())
+    except ValueError:
+        _warn_nonfatal_fallback(
+            code="invalid_env_int",
+            message=f"Environment variable {name}={raw!r} is not an int; using default {default}.",
+        )
+        return int(default)
+
+
+def _select_evidence_atoms(
+    atoms_by_id: dict[str, dict[str, Any]],
+    evidence_ids: list[str],
+    *,
+    max_atoms: int,
+    max_total_chars: int,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Select evidence atoms with both count + total-text guards.
+
+    Returns (atoms, atom_ids) in the same order as evidence_ids (after filtering).
+    """
+
+    selected_atoms: list[dict[str, Any]] = []
+    selected_ids: list[str] = []
+    total_chars = 0
+    max_atoms = max(0, int(max_atoms))
+    max_total_chars = max(0, int(max_total_chars))
+
+    for atom_id in evidence_ids:
+        atom = atoms_by_id.get(atom_id)
+        if not isinstance(atom, dict):
+            continue
+        text = atom.get("text")
+        text_s = text if isinstance(text, str) else ""
+        candidate_chars = len(text_s)
+
+        if max_atoms and len(selected_atoms) >= max_atoms:
+            break
+        if max_total_chars and selected_atoms and (total_chars + candidate_chars) > max_total_chars:
+            break
+
+        selected_atoms.append(atom)
+        selected_ids.append(atom_id)
+        total_chars += candidate_chars
+
+    return selected_atoms, selected_ids
+
 def _manifest_string_list(value: Any, *, field_name: str) -> tuple[str, ...]:
     """Validate manifest field as a non-empty list of template names.
 
@@ -746,6 +829,7 @@ def _consensus_labeler_payload(payloads: list[dict[str, Any]]) -> tuple[dict[str
             notes = candidate
             break
 
+    max_evidence_ids_used = _env_int("BACKLOG_LABELER_MAX_EVIDENCE_IDS_USED", 32)
     return (
         {
             "change_surface": {
@@ -756,7 +840,7 @@ def _consensus_labeler_payload(payloads: list[dict[str, Any]]) -> tuple[dict[str
             "component": consensus_component,
             "intent_risk": consensus_intent,
             "confidence": max(0.0, min(1.0, confidence_avg)),
-            "evidence_atom_ids_used": evidence_used_deduped[:12],
+            "evidence_atom_ids_used": evidence_used_deduped[:max_evidence_ids_used],
         },
         disagreement,
     )
@@ -796,6 +880,11 @@ def run_labeler_jobs(
 
     template = _load_prompt_template(prompts_dir, prompt_manifest.labeler_template)
 
+    template_sha256 = _sha256_text(template)
+    cfg_sha256 = _json_digest({"agent": cfg.agents.get(agent, {}), "policies": cfg.policies})
+    max_evidence_atoms = _env_int("BACKLOG_LABELER_MAX_EVIDENCE_ATOMS", 25)
+    max_evidence_chars = _env_int("BACKLOG_LABELER_MAX_EVIDENCE_CHARS", 60000)
+
     labeler_root = artifacts_dir / "labeler"
     labeler_root.mkdir(parents=True, exist_ok=True)
 
@@ -813,7 +902,12 @@ def run_labeler_jobs(
 
         raw_evidence_ids = ticket.get("evidence_atom_ids", [])
         evidence_ids = [item for item in raw_evidence_ids if isinstance(item, str)]
-        evidence_atoms = [atoms_by_id[item] for item in evidence_ids if item in atoms_by_id][:10]
+        evidence_atoms, evidence_ids_included = _select_evidence_atoms(
+            atoms_by_id,
+            evidence_ids,
+            max_atoms=max_evidence_atoms,
+            max_total_chars=max_evidence_chars,
+        )
         evidence_payload: list[dict[str, Any]] = []
         for atom in evidence_atoms:
             if not isinstance(atom, dict):
@@ -867,23 +961,75 @@ def run_labeler_jobs(
 
             tag = f"labeler_{idx:02d}"
             cached_path = ticket_dir / f"{tag}.label.json"
+            manifest_path = ticket_dir / f"{tag}.input.json"
+
+            input_manifest = {
+                "version": 1,
+                "template": prompt_manifest.labeler_template,
+                "template_sha256": template_sha256,
+                "agent": agent,
+                "model": model or "",
+                "variant": variant,
+                "max_evidence_atoms": max_evidence_atoms,
+                "max_evidence_chars": max_evidence_chars,
+                "ticket_anchor": _ticket_anchor(ticket),
+                "ticket_payload_sha256": _json_digest(ticket_payload),
+                "evidence_atom_ids_total": evidence_ids,
+                "evidence_atom_ids_included": evidence_ids_included,
+                "evidence_atoms_sha256": _atoms_content_digest(evidence_atoms),
+                "cfg_sha256": cfg_sha256,
+            }
+            input_manifest_digest = _json_digest(input_manifest)
+
             if resume and not force and cached_path.exists():
-                try:
-                    cached = json.loads(cached_path.read_text(encoding="utf-8"))
-                except json.JSONDecodeError:
-                    _warn_nonfatal_fallback(
-                        code="labeler_cache_json_invalid",
-                        message=(
-                            f"Cached labeler output was invalid JSON ({cached_path}); "
-                            "rerunning labeler for this ticket."
-                        ),
-                    )
-                    cached = None
-                if isinstance(cached, dict):
-                    payloads.append(cached)
-                    cached_runs += 1
-                    run_statuses.append("cached")
-                    continue
+                cached_manifest: dict[str, Any] | None = None
+                if manifest_path.exists():
+                    try:
+                        cached_manifest = _load_json_dict(manifest_path)
+                    except ValueError:
+                        _warn_nonfatal_fallback(
+                            code="labeler_cache_manifest_invalid",
+                            message=(
+                                f"Cached labeler manifest was invalid JSON ({manifest_path}); "
+                                "using cached output without manifest validation."
+                            ),
+                        )
+                        cached_manifest = None
+
+                if (
+                    isinstance(cached_manifest, dict)
+                    and _json_digest(cached_manifest) == input_manifest_digest
+                ):
+                    try:
+                        cached = json.loads(cached_path.read_text(encoding="utf-8"))
+                    except json.JSONDecodeError:
+                        _warn_nonfatal_fallback(
+                            code="labeler_cache_json_invalid",
+                            message=(
+                                f"Cached labeler output was invalid JSON ({cached_path}); "
+                                "rerunning labeler for this ticket."
+                            ),
+                        )
+                        cached = None
+                    if isinstance(cached, dict):
+                        payloads.append(cached)
+                        cached_runs += 1
+                        run_statuses.append("cached")
+                        continue
+                elif cached_manifest is None:
+                    # Legacy cache: output exists but no (or invalid) manifest.
+                    # Use the cached output (best-effort) and upgrade by writing a manifest
+                    # for future resume runs.
+                    try:
+                        cached = json.loads(cached_path.read_text(encoding="utf-8"))
+                    except json.JSONDecodeError:
+                        cached = None
+                    if isinstance(cached, dict):
+                        payloads.append(cached)
+                        cached_runs += 1
+                        run_statuses.append("cached")
+                        _write_json(manifest_path, input_manifest)
+                        continue
 
             if dry_run:
                 (ticket_dir / f"{tag}.dry_run.prompt.txt").write_text(prompt, encoding="utf-8")
@@ -911,6 +1057,7 @@ def run_labeler_jobs(
 
             normalized = _normalize_labeler_payload(parsed)
             _write_json(cached_path, normalized)
+            _write_json(manifest_path, input_manifest)
             payloads.append(normalized)
             run_statuses.append("ok")
 
@@ -947,6 +1094,11 @@ def run_labeler_jobs(
 
     meta = {
         "labelers_total": labelers,
+        "labeler_template": prompt_manifest.labeler_template,
+        "labeler_template_sha256": template_sha256,
+        "max_evidence_atoms": max_evidence_atoms,
+        "max_evidence_chars": max_evidence_chars,
+        "cfg_sha256": cfg_sha256,
         "tickets_total": len(tickets),
         "cached_runs": cached_runs,
         "labeler_runs": labeler_runs,
@@ -1073,6 +1225,7 @@ def run_backlog_prompt(
     tag: str,
     model: str | None,
     cfg: RunnerConfig,
+    workspace_dir: Path | None = None,
 ) -> str:
     """Execute a single backlog prompt and persist raw agent artifacts.
 
@@ -1105,54 +1258,95 @@ def run_backlog_prompt(
 
     prompt_path.write_text(prompt, encoding="utf-8")
 
-    with tempfile.TemporaryDirectory(prefix="usertest_backlog_") as temp_dir:
-        workspace = Path(temp_dir)
-        if agent == "codex":
-            with _codex_host_login_env():
-                run_codex_exec(
-                    workspace_dir=workspace,
-                    prompt=prompt,
-                    raw_events_path=raw_events_path,
-                    last_message_path=last_message_path,
-                    stderr_path=stderr_path,
-                    sandbox="read-only",
-                    ask_for_approval="never",
-                    binary=_agent_binary(cfg, "codex", "codex"),
-                    model=model,
-                    config_overrides=_codex_overrides(cfg),
-                    skip_git_repo_check=True,
-                )
-        elif agent == "claude":
-            run_claude_print(
-                workspace_dir=workspace,
+    workspace: Path | None = None
+    if workspace_dir is not None:
+        workspace = workspace_dir
+    else:
+        with tempfile.TemporaryDirectory(prefix="usertest_backlog_") as temp_dir:
+            workspace = Path(temp_dir)
+            _run_agent_in_workspace(
+                agent=agent,
+                workspace=workspace,
                 prompt=prompt,
                 raw_events_path=raw_events_path,
                 last_message_path=last_message_path,
                 stderr_path=stderr_path,
-                binary=_agent_binary(cfg, "claude", "claude"),
-                output_format=_agent_output_format(cfg, "claude"),
                 model=model,
-                allowed_tools=[],
-                permission_mode=None,
+                cfg=cfg,
             )
-        elif agent == "gemini":
-            run_gemini(
-                workspace_dir=workspace,
-                prompt=prompt,
-                raw_events_path=raw_events_path,
-                last_message_path=last_message_path,
-                stderr_path=stderr_path,
-                binary=_agent_binary(cfg, "gemini", "gemini"),
-                output_format=_agent_output_format(cfg, "gemini"),
-                sandbox=False,
-                model=model,
-                approval_mode="default",
-                allowed_tools=[],
-            )
-        else:
-            raise ValueError(f"Unsupported backlog agent: {agent!r}")
+            return _read_text(last_message_path)
+
+    _run_agent_in_workspace(
+        agent=agent,
+        workspace=workspace,
+        prompt=prompt,
+        raw_events_path=raw_events_path,
+        last_message_path=last_message_path,
+        stderr_path=stderr_path,
+        model=model,
+        cfg=cfg,
+    )
 
     return _read_text(last_message_path)
+
+
+def _run_agent_in_workspace(
+    *,
+    agent: str,
+    workspace: Path,
+    prompt: str,
+    raw_events_path: Path,
+    last_message_path: Path,
+    stderr_path: Path,
+    model: str | None,
+    cfg: RunnerConfig,
+) -> None:
+    if agent == "codex":
+        with _codex_host_login_env():
+            run_codex_exec(
+                workspace_dir=workspace,
+                prompt=prompt,
+                raw_events_path=raw_events_path,
+                last_message_path=last_message_path,
+                stderr_path=stderr_path,
+                sandbox="read-only",
+                ask_for_approval="never",
+                binary=_agent_binary(cfg, "codex", "codex"),
+                model=model,
+                config_overrides=_codex_overrides(cfg),
+                skip_git_repo_check=True,
+            )
+        return
+    if agent == "claude":
+        run_claude_print(
+            workspace_dir=workspace,
+            prompt=prompt,
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+            binary=_agent_binary(cfg, "claude", "claude"),
+            output_format=_agent_output_format(cfg, "claude"),
+            model=model,
+            allowed_tools=[],
+            permission_mode=None,
+        )
+        return
+    if agent == "gemini":
+        run_gemini(
+            workspace_dir=workspace,
+            prompt=prompt,
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+            binary=_agent_binary(cfg, "gemini", "gemini"),
+            output_format=_agent_output_format(cfg, "gemini"),
+            sandbox=False,
+            model=model,
+            approval_mode="default",
+            allowed_tools=[],
+        )
+        return
+    raise ValueError(f"Unsupported backlog agent: {agent!r}")
 
 
 def _atom_weight(atom: dict[str, Any]) -> float:
@@ -1467,6 +1661,15 @@ def _build_miner_prompt(
                 "location": atom.get("location"),
                 "priority": atom.get("priority"),
                 "expected_impact": atom.get("expected_impact"),
+                "report_kind": atom.get("report_kind"),
+                "report_block": atom.get("report_block"),
+                "report_issue_block": atom.get("report_issue_block"),
+                "report_ux_block": atom.get("report_ux_block"),
+                "issue_severity": atom.get("issue_severity"),
+                "issue_title": atom.get("issue_title"),
+                "evidence_text": atom.get("evidence_text"),
+                "path_anchors": atom.get("path_anchors"),
+                "linked_atom_ids": atom.get("linked_atom_ids"),
             }
             for atom in atoms
         ]
@@ -1667,13 +1870,20 @@ def _run_single_miner(
     parse_error_path = miner_dir / "parse_error.txt"
     meta_path = miner_dir / "meta.json"
     input_manifest_path = miner_dir / "input_manifest.json"
+    template_sha256 = _sha256_file(prompts_dir / job.template_name)
+    atoms_content_sha256 = _atoms_content_digest(job.atoms)
+    cfg_sha256 = _json_digest({"agent": cfg.agents.get(agent, {}), "policies": cfg.policies})
     input_manifest = {
+        "version": 2,
         "job_tag": job.tag,
         "pass_type": job.pass_type,
         "template": job.template_name,
+        "template_sha256": template_sha256,
         "agent": agent,
         "model": model,
+        "cfg_sha256": cfg_sha256,
         "atom_count": len(job.atoms),
+        "atoms_content_sha256": atoms_content_sha256,
         "atom_ids": [
             atom_id
             for atom in job.atoms
@@ -1706,7 +1916,9 @@ def _run_single_miner(
                 "tag": job.tag,
                 "pass_type": job.pass_type,
                 "template": job.template_name,
+                "template_sha256": template_sha256,
                 "atom_count": len(job.atoms),
+                "atoms_content_sha256": atoms_content_sha256,
                 "input_manifest_digest": input_manifest_digest,
                 "cached": True,
                 "status": "ok",
@@ -1731,7 +1943,9 @@ def _run_single_miner(
             "tag": job.tag,
             "pass_type": job.pass_type,
             "template": job.template_name,
+            "template_sha256": template_sha256,
             "atom_count": len(job.atoms),
+            "atoms_content_sha256": atoms_content_sha256,
             "input_manifest_digest": input_manifest_digest,
             "cached": False,
             "status": "dry_run",
@@ -1773,7 +1987,9 @@ def _run_single_miner(
         "tag": job.tag,
         "pass_type": job.pass_type,
         "template": job.template_name,
+        "template_sha256": template_sha256,
         "atom_count": len(job.atoms),
+        "atoms_content_sha256": atoms_content_sha256,
         "input_manifest_digest": input_manifest_digest,
         "cached": False,
         "status": status,
@@ -1909,6 +2125,8 @@ def _run_merge_judge(
     artifacts_dir: Path,
     tickets: list[dict[str, Any]],
     atoms_by_id: dict[str, dict[str, Any]],
+    merge_candidate_overall_threshold: float | None,
+    merge_keep_anchor_pairs: bool,
     resume: bool,
     force: bool,
     dry_run: bool,
@@ -1946,11 +2164,20 @@ def _run_merge_judge(
         Merged ticket list and number of merge decisions evaluated.
     """
 
-    candidates = build_merge_candidates(tickets)
+    candidates = build_merge_candidates(
+        tickets,
+        overall_similarity_threshold=merge_candidate_overall_threshold,
+        keep_anchor_pairs=merge_keep_anchor_pairs,
+    )
     if not candidates:
         return tickets, 0
 
     template = _load_prompt_template(prompts_dir, prompt_manifest.merge_judge_template)
+
+    template_sha256 = _sha256_text(template)
+    cfg_sha256 = _json_digest({"agent": cfg.agents.get(agent, {}), "policies": cfg.policies})
+    max_evidence_atoms = _env_int("BACKLOG_MERGE_JUDGE_MAX_EVIDENCE_ATOMS", 25)
+    max_evidence_chars = _env_int("BACKLOG_MERGE_JUDGE_MAX_EVIDENCE_CHARS", 60000)
 
     merged_working = list(tickets)
     inactive: set[int] = set()
@@ -1965,16 +2192,34 @@ def _run_merge_judge(
         left = merged_working[left_idx]
         right = merged_working[right_idx]
 
+        left_ids = [item for item in left.get("evidence_atom_ids", []) if isinstance(item, str)]
+        right_ids = [item for item in right.get("evidence_atom_ids", []) if isinstance(item, str)]
+        evidence_ids = sorted(set([*left_ids, *right_ids]))
+        evidence_atoms, evidence_ids_included = _select_evidence_atoms(
+            atoms_by_id,
+            evidence_ids,
+            max_atoms=max_evidence_atoms,
+            max_total_chars=max_evidence_chars,
+        )
+
         judge_dir = artifacts_dir / "merge_judge"
         judge_dir.mkdir(parents=True, exist_ok=True)
         tag = f"pair_{index:03d}"
         decision_path = judge_dir / f"{tag}.decision.json"
         input_path = judge_dir / f"{tag}.input.json"
         decision_input = {
+            "version": 1,
             "tag": tag,
             "template": prompt_manifest.merge_judge_template,
+            "template_sha256": template_sha256,
             "agent": agent,
             "model": model,
+            "cfg_sha256": cfg_sha256,
+            "max_evidence_atoms": max_evidence_atoms,
+            "max_evidence_chars": max_evidence_chars,
+            "evidence_atom_ids_total": evidence_ids,
+            "evidence_atom_ids_included": evidence_ids_included,
+            "evidence_atoms_sha256": _atoms_content_digest(evidence_atoms),
             "left_anchor": _ticket_anchor(left),
             "right_anchor": _ticket_anchor(right),
         }
@@ -1992,20 +2237,6 @@ def _run_merge_judge(
             _write_json(input_path, decision_input)
             _write_json(decision_path, decision_payload)
         else:
-            left_ids = [
-                item
-                for item in left.get("evidence_atom_ids", [])
-                if isinstance(item, str)
-            ]
-            right_ids = [
-                item
-                for item in right.get("evidence_atom_ids", [])
-                if isinstance(item, str)
-            ]
-            evidence_ids = sorted(set([*left_ids, *right_ids]))
-            evidence_atoms = [
-                atoms_by_id[item] for item in evidence_ids if item in atoms_by_id
-            ][:12]
             prompt = _build_merge_judge_prompt(
                 template_text=template,
                 left_ticket=left,
@@ -2202,6 +2433,8 @@ def run_backlog_ensemble(
     force: bool,
     dry_run: bool,
     no_merge: bool,
+    merge_candidate_overall_threshold: float | None = None,
+    merge_keep_anchor_pairs: bool = False,
     orphan_pass: int,
 ) -> dict[str, Any]:
     """Execute full backlog mining pipeline and return tickets plus run metadata.
@@ -2300,6 +2533,8 @@ def run_backlog_ensemble(
             artifacts_dir=artifacts_dir,
             tickets=tickets,
             atoms_by_id=atoms_by_id,
+            merge_candidate_overall_threshold=merge_candidate_overall_threshold,
+            merge_keep_anchor_pairs=merge_keep_anchor_pairs,
             resume=resume,
             force=force,
             dry_run=dry_run,

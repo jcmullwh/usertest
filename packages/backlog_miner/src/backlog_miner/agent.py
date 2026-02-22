@@ -17,6 +17,7 @@ def run_backlog_prompt(
     tag: str,
     model: str | None,
     cfg: RunnerConfig,
+    workspace_dir: Path | None = None,
 ) -> str:
     """Run a single backlog prompt through the configured agent adapter.
 
@@ -48,4 +49,5 @@ def run_backlog_prompt(
         tag=tag,
         model=model,
         cfg=cfg,
+        workspace_dir=workspace_dir,
     )

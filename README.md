@@ -41,10 +41,12 @@ Open the checked-in golden fixture artifacts directly (no Python deps required):
 
 Re-render that fixture from raw events (requires minimal Python deps + import-path setup):
 
+**Note:** this does not execute any agent runs; it just re-renders an existing golden fixture.
+
 One-command (recommended):
 
-- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1`
-- macOS/Linux: `bash ./scripts/offline_first_success.sh`
+- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_fixture_rerender.ps1`
+- macOS/Linux: `bash ./scripts/offline_fixture_rerender.sh`
 
 Manual steps (if you want to control an existing env):
 
@@ -80,6 +82,7 @@ The monorepo is managed by `tools/scaffold/scaffold.py` (manifest-driven task ru
 
 - Python 3.11+ (CI currently runs 3.11; newer versions are best-effort)
 - `git`
+- Optional: GitHub CLI (`gh`) (needed for `usertest-implement run --pr`)
 - At least one of: agent CLIs on PATH + credentials
   - `codex` CLI (logged in via `codex login` / subscription)
   - `claude` CLI (Claude Code)
@@ -239,6 +242,8 @@ Execution-policy notes:
     - `produce_default_output`: `--policy write`
 - If you need repo-specific tool probes, add `--preflight-command <CMD>` (repeatable) and optional
   `--require-preflight-command <CMD>`.
+- If you want a required “pre-handoff” CI/test gate, add `--verify-command "<SHELL_CMD>"` (repeatable) and optional
+  `--verify-timeout-seconds <SECONDS>`. The runner can schedule follow-up attempts to fix failures before handing off.
 - `preflight.json` includes per-command diagnostics with status values: `present`, `missing`, and
   `blocked_by_policy`.
 - `USERS.md` is optional context; built-in prompt templates no longer require it.
@@ -251,6 +256,7 @@ Artifacts land under `runs/usertest/<target>/<timestamp>/<agent>/<seed>/`:
 - `raw_events.jsonl`, `normalized_events.jsonl`
 - `metrics.json`
 - `report.json`, `report.md`
+- `verification.json` (when `--verify-command` is used)
 - `patch.diff` (only if writes were allowed and edits occurred)
 
 For the full file-level contract (required vs optional files, semantics, and a redacted sample

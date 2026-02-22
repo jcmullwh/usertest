@@ -101,7 +101,8 @@ if [[ "${SKIP_INSTALL}" -eq 0 ]]; then
       -e packages/backlog_miner \
       -e packages/backlog_repo \
       -e apps/usertest \
-      -e apps/usertest_backlog
+      -e apps/usertest_backlog \
+      -e apps/usertest_implement
   fi
 elif [[ "${USE_PYTHONPATH}" -eq 1 ]]; then
   echo "==> Configure PYTHONPATH via scripts/set_pythonpath.sh"
@@ -127,7 +128,10 @@ echo "==> CLI help smoke"
 echo "==> Backlog CLI help smoke"
 "${PYTHON_BIN}" -m usertest_backlog.cli --help
 
+echo "==> Implement CLI help smoke"
+"${PYTHON_BIN}" -m usertest_implement.cli --help
+
 echo "==> Pytest smoke suite"
-"${PYTHON_BIN}" -m pytest -q apps/usertest/tests/test_smoke.py apps/usertest/tests/test_golden_fixture.py apps/usertest_backlog/tests/test_smoke.py
+"${PYTHON_BIN}" -m pytest -q apps/usertest/tests/test_smoke.py apps/usertest/tests/test_golden_fixture.py apps/usertest_backlog/tests/test_smoke.py apps/usertest_implement/tests/test_smoke.py
 
 echo "==> Smoke complete: all checks passed."

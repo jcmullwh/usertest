@@ -240,6 +240,7 @@ def _prevalidate_batch_requests(
     requests: list[tuple[int, RunRequest]],
     probe_timeout_seconds: float,
     skip_command_responsiveness_probes: bool,
+    validate_only: bool,
 ) -> list[str]:
     """Validate batch requests against catalog and policy constraints."""
     errors: list[str] = []
@@ -392,16 +393,17 @@ def _prevalidate_batch_requests(
         except Exception as e:  # noqa: BLE001
             errors.append(f"targets[{idx}]: failed to resolve persona/mission: {e}")
 
-    for (agent, binary, kind), indices in sorted(missing_agent_binaries.items()):
-        rendered = ", ".join(f"targets[{idx}]" for idx in sorted(indices))
-        if kind == "path_missing":
-            errors.append(
-                f"env: agent binary path not found: {binary!r} for agent {agent!r} (used by {rendered})."
-            )
-        else:
-            errors.append(
-                f"env: agent binary not on PATH: {binary!r} for agent {agent!r} (used by {rendered})."
-            )
+    if not validate_only:
+        for (agent, binary, kind), indices in sorted(missing_agent_binaries.items()):
+            rendered = ", ".join(f"targets[{idx}]" for idx in sorted(indices))
+            if kind == "path_missing":
+                errors.append(
+                    f"env: agent binary path not found: {binary!r} for agent {agent!r} (used by {rendered})."
+                )
+            else:
+                errors.append(
+                    f"env: agent binary not on PATH: {binary!r} for agent {agent!r} (used by {rendered})."
+                )
 
     if skip_command_responsiveness_probes:
         return errors
@@ -544,6 +546,26 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Repeatable command name that must be available and permitted by policy during "
             "preflight (fails fast with structured diagnostics if missing/blocked)."
+        ),
+    )
+    run_p.add_argument(
+        "--verify-command",
+        action="append",
+        dest="verification_commands",
+        default=[],
+        help=(
+            "Repeatable shell command to run as a required verification gate before handing off "
+            "(e.g., --verify-command \"python -m pytest -q\"). Fails the run (and may trigger "
+            "agent follow-ups) if any command exits non-zero."
+        ),
+    )
+    run_p.add_argument(
+        "--verify-timeout-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Optional per-command timeout for --verify-command checks. "
+            "Non-positive values disable the timeout."
         ),
     )
     run_p.add_argument(
@@ -714,6 +736,19 @@ def build_parser() -> argparse.ArgumentParser:
             "Repeatable command name that must be available and permitted by policy during "
             "preflight (fails fast with structured diagnostics if missing/blocked)."
         ),
+    )
+    batch_p.add_argument(
+        "--verify-command",
+        action="append",
+        dest="verification_commands",
+        default=[],
+        help="Repeatable verification command applied to all targets (overridable per target).",
+    )
+    batch_p.add_argument(
+        "--verify-timeout-seconds",
+        type=float,
+        default=None,
+        help="Optional per-command timeout for --verify-command checks (applied to all targets).",
     )
     batch_p.add_argument(
         "--agent-system-prompt-file",
@@ -1236,6 +1271,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
             )
         preflight_required_commands.append(cmd.strip())
 
+    verification_commands: list[str] = []
+    for cmd in getattr(args, "verification_commands", None) or []:
+        if not isinstance(cmd, str) or not cmd.strip():
+            raise ValueError(f"--verify-command entries must be non-empty strings; got {cmd!r}.")
+        verification_commands.append(cmd.strip())
+
+    verification_timeout_seconds = getattr(args, "verification_timeout_seconds", None)
+    if verification_timeout_seconds is not None and verification_timeout_seconds <= 0:
+        verification_timeout_seconds = None
+
     result = run_once(
         cfg,
         RunRequest(
@@ -1255,6 +1300,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             keep_workspace=bool(args.keep_workspace),
             preflight_commands=tuple(preflight_commands),
             preflight_required_commands=tuple(preflight_required_commands),
+            verification_commands=tuple(verification_commands),
+            verification_timeout_seconds=verification_timeout_seconds,
             exec_backend=str(args.exec_backend),
             exec_docker_context=exec_docker_context,
             exec_dockerfile=args.exec_dockerfile,
@@ -1383,6 +1430,13 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         getattr(args, "preflight_required_commands", None),
         flag="--require-preflight-command",
     )
+    base_verification_commands = _append_arg_list_errors(
+        getattr(args, "verification_commands", None),
+        flag="--verify-command",
+    )
+    base_verification_timeout_seconds = getattr(args, "verification_timeout_seconds", None)
+    if base_verification_timeout_seconds is not None and base_verification_timeout_seconds <= 0:
+        base_verification_timeout_seconds = None
     base_agent_config_overrides = _append_arg_list_errors(
         getattr(args, "agent_config", None),
         flag="--agent-config",
@@ -1408,14 +1462,20 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             )
             continue
 
-        def _require_non_empty_str(field: str) -> str | None:
-            raw = item.get(field)
+        def _require_non_empty_str(
+            field: str,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> str | None:
+            raw = _item.get(field)
             if raw is None:
-                target_errors.append(f"targets[{idx}].{field} is required.")
+                _target_errors.append(f"targets[{_idx}].{field} is required.")
                 return None
             if not isinstance(raw, str) or not raw.strip():
-                target_errors.append(
-                    f"targets[{idx}].{field} must be a non-empty string; got {raw!r}."
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a non-empty string; got {raw!r}."
                 )
                 return None
             return raw
@@ -1439,25 +1499,41 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 "Update to persona_id / mission_id and remove legacy fields."
             )
 
-        def _optional_str(field: str, default: str | None) -> str | None:
-            if field not in item:
+        def _optional_str(
+            field: str,
+            default: str | None,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> str | None:
+            if field not in _item:
                 return default
-            raw = item.get(field)
+            raw = _item.get(field)
             if raw is None:
                 return None
             if not isinstance(raw, str):
-                target_errors.append(
-                    f"targets[{idx}].{field} must be a string if present; got {type(raw).__name__}."
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a string if present; got {type(raw).__name__}."
                 )
                 return None
             return raw
 
-        def _optional_int(field: str, default: int) -> int | None:
-            raw = item.get(field, default)
+        def _optional_int(
+            field: str,
+            default: int,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> int | None:
+            raw = _item.get(field, default)
             if raw is None:
                 return default
             if isinstance(raw, bool):
-                target_errors.append(f"targets[{idx}].{field} must be an integer; got bool.")
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be an integer; got bool."
+                )
                 return None
             if isinstance(raw, int):
                 return raw
@@ -1465,21 +1541,30 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 try:
                     return int(raw.strip())
                 except ValueError:
-                    target_errors.append(
-                        f"targets[{idx}].{field} must be an integer; got {raw!r}."
+                    _target_errors.append(
+                        f"targets[{_idx}].{field} must be an integer; got {raw!r}."
                     )
                     return None
-            target_errors.append(
-                f"targets[{idx}].{field} must be an integer; got {type(raw).__name__}."
+            _target_errors.append(
+                f"targets[{_idx}].{field} must be an integer; got {type(raw).__name__}."
             )
             return None
 
-        def _optional_float(field: str, default: float) -> float | None:
-            raw = item.get(field, default)
+        def _optional_float(
+            field: str,
+            default: float,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> float | None:
+            raw = _item.get(field, default)
             if raw is None:
                 return default
             if isinstance(raw, bool):
-                target_errors.append(f"targets[{idx}].{field} must be a number; got bool.")
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a number; got bool."
+                )
                 return None
             if isinstance(raw, (int, float)):
                 return float(raw)
@@ -1487,17 +1572,50 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 try:
                     return float(raw.strip())
                 except ValueError:
-                    target_errors.append(
-                        f"targets[{idx}].{field} must be a number; got {raw!r}."
+                    _target_errors.append(
+                        f"targets[{_idx}].{field} must be a number; got {raw!r}."
                     )
                     return None
-            target_errors.append(
-                f"targets[{idx}].{field} must be a number; got {type(raw).__name__}."
+            _target_errors.append(
+                f"targets[{_idx}].{field} must be a number; got {type(raw).__name__}."
+            )
+            return None
+
+        def _optional_nullable_float(
+            field: str,
+            default: float | None,
+            *,
+            _item=item,
+            _idx=idx,
+            _target_errors=target_errors,
+        ) -> float | None:
+            raw = _item.get(field, default)
+            if raw is None:
+                return default
+            if isinstance(raw, bool):
+                _target_errors.append(
+                    f"targets[{_idx}].{field} must be a number; got bool."
+                )
+                return None
+            if isinstance(raw, (int, float)):
+                return float(raw)
+            if isinstance(raw, str):
+                try:
+                    return float(raw.strip())
+                except ValueError:
+                    _target_errors.append(
+                        f"targets[{_idx}].{field} must be a number; got {raw!r}."
+                    )
+                    return None
+            _target_errors.append(
+                f"targets[{_idx}].{field} must be a number; got {type(raw).__name__}."
             )
             return None
 
         preflight_commands: list[str] = list(base_preflight_commands)
         preflight_required_commands: list[str] = list(base_preflight_required_commands)
+        verification_commands: list[str] = list(base_verification_commands)
+        verification_timeout_seconds = base_verification_timeout_seconds
         agent_config_overrides: list[str] = list(base_agent_config_overrides)
 
         raw_agent_config = item.get("agent_config")
@@ -1545,6 +1663,27 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                     )
                 else:
                     preflight_required_commands.append(cmd.strip())
+
+        raw_verification_commands = item.get("verification_commands")
+        if raw_verification_commands is not None:
+            if not isinstance(raw_verification_commands, list):
+                target_errors.append(
+                    f"targets[{idx}].verification_commands must be a list of strings if present."
+                )
+            for jdx, cmd in enumerate(raw_verification_commands):
+                if not isinstance(cmd, str) or not cmd.strip():
+                    target_errors.append(
+                        f"targets[{idx}].verification_commands[{jdx}] must be a non-empty string; "
+                        f"got {cmd!r}."
+                    )
+                else:
+                    verification_commands.append(cmd.strip())
+
+        verification_timeout_seconds = _optional_nullable_float(
+            "verification_timeout_seconds", verification_timeout_seconds
+        )
+        if verification_timeout_seconds is not None and verification_timeout_seconds <= 0:
+            verification_timeout_seconds = None
 
         ref_value = _optional_str("ref", None)
         agent_value = _optional_str("agent", str(args.agent))
@@ -1595,6 +1734,8 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             keep_workspace=bool(args.keep_workspace),
             preflight_commands=tuple(preflight_commands),
             preflight_required_commands=tuple(preflight_required_commands),
+            verification_commands=tuple(verification_commands),
+            verification_timeout_seconds=verification_timeout_seconds,
             exec_backend=str(args.exec_backend),
             exec_docker_context=exec_docker_context,
             exec_dockerfile=args.exec_dockerfile,
@@ -1639,6 +1780,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         requests=requests,
         probe_timeout_seconds=float(args.command_probe_timeout_seconds),
         skip_command_responsiveness_probes=bool(args.skip_command_probes),
+        validate_only=bool(getattr(args, "validate_only", False)),
     )
     all_errors = [*parse_errors, *validation_errors]
     if all_errors:
@@ -2374,6 +2516,7 @@ def _cmd_matrix(args: argparse.Namespace, *, execute: bool) -> int:
         requests=requests,
         probe_timeout_seconds=float(getattr(args, "command_probe_timeout_seconds", 0.25)),
         skip_command_responsiveness_probes=bool(getattr(args, "skip_command_probes", False)),
+        validate_only=not execute,
     )
     if batch_errors:
         print("Matrix environment validation failed; no runs were executed.", file=sys.stderr)

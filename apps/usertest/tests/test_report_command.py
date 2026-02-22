@@ -68,8 +68,9 @@ def test_report_command_renders_markdown(
     assert str(run_dir / "report.md") in out
 
     md = (run_dir / "report.md").read_text(encoding="utf-8")
-    assert "# Report" in md
+    assert "# Persona exploration report" in md
     assert "## Target" in md
-    assert "## Report" in md
+    assert "## Summary" in md
     assert "## Metrics" in md
-    assert '"schema_version": 1' in md
+    assert '"repo_input": "x"' in md
+    assert '"events_total": 1' in md

@@ -218,7 +218,11 @@ def _render_task_run_report(
                         continue
                     action = attempt.get("action") if isinstance(attempt.get("action"), str) else ""
                     result = attempt.get("result") if isinstance(attempt.get("result"), str) else ""
-                    evidence = attempt.get("evidence") if isinstance(attempt.get("evidence"), str) else ""
+                    evidence = (
+                        attempt.get("evidence")
+                        if isinstance(attempt.get("evidence"), str)
+                        else ""
+                    )
                     if action:
                         lines.append(f"  - Action: {action.strip()}")
                     else:

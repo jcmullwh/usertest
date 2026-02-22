@@ -1,4 +1,5 @@
 from backlog_core.backlog import (
+    add_atom_links,
     build_backlog_document,
     build_merge_candidates,
     compute_backlog_coverage,
@@ -15,6 +16,7 @@ from backlog_core.backlog_policy import BacklogPolicyConfig, apply_backlog_polic
 __all__ = [
     "BacklogPolicyConfig",
     "apply_backlog_policy",
+    "add_atom_links",
     "build_backlog_document",
     "build_merge_candidates",
     "compute_backlog_coverage",

@@ -48,6 +48,8 @@ If omitted, these fall back to the corresponding CLI flag values (or to catalog 
   - Alias: `agent_config_overrides` (prefer `agent_config`).
 - `preflight_commands` (list[string]): extra commands to probe during preflight in addition to `--preflight-command`.
 - `preflight_required_commands` (list[string]): commands that must be available and permitted (fails fast) in addition to `--require-preflight-command`.
+- `verification_commands` (list[string]): repeatable shell commands that must pass before handing off (in addition to any `--verify-command` flags).
+- `verification_timeout_seconds` (number | null): optional per-command timeout for verification checks (non-positive disables).
 
 Retry/backoff tuning (usually only needed when debugging provider capacity issues):
 
@@ -64,4 +66,3 @@ Retry/backoff tuning (usually only needed when debugging provider capacity issue
 For the most up-to-date flags, always prefer:
 
     python -m usertest.cli batch --help
-
