@@ -863,50 +863,60 @@ def _run_selected_ticket(
                 if workspace_dir is None:
                     pr_ref["error"] = "Missing workspace_ref.json; cannot locate workspace"
                 else:
-                    if not bool(args.skip_ci_wait):
-                        if not (push_ref is not None and push_ref.get("pushed") is True):
-                            pr_ref["error"] = (
-                                "Refusing to create PR before CI: branch was not pushed successfully "
-                                "(rerun with --push or pass --skip-ci-wait)."
-                            )
-                        else:
-                            head_sha = _git_head_sha(workspace_dir)
-                            if head_sha is None:
-                                pr_ref["error"] = "Unable to determine HEAD SHA for CI gating."
-                            else:
-                                ci_timeout = float(args.ci_timeout_seconds or 0)
-                                if ci_timeout <= 0:
-                                    ci_timeout = 3600
-                                ci_ref = _wait_for_ci_success(
-                                    run_dir=run_dir,
-                                    workspace_dir=workspace_dir,
-                                    branch=branch,
-                                    head_sha=head_sha,
-                                    workflow="CI",
-                                    timeout_seconds=ci_timeout,
+                        if not bool(args.skip_ci_wait):
+                            if not (push_ref is not None and push_ref.get("pushed") is True):
+                                pr_ref["error"] = (
+                                    "Refusing to create PR before CI: branch was not pushed successfully "
+                                    "(rerun with --push or pass --skip-ci-wait)."
                                 )
-                                if ci_ref.get("passed") is not True:
-                                    pr_ref["error"] = ci_ref.get("error") or "CI gate failed."
+                            else:
+                                head_sha = _git_head_sha(workspace_dir)
+                                if head_sha is None:
+                                    pr_ref["error"] = "Unable to determine HEAD SHA for CI gating."
+                                else:
+                                    ci_timeout = float(args.ci_timeout_seconds or 0)
+                                    if ci_timeout <= 0:
+                                        ci_timeout = 3600
+                                    ci_ref = _wait_for_ci_success(
+                                        run_dir=run_dir,
+                                        workspace_dir=workspace_dir,
+                                        branch=branch,
+                                        head_sha=head_sha,
+                                        workflow="CI",
+                                        timeout_seconds=ci_timeout,
+                                    )
+                                    if ci_ref.get("passed") is not True:
+                                        pr_ref["error"] = ci_ref.get("error") or "CI gate failed."
 
-                    if pr_ref.get("error"):
-                        pass
-                    else:
-                        proc = subprocess.run(
-                            ["gh", "pr", "create", "--title", title, "--body", body],
-                            cwd=str(workspace_dir),
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                        )
-                        if proc.returncode == 0:
-                            pr_ref["created"] = True
-                            pr_ref["url"] = proc.stdout.strip() or None
+                        if pr_ref.get("error"):
+                            pass
                         else:
-                            pr_ref["error"] = (
-                                proc.stderr.strip()
-                                or proc.stdout.strip()
-                                or f"gh failed ({proc.returncode})"
+                            proc = subprocess.run(
+                                [
+                                    "gh",
+                                    "pr",
+                                    "create",
+                                    "--base",
+                                    str(args.base_branch),
+                                    "--title",
+                                    title,
+                                    "--body",
+                                    body,
+                                ],
+                                cwd=str(workspace_dir),
+                                capture_output=True,
+                                text=True,
+                                check=False,
                             )
+                            if proc.returncode == 0:
+                                pr_ref["created"] = True
+                                pr_ref["url"] = proc.stdout.strip() or None
+                            else:
+                                pr_ref["error"] = (
+                                    proc.stderr.strip()
+                                    or proc.stdout.strip()
+                                    or f"gh failed ({proc.returncode})"
+                                )
         _write_json(run_dir / "pr_ref.json", pr_ref)
 
     if args.move_on_commit and selected.owner_root is not None and selected.idea_path is not None and args.commit:
@@ -1212,6 +1222,11 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--remote-name", default="origin")
     parser.add_argument("--remote-url")
     parser.add_argument("--force-push", dest="force_push", action="store_true")
+    parser.add_argument(
+        "--base-branch",
+        default="dev",
+        help="Base branch for PR creation (default: dev).",
+    )
     parser.add_argument("--pr", action="store_true", help="Best-effort PR creation via gh.")
 
     parser.add_argument(

@@ -12,6 +12,15 @@ def test_parser_smoke() -> None:
     args = parser.parse_args(["run", "--ticket-path", "C:\\tmp\\ticket.md", "--dry-run"])
     assert args.ticket_path == Path("C:\\tmp\\ticket.md")
     assert args.dry_run is True
+    assert args.base_branch == "dev"
+
+
+def test_parser_base_branch_override() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        ["run", "--ticket-path", "C:\\tmp\\ticket.md", "--base-branch", "main", "--dry-run"]
+    )
+    assert args.base_branch == "main"
 
 
 def test_help_smoke() -> None:
