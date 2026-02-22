@@ -154,14 +154,21 @@ except ModuleNotFoundError as exc:
         raise SystemExit(_from_source_import_remediation(missing_module="triage_engine")) from exc
     raise
 
-from usertest_backlog.triage_backlog import (
-    load_issue_items,
-    triage_issues,
-    write_triage_xlsx,
-)
-from usertest_backlog.triage_backlog import (
-    render_triage_markdown as render_backlog_triage_markdown,
-)
+try:
+    from usertest_backlog.triage_backlog import (
+        load_issue_items,
+        triage_issues,
+        write_triage_xlsx,
+    )
+    from usertest_backlog.triage_backlog import (
+        render_triage_markdown as render_backlog_triage_markdown,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name in {"usertest_backlog", "usertest_backlog.triage_backlog"}:
+        raise SystemExit(
+            _from_source_import_remediation(missing_module="usertest_backlog")
+        ) from exc
+    raise
 
 _EXPORT_SEVERITY_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "blocker": 3}
 _MONOREPO_OWNER_COMPONENTS: set[str] = {"runner_core", "agent_adapters", "sandbox_runner"}
