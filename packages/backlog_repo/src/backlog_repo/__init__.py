@@ -5,8 +5,8 @@ from backlog_repo.actions import (
     normalize_atom_status,
     promote_atom_status,
     sorted_unique_strings,
-    write_backlog_actions_yaml,
     write_atom_actions_yaml,
+    write_backlog_actions_yaml,
 )
 from backlog_repo.export import ticket_export_anchors, ticket_export_fingerprint
 from backlog_repo.plan_index import (
