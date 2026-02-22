@@ -30,6 +30,14 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
   mission.source.md
   mission.resolved.md
   preflight.json
+  verification_config.json            # only when --verify-command is configured
+  verification.json                   # only when verification ran (schema-valid attempt)
+  verification_errors.json            # only when verification failed
+  verification/                       # only when verification ran
+    attempt1/
+      verification.json
+      cmd_01.stdout.txt
+      cmd_01.stderr.txt
   raw_events.jsonl
   normalized_events.jsonl
   metrics.json
@@ -90,6 +98,10 @@ Files that are conditionally present:
 - `report_validation_errors.json`: present when report parsing/validation produced errors.
 - `error.json`: present when run failed (preflight, adapter execution, or other fatal error path).
 - `preflight.json`: present when preflight phase executed (normal path before adapter run).
+- `verification_config.json`: present when verification commands are configured.
+- `verification.json`: present when verification ran for the selected attempt (schema-valid agent output).
+- `verification_errors.json`: present when verification failed (even if agent exit code is zero).
+- `verification/*`: per-attempt verification logs (`cmd_*.stdout.txt` / `cmd_*.stderr.txt`).
 - `patch.diff` and `diff_numstat.json`: present only when edits are allowed and edits occurred.
 - `persona.source.md`, `persona.resolved.md`, `mission.source.md`, `mission.resolved.md`:
   present when catalog resolution succeeds.
@@ -108,6 +120,8 @@ Files that are conditionally present:
   - `error.json`
   - `agent_stderr.txt`
   - `agent_last_message.txt`
+  - `verification.json`
+  - `verification_errors.json`
   - `preflight.json`
   - `agent_attempts.json`
   - `run_meta.json`

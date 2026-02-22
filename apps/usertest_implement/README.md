@@ -20,6 +20,13 @@ Commit identity:
 - By default, `--commit` uses `usertest-implement <usertest-implement@local>` so agent commits are easy to spot.
 - Override via `--git-user-name` / `--git-user-email` (for example, to use a bot identity or a GitHub noreply email).
 
+Verification gate:
+
+- When using `--commit/--push/--pr`, `usertest-implement` configures a required verification step before handing off
+  (default: `scripts/smoke.ps1` on Windows local runs, `scripts/smoke.sh` otherwise).
+- Override the gate with `--verify-command "<cmd>"` (repeatable) and optional `--verify-timeout-seconds`.
+- Disable the default gate with `--skip-verify` (debugging only; expect CI failures).
+
 Quick checks:
 
 ```bash

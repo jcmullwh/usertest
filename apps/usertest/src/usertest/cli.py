@@ -547,6 +547,26 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     run_p.add_argument(
+        "--verify-command",
+        action="append",
+        dest="verification_commands",
+        default=[],
+        help=(
+            "Repeatable shell command to run as a required verification gate before handing off "
+            "(e.g., --verify-command \"python -m pytest -q\"). Fails the run (and may trigger "
+            "agent follow-ups) if any command exits non-zero."
+        ),
+    )
+    run_p.add_argument(
+        "--verify-timeout-seconds",
+        type=float,
+        default=None,
+        help=(
+            "Optional per-command timeout for --verify-command checks. "
+            "Non-positive values disable the timeout."
+        ),
+    )
+    run_p.add_argument(
         "--exec-backend",
         choices=["local", "docker"],
         default="local",
@@ -714,6 +734,19 @@ def build_parser() -> argparse.ArgumentParser:
             "Repeatable command name that must be available and permitted by policy during "
             "preflight (fails fast with structured diagnostics if missing/blocked)."
         ),
+    )
+    batch_p.add_argument(
+        "--verify-command",
+        action="append",
+        dest="verification_commands",
+        default=[],
+        help="Repeatable verification command applied to all targets (overridable per target).",
+    )
+    batch_p.add_argument(
+        "--verify-timeout-seconds",
+        type=float,
+        default=None,
+        help="Optional per-command timeout for --verify-command checks (applied to all targets).",
     )
     batch_p.add_argument(
         "--agent-system-prompt-file",
@@ -1236,6 +1269,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
             )
         preflight_required_commands.append(cmd.strip())
 
+    verification_commands: list[str] = []
+    for cmd in getattr(args, "verification_commands", None) or []:
+        if not isinstance(cmd, str) or not cmd.strip():
+            raise ValueError(f"--verify-command entries must be non-empty strings; got {cmd!r}.")
+        verification_commands.append(cmd.strip())
+
+    verification_timeout_seconds = getattr(args, "verification_timeout_seconds", None)
+    if verification_timeout_seconds is not None and verification_timeout_seconds <= 0:
+        verification_timeout_seconds = None
+
     result = run_once(
         cfg,
         RunRequest(
@@ -1255,6 +1298,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
             keep_workspace=bool(args.keep_workspace),
             preflight_commands=tuple(preflight_commands),
             preflight_required_commands=tuple(preflight_required_commands),
+            verification_commands=tuple(verification_commands),
+            verification_timeout_seconds=verification_timeout_seconds,
             exec_backend=str(args.exec_backend),
             exec_docker_context=exec_docker_context,
             exec_dockerfile=args.exec_dockerfile,
@@ -1383,6 +1428,13 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         getattr(args, "preflight_required_commands", None),
         flag="--require-preflight-command",
     )
+    base_verification_commands = _append_arg_list_errors(
+        getattr(args, "verification_commands", None),
+        flag="--verify-command",
+    )
+    base_verification_timeout_seconds = getattr(args, "verification_timeout_seconds", None)
+    if base_verification_timeout_seconds is not None and base_verification_timeout_seconds <= 0:
+        base_verification_timeout_seconds = None
     base_agent_config_overrides = _append_arg_list_errors(
         getattr(args, "agent_config", None),
         flag="--agent-config",
@@ -1496,8 +1548,30 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             )
             return None
 
+        def _optional_nullable_float(field: str, default: float | None) -> float | None:
+            raw = item.get(field, default)
+            if raw is None:
+                return default
+            if isinstance(raw, bool):
+                target_errors.append(f"targets[{idx}].{field} must be a number; got bool.")
+                return None
+            if isinstance(raw, (int, float)):
+                return float(raw)
+            if isinstance(raw, str):
+                try:
+                    return float(raw.strip())
+                except ValueError:
+                    target_errors.append(f"targets[{idx}].{field} must be a number; got {raw!r}.")
+                    return None
+            target_errors.append(
+                f"targets[{idx}].{field} must be a number; got {type(raw).__name__}."
+            )
+            return None
+
         preflight_commands: list[str] = list(base_preflight_commands)
         preflight_required_commands: list[str] = list(base_preflight_required_commands)
+        verification_commands: list[str] = list(base_verification_commands)
+        verification_timeout_seconds = base_verification_timeout_seconds
         agent_config_overrides: list[str] = list(base_agent_config_overrides)
 
         raw_agent_config = item.get("agent_config")
@@ -1545,6 +1619,27 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                     )
                 else:
                     preflight_required_commands.append(cmd.strip())
+
+        raw_verification_commands = item.get("verification_commands")
+        if raw_verification_commands is not None:
+            if not isinstance(raw_verification_commands, list):
+                target_errors.append(
+                    f"targets[{idx}].verification_commands must be a list of strings if present."
+                )
+            for jdx, cmd in enumerate(raw_verification_commands):
+                if not isinstance(cmd, str) or not cmd.strip():
+                    target_errors.append(
+                        f"targets[{idx}].verification_commands[{jdx}] must be a non-empty string; "
+                        f"got {cmd!r}."
+                    )
+                else:
+                    verification_commands.append(cmd.strip())
+
+        verification_timeout_seconds = _optional_nullable_float(
+            "verification_timeout_seconds", verification_timeout_seconds
+        )
+        if verification_timeout_seconds is not None and verification_timeout_seconds <= 0:
+            verification_timeout_seconds = None
 
         ref_value = _optional_str("ref", None)
         agent_value = _optional_str("agent", str(args.agent))
@@ -1595,6 +1690,8 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             keep_workspace=bool(args.keep_workspace),
             preflight_commands=tuple(preflight_commands),
             preflight_required_commands=tuple(preflight_required_commands),
+            verification_commands=tuple(verification_commands),
+            verification_timeout_seconds=verification_timeout_seconds,
             exec_backend=str(args.exec_backend),
             exec_docker_context=exec_docker_context,
             exec_dockerfile=args.exec_dockerfile,

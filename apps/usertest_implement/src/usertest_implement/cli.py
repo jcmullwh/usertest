@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -471,6 +472,27 @@ def _run_selected_ticket(
 
     keep_workspace = bool(args.keep_workspace) or bool(args.commit) or bool(args.push) or bool(args.pr)
 
+    verification_commands: list[str] = []
+    for cmd in getattr(args, "verification_commands", None) or []:
+        if not isinstance(cmd, str) or not cmd.strip():
+            raise SystemExit(f"--verify-command entries must be non-empty strings; got {cmd!r}.")
+        verification_commands.append(cmd.strip())
+
+    verification_timeout_seconds = getattr(args, "verify_timeout_seconds", None)
+    if verification_timeout_seconds is not None and verification_timeout_seconds <= 0:
+        verification_timeout_seconds = None
+
+    wants_handoff = bool(args.commit) or bool(args.push) or bool(args.pr)
+    if wants_handoff and not verification_commands and not bool(getattr(args, "skip_verify", False)):
+        if str(args.exec_backend).strip().lower() == "docker":
+            verification_commands = ["bash ./scripts/smoke.sh"]
+        elif os.name == "nt":
+            verification_commands = [
+                "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1"
+            ]
+        else:
+            verification_commands = ["bash ./scripts/smoke.sh"]
+
     ticket_blob = _compose_ticket_blob(selected)
     request = RunRequest(
         repo=repo_input,
@@ -484,6 +506,8 @@ def _run_selected_ticket(
         agent_config_overrides=tuple(args.agent_config_override or []),
         agent_append_system_prompt=ticket_blob,
         keep_workspace=keep_workspace,
+        verification_commands=tuple(verification_commands),
+        verification_timeout_seconds=verification_timeout_seconds,
         exec_backend=str(args.exec_backend),
         exec_keep_container=bool(args.exec_keep_container),
         exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
@@ -513,6 +537,8 @@ def _run_selected_ticket(
                 "keep_workspace": request.keep_workspace,
                 "exec_backend": request.exec_backend,
                 "exec_keep_container": request.exec_keep_container,
+                "verification_commands": list(request.verification_commands),
+                "verification_timeout_seconds": request.verification_timeout_seconds,
             },
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -902,6 +928,28 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--exec-keep-container", action="store_true")
 
     parser.add_argument("--dry-run", action="store_true")
+
+    parser.add_argument(
+        "--verify-command",
+        action="append",
+        dest="verification_commands",
+        default=[],
+        help=(
+            "Repeatable verification command gate that must pass before handing off "
+            "(default: run scripts/smoke.{ps1,sh} when --commit/--push/--pr)."
+        ),
+    )
+    parser.add_argument(
+        "--verify-timeout-seconds",
+        type=float,
+        default=None,
+        help="Optional per-command timeout for --verify-command (non-positive disables).",
+    )
+    parser.add_argument(
+        "--skip-verify",
+        action="store_true",
+        help="Disable default verification gate (useful for debugging).",
+    )
 
     parser.add_argument("--commit", action="store_true", help="Create branch + commit changes in kept workspace.")
     parser.add_argument("--branch", help="Branch name override.")
