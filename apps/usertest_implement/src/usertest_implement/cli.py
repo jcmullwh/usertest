@@ -24,10 +24,31 @@ except ModuleNotFoundError as exc:
         "Fix: `python -m pip install -r requirements-dev.txt`."
     ) from exc
 
+
+def _from_source_import_remediation(*, missing_module: str) -> str:
+    return (
+        f"Missing import `{missing_module}`.\n"
+        "This usually means you're running from source without editable installs or PYTHONPATH.\n"
+        "\n"
+        "Fix (from repo root):\n"
+        "  python -m pip install -r requirements-dev.txt\n"
+        "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
+        "  macOS/Linux: source scripts/set_pythonpath.sh\n"
+        "\n"
+        "Or install editables (recommended):\n"
+        "  python -m pip install -e apps/usertest_implement\n"
+    )
+
+
 try:
     from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
     from runner_core.pathing import slugify
+except ModuleNotFoundError as exc:
+    if exc.name == "runner_core":
+        raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
+    raise
 
+try:
     from usertest_implement.finalize import finalize_commit, finalize_push
     from usertest_implement.ledger import update_ledger_file
     from usertest_implement.model_detect import infer_observed_model
@@ -40,32 +61,8 @@ try:
         select_next_ticket_path,
     )
 except ModuleNotFoundError as exc:
-    if exc.name == "runner_core":
-        raise SystemExit(
-            "Missing import `runner_core`.\n"
-            "This usually means you're running from source without editable installs or PYTHONPATH.\n"
-            "\n"
-            "Fix (from repo root):\n"
-            "  python -m pip install -r requirements-dev.txt\n"
-            "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
-            "  macOS/Linux: source scripts/set_pythonpath.sh\n"
-            "\n"
-            "Or install editables (recommended):\n"
-            "  python -m pip install -e packages/runner_core\n"
-        ) from exc
     if exc.name == "usertest_implement":
-        raise SystemExit(
-            "Missing import `usertest_implement`.\n"
-            "This usually means you're running from source without editable installs or PYTHONPATH.\n"
-            "\n"
-            "Fix (from repo root):\n"
-            "  python -m pip install -r requirements-dev.txt\n"
-            "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
-            "  macOS/Linux: source scripts/set_pythonpath.sh\n"
-            "\n"
-            "Or install editables (recommended):\n"
-            "  python -m pip install -e apps/usertest_implement\n"
-        ) from exc
+        raise SystemExit(_from_source_import_remediation(missing_module="usertest_implement")) from exc
     raise
 
 

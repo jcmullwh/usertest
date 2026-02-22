@@ -31,65 +31,128 @@ except ModuleNotFoundError as exc:
         "Fix: `python -m pip install -r requirements-dev.txt`."
     ) from exc
 
-from backlog_core import (
-    add_atom_links,
-    build_backlog_document,
-    extract_backlog_atoms,
-    write_backlog,
-    write_backlog_atoms,
-)
-from backlog_core.aggregate_metrics import build_aggregate_metrics_atoms
-from backlog_core.backlog_policy import BacklogPolicyConfig, apply_backlog_policy
-from backlog_miner import (
-    load_prompt_manifest,
-    run_backlog_ensemble,
-    run_backlog_prompt,
-    run_labeler_jobs,
-)
-from backlog_repo import (
-    canonicalize_failure_atom_id as _canonicalize_failure_atom_id,
-)
-from backlog_repo import (
-    load_atom_actions_yaml as _load_atom_actions_yaml,
-)
-from backlog_repo import (
-    load_backlog_actions_yaml as _load_backlog_actions_yaml,
-)
-from backlog_repo import (
-    normalize_atom_status as _normalize_atom_status,
-)
-from backlog_repo import (
-    promote_atom_status as _promote_atom_status,
-)
-from backlog_repo import (
-    scan_plan_ticket_index as _scan_plan_ticket_index,
-)
-from backlog_repo import (
-    sorted_unique_strings as _sorted_unique_strings,
-)
-from backlog_repo import (
-    sync_atom_actions_from_plan_folders as _sync_atom_actions_from_plan_folders,
-)
-from backlog_repo import (
-    write_atom_actions_yaml as _write_atom_actions_yaml,
-)
-from backlog_repo.export import ticket_export_fingerprint
-from reporter import (
-    analyze_report_history,
-    build_window_summary,
-    write_issue_analysis,
-    write_window_summary,
-)
-from run_artifacts.history import (
-    iter_report_history,
-    load_run_record,
-    select_recent_run_dirs,
-    write_report_history_jsonl,
-)
-from runner_core import RunnerConfig, find_repo_root
-from runner_core.pathing import slugify
-from runner_core.target_acquire import acquire_target
-from triage_engine import cluster_items, extract_path_anchors_from_chunks
+
+def _from_source_import_remediation(*, missing_module: str) -> str:
+    return (
+        f"Missing import `{missing_module}`.\n"
+        "This usually means you're running from source without editable installs or PYTHONPATH.\n"
+        "\n"
+        "Fix (from repo root):\n"
+        "  python -m pip install -r requirements-dev.txt\n"
+        "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
+        "  macOS/Linux: source scripts/set_pythonpath.sh\n"
+        "\n"
+        "Or install editables (recommended):\n"
+        "  python -m pip install -e apps/usertest_backlog\n"
+    )
+
+
+try:
+    from backlog_core import (
+        add_atom_links,
+        build_backlog_document,
+        extract_backlog_atoms,
+        write_backlog,
+        write_backlog_atoms,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name == "backlog_core":
+        raise SystemExit(_from_source_import_remediation(missing_module="backlog_core")) from exc
+    raise
+
+try:
+    from backlog_core.aggregate_metrics import build_aggregate_metrics_atoms
+    from backlog_core.backlog_policy import BacklogPolicyConfig, apply_backlog_policy
+except ModuleNotFoundError as exc:
+    if exc.name == "backlog_core":
+        raise SystemExit(_from_source_import_remediation(missing_module="backlog_core")) from exc
+    raise
+
+try:
+    from backlog_miner import (
+        load_prompt_manifest,
+        run_backlog_ensemble,
+        run_backlog_prompt,
+        run_labeler_jobs,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name == "backlog_miner":
+        raise SystemExit(_from_source_import_remediation(missing_module="backlog_miner")) from exc
+    raise
+
+try:
+    from backlog_repo import (
+        canonicalize_failure_atom_id as _canonicalize_failure_atom_id,
+    )
+    from backlog_repo import (
+        load_atom_actions_yaml as _load_atom_actions_yaml,
+    )
+    from backlog_repo import (
+        load_backlog_actions_yaml as _load_backlog_actions_yaml,
+    )
+    from backlog_repo import (
+        normalize_atom_status as _normalize_atom_status,
+    )
+    from backlog_repo import (
+        promote_atom_status as _promote_atom_status,
+    )
+    from backlog_repo import (
+        scan_plan_ticket_index as _scan_plan_ticket_index,
+    )
+    from backlog_repo import (
+        sorted_unique_strings as _sorted_unique_strings,
+    )
+    from backlog_repo import (
+        sync_atom_actions_from_plan_folders as _sync_atom_actions_from_plan_folders,
+    )
+    from backlog_repo import (
+        write_atom_actions_yaml as _write_atom_actions_yaml,
+    )
+    from backlog_repo.export import ticket_export_fingerprint
+except ModuleNotFoundError as exc:
+    if exc.name == "backlog_repo":
+        raise SystemExit(_from_source_import_remediation(missing_module="backlog_repo")) from exc
+    raise
+
+try:
+    from reporter import (
+        analyze_report_history,
+        build_window_summary,
+        write_issue_analysis,
+        write_window_summary,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name == "reporter":
+        raise SystemExit(_from_source_import_remediation(missing_module="reporter")) from exc
+    raise
+
+try:
+    from run_artifacts.history import (
+        iter_report_history,
+        load_run_record,
+        select_recent_run_dirs,
+        write_report_history_jsonl,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name == "run_artifacts":
+        raise SystemExit(_from_source_import_remediation(missing_module="run_artifacts")) from exc
+    raise
+
+try:
+    from runner_core import RunnerConfig, find_repo_root
+    from runner_core.pathing import slugify
+    from runner_core.target_acquire import acquire_target
+except ModuleNotFoundError as exc:
+    if exc.name == "runner_core":
+        raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
+    raise
+
+try:
+    from triage_engine import cluster_items, extract_path_anchors_from_chunks
+except ModuleNotFoundError as exc:
+    if exc.name == "triage_engine":
+        raise SystemExit(_from_source_import_remediation(missing_module="triage_engine")) from exc
+    raise
 
 from usertest_backlog.triage_backlog import (
     load_issue_items,
