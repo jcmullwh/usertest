@@ -25,6 +25,7 @@ READLIKE_COMMANDS = {
 }
 CHAIN_OPERATORS = {"&&", ";", "||", "|"}
 _WINDOWS_DRIVE_POSIX_RE = re.compile(r"^/([a-zA-Z])/(.*)$")
+_WINDOWS_DRIVE_CLEAN_RE = re.compile(r"^([a-zA-Z]):/{2,}")
 _MAX_OUTPUT_EXCERPT_CHARS = 2_000
 
 
@@ -57,6 +58,11 @@ def _format_argv(argv: list[str]) -> str:
 
 def _strip_windows_extended_prefix(path_str: str) -> str:
     return path_str[4:] if path_str.startswith("\\\\?\\") else path_str
+
+
+def _render_path(path: Path) -> str:
+    rendered = str(path).replace("\\", "/")
+    return _WINDOWS_DRIVE_CLEAN_RE.sub(r"\1:/", rendered)
 
 
 def _maybe_windows_drive_posix_path(path_str: str) -> Path | None:
@@ -430,7 +436,7 @@ def normalize_codex_events(
                 }
 
                 if cwd is not None:
-                    data["cwd"] = str(cwd).replace("\\", "/")
+                    data["cwd"] = _render_path(cwd)
 
                 if exit_code != 0:
                     output_text = _join_streams(msg.get("stdout"), msg.get("stderr"))
