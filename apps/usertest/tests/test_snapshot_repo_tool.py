@@ -209,3 +209,52 @@ def test_snapshot_repo_non_git_repo_has_actionable_hint(tmp_path: Path) -> None:
     assert "not a git repository" in proc.stderr.lower()
     assert "--repo-root" in proc.stderr
     assert "Traceback" not in proc.stderr
+
+
+def test_snapshot_repo_missing_repo_root_is_flag_aware(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    missing_repo_root = tmp_path / "missing_repo_root"
+    out_zip = tmp_path / "out.zip"
+    proc = _run_snapshot_repo(
+        repo_root=repo_root,
+        args=[
+            "--repo-root",
+            str(missing_repo_root),
+            "--out",
+            str(out_zip),
+        ],
+    )
+
+    assert proc.returncode == 2
+    assert "ERROR:" in proc.stderr
+    assert "--repo-root" in proc.stderr
+    assert "does not exist" in proc.stderr.lower()
+    assert "fatal:" not in proc.stderr.lower()
+    assert "Traceback" not in proc.stderr
+    assert "SNAPSHOT PLAN" not in proc.stdout
+
+
+def test_snapshot_repo_repo_root_file_is_flag_aware(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    repo_root_file = tmp_path / "repo_root_file"
+    repo_root_file.write_text("not a repo", encoding="utf-8")
+
+    out_zip = tmp_path / "out.zip"
+    proc = _run_snapshot_repo(
+        repo_root=repo_root,
+        args=[
+            "--repo-root",
+            str(repo_root_file),
+            "--out",
+            str(out_zip),
+        ],
+    )
+
+    assert proc.returncode == 2
+    assert "ERROR:" in proc.stderr
+    assert "--repo-root" in proc.stderr
+    assert "not a directory" in proc.stderr.lower()
+    assert "Traceback" not in proc.stderr
+    assert "SNAPSHOT PLAN" not in proc.stdout
