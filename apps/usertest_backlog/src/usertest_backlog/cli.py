@@ -108,6 +108,9 @@ try:
     from backlog_repo import (
         write_atom_actions_yaml as _write_atom_actions_yaml,
     )
+    from backlog_repo import (
+        write_backlog_actions_yaml as _write_backlog_actions_yaml,
+    )
     from backlog_repo.export import ticket_export_fingerprint
 except ModuleNotFoundError as exc:
     if exc.name == "backlog_repo":
@@ -3769,12 +3772,9 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     ux_plan_tickets_updated = 0
     ux_idea_files_updated = 0
     ux_tickets_deferred = 0
-<<<<<<< HEAD
     swept_actioned_queue_dupes_removed = 0
     swept_actioned_bucket_dupes_removed = 0
-=======
     actions_mutated = False
->>>>>>> 994af62 (backlog: skip deferred exports, write action ledger)
 
     for ticket in tickets:
         stage = (_coerce_string(ticket.get("stage")) or "triage").strip()
