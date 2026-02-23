@@ -31,6 +31,7 @@ The backlog CLI provides tools to mine and analyze data produced by usertest, ge
 - **Tutorial:** `docs/tutorials/getting-started.md`
 - **Monorepo setup + scaffold workflow:** `docs/tutorials/monorepo-setup.md`
 - **One-command smoke (per OS):** `scripts/smoke.ps1` (Windows) / `scripts/smoke.sh` (macOS/Linux)
+- **CLI smoke (from a source checkout):** `usertest smoke` (wraps the OS-specific smoke script)
 
 ## Fastest output (no setup)
 
@@ -105,6 +106,9 @@ Run this first in any setup path:
 
 These commands are self-contained (no implicit prior shell state) and enforce non-zero exit on
 failure.
+
+If you already have the CLI installed in an environment, you can also run `usertest smoke` (it
+delegates to the OS-specific smoke script in this repo checkout).
 
 Windows PowerShell:
 

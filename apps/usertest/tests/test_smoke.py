@@ -79,6 +79,15 @@ def test_parser_smoke() -> None:
     args = parser.parse_args(["report", "--run-dir", "runs\\x\\y\\codex\\0"])
     assert args.run_dir == Path("runs\\x\\y\\codex\\0")
 
+    args = parser.parse_args(["smoke"])
+    assert args.skip_install is False
+    assert args.use_pythonpath is False
+    assert args.require_doctor is False
+    args = parser.parse_args(["smoke", "--skip-install", "--use-pythonpath", "--require-doctor"])
+    assert args.skip_install is True
+    assert args.use_pythonpath is True
+    assert args.require_doctor is True
+
     args = parser.parse_args(["reports", "analyze", "--target", "x"])
     assert args.target == "x"
     args = parser.parse_args(

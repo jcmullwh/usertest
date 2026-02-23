@@ -959,6 +959,31 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to monorepo root (auto-detected by default).",
     )
 
+    smoke_p = sub.add_parser(
+        "smoke",
+        help="Run repository smoke checks (wrapper for scripts/smoke.ps1 or scripts/smoke.sh).",
+    )
+    smoke_p.add_argument(
+        "--repo-root",
+        type=Path,
+        help="Path to monorepo root (auto-detected by default).",
+    )
+    smoke_p.add_argument(
+        "--skip-install",
+        action="store_true",
+        help="Pass through to smoke script (skip dependency installs).",
+    )
+    smoke_p.add_argument(
+        "--use-pythonpath",
+        action="store_true",
+        help="Pass through to smoke script (use PYTHONPATH mode instead of editable installs).",
+    )
+    smoke_p.add_argument(
+        "--require-doctor",
+        action="store_true",
+        help="Pass through to smoke script (fail if scaffold doctor tool checks cannot run).",
+    )
+
     init_p = sub.add_parser(
         "init-usertest",
         help="Initialize target .usertest/ scaffold (catalog.yaml).",
@@ -3495,6 +3520,66 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_smoke(args: argparse.Namespace) -> int:
+    """Run the monorepo smoke script for this repo checkout."""
+    repo_root: Path
+    if args.repo_root is not None:
+        repo_root = Path(args.repo_root).resolve()
+        if not repo_root.exists():
+            print(f"Smoke failed: --repo-root does not exist: {repo_root}", file=sys.stderr)
+            return 2
+    else:
+        try:
+            repo_root = find_repo_root()
+        except FileNotFoundError as e:
+            print(
+                "Smoke failed: could not auto-detect monorepo root.\n"
+                "Fix: run from a source checkout, or pass --repo-root.\n"
+                f"Details: {e}",
+                file=sys.stderr,
+            )
+            return 2
+
+    if sys.platform == "win32":
+        script_path = repo_root / "scripts" / "smoke.ps1"
+        if not script_path.exists():
+            print(f"Smoke failed: missing script: {script_path}", file=sys.stderr)
+            return 2
+        cmd = [
+            "powershell",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script_path),
+        ]
+        if args.skip_install:
+            cmd.append("-SkipInstall")
+        if args.use_pythonpath:
+            cmd.append("-UsePythonPath")
+        if args.require_doctor:
+            cmd.append("-RequireDoctor")
+    else:
+        script_path = repo_root / "scripts" / "smoke.sh"
+        if not script_path.exists():
+            print(f"Smoke failed: missing script: {script_path}", file=sys.stderr)
+            return 2
+        cmd = ["bash", str(script_path)]
+        if args.skip_install:
+            cmd.append("--skip-install")
+        if args.use_pythonpath:
+            cmd.append("--use-pythonpath")
+        if args.require_doctor:
+            cmd.append("--require-doctor")
+
+    try:
+        completed = subprocess.run(cmd, cwd=str(repo_root))
+    except FileNotFoundError as e:
+        print(f"Smoke failed: missing executable: {e}", file=sys.stderr)
+        return 2
+    return int(completed.returncode)
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the CLI entrypoint."""
     parser = build_parser()
@@ -3513,6 +3598,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_cmd_lint(args))
     if args.cmd == "report":
         raise SystemExit(_cmd_report(args))
+    if args.cmd == "smoke":
+        raise SystemExit(_cmd_smoke(args))
     if args.cmd == "init-usertest":
         raise SystemExit(_cmd_init_users(args))
     if args.cmd == "personas":
