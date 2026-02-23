@@ -20,6 +20,16 @@ PLAN_BUCKET_TO_ATOM_STATUS: dict[str, str] = {
     "5 - complete": "actioned",
     "0.1 - deferred": "actioned",
 }
+
+ACTIONED_PLAN_BUCKET_PRIORITY: list[str] = [
+    "5 - complete",
+    "4 - for_review",
+    "3 - in_progress",
+    "0.1 - deferred",
+]
+_ACTIONED_BUCKET_RANK: dict[str, int] = {
+    bucket: rank for rank, bucket in enumerate(reversed(ACTIONED_PLAN_BUCKET_PRIORITY), start=1)
+}
 PLAN_TICKET_FILENAME_RE = re.compile(
     r"^(?P<date>[0-9]{8})_(?P<ticket_id>BLG-[0-9]{3})_(?P<fingerprint>[0-9a-f]{16})_.+\.md$"
 )
@@ -106,6 +116,58 @@ def scan_plan_ticket_index(*, owner_root: Path) -> dict[str, dict[str, Any]]:
             index[fingerprint] = meta
 
     return index
+
+
+def dedupe_actioned_plan_ticket_files(*, owner_root: Path) -> int:
+    """Remove stale duplicates across actioned plan buckets.
+
+    When the same fingerprint exists in multiple actioned buckets (e.g.
+    `3 - in_progress` and `5 - complete`), keep only the most-advanced bucket's
+    files and delete the lower-bucket copies.
+
+    Returns
+    -------
+    int
+        Number of files removed.
+    """
+
+    plans_dir = owner_root / ".agents" / "plans"
+    if not plans_dir.exists() or not plans_dir.is_dir():
+        return 0
+
+    removed = 0
+    index = scan_plan_ticket_index(owner_root=owner_root)
+    for meta in index.values():
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("status") != "actioned":
+            continue
+        paths_raw = meta.get("paths", [])
+        paths = [Path(p) for p in paths_raw if isinstance(p, str) and p]
+
+        actioned_buckets: set[str] = set()
+        by_bucket: dict[str, list[Path]] = {}
+        for path in paths:
+            bucket = path.parent.name
+            if bucket not in _ACTIONED_BUCKET_RANK:
+                continue
+            actioned_buckets.add(bucket)
+            by_bucket.setdefault(bucket, []).append(path)
+
+        if len(actioned_buckets) <= 1:
+            continue
+
+        keep_bucket = max(actioned_buckets, key=lambda b: _ACTIONED_BUCKET_RANK.get(b, 0))
+        for bucket, bucket_paths in by_bucket.items():
+            if bucket == keep_bucket:
+                continue
+            for path in bucket_paths:
+                try:
+                    path.unlink(missing_ok=True)
+                except OSError:
+                    continue
+                removed += 1
+    return removed
 
 
 def sync_atom_actions_from_plan_folders(

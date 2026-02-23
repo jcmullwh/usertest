@@ -85,6 +85,7 @@ try:
         canonicalize_failure_atom_id as _canonicalize_failure_atom_id,
     )
     from backlog_repo import (
+        dedupe_actioned_plan_ticket_files as _dedupe_actioned_plan_ticket_files,
         load_atom_actions_yaml as _load_atom_actions_yaml,
     )
     from backlog_repo import (
@@ -1508,7 +1509,7 @@ def _cleanup_stale_ticket_idea_files(
         return
     pattern = f"*_{ticket_id_slug}_{fingerprint}_*.md"
 
-    candidate_roots: set[Path] = {repo_root.resolve()}
+    candidate_roots: set[Path] = {repo_root.resolve(), owner_repo_root.resolve()}
     for candidate in (
         _resolve_local_repo_input_root(repo_input=scope_repo_input, repo_root=repo_root),
         _resolve_local_repo_input_root(repo_input=cli_repo_input, repo_root=repo_root),
@@ -1531,6 +1532,48 @@ def _cleanup_stale_ticket_idea_files(
                 if keep_path_resolved is not None and stale_resolved == keep_path_resolved:
                     continue
                 stale.unlink(missing_ok=True)
+
+
+def _cleanup_actioned_plan_queue_duplicates(*, owner_repo_root: Path) -> int:
+    """Remove queued-bucket plan files for fingerprints already marked actioned.
+
+    This is a best-effort hygiene sweep to eliminate stale duplicates that can
+    linger across runs even when the current backlog no longer contains that
+    fingerprint.
+
+    Returns
+    -------
+    int
+        Number of files removed.
+    """
+
+    removed = 0
+    owner_root = owner_repo_root.resolve()
+    queue_dirs = {p.resolve() for p in _ticket_queue_dirs(owner_root)}
+    if not queue_dirs:
+        return 0
+
+    index = _scan_plan_ticket_index(owner_root=owner_root)
+    for meta in index.values():
+        if not isinstance(meta, dict):
+            continue
+        if _normalize_atom_status(_coerce_string(meta.get("status"))) != "actioned":
+            continue
+        paths = [item for item in meta.get("paths", []) if isinstance(item, str) and item]
+        for path_s in paths:
+            candidate = Path(path_s)
+            try:
+                candidate_parent = candidate.parent.resolve()
+            except OSError:
+                continue
+            if candidate_parent not in queue_dirs:
+                continue
+            if candidate.suffix.lower() != ".md":
+                continue
+            if candidate.exists():
+                candidate.unlink(missing_ok=True)
+                removed += 1
+    return removed
 
 
 def _read_text_excerpt(path: Path, *, max_bytes: int) -> str:
@@ -3727,6 +3770,8 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     ux_plan_tickets_updated = 0
     ux_idea_files_updated = 0
     ux_tickets_deferred = 0
+    swept_actioned_queue_dupes_removed = 0
+    swept_actioned_bucket_dupes_removed = 0
 
     for ticket in tickets:
         stage = (_coerce_string(ticket.get("stage")) or "triage").strip()
@@ -3821,6 +3866,12 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         if not include_actioned and not skip_plan_folder_dedupe:
             owner_key = owner_repo_root.resolve()
             if owner_key not in plan_index_cache:
+                swept_actioned_queue_dupes_removed += _cleanup_actioned_plan_queue_duplicates(
+                    owner_repo_root=owner_key,
+                )
+                swept_actioned_bucket_dupes_removed += _dedupe_actioned_plan_ticket_files(
+                    owner_root=owner_key,
+                )
                 plan_index_cache[owner_key] = _scan_plan_ticket_index(owner_root=owner_key)
             existing = plan_index_cache[owner_key].get(fingerprint)
             if isinstance(existing, dict):
@@ -3828,6 +3879,17 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 desired_status = _normalize_atom_status(_coerce_string(existing.get("status")))
                 if desired_status not in ("queued", "actioned"):
                     desired_status = "queued"
+
+                if desired_status == "actioned":
+                    _cleanup_stale_ticket_idea_files(
+                        ticket=ticket,
+                        fingerprint=fingerprint,
+                        owner_repo_root=owner_repo_root,
+                        repo_root=repo_root,
+                        scope_repo_input=backlog_scope_repo_input,
+                        cli_repo_input=repo_input,
+                    )
+
                 queue_paths = [
                     item for item in existing.get("paths", []) if isinstance(item, str) and item
                 ]
@@ -3971,6 +4033,8 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             "skipped_severity": skipped_severity,
             "actioned_total": len(actions),
             "idea_files_written": len(idea_files_written),
+            "swept_actioned_queue_dupes_removed": swept_actioned_queue_dupes_removed,
+            "swept_actioned_bucket_dupes_removed": swept_actioned_bucket_dupes_removed,
             "ux_recommendations_loaded": len(ux_recommendations_by_ticket_id),
             "ux_plan_tickets_updated": ux_plan_tickets_updated,
             "ux_idea_files_updated": ux_idea_files_updated,

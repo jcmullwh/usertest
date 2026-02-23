@@ -8,7 +8,7 @@ import yaml
 from backlog_repo.export import ticket_export_fingerprint
 from runner_core import find_repo_root
 
-from usertest_backlog.cli import main
+from usertest_backlog.cli import _cleanup_stale_ticket_idea_files, main
 
 
 def _write_json(path: Path, obj: object) -> None:
@@ -299,6 +299,273 @@ def test_reports_export_tickets_skips_when_plan_ticket_fingerprint_exists(tmp_pa
     canonical_failure_atom_id = "target_a/20260102T000000Z/claude/0:run_failure_event:1"
     assert atoms[canonical_failure_atom_id]["status"] == "actioned"
     assert legacy_failure_atom_id in atoms[canonical_failure_atom_id]["derived_from_atom_ids"]
+
+
+def test_reports_export_tickets_cleans_stale_queued_plan_files_when_actioned_plan_exists(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    ticket = {
+        "ticket_id": "BLG-001",
+        "title": "Add `usertest smoke` shortcut command",
+        "problem": "Operators want a single obvious entry point.",
+        "severity": "low",
+        "confidence": 0.6,
+        "stage": "ready_for_ticket",
+        "evidence_atom_ids": ["target_a/20260102T000000Z/claude/0:report_validation_error:1"],
+        "change_surface": {
+            "user_visible": True,
+            "kinds": ["new_command"],
+            "notes": "New command proposed.",
+        },
+        "breadth": {"missions": 3, "targets": 2, "repo_inputs": 2, "agents": 2, "runs": 8},
+        "suggested_owner": "docs",
+    }
+
+    backlog_path = compiled_dir / "target_a.backlog.json"
+    _write_json(
+        backlog_path,
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [ticket],
+        },
+    )
+
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    fingerprint = ticket_export_fingerprint(ticket)
+    complete_dir = owner_repo / ".agents" / "plans" / "5 - complete"
+    complete_dir.mkdir(parents=True, exist_ok=True)
+    complete_path = complete_dir / f"20260211_BLG-001_{fingerprint}_already-done.md"
+    complete_path.write_text("# Already done\n", encoding="utf-8")
+
+    ideas_dir = owner_repo / ".agents" / "plans" / "1 - ideas"
+    ideas_dir.mkdir(parents=True, exist_ok=True)
+    stale_idea_path = ideas_dir / f"20260212_BLG-001_{fingerprint}_stale-queue-copy.md"
+    stale_idea_path.write_text("# Stale copy\n", encoding="utf-8")
+
+    assert complete_path.exists()
+    assert stale_idea_path.exists()
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+            ]
+        )
+    assert exc.value.code == 0
+
+    export_doc = json.loads(
+        (compiled_dir / "target_a.tickets_export.json").read_text(encoding="utf-8")
+    )
+    assert export_doc["stats"]["exports_total"] == 0
+    assert export_doc["stats"]["skipped_existing_plan"] == 1
+    assert export_doc["stats"]["idea_files_written"] == 0
+
+    assert complete_path.exists()
+    assert not stale_idea_path.exists()
+
+
+def test_cleanup_stale_ticket_idea_files_includes_owner_repo_root_when_no_repo_inputs(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo_root"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    owner_repo_root = tmp_path / "owner_repo_root"
+    owner_repo_root.mkdir(parents=True, exist_ok=True)
+
+    fingerprint = "deadbeef"
+    ideas_dir = owner_repo_root / ".agents" / "plans" / "1 - ideas"
+    ideas_dir.mkdir(parents=True, exist_ok=True)
+    stale_idea_path = ideas_dir / f"20260212_BLG-001_{fingerprint}_stale-queue-copy.md"
+    stale_idea_path.write_text("# Stale copy\n", encoding="utf-8")
+    assert stale_idea_path.exists()
+
+    _cleanup_stale_ticket_idea_files(
+        ticket={"ticket_id": "BLG-001"},
+        fingerprint=fingerprint,
+        owner_repo_root=owner_repo_root,
+        repo_root=repo_root,
+        scope_repo_input=None,
+        cli_repo_input=None,
+    )
+
+    assert not stale_idea_path.exists()
+
+
+def test_reports_export_tickets_sweeps_actioned_queue_duplicates_not_in_backlog(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    backlog_path = compiled_dir / "target_a.backlog.json"
+    _write_json(
+        backlog_path,
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [
+                {
+                    "ticket_id": "BLG-001",
+                    "title": "Something else",
+                    "problem": "Irrelevant for sweep.",
+                    "severity": "low",
+                    "confidence": 0.5,
+                    "stage": "ready_for_ticket",
+                    "evidence_atom_ids": [],
+                    "change_surface": {"user_visible": False, "kinds": [], "notes": ""},
+                    "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
+                    "suggested_owner": "docs",
+                }
+            ],
+        },
+    )
+
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    # Fingerprint not present in backlog: should still be swept.
+    stale_fp = "deadbeefdeadbeef"
+    complete_dir = owner_repo / ".agents" / "plans" / "5 - complete"
+    complete_dir.mkdir(parents=True, exist_ok=True)
+    (complete_dir / f"20260211_BLG-999_{stale_fp}_already-done.md").write_text(
+        "# Already done\n",
+        encoding="utf-8",
+    )
+    ideas_dir = owner_repo / ".agents" / "plans" / "1 - ideas"
+    ideas_dir.mkdir(parents=True, exist_ok=True)
+    stale_idea_path = ideas_dir / f"20260212_BLG-999_{stale_fp}_stale-queue-copy.md"
+    stale_idea_path.write_text("# Stale copy\n", encoding="utf-8")
+    assert stale_idea_path.exists()
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+            ]
+        )
+    assert exc.value.code == 0
+
+    export_doc = json.loads(
+        (compiled_dir / "target_a.tickets_export.json").read_text(encoding="utf-8")
+    )
+    assert export_doc["stats"]["swept_actioned_queue_dupes_removed"] >= 1
+    assert not stale_idea_path.exists()
+
+
+def test_reports_export_tickets_sweeps_actioned_bucket_duplicates_not_in_backlog(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    backlog_path = compiled_dir / "target_a.backlog.json"
+    _write_json(
+        backlog_path,
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [
+                {
+                    "ticket_id": "BLG-001",
+                    "title": "Sweep trigger",
+                    "problem": "Irrelevant for sweep.",
+                    "severity": "low",
+                    "confidence": 0.5,
+                    "stage": "ready_for_ticket",
+                    "evidence_atom_ids": [],
+                    "change_surface": {"user_visible": False, "kinds": [], "notes": ""},
+                    "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
+                    "suggested_owner": "docs",
+                }
+            ],
+        },
+    )
+
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    stale_fp = "deadbeefdeadbeef"
+    in_progress_dir = owner_repo / ".agents" / "plans" / "3 - in_progress"
+    complete_dir = owner_repo / ".agents" / "plans" / "5 - complete"
+    in_progress_dir.mkdir(parents=True, exist_ok=True)
+    complete_dir.mkdir(parents=True, exist_ok=True)
+
+    in_progress_path = in_progress_dir / f"20260212_BLG-999_{stale_fp}_stale-in-progress.md"
+    complete_path = complete_dir / f"20260212_BLG-999_{stale_fp}_done.md"
+    in_progress_path.write_text("# In progress\n", encoding="utf-8")
+    complete_path.write_text("# Done\n", encoding="utf-8")
+    assert in_progress_path.exists()
+    assert complete_path.exists()
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+            ]
+        )
+    assert exc.value.code == 0
+
+    export_doc = json.loads(
+        (compiled_dir / "target_a.tickets_export.json").read_text(encoding="utf-8")
+    )
+    assert export_doc["stats"]["swept_actioned_bucket_dupes_removed"] >= 1
+    assert not in_progress_path.exists()
+    assert complete_path.exists()
 
 
 def test_reports_export_tickets_attaches_ux_review_and_promotes_docs(tmp_path: Path) -> None:

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from backlog_repo.plan_index import scan_plan_ticket_index
+from backlog_repo.plan_index import dedupe_actioned_plan_ticket_files, scan_plan_ticket_index
 
 
 @dataclass(frozen=True)
@@ -108,15 +108,85 @@ def move_ticket_file(
     to_bucket: str,
     dry_run: bool,
 ) -> Path:
+    if not dry_run:
+        dedupe_actioned_plan_ticket_files(owner_root=owner_root)
     index = build_ticket_index(owner_root=owner_root)
     entry = index.get(fingerprint)
     if entry is None:
         raise ValueError(f"Unknown fingerprint: {fingerprint}")
-    if len(entry.paths) != 1:
-        raise ValueError(
-            f"Expected exactly 1 ticket file for fingerprint {fingerprint}, got {len(entry.paths)}"
-        )
-    src_path = entry.paths[0]
+
+    # Prefer not to move a ticket "backwards" once it's in a more-advanced actioned bucket.
+    actioned_rank = {"3 - in_progress": 1, "4 - for_review": 2, "5 - complete": 3, "0.1 - deferred": 0}
+    to_rank = actioned_rank.get(to_bucket)
+    bucket_to_paths: dict[str, list[Path]] = {}
+    for path in entry.paths:
+        bucket_to_paths.setdefault(path.parent.name, []).append(path)
+
+    best_existing_bucket: str | None = None
+    best_existing_rank: int | None = None
+    for bucket in bucket_to_paths:
+        rank = actioned_rank.get(bucket)
+        if rank is None:
+            continue
+        if best_existing_rank is None or rank > best_existing_rank:
+            best_existing_rank = rank
+            best_existing_bucket = bucket
+
+    if to_rank is not None and best_existing_rank is not None and best_existing_rank > to_rank:
+        existing_paths = sorted(bucket_to_paths.get(best_existing_bucket or "", []), key=lambda p: str(p))
+        if existing_paths:
+            return existing_paths[0]
+
+    # If it's already in the destination bucket, treat as a no-op.
+    already_paths = sorted(bucket_to_paths.get(to_bucket, []), key=lambda p: str(p))
+    if already_paths:
+        return already_paths[0]
+
+    # Choose a sensible source bucket based on intended promotion direction.
+    if to_bucket == "4 - for_review":
+        source_priority = [
+            "3 - in_progress",
+            "2 - ready",
+            "1.5 - to_plan",
+            "1 - ideas",
+            "0.5 - to_triage",
+            "5 - complete",
+            "0.1 - deferred",
+        ]
+    elif to_bucket == "5 - complete":
+        source_priority = [
+            "4 - for_review",
+            "3 - in_progress",
+            "2 - ready",
+            "1.5 - to_plan",
+            "1 - ideas",
+            "0.5 - to_triage",
+            "0.1 - deferred",
+        ]
+    else:
+        source_priority = [
+            "2 - ready",
+            "1.5 - to_plan",
+            "1 - ideas",
+            "0.5 - to_triage",
+            "3 - in_progress",
+            "4 - for_review",
+            "5 - complete",
+            "0.1 - deferred",
+        ]
+
+    src_path: Path | None = None
+    for bucket in source_priority:
+        candidates = sorted(bucket_to_paths.get(bucket, []), key=lambda p: str(p))
+        if candidates:
+            src_path = candidates[0]
+            break
+    if src_path is None:
+        # Fall back to any known path.
+        candidates = sorted(entry.paths, key=lambda p: str(p))
+        if not candidates:
+            raise ValueError(f"Missing ticket files for fingerprint: {fingerprint}")
+        src_path = candidates[0]
     plans_dir = owner_root / ".agents" / "plans"
     dest_dir = plans_dir / to_bucket
     if not dest_dir.exists() or not dest_dir.is_dir():
@@ -126,6 +196,7 @@ def move_ticket_file(
         return dest_path
     dest_dir.mkdir(parents=True, exist_ok=True)
     src_path.replace(dest_path)
+    dedupe_actioned_plan_ticket_files(owner_root=owner_root)
     return dest_path
 
 

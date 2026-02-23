@@ -79,3 +79,36 @@ def test_select_next_ticket_path_prefers_research(tmp_path: Path) -> None:
     assert selected is not None
     _, path = selected
     assert path == research_path
+
+
+def test_move_ticket_file_dedupes_actioned_buckets_and_prevents_downgrade(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    complete_dir = owner_root / ".agents" / "plans" / "5 - complete"
+    in_progress_dir = owner_root / ".agents" / "plans" / "3 - in_progress"
+    for_review_dir = owner_root / ".agents" / "plans" / "4 - for_review"
+    complete_dir.mkdir(parents=True)
+    in_progress_dir.mkdir(parents=True)
+    for_review_dir.mkdir(parents=True)
+
+    fingerprint = "deadbeefdeadbeef"
+    name = f"20260220_BLG-003_{fingerprint}_fix-something.md"
+    complete_path = complete_dir / name
+    in_progress_path = in_progress_dir / name
+    complete_path.write_text("# Done\n\n- Fingerprint: `deadbeefdeadbeef`\n", encoding="utf-8")
+    in_progress_path.write_text(
+        "# WIP\n\n- Fingerprint: `deadbeefdeadbeef`\n",
+        encoding="utf-8",
+    )
+    assert complete_path.exists()
+    assert in_progress_path.exists()
+
+    # Attempting to move "back" from complete -> for_review should no-op to complete.
+    dest = move_ticket_file(
+        owner_root=owner_root,
+        fingerprint=fingerprint,
+        to_bucket="4 - for_review",
+        dry_run=False,
+    )
+    assert dest == complete_path
+    assert complete_path.exists()
+    assert not in_progress_path.exists()
