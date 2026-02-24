@@ -361,9 +361,12 @@ def normalize_claude_events(
                                                 len(file_text), idx + len(old_string) + 200
                                             )
                                             snippet = file_text[before:after]
+                                            rel_path = _safe_relpath(
+                                                candidate, workspace_root
+                                            )
                                             context_text = "\n".join(
                                                 [
-                                                    f"file={_safe_relpath(candidate, workspace_root)}",
+                                                    f"file={rel_path}",
                                                     f"found_occurrences={found_occurrences}",
                                                     "",
                                                     snippet,

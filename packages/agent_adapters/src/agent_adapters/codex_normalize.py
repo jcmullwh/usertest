@@ -445,7 +445,8 @@ def normalize_codex_events(
                     command_failure_idx += 1
                     stdout_text = msg.get("stdout") if isinstance(msg.get("stdout"), str) else ""
                     stderr_text = msg.get("stderr") if isinstance(msg.get("stderr"), str) else ""
-                    duration = msg.get("duration") if isinstance(msg.get("duration"), dict) else None
+                    duration_raw = msg.get("duration")
+                    duration = duration_raw if isinstance(duration_raw, dict) else None
                     data["failure_artifacts"] = write_command_failure_artifacts(
                         run_dir=run_dir,
                         failure_index=command_failure_idx,
