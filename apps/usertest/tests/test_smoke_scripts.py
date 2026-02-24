@@ -22,3 +22,7 @@ def test_smoke_scripts_exist_and_enforce_expected_contract() -> None:
         assert "apps/usertest_backlog/tests/test_smoke.py" in text
         assert "packages/run_artifacts" in text
         assert "pip install -U pdm" in text
+
+        if path.name == "smoke.sh":
+            assert "Smoke preflight failed:" in text
+            assert "Choose one setup mode:" in text

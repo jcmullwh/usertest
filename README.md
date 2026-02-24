@@ -139,6 +139,8 @@ Restricted environments (no editable installs / pre-provisioned deps):
 - No installs at runtime (deps already provisioned, e.g., offline wheelhouse): run smoke with both flags:
   - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -SkipInstall -UsePythonPath`
   - macOS/Linux: `bash ./scripts/smoke.sh --skip-install --use-pythonpath`
+- If you pass only `--skip-install` (without `--use-pythonpath`), smoke assumes your environment already has the
+  monorepo packages installed and importable.
 
 ### Manual editable install (no PYTHONPATH)
 
