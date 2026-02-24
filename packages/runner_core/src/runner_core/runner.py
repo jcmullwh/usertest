@@ -67,6 +67,10 @@ from runner_core.run_spec import resolve_effective_run_inputs
 from runner_core.target_acquire import acquire_target
 
 
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
 @dataclass(frozen=True)
 class RunnerConfig:
     repo_root: Path
@@ -1525,7 +1529,7 @@ def _build_verification_followup_prompt(
 def _verification_shell_argv(*, command_prefix: list[str], command: str) -> list[str]:
     if command_prefix:
         return [*command_prefix, "sh", "-lc", command]
-    if os.name == "nt":
+    if _is_windows():
         return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
     return ["sh", "-lc", command]
 
@@ -1743,10 +1747,10 @@ def _run_verification_commands(
     started_monotonic = time.monotonic()
     results: list[dict[str, Any]] = []
 
-    is_powershell = (not command_prefix) and os.name == "nt"
+    is_powershell = (not command_prefix) and _is_windows()
 
     windows_bash_probe: dict[str, Any] | None = None
-    if os.name == "nt" and not command_prefix:
+    if _is_windows() and not command_prefix:
         # Only probe when we might need to rewrite/skip bash-based commands.
         if any(
             isinstance(c, str)

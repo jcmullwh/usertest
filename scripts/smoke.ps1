@@ -55,6 +55,42 @@ try {
     }
 
     if (-not $SkipInstall) {
+        $pipProbeOk = $false
+        try {
+            & $pythonCmd -m pip --version *>$null
+            if ($LASTEXITCODE -eq 0) {
+                $pipProbeOk = $true
+            }
+        }
+        catch {
+            $pipProbeOk = $false
+        }
+
+        if (-not $pipProbeOk) {
+            $venvPython = Join-Path (Join-Path $repoRoot '.venv') 'Scripts\python.exe'
+            Invoke-Step -Name 'Create .venv (pip bootstrap)' -Command {
+                & $pythonCmd -m venv .venv
+            }
+            if (-not (Test-Path -LiteralPath $venvPython)) {
+                Write-Error "pip is required for smoke installs, but could not be bootstrapped.`nTried creating .venv at: $venvPython"
+                exit 1
+            }
+            $pythonCmd = $venvPython
+            Write-Host "==> Using Python: venv -> $pythonCmd"
+
+            try {
+                & $pythonCmd -m pip --version *>$null
+            }
+            catch {
+                Write-Error "pip is required for smoke installs, but is not available in the bootstrapped .venv.`nTry installing a full CPython (with ensurepip), then re-run smoke."
+                exit 1
+            }
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "pip is required for smoke installs, but is not available in the bootstrapped .venv.`nTry installing a full CPython (with ensurepip), then re-run smoke."
+                exit $LASTEXITCODE
+            }
+        }
+
         Invoke-Step -Name 'Install base Python deps' -Command {
             & $pythonCmd -m pip install @pipFlags -r requirements-dev.txt
         }
