@@ -17,7 +17,7 @@ Implement the requested change described in the backlog ticket.
 ## How the ticket is provided
 
 The ticket content is provided as "append system prompt" text and is saved as `append_system_prompt.md`
-in the run directory. Treat it as the source-of-truth requirements for this run.
+in the workspace root (the agent working directory). Treat it as the source-of-truth requirements for this run.
 
 ## Approach
 
@@ -35,4 +35,3 @@ in the run directory. Treat it as the source-of-truth requirements for this run.
 - Prefer minimal diffs; avoid unrelated refactors.
 - Do not change external behavior unless the ticket explicitly asks for it.
 - If a change impacts user-visible workflows, update docs/tests accordingly.
-

@@ -40,6 +40,7 @@ from sandbox_runner.diagnostics import (
 )
 
 from runner_core.agent_docs import obfuscate_target_agent_docs
+from runner_core.agent_prompt_files import _materialize_agent_prompt_into_workspace
 from runner_core.catalog import load_catalog_config
 from runner_core.execution_backend import prepare_execution_backend
 from runner_core.pathing import slugify, utc_timestamp_compact
@@ -1354,7 +1355,6 @@ def _stage_agent_prompt_file(*, run_dir: Path, name: str, src_path: Path) -> Pat
     shutil.copyfile(src_path, dest_path)
     return dest_path
 
-
 def _agent_path_for_staged_file(
     staged_path: Path, *, run_dir: Path, run_dir_mount: str | None
 ) -> str:
@@ -2579,20 +2579,31 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         if isinstance(append_text, str) and not append_text.strip():
             append_text = None
 
+        append_src_path: Path | None = None
+        if request.agent_append_system_prompt_file is not None:
+            append_src_path = _resolve_agent_prompt_input_path(
+                raw=request.agent_append_system_prompt_file,
+                repo_root=config.repo_root,
+                workspace_dir=acquired.workspace_dir,
+            )
+
+        if append_src_path is not None or append_text is not None:
+            _materialize_agent_prompt_into_workspace(
+                workspace_dir=acquired.workspace_dir,
+                name="append_system_prompt.md",
+                src_path=append_src_path,
+                text=append_text,
+            )
+
         staged_append_system_prompt: Path | None = None
         append_system_prompt_path_for_agent: str | None = None
-        if request.agent_append_system_prompt_file is not None or append_text is not None:
+        if append_src_path is not None or append_text is not None:
             if request.agent == "gemini":
                 # Gemini CLI doesn't support an explicit "append to system prompt" mechanism.
                 # Emulate append by concatenating the requested append content into the effective
                 # system prompt file, then pass that file as the Gemini system prompt.
-                if request.agent_append_system_prompt_file is not None:
-                    src_path = _resolve_agent_prompt_input_path(
-                        raw=request.agent_append_system_prompt_file,
-                        repo_root=config.repo_root,
-                        workspace_dir=acquired.workspace_dir,
-                    )
-                    append_payload = src_path.read_text(encoding="utf-8")
+                if append_src_path is not None:
+                    append_payload = append_src_path.read_text(encoding="utf-8")
                 else:
                     assert append_text is not None
                     append_payload = append_text
@@ -2623,16 +2634,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     run_dir_mount=backend.run_dir_mount,
                 )
             else:
-                if request.agent_append_system_prompt_file is not None:
-                    src_path = _resolve_agent_prompt_input_path(
-                        raw=request.agent_append_system_prompt_file,
-                        repo_root=config.repo_root,
-                        workspace_dir=acquired.workspace_dir,
-                    )
+                if append_src_path is not None:
                     staged_append_system_prompt = _stage_agent_prompt_file(
                         run_dir=run_dir,
                         name="append_system_prompt.md",
-                        src_path=src_path,
+                        src_path=append_src_path,
                     )
                 else:
                     assert append_text is not None
