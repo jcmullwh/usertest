@@ -5,7 +5,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from backlog_repo.plan_index import dedupe_actioned_plan_ticket_files, scan_plan_ticket_index
+from backlog_repo.plan_index import (
+    dedupe_actioned_plan_ticket_files,
+    dedupe_queued_plan_ticket_files_when_actioned_exists,
+    scan_plan_ticket_index,
+)
 
 
 @dataclass(frozen=True)
@@ -50,6 +54,8 @@ def select_next_ticket(
     for bucket in bucket_priority:
         candidates: list[TicketIndexEntry] = []
         for entry in index.values():
+            if entry.status == "actioned":
+                continue
             if bucket not in entry.buckets:
                 continue
             if not entry.paths:
@@ -77,6 +83,8 @@ def select_next_ticket_path(
     for bucket in bucket_priority:
         candidates: list[tuple[int, str, TicketIndexEntry, Path]] = []
         for entry in index.values():
+            if entry.status == "actioned":
+                continue
             if bucket not in entry.buckets:
                 continue
             bucket_paths = [path for path in entry.paths if path.parent.name == bucket]
@@ -110,6 +118,7 @@ def move_ticket_file(
 ) -> Path:
     if not dry_run:
         dedupe_actioned_plan_ticket_files(owner_root=owner_root)
+        dedupe_queued_plan_ticket_files_when_actioned_exists(owner_root=owner_root)
     index = build_ticket_index(owner_root=owner_root)
     entry = index.get(fingerprint)
     if entry is None:
@@ -197,6 +206,7 @@ def move_ticket_file(
     dest_dir.mkdir(parents=True, exist_ok=True)
     src_path.replace(dest_path)
     dedupe_actioned_plan_ticket_files(owner_root=owner_root)
+    dedupe_queued_plan_ticket_files_when_actioned_exists(owner_root=owner_root)
     return dest_path
 
 

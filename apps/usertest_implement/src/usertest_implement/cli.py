@@ -667,6 +667,14 @@ def _run_selected_ticket(
     else:
         raise SystemExit("Unable to infer target repo. Provide --repo.")
 
+    # Default handoff flags may be enabled on some subcommands (e.g. tickets run-next).
+    # Normalize so disabling an earlier step disables dependent later steps.
+    if not bool(args.commit):
+        args.push = False
+        args.pr = False
+    elif not bool(args.push):
+        args.pr = False
+
     if args.push or args.pr:
         if not args.commit:
             raise SystemExit("--push/--pr requires --commit")
@@ -809,6 +817,7 @@ def _run_selected_ticket(
     pr_ref: dict[str, Any] | None = None
 
     observed_model = infer_observed_model(run_dir=run_dir)
+    commit_performed = False
 
     if args.commit:
         git_ref = finalize_commit(
@@ -818,21 +827,36 @@ def _run_selected_ticket(
             git_user_name=args.git_user_name,
             git_user_email=args.git_user_email,
         )
+        commit_performed = bool(git_ref.get("commit_performed") is True)
 
     if args.push:
-        candidates: list[Path] = []
-        if selected.owner_root is not None and (selected.owner_root / ".git").exists():
-            candidates.append(selected.owner_root)
-        if _looks_like_local_path(repo_input) and (Path(repo_input) / ".git").exists():
-            candidates.append(Path(repo_input))
-        push_ref = finalize_push(
-            run_dir=run_dir,
-            remote_name=str(args.remote_name),
-            remote_url=args.remote_url,
-            candidate_repo_dirs=candidates,
-            branch=branch,
-            force_with_lease=bool(args.force_push),
-        )
+        if not commit_performed:
+            push_ref = {
+                "schema_version": 1,
+                "remote_name": str(args.remote_name),
+                "remote_url": args.remote_url,
+                "branch": branch,
+                "force_with_lease": bool(args.force_push),
+                "pushed": False,
+                "stdout": None,
+                "stderr": None,
+                "error": "Skipping push: no commit was performed.",
+            }
+            _write_json(run_dir / "push_ref.json", push_ref)
+        else:
+            candidates: list[Path] = []
+            if selected.owner_root is not None and (selected.owner_root / ".git").exists():
+                candidates.append(selected.owner_root)
+            if _looks_like_local_path(repo_input) and (Path(repo_input) / ".git").exists():
+                candidates.append(Path(repo_input))
+            push_ref = finalize_push(
+                run_dir=run_dir,
+                remote_name=str(args.remote_name),
+                remote_url=args.remote_url,
+                candidate_repo_dirs=candidates,
+                branch=branch,
+                force_with_lease=bool(args.force_push),
+            )
 
     if args.push or args.pr:
         title, body = _write_pr_manifest(
@@ -854,66 +878,68 @@ def _run_selected_ticket(
             "error": None,
         }
         if args.pr:
-            if shutil.which("gh") is None:
+            if not commit_performed:
+                pr_ref["error"] = "Skipping PR creation: no commit was performed."
+            elif shutil.which("gh") is None:
                 pr_ref["error"] = "gh not found on PATH"
             else:
                 if workspace_dir is None:
                     pr_ref["error"] = "Missing workspace_ref.json; cannot locate workspace"
                 else:
-                        if not bool(args.skip_ci_wait):
-                            if not (push_ref is not None and push_ref.get("pushed") is True):
-                                pr_ref["error"] = (
-                                    "Refusing to create PR before CI: branch was not pushed successfully "
-                                    "(rerun with --push or pass --skip-ci-wait)."
-                                )
-                            else:
-                                head_sha = _git_head_sha(workspace_dir)
-                                if head_sha is None:
-                                    pr_ref["error"] = "Unable to determine HEAD SHA for CI gating."
-                                else:
-                                    ci_timeout = float(args.ci_timeout_seconds or 0)
-                                    if ci_timeout <= 0:
-                                        ci_timeout = 3600
-                                    ci_ref = _wait_for_ci_success(
-                                        run_dir=run_dir,
-                                        workspace_dir=workspace_dir,
-                                        branch=branch,
-                                        head_sha=head_sha,
-                                        workflow="CI",
-                                        timeout_seconds=ci_timeout,
-                                    )
-                                    if ci_ref.get("passed") is not True:
-                                        pr_ref["error"] = ci_ref.get("error") or "CI gate failed."
-
-                        if pr_ref.get("error"):
-                            pass
-                        else:
-                            proc = subprocess.run(
-                                [
-                                    "gh",
-                                    "pr",
-                                    "create",
-                                    "--base",
-                                    str(args.base_branch),
-                                    "--title",
-                                    title,
-                                    "--body",
-                                    body,
-                                ],
-                                cwd=str(workspace_dir),
-                                capture_output=True,
-                                text=True,
-                                check=False,
+                    if not bool(args.skip_ci_wait):
+                        if not (push_ref is not None and push_ref.get("pushed") is True):
+                            pr_ref["error"] = (
+                                "Refusing to create PR before CI: branch was not pushed successfully "
+                                "(rerun with --push or pass --skip-ci-wait)."
                             )
-                            if proc.returncode == 0:
-                                pr_ref["created"] = True
-                                pr_ref["url"] = proc.stdout.strip() or None
+                        else:
+                            head_sha = _git_head_sha(workspace_dir)
+                            if head_sha is None:
+                                pr_ref["error"] = "Unable to determine HEAD SHA for CI gating."
                             else:
-                                pr_ref["error"] = (
-                                    proc.stderr.strip()
-                                    or proc.stdout.strip()
-                                    or f"gh failed ({proc.returncode})"
+                                ci_timeout = float(args.ci_timeout_seconds or 0)
+                                if ci_timeout <= 0:
+                                    ci_timeout = 3600
+                                ci_ref = _wait_for_ci_success(
+                                    run_dir=run_dir,
+                                    workspace_dir=workspace_dir,
+                                    branch=branch,
+                                    head_sha=head_sha,
+                                    workflow="CI",
+                                    timeout_seconds=ci_timeout,
                                 )
+                                if ci_ref.get("passed") is not True:
+                                    pr_ref["error"] = ci_ref.get("error") or "CI gate failed."
+
+                    if pr_ref.get("error"):
+                        pass
+                    else:
+                        proc = subprocess.run(
+                            [
+                                "gh",
+                                "pr",
+                                "create",
+                                "--base",
+                                str(args.base_branch),
+                                "--title",
+                                title,
+                                "--body",
+                                body,
+                            ],
+                            cwd=str(workspace_dir),
+                            capture_output=True,
+                            text=True,
+                            check=False,
+                        )
+                        if proc.returncode == 0:
+                            pr_ref["created"] = True
+                            pr_ref["url"] = proc.stdout.strip() or None
+                        else:
+                            pr_ref["error"] = (
+                                proc.stderr.strip()
+                                or proc.stdout.strip()
+                                or f"gh failed ({proc.returncode})"
+                            )
         _write_json(run_dir / "pr_ref.json", pr_ref)
 
     if args.move_on_commit and selected.owner_root is not None and selected.idea_path is not None and args.commit:
@@ -1104,7 +1130,7 @@ def _cmd_tickets_run_next(args: argparse.Namespace) -> int:
 
     kind_priority = list(args.kind_priority or [])
     if not kind_priority:
-        kind_priority = ["research", "implementation"]
+        kind_priority = ["implementation"]
 
     selected = select_next_ticket_path(
         index,
@@ -1201,7 +1227,12 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         help="Skip waiting for GitHub Actions CI before creating a PR (not recommended).",
     )
 
-    parser.add_argument("--commit", action="store_true", help="Create branch + commit changes in kept workspace.")
+    parser.add_argument(
+        "--commit",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Create branch + commit changes in kept workspace.",
+    )
     parser.add_argument("--branch", help="Branch name override.")
     parser.add_argument("--commit-message", dest="commit_message", help="Commit message override.")
     parser.add_argument(
@@ -1215,7 +1246,12 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         help="Git user.email used for commits (default: usertest-implement@local).",
     )
 
-    parser.add_argument("--push", action="store_true", help="Push branch to remote.")
+    parser.add_argument(
+        "--push",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Push branch to remote.",
+    )
     parser.add_argument("--remote-name", default="origin")
     parser.add_argument("--remote-url")
     parser.add_argument("--force-push", dest="force_push", action="store_true")
@@ -1224,7 +1260,12 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         default="dev",
         help="Base branch for PR creation (default: dev).",
     )
-    parser.add_argument("--pr", action="store_true", help="Best-effort PR creation via gh.")
+    parser.add_argument(
+        "--pr",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Best-effort PR creation via gh.",
+    )
 
     parser.add_argument(
         "--move-on-start",
@@ -1300,7 +1341,7 @@ def build_parser() -> argparse.ArgumentParser:
         "run-next",
         help=(
             "Refresh the backlog + ticket exports, then implement the next local plan ticket "
-            "(research-first)."
+            "(implementation-only by default; commits/pushes/opens a PR unless disabled)."
         ),
     )
     tickets_run_next_p.add_argument("--owner-root", type=Path, default=Path.cwd())
@@ -1311,7 +1352,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "Ticket kind ordering derived from markdown (repeatable). "
-            "Defaults to: research, implementation."
+            "Defaults to: implementation."
         ),
     )
     tickets_run_next_p.add_argument(
@@ -1346,6 +1387,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional model override for `usertest-backlog reports review-ux`.",
     )
     _add_run_execution_args(tickets_run_next_p)
+    tickets_run_next_p.set_defaults(commit=True, push=True, pr=True)
     tickets_run_next_p.set_defaults(func=_cmd_tickets_run_next)
 
     tickets_move_p = tickets_sub.add_parser("move", help="Move a ticket file between plan buckets.")

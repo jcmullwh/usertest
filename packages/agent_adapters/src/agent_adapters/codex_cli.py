@@ -296,9 +296,24 @@ def run_codex_exec(
     prefix = [p for p in command_prefix if isinstance(p, str) and p]
 
     resolved_binary = binary if prefix else _resolve_executable(binary)
-    argv: list[str] = [
-        resolved_binary,
-    ]
+
+    argv: list[str]
+    if not prefix and os.name == "nt" and resolved_binary.lower().endswith((".cmd", ".bat")):
+        codex_js = (
+            Path(resolved_binary).parent
+            / "node_modules"
+            / "@openai"
+            / "codex"
+            / "bin"
+            / "codex.js"
+        )
+        if codex_js.exists():
+            node_binary = shutil.which("node") or "node"
+            argv = [node_binary, str(codex_js)]
+        else:
+            argv = [resolved_binary]
+    else:
+        argv = [resolved_binary]
     if ask_for_approval is not None:
         argv.extend(["--ask-for-approval", ask_for_approval])
 
