@@ -870,7 +870,7 @@ def build_parser() -> argparse.ArgumentParser:
     reports_review_ux_p = reports_sub.add_parser(
         "review-ux",
         help=(
-            "Run a UX/intent review stage over research_required backlog tickets "
+            "Run a UX/intent review stage over research_required + high-surface gated tickets "
             "(optional cached LLM pass)."
         ),
     )
@@ -893,6 +893,14 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Backlog JSON path (defaults to <compiled_dir>/<scope>.backlog.json). "
             "This must contain tickets with `stage` fields."
+        ),
+    )
+    reports_review_ux_p.add_argument(
+        "--policy-config",
+        type=Path,
+        help=(
+            "Backlog policy config YAML path (defaults to configs/backlog_policy.yaml when "
+            "present). Used to gate high-surface user-visible ready_for_ticket items into UX review."
         ),
     )
     reports_review_ux_p.add_argument(
@@ -3146,11 +3154,53 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         if isinstance(tickets_raw, list)
         else []
     )
-    review_tickets = [
-        ticket
-        for ticket in tickets
-        if (_coerce_string(ticket.get("stage")) or "triage") == "research_required"
-    ]
+
+    policy_cfg: BacklogPolicyConfig | None = None
+    policy_config_path: Path | None
+    if args.policy_config is not None:
+        policy_config_path = (
+            _resolve_optional_path(repo_root, args.policy_config) or args.policy_config.resolve()
+        )
+    else:
+        default_policy = repo_root / "configs" / "backlog_policy.yaml"
+        policy_config_path = default_policy if default_policy.exists() else None
+    if policy_config_path is None or not policy_config_path.exists():
+        print(
+            "Missing backlog policy config (needed for high-surface gating). "
+            "Provide --policy-config or add configs/backlog_policy.yaml.",
+            file=sys.stderr,
+        )
+        return 2
+
+    try:
+        policy_raw = _load_yaml(policy_config_path).get("backlog_policy", {})
+        if not isinstance(policy_raw, dict):
+            raise ValueError("backlog_policy config must be a mapping")
+        policy_cfg = BacklogPolicyConfig.from_dict(policy_raw)
+    except (OSError, TypeError, ValueError, yaml.YAMLError) as e:
+        print(f"Invalid backlog policy config: {policy_config_path}: {e}", file=sys.stderr)
+        return 2
+
+    surface_area_high = set(policy_cfg.surface_area_high)
+
+    review_tickets: list[dict[str, Any]] = []
+    research_required_total = 0
+    high_surface_ready_total = 0
+    for ticket in tickets:
+        stage = (_coerce_string(ticket.get("stage")) or "triage").strip()
+        if stage == "research_required":
+            review_tickets.append(ticket)
+            research_required_total += 1
+            continue
+        if stage != "ready_for_ticket":
+            continue
+        change_surface_raw = ticket.get("change_surface")
+        change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
+        kinds = set(_coerce_string_list(change_surface.get("kinds")))
+        user_visible = bool(change_surface.get("user_visible"))
+        if user_visible and bool(kinds & surface_area_high):
+            review_tickets.append(ticket)
+            high_surface_ready_total += 1
 
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -3166,6 +3216,14 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
                 "backlog_json": str(backlog_path),
                 "intent_snapshot_json": intent_snapshot_json_path,
                 "repo_intent_md": str(repo_intent_path),
+                "policy_config": str(policy_config_path),
+            },
+            "policy": {"surface_area_high": sorted(surface_area_high)},
+            "tickets_meta": {
+                "tickets_total": len(tickets),
+                "research_required_total": 0,
+                "high_surface_ready_total": 0,
+                "review_total": 0,
             },
             "review": {"recommendations": [], "confidence": 1.0},
             "artifacts_dir": None,
@@ -3234,6 +3292,19 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         ):
             if key in ticket:
                 payload[key] = ticket.get(key)
+        stage = (_coerce_string(ticket.get("stage")) or "triage").strip()
+        change_surface_raw = ticket.get("change_surface")
+        change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
+        kinds = set(_coerce_string_list(change_surface.get("kinds")))
+        user_visible = bool(change_surface.get("user_visible"))
+        high_surface_gated = bool(user_visible and bool(kinds & surface_area_high))
+        payload["high_surface_gated"] = high_surface_gated
+        if stage == "research_required":
+            payload["ux_review_reason"] = "research_required"
+        elif stage == "ready_for_ticket" and high_surface_gated:
+            payload["ux_review_reason"] = "high_surface_ready"
+        else:
+            payload["ux_review_reason"] = "unknown"
         tickets_payload.append(payload)
 
     prompt = _render_template(
@@ -3245,6 +3316,9 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "INTENT_SNAPSHOT_JSON": json.dumps(intent_snapshot_obj, indent=2, ensure_ascii=False)
             if intent_snapshot_obj is not None
             else "null",
+            "SURFACE_AREA_HIGH_JSON": json.dumps(
+                sorted(surface_area_high), indent=2, ensure_ascii=False
+            ),
             "TICKETS_JSON": json.dumps(tickets_payload, indent=2, ensure_ascii=False),
         },
     )
@@ -3360,8 +3434,10 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "intent_snapshot_json": intent_snapshot_json_path,
             "repo_intent_md": str(repo_intent_path),
             "allow_missing_intent_snapshot": allow_missing_snapshot,
+            "policy_config": str(policy_config_path),
         },
         "artifacts_dir": str(artifacts_dir),
+        "policy": {"surface_area_high": sorted(surface_area_high)},
         "review_meta": {
             "agent": agent,
             "model": model,
@@ -3371,7 +3447,9 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         },
         "tickets_meta": {
             "tickets_total": len(tickets),
-            "research_required_total": len(review_tickets),
+            "research_required_total": research_required_total,
+            "high_surface_ready_total": high_surface_ready_total,
+            "review_total": len(review_tickets),
         },
         "review": review_obj,
     }
@@ -3781,6 +3859,14 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
         ux_recs = ux_recommendations_by_ticket_id.get(ticket_id) or []
 
+        change_surface_raw = ticket.get("change_surface")
+        change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
+        kinds = set(_coerce_string_list(change_surface.get("kinds")))
+        user_visible = bool(change_surface.get("user_visible"))
+        high_surface_ready = bool(
+            stage == "ready_for_ticket" and user_visible and bool(kinds & surface_area_high)
+        )
+
         stage_override: str | None = None
         export_kind_override: str | None = None
         defer_to_bucket: str | None = None
@@ -3799,6 +3885,10 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 export_kind_override = "implementation"
             elif stage == "research_required" and ux_approach == "defer":
                 defer_to_bucket = "0.1 - deferred"
+            elif high_surface_ready and ux_approach in ("docs", "parameterize_existing"):
+                export_kind_override = "implementation"
+            elif high_surface_ready and ux_approach == "defer":
+                defer_to_bucket = "0.1 - deferred"
 
         stage_effective = stage_override or stage
 
@@ -3814,11 +3904,6 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         if (fingerprint in actions) and not include_actioned:
             skipped_actioned += 1
             continue
-
-        change_surface_raw = ticket.get("change_surface")
-        change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
-        kinds = set(_coerce_string_list(change_surface.get("kinds")))
-        user_visible = bool(change_surface.get("user_visible"))
 
         export_kind = "implementation"
         if stage_effective == "research_required":
@@ -3916,6 +4001,14 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                             queue_paths[0] = str(moved)
                             desired_status = "actioned"
                             ux_tickets_deferred += 1
+                            if fingerprint not in actions:
+                                actions[fingerprint] = {
+                                    "fingerprint": fingerprint,
+                                    "status": "deferred",
+                                    "ticket_id": ticket_id,
+                                    "notes": "Deferred by UX review recommendation.",
+                                }
+                                actions_mutated = True
                 for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
                     ref: dict[str, str] = {
                         "atom_id": atom_id,

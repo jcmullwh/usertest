@@ -170,6 +170,52 @@ def dedupe_actioned_plan_ticket_files(*, owner_root: Path) -> int:
     return removed
 
 
+def dedupe_queued_plan_ticket_files_when_actioned_exists(*, owner_root: Path) -> int:
+    """Remove queued-bucket plan files for fingerprints already marked actioned.
+
+    This is a best-effort hygiene sweep to eliminate stale duplicates that can
+    linger across runs even when the current backlog no longer contains that
+    fingerprint.
+
+    Returns
+    -------
+    int
+        Number of files removed.
+    """
+
+    plans_dir = owner_root / ".agents" / "plans"
+    if not plans_dir.exists() or not plans_dir.is_dir():
+        return 0
+
+    queued_buckets = {
+        bucket
+        for bucket, desired_status in PLAN_BUCKET_TO_ATOM_STATUS.items()
+        if desired_status == "queued"
+    }
+    if not queued_buckets:
+        return 0
+
+    removed = 0
+    index = scan_plan_ticket_index(owner_root=owner_root)
+    for meta in index.values():
+        if not isinstance(meta, dict):
+            continue
+        if meta.get("status") != "actioned":
+            continue
+
+        paths_raw = meta.get("paths", [])
+        paths = [Path(p) for p in paths_raw if isinstance(p, str) and p]
+        for path in paths:
+            if path.parent.name not in queued_buckets:
+                continue
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                continue
+            removed += 1
+    return removed
+
+
 def sync_atom_actions_from_plan_folders(
     *,
     atom_actions: dict[str, dict[str, Any]],
