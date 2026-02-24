@@ -1413,6 +1413,22 @@ def _verification_shell_argv(*, command_prefix: list[str], command: str) -> list
     return ["sh", "-lc", command]
 
 
+_VERIFICATION_REJECTION_SENTINELS: frozenset[str] = frozenset({"rejected"})
+
+
+def _looks_like_verification_rejection_sentinel(command: str) -> bool:
+    token = (command or "").strip()
+    if not token:
+        return False
+    lowered = token.lower()
+    if lowered in _VERIFICATION_REJECTION_SENTINELS:
+        return True
+    if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
+        inner = token[1:-1].strip().lower()
+        return inner in _VERIFICATION_REJECTION_SENTINELS
+    return False
+
+
 def _tail_text_for_prompt(text: str, *, max_chars: int = 2000) -> str:
     cleaned = text.strip()
     if len(cleaned) <= max_chars:
@@ -1445,7 +1461,6 @@ def _run_verification_commands(
         stdout_path = attempt_dir / f"cmd_{idx:02d}.stdout.txt"
         stderr_path = attempt_dir / f"cmd_{idx:02d}.stderr.txt"
 
-        argv = _verification_shell_argv(command_prefix=command_prefix, command=cmd)
         cmd_started_utc = _utc_now_z()
         cmd_started_monotonic = time.monotonic()
         timed_out = False
@@ -1453,34 +1468,47 @@ def _run_verification_commands(
         stdout_text = ""
         stderr_text = ""
         exit_code: int = 0
-        try:
-            proc = subprocess.run(
-                argv,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                cwd=str(cwd),
-                check=False,
-                timeout=timeout_seconds,
+        argv: list[str] | None = None
+
+        rejected_sentinel = _looks_like_verification_rejection_sentinel(cmd)
+        if rejected_sentinel:
+            exit_code = 126
+            stderr_text = (
+                "[runner] Verification command dispatch blocked: received rejection sentinel "
+                f"token={cmd!r}.\n"
+                "[runner] This indicates a tool/policy rejection was forwarded as a command.\n"
+                "[runner] Fix: propagate the rejection as a structured error instead of executing it.\n"
             )
-            exit_code = int(proc.returncode or 0)
-            stdout_text = proc.stdout or ""
-            stderr_text = proc.stderr or ""
-        except subprocess.TimeoutExpired as exc:
-            timed_out = True
-            exit_code = 124
-            if isinstance(exc.stdout, bytes):
-                stdout_text = exc.stdout.decode("utf-8", "replace")
-            else:
-                stdout_text = exc.stdout or ""
-            if isinstance(exc.stderr, bytes):
-                stderr_text = exc.stderr.decode("utf-8", "replace")
-            else:
-                stderr_text = exc.stderr or ""
-            stderr_text = (stderr_text.rstrip() + "\n" if stderr_text else "") + (
-                f"[runner] Verification command timed out after {timeout_seconds} seconds.\n"
-            )
+        else:
+            argv = _verification_shell_argv(command_prefix=command_prefix, command=cmd)
+            try:
+                proc = subprocess.run(
+                    argv,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    cwd=str(cwd),
+                    check=False,
+                    timeout=timeout_seconds,
+                )
+                exit_code = int(proc.returncode or 0)
+                stdout_text = proc.stdout or ""
+                stderr_text = proc.stderr or ""
+            except subprocess.TimeoutExpired as exc:
+                timed_out = True
+                exit_code = 124
+                if isinstance(exc.stdout, bytes):
+                    stdout_text = exc.stdout.decode("utf-8", "replace")
+                else:
+                    stdout_text = exc.stdout or ""
+                if isinstance(exc.stderr, bytes):
+                    stderr_text = exc.stderr.decode("utf-8", "replace")
+                else:
+                    stderr_text = exc.stderr or ""
+                stderr_text = (stderr_text.rstrip() + "\n" if stderr_text else "") + (
+                    f"[runner] Verification command timed out after {timeout_seconds} seconds.\n"
+                )
 
         wall_seconds = max(0.0, time.monotonic() - cmd_started_monotonic)
         try:
@@ -1498,6 +1526,7 @@ def _run_verification_commands(
             "argv": argv,
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "rejected_sentinel": rejected_sentinel,
             "command_started_utc": cmd_started_utc,
             "wall_seconds": wall_seconds,
             "stdout_path": stdout_path.name,
