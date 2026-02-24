@@ -114,6 +114,10 @@ macOS/Linux:
 
 `bash ./scripts/smoke.sh`
 
+Note: on some Windows sandboxes, `bash.exe` may be on `PATH` (for example via Git for Windows) but
+execution is blocked ("Access is denied"). In that case, use the PowerShell smoke command above
+and avoid bash-based validation steps.
+
 The smoke scripts run:
 
 1. `python tools/scaffold/scaffold.py doctor`
