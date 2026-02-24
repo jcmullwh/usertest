@@ -54,7 +54,9 @@ from runner_core.pip_target import (
     requirements_path as pip_requirements_path,
 )
 from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
-from runner_core.python_interpreter_probe import probe_python_interpreters
+from runner_core.python_interpreter_probe import (
+    resolve_usable_python_interpreter,
+)
 from runner_core.run_spec import resolve_effective_run_inputs
 from runner_core.target_acquire import acquire_target
 
@@ -119,6 +121,7 @@ _BASE_PREFLIGHT_COMMANDS = [
     "rg",
     "python3",
     "python",
+    "py",
     "pip",
     "pip3",
     "pdm",
@@ -836,12 +839,20 @@ def _agent_binary_for_preflight_probe(*, agent: str, agent_cfg: dict[str, Any]) 
     return binary
 
 
-def _probe_commands_local(commands: list[str]) -> tuple[dict[str, bool], dict[str, Any]]:
+def _probe_commands_local(
+    commands: list[str],
+    *,
+    workspace_dir: Path | None = None,
+) -> tuple[dict[str, bool], dict[str, Any]]:
     out: dict[str, bool] = {}
     probe_details: dict[str, dict[str, Any]] = {}
     python_commands = [cmd for cmd in commands if cmd in {"python", "python3", "py"}]
     python_probe = (
-        probe_python_interpreters(candidate_commands=python_commands, timeout_seconds=5.0)
+        resolve_usable_python_interpreter(
+            workspace_dir=workspace_dir,
+            candidate_commands=python_commands,
+            timeout_seconds=5.0,
+        )
         if python_commands
         else None
     )
@@ -871,6 +882,69 @@ def _probe_commands_local(commands: list[str]) -> tuple[dict[str, bool], dict[st
     if python_probe is not None:
         meta["python_interpreter"] = python_probe.to_dict()
     return out, meta
+
+
+def _format_windows_python_preflight_error(probe: Any) -> str:
+    payload = probe.to_dict() if hasattr(probe, "to_dict") else {}
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    candidates_list = candidates if isinstance(candidates, list) else []
+    lines = [
+        "Python preflight failed on Windows: no usable interpreter could be resolved within ~5s.",
+        "",
+        "Tried:",
+    ]
+    for item in candidates_list:
+        if not isinstance(item, dict):
+            continue
+        command = item.get("command")
+        resolved_path = item.get("resolved_path")
+        reason_code = item.get("reason_code")
+        reason = item.get("reason")
+        summary = f"{command} -> {resolved_path} ({reason_code})"
+        lines.append("  - " + summary)
+        if isinstance(reason, str) and reason.strip():
+            tail = reason.strip()
+            if len(tail) > 300:
+                tail = tail[:300].rstrip() + "…"
+            lines.append("      " + tail.replace("\n", "\n      "))
+    lines.extend(
+        [
+            "",
+            "Fix options:",
+            "  1) Install CPython (python.org) or via winget: winget install -e --id Python.Python.3.13",
+            "  2) Disable App Execution Alias shims: Settings -> Apps -> Advanced app settings -> App execution aliases -> turn off python.exe/python3.exe",
+            "  3) Use a portable/vendored Python and put its folder first on PATH (or use --exec-backend docker)",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _ensure_windows_python_on_path(
+    *,
+    workspace_dir: Path,
+    env_overrides: dict[str, str] | None,
+) -> dict[str, str]:
+    base = dict(env_overrides or {})
+    probe = resolve_usable_python_interpreter(
+        workspace_dir=workspace_dir,
+        candidate_commands=("python", "python3", "py"),
+        timeout_seconds=5.0,
+        include_sys_executable=True,
+    )
+    if probe.selected_command is None:
+        raise RuntimeError(_format_windows_python_preflight_error(probe))
+
+    python_exe = probe.selected_executable or probe.selected_resolved_path or ""
+    python_exe_s = python_exe.strip()
+    if python_exe_s:
+        base.setdefault("USERTEST_PYTHON", python_exe_s)
+        python_dir = str(Path(python_exe_s).parent)
+        prior_path = base.get("PATH", os.environ.get("PATH", ""))
+        if prior_path:
+            base["PATH"] = f"{python_dir}{os.pathsep}{prior_path}"
+        else:
+            base["PATH"] = python_dir
+    return base
 
 
 def _snapshot_workspace_root(workspace_dir: Path, *, max_entries: int = 200) -> dict[str, Any]:
@@ -2287,7 +2361,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     installer=pip_spec.installer,
                 )
 
-            agent_env_overrides = bootstrap.env_overrides if bootstrap is not None else None
+            agent_env_overrides = dict(bootstrap.env_overrides) if bootstrap is not None else None
+            if os.name == "nt" and sandbox is None and bool(resolved_inputs.mission.requires_shell):
+                agent_env_overrides = _ensure_windows_python_on_path(
+                    workspace_dir=acquired.workspace_dir,
+                    env_overrides=agent_env_overrides,
+                )
 
             codex_sandbox_mode: str | None = None
             codex_ask_for_approval: str | None = None
@@ -2337,7 +2416,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     )
                 else:
                     preflight_commands_present, preflight_meta = _probe_commands_local(
-                        probe_commands
+                        probe_commands,
+                        workspace_dir=acquired.workspace_dir,
                     )
             except Exception as e:  # noqa: BLE001
                 preflight_commands_present = {}
@@ -2419,7 +2499,18 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     status = "blocked_by_policy"
                 remediation: str | None = None
                 if status == "missing":
-                    if reason_code_s == "windowsapps_alias":
+                    if cmd in {"python", "python3", "py"} and reason_code_s in {
+                        "access_denied",
+                        "launch_failed",
+                        "timeout",
+                    }:
+                        remediation = (
+                            "Python execution appears blocked or broken. Install a full CPython "
+                            "interpreter (python.org or winget), disable Windows App Execution "
+                            "Alias shims (python.exe/python3.exe), or switch to --exec-backend "
+                            "docker."
+                        )
+                    elif reason_code_s == "windowsapps_alias":
                         remediation = (
                             "Install and expose a full CPython interpreter (not WindowsApps "
                             "alias), then retry."
