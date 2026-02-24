@@ -36,17 +36,17 @@ try {
     }
     $pipFlags = @('--disable-pip-version-check', '--retries', '10', '--timeout', '30')
 
-    if (Get-Command pdm -ErrorAction SilentlyContinue) {
+    if ($RequireDoctor) {
+        if (-not (Get-Command pdm -ErrorAction SilentlyContinue)) {
+            Write-Error "Scaffold doctor required but pdm was not found on PATH.`nInstall pdm (recommended): $pythonCmd -m pip install -U pdm`nOr rerun without -RequireDoctor."
+            exit 1
+        }
         Invoke-Step -Name 'Scaffold doctor' -Command {
             & $pythonCmd tools/scaffold/scaffold.py doctor
         }
     }
     else {
-        if ($RequireDoctor) {
-            Write-Error "Scaffold doctor required but pdm was not found on PATH.`nInstall pdm (recommended): $pythonCmd -m pip install -U pdm`nOr rerun without -RequireDoctor."
-            exit 1
-        }
-        Invoke-Step -Name 'Scaffold doctor (tool checks skipped; pdm not found on PATH)' -Command {
+        Invoke-Step -Name 'Scaffold doctor (tool checks skipped; pdm optional)' -Command {
             Write-Host '    Note: pdm is optional; continuing with the pip-based flow.'
             Write-Host "    To enable tool checks: $pythonCmd -m pip install -U pdm"
             Write-Host '    To require doctor: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -RequireDoctor'
@@ -55,6 +55,35 @@ try {
     }
 
     if (-not $SkipInstall) {
+        $pipProbeOk = $false
+        & $pythonCmd -m pip --version
+        if ($LASTEXITCODE -eq 0) {
+            $pipProbeOk = $true
+        }
+
+        if (-not $pipProbeOk) {
+            $venvPython = Join-Path (Join-Path $repoRoot '.venv') 'Scripts\python.exe'
+            if (-not (Test-Path -LiteralPath $venvPython)) {
+                Invoke-Step -Name 'Create .venv (pip bootstrap)' -Command {
+                    & $pythonCmd -m venv .venv
+                }
+            }
+            if (Test-Path -LiteralPath $venvPython) {
+                $pythonCmd = $venvPython
+                Write-Host "==> Using Python: venv -> $pythonCmd"
+            }
+
+            Invoke-Step -Name 'Bootstrap pip (ensurepip)' -Command {
+                & $pythonCmd -m ensurepip --upgrade
+            }
+
+            & $pythonCmd -m pip --version
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "pip is required for smoke installs, but is not available after ensurepip.`nTry installing a full CPython (with ensurepip), then re-run smoke."
+                exit $LASTEXITCODE
+            }
+        }
+
         Invoke-Step -Name 'Install base Python deps' -Command {
             & $pythonCmd -m pip install @pipFlags -r requirements-dev.txt
         }

@@ -11,7 +11,7 @@ def test_verification_rewrites_bash_smoke_to_powershell_when_bash_blocked_on_win
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runner_mod.os, "name", "nt")
+    monkeypatch.setattr(runner_mod, "_is_windows", lambda: True)
     monkeypatch.setattr(
         runner_mod,
         "_probe_windows_bash_usable",
@@ -75,7 +75,7 @@ def test_verification_skips_bash_syntax_check_when_bash_blocked_on_windows(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(runner_mod.os, "name", "nt")
+    monkeypatch.setattr(runner_mod, "_is_windows", lambda: True)
     monkeypatch.setattr(
         runner_mod,
         "_probe_windows_bash_usable",

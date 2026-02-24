@@ -48,3 +48,30 @@ def test_materialize_agent_prompt_into_workspace_copies_file_and_skips_samefile(
         text=None,
     )
     assert dest.read_text(encoding="utf-8") == payload
+
+
+def test_materialize_agent_prompt_into_workspace_adds_git_exclude_entry(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "ws"
+    workspace_dir.mkdir()
+    exclude_path = workspace_dir / ".git" / "info" / "exclude"
+    exclude_path.parent.mkdir(parents=True, exist_ok=True)
+    exclude_path.write_text("# existing\n", encoding="utf-8", newline="\n")
+
+    payload = "# Ticket\n\nHello.\n"
+    _materialize_agent_prompt_into_workspace(
+        workspace_dir=workspace_dir,
+        name="append_system_prompt.md",
+        src_path=None,
+        text=payload,
+    )
+    _materialize_agent_prompt_into_workspace(
+        workspace_dir=workspace_dir,
+        name="append_system_prompt.md",
+        src_path=None,
+        text=payload,
+    )
+
+    lines = exclude_path.read_text(encoding="utf-8").splitlines()
+    assert lines.count("/append_system_prompt.md") == 1
