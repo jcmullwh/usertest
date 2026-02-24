@@ -5,6 +5,7 @@ import os
 import platform
 import random
 import re
+import shlex
 import shutil
 import subprocess
 import time
@@ -55,6 +56,12 @@ from runner_core.pip_target import (
 )
 from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
 from runner_core.python_interpreter_probe import probe_python_interpreters
+from runner_core.python_runtime import (
+    probe_pytest_module,
+    select_python_runtime,
+    verification_commands_may_provision_pytest,
+    verification_commands_need_pytest,
+)
 from runner_core.run_spec import resolve_effective_run_inputs
 from runner_core.target_acquire import acquire_target
 
@@ -119,6 +126,7 @@ _BASE_PREFLIGHT_COMMANDS = [
     "rg",
     "python3",
     "python",
+    "py",
     "pip",
     "pip3",
     "pdm",
@@ -1413,6 +1421,52 @@ def _verification_shell_argv(*, command_prefix: list[str], command: str) -> list
     return ["sh", "-lc", command]
 
 
+def _powershell_quote_literal(text: str) -> str:
+    # PowerShell: single-quote string literals escape a literal quote by doubling it.
+    return "'" + text.replace("'", "''") + "'"
+
+
+_VERIFICATION_PYTHON_CMD_PATTERN = re.compile(r"^(python3?|py)(?=\s|$)", re.IGNORECASE)
+_VERIFICATION_PYTEST_CMD_PATTERN = re.compile(r"^pytest(?=\s|$)", re.IGNORECASE)
+
+
+def _rewrite_verification_command_for_python(
+    command: str,
+    *,
+    python_executable: str | None,
+    is_powershell: bool,
+) -> tuple[str, bool]:
+    """
+    Rewrite `python ...` / `py ...` / `pytest ...` to a fully-qualified, verified interpreter.
+
+    This avoids PATH resolution hitting WindowsApps/Store aliases on restricted Windows runners.
+    """
+
+    if not isinstance(python_executable, str) or not python_executable.strip():
+        return command, False
+
+    raw = command
+    stripped = raw.lstrip()
+    indent = raw[: len(raw) - len(stripped)]
+
+    def _python_invocation() -> str:
+        if is_powershell:
+            return f"& {_powershell_quote_literal(python_executable)}"
+        return shlex.quote(python_executable)
+
+    match = _VERIFICATION_PYTHON_CMD_PATTERN.match(stripped)
+    if match is not None:
+        rest = stripped[match.end() :]
+        return indent + _python_invocation() + rest, True
+
+    match = _VERIFICATION_PYTEST_CMD_PATTERN.match(stripped)
+    if match is not None:
+        rest = stripped[match.end() :]
+        return indent + _python_invocation() + " -m pytest" + rest, True
+
+    return command, False
+
+
 def _tail_text_for_prompt(text: str, *, max_chars: int = 2000) -> str:
     cleaned = text.strip()
     if len(cleaned) <= max_chars:
@@ -1428,6 +1482,7 @@ def _run_verification_commands(
     command_prefix: list[str],
     cwd: Path,
     timeout_seconds: float | None,
+    python_executable: str | None,
 ) -> dict[str, Any]:
     attempt_dir_rel = Path("verification") / f"attempt{attempt_number}"
     attempt_dir = run_dir / attempt_dir_rel
@@ -1436,16 +1491,22 @@ def _run_verification_commands(
     started_utc = _utc_now_z()
     started_monotonic = time.monotonic()
     results: list[dict[str, Any]] = []
+    is_powershell = (not command_prefix) and os.name == "nt"
 
     for idx, raw in enumerate(commands, start=1):
-        cmd = raw.strip()
-        if not cmd:
+        cmd_original = raw.strip()
+        if not cmd_original:
             continue
 
         stdout_path = attempt_dir / f"cmd_{idx:02d}.stdout.txt"
         stderr_path = attempt_dir / f"cmd_{idx:02d}.stderr.txt"
 
-        argv = _verification_shell_argv(command_prefix=command_prefix, command=cmd)
+        effective_cmd, rewritten = _rewrite_verification_command_for_python(
+            cmd_original,
+            python_executable=python_executable,
+            is_powershell=is_powershell,
+        )
+        argv = _verification_shell_argv(command_prefix=command_prefix, command=effective_cmd)
         cmd_started_utc = _utc_now_z()
         cmd_started_monotonic = time.monotonic()
         timed_out = False
@@ -1494,7 +1555,9 @@ def _run_verification_commands(
 
         result: dict[str, Any] = {
             "index": idx,
-            "command": cmd,
+            "command": cmd_original,
+            "effective_command": effective_cmd,
+            "rewritten": rewritten,
             "argv": argv,
             "exit_code": exit_code,
             "timed_out": timed_out,
@@ -1522,6 +1585,7 @@ def _run_verification_commands(
         "finished_utc": finished_utc,
         "wall_seconds": wall_seconds_total,
         "timeout_seconds": timeout_seconds,
+        "python_executable": python_executable,
         "passed": passed,
         "commands": results,
     }
@@ -2396,6 +2460,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             python_interpreter_summary = (
                 python_interpreter_meta if isinstance(python_interpreter_meta, dict) else None
             )
+            python_runtime = select_python_runtime(workspace_dir=acquired.workspace_dir)
+            python_runtime_summary = python_runtime.to_dict()
+            pytest_probe: dict[str, Any] | None = None
+            if (
+                verification_commands_need_pytest(request.verification_commands)
+                and python_runtime.selected is not None
+            ):
+                pytest_probe = probe_pytest_module(
+                    python_executable=python_runtime.selected.path,
+                    cwd=acquired.workspace_dir,
+                )
 
             command_diagnostics: dict[str, Any] = {}
             for cmd in effective_probe_commands:
@@ -2466,6 +2541,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "required_agent_binary": required_agent_binary,
                     "required_agent_binary_present": required_agent_binary_present,
                     "python_interpreter": python_interpreter_summary,
+                    "python_runtime": python_runtime_summary,
+                    "pytest_probe": pytest_probe,
                     "capabilities": {
                         "shell_commands": {
                             "status": shell_status,
@@ -2482,6 +2559,70 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "workspace_root_snapshot": preflight_workspace_snapshot,
                 },
             )
+
+            if verification_commands_need_pytest(request.verification_commands):
+                if python_runtime.selected is None:
+                    _write_json(
+                        run_dir / "error.json",
+                        {
+                            "type": "AgentPreflightFailed",
+                            "subtype": "python_unavailable",
+                            "agent": request.agent,
+                            "message": (
+                                "Verification is configured to run pytest, but no usable Python "
+                                "interpreter could be selected (WindowsApps/Store aliases are "
+                                "rejected)."
+                            ),
+                            "hint": (
+                                "Install a full CPython interpreter and ensure it is executable "
+                                "(not a WindowsApps alias), or create a workspace `.venv` and "
+                                "install deps into it."
+                            ),
+                            "preflight": {
+                                "python_runtime": python_runtime_summary,
+                                "python_interpreter": python_interpreter_summary,
+                                "command_diagnostics": command_diagnostics,
+                            },
+                        },
+                    )
+                    return RunResult(
+                        run_dir=run_dir,
+                        exit_code=1,
+                        report_validation_errors=[],
+                    )
+
+                if (
+                    not verification_commands_may_provision_pytest(request.verification_commands)
+                    and not bool(pytest_probe and pytest_probe.get("passed", False))
+                ):
+                    remediation = pytest_probe.get("remediation") if isinstance(pytest_probe, dict) else None
+                    _write_json(
+                        run_dir / "error.json",
+                        {
+                            "type": "AgentPreflightFailed",
+                            "subtype": "pytest_unavailable",
+                            "agent": request.agent,
+                            "message": (
+                                "Verification is configured to run pytest, but "
+                                "`python -m pytest --version` failed."
+                            ),
+                            "hint": remediation
+                            or (
+                                "Install pytest into the selected interpreter, or ensure the "
+                                "workspace `.venv` exists and contains pytest."
+                            ),
+                            "preflight": {
+                                "python_runtime": python_runtime_summary,
+                                "pytest_probe": pytest_probe,
+                                "command_diagnostics": command_diagnostics,
+                            },
+                        },
+                    )
+                    return RunResult(
+                        run_dir=run_dir,
+                        exit_code=1,
+                        report_validation_errors=[],
+                    )
 
             if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
                 suggested_policy = (
@@ -3121,6 +3262,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     and not attempt_report_validation_errors
                     and verification_commands
                 ):
+                    python_exec_for_verification: str | None = None
+                    if not command_prefix:
+                        selection = select_python_runtime(workspace_dir=acquired.workspace_dir)
+                        if selection.selected is not None and selection.selected.path.strip():
+                            python_exec_for_verification = selection.selected.path
+
                     attempt_verification_summary = _run_verification_commands(
                         run_dir=run_dir,
                         attempt_number=attempt_number,
@@ -3128,6 +3275,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         command_prefix=command_prefix,
                         cwd=acquired.workspace_dir,
                         timeout_seconds=verification_timeout_seconds,
+                        python_executable=python_exec_for_verification,
                     )
                     attempt_verification_passed = bool(
                         attempt_verification_summary.get("passed", False)

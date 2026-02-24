@@ -331,6 +331,13 @@ Golden fixture verification command:
   `minimal|low|medium|high` (example: `--agent-config model_reasoning_effort=high`).
 - If preflight reports `blocked_by_policy`, switch to `--policy inspect` (read-only + shell) or
   update `configs/policies.yaml`.
+- If you're on Windows and `python`/`python3` resolves to a WindowsApps alias (for example
+  `...\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe`) and spawning Python fails (often
+  `Access is denied`), install/select a full CPython interpreter and ensure it takes precedence
+  over WindowsApps on PATH (or disable the "App execution aliases" for Python in Windows
+  Settings). When `--verify-command` uses pytest, the runner fails fast with actionable details in
+  `preflight.json` (`command_diagnostics`, `python_runtime`, `pytest_probe`) and `error.json`
+  (`python_unavailable` / `pytest_unavailable`).
 - If you use a Windows-host checkout inside WSL or a Linux container and `git status` shows
   widespread unrelated modifications, it is usually a CRLF/LF line ending mismatch. Mitigations:
   - For new clones: `git config --global core.autocrlf input`
