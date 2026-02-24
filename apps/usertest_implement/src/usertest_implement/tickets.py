@@ -125,7 +125,12 @@ def move_ticket_file(
         raise ValueError(f"Unknown fingerprint: {fingerprint}")
 
     # Prefer not to move a ticket "backwards" once it's in a more-advanced actioned bucket.
-    actioned_rank = {"3 - in_progress": 1, "4 - for_review": 2, "5 - complete": 3, "0.1 - deferred": 0}
+    actioned_rank = {
+        "0.1 - deferred": 0,
+        "3 - in_progress": 1,
+        "4 - for_review": 2,
+        "5 - complete": 3,
+    }
     to_rank = actioned_rank.get(to_bucket)
     bucket_to_paths: dict[str, list[Path]] = {}
     for path in entry.paths:
@@ -142,7 +147,10 @@ def move_ticket_file(
             best_existing_bucket = bucket
 
     if to_rank is not None and best_existing_rank is not None and best_existing_rank > to_rank:
-        existing_paths = sorted(bucket_to_paths.get(best_existing_bucket or "", []), key=lambda p: str(p))
+        existing_paths = sorted(
+            bucket_to_paths.get(best_existing_bucket or "", []),
+            key=lambda path: str(path),
+        )
         if existing_paths:
             return existing_paths[0]
 

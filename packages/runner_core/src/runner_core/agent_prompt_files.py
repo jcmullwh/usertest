@@ -15,8 +15,8 @@ def _materialize_agent_prompt_into_workspace(
     Some missions instruct agents to read prompt append files from the workspace root (agent CWD).
 
     The runner also stages prompt override/append files under the run directory's `agent_prompts/`
-    for artifact stability, but that directory is not the agent working directory. Materialize a copy
-    into the acquired workspace so relative reads like `append_system_prompt.md` succeed.
+    for artifact stability, but that directory is not the agent working directory. Materialize a
+    copy into the acquired workspace so relative reads like `append_system_prompt.md` succeed.
     """
 
     dest_path = workspace_dir / name
@@ -37,4 +37,3 @@ def _materialize_agent_prompt_into_workspace(
         ) from exc
 
     return dest_path
-

@@ -439,7 +439,13 @@ def test_reports_export_tickets_sweeps_actioned_queue_duplicates_not_in_backlog(
                     "stage": "ready_for_ticket",
                     "evidence_atom_ids": [],
                     "change_surface": {"user_visible": False, "kinds": [], "notes": ""},
-                    "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
+                    "breadth": {
+                        "missions": 1,
+                        "targets": 1,
+                        "repo_inputs": 1,
+                        "agents": 1,
+                        "runs": 1,
+                    },
                     "suggested_owner": "docs",
                 }
             ],
@@ -516,7 +522,13 @@ def test_reports_export_tickets_sweeps_actioned_bucket_duplicates_not_in_backlog
                     "stage": "ready_for_ticket",
                     "evidence_atom_ids": [],
                     "change_surface": {"user_visible": False, "kinds": [], "notes": ""},
-                    "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
+                    "breadth": {
+                        "missions": 1,
+                        "targets": 1,
+                        "repo_inputs": 1,
+                        "agents": 1,
+                        "runs": 1,
+                    },
                     "suggested_owner": "docs",
                 }
             ],
@@ -776,7 +788,8 @@ def test_reports_export_tickets_promotes_high_surface_ready_ticket_with_docs_rec
         )
     assert exc.value.code == 0
 
-    export_doc = json.loads((compiled_dir / "target_a.tickets_export.json").read_text(encoding="utf-8"))
+    out_json = compiled_dir / "target_a.tickets_export.json"
+    export_doc = json.loads(out_json.read_text(encoding="utf-8"))
     assert export_doc["stats"]["exports_total"] == 1
     export = export_doc["exports"][0]
     assert export["export_kind"] == "implementation"
@@ -907,7 +920,9 @@ def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_
     assert "## UX review" in updated
 
 
-def test_reports_export_tickets_defers_existing_plan_ticket_and_updates_actions(tmp_path: Path) -> None:
+def test_reports_export_tickets_defers_existing_plan_ticket_and_updates_actions(
+    tmp_path: Path,
+) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
@@ -1009,10 +1024,11 @@ def test_reports_export_tickets_defers_existing_plan_ticket_and_updates_actions(
                 "--atom-actions-yaml",
                 str(atom_actions_path),
             ]
-        )
+    )
     assert exc.value.code == 0
 
-    export_doc = json.loads((compiled_dir / "target_a.tickets_export.json").read_text(encoding="utf-8"))
+    out_json = compiled_dir / "target_a.tickets_export.json"
+    export_doc = json.loads(out_json.read_text(encoding="utf-8"))
     assert export_doc["stats"]["exports_total"] == 0
     assert export_doc["stats"]["skipped_existing_plan"] == 1
     assert export_doc["stats"]["ux_tickets_deferred"] == 1

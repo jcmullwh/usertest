@@ -83,7 +83,7 @@ def _make_dummy_gemini_binary(tmp_path: Path, *, expected_system_prompt: str) ->
                 "    except OSError as e:",
                 "        print(f'failed to read system prompt: {e}', file=sys.stderr)",
                 "        return 3",
-                f\"    expected = {json.dumps(expected_system_prompt, ensure_ascii=False)}\",
+                f"    expected = {json.dumps(expected_system_prompt, ensure_ascii=False)}",
                 "    if payload != expected:",
                 "        print('unexpected system prompt payload', file=sys.stderr)",
                 "        print(payload, file=sys.stderr)",
@@ -117,7 +117,10 @@ def _make_dummy_gemini_binary(tmp_path: Path, *, expected_system_prompt: str) ->
         return str(wrapper)
 
     wrapper = tmp_path / "dummy_gemini.sh"
-    wrapper.write_text(f"#!/bin/sh\nexec \"{sys.executable}\" \"{script}\" \"$@\"\n", encoding="utf-8")
+    wrapper.write_text(
+        f"#!/bin/sh\nexec \"{sys.executable}\" \"{script}\" \"$@\"\n",
+        encoding="utf-8",
+    )
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
     return str(wrapper)
 
@@ -208,4 +211,3 @@ def test_gemini_system_prompt_append_is_composed_into_replacement_file(tmp_path:
     )
     assert result.exit_code == 0
     assert not result.report_validation_errors
-
