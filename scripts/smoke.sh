@@ -59,17 +59,17 @@ print_setup_hint() {
 
 PIP_FLAGS=(--disable-pip-version-check --retries 10 --timeout 30)
 
-if command -v pdm >/dev/null 2>&1; then
-  echo "==> Scaffold doctor"
-  "${PYTHON_BIN}" tools/scaffold/scaffold.py doctor
-else
-  if [[ "${REQUIRE_DOCTOR}" -eq 1 ]]; then
+if [[ "${REQUIRE_DOCTOR}" -eq 1 ]]; then
+  if ! command -v pdm >/dev/null 2>&1; then
     echo "Scaffold doctor required but pdm was not found on PATH." >&2
     echo "Install pdm (recommended): ${PYTHON_BIN} -m pip install -U pdm" >&2
     echo "Or rerun without --require-doctor." >&2
     exit 1
   fi
-  echo "==> Scaffold doctor (tool checks skipped; pdm not found on PATH)"
+  echo "==> Scaffold doctor"
+  "${PYTHON_BIN}" tools/scaffold/scaffold.py doctor
+else
+  echo "==> Scaffold doctor (tool checks skipped; pdm optional)"
   echo "    Note: pdm is optional; continuing with the pip-based flow."
   echo "    To enable tool checks: ${PYTHON_BIN} -m pip install -U pdm"
   echo "    To require doctor: bash ./scripts/smoke.sh --require-doctor"

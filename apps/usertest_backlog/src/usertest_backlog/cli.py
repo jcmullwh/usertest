@@ -346,8 +346,6 @@ def _infer_responsiveness_probe_commands(repo_dir: Path) -> set[str]:
         Computed return value.
     """
     commands: set[str] = set()
-    if (repo_dir / "pdm.lock").exists():
-        commands.add("pdm")
     if (repo_dir / "package.json").exists():
         commands.update({"node", "npm"})
     return commands

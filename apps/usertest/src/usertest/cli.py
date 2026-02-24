@@ -185,8 +185,6 @@ def _resolve_local_repo_root(repo_root: Path, repo: str) -> Path | None:
 def _infer_responsiveness_probe_commands(repo_dir: Path) -> set[str]:
     """Infer shell commands to probe for environment responsiveness."""
     commands: set[str] = set()
-    if (repo_dir / "pdm.lock").exists():
-        commands.add("pdm")
     if (repo_dir / "package.json").exists():
         commands.update({"node", "npm"})
     return commands
@@ -820,7 +818,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=5.0,
         help=(
-            "Timeout per initial command responsiveness probe (e.g., `pdm --version`) before "
+            "Timeout per initial command responsiveness probe (e.g., `npm --version`) before "
             "starting the batch."
         ),
     )

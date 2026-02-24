@@ -36,17 +36,17 @@ try {
     }
     $pipFlags = @('--disable-pip-version-check', '--retries', '10', '--timeout', '30')
 
-    if (Get-Command pdm -ErrorAction SilentlyContinue) {
+    if ($RequireDoctor) {
+        if (-not (Get-Command pdm -ErrorAction SilentlyContinue)) {
+            Write-Error "Scaffold doctor required but pdm was not found on PATH.`nInstall pdm (recommended): $pythonCmd -m pip install -U pdm`nOr rerun without -RequireDoctor."
+            exit 1
+        }
         Invoke-Step -Name 'Scaffold doctor' -Command {
             & $pythonCmd tools/scaffold/scaffold.py doctor
         }
     }
     else {
-        if ($RequireDoctor) {
-            Write-Error "Scaffold doctor required but pdm was not found on PATH.`nInstall pdm (recommended): $pythonCmd -m pip install -U pdm`nOr rerun without -RequireDoctor."
-            exit 1
-        }
-        Invoke-Step -Name 'Scaffold doctor (tool checks skipped; pdm not found on PATH)' -Command {
+        Invoke-Step -Name 'Scaffold doctor (tool checks skipped; pdm optional)' -Command {
             Write-Host '    Note: pdm is optional; continuing with the pip-based flow.'
             Write-Host "    To enable tool checks: $pythonCmd -m pip install -U pdm"
             Write-Host '    To require doctor: powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -RequireDoctor'

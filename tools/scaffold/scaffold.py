@@ -10,6 +10,8 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as _dt
+import importlib.util
+import json
 import os
 import re
 import shutil
@@ -217,6 +219,10 @@ def _which(cmd: str) -> str | None:
     return shutil.which(cmd)
 
 
+def _pdm_importable() -> bool:
+    return importlib.util.find_spec("pdm") is not None
+
+
 def _resolve_argv(argv: list[str]) -> list[str]:
     """Resolve argv[0] via PATH for cross-platform execution.
 
@@ -237,7 +243,12 @@ def _resolve_argv(argv: list[str]) -> list[str]:
             shim = _repo_root() / "tools" / "pdm_shim.py"
             if not shim.exists():
                 raise ScaffoldError(f"Missing PDM shim: {shim}")
-            return ["python", str(shim), *argv[1:]]
+            # Prefer running PDM in the same interpreter as this scaffold process. This avoids relying on `python`
+            # being on PATH and avoids mixing tool installations across interpreters.
+            if _pdm_importable():
+                return [sys.executable, str(shim), *argv[1:]]
+            # Fall back to invoking `pdm` directly. This keeps `scaffold` usable when PDM is installed in a different
+            # interpreter than the one running scaffold.
 
     if any(sep and sep in cmd for sep in ("/", "\\", os.path.sep, os.path.altsep)):
         return argv
@@ -271,14 +282,65 @@ def _run(
     _eprint(f"+ ({cwd}) {' '.join(argv)}")
     if resolved_argv != argv:
         _eprint(f"  -> ({cwd}) {' '.join(resolved_argv)}")
-    return subprocess.run(
-        resolved_argv,
-        cwd=str(cwd),
-        env=env,
-        text=True,
-        check=False,
-        capture_output=capture,
-    )
+    try:
+        return subprocess.run(
+            resolved_argv,
+            cwd=str(cwd),
+            env=env,
+            text=True,
+            check=False,
+            capture_output=capture,
+        )
+    except FileNotFoundError as exc:
+        cmd_name = Path(argv[0]).name
+        hint = ""
+        if cmd_name.lower() in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
+            hint = f" Install PDM: {sys.executable} -m pip install -U pdm"
+        raise ScaffoldError(f"Command not found: {cmd_name!r}.{hint}") from exc
+    except OSError as exc:
+        raise ScaffoldError(f"Failed to execute {argv[0]!r}: {exc}") from exc
+
+
+def _probe_tool_version(*, argv: list[str], timeout_seconds: float) -> tuple[bool, str | None, str | None]:
+    """
+    Best-effort `--version` probe for a tool.
+
+    Returns
+    -------
+    tuple[bool, str | None, str | None]
+        `(ok, version_line, error)`.
+    """
+    try:
+        cp = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return False, None, f"timed out after {timeout_seconds:.1f}s"
+    except OSError as exc:
+        return False, None, str(exc)
+
+    combined = "\n".join(x for x in (cp.stdout, cp.stderr) if x).strip()
+    line = combined.splitlines()[0].strip() if combined else None
+    if cp.returncode != 0:
+        return False, line, f"exit_code={cp.returncode}"
+    return True, line, None
+
+
+def _write_doctor_tool_report(*, repo_root: Path, payload: dict[str, Any]) -> Path | None:
+    out_path = repo_root / ".scaffold" / "doctor_tool_report.json"
+    try:
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        return out_path
+    except OSError as exc:
+        _eprint(f"WARNING: failed to write doctor tool report: {out_path}: {exc}")
+        return None
 
 
 _KNOWN_TRANSIENT_PDM_LOCAL_PATH_MARKERS: tuple[str, ...] = (
@@ -1104,6 +1166,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     projects = _load_projects(repo_root)
 
     errors: list[str] = []
+    required_tools: dict[str, list[str]] = {}
     for project in projects:
         project_id = project.get("id")
         kind = project.get("kind")
@@ -1170,19 +1233,90 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 if ci.get(task_name) is True:
                     required_tasks.add(task_name)
 
-        if not bool(getattr(args, "skip_tool_checks", False)):
-            for task_name in sorted(required_tasks):
-                cmd = validated_task_cmds.get(task_name)
-                if cmd is None:
-                    continue
-                try:
-                    _require_on_path(cmd[0], why=f"task '{task_name}' for project '{project_id}'")
-                except ScaffoldError as exc:
-                    errors.append(f"{project_id}: {exc}")
+        for task_name in sorted(required_tasks):
+            cmd = validated_task_cmds.get(task_name)
+            if cmd is None:
+                continue
+            tool = str(cmd[0])
+            required_tools.setdefault(tool, []).append(f"{project_id}:{task_name}")
+
+    tool_timeout_seconds = 4.0
+    tool_report: dict[str, Any] = {
+        "kind": "scaffold_doctor_tool_report",
+        "generated_at": (
+            _dt.datetime.now(tz=_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        ),
+        "python": {"executable": sys.executable, "version": sys.version.split()[0]},
+        "tools": {},
+    }
+
+    for tool, contexts in sorted(required_tools.items(), key=lambda kv: kv[0]):
+        resolved = _which(tool)
+        entry: dict[str, Any] = {"required_by": contexts, "resolved_path": resolved}
+
+        tool_l = tool.lower()
+        if tool_l in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
+            if os.name == "nt" and _pdm_importable():
+                ok, version, err = _probe_tool_version(
+                    argv=[sys.executable, str(repo_root / "tools" / "pdm_shim.py"), "--version"],
+                    timeout_seconds=tool_timeout_seconds,
+                )
+                entry.update({"probe": "shim", "ok": ok, "version": version, "error": err})
+            elif resolved is None:
+                entry.update({"probe": "path", "ok": False, "version": None, "error": "missing"})
+            else:
+                ok, version, err = _probe_tool_version(
+                    argv=[resolved, "--version"],
+                    timeout_seconds=tool_timeout_seconds,
+                )
+                entry.update({"probe": "path", "ok": ok, "version": version, "error": err})
+                if os.name == "nt" and not ok and not _pdm_importable():
+                    entry["remediation"] = (
+                        f"Install pdm into this Python to enable the shim: {sys.executable} -m pip install -U pdm"
+                    )
+        else:
+            if resolved is None:
+                entry.update({"probe": "path", "ok": False, "version": None, "error": "missing"})
+            else:
+                ok, version, err = _probe_tool_version(
+                    argv=[resolved, "--version"],
+                    timeout_seconds=tool_timeout_seconds,
+                )
+                entry.update({"probe": "path", "ok": ok, "version": version, "error": err})
+
+        tool_report["tools"][tool] = entry
+
+        if not bool(getattr(args, "skip_tool_checks", False)) and not bool(entry.get("ok")):
+            details = entry.get("error") or "unknown_error"
+            hint = entry.get("remediation")
+            ctx = ", ".join(contexts[:3]) + ("..." if len(contexts) > 3 else "")
+            if hint:
+                errors.append(f"tool {tool!r} is required (by {ctx}) but not usable: {details} (hint: {hint})")
+            else:
+                errors.append(f"tool {tool!r} is required (by {ctx}) but not usable: {details}")
+
+    if required_tools:
+        _eprint("==> Tool preflight")
+        for tool in sorted(required_tools.keys()):
+            entry = cast(dict[str, Any], tool_report["tools"].get(tool, {}))
+            ok = bool(entry.get("ok"))
+            probe = entry.get("probe") or "unknown"
+            version = entry.get("version")
+            if ok:
+                suffix = f" ({version})" if version else ""
+                _eprint(f"    - {tool}: OK via {probe}{suffix}")
+            else:
+                details = entry.get("error") or "unknown_error"
+                _eprint(f"    - {tool}: NOT OK via {probe} ({details})")
+
+    report_path = _write_doctor_tool_report(repo_root=repo_root, payload=tool_report)
 
     if errors:
-        raise ScaffoldError("Doctor found problems:\n" + "\n".join(f"- {e}" for e in errors))
+        suffix = f"\n\nTool report: {report_path}" if report_path else ""
+        raise ScaffoldError("Doctor found problems:\n" + "\n".join(f"- {e}" for e in errors) + suffix)
 
+    if report_path is not None:
+        _eprint(f"==> Tool report: {report_path}")
     print("OK")
     return 0
 

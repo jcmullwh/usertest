@@ -19,7 +19,7 @@ def test_batch_fails_before_running_when_tool_hangs(
 
     target_repo = tmp_path / "target_repo"
     target_repo.mkdir(parents=True, exist_ok=True)
-    (target_repo / "pdm.lock").write_text("", encoding="utf-8")
+    (target_repo / "package.json").write_text("{}", encoding="utf-8")
 
     targets_path = tmp_path / "targets.yaml"
     targets_path.write_text(
@@ -40,11 +40,11 @@ def test_batch_fails_before_running_when_tool_hangs(
     monkeypatch.setattr(
         usertest.cli.shutil,
         "which",
-        lambda cmd: "pdm" if cmd == "pdm" else None,
+        lambda cmd: cmd if cmd in {"node", "npm"} else None,
     )
 
     def _fake_run(cmd: list[str], *args: Any, **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        if cmd and cmd[0] == "pdm":
+        if cmd and cmd[0] == "npm":
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=float(kwargs.get("timeout", 0)))
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
@@ -72,7 +72,7 @@ def test_batch_fails_before_running_when_tool_hangs(
     out = capsys.readouterr()
     assert "Batch validation failed" in out.err
     assert "env:" in out.err
-    assert "pdm" in out.err
+    assert "npm" in out.err
 
 
 def test_batch_validates_mission_ids_upfront(
