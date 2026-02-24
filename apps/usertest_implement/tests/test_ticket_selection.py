@@ -152,7 +152,7 @@ def test_run_dry_run_requires_exactly_one_selector(tmp_path: Path) -> None:
     assert proc.returncode != 0
 
 
-def test_tickets_run_next_dry_run_prefers_research(tmp_path: Path) -> None:
+def test_tickets_run_next_dry_run_defaults_to_implementation_only(tmp_path: Path) -> None:
     owner_root = tmp_path / "repo"
     ready_dir = owner_root / ".agents" / "plans" / "2 - ready"
     ready_dir.mkdir(parents=True)
@@ -187,4 +187,51 @@ def test_tickets_run_next_dry_run_prefers_research(tmp_path: Path) -> None:
     )
     assert proc.returncode == 0, proc.stderr or proc.stdout
     payload = json.loads(proc.stdout)
-    assert payload["selected_ticket"]["fingerprint"] == research_fp
+    assert payload["selected_ticket"]["fingerprint"] == impl_fp
+    assert payload["run_request"]["verification_commands"]
+
+
+def test_tickets_run_next_dry_run_ignores_actioned_fingerprints(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    ready_dir = owner_root / ".agents" / "plans" / "2 - ready"
+    complete_dir = owner_root / ".agents" / "plans" / "5 - complete"
+    ready_dir.mkdir(parents=True)
+    complete_dir.mkdir(parents=True)
+
+    # Fingerprint has both queued + actioned copies -> merged status is actioned.
+    stale_fp = "aaaaaaaaaaaaaaaa"
+    name = f"20260220_BLG-001_{stale_fp}_stale.md"
+    (ready_dir / name).write_text(
+        "# Stale queued copy\n\n- Export kind: `implementation`\n- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
+        encoding="utf-8",
+    )
+    (complete_dir / name).write_text(
+        "# Actioned copy\n\n- Export kind: `implementation`\n- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
+        encoding="utf-8",
+    )
+
+    good_fp = "bbbbbbbbbbbbbbbb"
+    (ready_dir / f"20260220_BLG-002_{good_fp}_ok.md").write_text(
+        "# Next\n\n- Export kind: `implementation`\n- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "tickets",
+            "run-next",
+            "--owner-root",
+            str(owner_root),
+            "--no-refresh-backlog",
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["selected_ticket"]["fingerprint"] == good_fp

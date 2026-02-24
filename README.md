@@ -114,6 +114,10 @@ macOS/Linux:
 
 `bash ./scripts/smoke.sh`
 
+Note: on some Windows sandboxes, `bash.exe` may be on `PATH` (for example via Git for Windows) but
+execution is blocked ("Access is denied"). In that case, use the PowerShell smoke command above
+and avoid bash-based validation steps.
+
 The smoke scripts run:
 
 1. `python tools/scaffold/scaffold.py doctor`
@@ -139,6 +143,8 @@ Restricted environments (no editable installs / pre-provisioned deps):
 - No installs at runtime (deps already provisioned, e.g., offline wheelhouse): run smoke with both flags:
   - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -SkipInstall -UsePythonPath`
   - macOS/Linux: `bash ./scripts/smoke.sh --skip-install --use-pythonpath`
+- If you pass only `--skip-install` (without `--use-pythonpath`), smoke assumes your environment already has the
+  monorepo packages installed and importable.
 
 ### Manual editable install (no PYTHONPATH)
 
@@ -331,6 +337,13 @@ Golden fixture verification command:
   `minimal|low|medium|high` (example: `--agent-config model_reasoning_effort=high`).
 - If preflight reports `blocked_by_policy`, switch to `--policy inspect` (read-only + shell) or
   update `configs/policies.yaml`.
+- If you're on Windows and `python`/`python3` resolves to a WindowsApps alias (for example
+  `...\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe`) and spawning Python fails (often
+  `Access is denied`), install/select a full CPython interpreter and ensure it takes precedence
+  over WindowsApps on PATH (or disable the "App execution aliases" for Python in Windows
+  Settings). When `--verify-command` uses pytest, the runner fails fast with actionable details in
+  `preflight.json` (`command_diagnostics`, `python_runtime`, `pytest_probe`) and `error.json`
+  (`python_unavailable` / `pytest_unavailable`).
 - If you use a Windows-host checkout inside WSL or a Linux container and `git status` shows
   widespread unrelated modifications, it is usually a CRLF/LF line ending mismatch. Mitigations:
   - For new clones: `git config --global core.autocrlf input`

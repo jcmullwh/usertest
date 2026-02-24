@@ -1262,7 +1262,10 @@ def run_backlog_prompt(
     if workspace_dir is not None:
         workspace = workspace_dir
     else:
-        with tempfile.TemporaryDirectory(prefix="usertest_backlog_") as temp_dir:
+        with tempfile.TemporaryDirectory(
+            prefix="usertest_backlog_",
+            ignore_cleanup_errors=(os.name == "nt"),
+        ) as temp_dir:
             workspace = Path(temp_dir)
             _run_agent_in_workspace(
                 agent=agent,

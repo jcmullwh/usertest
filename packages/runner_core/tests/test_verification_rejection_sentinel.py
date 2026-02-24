@@ -26,6 +26,7 @@ def test_run_verification_commands_does_not_execute_rejection_sentinel(
         command_prefix=[],
         cwd=tmp_path,
         timeout_seconds=None,
+        python_executable=None,
     )
 
     assert calls == []
@@ -43,4 +44,3 @@ def test_run_verification_commands_does_not_execute_rejection_sentinel(
     assert stderr_path.exists()
     stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
     assert "rejection sentinel" in stderr_text.lower()
-

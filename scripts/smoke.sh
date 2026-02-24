@@ -48,6 +48,15 @@ if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
   fi
 fi
 
+print_setup_hint() {
+  echo "==> Setup hint"
+  echo "    Default: editable installs (run: bash ./scripts/smoke.sh)"
+  echo "    From-source: --use-pythonpath (no editables; good for restricted envs)"
+  if [[ -z "${VIRTUAL_ENV:-}" && -z "${CI:-}" ]]; then
+    echo "    Recommended venv: ${PYTHON_BIN} -m venv .venv && source .venv/bin/activate  # or source .venv/Scripts/activate (Git Bash)"
+  fi
+}
+
 PIP_FLAGS=(--disable-pip-version-check --retries 10 --timeout 30)
 
 if command -v pdm >/dev/null 2>&1; then
@@ -66,6 +75,8 @@ else
   echo "    To require doctor: bash ./scripts/smoke.sh --require-doctor"
   "${PYTHON_BIN}" tools/scaffold/scaffold.py doctor --skip-tool-checks
 fi
+
+print_setup_hint
 
 if [[ "${SKIP_INSTALL}" -eq 0 ]]; then
   if command -v id >/dev/null 2>&1; then
@@ -110,14 +121,30 @@ elif [[ "${USE_PYTHONPATH}" -eq 1 ]]; then
   source "${SCRIPT_DIR}/set_pythonpath.sh"
 fi
 
-if [[ "${SKIP_INSTALL}" -eq 1 && "${USE_PYTHONPATH}" -eq 0 ]]; then
-  if ! "${PYTHON_BIN}" -c "import usertest" >/dev/null 2>&1; then
-    echo "==> Smoke preflight failed: 'usertest' is not importable in this Python environment." >&2
-    echo "    Fix options:" >&2
-    echo "      - Rerun without --skip-install (installs editables into the active env)." >&2
-    echo "      - Or use PYTHONPATH mode:" >&2
+if [[ "${SKIP_INSTALL}" -eq 1 ]]; then
+  PREFLIGHT_CODE=$'import importlib\nimport sys\n\nmods = [\n    "usertest",\n    "usertest.cli",\n    "usertest_backlog",\n    "usertest_backlog.cli",\n    "usertest_implement",\n    "usertest_implement.cli",\n    "agent_adapters",\n    "backlog_core",\n    "backlog_miner",\n    "backlog_repo",\n    "normalized_events",\n    "reporter",\n    "run_artifacts",\n    "runner_core",\n    "sandbox_runner",\n    "triage_engine",\n]\n\nerrors = []\nfor mod in mods:\n    try:\n        importlib.import_module(mod)\n    except Exception as e:\n        errors.append((mod, f"{type(e).__name__}: {e}"))\n\nif errors:\n    for mod, msg in errors:\n        print(f"{mod}: {msg}")\n    raise SystemExit(1)\n'
+
+  preflight_rc=0
+  preflight_out="$("${PYTHON_BIN}" -c "${PREFLIGHT_CODE}")" || preflight_rc=$?
+  if [[ "${preflight_rc}" -ne 0 ]]; then
+    echo "==> Smoke preflight failed: required imports are not available in this Python environment." >&2
+    if [[ -n "${preflight_out}" ]]; then
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        echo "    - ${line}" >&2
+      done <<<"${preflight_out}"
+    fi
+    echo "" >&2
+    echo "    You passed --skip-install, so this script will not install local packages into your environment." >&2
+    echo "    Choose one setup mode:" >&2
+    echo "      - Editable installs (recommended for dev):" >&2
+    echo "          bash ./scripts/smoke.sh" >&2
+    echo "      - From-source (PYTHONPATH) mode:" >&2
     echo "          ${PYTHON_BIN} -m pip install -r requirements-dev.txt" >&2
     echo "          bash ./scripts/smoke.sh --skip-install --use-pythonpath" >&2
+    echo "" >&2
+    echo "    Tip: prefer a virtualenv to avoid global/user-site installs:" >&2
+    echo "      ${PYTHON_BIN} -m venv .venv && source .venv/bin/activate" >&2
     exit 1
   fi
 fi
