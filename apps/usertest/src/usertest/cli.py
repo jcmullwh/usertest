@@ -503,7 +503,7 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Path to a file used to override the agent's built-in system prompt/instructions "
             "(mapped per agent: Codex model_instructions_file, Claude --system-prompt-file, "
-            "Gemini GEMINI_SYSTEM_MD)."
+            "Gemini --agent-system-prompt-file)."
         ),
     )
     run_p.add_argument(
