@@ -64,7 +64,11 @@ def test_verification_rewrites_bash_smoke_to_powershell_when_bash_blocked_on_win
 
     assert len(calls) == 1
     assert calls[0][:4] == ["powershell", "-NoProfile", "-NonInteractive", "-Command"]
-    assert "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1" in calls[0][4]
+    expected = (
+        "powershell -NoProfile -ExecutionPolicy Bypass -File "
+        ".\\scripts\\smoke.ps1"
+    )
+    assert expected in calls[0][4]
 
 
 def test_verification_skips_bash_syntax_check_when_bash_blocked_on_windows(

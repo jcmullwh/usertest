@@ -140,7 +140,10 @@ def test_probe_selects_verified_fallback_candidate(monkeypatch: pytest.MonkeyPat
     assert result.selected_resolved_path == r"C:\Python313\py.exe"
 
 
-def test_resolve_prefers_workspace_venv_python(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_resolve_prefers_workspace_venv_python(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
     workspace_dir = tmp_path / "workspace"
     venv_python = workspace_dir / ".venv" / "Scripts" / "python.exe"
     venv_python.parent.mkdir(parents=True, exist_ok=True)

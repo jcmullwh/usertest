@@ -952,9 +952,12 @@ def _format_windows_python_preflight_error(probe: Any) -> str:
         [
             "",
             "Fix options:",
-            "  1) Install CPython (python.org) or via winget: winget install -e --id Python.Python.3.13",
-            "  2) Disable App Execution Alias shims: Settings -> Apps -> Advanced app settings -> App execution aliases -> turn off python.exe/python3.exe",
-            "  3) Use a portable/vendored Python and put its folder first on PATH (or use --exec-backend docker)",
+            "  1) Install CPython (python.org) or via winget: "
+            "winget install -e --id Python.Python.3.13",
+            "  2) Disable App Execution Alias shims: Settings -> Apps -> Advanced app settings -> "
+            "App execution aliases -> turn off python.exe/python3.exe",
+            "  3) Use a portable/vendored Python and put its folder first on PATH "
+            "(or use --exec-backend docker)",
         ]
     )
     return "\n".join(lines)
@@ -1839,7 +1842,8 @@ def _run_verification_commands(
                 "[runner] Verification command dispatch blocked: received rejection sentinel "
                 f"token={effective_cmd!r}.\n"
                 "[runner] This indicates a tool/policy rejection was forwarded as a command.\n"
-                "[runner] Fix: propagate the rejection as a structured error instead of executing it.\n"
+                "[runner] Fix: propagate the rejection as a structured error instead of "
+                "executing it.\n"
             )
         else:
             argv = _verification_shell_argv(command_prefix=command_prefix, command=effective_cmd)
@@ -2949,7 +2953,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     not verification_commands_may_provision_pytest(request.verification_commands)
                     and not bool(pytest_probe and pytest_probe.get("passed", False))
                 ):
-                    remediation = pytest_probe.get("remediation") if isinstance(pytest_probe, dict) else None
+                    remediation = (
+                        pytest_probe.get("remediation")
+                        if isinstance(pytest_probe, dict)
+                        else None
+                    )
                     _write_json(
                         run_dir / "error.json",
                         {

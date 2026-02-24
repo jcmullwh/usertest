@@ -86,6 +86,8 @@ try:
     )
     from backlog_repo import (
         dedupe_actioned_plan_ticket_files as _dedupe_actioned_plan_ticket_files,
+    )
+    from backlog_repo import (
         load_atom_actions_yaml as _load_atom_actions_yaml,
     )
     from backlog_repo import (

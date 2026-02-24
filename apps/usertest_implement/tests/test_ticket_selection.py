@@ -201,12 +201,22 @@ def test_tickets_run_next_dry_run_ignores_actioned_fingerprints(tmp_path: Path) 
     # Fingerprint has both queued + actioned copies -> merged status is actioned.
     stale_fp = "aaaaaaaaaaaaaaaa"
     name = f"20260220_BLG-001_{stale_fp}_stale.md"
+    queued_text = (
+        "# Stale queued copy\n\n"
+        "- Export kind: `implementation`\n"
+        "- Fingerprint: `aaaaaaaaaaaaaaaa`\n"
+    )
     (ready_dir / name).write_text(
-        "# Stale queued copy\n\n- Export kind: `implementation`\n- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
+        queued_text,
         encoding="utf-8",
     )
+    actioned_text = (
+        "# Actioned copy\n\n"
+        "- Export kind: `implementation`\n"
+        "- Fingerprint: `aaaaaaaaaaaaaaaa`\n"
+    )
     (complete_dir / name).write_text(
-        "# Actioned copy\n\n- Export kind: `implementation`\n- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
+        actioned_text,
         encoding="utf-8",
     )
 

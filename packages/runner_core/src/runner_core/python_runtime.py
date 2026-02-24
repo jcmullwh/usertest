@@ -354,9 +354,15 @@ def probe_pytest_module(
             "Install/select a full CPython interpreter (not WindowsApps alias), then retry."
         )
     elif exit_code != 0:
-        if "no module named pytest" in lowered or "modulenotfounderror" in lowered and "pytest" in lowered:
+        if (
+            "no module named pytest" in lowered
+            or ("modulenotfounderror" in lowered and "pytest" in lowered)
+        ):
             reason_code = "pytest_missing"
-            remediation = f"Install pytest into the selected interpreter: {python_executable} -m pip install -U pytest"
+            remediation = (
+                "Install pytest into the selected interpreter: "
+                f"{python_executable} -m pip install -U pytest"
+            )
         elif "access is denied" in lowered or "permission denied" in lowered:
             reason_code = "access_denied"
             remediation = (
