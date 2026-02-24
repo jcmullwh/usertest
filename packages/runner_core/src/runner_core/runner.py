@@ -55,7 +55,7 @@ from runner_core.pip_target import (
     requirements_path as pip_requirements_path,
 )
 from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
-from runner_core.python_interpreter_probe import probe_python_interpreters
+from runner_core.python_interpreter_probe import resolve_usable_python_interpreter
 from runner_core.python_runtime import (
     probe_pytest_module,
     select_python_runtime,
@@ -124,6 +124,7 @@ class RunResult:
 _BASE_PREFLIGHT_COMMANDS = [
     "git",
     "rg",
+    "bash",
     "python3",
     "python",
     "py",
@@ -844,12 +845,20 @@ def _agent_binary_for_preflight_probe(*, agent: str, agent_cfg: dict[str, Any]) 
     return binary
 
 
-def _probe_commands_local(commands: list[str]) -> tuple[dict[str, bool], dict[str, Any]]:
+def _probe_commands_local(
+    commands: list[str],
+    *,
+    workspace_dir: Path | None = None,
+) -> tuple[dict[str, bool], dict[str, Any]]:
     out: dict[str, bool] = {}
     probe_details: dict[str, dict[str, Any]] = {}
     python_commands = [cmd for cmd in commands if cmd in {"python", "python3", "py"}]
     python_probe = (
-        probe_python_interpreters(candidate_commands=python_commands, timeout_seconds=5.0)
+        resolve_usable_python_interpreter(
+            workspace_dir=workspace_dir,
+            candidate_commands=python_commands,
+            timeout_seconds=5.0,
+        )
         if python_commands
         else None
     )
@@ -865,20 +874,117 @@ def _probe_commands_local(commands: list[str]) -> tuple[dict[str, bool], dict[st
 
         resolved = shutil.which(cmd)
         present = resolved is not None
-        out[cmd] = present
+        usable = present
+        reason_code: str | None = None if present else "not_found"
+        reason: str | None = None if present else f"`{cmd}` was not found on PATH."
+
+        if cmd == "bash" and os.name == "nt" and resolved is not None:
+            # On some Windows sandboxes, bash.exe may be on PATH (e.g., Git Bash) but execution is
+            # blocked by policy ("Access is denied"). Probe by actually starting bash.
+            try:
+                proc = subprocess.run(
+                    [resolved, "-lc", "echo ok"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=2.0,
+                    check=False,
+                )
+                usable = int(proc.returncode or 0) == 0
+                if not usable:
+                    reason_code = "probe_failed"
+                    stderr = (proc.stderr or "").strip()
+                    reason = (
+                        "bash probe exited non-zero"
+                        + (f": {stderr}" if stderr else f" (exit_code={proc.returncode})")
+                    )
+            except subprocess.TimeoutExpired:
+                usable = False
+                reason_code = "unresponsive"
+                reason = "bash probe timed out (2.0s) running `bash -lc \"echo ok\"`."
+            except OSError as e:
+                usable = False
+                reason_code = "blocked"
+                reason = f"bash probe failed: {e}"
+
+        out[cmd] = bool(usable)
         probe_details[cmd] = {
             "command": cmd,
             "resolved_path": resolved,
             "present": present,
-            "usable": present,
-            "reason_code": (None if present else "not_found"),
-            "reason": (None if present else f"`{cmd}` was not found on PATH."),
+            "usable": bool(usable),
+            "reason_code": reason_code,
+            "reason": reason,
         }
 
     meta: dict[str, Any] = {"command_probe_details": probe_details}
     if python_probe is not None:
         meta["python_interpreter"] = python_probe.to_dict()
     return out, meta
+
+
+def _format_windows_python_preflight_error(probe: Any) -> str:
+    payload = probe.to_dict() if hasattr(probe, "to_dict") else {}
+    candidates = payload.get("candidates") if isinstance(payload, dict) else None
+    candidates_list = candidates if isinstance(candidates, list) else []
+    lines = [
+        "Python preflight failed on Windows: no usable interpreter could be resolved within ~5s.",
+        "",
+        "Tried:",
+    ]
+    for item in candidates_list:
+        if not isinstance(item, dict):
+            continue
+        command = item.get("command")
+        resolved_path = item.get("resolved_path")
+        reason_code = item.get("reason_code")
+        reason = item.get("reason")
+        summary = f"{command} -> {resolved_path} ({reason_code})"
+        lines.append("  - " + summary)
+        if isinstance(reason, str) and reason.strip():
+            tail = reason.strip()
+            if len(tail) > 300:
+                tail = tail[:300].rstrip() + "…"
+            lines.append("      " + tail.replace("\n", "\n      "))
+    lines.extend(
+        [
+            "",
+            "Fix options:",
+            "  1) Install CPython (python.org) or via winget: winget install -e --id Python.Python.3.13",
+            "  2) Disable App Execution Alias shims: Settings -> Apps -> Advanced app settings -> App execution aliases -> turn off python.exe/python3.exe",
+            "  3) Use a portable/vendored Python and put its folder first on PATH (or use --exec-backend docker)",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _ensure_windows_python_on_path(
+    *,
+    workspace_dir: Path,
+    env_overrides: dict[str, str] | None,
+) -> dict[str, str]:
+    base = dict(env_overrides or {})
+    probe = resolve_usable_python_interpreter(
+        workspace_dir=workspace_dir,
+        candidate_commands=("python", "python3", "py"),
+        timeout_seconds=5.0,
+        include_sys_executable=True,
+    )
+    if probe.selected_command is None:
+        raise RuntimeError(_format_windows_python_preflight_error(probe))
+
+    python_exe = probe.selected_executable or probe.selected_resolved_path or ""
+    python_exe_s = python_exe.strip()
+    if python_exe_s:
+        base.setdefault("USERTEST_PYTHON", python_exe_s)
+        python_dir = str(Path(python_exe_s).parent)
+        prior_path = base.get("PATH", os.environ.get("PATH", ""))
+        if prior_path:
+            base["PATH"] = f"{python_dir}{os.pathsep}{prior_path}"
+        else:
+            base["PATH"] = python_dir
+    return base
 
 
 def _snapshot_workspace_root(workspace_dir: Path, *, max_entries: int = 200) -> dict[str, Any]:
@@ -1421,6 +1527,132 @@ def _verification_shell_argv(*, command_prefix: list[str], command: str) -> list
     return ["sh", "-lc", command]
 
 
+def _probe_windows_bash_usable() -> dict[str, Any]:
+    resolved = shutil.which("bash")
+    if resolved is None:
+        return {
+            "present": False,
+            "usable": False,
+            "resolved_path": None,
+            "reason_code": "not_found",
+            "reason": "`bash` was not found on PATH.",
+        }
+
+    try:
+        proc = subprocess.run(
+            [resolved, "-lc", "echo ok"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "present": True,
+            "usable": False,
+            "resolved_path": resolved,
+            "reason_code": "unresponsive",
+            "reason": "bash probe timed out (2.0s) running `bash -lc \"echo ok\"`.",
+        }
+    except OSError as e:
+        return {
+            "present": True,
+            "usable": False,
+            "resolved_path": resolved,
+            "reason_code": "blocked",
+            "reason": f"bash probe failed: {e}",
+        }
+
+    exit_code = int(proc.returncode or 0)
+    if exit_code == 0:
+        return {
+            "present": True,
+            "usable": True,
+            "resolved_path": resolved,
+            "reason_code": None,
+            "reason": None,
+        }
+    stderr = (proc.stderr or "").strip()
+    return {
+        "present": True,
+        "usable": False,
+        "resolved_path": resolved,
+        "reason_code": "probe_failed",
+        "reason": (
+            "bash probe exited non-zero"
+            + (f": {stderr}" if stderr else f" (exit_code={exit_code})")
+        ),
+    }
+
+
+def _maybe_rewrite_windows_bash_smoke_verification_command(
+    *,
+    command: str,
+    bash_probe: dict[str, Any],
+) -> dict[str, Any] | None:
+    """
+    If bash is not runnable on Windows local backend, rewrite known smoke invocations to the
+    PowerShell equivalent (or skip bash-only checks).
+
+    Returns a dict describing the action, or None to run the command as-is.
+    """
+
+    raw = command.strip()
+    if not raw:
+        return None
+
+    normalized = raw.replace("\\", "/")
+    lower = normalized.lower()
+    if not lower.startswith("bash "):
+        return None
+
+    usable = bool(bash_probe.get("usable", False))
+    if usable:
+        return None
+
+    # Skip bash-only syntax checks if bash can't execute.
+    if lower.startswith("bash -n ") and "scripts/smoke.sh" in lower:
+        return {
+            "action": "skip",
+            "reason": (
+                "Skipping `bash -n scripts/smoke.sh` because bash is not runnable on this Windows "
+                "host. Run this check on macOS/Linux, or in a Linux Docker backend."
+            ),
+            "rewrite": {
+                "kind": "skip_bash_syntax_check",
+                "bash_reason": str(bash_probe.get("reason") or "").strip() or None,
+            },
+        }
+
+    # Rewrite smoke.sh execution to smoke.ps1.
+    if "scripts/smoke.sh" in lower:
+        switches: list[str] = []
+        if "--skip-install" in lower:
+            switches.append("-SkipInstall")
+        if "--use-pythonpath" in lower:
+            switches.append("-UsePythonPath")
+        if "--require-doctor" in lower:
+            switches.append("-RequireDoctor")
+
+        ps_cmd = (
+            "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1"
+            + (" " + " ".join(switches) if switches else "")
+        )
+        return {
+            "action": "rewrite",
+            "command": ps_cmd,
+            "rewrite": {
+                "kind": "bash_smoke_to_powershell_smoke",
+                "original_command": raw,
+                "bash_reason": str(bash_probe.get("reason") or "").strip() or None,
+            },
+        }
+
+    return None
+
+
 def _powershell_quote_literal(text: str) -> str:
     # PowerShell: single-quote string literals escape a literal quote by doubling it.
     return "'" + text.replace("'", "''") + "'"
@@ -1491,7 +1723,19 @@ def _run_verification_commands(
     started_utc = _utc_now_z()
     started_monotonic = time.monotonic()
     results: list[dict[str, Any]] = []
+
     is_powershell = (not command_prefix) and os.name == "nt"
+
+    windows_bash_probe: dict[str, Any] | None = None
+    if os.name == "nt" and not command_prefix:
+        # Only probe when we might need to rewrite/skip bash-based commands.
+        if any(
+            isinstance(c, str)
+            and c.strip()
+            and c.strip().replace("\\", "/").lower().startswith("bash ")
+            for c in commands
+        ):
+            windows_bash_probe = _probe_windows_bash_usable()
 
     for idx, raw in enumerate(commands, start=1):
         cmd_original = raw.strip()
@@ -1501,11 +1745,68 @@ def _run_verification_commands(
         stdout_path = attempt_dir / f"cmd_{idx:02d}.stdout.txt"
         stderr_path = attempt_dir / f"cmd_{idx:02d}.stderr.txt"
 
-        effective_cmd, rewritten = _rewrite_verification_command_for_python(
-            cmd_original,
+        rewrite_meta: dict[str, Any] | None = None
+        cmd_after_bash_rewrite = cmd_original
+        bash_rewritten = False
+        if windows_bash_probe is not None:
+            decision = _maybe_rewrite_windows_bash_smoke_verification_command(
+                command=cmd_after_bash_rewrite,
+                bash_probe=windows_bash_probe,
+            )
+            if decision is not None:
+                rewrite_meta = (
+                    decision.get("rewrite")
+                    if isinstance(decision.get("rewrite"), dict)
+                    else None
+                )
+                action = decision.get("action")
+                if action == "skip":
+                    stdout_text = ""
+                    stderr_text = str(decision.get("reason") or "").strip() + "\n"
+                    exit_code = 0
+                    wall_seconds = 0.0
+                    try:
+                        stdout_path.write_text(stdout_text, encoding="utf-8", newline="\n")
+                    except OSError:
+                        pass
+                    try:
+                        stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
+                    except OSError:
+                        pass
+
+                    result: dict[str, Any] = {
+                        "index": idx,
+                        "command": cmd_original,
+                        "effective_command": None,
+                        "rewritten": False,
+                        "argv": None,
+                        "exit_code": exit_code,
+                        "timed_out": False,
+                        "skipped": True,
+                        "skip_reason": str(decision.get("reason") or "").strip() or None,
+                        "command_started_utc": _utc_now_z(),
+                        "wall_seconds": wall_seconds,
+                        "stdout_path": stdout_path.name,
+                        "stderr_path": stderr_path.name,
+                        "stdout_tail": _tail_text_for_prompt(stdout_text),
+                        "stderr_tail": _tail_text_for_prompt(stderr_text),
+                        "rewrite": rewrite_meta,
+                    }
+                    results.append(result)
+                    continue
+                if action == "rewrite":
+                    new_cmd = decision.get("command")
+                    if isinstance(new_cmd, str) and new_cmd.strip():
+                        cmd_after_bash_rewrite = new_cmd.strip()
+                        bash_rewritten = True
+
+        effective_cmd, python_rewritten = _rewrite_verification_command_for_python(
+            cmd_after_bash_rewrite,
             python_executable=python_executable,
             is_powershell=is_powershell,
         )
+        rewritten = bool(python_rewritten or bash_rewritten)
+
         argv = _verification_shell_argv(command_prefix=command_prefix, command=effective_cmd)
         cmd_started_utc = _utc_now_z()
         cmd_started_monotonic = time.monotonic()
@@ -1567,6 +1868,7 @@ def _run_verification_commands(
             "stderr_path": stderr_path.name,
             "stdout_tail": _tail_text_for_prompt(stdout_text),
             "stderr_tail": _tail_text_for_prompt(stderr_text),
+            "rewrite": rewrite_meta,
         }
         results.append(result)
 
@@ -2351,7 +2653,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     installer=pip_spec.installer,
                 )
 
-            agent_env_overrides = bootstrap.env_overrides if bootstrap is not None else None
+            agent_env_overrides = dict(bootstrap.env_overrides) if bootstrap is not None else None
+            if os.name == "nt" and sandbox is None and bool(resolved_inputs.mission.requires_shell):
+                agent_env_overrides = _ensure_windows_python_on_path(
+                    workspace_dir=acquired.workspace_dir,
+                    env_overrides=agent_env_overrides,
+                )
 
             codex_sandbox_mode: str | None = None
             codex_ask_for_approval: str | None = None
@@ -2401,7 +2708,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     )
                 else:
                     preflight_commands_present, preflight_meta = _probe_commands_local(
-                        probe_commands
+                        probe_commands,
+                        workspace_dir=acquired.workspace_dir,
                     )
             except Exception as e:  # noqa: BLE001
                 preflight_commands_present = {}
@@ -2494,7 +2802,18 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     status = "blocked_by_policy"
                 remediation: str | None = None
                 if status == "missing":
-                    if reason_code_s == "windowsapps_alias":
+                    if cmd in {"python", "python3", "py"} and reason_code_s in {
+                        "access_denied",
+                        "launch_failed",
+                        "timeout",
+                    }:
+                        remediation = (
+                            "Python execution appears blocked or broken. Install a full CPython "
+                            "interpreter (python.org or winget), disable Windows App Execution "
+                            "Alias shims (python.exe/python3.exe), or switch to --exec-backend "
+                            "docker."
+                        )
+                    elif reason_code_s == "windowsapps_alias":
                         remediation = (
                             "Install and expose a full CPython interpreter (not WindowsApps "
                             "alias), then retry."

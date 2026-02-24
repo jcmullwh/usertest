@@ -138,3 +138,53 @@ def test_probe_selects_verified_fallback_candidate(monkeypatch: pytest.MonkeyPat
     assert by_command["py"].usable is True
     assert result.selected_command == "py"
     assert result.selected_resolved_path == r"C:\Python313\py.exe"
+
+
+def test_resolve_prefers_workspace_venv_python(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    workspace_dir = tmp_path / "workspace"
+    venv_python = workspace_dir / ".venv" / "Scripts" / "python.exe"
+    venv_python.parent.mkdir(parents=True, exist_ok=True)
+    venv_python.write_text("", encoding="utf-8")
+
+    def _which(command: str) -> str | None:
+        if command == str(venv_python):
+            return str(venv_python)
+        return None
+
+    def _run(
+        args: list[str],
+        *,
+        capture_output: bool,
+        text: bool,
+        encoding: str,
+        errors: str,
+        timeout: float,
+        check: bool,
+    ) -> subprocess.CompletedProcess[str]:
+        assert args[0] == str(venv_python)
+        payload = json.dumps(
+            {
+                "executable": str(venv_python),
+                "version": "3.13.2",
+            }
+        )
+        return subprocess.CompletedProcess(
+            args=args,
+            returncode=0,
+            stdout=payload + "\n",
+            stderr="",
+        )
+
+    monkeypatch.setattr(probe_mod.shutil, "which", _which)
+    monkeypatch.setattr(probe_mod.subprocess, "run", _run)
+
+    resolved = probe_mod.resolve_usable_python_interpreter(
+        workspace_dir=workspace_dir,
+        candidate_commands=["python"],
+        timeout_seconds=1.0,
+        force_windows=True,
+        include_sys_executable=False,
+    )
+
+    assert resolved.selected_command == str(venv_python)
+    assert resolved.selected_resolved_path == str(venv_python)

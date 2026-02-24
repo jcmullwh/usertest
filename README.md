@@ -114,6 +114,10 @@ macOS/Linux:
 
 `bash ./scripts/smoke.sh`
 
+Note: on some Windows sandboxes, `bash.exe` may be on `PATH` (for example via Git for Windows) but
+execution is blocked ("Access is denied"). In that case, use the PowerShell smoke command above
+and avoid bash-based validation steps.
+
 The smoke scripts run:
 
 1. `python tools/scaffold/scaffold.py doctor`
@@ -139,6 +143,8 @@ Restricted environments (no editable installs / pre-provisioned deps):
 - No installs at runtime (deps already provisioned, e.g., offline wheelhouse): run smoke with both flags:
   - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -SkipInstall -UsePythonPath`
   - macOS/Linux: `bash ./scripts/smoke.sh --skip-install --use-pythonpath`
+- If you pass only `--skip-install` (without `--use-pythonpath`), smoke assumes your environment already has the
+  monorepo packages installed and importable.
 
 ### Manual editable install (no PYTHONPATH)
 

@@ -390,7 +390,7 @@ def probe_pytest_module(
 
 
 _VERIFICATION_PYTEST_CMD_PATTERN = re.compile(r"^(?:&\s*)?pytest(\s|$)", re.IGNORECASE)
-_VERIFICATION_PYTEST_MODULE_PATTERN = re.compile(r"\b-m\s+pytest\b", re.IGNORECASE)
+_VERIFICATION_PYTEST_MODULE_PATTERN = re.compile(r"(?:^|\s)-m\s+pytest(?:\s|$)", re.IGNORECASE)
 _VERIFICATION_INSTALL_PATTERN = re.compile(
     r"\b(pip|pdm|poetry|uv)\b.*\binstall\b",
     re.IGNORECASE,
