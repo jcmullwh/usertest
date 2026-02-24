@@ -10,6 +10,7 @@ They are convenience helpers; the “official” monorepo workflow is driven by 
 
 - `smoke.sh`
 - `smoke.ps1`
+- `python_preflight.ps1` (shared Windows Python resolver)
 
 These run a deterministic checklist used in onboarding and CI verification:
 

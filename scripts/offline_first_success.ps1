@@ -23,54 +23,8 @@ Write-Host "      It is a smoke check for offline-safe/report rendering workflow
 Write-Host ""
 $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 
-function Resolve-UsablePython {
-    $commands = @('python', 'python3', 'py')
-    $rejections = @()
 
-    foreach ($name in $commands) {
-        $cmd = Get-Command $name -ErrorAction SilentlyContinue
-        if (-not $cmd) {
-            continue
-        }
-
-        $resolved = $cmd.Source
-        if (-not $resolved) {
-            $resolved = $cmd.Path
-        }
-
-        if ($resolved -and $resolved.ToLower().Contains('\windowsapps\')) {
-            $rejections += "[$name] rejected windowsapps alias: $resolved"
-            continue
-        }
-
-        try {
-            $probe = & $resolved -c "import encodings,sys; print(sys.executable)"
-            if ($LASTEXITCODE -ne 0) {
-                $rejections += "[$name] interpreter probe exited with code $LASTEXITCODE"
-                continue
-            }
-            $executable = ($probe | Select-Object -Last 1).Trim()
-            if (-not $executable) {
-                $rejections += "[$name] interpreter probe returned no executable path"
-                continue
-            }
-            return @{
-                Name = $name
-                CommandPath = $resolved
-                Executable = $executable
-            }
-        }
-        catch {
-            $rejections += "[$name] interpreter probe failed: $($_.Exception.Message)"
-        }
-    }
-
-    Write-Host '==> Python interpreter probe failed'
-    foreach ($line in $rejections) {
-        Write-Host "    $line"
-    }
-    throw "No usable Python interpreter found. Install a full CPython runtime and ensure python.exe is on PATH."
-}
+. (Join-Path $PSScriptRoot 'python_preflight.ps1')
 
 function Invoke-Step {
     param(
@@ -89,15 +43,27 @@ function Invoke-Step {
 
 Push-Location $repoRoot
 try {
-    $pythonInfo = Resolve-UsablePython
-    $pythonCmd = $pythonInfo.CommandPath
-    Write-Host "==> Using Python: $($pythonInfo.Name) -> $pythonCmd"
-    Write-Host "==> Python executable: $($pythonInfo.Executable)"
-    $pipFlags = @('--disable-pip-version-check', '--retries', '10', '--timeout', '30')
-
     $venvDir = Join-Path $repoRoot '.venv'
     # Windows-specific: venv uses Scripts\python.exe
     $venvPython = Join-Path $venvDir 'Scripts\python.exe'
+
+    if (Test-Path -LiteralPath $venvPython) {
+        $venvProbe = Test-PythonInterpreter -CommandPath $venvPython -TimeoutSeconds 2.0
+        if (-not $venvProbe.Usable) {
+            Write-Host "==> Existing .venv looks unhealthy ($($venvProbe.ReasonCode)); recreating it." -ForegroundColor Yellow
+            try { Remove-Item -Recurse -Force -LiteralPath $venvDir } catch { }
+        }
+    }
+
+    $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
+    $pythonCmd = $pythonInfo.CommandPath
+    Write-Host "==> Using Python: $($pythonInfo.Name) -> $pythonCmd"
+    Write-Host "==> Python executable: $($pythonInfo.Executable)"
+    if ($pythonInfo.Version) {
+        Write-Host "==> Python version: $($pythonInfo.Version)"
+    }
+    $pipFlags = @('--disable-pip-version-check', '--retries', '10', '--timeout', '30')
+
     if (-not (Test-Path $venvPython)) {
         Invoke-Step -Name 'Create venv (.venv)' -Command {
             & $pythonCmd -m venv $venvDir

@@ -5,6 +5,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -123,6 +124,72 @@ class PythonInterpreterProbeResult:
         return {candidate.command: candidate for candidate in self.candidates}
 
 
+def resolve_usable_python_interpreter(
+    *,
+    workspace_dir: Path | None = None,
+    candidate_commands: Sequence[str] | None = None,
+    timeout_seconds: float = 5.0,
+    force_windows: bool | None = None,
+    include_sys_executable: bool = True,
+) -> PythonInterpreterProbeResult:
+    """
+    Resolve a usable Python interpreter with a stable, Windows-friendly precedence order.
+
+    Precedence
+    ----------
+    1) Repo-local `.venv` python when present (workspace_dir provided)
+    2) `python` / `python3`
+    3) `py` launcher (only if it probes as a real interpreter)
+    4) `sys.executable` fallback (when include_sys_executable=True)
+
+    Notes
+    -----
+    This function is intended for "first-run" workflows on Windows where `python` may resolve
+    to WindowsApps App Execution Alias shims or be blocked by policy. It uses the same health
+    probe as `probe_python_interpreters` and returns a structured result suitable for preflight
+    errors.
+    """
+
+    is_windows = _is_windows_platform(force_windows=force_windows)
+    timeout = max(0.1, float(timeout_seconds))
+
+    ordered: list[str] = []
+    if workspace_dir is not None:
+        if is_windows:
+            ordered.append(str(workspace_dir / ".venv" / "Scripts" / "python.exe"))
+        else:
+            ordered.append(str(workspace_dir / ".venv" / "bin" / "python"))
+
+    ordered.extend(_coerce_commands(candidate_commands))
+
+    if include_sys_executable and isinstance(sys.executable, str) and sys.executable.strip():
+        sys_exe = str(Path(sys.executable))
+        if sys_exe not in ordered:
+            ordered.append(sys_exe)
+
+    probed = probe_python_interpreters(
+        candidate_commands=ordered,
+        timeout_seconds=timeout,
+        force_windows=force_windows,
+    )
+
+    by_command = probed.by_command()
+    selected: PythonCandidateProbe | None = None
+    for cmd in ordered:
+        candidate = by_command.get(cmd)
+        if candidate is not None and candidate.usable:
+            selected = candidate
+            break
+
+    return PythonInterpreterProbeResult(
+        selected_command=selected.command if selected is not None else None,
+        selected_resolved_path=selected.resolved_path if selected is not None else None,
+        selected_version=selected.version if selected is not None else None,
+        selected_executable=selected.executable if selected is not None else None,
+        candidates=probed.candidates,
+    )
+
+
 def probe_python_interpreters(
     *,
     candidate_commands: Sequence[str] | None = None,
@@ -131,10 +198,12 @@ def probe_python_interpreters(
 ) -> PythonInterpreterProbeResult:
     commands = _coerce_commands(candidate_commands)
     is_windows = _is_windows_platform(force_windows=force_windows)
-    timeout = max(0.1, float(timeout_seconds))
+    timeout_budget = max(0.1, float(timeout_seconds))
+    deadline = time.monotonic() + timeout_budget
     candidates: list[PythonCandidateProbe] = []
 
     for command in commands:
+        remaining = max(0.1, deadline - time.monotonic())
         resolved = shutil.which(command)
         if resolved is None:
             candidates.append(
@@ -172,7 +241,7 @@ def probe_python_interpreters(
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
+                timeout=remaining,
                 check=False,
             )
         except subprocess.TimeoutExpired:
