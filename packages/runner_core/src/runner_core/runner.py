@@ -2875,10 +2875,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             if isinstance(raw_gemini_allowed, list):
                 gemini_allowed_tools = [x for x in raw_gemini_allowed if isinstance(x, str)]
             gemini_env_overrides: dict[str, str] | None = None
-            if system_prompt_path_for_agent is not None:
-                gemini_env_overrides = {"GEMINI_SYSTEM_MD": system_prompt_path_for_agent}
             if agent_env_overrides is not None:
-                gemini_env_overrides = {**(gemini_env_overrides or {}), **agent_env_overrides}
+                gemini_env_overrides = dict(agent_env_overrides)
 
             if (
                 request.agent == "codex"
@@ -2984,6 +2982,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     output_format=str(gemini_output_format),
                     sandbox=gemini_sandbox_enabled,
                     model=request.model,
+                    system_prompt_file=system_prompt_path_for_agent,
                     approval_mode=gemini_approval_mode,
                     allowed_tools=gemini_allowed_tools,
                     include_directories=_gemini_include_directories_for_workspace(

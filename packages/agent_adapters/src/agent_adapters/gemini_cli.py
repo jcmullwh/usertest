@@ -168,6 +168,7 @@ def run_gemini(
     output_format: str = "stream-json",
     sandbox: bool = True,
     model: str | None = None,
+    system_prompt_file: str | Path | None = None,
     approval_mode: str = "default",
     allowed_tools: Iterable[str] = (),
     include_directories: Iterable[str] = (),
@@ -194,6 +195,8 @@ def run_gemini(
         argv.append("--sandbox")
     if model is not None:
         argv.extend(["--model", model])
+    if system_prompt_file is not None:
+        argv.extend(["--agent-system-prompt-file", str(system_prompt_file)])
 
     tools = [t for t in allowed_tools if isinstance(t, str) and t.strip()]
     for tool in tools:
