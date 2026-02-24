@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shlex
 import subprocess
 from collections.abc import Iterator
@@ -9,8 +10,18 @@ from pathlib import Path
 from typing import Any
 
 from agent_adapters.events import make_event
+from agent_adapters.failure_artifacts import (
+    write_command_failure_artifacts,
+    write_tool_failure_artifacts,
+)
 
 _MAX_OUTPUT_EXCERPT_CHARS = 2_000
+_MAX_TOOL_CONTEXT_BYTES = 1_000_000
+
+_OCCURRENCES_RE = re.compile(
+    r"expected\\s+(?P<expected>\\d+)\\s+occurrences?\\b.*?found\\s+(?P<found>\\d+)\\b",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def _excerpt_text(text: str, *, max_chars: int = _MAX_OUTPUT_EXCERPT_CHARS) -> tuple[str, bool]:
@@ -97,6 +108,27 @@ def _tool_name(raw: Any) -> str:
     return raw.strip().lower() if isinstance(raw, str) else ""
 
 
+def _coerce_text(value: Any) -> str | None:
+    if isinstance(value, str) and value.strip():
+        return value
+    if isinstance(value, list):
+        chunks = [item for item in value if isinstance(item, str) and item.strip()]
+        return "\n".join(chunks) if chunks else None
+    return None
+
+
+def _extract_expected_found(error_text: str) -> tuple[int | None, int | None]:
+    match = _OCCURRENCES_RE.search(error_text)
+    if match is None:
+        return None, None
+    try:
+        expected = int(match.group("expected"))
+        found = int(match.group("found"))
+    except Exception:
+        return None, None
+    return expected, found
+
+
 def normalize_claude_events(
     *,
     raw_events_path: Path,
@@ -106,6 +138,9 @@ def normalize_claude_events(
     workspace_mount: str | None = None,
 ) -> None:
     normalized_events_path.parent.mkdir(parents=True, exist_ok=True)
+    run_dir = normalized_events_path.parent
+    command_failure_idx = 0
+    tool_failure_idx = 0
 
     def _next_ts() -> str | None:
         if ts_iter is None:
@@ -197,6 +232,7 @@ def normalize_claude_events(
                         argv = _split_command(cmd)
                         output_excerpt = None
                         output_truncated = False
+                        output_text = None
                         if is_error:
                             output_text = _coerce_tool_result_text(block.get("content"))
                             if isinstance(output_text, str) and output_text.strip():
@@ -212,6 +248,19 @@ def normalize_claude_events(
                             data["output_excerpt"] = output_excerpt
                             if output_truncated:
                                 data["output_excerpt_truncated"] = True
+                        if is_error:
+                            command_failure_idx += 1
+                            data["failure_artifacts"] = write_command_failure_artifacts(
+                                run_dir=run_dir,
+                                failure_index=command_failure_idx,
+                                command=_format_argv(argv),
+                                argv=argv,
+                                cwd=None,
+                                exit_code=1,
+                                stdout_text="",
+                                stderr_text=output_text if isinstance(output_text, str) else "",
+                                duration=None,
+                            )
                         event = make_event("run_command", data, ts=_next_ts())
                         out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                     continue
@@ -245,13 +294,114 @@ def normalize_claude_events(
                     continue
 
                 if name in {"edit", "write"}:
+                    event_data: dict[str, Any] = {
+                        "name": str(tool_use.get("name", "")),
+                        "input": tool_input,
+                        "is_error": is_error,
+                    }
+                    if is_error:
+                        tool_failure_idx += 1
+                        error_text = _coerce_text(block.get("content"))
+                        if error_text is not None:
+                            excerpt, truncated = _excerpt_text(error_text)
+                            event_data["error_excerpt"] = excerpt
+                            if truncated:
+                                event_data["error_excerpt_truncated"] = True
+
+                        extracted: dict[str, Any] = {}
+                        path_raw = tool_input.get("path") or tool_input.get("file_path")
+                        old_string = tool_input.get("old_string") or tool_input.get("old")
+                        new_string = tool_input.get("new_string") or tool_input.get("new")
+                        expected = tool_input.get("expected_replacements") or tool_input.get(
+                            "expected_occurrences"
+                        )
+
+                        if isinstance(path_raw, str) and path_raw.strip():
+                            extracted["file_path"] = path_raw.strip()
+                        if isinstance(expected, int):
+                            extracted["expected_occurrences"] = int(expected)
+
+                        if error_text is not None:
+                            expected_parsed, found_parsed = _extract_expected_found(error_text)
+                            if expected_parsed is not None:
+                                extracted["expected_occurrences_from_error"] = expected_parsed
+                            if found_parsed is not None:
+                                extracted["found_occurrences_from_error"] = found_parsed
+
+                        context_text: str | None = None
+                        if (
+                            workspace_root is not None
+                            and isinstance(path_raw, str)
+                            and path_raw.strip()
+                            and isinstance(old_string, str)
+                            and old_string
+                        ):
+                            candidate = _map_sandbox_path_str(
+                                path_raw.strip(),
+                                workspace_root=workspace_root,
+                                workspace_mount=workspace_mount,
+                            )
+                            candidate = (
+                                candidate
+                                if candidate.is_absolute()
+                                else (workspace_root / candidate)
+                            )
+                            try:
+                                if candidate.exists() and candidate.is_file():
+                                    if candidate.stat().st_size <= _MAX_TOOL_CONTEXT_BYTES:
+                                        file_text = candidate.read_text(
+                                            encoding="utf-8", errors="replace"
+                                        )
+                                        found_occurrences = file_text.count(old_string)
+                                        extracted["found_occurrences"] = found_occurrences
+                                        idx = file_text.find(old_string)
+                                        if idx >= 0:
+                                            before = max(0, idx - 200)
+                                            after = min(
+                                                len(file_text), idx + len(old_string) + 200
+                                            )
+                                            snippet = file_text[before:after]
+                                            context_text = "\n".join(
+                                                [
+                                                    f"file={_safe_relpath(candidate, workspace_root)}",
+                                                    f"found_occurrences={found_occurrences}",
+                                                    "",
+                                                    snippet,
+                                                    "",
+                                                ]
+                                            )
+                                            if isinstance(new_string, str) and new_string:
+                                                preview_old = old_string
+                                                preview_new = new_string
+                                                if len(preview_old) > 400:
+                                                    preview_old = (
+                                                        preview_old[:400] + "...(truncated)"
+                                                    )
+                                                if len(preview_new) > 400:
+                                                    preview_new = (
+                                                        preview_new[:400] + "...(truncated)"
+                                                    )
+                                                extracted["preview"] = {
+                                                    "old_string_excerpt": preview_old,
+                                                    "new_string_excerpt": preview_new,
+                                                }
+                            except OSError:
+                                pass
+
+                        event_data["failure_artifacts"] = write_tool_failure_artifacts(
+                            run_dir=run_dir,
+                            failure_index=tool_failure_idx,
+                            tool_name=name,
+                            tool_input=tool_input,
+                            error_text=error_text,
+                            extracted=extracted if extracted else None,
+                            context_text=context_text,
+                            preview_text=None,
+                        )
+
                     event = make_event(
                         "tool_call",
-                        {
-                            "name": str(tool_use.get("name", "")),
-                            "input": tool_input,
-                            "is_error": is_error,
-                        },
+                        event_data,
                         ts=_next_ts(),
                     )
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")

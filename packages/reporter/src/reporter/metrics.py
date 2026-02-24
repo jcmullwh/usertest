@@ -101,6 +101,9 @@ def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
                     cwd = data.get("cwd")
                     if isinstance(cwd, str) and cwd.strip():
                         entry["cwd"] = cwd.strip()
+                    failure_artifacts = data.get("failure_artifacts")
+                    if isinstance(failure_artifacts, dict) and failure_artifacts:
+                        entry["artifacts"] = failure_artifacts
                     output_excerpt = data.get("output_excerpt")
                     if isinstance(output_excerpt, str) and output_excerpt.strip():
                         excerpt = output_excerpt.strip()

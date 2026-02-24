@@ -88,6 +88,13 @@ def test_normalize_gemini_events_emits_expected_events(tmp_path: Path) -> None:
     )
     assert any(e["type"] == "agent_message" for e in events)
 
+    cmd = next(e for e in events if e["type"] == "run_command")
+    artifacts = cmd.get("data", {}).get("failure_artifacts")
+    assert isinstance(artifacts, dict)
+    assert (tmp_path / "command_failures" / "cmd_01" / "stdout.txt").read_text(
+        encoding="utf-8"
+    ).strip() == "denied"
+
 
 def test_normalize_gemini_events_maps_workspace_mount_paths(tmp_path: Path) -> None:
     (tmp_path / "USERS.md").write_text("# Users\n", encoding="utf-8")

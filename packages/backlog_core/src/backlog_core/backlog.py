@@ -610,6 +610,9 @@ def extract_backlog_atoms(
                             "command": command,
                             "exit_code": exit_code,
                             "cwd": _coerce_string(item.get("cwd")),
+                            "artifacts": item.get("artifacts")
+                            if isinstance(item.get("artifacts"), dict)
+                            else None,
                             "output_excerpt": _coerce_string(item.get("output_excerpt")),
                             "output_excerpt_truncated": item.get("output_excerpt_truncated")
                             is True,
@@ -656,6 +659,9 @@ def extract_backlog_atoms(
                                     "command": command,
                                     "exit_code": exit_code,
                                     "cwd": _coerce_string(data.get("cwd")),
+                                    "artifacts": data.get("failure_artifacts")
+                                    if isinstance(data.get("failure_artifacts"), dict)
+                                    else None,
                                     "output_excerpt": _coerce_string(data.get("output_excerpt")),
                                     "output_excerpt_truncated": data.get("output_excerpt_truncated")
                                     is True,
@@ -686,6 +692,9 @@ def extract_backlog_atoms(
                     command=command,
                     exit_code=exit_code,
                     cwd=_coerce_string(entry.get("cwd")),
+                    artifacts=entry.get("artifacts")
+                    if isinstance(entry.get("artifacts"), dict)
+                    else None,
                     output_excerpt=output_excerpt,
                     output_excerpt_truncated=output_excerpt_truncated,
                     from_events=True if entry.get("from_events") else None,
