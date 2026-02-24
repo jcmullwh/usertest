@@ -117,6 +117,7 @@ class RunResult:
 _BASE_PREFLIGHT_COMMANDS = [
     "git",
     "rg",
+    "bash",
     "python3",
     "python",
     "pip",
@@ -857,14 +858,48 @@ def _probe_commands_local(commands: list[str]) -> tuple[dict[str, bool], dict[st
 
         resolved = shutil.which(cmd)
         present = resolved is not None
-        out[cmd] = present
+        usable = present
+        reason_code: str | None = None if present else "not_found"
+        reason: str | None = None if present else f"`{cmd}` was not found on PATH."
+
+        if cmd == "bash" and os.name == "nt" and resolved is not None:
+            # On some Windows sandboxes, bash.exe may be on PATH (e.g., Git Bash) but execution is
+            # blocked by policy ("Access is denied"). Probe by actually starting bash.
+            try:
+                proc = subprocess.run(
+                    [resolved, "-lc", "echo ok"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=2.0,
+                    check=False,
+                )
+                usable = int(proc.returncode or 0) == 0
+                if not usable:
+                    reason_code = "probe_failed"
+                    stderr = (proc.stderr or "").strip()
+                    reason = (
+                        "bash probe exited non-zero"
+                        + (f": {stderr}" if stderr else f" (exit_code={proc.returncode})")
+                    )
+            except subprocess.TimeoutExpired:
+                usable = False
+                reason_code = "unresponsive"
+                reason = "bash probe timed out (2.0s) running `bash -lc \"echo ok\"`."
+            except OSError as e:
+                usable = False
+                reason_code = "blocked"
+                reason = f"bash probe failed: {e}"
+
+        out[cmd] = bool(usable)
         probe_details[cmd] = {
             "command": cmd,
             "resolved_path": resolved,
             "present": present,
-            "usable": present,
-            "reason_code": (None if present else "not_found"),
-            "reason": (None if present else f"`{cmd}` was not found on PATH."),
+            "usable": bool(usable),
+            "reason_code": reason_code,
+            "reason": reason,
         }
 
     meta: dict[str, Any] = {"command_probe_details": probe_details}
@@ -1413,6 +1448,129 @@ def _verification_shell_argv(*, command_prefix: list[str], command: str) -> list
     return ["sh", "-lc", command]
 
 
+def _probe_windows_bash_usable() -> dict[str, Any]:
+    resolved = shutil.which("bash")
+    if resolved is None:
+        return {
+            "present": False,
+            "usable": False,
+            "resolved_path": None,
+            "reason_code": "not_found",
+            "reason": "`bash` was not found on PATH.",
+        }
+
+    try:
+        proc = subprocess.run(
+            [resolved, "-lc", "echo ok"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "present": True,
+            "usable": False,
+            "resolved_path": resolved,
+            "reason_code": "unresponsive",
+            "reason": "bash probe timed out (2.0s) running `bash -lc \"echo ok\"`.",
+        }
+    except OSError as e:
+        return {
+            "present": True,
+            "usable": False,
+            "resolved_path": resolved,
+            "reason_code": "blocked",
+            "reason": f"bash probe failed: {e}",
+        }
+
+    exit_code = int(proc.returncode or 0)
+    if exit_code == 0:
+        return {
+            "present": True,
+            "usable": True,
+            "resolved_path": resolved,
+            "reason_code": None,
+            "reason": None,
+        }
+    stderr = (proc.stderr or "").strip()
+    return {
+        "present": True,
+        "usable": False,
+        "resolved_path": resolved,
+        "reason_code": "probe_failed",
+        "reason": ("bash probe exited non-zero" + (f": {stderr}" if stderr else f" (exit_code={exit_code})")),
+    }
+
+
+def _maybe_rewrite_windows_bash_smoke_verification_command(
+    *,
+    command: str,
+    bash_probe: dict[str, Any],
+) -> dict[str, Any] | None:
+    """
+    If bash is not runnable on Windows local backend, rewrite known smoke invocations to the
+    PowerShell equivalent (or skip bash-only checks).
+
+    Returns a dict describing the action, or None to run the command as-is.
+    """
+
+    raw = command.strip()
+    if not raw:
+        return None
+
+    normalized = raw.replace("\\", "/")
+    lower = normalized.lower()
+    if not lower.startswith("bash "):
+        return None
+
+    usable = bool(bash_probe.get("usable", False))
+    if usable:
+        return None
+
+    # Skip bash-only syntax checks if bash can't execute.
+    if lower.startswith("bash -n ") and "scripts/smoke.sh" in lower:
+        return {
+            "action": "skip",
+            "reason": (
+                "Skipping `bash -n scripts/smoke.sh` because bash is not runnable on this Windows "
+                "host. Run this check on macOS/Linux, or in a Linux Docker backend."
+            ),
+            "rewrite": {
+                "kind": "skip_bash_syntax_check",
+                "bash_reason": str(bash_probe.get("reason") or "").strip() or None,
+            },
+        }
+
+    # Rewrite smoke.sh execution to smoke.ps1.
+    if "scripts/smoke.sh" in lower:
+        switches: list[str] = []
+        if "--skip-install" in lower:
+            switches.append("-SkipInstall")
+        if "--use-pythonpath" in lower:
+            switches.append("-UsePythonPath")
+        if "--require-doctor" in lower:
+            switches.append("-RequireDoctor")
+
+        ps_cmd = (
+            "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1"
+            + (" " + " ".join(switches) if switches else "")
+        )
+        return {
+            "action": "rewrite",
+            "command": ps_cmd,
+            "rewrite": {
+                "kind": "bash_smoke_to_powershell_smoke",
+                "original_command": raw,
+                "bash_reason": str(bash_probe.get("reason") or "").strip() or None,
+            },
+        }
+
+    return None
+
+
 def _tail_text_for_prompt(text: str, *, max_chars: int = 2000) -> str:
     cleaned = text.strip()
     if len(cleaned) <= max_chars:
@@ -1436,6 +1594,16 @@ def _run_verification_commands(
     started_utc = _utc_now_z()
     started_monotonic = time.monotonic()
     results: list[dict[str, Any]] = []
+    windows_bash_probe: dict[str, Any] | None = None
+    if os.name == "nt" and not command_prefix:
+        # Only probe when we might need to rewrite/skip bash-based commands.
+        if any(
+            isinstance(c, str)
+            and c.strip()
+            and c.strip().replace("\\", "/").lower().startswith("bash ")
+            for c in commands
+        ):
+            windows_bash_probe = _probe_windows_bash_usable()
 
     for idx, raw in enumerate(commands, start=1):
         cmd = raw.strip()
@@ -1444,6 +1612,52 @@ def _run_verification_commands(
 
         stdout_path = attempt_dir / f"cmd_{idx:02d}.stdout.txt"
         stderr_path = attempt_dir / f"cmd_{idx:02d}.stderr.txt"
+
+        rewrite_meta: dict[str, Any] | None = None
+        if windows_bash_probe is not None:
+            decision = _maybe_rewrite_windows_bash_smoke_verification_command(
+                command=cmd,
+                bash_probe=windows_bash_probe,
+            )
+            if decision is not None:
+                rewrite_meta = decision.get("rewrite") if isinstance(decision.get("rewrite"), dict) else None
+                action = decision.get("action")
+                if action == "skip":
+                    stdout_text = ""
+                    stderr_text = str(decision.get("reason") or "").strip() + "\n"
+                    exit_code = 0
+                    wall_seconds = 0.0
+                    try:
+                        stdout_path.write_text(stdout_text, encoding="utf-8", newline="\n")
+                    except OSError:
+                        pass
+                    try:
+                        stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
+                    except OSError:
+                        pass
+
+                    result: dict[str, Any] = {
+                        "index": idx,
+                        "command": cmd,
+                        "argv": None,
+                        "exit_code": exit_code,
+                        "timed_out": False,
+                        "skipped": True,
+                        "skip_reason": str(decision.get("reason") or "").strip() or None,
+                        "command_started_utc": _utc_now_z(),
+                        "wall_seconds": wall_seconds,
+                        "stdout_path": stdout_path.name,
+                        "stderr_path": stderr_path.name,
+                        "stdout_tail": _tail_text_for_prompt(stdout_text),
+                        "stderr_tail": _tail_text_for_prompt(stderr_text),
+                        "rewrite": rewrite_meta,
+                    }
+                    results.append(result)
+                    continue
+                if action == "rewrite":
+                    new_cmd = decision.get("command")
+                    if isinstance(new_cmd, str) and new_cmd.strip():
+                        cmd = new_cmd.strip()
 
         argv = _verification_shell_argv(command_prefix=command_prefix, command=cmd)
         cmd_started_utc = _utc_now_z()
@@ -1504,6 +1718,7 @@ def _run_verification_commands(
             "stderr_path": stderr_path.name,
             "stdout_tail": _tail_text_for_prompt(stdout_text),
             "stderr_tail": _tail_text_for_prompt(stderr_text),
+            "rewrite": rewrite_meta,
         }
         results.append(result)
 
