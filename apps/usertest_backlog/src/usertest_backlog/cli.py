@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 try:
     import yaml
@@ -1301,6 +1302,74 @@ def _is_remote_repo_input(value: str) -> bool:
     return candidate.startswith("git@")
 
 
+def _normalize_remote_repo_input_for_match(value: str) -> str:
+    """
+    Normalize a remote repo input string for fuzzy matching against git remote URLs.
+
+    Examples
+    --------
+    - https://github.com/org/repo.git -> github.com/org/repo
+    - git@github.com:org/repo.git -> github.com/org/repo
+    """
+
+    raw = value.strip().rstrip("/")
+    if raw.endswith(".git"):
+        raw = raw[: -len(".git")]
+
+    if "://" in raw:
+        parsed = urlparse(raw)
+        host = (parsed.hostname or parsed.netloc or "").strip().lower()
+        path = (parsed.path or "").strip().strip("/")
+        if path.endswith(".git"):
+            path = path[: -len(".git")]
+        if host and path:
+            return f"{host}/{path.lower()}"
+        return (host or raw).lower()
+
+    match = re.match(r"^(?P<user>[^@]+)@(?P<host>[^:]+):(?P<path>.+)$", raw)
+    if match is not None:
+        host = match.group("host").strip().lower()
+        path = match.group("path").strip().strip("/")
+        if path.endswith(".git"):
+            path = path[: -len(".git")]
+        if host and path:
+            return f"{host}/{path.lower()}"
+        return (host or raw).lower()
+
+    return raw.lower()
+
+
+def _git_remote_urls(repo_root: Path) -> set[str]:
+    proc = subprocess.run(
+        ["git", "-C", str(repo_root), "remote", "-v"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if proc.returncode != 0:
+        return set()
+
+    urls: set[str] = set()
+    for line in proc.stdout.splitlines():
+        parts = line.split()
+        if len(parts) < 2:
+            continue
+        url = parts[1].strip()
+        if url:
+            urls.add(url)
+    return urls
+
+
+def _remote_repo_input_matches_repo_root(*, repo_input: str, repo_root: Path) -> bool:
+    if not _is_remote_repo_input(repo_input):
+        return False
+    target = _normalize_remote_repo_input_for_match(repo_input)
+    for url in _git_remote_urls(repo_root):
+        if _normalize_remote_repo_input_for_match(url) == target:
+            return True
+    return False
+
+
 def _resolve_local_repo_input_root(*, repo_input: str | None, repo_root: Path) -> Path | None:
     """
     Resolve a local filesystem repo_input to an existing directory, if possible.
@@ -1395,6 +1464,8 @@ def _resolve_owner_repo_root(
 
     if _is_remote_repo_input(chosen):
         ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+        if _remote_repo_input_matches_repo_root(repo_input=chosen, repo_root=repo_root):
+            return repo_root, str(repo_root), f"repo_root_remote_match:{source_label}"
         raise ValueError(
             "Cannot write idea file for remote repo_input. "
             f"ticket_id={ticket_id} repo_input={chosen}"
