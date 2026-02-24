@@ -56,14 +56,9 @@ try {
 
     if (-not $SkipInstall) {
         $pipProbeOk = $false
-        try {
-            & $pythonCmd -m pip --version *>$null
-            if ($LASTEXITCODE -eq 0) {
-                $pipProbeOk = $true
-            }
-        }
-        catch {
-            $pipProbeOk = $false
+        & $pythonCmd -m pip --version
+        if ($LASTEXITCODE -eq 0) {
+            $pipProbeOk = $true
         }
 
         if (-not $pipProbeOk) {
@@ -82,13 +77,7 @@ try {
                 & $pythonCmd -m ensurepip --upgrade
             }
 
-            try {
-                & $pythonCmd -m pip --version *>$null
-            }
-            catch {
-                Write-Error "pip is required for smoke installs, but is not available after ensurepip.`nTry installing a full CPython (with ensurepip), then re-run smoke."
-                exit 1
-            }
+            & $pythonCmd -m pip --version
             if ($LASTEXITCODE -ne 0) {
                 Write-Error "pip is required for smoke installs, but is not available after ensurepip.`nTry installing a full CPython (with ensurepip), then re-run smoke."
                 exit $LASTEXITCODE
