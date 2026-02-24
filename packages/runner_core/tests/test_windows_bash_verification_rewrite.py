@@ -46,6 +46,7 @@ def test_verification_rewrites_bash_smoke_to_powershell_when_bash_blocked_on_win
         command_prefix=[],
         cwd=tmp_path,
         timeout_seconds=None,
+        python_executable=None,
     )
 
     assert summary["passed"] is True
@@ -53,10 +54,11 @@ def test_verification_rewrites_bash_smoke_to_powershell_when_bash_blocked_on_win
     assert isinstance(commands, list)
     assert len(commands) == 1
     cmd0 = commands[0]
-    assert "smoke.ps1" in cmd0["command"]
-    assert "-SkipInstall" in cmd0["command"]
-    assert "-UsePythonPath" in cmd0["command"]
-    assert "-RequireDoctor" in cmd0["command"]
+    assert cmd0["command"].startswith("bash ")
+    assert "smoke.ps1" in cmd0["effective_command"]
+    assert "-SkipInstall" in cmd0["effective_command"]
+    assert "-UsePythonPath" in cmd0["effective_command"]
+    assert "-RequireDoctor" in cmd0["effective_command"]
     assert isinstance(cmd0.get("rewrite"), dict)
     assert cmd0["rewrite"]["kind"] == "bash_smoke_to_powershell_smoke"
 
@@ -94,6 +96,7 @@ def test_verification_skips_bash_syntax_check_when_bash_blocked_on_windows(
         command_prefix=[],
         cwd=tmp_path,
         timeout_seconds=None,
+        python_executable=None,
     )
 
     assert summary["passed"] is True
@@ -102,6 +105,6 @@ def test_verification_skips_bash_syntax_check_when_bash_blocked_on_windows(
     assert len(commands) == 1
     cmd0 = commands[0]
     assert cmd0.get("skipped") is True
+    assert cmd0.get("effective_command") is None
     assert cmd0.get("argv") is None
     assert "Skipping" in (cmd0.get("stderr_tail") or "")
-
