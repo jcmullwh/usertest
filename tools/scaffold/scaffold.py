@@ -653,6 +653,16 @@ def _validate_task_name(task_name: str, *, where: str) -> None:
         raise ScaffoldError(f"{where}: task name must match ^[a-zA-Z0-9_-]+$ (rejects dots and spaces): {task_name!r}")
 
 
+def _ruff_check_with_fix(cmd: list[str]) -> list[str] | None:
+    """Return a ruff-check command with `--fix` inserted, or None if not recognized."""
+    if "--fix" in cmd:
+        return cmd
+    for i in range(len(cmd) - 1):
+        if Path(cmd[i]).name.lower() in {"ruff", "ruff.exe", "ruff.cmd", "ruff.bat"} and cmd[i + 1] == "check":
+            return [*cmd[: i + 2], "--fix", *cmd[i + 2 :]]
+    return None
+
+
 def _ensure_unique_project_id(projects: list[dict[str, Any]], project_id: str) -> None:
     for project in projects:
         if project.get("id") == project_id:
@@ -1153,6 +1163,7 @@ def cmd_run(args: argparse.Namespace) -> int:
     projects = _load_projects(repo_root)
 
     _validate_task_name(args.task, where="scaffold run")
+    fix = bool(getattr(args, "fix", False))
 
     selectors = [bool(args.all), bool(args.kind), bool(args.project)]
     if sum(1 for x in selectors if x) != 1:
@@ -1178,15 +1189,42 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not isinstance(project_id, str) or not isinstance(path, str) or not isinstance(tasks, dict):
             raise ScaffoldError("Invalid project entry in monorepo.toml")
 
-        cmd = tasks.get(args.task)
-        if cmd is None:
-            msg = f"{project_id}: missing tasks.{args.task}"
-            if args.skip_missing:
-                _eprint(f"WARNING: {msg} (skipping)")
-                continue
-            raise ScaffoldError(msg)
+        task_name = str(args.task)
+        fix_task_name = f"{task_name}_fix"
 
-        cmd_list = _validate_task_cmd(cmd, where=f"projects.{project_id}.tasks.{args.task}")
+        cmd = tasks.get(fix_task_name) if fix else tasks.get(task_name)
+        if cmd is None:
+            if fix:
+                base = tasks.get(task_name)
+                if base is None:
+                    msg = f"{project_id}: missing tasks.{task_name}"
+                    if args.skip_missing:
+                        _eprint(f"WARNING: {msg} (skipping)")
+                        continue
+                    raise ScaffoldError(msg)
+
+                base_cmd_list = _validate_task_cmd(base, where=f"projects.{project_id}.tasks.{task_name}")
+                fixed = _ruff_check_with_fix(base_cmd_list) if task_name == "lint" else None
+                if fixed is None:
+                    msg = f"{project_id}: missing tasks.{fix_task_name}"
+                    if args.skip_missing:
+                        _eprint(f"WARNING: {msg} (skipping)")
+                        continue
+                    raise ScaffoldError(
+                        msg
+                        + f" (no known --fix support for tasks.{task_name}; define tasks.{fix_task_name} in the manifest)"
+                    )
+                cmd_list = fixed
+            else:
+                msg = f"{project_id}: missing tasks.{task_name}"
+                if args.skip_missing:
+                    _eprint(f"WARNING: {msg} (skipping)")
+                    continue
+                raise ScaffoldError(msg)
+        else:
+            where_task = fix_task_name if fix else task_name
+            cmd_list = _validate_task_cmd(cmd, where=f"projects.{project_id}.tasks.{where_task}")
+
         project_dir = repo_root / path
         if not project_dir.exists():
             raise ScaffoldError(f"{project_id}: project directory does not exist: {path}")
@@ -1194,11 +1232,11 @@ def cmd_run(args: argparse.Namespace) -> int:
         cp = _run_manifest_task(
             cmd=cmd_list,
             cwd=project_dir,
-            task_name=args.task,
+            task_name=task_name,
             project_id=project_id,
         )
         if cp.returncode != 0:
-            failures.append(f"{project_id}:{args.task} ({cp.returncode})")
+            failures.append(f"{project_id}:{task_name} ({cp.returncode})")
             if not args.keep_going:
                 break
 
@@ -1787,6 +1825,14 @@ def build_parser() -> argparse.ArgumentParser:
     sel.add_argument("--all", action="store_true")
     sel.add_argument("--kind")
     sel.add_argument("--project", action="append", default=[])
+    p_run.add_argument(
+        "--fix",
+        action="store_true",
+        help=(
+            "Run the task in autofix mode when supported. For lint, this uses tasks.lint_fix if present, "
+            "otherwise attempts a best-effort transformation (e.g. ruff check --fix)."
+        ),
+    )
     p_run.add_argument("--skip-missing", action="store_true", help="Skip projects that do not define this task.")
     p_run.add_argument("--keep-going", action="store_true", help="Continue running even if a task fails.")
     p_run.set_defaults(func=cmd_run)
