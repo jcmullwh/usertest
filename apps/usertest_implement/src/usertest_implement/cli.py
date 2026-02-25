@@ -612,10 +612,22 @@ def _write_pr_manifest(
     model: str | None,
 ) -> tuple[str, str]:
     title = f"{selected.ticket_id or selected.fingerprint}: {selected.title or 'Implement backlog ticket'}"
-    excerpt_lines = selected.ticket_markdown.strip().splitlines()
-    excerpt_text = "\n".join(excerpt_lines[:20]).strip()
-    if len(excerpt_text) > 1200:
-        excerpt_text = excerpt_text[:1200] + "..."
+
+    def _markdown_fence(text: str) -> str:
+        max_run = 0
+        cur = 0
+        for ch in text:
+            if ch == "`":
+                cur += 1
+                if cur > max_run:
+                    max_run = cur
+            else:
+                cur = 0
+        fence_len = max(3, max_run + 1)
+        return "`" * fence_len
+
+    ticket_text = selected.ticket_markdown.rstrip()
+    ticket_fence = _markdown_fence(ticket_text)
 
     body_lines: list[str] = []
     body_lines.append(f"Fingerprint: `{selected.fingerprint}`")
@@ -624,11 +636,11 @@ def _write_pr_manifest(
     body_lines.append(f"Agent: `{agent}`")
     body_lines.append(f"Model: `{model or 'unknown'}`")
     body_lines.append("")
-    body_lines.append("## Ticket excerpt")
+    body_lines.append("## Ticket (full)")
     body_lines.append("")
-    body_lines.append("```")
-    body_lines.append(excerpt_text)
-    body_lines.append("```")
+    body_lines.append(ticket_fence)
+    body_lines.append(ticket_text)
+    body_lines.append(ticket_fence)
     body_lines.append("")
     body_lines.append("## Testing")
     body_lines.append("")
