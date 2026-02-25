@@ -1667,7 +1667,17 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             if line is not None and col is not None:
                 location = f"{targets_path}:{line}:{col}"
                 try:
-                    snippet = targets_text.splitlines()[line - 1].rstrip("\r\n")
+                    lines = targets_text.splitlines()
+                    if 1 <= line <= len(lines):
+                        snippet = lines[line - 1].rstrip("\r\n")
+                    else:
+                        snippet = ""
+                    if not snippet.strip():
+                        for cand in reversed(lines[: min(line - 1, len(lines))]):
+                            cand = cand.rstrip("\r\n")
+                            if cand.strip():
+                                snippet = cand
+                                break
                 except Exception:  # noqa: BLE001
                     snippet = None
         summary = str(e).splitlines()[0].strip() or type(e).__name__
