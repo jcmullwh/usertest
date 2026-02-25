@@ -456,7 +456,9 @@ def probe_pip_module(
             "Install/select a full CPython interpreter (not WindowsApps alias), then retry."
         )
     elif exit_code != 0:
-        if "no module named pip" in lowered or ("modulenotfounderror" in lowered and "pip" in lowered):
+        if "no module named pip" in lowered or (
+            "modulenotfounderror" in lowered and "pip" in lowered
+        ):
             reason_code = "pip_missing"
             remediation = (
                 "Bootstrap pip for this interpreter (try): "

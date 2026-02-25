@@ -929,7 +929,9 @@ def _probe_commands_local(
                         (proc.stderr or "").strip(),
                         (proc.stdout or "").strip(),
                     ]
-                    details = "; ".join([p for p in details_parts if p]) or f"exit_code={proc.returncode}"
+                    details = "; ".join([p for p in details_parts if p]) or (
+                        f"exit_code={proc.returncode}"
+                    )
                     reason = f"pdm probe exited non-zero: {details}"
             except subprocess.TimeoutExpired:
                 usable = False
@@ -1150,7 +1152,11 @@ def _format_preflight_summary_md(
         pip_ok = bool(pip_probe.get("passed") is True)
         reason_code = pip_probe.get("reason_code")
         reason_code_s = reason_code if isinstance(reason_code, str) and reason_code else None
-        pip_label = "OK" if pip_ok else f"NOT OK{f' ({reason_code_s})' if reason_code_s else ''}"
+        if pip_ok:
+            pip_label = "OK"
+        else:
+            suffix = f" ({reason_code_s})" if reason_code_s else ""
+            pip_label = "NOT OK" + suffix
 
     tool_order = ("git", "rg", "pdm", "bash")
     tool_parts: list[str] = []
@@ -1176,7 +1182,11 @@ def _format_preflight_summary_md(
         pytest_ok = bool(pytest_probe.get("passed") is True)
         reason_code = pytest_probe.get("reason_code")
         reason_code_s = reason_code if isinstance(reason_code, str) and reason_code else None
-        pytest_label = "OK" if pytest_ok else f"NOT OK{f' ({reason_code_s})' if reason_code_s else ''}"
+        if pytest_ok:
+            pytest_label = "OK"
+        else:
+            suffix = f" ({reason_code_s})" if reason_code_s else ""
+            pytest_label = "NOT OK" + suffix
         lines.append(f"- pytest: {pytest_label}")
 
     return "\n".join(lines)

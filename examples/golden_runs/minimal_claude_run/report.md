@@ -68,6 +68,8 @@ _None suggested._
   "distinct_files_written": [],
   "commands_executed": 1,
   "commands_failed": 0,
+  "commands_no_matches": 0,
+  "commands_blocked_by_policy": 0,
   "lines_added_total": 0,
   "lines_removed_total": 0,
   "step_count": 2
