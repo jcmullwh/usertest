@@ -5,7 +5,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-
 from runner_core import RunnerConfig
 
 import usertest_implement.cli as implement_cli

@@ -36,7 +36,11 @@ def _make_dummy_codex_binary(tmp_path: Path) -> str:
                 "    report = {'ok': 'yes'}",
                 "    if out_path is not None:",
                 "        Path(out_path).write_text(json.dumps(report) + '\\n', encoding='utf-8')",
-                "    print(json.dumps({'id': '1', 'msg': {'type': 'agent_message', 'message': 'hi'}}))",
+                (
+                    "    payload = {'id': '1', 'msg': {'type': 'agent_message', "
+                    "'message': 'hi'}}"
+                ),
+                "    print(json.dumps(payload))",
                 "    return 0",
                 "",
                 "",
