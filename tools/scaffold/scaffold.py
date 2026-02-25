@@ -332,6 +332,53 @@ def _probe_tool_version(*, argv: list[str], timeout_seconds: float) -> tuple[boo
     return True, line, None
 
 
+def _dedup_preserve_order(items: list[str]) -> list[str]:
+    seen: set[str] = set()
+    out: list[str] = []
+    for item in items:
+        if item in seen:
+            continue
+        seen.add(item)
+        out.append(item)
+    return out
+
+
+def _probe_temp_writable(*, timeout_seconds: float) -> tuple[bool, str | None, str | None]:
+    del timeout_seconds  # reserved for future parity with other probes
+    tmp_dir = Path(tempfile.gettempdir())
+    try:
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix="scaffold_doctor_", dir=str(tmp_dir))
+        try:
+            os.write(fd, b"ok")
+        finally:
+            os.close(fd)
+        os.unlink(name)
+    except OSError as exc:
+        return False, str(tmp_dir), str(exc)
+    return True, str(tmp_dir), None
+
+
+def _pip_remediation_hint(*, python_exe: str) -> str:
+    parts: list[str] = []
+    parts.append(f"Try: {python_exe} -m ensurepip --upgrade")
+    parts.append(f"Then: {python_exe} -m pip --version")
+    parts.append("If ensurepip is missing, install a full CPython (python.org) with pip included.")
+    return " ".join(parts)
+
+
+def _git_remediation_hint() -> str:
+    if os.name == "nt":
+        return "Install Git and ensure 'git' is on PATH (for example: winget install -e --id Git.Git)."
+    return "Install Git and ensure 'git' is on PATH."
+
+
+def _bash_remediation_hint() -> str:
+    if os.name == "nt":
+        return "Install a bash (Git for Windows or WSL) or use PowerShell-only workflows."
+    return "Install bash (required for scripts/smoke.sh) and ensure it is on PATH."
+
+
 def _write_doctor_tool_report(*, repo_root: Path, payload: dict[str, Any]) -> Path | None:
     out_path = repo_root / ".scaffold" / "doctor_tool_report.json"
     try:
@@ -1166,6 +1213,96 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     projects = _load_projects(repo_root)
 
     errors: list[str] = []
+    next_actions: list[str] = []
+
+    baseline_timeout_seconds = 3.0
+    baseline: dict[str, Any] = {
+        "python": {
+            "executable": sys.executable,
+            "version": sys.version.split()[0],
+            "min_version": "3.11",
+            "ok": sys.version_info >= (3, 11),
+        }
+    }
+    if not bool(baseline["python"]["ok"]):
+        errors.append(
+            f"python {baseline['python']['version']} is too old (need {baseline['python']['min_version']}+)"
+        )
+        next_actions.append("Install Python 3.11+ and re-run doctor.")
+
+    ok, tmp_dir, err = _probe_temp_writable(timeout_seconds=baseline_timeout_seconds)
+    baseline["temp"] = {"ok": ok, "dir": tmp_dir, "error": err}
+    if not ok:
+        errors.append(f"temp directory is not writable: {tmp_dir} ({err})")
+        next_actions.append("Fix temp directory permissions/free space and re-run doctor.")
+
+    ok, version_line, err = _probe_tool_version(
+        argv=[sys.executable, "-m", "pip", "--version"],
+        timeout_seconds=baseline_timeout_seconds,
+    )
+    baseline["pip"] = {"ok": ok, "probe": "python -m pip", "version": version_line, "error": err}
+    if not ok:
+        details_parts = [p for p in (version_line, err) if p]
+        details = "; ".join(details_parts) if details_parts else "unknown_error"
+        errors.append(f"pip is required but not usable: {details}")
+        next_actions.append(_pip_remediation_hint(python_exe=sys.executable))
+
+    git_path = _which("git")
+    if git_path is None:
+        baseline["git"] = {"ok": False, "probe": "path", "resolved_path": None, "version": None, "error": "missing"}
+        errors.append("git is required but was not found on PATH")
+        next_actions.append(_git_remediation_hint())
+    else:
+        ok, version_line, err = _probe_tool_version(
+            argv=[git_path, "--version"],
+            timeout_seconds=baseline_timeout_seconds,
+        )
+        baseline["git"] = {
+            "ok": ok,
+            "probe": "path",
+            "resolved_path": git_path,
+            "version": version_line,
+            "error": err,
+        }
+        if not ok:
+            details_parts = [p for p in (version_line, err) if p]
+            details = "; ".join(details_parts) if details_parts else "unknown_error"
+            errors.append(f"git is required but not usable: {details}")
+            next_actions.append(_git_remediation_hint())
+
+    bash_required = os.name != "nt"
+    bash_path = _which("bash")
+    if bash_path is None:
+        baseline["bash"] = {
+            "required": bash_required,
+            "ok": False,
+            "probe": "path",
+            "resolved_path": None,
+            "version": None,
+            "error": "missing",
+        }
+        if bash_required:
+            errors.append("bash is required (for scripts/smoke.sh) but was not found on PATH")
+    else:
+        ok, version_line, err = _probe_tool_version(
+            argv=[bash_path, "-lc", "echo ok"],
+            timeout_seconds=2.0,
+        )
+        baseline["bash"] = {
+            "required": bash_required,
+            "ok": ok,
+            "probe": "bash -lc",
+            "resolved_path": bash_path,
+            "version": version_line,
+            "error": err,
+        }
+        if bash_required and not ok:
+            details = err or "unknown_error"
+            errors.append(f"bash is required (for scripts/smoke.sh) but not usable: {details}")
+            next_actions.append(_bash_remediation_hint())
+        elif not ok:
+            next_actions.append(_bash_remediation_hint())
+
     required_tools: dict[str, list[str]] = {}
     for project in projects:
         project_id = project.get("id")
@@ -1247,6 +1384,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             _dt.datetime.now(tz=_dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         ),
         "python": {"executable": sys.executable, "version": sys.version.split()[0]},
+        "baseline": baseline,
         "tools": {},
     }
 
@@ -1294,6 +1432,36 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 errors.append(f"tool {tool!r} is required (by {ctx}) but not usable: {details} (hint: {hint})")
             else:
                 errors.append(f"tool {tool!r} is required (by {ctx}) but not usable: {details}")
+        elif not bool(entry.get("ok")):
+            hint = entry.get("remediation")
+            if hint:
+                next_actions.append(hint)
+
+    report_path = _write_doctor_tool_report(repo_root=repo_root, payload=tool_report)
+
+    _eprint(f"Doctor: {'PASS' if not errors else 'FAIL'}")
+    _eprint(f"Repo: {repo_root}")
+    _eprint("==> Baseline preflight")
+    py = cast(dict[str, Any], baseline.get("python", {}))
+    py_ok = bool(py.get("ok"))
+    py_ver = py.get("version") or "unknown"
+    _eprint(f"    - python: {'OK' if py_ok else 'NOT OK'} ({py_ver})")
+    tmp = cast(dict[str, Any], baseline.get("temp", {}))
+    tmp_suffix = f" ({tmp.get('error')})" if tmp.get("error") else ""
+    _eprint(f"    - temp: {'OK' if bool(tmp.get('ok')) else 'NOT OK'} ({tmp.get('dir') or 'unknown'}){tmp_suffix}")
+    pip = cast(dict[str, Any], baseline.get("pip", {}))
+    _eprint(f"    - pip: {'OK' if bool(pip.get('ok')) else 'NOT OK'} ({pip.get('version') or pip.get('error') or 'unknown'})")
+    git = cast(dict[str, Any], baseline.get("git", {}))
+    _eprint(f"    - git: {'OK' if bool(git.get('ok')) else 'NOT OK'} ({git.get('version') or git.get('error') or 'unknown'})")
+    bash = cast(dict[str, Any], baseline.get("bash", {}))
+    bash_required = bool(bash.get("required"))
+    bash_ok = bool(bash.get("ok"))
+    if bash_required:
+        bash_status = "OK" if bash_ok else "NOT OK"
+    else:
+        bash_status = "OK" if bash_ok else ("MISSING" if not bash.get("resolved_path") else "NOT OK")
+    bash_label = "bash (required)" if bash_required else "bash (optional)"
+    _eprint(f"    - {bash_label}: {bash_status} ({bash.get('version') or bash.get('error') or 'unknown'})")
 
     if required_tools:
         _eprint("==> Tool preflight")
@@ -1309,14 +1477,20 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 details = entry.get("error") or "unknown_error"
                 _eprint(f"    - {tool}: NOT OK via {probe} ({details})")
 
-    report_path = _write_doctor_tool_report(repo_root=repo_root, payload=tool_report)
-
-    if errors:
-        suffix = f"\n\nTool report: {report_path}" if report_path else ""
-        raise ScaffoldError("Doctor found problems:\n" + "\n".join(f"- {e}" for e in errors) + suffix)
-
     if report_path is not None:
         _eprint(f"==> Tool report: {report_path}")
+
+    if errors:
+        _eprint("==> Problems")
+        for e in errors:
+            _eprint(f"    - {e}")
+        actions = _dedup_preserve_order([a for a in next_actions if a.strip()])
+        if actions:
+            _eprint("==> Next actions")
+            for a in actions:
+                _eprint(f"    - {a}")
+        return 1
+
     print("OK")
     return 0
 
