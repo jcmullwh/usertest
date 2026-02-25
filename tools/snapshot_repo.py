@@ -24,7 +24,7 @@ class SnapshotPlan:
     repo_root
         Repository root directory.
     out_path
-        Output archive path.
+        Output archive path (or None in preview/listing modes).
     files
         Repo-relative file paths to include in the archive, using forward slashes.
     excluded_gitignores
@@ -33,14 +33,36 @@ class SnapshotPlan:
         Repo-relative paths excluded because they matched git ignore rules.
     excluded_outputs
         Repo-relative paths excluded because they point at the output archive (to prevent self-inclusion).
+    excluded_untracked
+        Repo-relative paths excluded because they were untracked and `--tracked-only` was requested.
     """
 
     repo_root: Path
-    out_path: Path
+    out_path: Path | None
     files: tuple[str, ...]
     excluded_gitignores: tuple[str, ...]
     excluded_ignored: tuple[str, ...]
     excluded_outputs: tuple[str, ...]
+    excluded_untracked: tuple[str, ...]
+
+
+def _validate_out_path_shape(out_path: Path) -> None:
+    """
+    Validate the shape of an `--out` path regardless of whether we will write.
+
+    This is used by preview/listing modes where we may want to resolve output-relative exclusions,
+    but must not require `--overwrite` or fail due to an existing output file.
+    """
+
+    if out_path.exists() and out_path.is_dir():
+        raise SnapshotError(f"Output path is a directory (pass a .zip file path): {out_path}")
+
+    if out_path.suffix.lower() != ".zip":
+        raise SnapshotError(f"Output path must be a .zip file path: {out_path}")
+
+    parent = out_path.parent
+    if parent.exists() and not parent.is_dir():
+        raise SnapshotError(f"Output directory is not a directory: {parent}")
 
 
 def _validate_out_path(out_path: Path, *, overwrite: bool) -> None:
@@ -57,12 +79,7 @@ def _validate_out_path(out_path: Path, *, overwrite: bool) -> None:
         if not overwrite:
             raise SnapshotError(f"Output already exists (pass --overwrite to replace): {out_path}")
 
-    if out_path.suffix.lower() != ".zip":
-        raise SnapshotError(f"Output path must be a .zip file path: {out_path}")
-
-    parent = out_path.parent
-    if parent.exists() and not parent.is_dir():
-        raise SnapshotError(f"Output directory is not a directory: {parent}")
+    _validate_out_path_shape(out_path)
 
 
 def _validate_repo_root_arg(repo_root: Path) -> None:
@@ -235,6 +252,46 @@ def _git_ls_files(*, repo_root: Path, include_untracked: bool, include_ignored: 
     return sorted(files)
 
 
+def _git_ls_files_parts(
+    *,
+    repo_root: Path,
+    include_untracked: bool,
+    include_ignored: bool,
+    collect_untracked_details: bool,
+) -> tuple[list[str], list[str], list[str]]:
+    """
+    Enumerate repo files via `git ls-files`, returning tracked/untracked parts.
+
+    Returns
+    -------
+    tuple[list[str], list[str], list[str]]
+        (tracked, untracked_not_ignored, untracked_ignored)
+    """
+
+    if not include_untracked and include_ignored:
+        raise SnapshotError("--include-ignored requires including untracked files (omit --tracked-only).")
+
+    out_tracked = _run_git(["ls-files", "-z", "--cached"], cwd=repo_root)
+    tracked = sorted(filter(None, out_tracked.decode("utf-8", errors="strict").split("\0")))
+
+    untracked_not_ignored: list[str] = []
+    untracked_ignored: list[str] = []
+
+    if include_untracked or collect_untracked_details:
+        out_untracked = _run_git(["ls-files", "-z", "--others", "--exclude-standard"], cwd=repo_root)
+        untracked_not_ignored = sorted(
+            filter(None, out_untracked.decode("utf-8", errors="strict").split("\0"))
+        )
+
+        if include_ignored or collect_untracked_details:
+            out_ignored = _run_git(
+                ["ls-files", "-z", "--others", "--ignored", "--exclude-standard"], cwd=repo_root
+            )
+            untracked_ignored = sorted(filter(None, out_ignored.decode("utf-8", errors="strict").split("\0")))
+
+    return tracked, untracked_not_ignored, untracked_ignored
+
+
 def _git_check_ignore(*, repo_root: Path, paths: list[str]) -> set[str]:
     """
     Return the subset of `paths` that match ignore rules.
@@ -276,29 +333,38 @@ def _git_check_ignore(*, repo_root: Path, paths: list[str]) -> set[str]:
 def _plan_snapshot(
     *,
     repo_root: Path,
-    out_path: Path,
+    out_path: Path | None,
     include_untracked: bool,
     include_ignored: bool,
     include_gitignore_files: bool,
     exclude_ignored: bool,
+    collect_excluded_details: bool,
 ) -> SnapshotPlan:
     """
     Build a snapshot plan (file list + exclusions).
     """
 
-    all_files = _git_ls_files(
+    tracked, untracked_not_ignored, untracked_ignored = _git_ls_files_parts(
         repo_root=repo_root,
         include_untracked=include_untracked,
         include_ignored=include_ignored,
+        collect_untracked_details=collect_excluded_details,
     )
+    files: set[str] = set(tracked)
+    if include_untracked:
+        files.update(untracked_not_ignored)
+        if include_ignored:
+            files.update(untracked_ignored)
+    all_files = sorted(files)
 
     excluded_output_candidates: set[str] = set()
-    try:
-        out_rel = out_path.resolve().relative_to(repo_root.resolve()).as_posix()
-        excluded_output_candidates.add(out_rel)
-        excluded_output_candidates.add(out_rel + ".tmp")
-    except Exception:
-        pass
+    if out_path is not None:
+        try:
+            out_rel = out_path.resolve().relative_to(repo_root.resolve()).as_posix()
+            excluded_output_candidates.add(out_rel)
+            excluded_output_candidates.add(out_rel + ".tmp")
+        except Exception:
+            pass
 
     ignored_set = _git_check_ignore(repo_root=repo_root, paths=all_files) if exclude_ignored else set()
 
@@ -307,16 +373,23 @@ def _plan_snapshot(
     excluded_ignored: list[str] = []
     excluded_outputs: list[str] = []
     for rel in all_files:
-        if rel in ignored_set:
-            excluded_ignored.append(rel)
-            continue
         if rel in excluded_output_candidates:
             excluded_outputs.append(rel)
             continue
         if not include_gitignore_files and _posix_basename(rel).lower() == ".gitignore":
             excluded_gitignores.append(rel)
             continue
+        if rel in ignored_set:
+            excluded_ignored.append(rel)
+            continue
         included.append(rel)
+
+    excluded_untracked: list[str] = []
+    if collect_excluded_details and not include_untracked:
+        excluded_untracked = list(untracked_not_ignored)
+
+    if collect_excluded_details and exclude_ignored and untracked_ignored:
+        excluded_ignored.extend(untracked_ignored)
 
     if not included:
         raise SnapshotError("No files selected for snapshot (after exclusions).")
@@ -326,8 +399,9 @@ def _plan_snapshot(
         out_path=out_path,
         files=tuple(included),
         excluded_gitignores=tuple(excluded_gitignores),
-        excluded_ignored=tuple(sorted(excluded_ignored)),
+        excluded_ignored=tuple(sorted(set(excluded_ignored))),
         excluded_outputs=tuple(sorted(set(excluded_outputs))),
+        excluded_untracked=tuple(sorted(set(excluded_untracked))),
     )
 
 
@@ -344,6 +418,8 @@ def _write_zip(plan: SnapshotPlan, *, overwrite: bool) -> None:
     """
 
     out_path = plan.out_path
+    if out_path is None:
+        raise SnapshotError("Internal error: missing output path for archive write.")
     _validate_out_path(out_path, overwrite=overwrite)
 
     try:
@@ -462,9 +538,13 @@ def build_parser() -> argparse.ArgumentParser:
             "  python tools/snapshot_repo.py --out repo_snapshot.zip\n"
             "  python tools/snapshot_repo.py --out repo_snapshot.zip --overwrite\n"
             "  python tools/snapshot_repo.py --out repo_snapshot.zip --include-gitignore-files\n"
+            "  python tools/snapshot_repo.py --dry-run\n"
+            "  python tools/snapshot_repo.py --list-included\n"
+            "  python tools/snapshot_repo.py --list-excluded --list-limit 200\n"
             "\n"
             "Notes:\n"
             "  - `--out` must be a .zip file path.\n"
+            "  - `--out` is optional in preview/listing modes.\n"
             "  - `.gitignore` files are excluded by default; pass --include-gitignore-files to include them.\n"
         ),
     )
@@ -476,8 +556,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--out",
         type=Path,
-        required=True,
-        help="Output .zip path to write.",
+        help="Output .zip path to write (required unless using --dry-run/--plan-only/--list-*).",
     )
     parser.add_argument(
         "--tracked-only",
@@ -512,6 +591,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the snapshot plan and exit (do not write the archive).",
     )
     parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Alias for --plan-only.",
+    )
+    list_group = parser.add_mutually_exclusive_group()
+    list_group.add_argument(
+        "--list-included",
+        action="store_true",
+        help="Print newline-delimited included paths (repo-relative) and exit.",
+    )
+    list_group.add_argument(
+        "--list-excluded",
+        action="store_true",
+        help="Print newline-delimited excluded paths (repo-relative) with reason codes and exit.",
+    )
+    parser.add_argument(
+        "--list-limit",
+        type=int,
+        help="Limit list output to the first N lines (applies to --list-included/--list-excluded).",
+    )
+    parser.add_argument(
         "--overwrite",
         action="store_true",
         help="Overwrite --out if it already exists.",
@@ -522,13 +622,37 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
+    if args.list_limit is not None and args.list_limit <= 0:
+        raise SnapshotError("--list-limit must be a positive integer.")
+
     if args.repo_root is not None:
         repo_root = args.repo_root.resolve()
         _validate_repo_root_arg(repo_root)
     else:
         repo_root = _find_repo_root(Path.cwd())
-    out_path = args.out.resolve()
-    _validate_out_path(out_path, overwrite=bool(args.overwrite))
+
+    do_list_included = bool(args.list_included)
+    do_list_excluded = bool(args.list_excluded)
+    do_plan = bool(args.plan_only) or bool(args.dry_run)
+    preview_mode = do_plan or do_list_included or do_list_excluded
+
+    if args.list_limit is not None and not (do_list_included or do_list_excluded):
+        raise SnapshotError("--list-limit requires --list-included or --list-excluded.")
+
+    out_path: Path | None
+    if args.out is not None:
+        out_path = args.out.resolve()
+        _validate_out_path_shape(out_path)
+    else:
+        out_path = None
+
+    if not preview_mode:
+        if out_path is None:
+            raise SnapshotError(
+                "Missing required --out.\n"
+                "Hint: pass --out PATH.zip to write an archive, or use --dry-run/--plan-only/--list-*."
+            )
+        _validate_out_path(out_path, overwrite=bool(args.overwrite))
 
     plan = _plan_snapshot(
         repo_root=repo_root,
@@ -537,26 +661,58 @@ def main(argv: list[str] | None = None) -> int:
         include_ignored=bool(args.include_ignored),
         include_gitignore_files=bool(args.include_gitignore_files),
         exclude_ignored=not bool(args.include_ignored),
+        collect_excluded_details=do_list_excluded,
     )
+
+    if do_list_included:
+        limit = args.list_limit
+        for rel in (plan.files if limit is None else plan.files[:limit]):
+            print(rel)
+        return 0
+
+    if do_list_excluded:
+        excluded: dict[str, str] = {}
+
+        # Priority order matters: earlier reasons win.
+        for rel in plan.excluded_outputs:
+            excluded.setdefault(rel, "output_path")
+        for rel in plan.excluded_gitignores:
+            excluded.setdefault(rel, "gitignore_file")
+        for rel in plan.excluded_ignored:
+            excluded.setdefault(rel, "gitignored")
+        for rel in plan.excluded_untracked:
+            excluded.setdefault(rel, "untracked_excluded")
+
+        items = sorted(excluded.items(), key=lambda kv: kv[0])
+        if args.list_limit is not None:
+            items = items[: args.list_limit]
+        for rel, reason in items:
+            print(f"{rel}\t{reason}")
+        return 0
 
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     print("SNAPSHOT PLAN")
     print(f"- time_utc: {now}")
     print(f"- repo_root: {plan.repo_root}")
-    print(f"- out: {plan.out_path}")
+    print(f"- out: {plan.out_path if plan.out_path is not None else '<none>'}")
     print(f"- tracked_only: {bool(args.tracked_only)}")
     print(f"- include_ignored: {bool(args.include_ignored)}")
     print(f"- include_gitignore_files: {bool(args.include_gitignore_files)}")
     print(f"- verify: {bool(args.verify)}")
     print(f"- plan_only: {bool(args.plan_only)}")
+    print(f"- dry_run: {bool(args.dry_run)}")
     print(f"- files: {len(plan.files)}")
     print(f"- excluded_gitignores: {len(plan.excluded_gitignores)}")
     print(f"- excluded_ignored: {len(plan.excluded_ignored)}")
     print(f"- excluded_outputs: {len(plan.excluded_outputs)}")
+    print(f"- excluded_untracked: {len(plan.excluded_untracked)}")
     print("")
 
-    if bool(args.plan_only):
-        print("Plan-only: no archive written.")
+    if preview_mode:
+        if bool(args.dry_run):
+            print("Dry-run: no archive written.")
+        else:
+            print("Plan-only: no archive written.")
         return 0
 
     _write_zip(plan, overwrite=bool(args.overwrite))
