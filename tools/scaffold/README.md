@@ -13,6 +13,21 @@ List available kinds and generators, then scaffold a project and run its tasks:
     python tools/scaffold/scaffold.py run install --project billing-api --skip-missing
     python tools/scaffold/scaffold.py run test --project billing-api
 
+## Fixing / syncing the manifest
+
+`tools/scaffold/monorepo.toml` is the source of truth for repo-wide tasks and CI. If you update
+`tools/scaffold/registry.toml` (for example to add or change generator tasks), you can normalize/sync the manifest:
+
+    python tools/scaffold/scaffold.py fix
+
+Options:
+
+- `--sync-tasks`: overwrite generator-defined tasks in each project from `registry.toml` (keeps extra per-project tasks)
+- `--sync-ci`: overwrite each project's `ci` flags from `kinds.<kind>.ci`
+- `--prune-missing`: drop manifest entries whose project directories do not exist
+- `--check`: do not write; exit non-zero if changes would be made (useful for CI)
+- `--diff`: print a unified diff of the changes
+
 ## Minimal requirements
 
 - Always required: `python` on PATH (Python 3.11+ recommended; older Pythons need `tomli` installed to parse TOML).

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import datetime as _dt
+import difflib
 import importlib.util
 import json
 import os
@@ -490,6 +491,17 @@ def _validate_simple_name(name: str) -> None:
         seps.add(os.path.altsep)
     if any(sep in name for sep in seps):
         raise ScaffoldError("Name must not contain path separators.")
+
+
+def _normalize_repo_rel_path(value: str) -> str:
+    normalized = value.strip().replace("\\", "/")
+    if normalized.startswith("./"):
+        normalized = normalized[2:]
+    while normalized.startswith("/"):
+        normalized = normalized[1:]
+    while normalized.endswith("/"):
+        normalized = normalized[:-1]
+    return normalized
 
 
 _SNAKE_NON_ALNUM_RE = re.compile(r"[^a-zA-Z0-9]+")
@@ -1505,6 +1517,154 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_fix(args: argparse.Namespace) -> int:
+    repo_root = _repo_root()
+    registry = _load_registry(repo_root)
+    manifest_path = _manifest_path(repo_root)
+    manifest = _load_manifest(repo_root)
+
+    projects_raw = manifest.get("projects", [])
+    if projects_raw is None:
+        projects_raw = []
+    if not isinstance(projects_raw, list):
+        raise ScaffoldError("monorepo.toml: expected [[projects]] array")
+
+    sync_tasks = bool(getattr(args, "sync_tasks", False))
+    sync_ci = bool(getattr(args, "sync_ci", False))
+    prune_missing = bool(getattr(args, "prune_missing", False))
+    check = bool(getattr(args, "check", False))
+    show_diff = bool(getattr(args, "diff", False))
+
+    changes: list[str] = []
+    updated_projects: list[dict[str, Any]] = []
+    for project in projects_raw:
+        if not isinstance(project, dict):
+            raise ScaffoldError("monorepo.toml: each [[projects]] entry must be a table")
+
+        project_id = project.get("id")
+        kind = project.get("kind")
+        generator_id = project.get("generator")
+        path_raw = project.get("path")
+        if not isinstance(project_id, str) or not project_id:
+            raise ScaffoldError("monorepo.toml: projects[].id must be a non-empty string")
+        if not isinstance(kind, str) or not kind:
+            raise ScaffoldError(f"{project_id}: projects[].kind must be a non-empty string")
+        if not isinstance(generator_id, str) or not generator_id:
+            raise ScaffoldError(f"{project_id}: projects[].generator must be a non-empty string")
+        if not isinstance(path_raw, str) or not path_raw:
+            raise ScaffoldError(f"{project_id}: projects[].path must be a non-empty string")
+
+        normalized_path = _normalize_repo_rel_path(path_raw)
+        if not normalized_path:
+            raise ScaffoldError(f"{project_id}: projects[].path normalizes to empty: {path_raw!r}")
+        if normalized_path != path_raw:
+            project["path"] = normalized_path
+            changes.append(f"{project_id}: normalized path {path_raw!r} -> {normalized_path!r}")
+
+        project_dir = repo_root / normalized_path
+        if prune_missing and not project_dir.exists():
+            changes.append(f"{project_id}: pruned missing path {normalized_path!r}")
+            continue
+
+        kind_cfg = _get_kind(registry, kind)
+        generator = _get_generator(registry, generator_id)
+
+        toolchain = _require_generator_str(generator, "toolchain")
+        package_manager = _require_generator_str(generator, "package_manager")
+
+        if project.get("toolchain") != toolchain:
+            project["toolchain"] = toolchain
+            changes.append(f"{project_id}: set toolchain={toolchain!r}")
+        if project.get("package_manager") != package_manager:
+            project["package_manager"] = package_manager
+            changes.append(f"{project_id}: set package_manager={package_manager!r}")
+
+        kind_ci_raw = kind_cfg.get("ci", {"lint": False, "test": False, "build": False})
+        if not isinstance(kind_ci_raw, dict):
+            raise ScaffoldError(f"kinds.{kind}.ci must be a table")
+        kind_ci: dict[str, Any] = {}
+        for key in ("lint", "test", "build"):
+            if key in kind_ci_raw:
+                kind_ci[key] = _require_bool(kind_ci_raw[key], where=f"kinds.{kind}.ci.{key}")
+
+        ci_raw = project.get("ci")
+        if sync_ci or ci_raw is None:
+            if project.get("ci") != kind_ci:
+                project["ci"] = kind_ci
+                changes.append(f"{project_id}: synced ci from kinds.{kind}.ci")
+        else:
+            if not isinstance(ci_raw, dict):
+                raise ScaffoldError(f"{project_id}: projects[].ci must be a table when present")
+            ci: dict[str, Any] = dict(ci_raw)
+            for key in ("lint", "test", "build"):
+                if key in ci:
+                    ci[key] = _require_bool(ci[key], where=f"projects.{project_id}.ci.{key}")
+                elif key in kind_ci:
+                    ci[key] = kind_ci[key]
+            if ci != ci_raw:
+                project["ci"] = ci
+                changes.append(f"{project_id}: filled missing ci flags from kinds.{kind}.ci")
+
+        project_tasks = _normalize_tasks(project.get("tasks"), where=f"projects.{project_id}")
+        generator_tasks = _normalize_tasks(generator.get("tasks"), where=f"generators.{generator_id}")
+        if sync_tasks:
+            for task_name, cmd in generator_tasks.items():
+                if project_tasks.get(task_name) != cmd:
+                    project_tasks[task_name] = cmd
+                    changes.append(f"{project_id}: synced tasks.{task_name} from generators.{generator_id}")
+        else:
+            for task_name, cmd in generator_tasks.items():
+                if task_name not in project_tasks:
+                    project_tasks[task_name] = cmd
+                    changes.append(f"{project_id}: added missing tasks.{task_name} from generators.{generator_id}")
+        project["tasks"] = project_tasks
+
+        updated_projects.append(project)
+
+    if prune_missing and len(updated_projects) != len(projects_raw):
+        manifest["projects"] = updated_projects
+    else:
+        manifest["projects"] = projects_raw
+
+    existing_text = manifest_path.read_text(encoding="utf-8") if manifest_path.exists() else ""
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        rendered_path = Path(tmp_dir) / "monorepo.toml"
+        _write_manifest(rendered_path, manifest)
+        new_text = rendered_path.read_text(encoding="utf-8")
+
+    if existing_text == new_text:
+        print("Nothing to do.")
+        return 0
+
+    if show_diff:
+        diff = difflib.unified_diff(
+            existing_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=str(manifest_path),
+            tofile=str(manifest_path),
+        )
+        print("".join(diff).rstrip())
+
+    if check:
+        _eprint("Fix would update tools/scaffold/monorepo.toml.")
+        if changes:
+            for line in changes:
+                _eprint(f"- {line}")
+        else:
+            _eprint("- formatting only")
+        return 1
+
+    manifest_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_path.write_text(new_text, encoding="utf-8")
+    if changes:
+        print("Updated tools/scaffold/monorepo.toml:")
+        for line in changes:
+            print(f"- {line}")
+    else:
+        print("Updated tools/scaffold/monorepo.toml.")
+    return 0
+
+
 def _detect_license_spdx(text: str) -> str:
     t = text.lower()
     if "mit license" in t or "permission is hereby granted" in t:
@@ -1803,6 +1963,34 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_doctor.set_defaults(func=cmd_doctor)
+
+    p_fix = sub.add_parser("fix", help="Normalize/sync tools/scaffold/monorepo.toml from registry.toml.")
+    p_fix.add_argument(
+        "--sync-tasks",
+        action="store_true",
+        help="Overwrite generator-defined tasks in each project from registry.toml (preserves extra project tasks).",
+    )
+    p_fix.add_argument(
+        "--sync-ci",
+        action="store_true",
+        help="Overwrite each project's ci flags from kinds.<kind>.ci in registry.toml.",
+    )
+    p_fix.add_argument(
+        "--prune-missing",
+        action="store_true",
+        help="Remove manifest entries whose project directories do not exist.",
+    )
+    p_fix.add_argument(
+        "--check",
+        action="store_true",
+        help="Exit with status 1 if changes would be made; do not write.",
+    )
+    p_fix.add_argument(
+        "--diff",
+        action="store_true",
+        help="Print a unified diff of tools/scaffold/monorepo.toml changes.",
+    )
+    p_fix.set_defaults(func=cmd_fix)
 
     p_vendor = sub.add_parser("vendor", help="Vendoring helpers for external templates.")
     vendor_sub = p_vendor.add_subparsers(dest="vendor_cmd", required=True)
