@@ -89,6 +89,56 @@ def test_normalize_codex_events_joins_begin_end(tmp_path: Path) -> None:
     assert any(e["type"] == "read_file" for e in events)
 
 
+def test_normalize_codex_events_writes_failure_artifacts(tmp_path: Path) -> None:
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        json.dumps(
+            {
+                "id": "1",
+                "msg": {
+                    "type": "exec_command_begin",
+                    "call_id": "call_1",
+                    "command": ["rg", "nope", "USERS.md"],
+                    "cwd": str(tmp_path),
+                },
+            }
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "id": "1",
+                "msg": {
+                    "type": "exec_command_end",
+                    "call_id": "call_1",
+                    "stdout": "",
+                    "stderr": "no matches\n",
+                    "exit_code": 2,
+                    "duration": {"secs": 0, "nanos": 2},
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    normalized = tmp_path / "normalized.jsonl"
+    normalize_codex_events(
+        raw_events_path=raw,
+        normalized_events_path=normalized,
+        workspace_root=tmp_path,
+    )
+
+    events = list(iter_events_jsonl(normalized))
+    cmd = next(e for e in events if e["type"] == "run_command")
+    artifacts = cmd.get("data", {}).get("failure_artifacts")
+    assert isinstance(artifacts, dict)
+    assert artifacts.get("stdout") == "command_failures/cmd_01/stdout.txt"
+    assert artifacts.get("stderr") == "command_failures/cmd_01/stderr.txt"
+    assert (tmp_path / "command_failures" / "cmd_01" / "stderr.txt").read_text(
+        encoding="utf-8"
+    ).strip() == "no matches"
+
+
 def test_normalize_codex_events_maps_workspace_mount_paths(tmp_path: Path) -> None:
     raw = tmp_path / "raw.jsonl"
     raw.write_text(

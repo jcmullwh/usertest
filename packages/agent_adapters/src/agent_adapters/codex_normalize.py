@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_adapters.events import make_event
+from agent_adapters.failure_artifacts import write_command_failure_artifacts
 
 READLIKE_COMMANDS = {
     "cat",
@@ -318,6 +319,8 @@ def normalize_codex_events(
     workspace_mount: str | None = None,
 ) -> None:
     normalized_events_path.parent.mkdir(parents=True, exist_ok=True)
+    run_dir = normalized_events_path.parent
+    command_failure_idx = 0
 
     def _next_ts() -> str | None:
         if ts_iter is None:
@@ -439,6 +442,22 @@ def normalize_codex_events(
                     data["cwd"] = _render_path(cwd)
 
                 if exit_code != 0:
+                    command_failure_idx += 1
+                    stdout_text = msg.get("stdout") if isinstance(msg.get("stdout"), str) else ""
+                    stderr_text = msg.get("stderr") if isinstance(msg.get("stderr"), str) else ""
+                    duration_raw = msg.get("duration")
+                    duration = duration_raw if isinstance(duration_raw, dict) else None
+                    data["failure_artifacts"] = write_command_failure_artifacts(
+                        run_dir=run_dir,
+                        failure_index=command_failure_idx,
+                        command=_format_argv(argv),
+                        argv=argv,
+                        cwd=_render_path(cwd) if cwd is not None else None,
+                        exit_code=exit_code,
+                        stdout_text=stdout_text,
+                        stderr_text=stderr_text,
+                        duration=duration,
+                    )
                     output_text = _join_streams(msg.get("stdout"), msg.get("stderr"))
                     if output_text:
                         excerpt, truncated = _excerpt_text(output_text)
@@ -513,6 +532,24 @@ def normalize_codex_events(
                 "exit_code": exit_code,
             }
             if exit_code != 0:
+                command_failure_idx += 1
+                stdout_text = (
+                    item.get("stdout")
+                    if isinstance(item.get("stdout"), str)
+                    else (item.get("output") if isinstance(item.get("output"), str) else "")
+                )
+                stderr_text = item.get("stderr") if isinstance(item.get("stderr"), str) else ""
+                data["failure_artifacts"] = write_command_failure_artifacts(
+                    run_dir=run_dir,
+                    failure_index=command_failure_idx,
+                    command=_format_argv(argv),
+                    argv=argv,
+                    cwd=None,
+                    exit_code=exit_code,
+                    stdout_text=stdout_text,
+                    stderr_text=stderr_text,
+                    duration=None,
+                )
                 output_text = _join_streams(
                     item.get("stdout") or item.get("output"),
                     item.get("stderr"),

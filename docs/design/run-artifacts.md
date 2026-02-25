@@ -38,6 +38,16 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
       verification.json
       cmd_01.stdout.txt
       cmd_01.stderr.txt
+  command_failures/                   # only when agent tool shell commands fail
+    cmd_01/
+      command.json
+      stdout.txt
+      stderr.txt
+      timing.json
+  tool_failures/                      # only when tool edit/write calls fail
+    tool_01_replace/
+      tool.json
+      context.txt
   raw_events.jsonl
   normalized_events.jsonl
   metrics.json
@@ -102,6 +112,10 @@ Files that are conditionally present:
 - `verification.json`: present when verification ran for the selected attempt (schema-valid agent output).
 - `verification_errors.json`: present when verification failed (even if agent exit code is zero).
 - `verification/*`: per-attempt verification logs (`cmd_*.stdout.txt` / `cmd_*.stderr.txt`).
+- `command_failures/*`: per-failure artifacts for agent-executed shell commands (`command.json`,
+  `stdout.txt`, `stderr.txt`, `timing.json`).
+- `tool_failures/*`: per-failure artifacts for tool edit/write calls (`tool.json` plus optional
+  context/preview files).
 - `patch.diff` and `diff_numstat.json`: present only when edits are allowed and edits occurred.
 - `persona.source.md`, `persona.resolved.md`, `mission.source.md`, `mission.resolved.md`:
   present when catalog resolution succeeds.
