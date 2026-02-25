@@ -1413,13 +1413,26 @@ def _probe_agent_cli_version(
     env_overrides: dict[str, str] | None,
     timeout_seconds: float = 2.5,
 ) -> dict[str, Any]:
-    argv = [binary, "--version"]
-    full_argv = [*command_prefix, *argv] if command_prefix else argv
-
     env: dict[str, str] | None = None
     if env_overrides is not None and not command_prefix:
         env = os.environ.copy()
-        env.update({k: v for k, v in env_overrides.items() if isinstance(k, str) and isinstance(v, str)})
+        env.update(
+            {
+                k: v
+                for k, v in env_overrides.items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+        )
+
+    binary_to_run = binary
+    if os.name == "nt" and not command_prefix:
+        path = (env or os.environ).get("PATH")
+        resolved = shutil.which(binary, path=path)
+        if resolved:
+            binary_to_run = resolved
+
+    argv = [binary_to_run, "--version"]
+    full_argv = [*command_prefix, *argv] if command_prefix else argv
 
     try:
         proc = subprocess.run(
@@ -1488,11 +1501,21 @@ def _agent_login_state_paths(agent: str) -> tuple[Path, ...]:
     return ()
 
 
-def _agent_auth_present_local(*, agent: str, env_overrides: dict[str, str] | None) -> tuple[bool, str]:
+def _agent_auth_present_local(
+    *,
+    agent: str,
+    env_overrides: dict[str, str] | None,
+) -> tuple[bool, str]:
     env = os.environ
     if env_overrides:
         merged = dict(os.environ)
-        merged.update({k: v for k, v in env_overrides.items() if isinstance(k, str) and isinstance(v, str)})
+        merged.update(
+            {
+                k: v
+                for k, v in env_overrides.items()
+                if isinstance(k, str) and isinstance(v, str)
+            }
+        )
         env = merged  # type: ignore[assignment]
 
     for key in _agent_auth_env_var_candidates(agent):
@@ -1546,11 +1569,15 @@ def _build_auth_missing_hints(
 
     agent_norm = (agent or "").strip().lower()
     if agent_norm == "codex":
-        hints["login"] = "`codex login` (subscription) or `$env:OPENAI_API_KEY | codex login --with-api-key`"
+        hints["login"] = (
+            "`codex login` (subscription) or `$env:OPENAI_API_KEY | codex login --with-api-key`"
+        )
     elif agent_norm == "claude":
         hints["login"] = "`claude login` (if supported) or set `ANTHROPIC_API_KEY`"
     elif agent_norm == "gemini":
-        hints["login"] = "Set `GOOGLE_API_KEY` (AI Studio key) or configure the Gemini CLI login state"
+        hints["login"] = (
+            "Set `GOOGLE_API_KEY` (AI Studio key) or configure the Gemini CLI login state"
+        )
 
     if exec_backend == "docker" and not exec_use_host_agent_login:
         hints["docker"] = (
