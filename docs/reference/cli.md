@@ -21,7 +21,7 @@ Entry points:
 
 - `usertest run`
   - Run a single target repo.
-  - Writes a run directory under `runs/usertest/…`.
+  - Writes a run directory under `runs/usertest/…` (treat as sensitive by default; see `docs/ops/security.md`).
 - `usertest batch`
   - Run multiple targets from a YAML file.
   - Validation runs in phases: (1) parse/shape checks of `targets.yaml`, then (2) catalog/policy/environment checks before any execution.
@@ -88,7 +88,7 @@ Entry points:
 
 - `usertest-implement run`
   - Implement a single exported backlog ticket in a target repo.
-  - Writes a run directory under `runs/usertest_implement/…` with ticket linkage artifacts.
+  - Writes a run directory under `runs/usertest_implement/…` with ticket linkage artifacts (treat as sensitive by default; see `docs/ops/security.md`).
   - Optional git finalization:
     - `--commit` creates a branch + commit in the kept workspace.
     - `--push` pushes the branch to the configured remote.

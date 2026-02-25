@@ -143,3 +143,13 @@ Run directories are written under:
 `runs/usertest/<target>/<timestamp>/<agent>/<seed>/`
 
 They contain rich evidence logs. Treat them as sensitive by default.
+
+Before sharing a run directory (or uploading it from CI), do a quick review/redaction pass:
+
+- scan for credentials and tokens in `prompt.txt`, `raw_events.jsonl`, `normalized_events.jsonl`,
+  `agent_stderr.txt`, and verification logs
+- watch for accidental capture of target `.env` contents (target acquisition does not exclude them)
+- prefer sharing the smallest subset that still supports debugging (often `report.*`, `metrics.json`,
+  `error.json`, `agent_stderr.txt`, and `verification*`)
+
+CI archiving guidance (including GitHub Actions examples for `runs/usertest/**`): `docs/ops/security.md`.

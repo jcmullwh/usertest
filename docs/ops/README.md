@@ -1,9 +1,11 @@
-# Ops docs moved
+# Ops docs
 
-Operational documentation (runbooks, remediation plans, security notes) lives under:
+This folder contains **committed** operational documentation (security notes, CI guidance, and
+runbooks that should be visible to repo consumers).
 
-- `.agents/ops/`
+If you keep local-only operator notes, put them under `.agents/ops/` (that folder is git-ignored by
+default; see `.gitignore`).
 
-This keeps “working ops notes” co-located with other agent/maintainer artifacts.
+Start here:
 
-If you’re looking for user-facing docs, start at `docs/README.md`.
+- `docs/ops/security.md` (run artifacts sensitivity + safe sharing + CI archiving guidance)

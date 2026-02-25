@@ -41,4 +41,4 @@ See:
 - Policy selection (`safe` / `inspect` / `write`) controls agent execution permissions, not post-hoc artifact redaction.
 - Current sanitization is narrow and targeted (for example selected stderr noise suppression and sandbox diagnostic env-value scrubbing); there is no universal secret scrub of all artifacts.
 - Target acquisition does not automatically exclude `.env`-style files. If those files exist in scope and are readable, agent prompts/tool output can include their contents.
-- Treat run directories under `runs/usertest/` as sensitive operational data. For operator guidance, see `.agents/ops/security.md`.
+- Treat run directories under `runs/` (including `runs/usertest/`) as sensitive operational data. For operator guidance and CI examples, see `docs/ops/security.md`.

@@ -26,6 +26,10 @@ Each run writes a folder under `runs/usertest/…` with:
 
 If writes are allowed and edits occurred, a `patch.diff` is also written.
 
+These artifacts are evidence logs and may contain sensitive data (prompts/transcripts, tool output,
+and anything printed by the target). Review/redact before sharing; CI archiving guidance:
+`docs/ops/security.md`.
+
 See `docs/design/run-artifacts.md` for the full contract.
 
 ---

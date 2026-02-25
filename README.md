@@ -290,6 +290,10 @@ Artifacts land under `runs/usertest/<target>/<timestamp>/<agent>/<seed>/`:
 For the full file-level contract (required vs optional files, semantics, and a redacted sample
 layout), see `docs/design/run-artifacts.md`. For offline fixtures, see `examples/golden_runs/`.
 
+These run directories may contain sensitive data (prompts/transcripts, stderr, reports, diffs, and
+anything printed by tools). Review and redact before sharing or archiving in CI; see
+`docs/ops/security.md`.
+
 ### Docker execution backend (optional)
 
 `python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker`
@@ -409,18 +413,17 @@ Windows coverage is enforced in CI by `.github/workflows/ci.yml` jobs
 
 ## Security
 
-Operational security/runbook notes live under `.agents/ops/`.
-
 Key points:
 
 - Run policies constrain agent tool permissions during `run`/`batch`; they do not sanitize run
   artifacts globally.
-- Run artifacts (`prompt.txt`, `raw_events.jsonl`, `normalized_events.jsonl`, `report.*`) may
-  contain sensitive data.
-- `.env`-style files are not automatically excluded from target workspace acquisition; treat targets
-  and artifacts as sensitive by default.
+- Treat `runs/` (including `runs/usertest/` and `runs/usertest_implement/`) as sensitive by default.
+- Run artifacts (`prompt.txt`, `raw_events.jsonl`, `normalized_events.jsonl`, `report.*`, `patch.diff`)
+  can contain proprietary code, secrets printed by tools, or target `.env` contents.
+- Do not upload run directories to public systems by default; when archiving for debugging, prefer
+  opt-in/on-failure uploads with restricted access + short retention.
 
-For details, see `.agents/ops/security.md`.
+Guidance and CI examples: `docs/ops/security.md`.
 
 ## Snapshot publishing (private registry)
 

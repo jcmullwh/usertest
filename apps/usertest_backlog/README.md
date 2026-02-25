@@ -99,9 +99,9 @@ This CLI relies on:
 
 - run artifact contract (`docs/design/run-artifacts.md`)
 - backlog policy and prompt manifests under `configs/`
-- repo-local tracking under `.agents/` (plans, todos, actions ledgers)
+- repo-local tracking under `.agents/` (plans, todos, actions ledgers; typically local-only / git-ignored)
 
-Operational notes (ticket export workflow, remediation plans) live under `.agents/ops/`.
+Operational notes (security, CI guidance) live under `docs/ops/`.
 
 ---
 
