@@ -894,16 +894,81 @@ def _run_selected_ticket(
                 if workspace_dir is None:
                     pr_ref["error"] = "Missing workspace_ref.json; cannot locate workspace"
                 else:
-                    if not bool(args.skip_ci_wait):
+                    create_draft = False
+                    pr_body = body
+
+                    if bool(args.skip_ci_wait):
+                        head_sha = _git_head_sha(workspace_dir)
+                        _write_json(
+                            run_dir / "ci_gate.json",
+                            {
+                                "schema_version": 1,
+                                "workflow": "CI",
+                                "branch": branch,
+                                "head_sha": head_sha,
+                                "run_id": None,
+                                "run_url": None,
+                                "status": None,
+                                "conclusion": None,
+                                "passed": None,
+                                "error": None,
+                                "skipped": True,
+                                "skip_reason": "flag --skip-ci-wait",
+                                "started_at_utc": _utc_now_z(),
+                                "finished_at_utc": _utc_now_z(),
+                                "timeout_seconds": float(args.ci_timeout_seconds or 0),
+                            },
+                        )
+                    else:
                         if not (push_ref is not None and push_ref.get("pushed") is True):
                             pr_ref["error"] = (
                                 "Refusing to create PR before CI: branch was not pushed successfully "
                                 "(rerun with --push or pass --skip-ci-wait)."
                             )
+                            _write_json(
+                                run_dir / "ci_gate.json",
+                                {
+                                    "schema_version": 1,
+                                    "workflow": "CI",
+                                    "branch": branch,
+                                    "head_sha": None,
+                                    "run_id": None,
+                                    "run_url": None,
+                                    "status": None,
+                                    "conclusion": None,
+                                    "passed": None,
+                                    "error": None,
+                                    "skipped": True,
+                                    "skip_reason": "branch_not_pushed",
+                                    "started_at_utc": _utc_now_z(),
+                                    "finished_at_utc": _utc_now_z(),
+                                    "timeout_seconds": float(args.ci_timeout_seconds or 0),
+                                },
+                            )
                         else:
                             head_sha = _git_head_sha(workspace_dir)
                             if head_sha is None:
                                 pr_ref["error"] = "Unable to determine HEAD SHA for CI gating."
+                                _write_json(
+                                    run_dir / "ci_gate.json",
+                                    {
+                                        "schema_version": 1,
+                                        "workflow": "CI",
+                                        "branch": branch,
+                                        "head_sha": None,
+                                        "run_id": None,
+                                        "run_url": None,
+                                        "status": None,
+                                        "conclusion": None,
+                                        "passed": None,
+                                        "error": pr_ref["error"],
+                                        "skipped": True,
+                                        "skip_reason": "head_sha_unavailable",
+                                        "started_at_utc": _utc_now_z(),
+                                        "finished_at_utc": _utc_now_z(),
+                                        "timeout_seconds": float(args.ci_timeout_seconds or 0),
+                                    },
+                                )
                             else:
                                 ci_timeout = float(args.ci_timeout_seconds or 0)
                                 if ci_timeout <= 0:
@@ -916,12 +981,27 @@ def _run_selected_ticket(
                                     workflow="CI",
                                     timeout_seconds=ci_timeout,
                                 )
+                                pr_ref["ci_gate_passed"] = bool(ci_ref.get("passed") is True)
+                                pr_ref["ci_gate_run_url"] = ci_ref.get("run_url")
                                 if ci_ref.get("passed") is not True:
-                                    pr_ref["error"] = ci_ref.get("error") or "CI gate failed."
+                                    if bool(args.draft_pr_on_ci_failure):
+                                        create_draft = True
+                                        ci_err = ci_ref.get("error") or "CI gate failed."
+                                        pr_ref["ci_gate_error"] = ci_err
+                                        pr_body = (
+                                            pr_body.rstrip()
+                                            + "\n\n---\n\nCI gate failed (draft PR created):\n\n"
+                                            + f"- {ci_err}\n"
+                                        )
+                                    else:
+                                        pr_ref["error"] = ci_ref.get("error") or "CI gate failed."
+                                if create_draft:
+                                    pr_ref["draft"] = True
 
                     if pr_ref.get("error"):
                         pass
                     else:
+                        pr_ref["body"] = pr_body
                         proc = subprocess.run(
                             [
                                 "gh",
@@ -932,7 +1012,8 @@ def _run_selected_ticket(
                                 "--title",
                                 title,
                                 "--body",
-                                body,
+                                pr_body,
+                                *(["--draft"] if create_draft else []),
                             ],
                             cwd=str(workspace_dir),
                             capture_output=True,
@@ -1234,6 +1315,11 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         "--skip-ci-wait",
         action="store_true",
         help="Skip waiting for GitHub Actions CI before creating a PR (not recommended).",
+    )
+    parser.add_argument(
+        "--draft-pr-on-ci-failure",
+        action="store_true",
+        help="If CI does not pass, create a draft PR instead of failing PR creation.",
     )
 
     parser.add_argument(

@@ -31,8 +31,9 @@ def test_compute_metrics_basic_counts() -> None:
         ]
     )
     assert metrics["commands_executed"] == 1
-    assert metrics["commands_failed"] == 1
-    assert metrics["failed_commands"] == [{"command": "rg TODO README.md", "exit_code": 1}]
+    assert metrics["commands_failed"] == 0
+    assert metrics["commands_no_matches"] == 1
+    assert metrics["no_match_commands"] == [{"command": "rg TODO README.md", "exit_code": 1}]
     assert "README.md" in metrics["distinct_docs_read"]
     assert metrics["lines_added_total"] == 5
 

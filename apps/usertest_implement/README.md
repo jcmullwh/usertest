@@ -33,7 +33,8 @@ CI gate (before PR creation):
 - When using `--pr`, `usertest-implement` waits for GitHub Actions workflow `CI` to pass on the pushed branch
   before running `gh pr create`.
 - Override with `--skip-ci-wait` (debugging only; expect PR checks to fail) and `--ci-timeout-seconds`.
-- CI wait metadata is written to `ci_gate.json` in the run directory.
+- If you still want a PR even when CI fails, use `--draft-pr-on-ci-failure` to create a draft PR.
+- CI gate metadata is written to `ci_gate.json` in the run directory (including when skipped).
 
 Quick checks:
 

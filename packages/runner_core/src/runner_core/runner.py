@@ -58,6 +58,7 @@ from runner_core.pip_target import (
 from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
 from runner_core.python_interpreter_probe import resolve_usable_python_interpreter
 from runner_core.python_runtime import (
+    probe_pip_module,
     probe_pytest_module,
     select_python_runtime,
     verification_commands_may_provision_pytest,
@@ -854,15 +855,26 @@ def _probe_commands_local(
     commands: list[str],
     *,
     workspace_dir: Path | None = None,
+    env_overrides: dict[str, str] | None = None,
 ) -> tuple[dict[str, bool], dict[str, Any]]:
     out: dict[str, bool] = {}
     probe_details: dict[str, dict[str, Any]] = {}
+    effective_env: dict[str, str] | None = None
+    effective_path: str | None = None
+    if env_overrides:
+        effective_env = dict(os.environ)
+        for key, value in env_overrides.items():
+            if not isinstance(key, str) or not isinstance(value, str):
+                continue
+            effective_env[key] = value
+        effective_path = env_overrides.get("PATH")
     python_commands = [cmd for cmd in commands if cmd in {"python", "python3", "py"}]
     python_probe = (
         resolve_usable_python_interpreter(
             workspace_dir=workspace_dir,
             candidate_commands=python_commands,
             timeout_seconds=5.0,
+            path=effective_path,
         )
         if python_commands
         else None
@@ -877,11 +889,61 @@ def _probe_commands_local(
             probe_details[cmd] = candidate.to_dict()
             continue
 
-        resolved = shutil.which(cmd)
+        resolved = (
+            shutil.which(cmd, path=effective_path)
+            if effective_path is not None
+            else shutil.which(cmd)
+        )
         present = resolved is not None
         usable = present
         reason_code: str | None = None if present else "not_found"
         reason: str | None = None if present else f"`{cmd}` was not found on PATH."
+
+        if resolved is not None and cmd in {"pdm"}:
+            # Some environments can resolve `pdm` but block execution or hang at import time.
+            try:
+                proc = subprocess.run(
+                    [resolved, "--version"],
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=2.5,
+                    check=False,
+                    env=effective_env,
+                )
+                usable = int(proc.returncode or 0) == 0
+                probe_details[cmd] = {
+                    "command": cmd,
+                    "resolved_path": resolved,
+                    "present": present,
+                    "usable": bool(usable),
+                    "probe_argv": [resolved, "--version"],
+                    "probe_exit_code": int(proc.returncode or 0),
+                    "probe_stdout_excerpt": (proc.stdout or "").strip()[:300] or None,
+                    "probe_stderr_excerpt": (proc.stderr or "").strip()[:300] or None,
+                }
+                if not usable:
+                    reason_code = "probe_failed"
+                    details_parts = [
+                        (proc.stderr or "").strip(),
+                        (proc.stdout or "").strip(),
+                    ]
+                    details = "; ".join([p for p in details_parts if p]) or (
+                        f"exit_code={proc.returncode}"
+                    )
+                    reason = f"pdm probe exited non-zero: {details}"
+            except subprocess.TimeoutExpired:
+                usable = False
+                reason_code = "unresponsive"
+                reason = "pdm probe timed out (2.5s) running `pdm --version`."
+            except OSError as e:
+                usable = False
+                reason_code = "blocked"
+                reason = f"pdm probe failed: {e}"
+            if cmd in probe_details:
+                probe_details[cmd]["reason_code"] = reason_code
+                probe_details[cmd]["reason"] = reason
 
         if cmd == "bash" and os.name == "nt" and resolved is not None:
             # On some Windows sandboxes, bash.exe may be on PATH (e.g., Git Bash) but execution is
@@ -895,6 +957,7 @@ def _probe_commands_local(
                     errors="replace",
                     timeout=2.0,
                     check=False,
+                    env=effective_env,
                 )
                 usable = int(proc.returncode or 0) == 0
                 if not usable:
@@ -914,14 +977,17 @@ def _probe_commands_local(
                 reason = f"bash probe failed: {e}"
 
         out[cmd] = bool(usable)
-        probe_details[cmd] = {
-            "command": cmd,
-            "resolved_path": resolved,
-            "present": present,
-            "usable": bool(usable),
-            "reason_code": reason_code,
-            "reason": reason,
-        }
+        probe_details.setdefault(
+            cmd,
+            {
+                "command": cmd,
+                "resolved_path": resolved,
+                "present": present,
+                "usable": bool(usable),
+                "reason_code": reason_code,
+                "reason": reason,
+            },
+        )
 
     meta: dict[str, Any] = {"command_probe_details": probe_details}
     if python_probe is not None:
@@ -1054,6 +1120,76 @@ def _execution_shell_family(*, exec_backend: str, host_os: str) -> str:
     if host_os.strip().lower().startswith("windows"):
         return "powershell"
     return "bash"
+
+
+def _format_preflight_summary_md(
+    *,
+    execution_shell: str,
+    shell_status: str,
+    python_runtime_summary: dict[str, Any],
+    pip_probe: dict[str, Any] | None,
+    pytest_probe: dict[str, Any] | None,
+    command_diagnostics: dict[str, Any],
+) -> str:
+    shell_label = execution_shell.strip() or "unknown"
+    if shell_label.lower() == "powershell":
+        shell_label = "PowerShell (Windows; no `&&` / `||`)"
+    elif shell_label.lower() == "bash":
+        shell_label = "bash"
+
+    selected = python_runtime_summary.get("selected")
+    selected_dict = selected if isinstance(selected, dict) else {}
+    py_path = selected_dict.get("path") if isinstance(selected_dict.get("path"), str) else None
+    py_version = (
+        selected_dict.get("version") if isinstance(selected_dict.get("version"), str) else None
+    )
+    python_label = "`unavailable`" if not py_path else f"`{py_path}`"
+    if py_version:
+        python_label += f" ({py_version})"
+
+    pip_label = "unknown"
+    if isinstance(pip_probe, dict):
+        pip_ok = bool(pip_probe.get("passed") is True)
+        reason_code = pip_probe.get("reason_code")
+        reason_code_s = reason_code if isinstance(reason_code, str) and reason_code else None
+        if pip_ok:
+            pip_label = "OK"
+        else:
+            suffix = f" ({reason_code_s})" if reason_code_s else ""
+            pip_label = "NOT OK" + suffix
+
+    tool_order = ("git", "rg", "pdm", "bash")
+    tool_parts: list[str] = []
+    for tool in tool_order:
+        diag = command_diagnostics.get(tool)
+        diag_dict = diag if isinstance(diag, dict) else {}
+        status = diag_dict.get("status")
+        status_s = status if isinstance(status, str) and status else "unknown"
+        label = {
+            "present": "OK",
+            "missing": "MISSING",
+            "unusable": "UNUSABLE",
+            "blocked_by_policy": "BLOCKED",
+        }.get(status_s, status_s.upper())
+        tool_parts.append(f"{tool}={label}")
+
+    lines = [
+        f"- Shell: {shell_label} (shell_commands: {shell_status})",
+        f"- Python: {python_label}; pip: {pip_label}",
+        f"- Tools: {', '.join(tool_parts)}",
+    ]
+    if isinstance(pytest_probe, dict):
+        pytest_ok = bool(pytest_probe.get("passed") is True)
+        reason_code = pytest_probe.get("reason_code")
+        reason_code_s = reason_code if isinstance(reason_code, str) and reason_code else None
+        if pytest_ok:
+            pytest_label = "OK"
+        else:
+            suffix = f" ({reason_code_s})" if reason_code_s else ""
+            pytest_label = "NOT OK" + suffix
+        lines.append(f"- pytest: {pytest_label}")
+
+    return "\n".join(lines)
 
 
 def _effective_gemini_cli_sandbox(*, policy_value: Any, has_outer_sandbox: bool) -> bool:
@@ -2754,6 +2890,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     preflight_commands_present, preflight_meta = _probe_commands_local(
                         probe_commands,
                         workspace_dir=acquired.workspace_dir,
+                        env_overrides=agent_env_overrides,
                     )
             except Exception as e:  # noqa: BLE001
                 preflight_commands_present = {}
@@ -2814,6 +2951,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
             python_runtime = select_python_runtime(workspace_dir=acquired.workspace_dir)
             python_runtime_summary = python_runtime.to_dict()
+            pip_probe: dict[str, Any] | None = None
+            if python_runtime.selected is not None:
+                pip_probe = probe_pip_module(
+                    python_executable=python_runtime.selected.path,
+                    cwd=acquired.workspace_dir,
+                )
             pytest_probe: dict[str, Any] | None = None
             if (
                 verification_commands_need_pytest(request.verification_commands)
@@ -2826,15 +2969,23 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
             command_diagnostics: dict[str, Any] = {}
             for cmd in effective_probe_commands:
-                present = preflight_commands_present.get(cmd)
-                status = "unknown"
-                if present is True:
-                    status = "present"
-                elif present is False:
-                    status = "missing"
-
                 detail = probe_details_dict.get(cmd)
                 detail_dict = detail if isinstance(detail, dict) else {}
+                detail_present = detail_dict.get("present")
+                detail_usable = detail_dict.get("usable")
+
+                usable = preflight_commands_present.get(cmd)
+                present: bool | None = (
+                    detail_present
+                    if isinstance(detail_present, bool)
+                    else (usable if isinstance(usable, bool) else None)
+                )
+                usable_effective: bool | None = (
+                    detail_usable
+                    if isinstance(detail_usable, bool)
+                    else (usable if isinstance(usable, bool) else None)
+                )
+
                 reason_code = detail_dict.get("reason_code")
                 reason_code_s = reason_code if isinstance(reason_code, str) else None
                 reason = detail_dict.get("reason")
@@ -2842,10 +2993,18 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 resolved_path = detail_dict.get("resolved_path")
                 resolved_path_s = resolved_path if isinstance(resolved_path, str) else None
 
+                status = "unknown"
+                if present is False:
+                    status = "missing"
+                elif usable_effective is True:
+                    status = "present"
+                elif present is True and usable_effective is False:
+                    status = "unusable"
+
                 if shell_status == "blocked" and status == "present":
                     status = "blocked_by_policy"
                 remediation: str | None = None
-                if status == "missing":
+                if status in {"missing", "unusable"}:
                     if cmd in {"python", "python3", "py"} and reason_code_s in {
                         "access_denied",
                         "launch_failed",
@@ -2867,6 +3026,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "Selected Python runtime is incomplete (missing stdlib). "
                             "Install a full interpreter and retry."
                         )
+                    elif cmd == "pdm" and status == "unusable":
+                        remediation = (
+                            "PDM is present but not usable. Try reinstalling it into your Python "
+                            "(python -m pip install -U pdm), or switch to --exec-backend docker."
+                        )
                     else:
                         remediation = (
                             f"Install `{cmd}` in the selected execution backend, "
@@ -2879,6 +3043,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     )
                 command_diagnostics[cmd] = {
                     "present": present,
+                    "usable": usable_effective,
                     "status": status,
                     "resolved_path": resolved_path_s,
                     "reason_code": reason_code_s,
@@ -2905,6 +3070,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "required_agent_binary_present": required_agent_binary_present,
                     "python_interpreter": python_interpreter_summary,
                     "python_runtime": python_runtime_summary,
+                    "pip_probe": pip_probe,
                     "pytest_probe": pytest_probe,
                     "capabilities": {
                         "shell_commands": {
@@ -3287,6 +3453,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "commands": preflight_commands_present,
                         "command_diagnostics": command_diagnostics,
                         "python_interpreter": python_interpreter_summary,
+                        "python_runtime": python_runtime_summary,
+                        "pip_probe": pip_probe,
+                        "pytest_probe": pytest_probe,
                         "meta": preflight_meta,
                         "probe_commands": effective_probe_commands,
                         "capabilities": {
@@ -3309,6 +3478,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 effective_spec.report_schema_dict, indent=2, ensure_ascii=False
             )
 
+            preflight_summary_md = _format_preflight_summary_md(
+                execution_shell=execution_shell,
+                shell_status=shell_status,
+                python_runtime_summary=python_runtime_summary,
+                pip_probe=pip_probe,
+                pytest_probe=pytest_probe,
+                command_diagnostics=command_diagnostics,
+            )
+
             try:
                 prompt = build_prompt_from_template(
                     template_text=effective_spec.prompt_template_text,
@@ -3319,6 +3497,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "mission_md": effective_spec.mission_md_resolved,
                         "users_md": users_md_text,
                         "policy_json": policy_json,
+                        "preflight_summary_md": preflight_summary_md,
                         "environment_json": environment_json,
                         "report_schema_json": report_schema_json,
                     },
@@ -3855,6 +4034,34 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 _materialize_attempt_artifact(
                     selected_verification_summary_path,
                     run_dir / "verification.json",
+                )
+            else:
+                selected_attempt = attempts_meta[-1] if attempts_meta else {}
+                selected_verification = (
+                    selected_attempt.get("verification")
+                    if isinstance(selected_attempt, dict)
+                    else None
+                )
+                selected_verification_dict = (
+                    selected_verification if isinstance(selected_verification, dict) else {}
+                )
+                status = selected_verification_dict.get("status")
+                status_s = status if isinstance(status, str) and status.strip() else "disabled"
+                skip_reason = {
+                    "disabled": "verification_commands_not_configured",
+                    "skipped_agent_failed": "agent_exit_code_nonzero",
+                    "skipped_report_invalid": "report_validation_failed",
+                }.get(status_s, "verification_not_run")
+                _write_json(
+                    run_dir / "verification.json",
+                    {
+                        "schema_version": 1,
+                        "status": status_s,
+                        "skipped": True,
+                        "skip_reason": skip_reason,
+                        "attempt_number": len(attempts_meta),
+                        "commands_configured": verification_commands,
+                    },
                 )
             phases = run_meta.get("phases")
             if isinstance(phases, dict) and verification_commands:

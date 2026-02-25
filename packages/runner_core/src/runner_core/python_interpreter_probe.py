@@ -131,6 +131,7 @@ def resolve_usable_python_interpreter(
     timeout_seconds: float = 5.0,
     force_windows: bool | None = None,
     include_sys_executable: bool = True,
+    path: str | None = None,
 ) -> PythonInterpreterProbeResult:
     """
     Resolve a usable Python interpreter with a stable, Windows-friendly precedence order.
@@ -171,6 +172,7 @@ def resolve_usable_python_interpreter(
         candidate_commands=ordered,
         timeout_seconds=timeout,
         force_windows=force_windows,
+        path=path,
     )
 
     by_command = probed.by_command()
@@ -195,6 +197,7 @@ def probe_python_interpreters(
     candidate_commands: Sequence[str] | None = None,
     timeout_seconds: float = 5.0,
     force_windows: bool | None = None,
+    path: str | None = None,
 ) -> PythonInterpreterProbeResult:
     commands = _coerce_commands(candidate_commands)
     is_windows = _is_windows_platform(force_windows=force_windows)
@@ -204,7 +207,7 @@ def probe_python_interpreters(
 
     for command in commands:
         remaining = max(0.1, deadline - time.monotonic())
-        resolved = shutil.which(command)
+        resolved = shutil.which(command, path=path) if path is not None else shutil.which(command)
         if resolved is None:
             candidates.append(
                 PythonCandidateProbe(

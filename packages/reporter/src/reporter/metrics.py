@@ -7,6 +7,7 @@ from typing import Any
 
 DOC_EXTS = {".md", ".rst", ".txt", ".adoc"}
 _MAX_FAILED_COMMANDS = 10
+_MAX_NO_MATCH_COMMANDS = 10
 
 
 def _looks_like_path(token: str) -> bool:
@@ -39,6 +40,19 @@ def _infer_files_from_run_command(event: dict[str, Any]) -> set[str]:
     return files
 
 
+def _is_ripgrep_no_matches(*, argv: object, exit_code: int) -> bool:
+    if exit_code != 1:
+        return False
+    argv_list = argv if isinstance(argv, list) else []
+    if not argv_list:
+        return False
+    head = argv_list[0]
+    if not isinstance(head, str) or not head.strip():
+        return False
+    tool = head.strip().replace("\\", "/").split("/")[-1].lower()
+    return tool in {"rg", "rg.exe"}
+
+
 def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
     event_counts: Counter[str] = Counter()
     distinct_files_read: set[str] = set()
@@ -47,8 +61,12 @@ def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
     commands_executed = 0
     commands_failed = 0
+    commands_no_matches = 0
+    commands_blocked_by_policy = 0
     failed_commands: list[dict[str, Any]] = []
     failed_commands_total = 0
+    no_match_commands: list[dict[str, Any]] = []
+    no_match_commands_total = 0
 
     lines_added_total = 0
     lines_removed_total = 0
@@ -91,32 +109,57 @@ def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
             commands_executed += 1
             exit_code = data.get("exit_code")
             if isinstance(exit_code, int) and exit_code != 0:
-                commands_failed += 1
-                failed_commands_total += 1
-                if len(failed_commands) < _MAX_FAILED_COMMANDS:
-                    command = data.get("command")
-                    if not isinstance(command, str) or not command.strip():
-                        command = " ".join(str(tok) for tok in data.get("argv", []) if tok)
-                    entry: dict[str, Any] = {"command": command, "exit_code": exit_code}
-                    cwd = data.get("cwd")
-                    if isinstance(cwd, str) and cwd.strip():
-                        entry["cwd"] = cwd.strip()
-                    failure_artifacts = data.get("failure_artifacts")
-                    if isinstance(failure_artifacts, dict) and failure_artifacts:
-                        entry["artifacts"] = failure_artifacts
+                argv = data.get("argv")
+                if _is_ripgrep_no_matches(argv=argv, exit_code=exit_code):
+                    commands_no_matches += 1
+                    no_match_commands_total += 1
+                    if len(no_match_commands) < _MAX_NO_MATCH_COMMANDS:
+                        command = data.get("command")
+                        if not isinstance(command, str) or not command.strip():
+                            argv_list = argv if isinstance(argv, list) else []
+                            command = " ".join(str(tok) for tok in argv_list if tok)
+                        entry: dict[str, Any] = {"command": command, "exit_code": exit_code}
+                        cwd = data.get("cwd")
+                        if isinstance(cwd, str) and cwd.strip():
+                            entry["cwd"] = cwd.strip()
+                        no_match_commands.append(entry)
+                else:
+                    commands_failed += 1
+                    failed_commands_total += 1
+
                     output_excerpt = data.get("output_excerpt")
-                    if isinstance(output_excerpt, str) and output_excerpt.strip():
-                        excerpt = output_excerpt.strip()
-                        entry["output_excerpt"] = excerpt
-                        if data.get("output_excerpt_truncated") is True:
-                            entry["output_excerpt_truncated"] = True
-                        lowered_excerpt = excerpt.lower()
-                        if (
-                            "tool execution denied by policy" in lowered_excerpt
-                            or "denied by policy" in lowered_excerpt
-                        ):
+                    lowered_excerpt = (
+                        output_excerpt.lower()
+                        if isinstance(output_excerpt, str) and output_excerpt.strip()
+                        else ""
+                    )
+                    is_policy_denial = (
+                        "tool execution denied by policy" in lowered_excerpt
+                        or "denied by policy" in lowered_excerpt
+                    )
+                    if is_policy_denial:
+                        commands_blocked_by_policy += 1
+
+                    if len(failed_commands) < _MAX_FAILED_COMMANDS:
+                        command = data.get("command")
+                        if not isinstance(command, str) or not command.strip():
+                            argv_list = argv if isinstance(argv, list) else []
+                            command = " ".join(str(tok) for tok in argv_list if tok)
+                        entry: dict[str, Any] = {"command": command, "exit_code": exit_code}
+                        cwd = data.get("cwd")
+                        if isinstance(cwd, str) and cwd.strip():
+                            entry["cwd"] = cwd.strip()
+                        failure_artifacts = data.get("failure_artifacts")
+                        if isinstance(failure_artifacts, dict) and failure_artifacts:
+                            entry["artifacts"] = failure_artifacts
+
+                        if lowered_excerpt:
+                            excerpt = str(output_excerpt).strip()
+                            entry["output_excerpt"] = excerpt
+                            if data.get("output_excerpt_truncated") is True:
+                                entry["output_excerpt_truncated"] = True
+                        if is_policy_denial:
                             entry["failure_category"] = "policy_denial"
-                            argv = data.get("argv")
                             argv_list = argv if isinstance(argv, list) else []
                             has_heredoc = "<<" in command or any(
                                 isinstance(tok, str) and tok.strip().startswith("<<")
@@ -137,7 +180,7 @@ def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
                                     "Consult preflight.json for allowed capabilities "
                                     "or rewrite using file tools."
                                 )
-                    failed_commands.append(entry)
+                        failed_commands.append(entry)
             for inferred in _infer_files_from_run_command(event):
                 distinct_files_read.add(inferred)
                 if _maybe_doc_path(inferred):
@@ -150,6 +193,8 @@ def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
         "distinct_files_written": sorted(distinct_files_written),
         "commands_executed": commands_executed,
         "commands_failed": commands_failed,
+        "commands_no_matches": commands_no_matches,
+        "commands_blocked_by_policy": commands_blocked_by_policy,
         "lines_added_total": lines_added_total,
         "lines_removed_total": lines_removed_total,
         "step_count": step_count,
@@ -162,5 +207,13 @@ def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
             metrics["failed_commands_truncated"] = True
             metrics["failed_commands_omitted_count"] = omitted
             metrics["failed_commands_max"] = _MAX_FAILED_COMMANDS
+
+    if no_match_commands_total:
+        metrics["no_match_commands"] = no_match_commands
+        omitted = max(0, int(no_match_commands_total) - len(no_match_commands))
+        if omitted:
+            metrics["no_match_commands_truncated"] = True
+            metrics["no_match_commands_omitted_count"] = omitted
+            metrics["no_match_commands_max"] = _MAX_NO_MATCH_COMMANDS
 
     return metrics
