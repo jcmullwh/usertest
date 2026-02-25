@@ -4,6 +4,16 @@ This document defines the stable artifact layout for a single `usertest run` out
 It is intended for operators, CI maintainers, and reviewers who need to inspect outputs without
 reading runner source code.
 
+## Security and privacy (read first)
+
+Anything under `runs/` should be treated as sensitive by default.
+
+Run artifacts can include prompts/transcripts, stderr/stdout from tools, rendered reports, patch
+diffs, and other content that may contain proprietary code or credentials printed by tools.
+Review and redact before sharing, and be cautious when archiving in CI.
+
+Operator guidance + CI examples: `docs/ops/security.md`.
+
 ## Run directory shape
 
 Canonical run path:
