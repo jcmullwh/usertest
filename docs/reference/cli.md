@@ -116,6 +116,11 @@ Path to *this* runner repo’s root. Used to locate `configs/`, prompt templates
 
 ### `--repo`
 
+Notes:
+
+- For discovery-style commands that only need to read a target's `.usertest/catalog.yaml` (for example `usertest personas list`, `usertest missions list`, and `usertest lint`), local paths are read in-place, while git URLs are cloned to a temp dir.
+- For `usertest run`, the target is acquired into a workspace directory (clone/copy) for isolation before execution.
+
 The target under test. Can be:
 
 - local path

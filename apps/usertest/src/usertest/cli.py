@@ -489,7 +489,16 @@ def _serialize_run_request_for_print(req: RunRequest) -> dict[str, Any]:
 
 def build_parser() -> argparse.ArgumentParser:
     """Build the usertest CLI argument parser."""
-    parser = argparse.ArgumentParser(prog="usertest")
+    parser = argparse.ArgumentParser(
+        prog="usertest",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Examples:\n"
+            "  # Discover valid persona/mission IDs from this repo:\n"
+            "  python -m usertest.cli personas list --repo-root .\n"
+            "  python -m usertest.cli missions list --repo-root .\n"
+        ),
+    )
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     run_p = sub.add_parser("run", help="Run a single persona exploration against a target repo.")
@@ -1005,7 +1014,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     lint_p.add_argument(
         "--repo",
-        help="Optional target repo path/git URL to lint catalog overrides (same forms as `run --repo`).",
+        help=(
+            "Optional target repo input to lint catalog overrides (accepted forms: same syntax as "
+            "`run --repo`). Local paths are read in-place; git URLs / pip:/pdm: inputs are acquired "
+            "into a temp workspace."
+        ),
     )
     lint_p.add_argument("--ref", help="Branch/tag/SHA to checkout when --repo is a git URL.")
     lint_p.add_argument(
@@ -1055,10 +1068,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     personas_p = sub.add_parser("personas", help="Persona catalog commands.")
     personas_sub = personas_p.add_subparsers(dest="personas_cmd", required=True)
-    personas_list_p = personas_sub.add_parser("list", help="List discovered personas.")
+    personas_list_p = personas_sub.add_parser(
+        "list",
+        help="List discovered personas.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Repo selection (--repo):\n"
+            "  - Local path: read in-place.\n"
+            "  - Git URL: cloned to a temp dir.\n"
+            "\n"
+            "Examples:\n"
+            "  usertest personas list --repo C:\\path\\to\\repo\n"
+            "  usertest personas list --repo https://github.com/org/repo\n"
+            "  usertest personas list --repo-root .\n"
+        ),
+    )
     personas_list_p.add_argument(
         "--repo",
-        help="Optional target repo path/URL (loads .usertest/catalog.yaml if present).",
+        help=(
+            "Optional target repo (local path or git URL) to load .usertest/catalog.yaml from "
+            "(if present)."
+        ),
     )
     personas_list_p.add_argument(
         "--repo-root",
@@ -1068,10 +1098,27 @@ def build_parser() -> argparse.ArgumentParser:
 
     missions_p = sub.add_parser("missions", help="Mission catalog commands.")
     missions_sub = missions_p.add_subparsers(dest="missions_cmd", required=True)
-    missions_list_p = missions_sub.add_parser("list", help="List discovered missions.")
+    missions_list_p = missions_sub.add_parser(
+        "list",
+        help="List discovered missions.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Repo selection (--repo):\n"
+            "  - Local path: read in-place.\n"
+            "  - Git URL: cloned to a temp dir.\n"
+            "\n"
+            "Examples:\n"
+            "  usertest missions list --repo C:\\path\\to\\repo\n"
+            "  usertest missions list --repo https://github.com/org/repo\n"
+            "  usertest missions list --repo-root .\n"
+        ),
+    )
     missions_list_p.add_argument(
         "--repo",
-        help="Optional target repo path/URL (loads .usertest/catalog.yaml if present).",
+        help=(
+            "Optional target repo (local path or git URL) to load .usertest/catalog.yaml from "
+            "(if present)."
+        ),
     )
     missions_list_p.add_argument(
         "--repo-root",
@@ -3451,14 +3498,19 @@ def _cmd_personas_list(args: argparse.Namespace) -> int:
 
     try:
         if repo_arg is not None:
-            with tempfile.TemporaryDirectory(prefix="usertest_catalog_") as tmp_dir:
-                dest_dir = Path(tmp_dir) / "workspace"
-                acquired = acquire_target(repo=repo_arg, dest_dir=dest_dir, ref=None)
-                try:
-                    catalog_cfg = load_catalog_config(repo_root, acquired.workspace_dir)
-                    personas = discover_personas(catalog_cfg)
-                finally:
-                    shutil.rmtree(acquired.workspace_dir, ignore_errors=True)
+            local = _resolve_local_repo_root(repo_root, repo_arg)
+            if local is not None:
+                catalog_cfg = load_catalog_config(repo_root, local)
+                personas = discover_personas(catalog_cfg)
+            else:
+                with tempfile.TemporaryDirectory(prefix="usertest_catalog_") as tmp_dir:
+                    dest_dir = Path(tmp_dir) / "workspace"
+                    acquired = acquire_target(repo=repo_arg, dest_dir=dest_dir, ref=None)
+                    try:
+                        catalog_cfg = load_catalog_config(repo_root, acquired.workspace_dir)
+                        personas = discover_personas(catalog_cfg)
+                    finally:
+                        shutil.rmtree(acquired.workspace_dir, ignore_errors=True)
         else:
             catalog_cfg = load_catalog_config(repo_root, None)
             personas = discover_personas(catalog_cfg)
@@ -3478,14 +3530,19 @@ def _cmd_missions_list(args: argparse.Namespace) -> int:
 
     try:
         if repo_arg is not None:
-            with tempfile.TemporaryDirectory(prefix="usertest_catalog_") as tmp_dir:
-                dest_dir = Path(tmp_dir) / "workspace"
-                acquired = acquire_target(repo=repo_arg, dest_dir=dest_dir, ref=None)
-                try:
-                    catalog_cfg = load_catalog_config(repo_root, acquired.workspace_dir)
-                    missions = discover_missions(catalog_cfg)
-                finally:
-                    shutil.rmtree(acquired.workspace_dir, ignore_errors=True)
+            local = _resolve_local_repo_root(repo_root, repo_arg)
+            if local is not None:
+                catalog_cfg = load_catalog_config(repo_root, local)
+                missions = discover_missions(catalog_cfg)
+            else:
+                with tempfile.TemporaryDirectory(prefix="usertest_catalog_") as tmp_dir:
+                    dest_dir = Path(tmp_dir) / "workspace"
+                    acquired = acquire_target(repo=repo_arg, dest_dir=dest_dir, ref=None)
+                    try:
+                        catalog_cfg = load_catalog_config(repo_root, acquired.workspace_dir)
+                        missions = discover_missions(catalog_cfg)
+                    finally:
+                        shutil.rmtree(acquired.workspace_dir, ignore_errors=True)
         else:
             catalog_cfg = load_catalog_config(repo_root, None)
             missions = discover_missions(catalog_cfg)
