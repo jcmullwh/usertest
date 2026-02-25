@@ -40,6 +40,7 @@ ${environment_json}
 - Prefer the environment's file/directory tools for repo inspection (read/search/list) over launching shell commands when possible.
 - When using `run_shell_command`, use syntax compatible with the execution shell family in `environment.execution_backend.shell` (bash vs PowerShell). Example: bash `export FOO=bar`; PowerShell `$env:FOO='bar'`.
 - PowerShell (Windows): assume PowerShell 5.1 compatibility unless the environment explicitly says otherwise (no `&&` / `||`). Run commands separately, or check `$LASTEXITCODE` after each native command and `exit $LASTEXITCODE` on failure.
+- PowerShell (Windows): bash-only helpers like `nl` may be unavailable. Example line numbers: `$i=1; Get-Content -LiteralPath path | % { '{0,6}: {1}' -f $i, $_; $i++ }`
 - Ripgrep: when searching for a literal pattern that begins with `-`, pass `--` to end option parsing (example: `rg -n -- "--skip-install" README.md`).
 - Ripgrep: exit code `1` means "no matches found" (not necessarily a tool failure).
 - Avoid heredocs (for example `<<EOF ... EOF`) in `run_shell_command`; they may be rejected by sandbox policy. For multiline content, prefer `write_file` / `replace`.
