@@ -68,10 +68,15 @@ These are typically invoked by CI.
 ## Other utilities
 
 - `snapshot_repo.py` – create a shareable snapshot ZIP of this repo
-  - Example: `python tools/snapshot_repo.py --out repo_snapshot.zip`
-  - Default: `.gitignore` files are excluded; pass `--include-gitignore-files` to include them.
-  - Preview/audit (no archive written):
-    - `python tools/snapshot_repo.py --dry-run`
+  - Minimal: `python tools/snapshot_repo.py --out repo_snapshot.zip`
+  - Preview (no archive written): `python tools/snapshot_repo.py --dry-run`
+  - Key defaults:
+    - `.gitignore` files are excluded by default; pass `--include-gitignore-files` to include them.
+    - Untracked-but-not-ignored files are included by default; pass `--tracked-only` to exclude them.
+  - Common pitfalls:
+    - If the output already exists, pass `--overwrite`.
+    - `--no-verify` skips post-write invariant checks; only use it if you trust the tool (or when debugging performance).
+  - Audit helpers:
     - `python tools/snapshot_repo.py --list-included`
     - `python tools/snapshot_repo.py --list-excluded --list-limit 200` (prints `PATH<TAB>REASON`)
 - `pdm_shim.py` – small shim to make PDM invocation consistent across environments

@@ -38,6 +38,7 @@ Once we have all of those target issues, we need to implement them.
 - **Tutorial:** `docs/tutorials/getting-started.md`
 - **Monorepo setup + scaffold workflow:** `docs/tutorials/monorepo-setup.md`
 - **One-command smoke (per OS):** `scripts/smoke.ps1` (Windows) / `scripts/smoke.sh` (macOS/Linux)
+- **Shareable repo snapshot ZIP:** `scripts/snapshot_repo.ps1` (Windows) / `scripts/snapshot_repo.sh` (macOS/Linux)
 
 ## Fastest output (no setup)
 
@@ -159,9 +160,25 @@ Restricted environments (no editable installs / pre-provisioned deps):
   monorepo packages installed and importable. Note: `--skip-install` skips *all* installs (including
   `requirements-dev.txt`); smoke will run an import preflight and fail fast with actionable setup guidance if imports
   are not available.
+
 - Manual repro (preflight UX): in a fresh environment without installs, run `bash ./scripts/smoke.sh --skip-install`
   (or PowerShell `.\scripts\smoke.ps1 -SkipInstall`) and confirm the first failure signal is the preflight guidance
   (not a Python stack trace from later CLI/pytest imports).
+
+### Share this repo as a ZIP (snapshot)
+
+Use `snapshot_repo.py` when you need a shareable copy of this repo for debugging or review.
+
+- Minimal:
+  - `python tools/snapshot_repo.py --out repo_snapshot.zip`
+  - Windows wrapper: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\snapshot_repo.ps1`
+  - macOS/Linux wrapper: `bash ./scripts/snapshot_repo.sh`
+- Key defaults / gotchas:
+  - `.gitignore` files are excluded by default; pass `--include-gitignore-files` to include them.
+  - If `repo_snapshot.zip` already exists, pass `--overwrite`.
+  - Preview/audit without writing an archive:
+    - `python tools/snapshot_repo.py --dry-run`
+    - `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\snapshot_repo.ps1 -DryRun`
 
 ### Manual editable install (no PYTHONPATH)
 

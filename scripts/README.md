@@ -35,6 +35,20 @@ See the repo root `README.md` for copy/paste invocations.
 
 ---
 
+## Repo snapshot script
+
+- `snapshot_repo.sh`
+- `snapshot_repo.ps1`
+
+These are thin wrappers around `tools/snapshot_repo.py`.
+
+With no args, they default to writing `repo_snapshot.zip`. To preview without writing an archive:
+
+- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\snapshot_repo.ps1 -DryRun`
+- bash: `bash ./scripts/snapshot_repo.sh --dry-run`
+
+---
+
 ## PYTHONPATH helpers
 
 - `set_pythonpath.sh`
