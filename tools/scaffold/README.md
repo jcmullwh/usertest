@@ -13,6 +13,12 @@ List available kinds and generators, then scaffold a project and run its tasks:
     python tools/scaffold/scaffold.py run install --project billing-api --skip-missing
     python tools/scaffold/scaffold.py run test --project billing-api
 
+## Lint autofix
+
+To run lint in autofix mode across projects (when supported), use `scaffold run` with `--fix`:
+
+    python tools/scaffold/scaffold.py run lint --fix --kind lib
+
 ## Minimal requirements
 
 - Always required: `python` on PATH (Python 3.11+ recommended; older Pythons need `tomli` installed to parse TOML).
