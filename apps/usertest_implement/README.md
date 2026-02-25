@@ -24,7 +24,7 @@ Verification gate:
 
 - When using `--commit/--push/--pr`, `usertest-implement` configures a required verification step before handing off
   (default: `scripts/smoke.ps1` on Windows local runs, `scripts/smoke.sh` otherwise, then
-  `python tools/scaffold/scaffold.py run --all lint`).
+  `python tools/scaffold/scaffold.py run --all --fix lint`).
 - Override the gate with `--verify-command "<cmd>"` (repeatable) and optional `--verify-timeout-seconds`.
 - Disable the default gate with `--skip-verify` (debugging only; expect CI failures).
 
