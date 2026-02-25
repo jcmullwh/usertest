@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import json
 import os
 import re
@@ -421,6 +422,60 @@ def _prevalidate_batch_requests(
     return errors
 
 
+_SENSITIVE_KV_KEY_RE = re.compile(r"(api[_-]?key|token|secret|password|passwd|pwd)", re.IGNORECASE)
+
+
+def _redact_kv_list(items: list[str], *, redacted_value: str = "<redacted>") -> list[str]:
+    redacted: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            redacted.append(str(item))
+            continue
+        if "=" not in item:
+            redacted.append(item)
+            continue
+        key, value = item.split("=", 1)
+        key_stripped = key.strip()
+        value_stripped = value.strip()
+        if not key_stripped or not value_stripped:
+            redacted.append(item)
+            continue
+        if _SENSITIVE_KV_KEY_RE.search(key_stripped):
+            redacted.append(f"{key_stripped}={redacted_value}")
+        else:
+            redacted.append(item)
+    return redacted
+
+
+def _jsonify(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, tuple):
+        return [_jsonify(v) for v in value]
+    if isinstance(value, list):
+        return [_jsonify(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _jsonify(v) for k, v in value.items()}
+    return str(value)
+
+
+def _serialize_run_request_for_print(req: RunRequest) -> dict[str, Any]:
+    rendered: dict[str, Any] = {}
+    for field in dataclasses.fields(RunRequest):
+        rendered[field.name] = _jsonify(getattr(req, field.name))
+    exec_env = rendered.get("exec_env")
+    if isinstance(exec_env, list):
+        rendered["exec_env"] = _redact_kv_list([str(x) for x in exec_env])
+    agent_config_overrides = rendered.get("agent_config_overrides")
+    if isinstance(agent_config_overrides, list):
+        rendered["agent_config_overrides"] = _redact_kv_list(
+            [str(x) for x in agent_config_overrides]
+        )
+    return rendered
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Build the usertest CLI argument parser."""
     parser = argparse.ArgumentParser(prog="usertest")
@@ -675,12 +730,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Force rebuilding the Docker image even if it exists.",
     )
 
-    batch_p = sub.add_parser("batch", help="Run multiple targets from a YAML file.")
+    batch_p = sub.add_parser(
+        "batch",
+        help="Run multiple targets from a YAML file.",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        description=(
+            "Batch validation runs in phases:\n"
+            "  1) Parse/shape validation of targets.yaml (YAML syntax, required fields, types)\n"
+            "  2) Catalog/policy/environment validation (persona/mission resolution, agent/policy checks,\n"
+            "     local repo path checks, and optional command responsiveness probes)\n"
+            "\n"
+            "If validation passes, targets execute in-order unless --validate-only/--print-requests is set."
+        ),
+    )
     batch_p.add_argument("--targets", required=True, type=Path, help="YAML file with targets list.")
     batch_p.add_argument(
         "--validate-only",
         action="store_true",
-        help="Validate targets.yaml and exit (do not create run dirs or execute targets).",
+        help=(
+            "Validate targets.yaml and exit (no run dirs, no agent execution). "
+            "Runs all validation phases described above."
+        ),
+    )
+    batch_p.add_argument(
+        "--print-requests",
+        action="store_true",
+        help=(
+            "Print the resolved RunRequest list as deterministic JSON and exit "
+            "(implies --validate-only; redacts sensitive KEY=VALUE pairs)."
+        ),
     )
     batch_p.add_argument("--agent", default="codex")
     batch_p.add_argument("--policy", default="write")
@@ -1773,6 +1851,9 @@ def _cmd_batch(args: argparse.Namespace) -> int:
 
         requests.append((idx, req))
 
+    print_requests = bool(getattr(args, "print_requests", False))
+    validate_only = bool(getattr(args, "validate_only", False)) or print_requests
+
     validation_errors = _prevalidate_batch_requests(
         cfg=cfg,
         repo_root=repo_root,
@@ -1780,7 +1861,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         requests=requests,
         probe_timeout_seconds=float(args.command_probe_timeout_seconds),
         skip_command_responsiveness_probes=bool(args.skip_command_probes),
-        validate_only=bool(getattr(args, "validate_only", False)),
+        validate_only=validate_only,
     )
     all_errors = [*parse_errors, *validation_errors]
     if all_errors:
@@ -1789,7 +1870,15 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             print(f"- {e}", file=sys.stderr)
         print("- See docs/reference/targets-yaml.md for targets.yaml format.", file=sys.stderr)
         return 2
-    if bool(getattr(args, "validate_only", False)):
+    if print_requests:
+        payload = [
+            {"index": idx, "request": _serialize_run_request_for_print(req)}
+            for idx, req in requests
+        ]
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
+        print("Batch validation passed; no targets were executed (--print-requests).", file=sys.stderr)
+        return 0
+    if validate_only:
         print("Batch validation passed; no targets were executed (validate-only).", file=sys.stderr)
         return 0
 
