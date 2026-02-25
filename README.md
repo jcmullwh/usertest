@@ -303,10 +303,22 @@ If you want API-key auth instead, opt in explicitly with:
 
 `--exec-use-api-key-auth --exec-env OPENAI_API_KEY`
 
-Note: the agent CLI itself runs *inside* the Docker container in this repo. Setting
-`--exec-network none` will prevent Codex/Claude/Gemini from reaching their hosted APIs, so it is
-not a “privacy-locked agent run” mode. For a no-network / no-credentials first success signal, use
-the golden fixtures in “Fastest output (no setup)” above.
+`--exec-network` controls only the Docker sandbox container's *runtime* network (maps to
+`docker run --network ...`). It is **not** an end-to-end "no network" / privacy mode:
+
+- `docker build` may still pull base images and download dependencies.
+- Any host-side steps (for `--exec-backend local`) are unaffected.
+
+In this repo's Docker execution backend, the agent CLI runs inside the container by default, so
+`--exec-network none` will also prevent Codex/Claude/Gemini from reaching their hosted APIs and
+the run will fail.
+
+Decision table:
+
+| What you want | Recommended workflow | Expected outcome |
+| --- | --- | --- |
+| No-network baseline / artifact validation | Run `scripts/offline_first_success.ps1` (Windows) or `scripts/offline_first_success.sh` (macOS/Linux) | Verifies report rendering with **no agents** and **no network calls** |
+| Real agent run (hosted API) | Use Docker backend with `--exec-network open` | Agent can reach its provider API; target commands may still choose to use network unless your mission/policy avoids it |
 
 If you need to override the Docker build context, pass `--exec-docker-context` explicitly (default:
 the built-in sandbox_cli context shipped with `sandbox_runner`).
