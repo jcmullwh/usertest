@@ -143,6 +143,112 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
+@dataclasses.dataclass(frozen=True)
+class _TargetsYamlLocations:
+    targets_value: tuple[int, int] | None
+    target_entries: dict[int, tuple[int, int]]
+    target_fields: dict[tuple[int, str], tuple[int, int]]
+
+
+def _extract_targets_yaml_locations(text: str) -> _TargetsYamlLocations:
+    """Best-effort extraction of 1-based (line, col) for targets.yaml semantic errors."""
+    empty = _TargetsYamlLocations(
+        targets_value=None,
+        target_entries={},
+        target_fields={},
+    )
+    try:
+        node = yaml.compose(text, Loader=yaml.SafeLoader)
+    except Exception:  # noqa: BLE001
+        return empty
+    if node is None:
+        return empty
+    try:
+        from yaml.nodes import MappingNode, ScalarNode, SequenceNode
+    except Exception:  # noqa: BLE001
+        return empty
+    if not isinstance(node, MappingNode):
+        return empty
+
+    def _mark_to_line_col(mark: Any) -> tuple[int, int] | None:
+        if mark is None:
+            return None
+        line = getattr(mark, "line", None)
+        col = getattr(mark, "column", None)
+        if line is None or col is None:
+            return None
+        try:
+            return (int(line) + 1, int(col) + 1)
+        except Exception:  # noqa: BLE001
+            return None
+
+    targets_node = None
+    targets_value_loc: tuple[int, int] | None = None
+    for key_node, value_node in node.value:
+        if isinstance(key_node, ScalarNode) and key_node.value == "targets":
+            targets_node = value_node
+            targets_value_loc = _mark_to_line_col(getattr(value_node, "start_mark", None))
+            break
+
+    if not isinstance(targets_node, SequenceNode):
+        return _TargetsYamlLocations(
+            targets_value=targets_value_loc,
+            target_entries={},
+            target_fields={},
+        )
+
+    target_entries: dict[int, tuple[int, int]] = {}
+    target_fields: dict[tuple[int, str], tuple[int, int]] = {}
+
+    for idx, item_node in enumerate(targets_node.value):
+        item_loc = _mark_to_line_col(getattr(item_node, "start_mark", None))
+        if item_loc is not None:
+            target_entries[idx] = item_loc
+
+        if not isinstance(item_node, MappingNode):
+            continue
+
+        for k_node, v_node in item_node.value:
+            if not isinstance(k_node, ScalarNode):
+                continue
+            key = k_node.value
+            value_loc = _mark_to_line_col(getattr(v_node, "start_mark", None))
+            if value_loc is not None:
+                target_fields[(idx, str(key))] = value_loc
+
+    return _TargetsYamlLocations(
+        targets_value=targets_value_loc,
+        target_entries=target_entries,
+        target_fields=target_fields,
+    )
+
+
+def _format_targets_yaml_location(
+    *,
+    targets_path: Path,
+    locations: _TargetsYamlLocations | None,
+    idx: int | None,
+    field: str | None = None,
+) -> str | None:
+    if locations is None:
+        return None
+    if idx is None:
+        if locations.targets_value is None:
+            return None
+        line, col = locations.targets_value
+        return f"{targets_path}:{line}:{col}"
+    if field is not None:
+        loc = locations.target_fields.get((idx, field))
+        if loc is not None:
+            line, col = loc
+            return f"{targets_path}:{line}:{col}"
+    loc = locations.target_entries.get(idx)
+    if loc is None:
+        return None
+    line, col = loc
+    return f"{targets_path}:{line}:{col}"
+
+
 def _load_runner_config(repo_root: Path) -> RunnerConfig:
     """Load runner configuration from repository config files."""
     agents_cfg = _load_yaml(repo_root / "configs" / "agents.yaml").get("agents", {})
@@ -253,16 +359,30 @@ def _prevalidate_batch_requests(
     probe_timeout_seconds: float,
     skip_command_responsiveness_probes: bool,
     validate_only: bool,
+    target_locations: _TargetsYamlLocations | None = None,
 ) -> list[str]:
     """Validate batch requests against catalog and policy constraints."""
     errors: list[str] = []
     local_repos: list[Path] = []
     missing_agent_binaries: dict[tuple[str, str, str], list[int]] = {}
 
+    def _append_targets_error(message: str, *, idx: int, field: str | None = None) -> None:
+        loc = _format_targets_yaml_location(
+            targets_path=targets_path,
+            locations=target_locations,
+            idx=idx,
+            field=field,
+        )
+        if loc:
+            message = f"{message} ({loc})"
+        errors.append(message)
+
     for idx, req in requests:
         if req.agent not in cfg.agents:
-            errors.append(
-                f"targets[{idx}]: unknown agent {req.agent!r} (defined in configs/agents.yaml)."
+            _append_targets_error(
+                f"targets[{idx}]: unknown agent {req.agent!r} (defined in configs/agents.yaml).",
+                idx=idx,
+                field="agent",
             )
         else:
             agent_cfg = cfg.agents.get(req.agent, {})
@@ -289,22 +409,28 @@ def _prevalidate_batch_requests(
                     )
 
         if req.policy not in cfg.policies:
-            errors.append(
-                f"targets[{idx}]: unknown policy {req.policy!r} (defined in configs/policies.yaml)."
+            _append_targets_error(
+                f"targets[{idx}]: unknown policy {req.policy!r} (defined in configs/policies.yaml).",
+                idx=idx,
+                field="policy",
             )
 
         local_repo_root = _resolve_local_repo_root(repo_root, req.repo)
         if local_repo_root is None:
             if _looks_like_local_repo_input(req.repo):
-                errors.append(
+                _append_targets_error(
                     f"targets[{idx}]: repo looks like a local path but does not exist: "
-                    f"{req.repo!r} (from {targets_path})"
+                    f"{req.repo!r} (from {targets_path})",
+                    idx=idx,
+                    field="repo",
                 )
             continue
         if not local_repo_root.is_dir():
-            errors.append(
+            _append_targets_error(
                 f"targets[{idx}]: repo must be a directory (got file): {local_repo_root} "
-                f"(from {targets_path})"
+                f"(from {targets_path})",
+                idx=idx,
+                field="repo",
             )
             continue
 
@@ -372,26 +498,32 @@ def _prevalidate_batch_requests(
                         "use --exec-backend docker (Gemini shell is blocked on Windows local backend) "
                         "and policy=write"
                     )
-                errors.append(
+                _append_targets_error(
                     f"targets[{idx}]: mission {effective_spec.mission_id!r} requires shell "
                     f"commands, but policy {req.policy!r} for agent {req.agent!r} blocks shell "
-                    f"commands ({hint})."
+                    f"commands ({hint}).",
+                    idx=idx,
+                    field="mission_id",
                 )
             if requires_edits and not allow_edits:
-                errors.append(
+                _append_targets_error(
                     f"targets[{idx}]: mission {effective_spec.mission_id!r} requires edits, but "
                     f"policy {req.policy!r} for agent {req.agent!r} has allow_edits=false "
-                    "(use policy=write)."
+                    "(use policy=write).",
+                    idx=idx,
+                    field="mission_id",
                 )
             if (
                 (not requires_shell)
                 and req.policy in {"inspect", "write"}
                 and shell_status == "blocked"
             ):
-                errors.append(
+                _append_targets_error(
                     f"targets[{idx}]: policy {req.policy!r} for agent {req.agent!r} blocks shell "
                     "commands for this backend (use --exec-backend docker for gemini on Windows, "
-                    "or fix configs/policies.yaml)."
+                    "or fix configs/policies.yaml).",
+                    idx=idx,
+                    field="policy",
                 )
         except RunSpecError as e:
             parts = [str(e)]
@@ -401,9 +533,15 @@ def _prevalidate_batch_requests(
                 parts.append(f"details={json.dumps(e.details, ensure_ascii=False)}")
             if isinstance(e.hint, str) and e.hint.strip():
                 parts.append(f"hint={e.hint.strip()}")
-            errors.append(f"targets[{idx}]: {' | '.join(parts)}")
+            _append_targets_error(
+                f"targets[{idx}]: {' | '.join(parts)}",
+                idx=idx,
+            )
         except Exception as e:  # noqa: BLE001
-            errors.append(f"targets[{idx}]: failed to resolve persona/mission: {e}")
+            _append_targets_error(
+                f"targets[{idx}]: failed to resolve persona/mission: {e}",
+                idx=idx,
+            )
 
     if not validate_only:
         for (agent, binary, kind), indices in sorted(missing_agent_binaries.items()):
@@ -1505,11 +1643,20 @@ def _cmd_batch(args: argparse.Namespace) -> int:
     targets_path: Path = args.targets
     if not targets_path.is_absolute() and not targets_path.exists():
         targets_path = repo_root / targets_path
+    targets_text = ""
+    target_locations: _TargetsYamlLocations | None = None
     try:
-        data = _load_yaml(targets_path)
+        targets_text = targets_path.read_text(encoding="utf-8")
+        data = yaml.safe_load(targets_text)
+        if data is None:
+            data = {}
+        if not isinstance(data, dict):
+            raise ValueError(f"Expected mapping in {targets_path}, got {type(data).__name__}")
+        target_locations = _extract_targets_yaml_locations(targets_text)
     except yaml.YAMLError as e:
         mark = getattr(e, "problem_mark", None) or getattr(e, "context_mark", None)
         location = str(targets_path)
+        snippet = None
         if mark is not None and hasattr(mark, "line") and hasattr(mark, "column"):
             try:
                 line = int(mark.line) + 1
@@ -1519,9 +1666,25 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 col = None
             if line is not None and col is not None:
                 location = f"{targets_path}:{line}:{col}"
+                try:
+                    lines = targets_text.splitlines()
+                    if 1 <= line <= len(lines):
+                        snippet = lines[line - 1].rstrip("\r\n")
+                    else:
+                        snippet = ""
+                    if not snippet.strip():
+                        for cand in reversed(lines[: min(line - 1, len(lines))]):
+                            cand = cand.rstrip("\r\n")
+                            if cand.strip():
+                                snippet = cand
+                                break
+                except Exception:  # noqa: BLE001
+                    snippet = None
         summary = str(e).splitlines()[0].strip() or type(e).__name__
         print("Batch validation failed; no targets were executed.", file=sys.stderr)
         print(f"- YAML parse error in {location}: {summary}", file=sys.stderr)
+        if isinstance(snippet, str) and snippet.strip():
+            print(f"  > {snippet}", file=sys.stderr)
         return 2
     except ValueError as e:
         print("Batch validation failed; no targets were executed.", file=sys.stderr)
@@ -1532,6 +1695,17 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         print(f"- Failed to read targets YAML {targets_path}: {e}", file=sys.stderr)
         return 2
     parse_errors: list[str] = []
+
+    def _with_targets_loc(message: str, *, idx: int | None, field: str | None = None) -> str:
+        loc = _format_targets_yaml_location(
+            targets_path=targets_path,
+            locations=target_locations,
+            idx=idx,
+            field=field,
+        )
+        if loc:
+            return f"{message} ({loc})"
+        return message
 
     def _append_arg_list_errors(values: Any, *, flag: str) -> list[str]:
         if values is None:
@@ -1574,7 +1748,10 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         targets_raw = []
     if not isinstance(targets_raw, list):
         parse_errors.append(
-            f"targets: expected a list (YAML sequence) in {targets_path}; got {type(targets_raw).__name__}."
+            _with_targets_loc(
+                f"targets: expected a list (YAML sequence) in {targets_path}; got {type(targets_raw).__name__}.",
+                idx=None,
+            )
         )
         targets: list[Any] = []
     else:
@@ -1585,7 +1762,10 @@ def _cmd_batch(args: argparse.Namespace) -> int:
 
         if not isinstance(item, dict):
             parse_errors.append(
-                f"targets[{idx}]: must be a mapping (YAML object); got {type(item).__name__}."
+                _with_targets_loc(
+                    f"targets[{idx}]: must be a mapping (YAML object); got {type(item).__name__}.",
+                    idx=idx,
+                )
             )
             continue
 
@@ -1598,11 +1778,20 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         ) -> str | None:
             raw = _item.get(field)
             if raw is None:
-                _target_errors.append(f"targets[{_idx}].{field} is required.")
+                _target_errors.append(
+                    _with_targets_loc(
+                        f"targets[{_idx}].{field} is required.",
+                        idx=_idx,
+                    )
+                )
                 return None
             if not isinstance(raw, str) or not raw.strip():
                 _target_errors.append(
-                    f"targets[{_idx}].{field} must be a non-empty string; got {raw!r}."
+                    _with_targets_loc(
+                        f"targets[{_idx}].{field} must be a non-empty string; got {raw!r}.",
+                        idx=_idx,
+                        field=field,
+                    )
                 )
                 return None
             return raw
@@ -1622,8 +1811,11 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         if legacy_keys:
             legacy_list = ", ".join(sorted(legacy_keys))
             parse_errors.append(
-                f"targets[{idx}]: uses legacy keys ({legacy_list}). "
-                "Update to persona_id / mission_id and remove legacy fields."
+                _with_targets_loc(
+                    f"targets[{idx}]: uses legacy keys ({legacy_list}). "
+                    "Update to persona_id / mission_id and remove legacy fields.",
+                    idx=idx,
+                )
             )
 
         def _optional_str(
@@ -1641,7 +1833,11 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 return None
             if not isinstance(raw, str):
                 _target_errors.append(
-                    f"targets[{_idx}].{field} must be a string if present; got {type(raw).__name__}."
+                    _with_targets_loc(
+                        f"targets[{_idx}].{field} must be a string if present; got {type(raw).__name__}.",
+                        idx=_idx,
+                        field=field,
+                    )
                 )
                 return None
             return raw
@@ -1659,7 +1855,11 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 return default
             if isinstance(raw, bool):
                 _target_errors.append(
-                    f"targets[{_idx}].{field} must be an integer; got bool."
+                    _with_targets_loc(
+                        f"targets[{_idx}].{field} must be an integer; got bool.",
+                        idx=_idx,
+                        field=field,
+                    )
                 )
                 return None
             if isinstance(raw, int):
@@ -1669,11 +1869,19 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                     return int(raw.strip())
                 except ValueError:
                     _target_errors.append(
-                        f"targets[{_idx}].{field} must be an integer; got {raw!r}."
+                        _with_targets_loc(
+                            f"targets[{_idx}].{field} must be an integer; got {raw!r}.",
+                            idx=_idx,
+                            field=field,
+                        )
                     )
                     return None
             _target_errors.append(
-                f"targets[{_idx}].{field} must be an integer; got {type(raw).__name__}."
+                _with_targets_loc(
+                    f"targets[{_idx}].{field} must be an integer; got {type(raw).__name__}.",
+                    idx=_idx,
+                    field=field,
+                )
             )
             return None
 
@@ -1690,7 +1898,11 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 return default
             if isinstance(raw, bool):
                 _target_errors.append(
-                    f"targets[{_idx}].{field} must be a number; got bool."
+                    _with_targets_loc(
+                        f"targets[{_idx}].{field} must be a number; got bool.",
+                        idx=_idx,
+                        field=field,
+                    )
                 )
                 return None
             if isinstance(raw, (int, float)):
@@ -1700,11 +1912,19 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                     return float(raw.strip())
                 except ValueError:
                     _target_errors.append(
-                        f"targets[{_idx}].{field} must be a number; got {raw!r}."
+                        _with_targets_loc(
+                            f"targets[{_idx}].{field} must be a number; got {raw!r}.",
+                            idx=_idx,
+                            field=field,
+                        )
                     )
                     return None
             _target_errors.append(
-                f"targets[{_idx}].{field} must be a number; got {type(raw).__name__}."
+                _with_targets_loc(
+                    f"targets[{_idx}].{field} must be a number; got {type(raw).__name__}.",
+                    idx=_idx,
+                    field=field,
+                )
             )
             return None
 
@@ -1721,7 +1941,11 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                 return default
             if isinstance(raw, bool):
                 _target_errors.append(
-                    f"targets[{_idx}].{field} must be a number; got bool."
+                    _with_targets_loc(
+                        f"targets[{_idx}].{field} must be a number; got bool.",
+                        idx=_idx,
+                        field=field,
+                    )
                 )
                 return None
             if isinstance(raw, (int, float)):
@@ -1731,11 +1955,19 @@ def _cmd_batch(args: argparse.Namespace) -> int:
                     return float(raw.strip())
                 except ValueError:
                     _target_errors.append(
-                        f"targets[{_idx}].{field} must be a number; got {raw!r}."
+                        _with_targets_loc(
+                            f"targets[{_idx}].{field} must be a number; got {raw!r}.",
+                            idx=_idx,
+                            field=field,
+                        )
                     )
                     return None
             _target_errors.append(
-                f"targets[{_idx}].{field} must be a number; got {type(raw).__name__}."
+                _with_targets_loc(
+                    f"targets[{_idx}].{field} must be a number; got {type(raw).__name__}.",
+                    idx=_idx,
+                    field=field,
+                )
             )
             return None
 
@@ -1751,12 +1983,20 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         if raw_agent_config is not None:
             if not isinstance(raw_agent_config, list):
                 target_errors.append(
-                    f"targets[{idx}].agent_config must be a list of strings if present."
+                    _with_targets_loc(
+                        f"targets[{idx}].agent_config must be a list of strings if present.",
+                        idx=idx,
+                        field="agent_config",
+                    )
                 )
             for jdx, override in enumerate(raw_agent_config):
                 if not isinstance(override, str) or not override.strip():
                     target_errors.append(
-                        f"targets[{idx}].agent_config[{jdx}] must be a non-empty string; got {override!r}."
+                        _with_targets_loc(
+                            f"targets[{idx}].agent_config[{jdx}] must be a non-empty string; got {override!r}.",
+                            idx=idx,
+                            field="agent_config",
+                        )
                     )
                 else:
                     agent_config_overrides.append(override.strip())
@@ -1764,13 +2004,21 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         if raw_preflight_commands is not None:
             if not isinstance(raw_preflight_commands, list):
                 target_errors.append(
-                    f"targets[{idx}].preflight_commands must be a list of strings if present."
+                    _with_targets_loc(
+                        f"targets[{idx}].preflight_commands must be a list of strings if present.",
+                        idx=idx,
+                        field="preflight_commands",
+                    )
                 )
             for jdx, cmd in enumerate(raw_preflight_commands):
                 if not isinstance(cmd, str) or not cmd.strip():
                     target_errors.append(
-                        f"targets[{idx}].preflight_commands[{jdx}] must be a non-empty string; "
-                        f"got {cmd!r}."
+                        _with_targets_loc(
+                            f"targets[{idx}].preflight_commands[{jdx}] must be a non-empty string; "
+                            f"got {cmd!r}.",
+                            idx=idx,
+                            field="preflight_commands",
+                        )
                     )
                 else:
                     preflight_commands.append(cmd.strip())
@@ -1779,14 +2027,22 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         if raw_preflight_required is not None:
             if not isinstance(raw_preflight_required, list):
                 target_errors.append(
-                    f"targets[{idx}].preflight_required_commands must be a list of strings "
-                    f"if present."
+                    _with_targets_loc(
+                        f"targets[{idx}].preflight_required_commands must be a list of strings "
+                        f"if present.",
+                        idx=idx,
+                        field="preflight_required_commands",
+                    )
                 )
             for jdx, cmd in enumerate(raw_preflight_required):
                 if not isinstance(cmd, str) or not cmd.strip():
                     target_errors.append(
-                        f"targets[{idx}].preflight_required_commands[{jdx}] "
-                        f"must be a non-empty string; got {cmd!r}."
+                        _with_targets_loc(
+                            f"targets[{idx}].preflight_required_commands[{jdx}] "
+                            f"must be a non-empty string; got {cmd!r}.",
+                            idx=idx,
+                            field="preflight_required_commands",
+                        )
                     )
                 else:
                     preflight_required_commands.append(cmd.strip())
@@ -1795,13 +2051,21 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         if raw_verification_commands is not None:
             if not isinstance(raw_verification_commands, list):
                 target_errors.append(
-                    f"targets[{idx}].verification_commands must be a list of strings if present."
+                    _with_targets_loc(
+                        f"targets[{idx}].verification_commands must be a list of strings if present.",
+                        idx=idx,
+                        field="verification_commands",
+                    )
                 )
             for jdx, cmd in enumerate(raw_verification_commands):
                 if not isinstance(cmd, str) or not cmd.strip():
                     target_errors.append(
-                        f"targets[{idx}].verification_commands[{jdx}] must be a non-empty string; "
-                        f"got {cmd!r}."
+                        _with_targets_loc(
+                            f"targets[{idx}].verification_commands[{jdx}] must be a non-empty string; "
+                            f"got {cmd!r}.",
+                            idx=idx,
+                            field="verification_commands",
+                        )
                     )
                 else:
                     verification_commands.append(cmd.strip())
@@ -1911,6 +2175,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         probe_timeout_seconds=float(args.command_probe_timeout_seconds),
         skip_command_responsiveness_probes=bool(args.skip_command_probes),
         validate_only=validate_only,
+        target_locations=target_locations,
     )
     all_errors = [*parse_errors, *validation_errors]
     if all_errors:

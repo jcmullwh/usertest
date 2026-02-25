@@ -269,6 +269,7 @@ def test_batch_invalid_yaml_is_concise(
     assert "Batch validation failed" in out.err
     assert str(targets_path) in out.err
     assert re.search(r":\d+:\d+", out.err) is not None
+    assert re.search(r">\s*bad:\s*\[", out.err) is not None
     assert "Traceback" not in out.err
 
 
@@ -455,6 +456,7 @@ def test_batch_missing_repo_is_structured(
     out = capsys.readouterr()
     assert "Batch validation failed" in out.err
     assert "targets[0].repo is required" in out.err
+    assert re.search(rf"{re.escape(str(targets_path))}:2:\d+", out.err) is not None
     assert "Traceback" not in out.err
     assert "docs/reference/targets-yaml.md" in out.err
 
