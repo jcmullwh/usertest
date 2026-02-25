@@ -410,24 +410,6 @@ def _is_pdm_install_command(argv: list[str]) -> bool:
     return argv[1].strip().lower() == "install"
 
 
-def _is_pdm_run_command(argv: list[str]) -> bool:
-    if len(argv) < 3:
-        return False
-    cmd_name = Path(argv[0]).name.lower()
-    if cmd_name not in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
-        return False
-    return argv[1].strip().lower() == "run"
-
-
-def _looks_like_pdm_missing_command_failure(*, stdout: str, stderr: str) -> bool:
-    text = "\n".join(x for x in (stdout, stderr) if x).lower()
-    if not text:
-        return False
-    if "pdmusageerror" not in text:
-        return False
-    return "is not found in your path" in text and "command" in text
-
-
 def _looks_like_transient_pdm_local_path_failure(*, stdout: str, stderr: str) -> bool:
     text = "\n".join(x for x in (stdout, stderr) if x).lower()
     if not text:
@@ -456,42 +438,7 @@ def _run_manifest_task(
     project_id: str,
 ) -> subprocess.CompletedProcess[str]:
     if task_name != "install" or not _is_pdm_install_command(cmd):
-        if not _is_pdm_run_command(cmd):
-            return _run(cmd, cwd=cwd)
-
-        first = _run(cmd, cwd=cwd, capture=True)
-        _emit_captured_process_output(first)
-        if first.returncode == 0:
-            return first
-
-        already_installed = getattr(_run_manifest_task, "_auto_installed", None)
-        if already_installed is None:
-            already_installed = set()
-            setattr(_run_manifest_task, "_auto_installed", already_installed)
-
-        if cwd not in already_installed and _looks_like_pdm_missing_command_failure(
-            stdout=first.stdout or "",
-            stderr=first.stderr or "",
-        ):
-            already_installed.add(cwd)
-            _eprint(
-                f"WARNING: {project_id}: PDM tool not found for task '{task_name}'. "
-                "Running 'pdm install' once and retrying."
-            )
-            installer = _run_manifest_task(
-                cmd=[cmd[0], "install", "--no-lock"],
-                cwd=cwd,
-                task_name="install",
-                project_id=project_id,
-            )
-            if installer.returncode != 0:
-                return installer
-
-            second = _run(cmd, cwd=cwd, capture=True)
-            _emit_captured_process_output(second)
-            return second
-
-        return first
+        return _run(cmd, cwd=cwd)
 
     first = _run(cmd, cwd=cwd, capture=True)
     _emit_captured_process_output(first)
