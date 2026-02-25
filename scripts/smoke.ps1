@@ -25,6 +25,102 @@ function Invoke-Step {
     }
 }
 
+function Write-Err {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Message
+    )
+    [Console]::Error.WriteLine($Message)
+}
+
+function Write-SetupHint {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonCmd
+    )
+
+    Write-Host '==> Setup hint'
+    Write-Host '    Choose a setup mode:'
+    Write-Host '      - Default (recommended): installs deps + editable installs'
+    Write-Host '          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1'
+    Write-Host '      - From-source: installs deps + sets PYTHONPATH (no editables)'
+    Write-Host '          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -UsePythonPath'
+    Write-Host '      - No-install: assumes deps + local packages are already importable'
+    Write-Host '          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -SkipInstall  # (often combined with -UsePythonPath)'
+
+    if (-not $env:VIRTUAL_ENV -and -not $env:CI) {
+        Write-Host '    Recommended venv:'
+        Write-Host "      $PythonCmd -m venv .venv"
+        Write-Host '      . .\.venv\Scripts\Activate.ps1'
+    }
+}
+
+function Invoke-SmokeImportPreflight {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$PythonCmd
+    )
+
+    $preflightCode = @'
+import importlib
+
+mods = [
+    "usertest",
+    "usertest.cli",
+    "usertest_backlog",
+    "usertest_backlog.cli",
+    "agent_adapters",
+    "backlog_core",
+    "backlog_miner",
+    "backlog_repo",
+    "normalized_events",
+    "reporter",
+    "run_artifacts",
+    "runner_core",
+    "sandbox_runner",
+    "triage_engine",
+]
+
+errors = []
+for mod in mods:
+    try:
+        importlib.import_module(mod)
+    except Exception as e:
+        errors.append((mod, f"{type(e).__name__}: {e}"))
+
+if errors:
+    for mod, msg in errors:
+        print(f"{mod}: {msg}")
+    raise SystemExit(1)
+'@
+
+    $preflightOutput = & $PythonCmd -c $preflightCode 2>&1
+    $preflightRc = $LASTEXITCODE
+    if ($preflightRc -ne 0) {
+        Write-Err '==> Smoke preflight failed: required imports are not available in this Python environment.'
+        if ($preflightOutput) {
+            foreach ($line in $preflightOutput) {
+                if ($line) { Write-Err "    - $line" }
+            }
+        }
+        Write-Err ''
+        Write-Err '    You passed -SkipInstall, so this script will not run any installs.'
+        Write-Err '    That means it will NOT install requirements-dev.txt and it will NOT install local monorepo packages.'
+        Write-Err ''
+        Write-Err '    Choose one setup mode:'
+        Write-Err '      - Default (recommended for dev):'
+        Write-Err '          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1'
+        Write-Err '      - From-source (no editables, but installs deps):'
+        Write-Err '          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -UsePythonPath'
+        Write-Err '      - No-install (deps already provisioned):'
+        Write-Err '          powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -SkipInstall -UsePythonPath'
+        Write-Err ''
+        Write-Err '    Tip: prefer a virtualenv to avoid global/user-site installs:'
+        Write-Err "      $PythonCmd -m venv .venv ; . .\\.venv\\Scripts\\Activate.ps1"
+        exit 1
+    }
+}
+
 Push-Location $repoRoot
 try {
     $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
@@ -53,6 +149,8 @@ try {
             & $pythonCmd tools/scaffold/scaffold.py doctor --skip-tool-checks
         }
     }
+
+    Write-SetupHint -PythonCmd $pythonCmd
 
     if (-not $SkipInstall) {
         $pipProbeOk = $false
@@ -102,6 +200,10 @@ try {
     elseif ($UsePythonPath) {
         Write-Host '==> Configure PYTHONPATH via scripts/set_pythonpath.ps1'
         . (Join-Path $PSScriptRoot 'set_pythonpath.ps1')
+    }
+
+    if ($SkipInstall) {
+        Invoke-SmokeImportPreflight -PythonCmd $pythonCmd
     }
 
     Invoke-Step -Name 'CLI help smoke' -Command {
