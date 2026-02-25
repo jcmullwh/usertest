@@ -1493,6 +1493,7 @@ def _write_ticket_idea_file(
     fingerprint: str,
     body_markdown: str,
     owner_repo_root: Path,
+    ux_review_section: str | None = None,
 ) -> Path:
     """
     Write a single exported ticket as an idea markdown file in owner repo plans.
@@ -1509,6 +1510,9 @@ def _write_ticket_idea_file(
     filename = f"{date_tag}_{ticket_id_slug}_{fingerprint}_{title_slug[:64]}.md"
 
     lines: list[str] = []
+    if isinstance(ux_review_section, str) and ux_review_section.strip():
+        lines.append(ux_review_section.strip())
+        lines.append("")
     lines.append(f"# {issue_title}")
     lines.append("")
     lines.append(
@@ -2962,7 +2966,12 @@ def _render_ux_review_section_for_ticket(
 ) -> str:
     lines: list[str] = []
     lines.append(_UX_REVIEW_SECTION_START)
-    lines.append("## UX review")
+    lines.append("## UX review (authoritative)")
+    lines.append("")
+    lines.append(
+        "**Authoritative**: This UX review is the decision source of truth for implementation. "
+        "If it conflicts with the original ticket text below, follow the UX review."
+    )
     lines.append("")
     lines.append(f"- ux_review.json: `{ux_review_json_path}`")
     lines.append(f"- ux_review.md: `{ux_review_md_path}`")
@@ -3044,13 +3053,18 @@ def _upsert_ux_review_section(markdown: str, *, section: str) -> str:
     end = markdown.find(_UX_REVIEW_SECTION_END)
     if start != -1 and end != -1 and end > start:
         end_idx = end + len(_UX_REVIEW_SECTION_END)
-        prefix = markdown[:start].rstrip()
-        suffix = markdown[end_idx:].lstrip("\n")
-        out = prefix + "\n\n" + section.strip() + "\n"
-        if suffix:
-            out += suffix
-        return out
-    return markdown.rstrip() + "\n\n" + section.strip() + "\n"
+        prefix = markdown[:start]
+        suffix = markdown[end_idx:]
+        remainder = (prefix.rstrip() + "\n\n" + suffix.lstrip("\n")).strip()
+        out = section.strip()
+        if remainder:
+            out += "\n\n" + remainder
+        return out.rstrip() + "\n"
+    remainder = markdown.strip()
+    out = section.strip()
+    if remainder:
+        out += "\n\n" + remainder
+    return out.rstrip() + "\n"
 
 
 def _apply_ux_review_to_plan_ticket(
@@ -3989,14 +4003,15 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
 
         ticket_for_body = dict(ticket)
         ticket_for_body["stage"] = stage_effective
-        body = _render_export_issue_body(
+        base_body = _render_export_issue_body(
             ticket=ticket_for_body,
             fingerprint=fingerprint,
             export_kind=export_kind,
             surface_area_high=surface_area_high,
         )
+        body = base_body
         if ux_section is not None:
-            body = body.rstrip() + "\n\n" + ux_section
+            body = ux_section.strip() + "\n\n" + base_body.strip() + "\n"
 
         labels: list[str] = []
         labels.append(f"stage:{stage_effective}")
@@ -4097,8 +4112,9 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             ticket=ticket,
             issue_title=issue_title,
             fingerprint=fingerprint,
-            body_markdown=body,
+            body_markdown=base_body,
             owner_repo_root=owner_repo_root,
+            ux_review_section=ux_section,
         )
         _cleanup_stale_ticket_idea_files(
             ticket=ticket,
