@@ -1342,6 +1342,18 @@ def _render_sandbox_cli_install_hint(agent_cfg: dict[str, Any]) -> str | None:
     return None
 
 
+def _default_agent_install_hint(agent: str) -> str | None:
+    agent_norm = (agent or "").strip().lower()
+    npm_pkg = {
+        "codex": "@openai/codex",
+        "claude": "@anthropic-ai/claude-code",
+        "gemini": "@google/gemini-cli",
+    }.get(agent_norm)
+    if npm_pkg:
+        return f"`npm install -g {npm_pkg}` (requires Node.js + npm)"
+    return None
+
+
 def _build_binary_missing_hints(
     *,
     agent: str,
@@ -1360,8 +1372,15 @@ def _build_binary_missing_hints(
         "Run `python -m agent_adapters.cli doctor` to check which agent CLIs "
         "are on PATH."
     )
+    hints["offline_validation"] = (
+        "To validate the pipeline without executing agent CLIs, use "
+        "`usertest batch --validate-only` and/or render the checked-in fixtures under "
+        "`examples/golden_runs/`."
+    )
 
     install_hint = _render_sandbox_cli_install_hint(agent_cfg)
+    if install_hint is None:
+        install_hint = _default_agent_install_hint(agent)
     if exec_backend == "docker":
         details = f" (expected install: {install_hint})" if install_hint else ""
         hints["install"] = (
@@ -1384,6 +1403,174 @@ def _build_binary_missing_hints(
             + (f"; suggested: {install_hint}." if install_hint else ".")
         )
 
+    return hints
+
+
+def _probe_agent_cli_version(
+    *,
+    binary: str,
+    command_prefix: list[str],
+    env_overrides: dict[str, str] | None,
+    timeout_seconds: float = 2.5,
+) -> dict[str, Any]:
+    argv = [binary, "--version"]
+    full_argv = [*command_prefix, *argv] if command_prefix else argv
+
+    env: dict[str, str] | None = None
+    if env_overrides is not None and not command_prefix:
+        env = os.environ.copy()
+        env.update({k: v for k, v in env_overrides.items() if isinstance(k, str) and isinstance(v, str)})
+
+    try:
+        proc = subprocess.run(
+            full_argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+            env=env,
+        )
+    except FileNotFoundError as e:
+        return {
+            "ok": False,
+            "argv": full_argv,
+            "error": "FileNotFoundError",
+            "details": str(e),
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "ok": False,
+            "argv": full_argv,
+            "error": "timeout",
+            "timeout_seconds": timeout_seconds,
+        }
+    except Exception as e:  # noqa: BLE001
+        return {
+            "ok": False,
+            "argv": full_argv,
+            "error": type(e).__name__,
+            "details": str(e),
+        }
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    return {
+        "ok": int(proc.returncode or 0) == 0,
+        "argv": full_argv,
+        "exit_code": int(proc.returncode or 0),
+        "stdout_excerpt": stdout[:300] if stdout else None,
+        "stderr_excerpt": stderr[:300] if stderr else None,
+    }
+
+
+def _agent_auth_env_var_candidates(agent: str) -> tuple[str, ...]:
+    agent_norm = (agent or "").strip().lower()
+    if agent_norm == "codex":
+        return ("OPENAI_API_KEY",)
+    if agent_norm == "claude":
+        return ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY")
+    if agent_norm == "gemini":
+        return ("GOOGLE_API_KEY", "GEMINI_API_KEY")
+    return ()
+
+
+def _agent_login_state_paths(agent: str) -> tuple[Path, ...]:
+    home = Path.home()
+    agent_norm = (agent or "").strip().lower()
+    if agent_norm == "codex":
+        return (home / ".codex",)
+    if agent_norm == "claude":
+        return (home / ".claude", home / ".claude.json")
+    if agent_norm == "gemini":
+        return (home / ".gemini",)
+    return ()
+
+
+def _agent_auth_present_local(*, agent: str, env_overrides: dict[str, str] | None) -> tuple[bool, str]:
+    env = os.environ
+    if env_overrides:
+        merged = dict(os.environ)
+        merged.update({k: v for k, v in env_overrides.items() if isinstance(k, str) and isinstance(v, str)})
+        env = merged  # type: ignore[assignment]
+
+    for key in _agent_auth_env_var_candidates(agent):
+        if str(env.get(key, "")).strip():
+            return True, f"env:{key}"
+
+    for path in _agent_login_state_paths(agent):
+        try:
+            if path.exists():
+                return True, f"path:{path}"
+        except OSError:
+            continue
+
+    return False, "missing"
+
+
+def _agent_auth_present_docker(
+    *,
+    agent: str,
+    exec_use_host_agent_login: bool,
+    exec_env_allowlist: list[str],
+) -> tuple[bool, str]:
+    if exec_use_host_agent_login:
+        # Docker backend validates the host login dir exists before starting the sandbox.
+        return True, "host_login_mount"
+
+    candidates = set(_agent_auth_env_var_candidates(agent))
+    allowlisted = [name for name in exec_env_allowlist if name in candidates]
+    if not allowlisted:
+        # Best-effort: if no known auth vars are allowlisted, assume auth is missing.
+        return False, "missing:env_allowlist"
+
+    for key in allowlisted:
+        if str(os.environ.get(key, "")).strip():
+            return True, f"env:{key}"
+
+    return False, "missing:env_unset"
+
+
+def _build_auth_missing_hints(
+    *,
+    agent: str,
+    exec_backend: str,
+    exec_use_host_agent_login: bool,
+    required_binary: str,
+) -> dict[str, str]:
+    hints: dict[str, str] = {}
+    env_vars = list(_agent_auth_env_var_candidates(agent))
+    if env_vars:
+        hints["env"] = "Set one of: " + ", ".join(f"`{name}`" for name in env_vars)
+
+    agent_norm = (agent or "").strip().lower()
+    if agent_norm == "codex":
+        hints["login"] = "`codex login` (subscription) or `$env:OPENAI_API_KEY | codex login --with-api-key`"
+    elif agent_norm == "claude":
+        hints["login"] = "`claude login` (if supported) or set `ANTHROPIC_API_KEY`"
+    elif agent_norm == "gemini":
+        hints["login"] = "Set `GOOGLE_API_KEY` (AI Studio key) or configure the Gemini CLI login state"
+
+    if exec_backend == "docker" and not exec_use_host_agent_login:
+        hints["docker"] = (
+            "For Docker runs, allowlist the auth env var into the container (e.g. "
+            f"`--exec-env {env_vars[0]}`) and set it on the host."
+            if env_vars
+            else "For Docker runs, allowlist the required auth env var via `--exec-env`."
+        )
+    elif exec_backend == "docker" and exec_use_host_agent_login:
+        hints["docker"] = (
+            "If you intended API-key auth for Docker, pass `--exec-use-api-key-auth` and "
+            "allowlist the key via `--exec-env`."
+        )
+
+    hints["verify"] = f"`{required_binary} --version`"
+    hints["offline_validation"] = (
+        "To validate the pipeline without executing agent CLIs, use "
+        "`usertest batch --validate-only` and/or render the checked-in fixtures under "
+        "`examples/golden_runs/`."
+    )
     return hints
 
 
@@ -3370,6 +3557,109 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         *(["suggested_command=" + suggested_command] if suggested_command else []),
                     ],
                 )
+
+            if (
+                required_agent_binary is not None
+                and preflight_commands_present
+                and preflight_commands_present.get(required_agent_binary) is True
+            ):
+                exec_backend = str(getattr(request, "exec_backend", "local") or "local").strip()
+
+                version_probe = _probe_agent_cli_version(
+                    binary=required_agent_binary,
+                    command_prefix=command_prefix,
+                    env_overrides=agent_env_overrides,
+                )
+                if not bool(version_probe.get("ok")):
+                    message = (
+                        f"Required agent binary '{required_agent_binary}' is present but failed "
+                        "`--version` preflight probe."
+                    )
+                    hints = _build_binary_missing_hints(
+                        agent=request.agent,
+                        required_binary=required_agent_binary,
+                        exec_backend=exec_backend,
+                        agent_cfg=agent_cfg_dict,
+                        command_prefix=command_prefix,
+                    )
+                    _write_json(
+                        run_dir / "error.json",
+                        {
+                            "type": "AgentPreflightFailed",
+                            "subtype": "binary_unusable",
+                            "code": "binary_unusable",
+                            "agent": request.agent,
+                            "required_binary": required_agent_binary,
+                            "exec_backend": exec_backend,
+                            "message": message,
+                            "hints": hints,
+                            "probe": {"version": version_probe},
+                        },
+                    )
+                    return RunResult(
+                        run_dir=run_dir,
+                        exit_code=1,
+                        report_validation_errors=[
+                            message,
+                            "code=binary_unusable",
+                            *[f"{key}={value}" for key, value in hints.items() if value],
+                        ],
+                    )
+
+                exec_use_host_agent_login = bool(
+                    getattr(request, "exec_use_host_agent_login", False)
+                )
+                exec_env_allowlist_raw = getattr(request, "exec_env", ())
+                exec_env_allowlist = [
+                    str(x) for x in exec_env_allowlist_raw if isinstance(x, str) and x.strip()
+                ]
+                if exec_backend == "docker":
+                    auth_ok, auth_evidence = _agent_auth_present_docker(
+                        agent=request.agent,
+                        exec_use_host_agent_login=exec_use_host_agent_login,
+                        exec_env_allowlist=exec_env_allowlist,
+                    )
+                else:
+                    auth_ok, auth_evidence = _agent_auth_present_local(
+                        agent=request.agent,
+                        env_overrides=agent_env_overrides,
+                    )
+
+                if not auth_ok:
+                    message = (
+                        f"Agent authentication appears missing for agent '{request.agent}' "
+                        f"(exec_backend={exec_backend})."
+                    )
+                    hints = _build_auth_missing_hints(
+                        agent=request.agent,
+                        exec_backend=exec_backend,
+                        exec_use_host_agent_login=exec_use_host_agent_login,
+                        required_binary=required_agent_binary,
+                    )
+                    _write_json(
+                        run_dir / "error.json",
+                        {
+                            "type": "AgentPreflightFailed",
+                            "subtype": "auth_missing",
+                            "code": "auth_missing",
+                            "agent": request.agent,
+                            "required_binary": required_agent_binary,
+                            "exec_backend": exec_backend,
+                            "message": message,
+                            "hints": hints,
+                            "evidence": auth_evidence,
+                        },
+                    )
+                    return RunResult(
+                        run_dir=run_dir,
+                        exit_code=1,
+                        report_validation_errors=[
+                            message,
+                            "code=auth_missing",
+                            *[f"{key}={value}" for key, value in hints.items() if value],
+                            f"evidence={auth_evidence}",
+                        ],
+                    )
 
             if preflight_required_commands:
                 failures: dict[str, Any] = {}
