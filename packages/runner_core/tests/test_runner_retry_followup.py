@@ -83,6 +83,17 @@ def _make_dummy_codex_retry_binary(tmp_path: Path) -> str:
                 "        return 1",
                 "    attempt = _next_attempt(state_file)",
                 "    mode = os.environ.get('DUMMY_MODE', 'rate_limit_then_success')",
+                "    include_warning = os.environ.get('DUMMY_INCLUDE_CODEX_PERSONALITY_WARNING', '').strip()",
+                "    if include_warning and include_warning not in {'0', 'false', 'False'}:",
+                "        sys.stderr.write(",
+                "            '2026-02-11T07:26:19.697569Z WARN codex_protocol::openai_models: '",
+                (
+                    "            'Model personality requested but model_messages is missing, "
+                    "falling back '"
+                ),
+                "            'to base instructions. model=gpt-5.2 personality=pragmatic\\n'",
+                "        )",
+                "        sys.stderr.flush()",
                 "",
                 (
                     "    print(json.dumps({'id': str(attempt), 'msg': {'type': 'agent_message', "
@@ -295,6 +306,50 @@ def test_run_once_retries_provider_capacity_then_succeeds(
         assert attempt["agent_exec_wall_seconds"] >= 0
 
 
+def test_run_once_retries_provider_capacity_then_succeeds_even_with_codex_personality_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    state_file = tmp_path / "attempt_state_capacity_warning.txt"
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "rate_limit_then_success")
+    monkeypatch.setenv("DUMMY_INCLUDE_CODEX_PERSONALITY_WARNING", "1")
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=2,
+            agent_followup_attempts=0,
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert result.report_validation_errors == []
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert len(attempts["attempts"]) == 2
+    assert attempts["attempts"][0]["failure_subtype"] == "provider_capacity"
+    assert any(
+        "code=codex_model_messages_missing" in str(line)
+        for line in attempts["attempts"][0].get("warnings", [])
+    )
+
+
 def test_run_once_followup_prompt_recovers_invalid_json(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -409,6 +464,78 @@ def test_run_once_verification_gate_triggers_followup_until_checks_pass(
     prompts_text = prompts_file.read_text(encoding="utf-8")
     assert prompts_text.count("===PROMPT===") >= 2
     assert "required verification checks failed" in prompts_text
+
+
+def test_run_once_verification_followup_runs_even_with_codex_personality_warning(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    (target / "verify_gate.py").write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import sys",
+                "from pathlib import Path",
+                "",
+                "if not Path('marker.txt').exists():",
+                "    print('marker.txt missing', file=sys.stderr)",
+                "    raise SystemExit(1)",
+                "print('ok')",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    state_file = tmp_path / "attempt_state_verify_warning.txt"
+    prompts_file = tmp_path / "prompts_verify_warning.log"
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "verification_fail_then_pass")
+    monkeypatch.setenv("DUMMY_PROMPTS_FILE", str(prompts_file))
+    monkeypatch.setenv("DUMMY_INCLUDE_CODEX_PERSONALITY_WARNING", "1")
+
+    if os.name == "nt":
+        verify_cmd = f'& "{sys.executable}" verify_gate.py'
+    else:
+        verify_cmd = f'"{sys.executable}" verify_gate.py'
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=0,
+            agent_followup_attempts=2,
+            verification_commands=(verify_cmd,),
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert result.report_validation_errors == []
+
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert len(attempts["attempts"]) == 2
+    assert attempts["attempts"][0].get("followup_reason") == "verification_failed"
+    assert any(
+        "code=codex_model_messages_missing" in str(line)
+        for line in attempts["attempts"][0].get("warnings", [])
+    )
 
 
 def test_run_once_uses_last_message_for_capacity_failures_with_empty_stderr(

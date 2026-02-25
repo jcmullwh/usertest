@@ -878,6 +878,45 @@ def _run_selected_ticket(
         },
     )
 
+    exit_code = int(result.exit_code or 0)
+    verification_failed = False
+    failing_verification_command: str | None = None
+
+    verification_configured = bool(request.verification_commands)
+    if verification_configured and not bool(getattr(args, "skip_verify", False)):
+        verification = _read_json(run_dir / "verification.json")
+        if isinstance(verification, dict) and verification.get("passed") is False:
+            verification_failed = True
+            exit_code = max(exit_code, 2)
+            commands = verification.get("commands")
+            if isinstance(commands, list):
+                for cmd in commands:
+                    if not isinstance(cmd, dict):
+                        continue
+                    cmd_exit = cmd.get("exit_code")
+                    if isinstance(cmd_exit, int) and cmd_exit != 0:
+                        raw_cmd = cmd.get("command")
+                        if isinstance(raw_cmd, str) and raw_cmd.strip():
+                            failing_verification_command = raw_cmd.strip()
+                        break
+
+            if wants_handoff:
+                print(
+                    "[implement] ERROR: Verification gate failed; refusing to commit/push/PR.",
+                    file=sys.stderr,
+                )
+            else:
+                print("[implement] ERROR: Verification gate failed.", file=sys.stderr)
+            print(f"  Run dir: {run_dir}", file=sys.stderr)
+            if failing_verification_command is not None:
+                print(f"  Failing command: {failing_verification_command}", file=sys.stderr)
+            print(
+                "  Override (debugging only): rerun with --skip-verify",
+                file=sys.stderr,
+            )
+
+    handoff_blocked = bool(wants_handoff and verification_failed and not args.skip_verify)
+
     workspace_ref = _read_json(run_dir / "workspace_ref.json")
     workspace_dir: Path | None = None
     if isinstance(workspace_ref, dict):
@@ -898,7 +937,7 @@ def _run_selected_ticket(
     observed_model = infer_observed_model(run_dir=run_dir)
     commit_performed = False
 
-    if args.commit:
+    if args.commit and not handoff_blocked:
         git_ref = finalize_commit(
             run_dir=run_dir,
             branch=branch,
@@ -908,7 +947,7 @@ def _run_selected_ticket(
         )
         commit_performed = bool(git_ref.get("commit_performed") is True)
 
-    if args.push:
+    if args.push and not handoff_blocked:
         if not commit_performed:
             push_ref = {
                 "schema_version": 1,
@@ -937,7 +976,7 @@ def _run_selected_ticket(
                 force_with_lease=bool(args.force_push),
             )
 
-    if args.push or args.pr:
+    if (args.push or args.pr) and not handoff_blocked:
         title, body = _write_pr_manifest(
             run_dir=run_dir,
             selected=selected,
@@ -1102,7 +1141,12 @@ def _run_selected_ticket(
                             )
         _write_json(run_dir / "pr_ref.json", pr_ref)
 
-    if args.move_on_commit and selected.owner_root is not None and selected.idea_path is not None and args.commit:
+    if (
+        args.move_on_commit
+        and selected.owner_root is not None
+        and selected.idea_path is not None
+        and commit_performed
+    ):
         try:
             move_ticket_file(
                 owner_root=selected.owner_root,
@@ -1141,8 +1185,6 @@ def _run_selected_ticket(
             update_ledger_file(ledger_path, fingerprint=selected.fingerprint, updates=updates)
         except Exception as e:
             print(f"WARNING: failed to update ledger: {e}", file=sys.stderr)
-
-    exit_code = int(result.exit_code or 0)
 
     if result.report_validation_errors:
         print("[implement] WARNING: report validation failed:", file=sys.stderr)

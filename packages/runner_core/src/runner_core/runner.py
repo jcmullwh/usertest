@@ -153,14 +153,6 @@ _BASE_PREFLIGHT_COMMANDS = [
 
 _FAILURE_SUBTYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
     (
-        "codex_model_messages_missing",
-        (
-            re.compile(r"codex_model_messages_missing", re.IGNORECASE),
-            re.compile(r"model personality requested but model_messages is missing", re.IGNORECASE),
-            re.compile(r"\bmodel_messages\b.*\bmissing\b", re.IGNORECASE),
-        ),
-    ),
-    (
         "invalid_agent_config",
         (
             re.compile(r"invalid value.*model_reasoning_effort", re.IGNORECASE),
@@ -1130,6 +1122,10 @@ def _format_preflight_summary_md(
     pip_probe: dict[str, Any] | None,
     pytest_probe: dict[str, Any] | None,
     command_diagnostics: dict[str, Any],
+    verification_commands: list[str],
+    verification_timeout_seconds: float | None,
+    agent: str,
+    codex_sandbox_mode: str | None,
 ) -> str:
     shell_label = execution_shell.strip() or "unknown"
     if shell_label.lower() == "powershell":
@@ -1188,6 +1184,28 @@ def _format_preflight_summary_md(
             suffix = f" ({reason_code_s})" if reason_code_s else ""
             pytest_label = "NOT OK" + suffix
         lines.append(f"- pytest: {pytest_label}")
+
+    if verification_commands:
+        timeout_label = "none"
+        if verification_timeout_seconds is not None:
+            timeout_label = f"{float(verification_timeout_seconds):g}"
+        lines.append("- Verification gate:")
+        lines.append(f"  - timeout_seconds: {timeout_label}")
+        lines.append("  - commands:")
+        for cmd in verification_commands:
+            lines.append(f"    - `{cmd}`")
+
+    if (
+        agent == "codex"
+        and isinstance(codex_sandbox_mode, str)
+        and codex_sandbox_mode.strip().lower().startswith("workspace-")
+    ):
+        sandbox_label = codex_sandbox_mode.strip()
+        lines.append(
+            "- Note: Codex workspace sandbox is enabled "
+            f"(sandbox={sandbox_label}); commands/files outside the workspace may be unavailable. "
+            "If you need a consistent toolchain, consider `--exec-backend docker`."
+        )
 
     return "\n".join(lines)
 
@@ -3729,6 +3747,18 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 exec_backend=request.exec_backend, host_os=host_os
             )
 
+            verification_commands = [
+                cmd.strip()
+                for cmd in request.verification_commands
+                if isinstance(cmd, str) and cmd.strip()
+            ]
+            verification_timeout_seconds = request.verification_timeout_seconds
+            if (
+                verification_timeout_seconds is not None
+                and float(verification_timeout_seconds) <= 0.0
+            ):
+                verification_timeout_seconds = None
+
             policy_json = json.dumps(
                 {
                     "agent": request.agent,
@@ -3766,6 +3796,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         if sandbox is not None
                         else None,
                     },
+                    "verification_gate": {
+                        "configured": bool(verification_commands),
+                        "commands": verification_commands,
+                        "timeout_seconds": verification_timeout_seconds,
+                    },
                     "preflight": {
                         "commands": preflight_commands_present,
                         "command_diagnostics": command_diagnostics,
@@ -3802,6 +3837,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 pip_probe=pip_probe,
                 pytest_probe=pytest_probe,
                 command_diagnostics=command_diagnostics,
+                verification_commands=verification_commands,
+                verification_timeout_seconds=verification_timeout_seconds,
+                agent=request.agent,
+                codex_sandbox_mode=codex_sandbox_mode,
             )
 
             try:
@@ -4004,17 +4043,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
             followup_attempts = max(0, int(request.agent_followup_attempts))
 
-            verification_commands = [
-                cmd.strip()
-                for cmd in request.verification_commands
-                if isinstance(cmd, str) and cmd.strip()
-            ]
-            verification_timeout_seconds = request.verification_timeout_seconds
-            if (
-                verification_timeout_seconds is not None
-                and float(verification_timeout_seconds) <= 0.0
-            ):
-                verification_timeout_seconds = None
             if verification_commands:
                 _write_json(
                     run_dir / "verification_config.json",
@@ -4260,7 +4288,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     and attempt_verification_summary is not None
                     and not attempt_verification_passed
                     and followup_count < followup_attempts
-                    and failure_subtype is None
                     and attempt_last_text.strip()
                 ):
                     followup_count += 1
@@ -4280,7 +4307,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     agent_exit_code == 0
                     and attempt_report_validation_errors
                     and followup_count < followup_attempts
-                    and failure_subtype is None
                     and attempt_last_text.strip()
                 ):
                     followup_count += 1
