@@ -76,6 +76,8 @@ defaults:
   mission_id: first_run
 ```
 
+Relative paths in `personas_dirs` / `missions_dirs` are resolved relative to the *target repo root* (the directory passed to `init-usertest --repo`).
+
 ---
 
 ## Persona format
