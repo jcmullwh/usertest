@@ -383,6 +383,10 @@ Golden fixture verification command:
   `python tools/snapshot_repo.py --out repo_snapshot.zip`
   - `.gitignore` files are excluded by default; pass `--include-gitignore-files` to include them.
   - If the output already exists, pass `--overwrite`.
+  - Preview/audit (no archive written):
+    - `python tools/snapshot_repo.py --dry-run`
+    - `python tools/snapshot_repo.py --list-included`
+    - `python tools/snapshot_repo.py --list-excluded --list-limit 200` (prints `PATH<TAB>REASON`)
 - If a run fails mid-acquisition or disk usage grows, delete `runs/usertest/_workspaces/`.
 - If you change `packages/runner_core`, `packages/agent_adapters`, or `packages/reporter` and the
   CLI still behaves like old code, refresh the CLI env:
