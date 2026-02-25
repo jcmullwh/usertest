@@ -35,6 +35,9 @@ class SnapshotPlan:
         Repo-relative paths excluded because they point at the output archive (to prevent self-inclusion).
     excluded_untracked
         Repo-relative paths excluded because they were untracked and `--tracked-only` was requested.
+        Populated only when excluded details are collected (e.g. `--list-excluded`).
+    excluded_untracked_count
+        Count of repo-relative paths excluded because they were untracked and `--tracked-only` was requested.
     """
 
     repo_root: Path
@@ -44,6 +47,21 @@ class SnapshotPlan:
     excluded_ignored: tuple[str, ...]
     excluded_outputs: tuple[str, ...]
     excluded_untracked: tuple[str, ...]
+    excluded_untracked_count: int
+
+
+def _count_git_z_paths(payload: bytes) -> int:
+    """
+    Count paths in a NUL-delimited (git -z) byte payload.
+    """
+
+    if not payload:
+        return 0
+    count = payload.count(b"\0")
+    # Be defensive if a tool ever produces a non-trailing-terminator payload.
+    if not payload.endswith(b"\0"):
+        count += 1
+    return count
 
 
 def _validate_out_path_shape(out_path: Path) -> None:
@@ -384,9 +402,18 @@ def _plan_snapshot(
             continue
         included.append(rel)
 
-    excluded_untracked: list[str] = []
-    if collect_excluded_details and not include_untracked:
-        excluded_untracked = list(untracked_not_ignored)
+    excluded_untracked: tuple[str, ...] = ()
+    excluded_untracked_count = 0
+    if not include_untracked:
+        if untracked_not_ignored:
+            excluded_untracked_count = len(untracked_not_ignored)
+            if collect_excluded_details:
+                excluded_untracked = tuple(sorted(set(untracked_not_ignored)))
+        else:
+            # We did not enumerate untracked-but-not-ignored paths, but we still want an auditable
+            # excluded_untracked count for `--tracked-only` plan output.
+            out_untracked = _run_git(["ls-files", "-z", "--others", "--exclude-standard"], cwd=repo_root)
+            excluded_untracked_count = _count_git_z_paths(out_untracked)
 
     if collect_excluded_details and exclude_ignored and untracked_ignored:
         excluded_ignored.extend(untracked_ignored)
@@ -401,7 +428,8 @@ def _plan_snapshot(
         excluded_gitignores=tuple(excluded_gitignores),
         excluded_ignored=tuple(sorted(set(excluded_ignored))),
         excluded_outputs=tuple(sorted(set(excluded_outputs))),
-        excluded_untracked=tuple(sorted(set(excluded_untracked))),
+        excluded_untracked=excluded_untracked,
+        excluded_untracked_count=int(excluded_untracked_count),
     )
 
 
@@ -530,6 +558,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="python tools/snapshot_repo.py",
         description=(
             "Create a zip snapshot of the repo using git's standard excludes (.gitignore, etc). "
+            "Archive entries use repo-relative paths. "
             "By default, `.gitignore` files themselves are excluded from the archive."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
@@ -545,7 +574,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Notes:\n"
             "  - `--out` must be a .zip file path.\n"
             "  - `--out` is optional in preview/listing modes.\n"
-            "  - `.gitignore` files are excluded by default; pass --include-gitignore-files to include them.\n"
+            "  - Archive entries are repo-relative (no top-level directory prefix).\n"
+            "  - By default, untracked files are included if they are not ignored; pass --tracked-only to exclude them.\n"
+            "  - `.gitignore` files are excluded by default (avoid sharing ignore rules); pass --include-gitignore-files to include them.\n"
         ),
     )
     parser.add_argument(
@@ -561,7 +592,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tracked-only",
         action="store_true",
-        help="Only include tracked files (omit untracked files).",
+        help="Only include tracked files (omit untracked files; default includes untracked-but-not-ignored).",
     )
     parser.add_argument(
         "--include-ignored",
@@ -574,7 +605,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--include-gitignore-files",
         action="store_true",
-        help="Include `.gitignore` files in the snapshot (by default they are excluded).",
+        help="Include `.gitignore` files in the snapshot (excluded by default to avoid sharing ignore rules).",
     )
     parser.add_argument(
         "--verify",
@@ -695,6 +726,9 @@ def main(argv: list[str] | None = None) -> int:
     print(f"- time_utc: {now}")
     print(f"- repo_root: {plan.repo_root}")
     print(f"- out: {plan.out_path if plan.out_path is not None else '<none>'}")
+    print("- archive_paths: repo-relative")
+    print("- default_untracked: include untracked (not ignored); pass --tracked-only to exclude")
+    print("- default_gitignore_files: excluded (avoid sharing ignore rules); pass --include-gitignore-files to include")
     print(f"- tracked_only: {bool(args.tracked_only)}")
     print(f"- include_ignored: {bool(args.include_ignored)}")
     print(f"- include_gitignore_files: {bool(args.include_gitignore_files)}")
@@ -705,7 +739,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"- excluded_gitignores: {len(plan.excluded_gitignores)}")
     print(f"- excluded_ignored: {len(plan.excluded_ignored)}")
     print(f"- excluded_outputs: {len(plan.excluded_outputs)}")
-    print(f"- excluded_untracked: {len(plan.excluded_untracked)}")
+    print(f"- excluded_untracked: {plan.excluded_untracked_count}")
     print("")
 
     if preview_mode:

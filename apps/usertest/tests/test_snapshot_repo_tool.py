@@ -19,6 +19,19 @@ def _run_snapshot_repo(*, repo_root: Path, args: list[str]) -> subprocess.Comple
     )
 
 
+def _normalize_snapshot_plan(stdout: str) -> str:
+    stdout = stdout.replace("\r\n", "\n")
+    lines: list[str] = []
+    for line in stdout.splitlines():
+        if line.startswith("- time_utc: "):
+            lines.append("- time_utc: <TIME>")
+        elif line.startswith("- repo_root: "):
+            lines.append("- repo_root: <REPO_ROOT>")
+        else:
+            lines.append(line)
+    return "\n".join(lines).strip() + "\n"
+
+
 def test_snapshot_repo_existing_out_fails_without_printing_plan(tmp_path: Path) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
     out_path = tmp_path / "snapshot.zip"
@@ -220,6 +233,113 @@ def test_snapshot_repo_dry_run_does_not_require_out(tmp_path: Path) -> None:
     assert "SNAPSHOT PLAN" in proc.stdout
     assert "Dry-run" in proc.stdout
     assert not list(tmp_path.glob("*.zip"))
+
+
+def test_snapshot_repo_plan_output_tracked_only_prints_excluded_untracked_zero(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    target_repo = tmp_path / "repo_plan_tracked_only_clean"
+    target_repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "-C", str(target_repo), "init"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    (target_repo / "file.txt").write_text("ok", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(target_repo), "add", "file.txt"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    proc = _run_snapshot_repo(
+        repo_root=repo_root,
+        args=["--repo-root", str(target_repo), "--tracked-only", "--plan-only"],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    normalized = _normalize_snapshot_plan(proc.stdout)
+    assert normalized == (
+        "SNAPSHOT PLAN\n"
+        "- time_utc: <TIME>\n"
+        "- repo_root: <REPO_ROOT>\n"
+        "- out: <none>\n"
+        "- archive_paths: repo-relative\n"
+        "- default_untracked: include untracked (not ignored); pass --tracked-only to exclude\n"
+        "- default_gitignore_files: excluded (avoid sharing ignore rules); pass "
+        "--include-gitignore-files to include\n"
+        "- tracked_only: True\n"
+        "- include_ignored: False\n"
+        "- include_gitignore_files: False\n"
+        "- verify: True\n"
+        "- plan_only: True\n"
+        "- dry_run: False\n"
+        "- files: 1\n"
+        "- excluded_gitignores: 0\n"
+        "- excluded_ignored: 0\n"
+        "- excluded_outputs: 0\n"
+        "- excluded_untracked: 0\n"
+        "\n"
+        "Plan-only: no archive written.\n"
+    )
+
+
+def test_snapshot_repo_plan_output_tracked_only_counts_untracked_excluded(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    target_repo = tmp_path / "repo_plan_tracked_only_untracked"
+    target_repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "-C", str(target_repo), "init"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    (target_repo / "file.txt").write_text("ok", encoding="utf-8")
+    (target_repo / "untracked.txt").write_text("untracked", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(target_repo), "add", "file.txt"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    proc = _run_snapshot_repo(
+        repo_root=repo_root,
+        args=["--repo-root", str(target_repo), "--tracked-only", "--plan-only"],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    normalized = _normalize_snapshot_plan(proc.stdout)
+    assert normalized == (
+        "SNAPSHOT PLAN\n"
+        "- time_utc: <TIME>\n"
+        "- repo_root: <REPO_ROOT>\n"
+        "- out: <none>\n"
+        "- archive_paths: repo-relative\n"
+        "- default_untracked: include untracked (not ignored); pass --tracked-only to exclude\n"
+        "- default_gitignore_files: excluded (avoid sharing ignore rules); pass "
+        "--include-gitignore-files to include\n"
+        "- tracked_only: True\n"
+        "- include_ignored: False\n"
+        "- include_gitignore_files: False\n"
+        "- verify: True\n"
+        "- plan_only: True\n"
+        "- dry_run: False\n"
+        "- files: 1\n"
+        "- excluded_gitignores: 0\n"
+        "- excluded_ignored: 0\n"
+        "- excluded_outputs: 0\n"
+        "- excluded_untracked: 1\n"
+        "\n"
+        "Plan-only: no archive written.\n"
+    )
 
 
 def test_snapshot_repo_list_included_is_deterministic_and_sorted(tmp_path: Path) -> None:
