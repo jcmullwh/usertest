@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -171,6 +172,62 @@ def test_batch_validate_only_exits_zero_without_running(
 
     out = capsys.readouterr()
     assert "Batch validation passed" in out.err
+
+
+def test_batch_print_requests_exits_zero_and_outputs_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    target_repo = tmp_path / "target_repo"
+    target_repo.mkdir(parents=True, exist_ok=True)
+
+    targets_path = tmp_path / "targets.yaml"
+    targets_path.write_text(
+        "\n".join(
+            [
+                "targets:",
+                f"- repo: {target_repo.as_posix()!r}",
+                "  agent: codex",
+                "  policy: inspect",
+                "  persona_id: quickstart_sprinter",
+                "  mission_id: privacy_locked_run",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        usertest.cli,
+        "run_once",
+        lambda *_args, **_kwargs: pytest.fail("run_once should not run in --print-requests mode"),
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "batch",
+                "--repo-root",
+                str(repo_root),
+                "--targets",
+                str(targets_path),
+                "--skip-command-probes",
+                "--exec-env",
+                "OPENAI_API_KEY=shh",
+                "--print-requests",
+            ]
+        )
+    assert exc.value.code == 0
+
+    out = capsys.readouterr()
+    payload = json.loads(out.out)
+    assert isinstance(payload, list)
+    assert payload and payload[0]["index"] == 0
+    req = payload[0]["request"]
+    assert req["repo"] == target_repo.as_posix()
+    assert "exec_env" in req
+    assert req["exec_env"] == ["OPENAI_API_KEY=<redacted>"]
 
 
 def test_batch_invalid_yaml_is_concise(

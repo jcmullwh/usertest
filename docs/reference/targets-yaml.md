@@ -60,7 +60,13 @@ Retry/backoff tuning (usually only needed when debugging provider capacity issue
 
 ## Validation behavior
 
-- `python -m usertest.cli batch --validate-only ...` validates `targets.yaml` and exits without creating run directories or invoking any agent.
+- Batch validation runs in phases:
+  1) Parse/shape checks of `targets.yaml` (YAML syntax, required fields, types)
+  2) Catalog/policy/environment checks (persona/mission resolution, agent/policy checks, local repo path checks, and optional command responsiveness probes)
+
+- `python -m usertest.cli batch --validate-only ...` runs validation and exits without creating run directories or invoking any agent.
+- `python -m usertest.cli batch --print-requests ...` prints the resolved RunRequest list as deterministic JSON and exits without creating run directories or invoking any agent.
+  - Sensitive `KEY=VALUE` pairs (for example `OPENAI_API_KEY=...`) are redacted in the printed JSON.
 - On validation failure, the command prints a structured error summary and exits with code `2`.
 
 For the most up-to-date flags, always prefer:

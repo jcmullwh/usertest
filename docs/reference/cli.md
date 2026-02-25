@@ -24,6 +24,8 @@ Entry points:
   - Writes a run directory under `runs/usertest/…`.
 - `usertest batch`
   - Run multiple targets from a YAML file.
+  - Validation runs in phases: (1) parse/shape checks of `targets.yaml`, then (2) catalog/policy/environment checks before any execution.
+  - Inspection mode: `usertest batch --targets <file> --print-requests` prints resolved requests as JSON and exits without executing.
 - `usertest report`
   - Re-render `report.md` / `report.json` for an existing run directory.
 
