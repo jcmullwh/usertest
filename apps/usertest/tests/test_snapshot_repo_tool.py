@@ -235,7 +235,9 @@ def test_snapshot_repo_dry_run_does_not_require_out(tmp_path: Path) -> None:
     assert not list(tmp_path.glob("*.zip"))
 
 
-def test_snapshot_repo_plan_output_tracked_only_prints_excluded_untracked_zero(tmp_path: Path) -> None:
+def test_snapshot_repo_plan_output_tracked_only_prints_excluded_untracked_zero(
+    tmp_path: Path,
+) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
 
     target_repo = tmp_path / "repo_plan_tracked_only_clean"
@@ -269,7 +271,8 @@ def test_snapshot_repo_plan_output_tracked_only_prints_excluded_untracked_zero(t
         "- out: <none>\n"
         "- archive_paths: repo-relative\n"
         "- default_untracked: include untracked (not ignored); pass --tracked-only to exclude\n"
-        "- default_gitignore_files: excluded (avoid sharing ignore rules); pass --include-gitignore-files to include\n"
+        "- default_gitignore_files: excluded (avoid sharing ignore rules); pass "
+        "--include-gitignore-files to include\n"
         "- tracked_only: True\n"
         "- include_ignored: False\n"
         "- include_gitignore_files: False\n"
@@ -321,7 +324,8 @@ def test_snapshot_repo_plan_output_tracked_only_counts_untracked_excluded(tmp_pa
         "- out: <none>\n"
         "- archive_paths: repo-relative\n"
         "- default_untracked: include untracked (not ignored); pass --tracked-only to exclude\n"
-        "- default_gitignore_files: excluded (avoid sharing ignore rules); pass --include-gitignore-files to include\n"
+        "- default_gitignore_files: excluded (avoid sharing ignore rules); pass "
+        "--include-gitignore-files to include\n"
         "- tracked_only: True\n"
         "- include_ignored: False\n"
         "- include_gitignore_files: False\n"
