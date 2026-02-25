@@ -29,10 +29,13 @@ def test_init_usertest_writes_scaffold_and_is_non_destructive(
     assert missions_dir.exists()
     assert (personas_dir / ".gitkeep").exists()
     assert (missions_dir / ".gitkeep").exists()
-    assert "version: 1" in catalog.read_text(encoding="utf-8")
-    assert "defaults:" in catalog.read_text(encoding="utf-8")
-    assert "personas_dirs:" in catalog.read_text(encoding="utf-8")
-    assert "missions_dirs:" in catalog.read_text(encoding="utf-8")
+    catalog_text = catalog.read_text(encoding="utf-8")
+    assert "version: 1" in catalog_text
+    assert "defaults:" in catalog_text
+    assert "personas_dirs:" in catalog_text
+    assert "missions_dirs:" in catalog_text
+    assert "Path semantics (important):" in catalog_text
+    assert "target repo root" in catalog_text
     assert "sandbox_cli_install:" in manifest.read_text(encoding="utf-8")
 
     # Ensure a local persona/mission dropped into the scaffold becomes discoverable without
