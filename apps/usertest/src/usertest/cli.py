@@ -31,6 +31,17 @@ except ModuleNotFoundError as exc:
     ) from exc
 
 
+_EXEC_NETWORK_HELP = (
+    "Docker sandbox container runtime network mode (maps to `docker run --network ...`). "
+    "Only applies when `--exec-backend docker`. "
+    "`none` disables outbound network for the container, but it is NOT an end-to-end offline/privacy mode: "
+    "`docker build` may still pull base images and download dependencies, and any host-side steps "
+    "(e.g., when using `--exec-backend local`) are unaffected. "
+    "If the agent CLI runs inside the container, `none` also prevents hosted agent CLIs "
+    "(codex/claude/gemini) from reaching their APIs."
+)
+
+
 def _from_source_import_remediation(*, missing_module: str) -> str:
     return (
         f"Missing import `{missing_module}`.\n"
@@ -676,10 +687,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--exec-network",
         choices=["open", "none"],
         default="open",
-        help=(
-            "Docker container network mode. Note: the agent CLI runs inside the container in this repo; "
-            "`none` will prevent hosted agent CLIs (codex/claude/gemini) from reaching their APIs."
-        ),
+        help=_EXEC_NETWORK_HELP,
     )
     run_p.add_argument(
         "--exec-cache",
@@ -860,10 +868,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--exec-network",
         choices=["open", "none"],
         default="open",
-        help=(
-            "Docker container network mode. Note: the agent CLI runs inside the container in this repo; "
-            "`none` will prevent hosted agent CLIs (codex/claude/gemini) from reaching their APIs."
-        ),
+        help=_EXEC_NETWORK_HELP,
     )
     batch_p.add_argument("--exec-cache", choices=["cold", "warm"], default="cold")
     batch_p.add_argument("--exec-cache-dir", type=Path)
@@ -964,10 +969,7 @@ def build_parser() -> argparse.ArgumentParser:
             "--exec-network",
             choices=["open", "none"],
             default="open",
-            help=(
-                "Docker container network mode. Note: the agent CLI runs inside the container in this repo; "
-                "`none` will prevent hosted agent CLIs (codex/claude/gemini) from reaching their APIs."
-            ),
+            help=_EXEC_NETWORK_HELP,
         )
         p.add_argument("--exec-cache", choices=["cold", "warm"], default="cold")
         p.add_argument("--exec-cache-dir", type=Path)

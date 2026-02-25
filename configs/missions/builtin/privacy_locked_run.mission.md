@@ -15,9 +15,14 @@ requires_edits: false
 Execute a useful workflow while minimizing external side effects: avoid unintended network calls, uploads, telemetry, and publishing.
 
 Note: this mission constrains the *target workflow* (commands the agent chooses to run against the repo). It does **not**
-make the run “offline” in the sense of preventing the agent CLI from reaching its hosted API provider. In this repo’s
-Docker execution backend, the agent CLI runs inside the container; setting `--exec-network none` will prevent hosted
-agents (Codex/Claude/Gemini) from running.
+make the overall run “offline” or provide end-to-end privacy guarantees.
+
+`--exec-network` (when using `--exec-backend docker`) only controls the Docker sandbox container's *runtime* network
+(`docker run --network ...`). `docker build` may still pull base images and download dependencies.
+
+In this repo’s Docker execution backend, the agent CLI runs inside the container by default, so setting
+`--exec-network none` will also prevent hosted agents (Codex/Claude/Gemini) from reaching their APIs and the run will
+fail.
 
 ## Approach
 
