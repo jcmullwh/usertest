@@ -1214,6 +1214,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     errors: list[str] = []
     next_actions: list[str] = []
+    skip_tool_checks = bool(getattr(args, "skip_tool_checks", False))
 
     baseline_timeout_seconds = 3.0
     baseline: dict[str, Any] = {
@@ -1240,17 +1241,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         argv=[sys.executable, "-m", "pip", "--version"],
         timeout_seconds=baseline_timeout_seconds,
     )
-    baseline["pip"] = {"ok": ok, "probe": "python -m pip", "version": version_line, "error": err}
+    baseline["pip"] = {
+        "required": False,
+        "ok": ok,
+        "probe": "python -m pip",
+        "version": version_line,
+        "error": err,
+    }
     if not ok:
         details_parts = [p for p in (version_line, err) if p]
         details = "; ".join(details_parts) if details_parts else "unknown_error"
-        errors.append(f"pip is required but not usable: {details}")
+        # `pip` is helpful for onboarding and remediation (e.g., installing PDM), but it's not required to validate a
+        # scaffold manifest. Some managed environments (including PDM/virtualenv-backed ones) may not ship `pip`.
         next_actions.append(_pip_remediation_hint(python_exe=sys.executable))
 
     git_path = _which("git")
     if git_path is None:
         baseline["git"] = {"ok": False, "probe": "path", "resolved_path": None, "version": None, "error": "missing"}
-        errors.append("git is required but was not found on PATH")
+        if not skip_tool_checks:
+            errors.append("git is required but was not found on PATH")
         next_actions.append(_git_remediation_hint())
     else:
         ok, version_line, err = _probe_tool_version(
@@ -1267,7 +1276,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         if not ok:
             details_parts = [p for p in (version_line, err) if p]
             details = "; ".join(details_parts) if details_parts else "unknown_error"
-            errors.append(f"git is required but not usable: {details}")
+            if not skip_tool_checks:
+                errors.append(f"git is required but not usable: {details}")
             next_actions.append(_git_remediation_hint())
 
     bash_required = os.name != "nt"
@@ -1281,7 +1291,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "version": None,
             "error": "missing",
         }
-        if bash_required:
+        if bash_required and not skip_tool_checks:
             errors.append("bash is required (for scripts/smoke.sh) but was not found on PATH")
     else:
         ok, version_line, err = _probe_tool_version(
@@ -1296,7 +1306,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             "version": version_line,
             "error": err,
         }
-        if bash_required and not ok:
+        if bash_required and not ok and not skip_tool_checks:
             details = err or "unknown_error"
             errors.append(f"bash is required (for scripts/smoke.sh) but not usable: {details}")
             next_actions.append(_bash_remediation_hint())
@@ -1424,7 +1434,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
         tool_report["tools"][tool] = entry
 
-        if not bool(getattr(args, "skip_tool_checks", False)) and not bool(entry.get("ok")):
+        if not skip_tool_checks and not bool(entry.get("ok")):
             details = entry.get("error") or "unknown_error"
             hint = entry.get("remediation")
             ctx = ", ".join(contexts[:3]) + ("..." if len(contexts) > 3 else "")
