@@ -111,6 +111,22 @@ If you prefer to manage your environment manually, you must install dependencies
 
 ---
 
+## Agent setup (first real run)
+
+Your first real agent run can fail fast if the agent CLI is missing (`code=binary_missing`) or credentials are missing (`code=auth_missing`).
+The error output includes copy/paste remediation, but the common fixes are:
+
+- **Codex:** `npm install -g @openai/codex`, then `codex login` (or set `OPENAI_API_KEY` and run `codex login --with-api-key`).
+- **Claude Code:** `npm install -g @anthropic-ai/claude-code`, then set `ANTHROPIC_API_KEY` (or run `claude login` if your CLI supports it).
+- **Gemini CLI:** `npm install -g @google/gemini-cli`, then set `GOOGLE_API_KEY` (or configure the CLI's login state under `~/.gemini`).
+
+Useful helpers:
+
+- `python -m agent_adapters.cli doctor` - checks whether `codex`/`claude`/`gemini` are on `PATH`.
+- Offline validation without running agents: `usertest batch --validate-only` and/or `examples/golden_runs/`.
+
+---
+
 ## One-command smoke (recommended for developers)
 
 For a fast, deterministic end-to-end sanity check (doctor -> deps -> CLI help -> smoke tests), use the OS-specific smoke script:

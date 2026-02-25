@@ -299,6 +299,159 @@ def test_run_once_fails_fast_when_required_agent_binary_missing(tmp_path: Path) 
     assert "configs/agents.yaml" in str(hints.get("config", ""))
     assert "agent_adapters.cli doctor" in str(hints.get("doctor", ""))
     assert "--version" in str(hints.get("verify", ""))
+    assert "npm install -g" in str(hints.get("install", ""))
+    assert "@openai/codex" in str(hints.get("install", ""))
+    assert "examples/golden_runs" in str(hints.get("offline_validation", ""))
+
+
+@pytest.mark.parametrize(
+    ("agent", "missing_binary", "expected_install_snippet"),
+    [
+        ("codex", "missing-codex-cli-for-usertest", "@openai/codex"),
+        ("claude", "missing-claude-cli-for-usertest", "@anthropic-ai/claude-code"),
+        ("gemini", "missing-gemini-cli-for-usertest", "@google/gemini-cli"),
+    ],
+)
+def test_run_once_binary_missing_includes_agent_specific_install_hint(
+    tmp_path: Path,
+    agent: str,
+    missing_binary: str,
+    expected_install_snippet: str,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    policy_entry: dict[str, object]
+    if agent == "codex":
+        policy_entry = {"sandbox": "read-only", "allow_edits": False}
+    else:
+        policy_entry = {"allow_edits": False}
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={agent: {"binary": missing_binary}},
+        policies={"safe": {agent: policy_entry}},
+    )
+
+    result = run_once(cfg, RunRequest(repo=str(target), agent=agent, policy="safe"))
+
+    assert result.exit_code == 1
+    payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert payload.get("type") == "AgentPreflightFailed"
+    assert payload.get("subtype") == "binary_missing"
+    hints = payload.get("hints", {})
+    assert isinstance(hints, dict)
+    assert expected_install_snippet in str(hints.get("install", ""))
+    assert "examples/golden_runs" in str(hints.get("offline_validation", ""))
+
+
+def _install_dummy_version_binary(tmp_path: Path, *, name: str) -> Path:
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+
+    if os.name == "nt":
+        path = bin_dir / f"{name}.cmd"
+        path.write_text(
+            "\n".join(
+                [
+                    "@echo off",
+                    "set ARG1=%1",
+                    "if \"%ARG1%\"==\"--version\" (",
+                    f"  echo {name} 0.0.0",
+                    "  exit /b 0",
+                    ")",
+                    "exit /b 0",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return path
+
+    path = bin_dir / name
+    path.write_text(
+        "\n".join(
+            [
+                "#!/bin/sh",
+                "if [ \"${1:-}\" = \"--version\" ]; then",
+                f"  echo \"{name} 0.0.0\"",
+                "  exit 0",
+                "fi",
+                "exit 0",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    path.chmod(path.stat().st_mode | stat.S_IEXEC)
+    return path
+
+
+@pytest.mark.parametrize(
+    ("agent", "expected_env_var", "env_vars_to_clear"),
+    [
+        ("codex", "OPENAI_API_KEY", ("OPENAI_API_KEY",)),
+        ("claude", "ANTHROPIC_API_KEY", ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY")),
+        ("gemini", "GOOGLE_API_KEY", ("GOOGLE_API_KEY", "GEMINI_API_KEY")),
+    ],
+)
+def test_run_once_fails_fast_when_agent_auth_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    agent: str,
+    expected_env_var: str,
+    env_vars_to_clear: tuple[str, ...],
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    _install_dummy_version_binary(tmp_path, name=agent)
+    bin_dir = tmp_path / "bin"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    if os.name == "nt":
+        monkeypatch.setenv("PATHEXT", f"{os.environ.get('PATHEXT', '')};.CMD")
+
+    # Point home at an empty temp dir so login state detection is deterministic.
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    for key in env_vars_to_clear:
+        monkeypatch.delenv(key, raising=False)
+
+    policy_entry: dict[str, object]
+    if agent == "codex":
+        policy_entry = {"sandbox": "read-only", "allow_edits": False}
+    else:
+        policy_entry = {"allow_edits": False}
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={agent: {"binary": agent}},
+        policies={"safe": {agent: policy_entry}},
+    )
+
+    result = run_once(cfg, RunRequest(repo=str(target), agent=agent, policy="safe"))
+
+    assert result.exit_code == 1
+    payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert payload.get("type") == "AgentPreflightFailed"
+    assert payload.get("subtype") == "auth_missing"
+    assert payload.get("code") == "auth_missing"
+    assert payload.get("agent") == agent
+    hints = payload.get("hints", {})
+    assert isinstance(hints, dict)
+    assert "offline_validation" in hints
+    assert "examples/golden_runs" in str(hints.get("offline_validation", ""))
+    assert expected_env_var in str(hints.get("env", ""))
 
 
 def test_run_once_warns_when_codex_personality_missing_model_messages(tmp_path: Path) -> None:
