@@ -661,6 +661,62 @@ def _write_pr_manifest(
     return title, body
 
 
+def _require_docker_available() -> None:
+    docker = shutil.which("docker")
+    if docker is None:
+        raise SystemExit(
+            "Docker exec backend is enabled but Docker is not available.\n"
+            "\n"
+            "Reason: `docker` was not found on PATH.\n"
+            "\n"
+            "Fix: install Docker (Docker Desktop on Windows/macOS; Docker Engine on Linux) and ensure it is running.\n"
+            "\n"
+            "Opt out (run without sandboxing): pass `--no-docker` (or `--exec-backend local`)."
+        )
+    try:
+        proc = subprocess.run(
+            [docker, "version"],
+            capture_output=True,
+            text=True,
+            timeout=8,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        raise SystemExit(
+            "Docker exec backend is enabled but Docker is not responding.\n"
+            "\n"
+            "Reason: `docker version` timed out.\n"
+            "\n"
+            "Fix: start Docker and try again.\n"
+            "\n"
+            "Opt out (run without sandboxing): pass `--no-docker` (or `--exec-backend local`)."
+        ) from None
+    except OSError as e:
+        raise SystemExit(
+            "Docker exec backend is enabled but Docker is not usable.\n"
+            "\n"
+            f"Reason: failed to run `docker version`: {e}\n"
+            "\n"
+            "Fix: install/start Docker and try again.\n"
+            "\n"
+            "Opt out (run without sandboxing): pass `--no-docker` (or `--exec-backend local`)."
+        ) from e
+
+    if proc.returncode != 0:
+        details = (proc.stderr or proc.stdout or "").strip()
+        detail_block = f"\n\nDocker output:\n{details}" if details else ""
+        raise SystemExit(
+            "Docker exec backend is enabled but Docker is not usable.\n"
+            "\n"
+            "Reason: `docker version` failed (non-zero exit code)."
+            f"{detail_block}\n"
+            "\n"
+            "Fix: start Docker and try again.\n"
+            "\n"
+            "Opt out (run without sandboxing): pass `--no-docker` (or `--exec-backend local`)."
+        )
+
+
 def _run_selected_ticket(
     *,
     args: argparse.Namespace,
@@ -772,6 +828,9 @@ def _run_selected_ticket(
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
+
+    if str(args.exec_backend).strip().lower() == "docker":
+        _require_docker_available()
 
     if args.move_on_start and selected.owner_root is not None and selected.idea_path is not None:
         try:
@@ -1277,7 +1336,20 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--keep-workspace", action="store_true", help="Keep workspace directory after run.")
 
-    parser.add_argument("--exec-backend", choices=["local", "docker"], default="local")
+    exec_backend_group = parser.add_mutually_exclusive_group()
+    exec_backend_group.add_argument(
+        "--exec-backend",
+        choices=["docker", "local"],
+        default="docker",
+        help="Execution backend (default: docker).",
+    )
+    exec_backend_group.add_argument(
+        "--no-docker",
+        dest="exec_backend",
+        action="store_const",
+        const="local",
+        help="Opt out of Docker sandboxing (exec_backend=local).",
+    )
     run_auth_group = parser.add_mutually_exclusive_group()
     run_auth_group.add_argument(
         "--exec-use-host-agent-login",
@@ -1291,7 +1363,12 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         action="store_false",
     )
     parser.add_argument("--exec-use-target-sandbox-cli-install", action="store_true", default=False)
-    parser.add_argument("--exec-keep-container", action="store_true")
+    parser.add_argument(
+        "--exec-keep-container",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep Docker container after the run (default: enabled).",
+    )
 
     parser.add_argument("--dry-run", action="store_true")
 
@@ -1330,8 +1407,9 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument(
         "--draft-pr-on-ci-failure",
-        action="store_true",
-        help="If CI does not pass, create a draft PR instead of failing PR creation.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="If CI does not pass, create a draft PR instead of failing PR creation (default: enabled).",
     )
 
     parser.add_argument(
@@ -1376,13 +1454,15 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
 
     parser.add_argument(
         "--move-on-start",
-        action="store_true",
-        help="Move ticket file to 3 - in_progress if possible.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Move ticket file to 3 - in_progress if possible (default: enabled).",
     )
     parser.add_argument(
         "--move-on-commit",
-        action="store_true",
-        help="Move ticket file to 4 - for_review after --commit.",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Move ticket file to 4 - for_review after --commit (default: enabled).",
     )
     parser.add_argument(
         "--ledger",
