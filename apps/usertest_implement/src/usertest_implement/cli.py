@@ -693,14 +693,22 @@ def _run_selected_ticket(
 
     wants_handoff = bool(args.commit) or bool(args.push) or bool(args.pr)
     if wants_handoff and not verification_commands and not bool(getattr(args, "skip_verify", False)):
+        lint_gate = "python tools/scaffold/scaffold.py run --all lint"
         if str(args.exec_backend).strip().lower() == "docker":
-            verification_commands = ["bash ./scripts/smoke.sh"]
+            verification_commands = [
+                "bash ./scripts/smoke.sh",
+                (
+                    'PYTHON_BIN=python; command -v "$PYTHON_BIN" >/dev/null 2>&1 || '
+                    'PYTHON_BIN=python3; "$PYTHON_BIN" tools/scaffold/scaffold.py run --all lint'
+                ),
+            ]
         elif os.name == "nt":
             verification_commands = [
-                "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1"
+                "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1",
+                lint_gate,
             ]
         else:
-            verification_commands = ["bash ./scripts/smoke.sh"]
+            verification_commands = ["bash ./scripts/smoke.sh", lint_gate]
 
     ticket_blob = _compose_ticket_blob(selected)
     request = RunRequest(
@@ -1201,7 +1209,8 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         default=[],
         help=(
             "Repeatable verification command gate that must pass before handing off "
-            "(default: run scripts/smoke.{ps1,sh} when --commit/--push/--pr)."
+            "(default: run scripts/smoke.{ps1,sh} then tools/scaffold/scaffold.py run --all lint "
+            "when --commit/--push/--pr)."
         ),
     )
     parser.add_argument(
