@@ -67,6 +67,10 @@ Re-render `report.md` (and optionally recompute metrics) for an existing run dir
 usertest report --repo-root . --run-dir "RUN_DIR" --recompute-metrics
 ```
 
+`--recompute-metrics` overwrites `normalized_events.jsonl` as a side effect; when an existing
+`normalized_events.jsonl` is present, its timestamps are reused when possible to keep reruns
+diff-minimal/reproducible.
+
 ### `usertest init-usertest`
 
 Initialize `.usertest/` inside a **local** target repo:

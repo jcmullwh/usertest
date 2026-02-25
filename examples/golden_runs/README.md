@@ -19,6 +19,9 @@ Notes:
 - `usertest report` can render `report.md` for any fixture directory.
 - `usertest report --recompute-metrics` can re-normalize `raw_events.jsonl` into
   `normalized_events.jsonl` and regenerate `metrics.json`.
+  - Note: `--recompute-metrics` overwrites `normalized_events.jsonl`; when an existing
+    `normalized_events.jsonl` is present, its timestamps are reused when possible to keep reruns
+    reproducible.
 
 Example (from repository root):
 

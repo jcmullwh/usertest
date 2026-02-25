@@ -5,11 +5,11 @@ description = "A Python library (PDM)"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "agent-adapters",
-  "normalized_events",
+  "agent-adapters @ file:///${PROJECT_ROOT}/../agent_adapters",
+  "normalized_events @ file:///${PROJECT_ROOT}/../normalized_events",
   "pyyaml>=6.0.3",
-  "reporter",
-  "sandbox_runner",
+  "reporter @ file:///${PROJECT_ROOT}/../reporter",
+  "sandbox_runner @ file:///${PROJECT_ROOT}/../sandbox_runner",
 ]
 
 [build-system]
@@ -34,6 +34,7 @@ dev = [
     "-e file:///${PROJECT_ROOT}/../../packages/reporter#egg=reporter",
     "-e file:///${PROJECT_ROOT}/../run_artifacts#egg=run_artifacts",
     "-e file:///${PROJECT_ROOT}/../../packages/sandbox_runner#egg=sandbox_runner",
+    "ruff>=0.14.0",
 ]
 
 [tool.pytest.ini_options]
@@ -68,4 +69,3 @@ dev = [
     "types-PyYAML>=6.0.0.0",
     "tomlkit>=0.12.0",
 ]
-
