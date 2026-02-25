@@ -14,12 +14,29 @@ def test_run_claude_print_injects_docker_exec_env(
 ) -> None:
     captured: dict[str, object] = {}
 
-    def _fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
-        captured["argv"] = args[0]
-        captured["env"] = kwargs.get("env")
-        return subprocess.CompletedProcess(args[0], 0)
+    class _FakeStdin:
+        def write(self, text: str) -> None:
+            return
 
-    monkeypatch.setattr(subprocess, "run", _fake_run)
+        def close(self) -> None:
+            return
+
+    class _FakeProc:
+        def __init__(self, argv: object, **kwargs: object) -> None:
+            captured["argv"] = argv
+            captured["env"] = kwargs.get("env")
+            self.stdin = _FakeStdin()
+            self.stdout = []
+            self.returncode = 0
+
+        def wait(self) -> int:
+            self.returncode = 0
+            return 0
+
+    def _fake_popen(*args: object, **kwargs: object) -> _FakeProc:
+        return _FakeProc(args[0], **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", _fake_popen)
 
     run_claude_print(
         workspace_dir=tmp_path,

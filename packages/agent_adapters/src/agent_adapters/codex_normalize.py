@@ -276,18 +276,19 @@ def _maybe_emit_read_events(
     workspace_root: Path | None,
     workspace_mount: str | None,
     ts_iter: Iterator[str] | None,
+    fallback_ts: str | None = None,
 ) -> Iterable[dict[str, Any]]:
     if workspace_root is None:
         return []
     out: list[dict[str, Any]] = []
 
     def _next_ts() -> str | None:
-        if ts_iter is None:
-            return None
-        try:
-            return next(ts_iter)
-        except StopIteration:
-            return None
+        if ts_iter is not None:
+            try:
+                return next(ts_iter)
+            except StopIteration:
+                return fallback_ts
+        return fallback_ts
 
     for candidate in _infer_read_candidate_paths(
         argv=argv,
@@ -315,6 +316,7 @@ def normalize_codex_events(
     raw_events_path: Path,
     normalized_events_path: Path,
     ts_iter: Iterator[str] | None = None,
+    raw_ts_iter: Iterator[str] | None = None,
     workspace_root: Path | None = None,
     workspace_mount: str | None = None,
 ) -> None:
@@ -322,17 +324,31 @@ def normalize_codex_events(
     run_dir = normalized_events_path.parent
     command_failure_idx = 0
 
-    def _next_ts() -> str | None:
-        if ts_iter is None:
+    def _next_raw_ts() -> str | None:
+        if raw_ts_iter is None:
             return None
         try:
-            return next(ts_iter)
+            return next(raw_ts_iter)
         except StopIteration:
             return None
+
+    line_ts: str | None = None
+
+    def _next_ts() -> str | None:
+        if ts_iter is not None:
+            try:
+                return next(ts_iter)
+            except StopIteration:
+                return None
+        return line_ts
 
     with normalized_events_path.open("w", encoding="utf-8", newline="\n") as out_f:
         call_ctx: dict[str, dict[str, Any]] = {}
         for raw_line, payload in _iter_codex_raw_lines(raw_events_path):
+            if ts_iter is None:
+                line_ts = _next_raw_ts()
+            else:
+                line_ts = None
             if payload is None:
                 event = make_event(
                     "error",
@@ -478,6 +494,7 @@ def normalize_codex_events(
                     workspace_root=workspace_root,
                     workspace_mount=workspace_mount,
                     ts_iter=ts_iter,
+                    fallback_ts=line_ts,
                 ):
                     out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")
                 continue
@@ -573,5 +590,6 @@ def normalize_codex_events(
                 workspace_root=workspace_root,
                 workspace_mount=workspace_mount,
                 ts_iter=ts_iter,
+                fallback_ts=line_ts,
             ):
                 out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")

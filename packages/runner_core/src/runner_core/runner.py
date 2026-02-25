@@ -2544,6 +2544,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         _write_json(run_dir / "target_ref.json", target_ref)
 
         raw_events_path = run_dir / "raw_events.jsonl"
+        raw_events_ts_path = raw_events_path.with_suffix(".ts.jsonl")
         last_message_path = run_dir / "agent_last_message.txt"
         stderr_path = run_dir / "agent_stderr.txt"
 
@@ -3533,6 +3534,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             followup_count = 0
             attempts_meta: list[dict[str, Any]] = []
             selected_raw_events_path = raw_events_path
+            selected_raw_events_ts_path = raw_events_ts_path
             selected_last_message_path = last_message_path
             selected_stderr_path = stderr_path
             selected_stderr_text = ""
@@ -3550,6 +3552,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     last_message_attempt_path,
                     stderr_attempt_path,
                 ) = _attempt_paths(attempt_number)
+                raw_events_attempt_ts_path = raw_events_attempt_path.with_suffix(".ts.jsonl")
 
                 attempt_started_utc = _utc_now_z()
                 attempt_start_monotonic = time.monotonic()
@@ -3797,6 +3800,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     continue
 
                 selected_raw_events_path = raw_events_attempt_path
+                selected_raw_events_ts_path = raw_events_attempt_ts_path
                 selected_last_message_path = last_message_attempt_path
                 selected_stderr_path = stderr_attempt_path
                 selected_stderr_text = attempt_stderr_text
@@ -3835,6 +3839,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     return
 
             _materialize_attempt_artifact(selected_raw_events_path, raw_events_path)
+            _materialize_attempt_artifact(selected_raw_events_ts_path, raw_events_ts_path)
             _materialize_attempt_artifact(
                 selected_last_message_path,
                 last_message_path,
@@ -4039,27 +4044,44 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
 
         normalized_events_path = run_dir / "normalized_events.jsonl"
-        if request.agent == "codex":
-            normalize_codex_events(
-                raw_events_path=raw_events_path,
-                normalized_events_path=normalized_events_path,
-                workspace_root=acquired.workspace_dir,
-                workspace_mount=workspace_mount,
-            )
-        elif request.agent == "claude":
-            normalize_claude_events(
-                raw_events_path=raw_events_path,
-                normalized_events_path=normalized_events_path,
-                workspace_root=acquired.workspace_dir,
-                workspace_mount=workspace_mount,
-            )
-        else:
-            normalize_gemini_events(
-                raw_events_path=raw_events_path,
-                normalized_events_path=normalized_events_path,
-                workspace_root=acquired.workspace_dir,
-                workspace_mount=workspace_mount,
-            )
+        raw_ts_f = None
+        raw_ts_iter = None
+        if raw_events_ts_path.exists():
+            try:
+                raw_ts_f = raw_events_ts_path.open("r", encoding="utf-8")
+                raw_ts_iter = (line.strip() for line in raw_ts_f if line.strip())
+            except OSError:
+                raw_ts_f = None
+                raw_ts_iter = None
+
+        try:
+            if request.agent == "codex":
+                normalize_codex_events(
+                    raw_events_path=raw_events_path,
+                    normalized_events_path=normalized_events_path,
+                    raw_ts_iter=raw_ts_iter,
+                    workspace_root=acquired.workspace_dir,
+                    workspace_mount=workspace_mount,
+                )
+            elif request.agent == "claude":
+                normalize_claude_events(
+                    raw_events_path=raw_events_path,
+                    normalized_events_path=normalized_events_path,
+                    raw_ts_iter=raw_ts_iter,
+                    workspace_root=acquired.workspace_dir,
+                    workspace_mount=workspace_mount,
+                )
+            else:
+                normalize_gemini_events(
+                    raw_events_path=raw_events_path,
+                    normalized_events_path=normalized_events_path,
+                    raw_ts_iter=raw_ts_iter,
+                    workspace_root=acquired.workspace_dir,
+                    workspace_mount=workspace_mount,
+                )
+        finally:
+            if raw_ts_f is not None:
+                raw_ts_f.close()
 
         diff_numstat: list[dict[str, Any]] = []
         if allow_edits:

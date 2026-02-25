@@ -11,6 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
+from agent_adapters.events import utc_now_iso
 
 _CODEX_REFRESH_TOKEN_REUSED_MARKER = "[usertest] detected codex auth error: refresh_token_reused"
 _CODEX_REFRESH_TOKEN_REUSED_SUBSTRING = "refresh_token_reused"
@@ -292,6 +293,7 @@ def run_codex_exec(
     raw_events_path.parent.mkdir(parents=True, exist_ok=True)
     last_message_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_events_ts_path = raw_events_path.with_suffix(".ts.jsonl")
 
     prefix = [p for p in command_prefix if isinstance(p, str) and p]
 
@@ -343,9 +345,11 @@ def run_codex_exec(
     )
 
     saw_refresh_token_reused = False
-    with raw_events_path.open("w", encoding="utf-8", newline="\n") as stdout_f, stderr_path.open(
-        "w", encoding="utf-8", newline="\n"
-    ) as stderr_f:
+    with (
+        raw_events_path.open("w", encoding="utf-8", newline="\n") as stdout_f,
+        raw_events_ts_path.open("w", encoding="utf-8", newline="\n") as ts_f,
+        stderr_path.open("w", encoding="utf-8", newline="\n") as stderr_f,
+    ):
         effective_timeout_seconds = timeout_seconds
         if effective_timeout_seconds is None:
             timeout_raw = os.environ.get("AGENT_ADAPTERS_CODEX_TIMEOUT_SECONDS")
@@ -412,6 +416,9 @@ def run_codex_exec(
             for line in proc.stdout:
                 stdout_f.write(line)
                 stdout_f.flush()
+                if line.strip():
+                    ts_f.write(utc_now_iso() + "\n")
+                    ts_f.flush()
                 # Avoid false positives if the agent prints this token in normal output.
                 try:
                     payload = json.loads(line)

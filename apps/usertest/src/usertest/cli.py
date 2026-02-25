@@ -3084,7 +3084,17 @@ def _cmd_report(args: argparse.Namespace) -> int:
 
         normalized_events_path = run_dir / "normalized_events.jsonl"
         ts_iter: Iterator[str] | None = None
-        if normalized_events_path.exists():
+        raw_ts_f = None
+        raw_ts_iter: Iterator[str] | None = None
+        raw_events_ts_path = raw_events_path.with_suffix(".ts.jsonl")
+        if raw_events_ts_path.exists():
+            try:
+                raw_ts_f = raw_events_ts_path.open("r", encoding="utf-8")
+                raw_ts_iter = (line.strip() for line in raw_ts_f if line.strip())
+            except OSError:
+                raw_ts_f = None
+                raw_ts_iter = None
+        elif normalized_events_path.exists():
             try:
                 ts_values: list[str] = []
                 for event in iter_events_jsonl(normalized_events_path):
@@ -3095,31 +3105,38 @@ def _cmd_report(args: argparse.Namespace) -> int:
                     ts_iter = iter(ts_values)
             except Exception:  # noqa: BLE001
                 ts_iter = None
-        if agent_name == "codex":
-            normalize_codex_events(
-                raw_events_path=raw_events_path,
-                normalized_events_path=normalized_events_path,
-                ts_iter=ts_iter,
-                workspace_root=workspace_root,
-            )
-        elif agent_name == "claude":
-            normalize_claude_events(
-                raw_events_path=raw_events_path,
-                normalized_events_path=normalized_events_path,
-                ts_iter=ts_iter,
-                workspace_root=workspace_root,
-            )
-        elif agent_name == "gemini":
-            normalize_gemini_events(
-                raw_events_path=raw_events_path,
-                normalized_events_path=normalized_events_path,
-                ts_iter=ts_iter,
-                workspace_root=workspace_root,
-            )
-        else:
-            raise ValueError(
-                "Cannot recompute metrics: could not determine agent type from target_ref.json."
-            )
+        try:
+            if agent_name == "codex":
+                normalize_codex_events(
+                    raw_events_path=raw_events_path,
+                    normalized_events_path=normalized_events_path,
+                    ts_iter=ts_iter,
+                    raw_ts_iter=raw_ts_iter,
+                    workspace_root=workspace_root,
+                )
+            elif agent_name == "claude":
+                normalize_claude_events(
+                    raw_events_path=raw_events_path,
+                    normalized_events_path=normalized_events_path,
+                    ts_iter=ts_iter,
+                    raw_ts_iter=raw_ts_iter,
+                    workspace_root=workspace_root,
+                )
+            elif agent_name == "gemini":
+                normalize_gemini_events(
+                    raw_events_path=raw_events_path,
+                    normalized_events_path=normalized_events_path,
+                    ts_iter=ts_iter,
+                    raw_ts_iter=raw_ts_iter,
+                    workspace_root=workspace_root,
+                )
+            else:
+                raise ValueError(
+                    "Cannot recompute metrics: could not determine agent type from target_ref.json."
+                )
+        finally:
+            if raw_ts_f is not None:
+                raw_ts_f.close()
 
         diff_numstat: list[dict[str, Any]] = []
         diff_numstat_path = run_dir / "diff_numstat.json"

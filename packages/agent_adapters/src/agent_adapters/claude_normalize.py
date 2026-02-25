@@ -134,6 +134,7 @@ def normalize_claude_events(
     raw_events_path: Path,
     normalized_events_path: Path,
     ts_iter: Iterator[str] | None = None,
+    raw_ts_iter: Iterator[str] | None = None,
     workspace_root: Path | None = None,
     workspace_mount: str | None = None,
 ) -> None:
@@ -142,18 +143,32 @@ def normalize_claude_events(
     command_failure_idx = 0
     tool_failure_idx = 0
 
-    def _next_ts() -> str | None:
-        if ts_iter is None:
+    def _next_raw_ts() -> str | None:
+        if raw_ts_iter is None:
             return None
         try:
-            return next(ts_iter)
+            return next(raw_ts_iter)
         except StopIteration:
             return None
+
+    line_ts: str | None = None
+
+    def _next_ts() -> str | None:
+        if ts_iter is not None:
+            try:
+                return next(ts_iter)
+            except StopIteration:
+                return None
+        return line_ts
 
     tool_uses: dict[str, dict[str, Any]] = {}
 
     with normalized_events_path.open("w", encoding="utf-8", newline="\n") as out_f:
         for raw_line, payload in _iter_raw_lines(raw_events_path):
+            if ts_iter is None:
+                line_ts = _next_raw_ts()
+            else:
+                line_ts = None
             if payload is None:
                 event = make_event(
                     "error",

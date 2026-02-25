@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
+from agent_adapters.events import utc_now_iso
 
 
 @dataclass(frozen=True)
@@ -178,6 +179,7 @@ def run_gemini(
     raw_events_path.parent.mkdir(parents=True, exist_ok=True)
     last_message_path.parent.mkdir(parents=True, exist_ok=True)
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
+    raw_events_ts_path = raw_events_path.with_suffix(".ts.jsonl")
 
     prefix = [p for p in command_prefix if isinstance(p, str) and p]
     resolved_binary = binary if prefix else _resolve_executable(binary)
@@ -208,9 +210,11 @@ def run_gemini(
 
     full_argv = [*prefix, *argv] if prefix else argv
 
-    with raw_events_path.open("w", encoding="utf-8", newline="\n") as stdout_f, stderr_path.open(
-        "w", encoding="utf-8", newline="\n"
-    ) as stderr_f:
+    with (
+        raw_events_path.open("w", encoding="utf-8", newline="\n") as stdout_f,
+        raw_events_ts_path.open("w", encoding="utf-8", newline="\n") as ts_f,
+        stderr_path.open("w", encoding="utf-8", newline="\n") as stderr_f,
+    ):
         try:
             env: dict[str, str] | None = None
             if env_overrides is not None:
@@ -219,16 +223,15 @@ def run_gemini(
                 else:
                     env = os.environ.copy()
                     env.update(env_overrides)
-            proc = subprocess.run(
+            proc = subprocess.Popen(
                 full_argv,
-                input=prompt,
-                stdout=stdout_f,
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
                 stderr=stderr_f,
                 text=True,
                 encoding="utf-8",
                 cwd=str(workspace_dir) if not prefix else None,
                 env=env,
-                check=False,
             )
         except FileNotFoundError as e:
             stderr_f.write(
@@ -244,11 +247,32 @@ def run_gemini(
                 "configs/agents.yaml `agents.gemini.binary` to the full path."
             ) from e
 
+        if proc.stdin is not None:
+            try:
+                proc.stdin.write(prompt)
+            except BrokenPipeError:
+                pass
+            finally:
+                try:
+                    proc.stdin.close()
+                except Exception:
+                    pass
+
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                stdout_f.write(line)
+                stdout_f.flush()
+                if line.strip():
+                    ts_f.write(utc_now_iso() + "\n")
+                    ts_f.flush()
+
+        proc.wait()
+
     last_message_path.write_text(_extract_last_message_text(raw_events_path), encoding="utf-8")
 
     return GeminiRunResult(
         argv=full_argv,
-        exit_code=proc.returncode,
+        exit_code=proc.returncode if proc.returncode is not None else 1,
         raw_events_path=raw_events_path,
         last_message_path=last_message_path,
         stderr_path=stderr_path,

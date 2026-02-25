@@ -272,3 +272,48 @@ def test_resolve_candidate_path_accepts_windows_posix_drive_form(tmp_path: Path)
     )
     assert resolved is not None
     assert resolved.as_posix() == "D:/tmp/example.txt"
+
+
+def test_normalize_codex_events_uses_raw_ts_iter_for_per_line_timestamps(tmp_path: Path) -> None:
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        "\n".join(
+            [
+                json.dumps({"id": "1", "msg": {"type": "agent_message", "message": "hi"}}),
+                json.dumps(
+                    {
+                        "id": "1",
+                        "msg": {
+                            "type": "exec_command_end",
+                            "command": ["cat", "USERS.md"],
+                            "exit_code": 0,
+                            "cwd": str(tmp_path),
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "USERS.md").write_text("# Users\n", encoding="utf-8")
+
+    normalized = tmp_path / "normalized.jsonl"
+    normalize_codex_events(
+        raw_events_path=raw,
+        normalized_events_path=normalized,
+        raw_ts_iter=iter(
+            [
+                "2026-02-01T00:00:00+00:00",
+                "2026-02-01T00:00:05+00:00",
+            ]
+        ),
+        workspace_root=tmp_path,
+    )
+
+    events = list(iter_events_jsonl(normalized))
+    assert [e.get("ts") for e in events] == [
+        "2026-02-01T00:00:00+00:00",
+        "2026-02-01T00:00:05+00:00",
+        "2026-02-01T00:00:05+00:00",
+    ]
