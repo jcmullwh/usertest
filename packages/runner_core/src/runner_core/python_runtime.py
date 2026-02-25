@@ -395,6 +395,105 @@ def probe_pytest_module(
     }
 
 
+def probe_pip_module(
+    *,
+    python_executable: str,
+    cwd: Path,
+    timeout_seconds: float = 6.0,
+) -> dict[str, Any]:
+    """
+    Probe `python -m pip --version`, capturing stdout/stderr for actionable diagnostics.
+    """
+
+    argv = [python_executable, "-m", "pip", "--version"]
+    stdout_text = ""
+    stderr_text = ""
+    exit_code = 0
+    timed_out = False
+    exception: str | None = None
+
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(cwd),
+            timeout=max(0.1, float(timeout_seconds)),
+            check=False,
+        )
+        exit_code = int(proc.returncode or 0)
+        stdout_text = proc.stdout or ""
+        stderr_text = proc.stderr or ""
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        exit_code = 124
+        if isinstance(exc.stdout, bytes):
+            stdout_text = exc.stdout.decode("utf-8", "replace")
+        else:
+            stdout_text = exc.stdout or ""
+        if isinstance(exc.stderr, bytes):
+            stderr_text = exc.stderr.decode("utf-8", "replace")
+        else:
+            stderr_text = exc.stderr or ""
+    except OSError as exc:
+        exception = str(exc)
+        exit_code = 1
+
+    merged = "\n".join(value for value in (stderr_text, stdout_text, exception) if value).strip()
+    lowered = merged.lower()
+    reason_code: str | None = None
+    remediation: str | None = None
+
+    if timed_out:
+        reason_code = "timeout"
+        remediation = "The interpreter or pip import is hanging. Verify the selected Python."
+    elif exception is not None:
+        reason_code = "launch_failed"
+        remediation = (
+            "Python executable could not be launched. "
+            "Install/select a full CPython interpreter (not WindowsApps alias), then retry."
+        )
+    elif exit_code != 0:
+        if "no module named pip" in lowered or ("modulenotfounderror" in lowered and "pip" in lowered):
+            reason_code = "pip_missing"
+            remediation = (
+                "Bootstrap pip for this interpreter (try): "
+                f"{python_executable} -m ensurepip --upgrade"
+            )
+        elif "access is denied" in lowered or "permission denied" in lowered:
+            reason_code = "access_denied"
+            remediation = (
+                "The selected interpreter cannot be spawned in this environment. "
+                "Avoid WindowsApps aliases; install CPython and ensure it is executable."
+            )
+        else:
+            reason_code = "pip_probe_failed"
+            remediation = "Inspect stdout/stderr and ensure pip is available for this interpreter."
+
+    def _tail(text: str, *, max_chars: int = 2000) -> str:
+        cleaned = (text or "").strip()
+        if len(cleaned) <= max_chars:
+            return cleaned
+        return cleaned[-max_chars:]
+
+    return {
+        "command": "python -m pip --version",
+        "argv": argv,
+        "python_executable": python_executable,
+        "cwd": str(cwd),
+        "passed": bool(exit_code == 0 and not timed_out and exception is None),
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "reason_code": reason_code,
+        "remediation": remediation,
+        "stdout_tail": _tail(stdout_text),
+        "stderr_tail": _tail(stderr_text),
+        "exception": exception,
+    }
+
+
 _VERIFICATION_PYTEST_CMD_PATTERN = re.compile(r"^(?:&\s*)?pytest(\s|$)", re.IGNORECASE)
 _VERIFICATION_PYTEST_MODULE_PATTERN = re.compile(r"(?:^|\s)-m\s+pytest(?:\s|$)", re.IGNORECASE)
 _VERIFICATION_INSTALL_PATTERN = re.compile(

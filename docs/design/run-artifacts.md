@@ -31,7 +31,7 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
   mission.resolved.md
   preflight.json
   verification_config.json            # only when --verify-command is configured
-  verification.json                   # only when verification ran (schema-valid attempt)
+  verification.json                   # always (records pass/fail/skip for selected attempt)
   verification_errors.json            # only when verification failed
   verification/                       # only when verification ran
     attempt1/
@@ -109,7 +109,7 @@ Files that are conditionally present:
 - `error.json`: present when run failed (preflight, adapter execution, or other fatal error path).
 - `preflight.json`: present when preflight phase executed (normal path before adapter run).
 - `verification_config.json`: present when verification commands are configured.
-- `verification.json`: present when verification ran for the selected attempt (schema-valid agent output).
+- `verification.json`: always present; when verification did not run it records `skipped`/`skip_reason`.
 - `verification_errors.json`: present when verification failed (even if agent exit code is zero).
 - `verification/*`: per-attempt verification logs (`cmd_*.stdout.txt` / `cmd_*.stderr.txt`).
 - `command_failures/*`: per-failure artifacts for agent-executed shell commands (`command.json`,

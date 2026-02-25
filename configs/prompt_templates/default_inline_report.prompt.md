@@ -19,6 +19,10 @@ ${mission_md}
 ${policy_json}
 ```
 
+## Preflight summary
+
+${preflight_summary_md}
+
 ## Environment
 
 ```json

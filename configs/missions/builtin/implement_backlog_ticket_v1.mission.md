@@ -19,6 +19,9 @@ Implement the requested change described in the backlog ticket.
 The ticket content is provided as "append system prompt" text and is saved as `append_system_prompt.md`
 in the workspace root (the agent working directory). Treat it as the source-of-truth requirements for this run.
 
+If `append_system_prompt.md` is missing or unreadable, do **not** spend time scanning the repo for it: the full
+ticket text is already included in this prompt as append system prompt content. Proceed using that text.
+
 ## Approach
 
 1) Read the ticket carefully and restate the concrete requirements.

@@ -25,6 +25,10 @@ ${mission_md}
 ${policy_json}
 ```
 
+## Preflight summary
+
+${preflight_summary_md}
+
 ## Environment
 
 ```json
@@ -35,6 +39,9 @@ ${environment_json}
 
 - Prefer the environment's file/directory tools for repo inspection (read/search/list) over launching shell commands when possible.
 - When using `run_shell_command`, use syntax compatible with the execution shell family in `environment.execution_backend.shell` (bash vs PowerShell). Example: bash `export FOO=bar`; PowerShell `$env:FOO='bar'`.
+- PowerShell (Windows): assume PowerShell 5.1 compatibility unless the environment explicitly says otherwise (no `&&` / `||`). Run commands separately, or check `$LASTEXITCODE` after each native command and `exit $LASTEXITCODE` on failure.
+- Ripgrep: when searching for a literal pattern that begins with `-`, pass `--` to end option parsing (example: `rg -n -- "--skip-install" README.md`).
+- Ripgrep: exit code `1` means "no matches found" (not necessarily a tool failure).
 - Avoid heredocs (for example `<<EOF ... EOF`) in `run_shell_command`; they may be rejected by sandbox policy. For multiline content, prefer `write_file` / `replace`.
 - Before inspecting a specific subpath, confirm it exists (use `environment.preflight.workspace_root_snapshot` and/or list parent directories first).
 - On Windows PowerShell, prefer `-LiteralPath` for paths that contain `{` or `}` (for example Cookiecutter template paths).
