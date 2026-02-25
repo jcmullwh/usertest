@@ -108,6 +108,11 @@ Run this first in any setup path:
 
 `python tools/scaffold/scaffold.py doctor`
 
+Convenience wrappers:
+
+- Windows PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`
+- macOS/Linux: `bash ./scripts/doctor.sh`
+
 ### One copy-paste smoke command per OS
 
 These commands are self-contained (no implicit prior shell state) and enforce non-zero exit on
