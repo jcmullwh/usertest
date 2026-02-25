@@ -150,6 +150,14 @@ def test_normalize_gemini_events_merges_delta_messages(tmp_path: Path) -> None:
     normalize_gemini_events(
         raw_events_path=raw,
         normalized_events_path=normalized,
+        raw_ts_iter=iter(
+            [
+                "2026-02-01T00:00:00+00:00",
+                "2026-02-01T00:00:01+00:00",
+                "2026-02-01T00:00:02+00:00",
+                "2026-02-01T00:00:03+00:00",
+            ]
+        ),
         workspace_root=tmp_path,
     )
 
@@ -157,3 +165,7 @@ def test_normalize_gemini_events_merges_delta_messages(tmp_path: Path) -> None:
     msgs = [e for e in events if e["type"] == "agent_message"]
     assert len(msgs) == 1
     assert msgs[0].get("data", {}).get("text") == "ab"
+    assert msgs[0].get("ts") == "2026-02-01T00:00:01+00:00"
+    commands = [e for e in events if e["type"] == "run_command"]
+    assert len(commands) == 1
+    assert commands[0].get("ts") == "2026-02-01T00:00:03+00:00"
