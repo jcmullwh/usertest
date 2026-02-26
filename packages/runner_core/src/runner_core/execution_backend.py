@@ -42,6 +42,27 @@ _DEFAULT_DOCKER_CONTEXT_REL = Path(
 )
 
 
+def _default_sandbox_env_overrides(
+    *,
+    cache_mode: Literal["cold", "warm"],
+) -> dict[str, str]:
+    """
+    Ensure common tooling (pip/pytest/build backends) uses a writable temp root inside the sandbox.
+
+    This is especially important for editable installs (`pip install -e ...`) where pip's temp
+    build-tracker directories can fail if TMP/TMPDIR resolve to a read-only path in a sandboxed
+    filesystem.
+    """
+
+    pip_cache_dir = "/cache/pip" if cache_mode == "warm" else "/tmp/usertest-pip-cache"
+    return {
+        "TMPDIR": "/tmp",
+        "TMP": "/tmp",
+        "TEMP": "/tmp",
+        "PIP_CACHE_DIR": pip_cache_dir,
+    }
+
+
 def _copy_builtin_sandbox_cli_context_from_resources(*, run_dir: Path) -> Path | None:
     """
     Copy the built-in sandbox_cli Docker context shipped with the `sandbox_runner` package into
@@ -190,6 +211,7 @@ def prepare_execution_backend(
         cache_mode=cache_mode_typed,
         cache_dir=cache_dir.resolve() if cache_dir is not None else None,
         env_allowlist=env_allowlist,
+        env_overrides=_default_sandbox_env_overrides(cache_mode=cache_mode_typed),
         extra_mounts=extra_mounts,
         keep_container=keep_container,
         rebuild_image=rebuild_image,

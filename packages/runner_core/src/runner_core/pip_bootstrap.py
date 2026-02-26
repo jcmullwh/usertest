@@ -389,10 +389,35 @@ def bootstrap_pip_requirements(
     base_env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
     base_env["PIP_NO_INPUT"] = "1"
 
+    temp_root = run_dir / "tmp"
+    temp_root_str: str | None = None
+    try:
+        temp_root.mkdir(parents=True, exist_ok=True)
+        temp_root_str = str(temp_root)
+        # Ensure pip/pytest subprocesses use a guaranteed-writable temp root. This mitigates
+        # sandboxed / enterprise Windows environments where the default temp directory can be
+        # non-writable (e.g., pip build-tracker / editable install failures).
+        base_env["TMPDIR"] = temp_root_str
+        base_env["TMP"] = temp_root_str
+        base_env["TEMP"] = temp_root_str
+    except OSError:
+        temp_root_str = None
+
+    if temp_root_str is not None:
+        log_lines.append(f"temp_root={temp_root_str}")
+        log_lines.append(f"TMPDIR={base_env.get('TMPDIR', '')}")
+        log_lines.append(f"TMP={base_env.get('TMP', '')}")
+        log_lines.append(f"TEMP={base_env.get('TEMP', '')}")
+        log_lines.append("")
+
     def _run_pip(argv: list[str], *, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
         return _run_logged(argv, cwd=workspace_dir, env=env, log=log_lines)
 
-    with tempfile.TemporaryDirectory(prefix="usertest_pip_home_") as td:
+    td_kwargs: dict[str, str] = {}
+    if temp_root_str is not None:
+        td_kwargs["dir"] = temp_root_str
+
+    with tempfile.TemporaryDirectory(prefix="usertest_pip_home_", **td_kwargs) as td:
         home = Path(td)
         # pip supports netrc for HTTP basic auth; create both names for Windows safety.
         if gitlab_index_url is not None:

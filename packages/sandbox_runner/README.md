@@ -91,6 +91,7 @@ finally:
 
 - `SandboxSpec`
   - describes backend (`docker`) and image/build settings
+  - `env_overrides` can force specific env vars inside the container (e.g., `TMPDIR`, `PIP_CACHE_DIR`)
 - `MountSpec`
   - host → container mounts, with `read_only` support
 - `ResourceSpec`
