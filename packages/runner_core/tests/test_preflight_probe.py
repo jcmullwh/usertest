@@ -557,7 +557,9 @@ def test_run_once_emits_suggested_command_when_mission_requires_shell(tmp_path: 
     assert isinstance(suggested_command, str)
     assert "--policy inspect" in suggested_command
     assert "--mission-id test_requires_shell_no_edits" in suggested_command
-    assert any(
+    assert "Recommended next command:" in result.report_validation_errors
+    assert suggested_command in result.report_validation_errors
+    assert not any(
         isinstance(line, str) and line.startswith("suggested_command=")
         for line in result.report_validation_errors
     )

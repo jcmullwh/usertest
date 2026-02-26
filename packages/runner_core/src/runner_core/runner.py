@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import time
 import traceback
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from json import JSONDecoder
@@ -1869,6 +1870,107 @@ def _infer_shell_policy_status(
     )
 
 
+def _policy_allows_edits(*, agent: str, policy_cfg: dict[str, Any]) -> bool:
+    agent_cfg = policy_cfg.get(agent, {})
+    agent_cfg = agent_cfg if isinstance(agent_cfg, dict) else {}
+    return bool(agent_cfg.get("allow_edits", False))
+
+
+def _policy_allows_shell(
+    *,
+    agent: str,
+    policy_cfg: dict[str, Any],
+    exec_backend: str,
+) -> bool:
+    claude_policy = policy_cfg.get("claude", {})
+    claude_policy = claude_policy if isinstance(claude_policy, dict) else {}
+
+    gemini_policy = policy_cfg.get("gemini", {})
+    gemini_policy = gemini_policy if isinstance(gemini_policy, dict) else {}
+
+    status, _reason, _allowed_tools = _infer_shell_policy_status(
+        agent=agent,
+        claude_policy=claude_policy,
+        gemini_policy=gemini_policy,
+        has_outer_sandbox=(str(exec_backend) == "docker"),
+    )
+    return status == "allowed"
+
+
+def _recommended_shell_policy_and_exec_backend(
+    *,
+    policies: dict[str, Any],
+    agent: str,
+    requires_edits: bool,
+    current_policy: str,
+    current_exec_backend: str,
+) -> tuple[str, str] | None:
+    """
+    Suggest a single policy/exec-backend combination expected to satisfy:
+    - shell commands available (for the selected agent)
+    - edits allowed if the mission requires edits
+    """
+
+    policies_dict: dict[str, dict[str, Any]] = {}
+    for name, cfg in (policies or {}).items():
+        if isinstance(name, str) and name.strip() and isinstance(cfg, dict):
+            policies_dict[name] = cfg
+
+    if not policies_dict:
+        return None
+
+    exec_backend_norm = str(current_exec_backend or "local").strip() or "local"
+    exec_backend_candidates: list[str] = [exec_backend_norm]
+    if exec_backend_norm != "docker" and _docker_exec_backend_available():
+        exec_backend_candidates.append("docker")
+
+    baseline_policy = "write" if requires_edits else "inspect"
+
+    def policy_satisfies(*, policy_name: str, exec_backend: str) -> bool:
+        policy_cfg = policies_dict.get(policy_name)
+        if not isinstance(policy_cfg, dict):
+            return False
+        if requires_edits and not _policy_allows_edits(agent=agent, policy_cfg=policy_cfg):
+            return False
+        if not _policy_allows_shell(agent=agent, policy_cfg=policy_cfg, exec_backend=exec_backend):
+            return False
+        return True
+
+    policy_name_order: list[str] = []
+    if isinstance(current_policy, str) and current_policy.strip():
+        policy_name_order.append(current_policy.strip())
+    if baseline_policy not in policy_name_order:
+        policy_name_order.append(baseline_policy)
+    if not requires_edits and "write" not in policy_name_order:
+        policy_name_order.append("write")
+    for name in sorted(policies_dict):
+        if name not in policy_name_order:
+            policy_name_order.append(name)
+
+    for exec_backend in exec_backend_candidates:
+        if not requires_edits:
+            for policy_name in policy_name_order:
+                if not policy_satisfies(policy_name=policy_name, exec_backend=exec_backend):
+                    continue
+                policy_cfg = policies_dict.get(policy_name, {})
+                if not _policy_allows_edits(agent=agent, policy_cfg=policy_cfg):
+                    return policy_name, exec_backend
+            for policy_name in policy_name_order:
+                if policy_satisfies(policy_name=policy_name, exec_backend=exec_backend):
+                    return policy_name, exec_backend
+            continue
+
+        for policy_name in policy_name_order:
+            if policy_satisfies(policy_name=policy_name, exec_backend=exec_backend):
+                return policy_name, exec_backend
+
+    return None
+
+
+def _format_usertest_rerun_command(argv: Sequence[str]) -> str:
+    return shlex.join([str(x) for x in argv])
+
+
 def _resolve_agent_prompt_input_path(*, raw: Path, repo_root: Path, workspace_dir: Path) -> Path:
     if raw.is_absolute():
         candidate = raw
@@ -3176,26 +3278,36 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
 
         if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
-            suggested_policy = (
-                "write" if bool(resolved_inputs.mission.requires_edits) else "inspect"
-            )
+            requires_edits = bool(resolved_inputs.mission.requires_edits)
+
+            suggested_policy = "write" if requires_edits else "inspect"
             suggested_exec_backend = str(request.exec_backend or "local").strip() or "local"
+            suggested = _recommended_shell_policy_and_exec_backend(
+                policies=config.policies,
+                agent=request.agent,
+                requires_edits=requires_edits,
+                current_policy=request.policy,
+                current_exec_backend=str(request.exec_backend or "local"),
+            )
+            if suggested is not None:
+                suggested_policy, suggested_exec_backend = suggested
 
             gemini_local_sandbox_available = True
-            if request.agent == "gemini" and suggested_exec_backend == "local":
+            if request.agent == "gemini" and str(request.exec_backend) == "local":
                 gemini_local_sandbox_available = _effective_gemini_cli_sandbox(
                     policy_value=gemini_policy.get("sandbox", True),
                     has_outer_sandbox=False,
                 )
-                if not gemini_local_sandbox_available:
-                    suggested_exec_backend = "docker"
 
             blocked_by_backend = (
                 request.agent == "gemini"
+                and str(request.exec_backend) == "local"
                 and isinstance(allowed_tools, list)
                 and "run_shell_command" in allowed_tools
                 and not gemini_local_sandbox_available
             )
+            if blocked_by_backend and suggested_exec_backend == "local":
+                suggested_exec_backend = "docker"
 
             if blocked_by_backend:
                 message = (
@@ -3204,7 +3316,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "(Gemini sandbox disabled/unavailable)."
                 )
                 hint = "Rerun with `--exec-backend docker` (recommended)."
-                if bool(resolved_inputs.mission.requires_edits) and not allow_edits:
+                if requires_edits and not allow_edits:
                     suggested_policy = "write"
                 else:
                     suggested_policy = request.policy
@@ -3221,7 +3333,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 if suggested_exec_backend == "docker" and str(request.exec_backend) == "local":
                     hint = f"{hint} Also add `--exec-backend docker`."
 
-            suggested_command_parts: list[str] = [
+            suggested_command_argv: list[str] = [
                 "python",
                 "-m",
                 "usertest.cli",
@@ -3229,22 +3341,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 "--repo-root",
                 ".",
                 "--repo",
-                json.dumps(request.repo, ensure_ascii=False),
+                str(request.repo),
                 "--agent",
-                request.agent,
+                str(request.agent),
                 "--policy",
-                suggested_policy,
+                str(suggested_policy),
             ]
             if request.ref:
-                ref_json = json.dumps(request.ref, ensure_ascii=False)
-                suggested_command_parts.extend(["--ref", ref_json])
+                suggested_command_argv.extend(["--ref", str(request.ref)])
             if effective_spec.persona_id:
-                suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
+                suggested_command_argv.extend(["--persona-id", str(effective_spec.persona_id)])
             if effective_spec.mission_id:
-                suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
+                suggested_command_argv.extend(["--mission-id", str(effective_spec.mission_id)])
             if suggested_exec_backend != "local":
-                suggested_command_parts.extend(["--exec-backend", suggested_exec_backend])
-            suggested_command = " ".join(suggested_command_parts)
+                suggested_command_argv.extend(["--exec-backend", str(suggested_exec_backend)])
+            suggested_command = _format_usertest_rerun_command(suggested_command_argv)
             _write_json(
                 run_dir / "preflight.json",
                 {
@@ -3295,8 +3406,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 report_validation_errors=[
                     message,
                     "code=mission_requires_shell",
-                    f"hint={hint}",
-                    f"suggested_command={suggested_command}",
+                    "Recommended next command:",
+                    suggested_command,
                 ],
             )
 
