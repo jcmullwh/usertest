@@ -441,7 +441,15 @@ def _run_manifest_task(
     if task_name != "install" or not _is_pdm_install_command(cmd):
         return _run(cmd, cwd=cwd)
 
-    first = _run(cmd, cwd=cwd, capture=True)
+    env = dict(os.environ)
+    # Some environments (including certain containerized/CI setups) disallow creating symlinks inside bind mounts.
+    # PDM's default `venv.backend=virtualenv` may attempt to symlink the interpreter into the venv, which fails with
+    # `PermissionError: [Errno 1] Operation not permitted`.
+    #
+    # `virtualenv` honors `VIRTUALENV_COPIES=1` and will copy instead of symlinking, making installs more reliable.
+    env.setdefault("VIRTUALENV_COPIES", "1")
+
+    first = _run(cmd, cwd=cwd, capture=True, env=env)
     _emit_captured_process_output(first)
     if first.returncode == 0:
         return first
@@ -456,7 +464,7 @@ def _run_manifest_task(
         "WARNING: transient PDM local-path resolution failure detected for "
         f"project '{project_id}'. Retrying install once."
     )
-    second = _run(cmd, cwd=cwd, capture=True)
+    second = _run(cmd, cwd=cwd, capture=True, env=env)
     _emit_captured_process_output(second)
     return second
 

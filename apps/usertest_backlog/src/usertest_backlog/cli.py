@@ -34,17 +34,18 @@ except ModuleNotFoundError as exc:
 
 def _from_source_import_remediation(*, missing_module: str) -> str:
     return (
-        f"Missing import `{missing_module}`.\n"
-        "This usually means you're running from source without editable installs or PYTHONPATH.\n"
-        "\n"
-        "Fix (from repo root):\n"
-        "  python -m pip install -r requirements-dev.txt\n"
-        "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
-        "  macOS/Linux: source scripts/set_pythonpath.sh\n"
-        "\n"
-        "Or install editables (recommended):\n"
-        "  python -m pip install -e apps/usertest_backlog\n"
+        f"Missing import `{missing_module}`. "
+        "Hint: from repo root, run `source scripts/set_pythonpath.sh` (macOS/Linux) "
+        "or `. .\\scripts\\set_pythonpath.ps1` (PowerShell); "
+        "or install deps: `python -m pip install -r requirements-dev.txt && pip install -e apps/usertest_backlog`."
     )
+
+
+def _is_missing_module(exc: ModuleNotFoundError, module: str) -> bool:
+    name = getattr(exc, "name", None)
+    if not name:
+        return False
+    return name == module or name.startswith(f"{module}.")
 
 
 try:
@@ -56,7 +57,7 @@ try:
         write_backlog_atoms,
     )
 except ModuleNotFoundError as exc:
-    if exc.name == "backlog_core":
+    if _is_missing_module(exc, "backlog_core"):
         raise SystemExit(_from_source_import_remediation(missing_module="backlog_core")) from exc
     raise
 
@@ -64,7 +65,7 @@ try:
     from backlog_core.aggregate_metrics import build_aggregate_metrics_atoms
     from backlog_core.backlog_policy import BacklogPolicyConfig, apply_backlog_policy
 except ModuleNotFoundError as exc:
-    if exc.name == "backlog_core":
+    if _is_missing_module(exc, "backlog_core"):
         raise SystemExit(_from_source_import_remediation(missing_module="backlog_core")) from exc
     raise
 
@@ -76,7 +77,7 @@ try:
         run_labeler_jobs,
     )
 except ModuleNotFoundError as exc:
-    if exc.name == "backlog_miner":
+    if _is_missing_module(exc, "backlog_miner"):
         raise SystemExit(_from_source_import_remediation(missing_module="backlog_miner")) from exc
     raise
 
@@ -116,7 +117,7 @@ try:
     )
     from backlog_repo.export import ticket_export_fingerprint
 except ModuleNotFoundError as exc:
-    if exc.name == "backlog_repo":
+    if _is_missing_module(exc, "backlog_repo"):
         raise SystemExit(_from_source_import_remediation(missing_module="backlog_repo")) from exc
     raise
 
@@ -128,7 +129,7 @@ try:
         write_window_summary,
     )
 except ModuleNotFoundError as exc:
-    if exc.name == "reporter":
+    if _is_missing_module(exc, "reporter"):
         raise SystemExit(_from_source_import_remediation(missing_module="reporter")) from exc
     raise
 
@@ -140,7 +141,7 @@ try:
         write_report_history_jsonl,
     )
 except ModuleNotFoundError as exc:
-    if exc.name == "run_artifacts":
+    if _is_missing_module(exc, "run_artifacts"):
         raise SystemExit(_from_source_import_remediation(missing_module="run_artifacts")) from exc
     raise
 
@@ -149,14 +150,14 @@ try:
     from runner_core.pathing import slugify
     from runner_core.target_acquire import acquire_target
 except ModuleNotFoundError as exc:
-    if exc.name == "runner_core":
+    if _is_missing_module(exc, "runner_core"):
         raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
     raise
 
 try:
     from triage_engine import cluster_items, extract_path_anchors_from_chunks
 except ModuleNotFoundError as exc:
-    if exc.name == "triage_engine":
+    if _is_missing_module(exc, "triage_engine"):
         raise SystemExit(_from_source_import_remediation(missing_module="triage_engine")) from exc
     raise
 
