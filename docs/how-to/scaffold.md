@@ -20,7 +20,12 @@ For the full reference (generators, trust model, vendoring), see `tools/scaffold
 python tools/scaffold/scaffold.py doctor
 ```
 
-This checks the manifest and verifies required tools for recorded projects.
+This checks Python + temp directory health, verifies `python -m pip`, and checks required tools for recorded projects.
+If your environment intentionally does not ship `pip` (pre-provisioned dependencies), you can run:
+
+```bash
+python tools/scaffold/scaffold.py doctor --allow-missing-pip
+```
 
 ---
 

@@ -24,6 +24,9 @@ These run a deterministic checklist used in onboarding and CI verification:
 If `pdm` is not installed, the smoke scripts still run doctor in “tool checks skipped” mode
 (`python tools/scaffold/scaffold.py doctor --skip-tool-checks`).
 
+If your environment intentionally does not ship `pip`, both `doctor.sh` and `doctor.ps1` support
+passing through `--allow-missing-pip` / `-AllowMissingPip`.
+
 Use strict preflight mode when needed:
 
 - `smoke.sh --require-doctor`
