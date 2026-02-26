@@ -441,27 +441,7 @@ def _run_manifest_task(
     if task_name != "install" or not _is_pdm_install_command(cmd):
         return _run(cmd, cwd=cwd)
 
-    # In some container/workspace mounts, `virtualenv`/PDM can fail when it tries to symlink the base interpreter
-    # into an in-project venv (PermissionError / Operation not permitted). Force copies to keep `scaffold run ... install`
-    # reliable in restricted filesystems.
-    env = dict(os.environ)
-    env.setdefault("VIRTUALENV_ALWAYS_COPY", "1")
-    if "XDG_CACHE_HOME" not in env:
-        pdm_cache = Path.home() / ".cache" / "pdm"
-        cache_is_broken = False
-        try:
-            if pdm_cache.is_symlink() and not pdm_cache.exists():
-                cache_is_broken = True
-            elif pdm_cache.exists() and not pdm_cache.is_dir():
-                cache_is_broken = True
-        except OSError:
-            cache_is_broken = True
-        if cache_is_broken:
-            cache_home = Path(tempfile.gettempdir()) / "scaffold_xdg_cache"
-            cache_home.mkdir(parents=True, exist_ok=True)
-            env["XDG_CACHE_HOME"] = str(cache_home)
-
-    first = _run(cmd, cwd=cwd, env=env, capture=True)
+    first = _run(cmd, cwd=cwd, capture=True)
     _emit_captured_process_output(first)
     if first.returncode == 0:
         return first
@@ -476,7 +456,7 @@ def _run_manifest_task(
         "WARNING: transient PDM local-path resolution failure detected for "
         f"project '{project_id}'. Retrying install once."
     )
-    second = _run(cmd, cwd=cwd, env=env, capture=True)
+    second = _run(cmd, cwd=cwd, capture=True)
     _emit_captured_process_output(second)
     return second
 
