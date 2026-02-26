@@ -2421,6 +2421,7 @@ def _run_verification_commands(
             isinstance(c, str)
             and c.strip()
             and c.strip().replace("\\", "/").lower().startswith("bash ")
+            and not _looks_like_verification_rejection_sentinel(c)
             for c in commands
         ):
             windows_bash_probe = _probe_windows_bash_usable()
