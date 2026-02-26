@@ -2,11 +2,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from runner_core import find_repo_root
-
 
 def test_smoke_scripts_exist_and_enforce_expected_contract() -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = Path(__file__).resolve().parents[3]
     scripts = [
         repo_root / "scripts" / "smoke.ps1",
         repo_root / "scripts" / "smoke.sh",
@@ -22,6 +20,7 @@ def test_smoke_scripts_exist_and_enforce_expected_contract() -> None:
         assert "apps/usertest_backlog/tests/test_smoke.py" in text
         assert "packages/run_artifacts" in text
         assert "pip install -U pdm" in text
+        assert "tools/smoke_import_guard.py" in text
 
         if path.name == "smoke.sh":
             assert "Smoke preflight failed:" in text

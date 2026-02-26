@@ -203,6 +203,26 @@ try {
         . (Join-Path $PSScriptRoot 'set_pythonpath.ps1')
     }
 
+    Write-Host '==> Import-origin guard smoke'
+    & $pythonCmd tools/smoke_import_guard.py --repo-root $repoRoot
+    $guardRc = $LASTEXITCODE
+    if ($guardRc -ne 0) {
+        if (-not $UsePythonPath) {
+            Write-Host "==> WARNING: 'usertest' did not import from this workspace; switching to PYTHONPATH mode."
+            Write-Host '    (This commonly happens when another checkout is installed editable in the same interpreter.)'
+            Write-Host '==> Configure PYTHONPATH via scripts/set_pythonpath.ps1'
+            $UsePythonPath = $true
+            . (Join-Path $PSScriptRoot 'set_pythonpath.ps1') -RepoRoot $repoRoot
+            & $pythonCmd tools/smoke_import_guard.py --repo-root $repoRoot
+            if ($LASTEXITCODE -ne 0) {
+                exit $LASTEXITCODE
+            }
+        }
+        else {
+            exit $guardRc
+        }
+    }
+
     if ($SkipInstall) {
         Invoke-SmokeImportPreflight -PythonCmd $pythonCmd
     }
