@@ -33,7 +33,16 @@ VENV_DIR="${REPO_ROOT}/.venv"
 VENV_PY="${VENV_DIR}/bin/python"
 if [[ ! -x "${VENV_PY}" ]]; then
   echo "==> Create venv (.venv)"
-  "${PYTHON_BIN}" -m venv "${VENV_DIR}"
+  venv_out=""
+  if ! venv_out="$("${PYTHON_BIN}" -m venv "${VENV_DIR}" 2>&1)"; then
+    echo "${venv_out}" >&2
+    echo "==> WARNING: could not create ${VENV_DIR} (symlinks may be blocked on this filesystem)." >&2
+    echo "==> Falling back to a temp venv under /tmp (this does not modify your global Python)." >&2
+    rm -rf "${VENV_DIR}"
+    VENV_DIR="$(mktemp -d -t usertest_venv_XXXXXX)"
+    "${PYTHON_BIN}" -m venv "${VENV_DIR}"
+    VENV_PY="${VENV_DIR}/bin/python"
+  fi
 fi
 if [[ ! -x "${VENV_PY}" ]]; then
   echo "Failed to create venv at ${VENV_DIR}" >&2

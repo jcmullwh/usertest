@@ -15,6 +15,28 @@ The runner can drive multiple agent CLIs (Codex, Claude Code, Gemini) in headles
 
 ---
 
+## Quickstart (one command)
+
+Run the offline-safe “first success” script (creates a local `.venv`, installs minimal deps, sets `PYTHONPATH`, and re-renders a golden fixture report — **no agents**, **no network calls**):
+
+- **Windows PowerShell:**
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1
+  ```
+- **macOS / Linux:**
+  ```bash
+  bash ./scripts/offline_first_success.sh
+  ```
+
+Success signal: prints a “Scratch run dir” path containing a freshly re-rendered `report.md`.
+
+## Developer smoke (one command, optional)
+
+For a deterministic end-to-end sanity check (doctor -> deps -> CLI help -> pytest smoke suite):
+
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1`
+- **macOS / Linux:** `bash ./scripts/smoke.sh`
+
 ## What you get
 
 Each run writes a folder under `runs/usertest/…` with:
@@ -82,16 +104,7 @@ To understand what a run produces without installing anything, open the checked-
 
 ### One-command "from source" verification
 
-If you haven't set up a Python environment for this repo yet, use the one-command scripts to verify everything is working. They create a local `.venv`, install minimal dependencies, configure `PYTHONPATH`, and render a report from a golden fixture. These scripts do **not** execute any agents or make network calls:
-
-- **Windows PowerShell:**
-  ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1
-  ```
-- **macOS / Linux:**
-  ```bash
-  bash ./scripts/offline_first_success.sh
-  ```
+See “Quickstart (one command)” above.
 
 ---
 
@@ -136,19 +149,7 @@ Useful helpers:
 
 ## One-command smoke (recommended for developers)
 
-For a fast, deterministic end-to-end sanity check (doctor -> deps -> CLI help -> smoke tests), use the OS-specific smoke script:
-
-Windows PowerShell:
-
-```text
-powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1
-```
-
-macOS/Linux:
-
-```text
-bash ./scripts/smoke.sh
-```
+See “Developer smoke (one command, optional)” above.
 
 ---
 

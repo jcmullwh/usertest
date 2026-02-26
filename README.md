@@ -32,6 +32,28 @@ Once we have all of those target issues, we need to implement them.
 - Use the same mechanisms as usertest and usertest-backlog to generate a PR.
 - Track metrics on the implementers to identify rising complexity and tech debt.
 
+## Quickstart (one command)
+
+Run the offline-safe “first success” script (creates a local `.venv`, installs minimal deps, sets `PYTHONPATH`, and re-renders a golden fixture report — **no agents**, **no network calls**):
+
+- **Windows PowerShell:**
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1
+  ```
+- **macOS / Linux:**
+  ```bash
+  bash ./scripts/offline_first_success.sh
+  ```
+
+Success signal: prints a “Scratch run dir” path containing a freshly re-rendered `report.md`.
+
+## Developer smoke (one command, optional)
+
+For a deterministic end-to-end sanity check (doctor -> deps -> CLI help -> pytest smoke suite):
+
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1`
+- **macOS / Linux:** `bash ./scripts/smoke.sh`
+
 ## Start here
 
 - **Docs hub:** `docs/README.md`
@@ -49,16 +71,7 @@ Open the checked-in golden fixture artifacts directly (no Python deps required):
 
 ### One-command "from source" verification
 
-If you haven't set up a Python environment for this repo yet, use the one-command scripts to verify everything is working. They create a local `.venv`, install minimal dependencies, configure `PYTHONPATH`, and render a report from a golden fixture. These scripts do **not** execute any agents or make network calls:
-
-- **Windows PowerShell:**
-  ```powershell
-  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1
-  ```
-- **macOS / Linux:**
-  ```bash
-  bash ./scripts/offline_first_success.sh
-  ```
+See “Quickstart (one command)” above.
 
 ### Running from source (manual)
 
