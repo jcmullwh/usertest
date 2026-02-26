@@ -211,3 +211,85 @@ def test_gemini_system_prompt_append_is_composed_into_replacement_file(tmp_path:
     )
     assert result.exit_code == 0
     assert not result.report_validation_errors
+
+
+def test_gemini_system_prompt_append_without_base_prompt_fails_preflight(tmp_path: Path) -> None:
+    runner_root = tmp_path / "runner_root"
+    runner_root.mkdir(parents=True, exist_ok=True)
+
+    target = tmp_path / "target"
+    target.mkdir()
+    _write(target / "README.md", "# hi\n")
+
+    invoked_marker = tmp_path / "invoked.txt"
+    invoked_marker_json = json.dumps(str(invoked_marker), ensure_ascii=False)
+    dummy_script = tmp_path / "dummy_gemini.py"
+    dummy_script.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "from pathlib import Path",
+                "",
+                "",
+                "def main() -> int:",
+                f"    Path({invoked_marker_json}).write_text('yes')",
+                "    return 0",
+                "",
+                "",
+                "if __name__ == '__main__':",
+                "    raise SystemExit(main())",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    if os.name == "nt":
+        wrapper = tmp_path / "dummy_gemini.cmd"
+        wrapper.write_text(
+            "\n".join(
+                [
+                    "@echo off",
+                    f"\"{sys.executable}\" \"{dummy_script}\" %*",
+                    "exit /b %ERRORLEVEL%",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        dummy_binary = str(wrapper)
+    else:
+        wrapper = tmp_path / "dummy_gemini.sh"
+        wrapper.write_text(
+            f"#!/bin/sh\nexec \"{sys.executable}\" \"{dummy_script}\" \"$@\"\n",
+            encoding="utf-8",
+        )
+        wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+        dummy_binary = str(wrapper)
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"gemini": {"binary": dummy_binary, "output_format": "json"}},
+        policies={"safe": {"gemini": {"sandbox": False, "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="gemini",
+            policy="safe",
+            agent_append_system_prompt="APPEND",
+        ),
+    )
+    assert result.exit_code == 1
+    assert (result.run_dir / "error.json").exists()
+    payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert payload["type"] == "AgentPreflightFailed"
+    assert payload["code"] == "gemini_system_prompt_append_unsupported"
+    assert "--agent-system-prompt-file" in payload["message"] or "--agent-system-prompt-file" in (
+        payload.get("hint") or ""
+    )
+    assert not invoked_marker.exists()
