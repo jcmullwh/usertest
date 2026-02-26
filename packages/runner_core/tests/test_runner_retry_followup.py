@@ -467,6 +467,63 @@ def test_run_once_verification_gate_triggers_followup_until_checks_pass(
     assert "required verification checks failed" in prompts_text
 
 
+def test_run_once_verification_rejection_sentinel_fails_fast_without_followup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    state_file = tmp_path / "attempt_state_rejected_sentinel.txt"
+    prompts_file = tmp_path / "prompts_rejected_sentinel.log"
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "always_success")
+    monkeypatch.setenv("DUMMY_PROMPTS_FILE", str(prompts_file))
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=0,
+            agent_followup_attempts=2,
+            verification_commands=("rejected",),
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert result.report_validation_errors
+    assert any(
+        "verification_rejected_sentinel" in str(line) for line in result.report_validation_errors
+    )
+
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert len(attempts["attempts"]) == 1
+    verification = attempts["attempts"][0].get("verification")
+    assert isinstance(verification, dict)
+    assert verification.get("status") == "rejected_sentinel"
+    assert verification.get("rejected_sentinel") is True
+    assert attempts["attempts"][0].get("followup_scheduled") is not True
+
+    prompts_text = prompts_file.read_text(encoding="utf-8")
+    assert "Follow-up required." not in prompts_text
+
+    error_payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error_payload.get("type") == "VerificationRejectedSentinel"
+    assert error_payload.get("code") == "verification_rejected_sentinel"
+
+
 def test_run_once_verification_followup_runs_even_with_codex_personality_warning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

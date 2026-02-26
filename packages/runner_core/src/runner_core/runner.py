@@ -2656,6 +2656,20 @@ def _run_verification_commands(
     return summary
 
 
+def _first_verification_rejection_sentinel(
+    verification_summary: dict[str, Any],
+) -> dict[str, Any] | None:
+    commands = verification_summary.get("commands")
+    if not isinstance(commands, list):
+        return None
+    for item in commands:
+        if not isinstance(item, dict):
+            continue
+        if item.get("rejected_sentinel") is True:
+            return item
+    return None
+
+
 def _utc_now_z() -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -4673,6 +4687,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             verification_seconds_total = 0.0
             report_json = None
             report_validation_errors = []
+            forced_exit_code: int | None = None
 
             while True:
                 attempt_number = len(attempts_meta) + 1
@@ -4752,6 +4767,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
                 attempt_verification_summary: dict[str, Any] | None = None
                 attempt_verification_passed = True
+                attempt_verification_rejected_sentinel = False
+                attempt_verification_rejected_sentinel_command: str | None = None
                 attempt_verification_errors: list[str] = []
                 attempt_verification_summary_path: Path | None = None
                 if (
@@ -4787,7 +4804,79 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             run_dir / Path(artifacts_dir) / "verification.json"
                         )
 
-                    if not attempt_verification_passed:
+                    rejected_sentinel = _first_verification_rejection_sentinel(
+                        attempt_verification_summary
+                    )
+                    if rejected_sentinel is not None:
+                        attempt_verification_passed = False
+                        attempt_verification_rejected_sentinel = True
+                        forced_exit_code = 1
+                        cmd = rejected_sentinel.get("command")
+                        if isinstance(cmd, str) and cmd.strip():
+                            attempt_verification_rejected_sentinel_command = cmd.strip()
+                        effective_cmd = rejected_sentinel.get("effective_command")
+                        effective_cmd_s = (
+                            effective_cmd.strip()
+                            if isinstance(effective_cmd, str) and effective_cmd.strip()
+                            else None
+                        )
+                        exit_code = rejected_sentinel.get("exit_code")
+                        exit_code_i = exit_code if isinstance(exit_code, int) else None
+                        stderr_tail = rejected_sentinel.get("stderr_tail")
+                        stderr_tail_s = (
+                            stderr_tail.strip()
+                            if isinstance(stderr_tail, str) and stderr_tail.strip()
+                            else None
+                        )
+
+                        attempt_verification_errors = [
+                            "verification_rejected_sentinel",
+                            "code=verification_rejected_sentinel",
+                        ]
+                        if isinstance(artifacts_dir, str) and artifacts_dir.strip():
+                            attempt_verification_errors.append(
+                                f"artifacts_dir={artifacts_dir.strip()}"
+                            )
+                        if attempt_verification_rejected_sentinel_command is not None:
+                            attempt_verification_errors.append(
+                                f"command={attempt_verification_rejected_sentinel_command}"
+                            )
+                        if effective_cmd_s is not None:
+                            attempt_verification_errors.append(
+                                f"effective_command={effective_cmd_s}"
+                            )
+                        if exit_code_i is not None:
+                            attempt_verification_errors.append(f"exit_code={exit_code_i}")
+
+                        _write_json(
+                            run_dir / "error.json",
+                            {
+                                "type": "VerificationRejectedSentinel",
+                                "subtype": "rejection_sentinel",
+                                "code": "verification_rejected_sentinel",
+                                "message": (
+                                    "Verification command dispatch blocked: received rejection "
+                                    "sentinel forwarded as a command. This indicates a tool/policy "
+                                    "rejection was incorrectly serialized into the shell command "
+                                    "stream; the command was not executed."
+                                ),
+                                "attempt": attempt_number,
+                                "verification": {
+                                    "summary_path": (
+                                        str(Path(artifacts_dir.strip()) / "verification.json")
+                                        if isinstance(artifacts_dir, str)
+                                        and artifacts_dir.strip()
+                                        else None
+                                    ),
+                                    "command": attempt_verification_rejected_sentinel_command,
+                                    "effective_command": effective_cmd_s,
+                                    "exit_code": exit_code_i,
+                                    "stderr_tail": stderr_tail_s,
+                                    "command_prefix": list(command_prefix),
+                                },
+                            },
+                        )
+                    elif not attempt_verification_passed:
                         attempt_verification_errors = [
                             "verification_failed",
                             f"artifacts_dir={artifacts_dir}",
@@ -4843,11 +4932,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 else (
                                     "skipped_report_invalid"
                                     if attempt_report_validation_errors
-                                    else ("passed" if attempt_verification_passed else "failed")
+                                    else (
+                                        "rejected_sentinel"
+                                        if attempt_verification_rejected_sentinel
+                                        else ("passed" if attempt_verification_passed else "failed")
+                                    )
                                 )
                             )
                         ),
                         "passed": attempt_verification_passed if verification_commands else None,
+                        "rejected_sentinel": attempt_verification_rejected_sentinel
+                        if verification_commands
+                        else None,
+                        "rejected_command": attempt_verification_rejected_sentinel_command
+                        if attempt_verification_rejected_sentinel
+                        else None,
                         "summary_path": verification_summary_path,
                     },
                     "raw_events_path": raw_events_attempt_path.name,
@@ -4892,6 +4991,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     and not attempt_report_validation_errors
                     and attempt_verification_summary is not None
                     and not attempt_verification_passed
+                    and not attempt_verification_rejected_sentinel
                     and followup_count < followup_attempts
                     and attempt_last_text.strip()
                 ):
@@ -5324,9 +5424,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         )
         (run_dir / "report.md").write_text(md, encoding="utf-8", newline="\n")
 
+        final_exit_code = agent_exit_code
+        if final_exit_code == 0 and forced_exit_code is not None:
+            final_exit_code = int(forced_exit_code)
+
         return RunResult(
             run_dir=run_dir,
-            exit_code=agent_exit_code,
+            exit_code=final_exit_code,
             report_validation_errors=report_validation_errors,
         )
     except Exception as e:  # noqa: BLE001
