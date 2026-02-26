@@ -300,12 +300,32 @@ def _try_parse_json_blob(text: str) -> Any | None:
         return None
 
 
+def _try_parse_json_anywhere(text: str) -> Any | None:
+    cleaned = text.strip()
+    if not cleaned:
+        return None
+
+    decoder = json.JSONDecoder()
+    for idx, char in enumerate(cleaned):
+        if char not in "{[":
+            continue
+        try:
+            parsed, _ = decoder.raw_decode(cleaned[idx:])
+        except Exception:  # noqa: BLE001
+            continue
+        if isinstance(parsed, (dict, list)):
+            return parsed
+    return None
+
+
 def _normalize_signal_text(*, source: str, text: str) -> tuple[str, str | None]:
     cleaned = text.strip()
     if not cleaned:
         return "", None
 
     parsed = _try_parse_json_blob(cleaned)
+    if parsed is None and source == "agent_last_message":
+        parsed = _try_parse_json_anywhere(cleaned)
     if source == "agent_last_message" and isinstance(parsed, dict):
         if {"schema_version", "persona", "mission"}.issubset(set(parsed)):
             recommendation = None

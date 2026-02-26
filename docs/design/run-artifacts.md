@@ -86,9 +86,11 @@ runs/usertest/project_scaffold/20260214T201500Z/codex/0/
 Offline reference fixtures (minimal / synthetic):
 
 - `examples/golden_runs/minimal_*_run/` provides minimal sanitized run directories used in tests.
-  These fixtures are **not** full “normal operation” runs; they intentionally omit many artifacts
-  that exist in real runs (for example `effective_run_spec.json`, persona/mission markdown,
-  `preflight.json`, sandbox diagnostics, and per-attempt artifacts). Each fixture directory
+  These fixtures are **not** full “normal operation” runs; they are small, synthetic samples.
+  They include lightweight stubs for many stable artifacts (for example `effective_run_spec.json`,
+  `prompt.template.md`, `agent_attempts.json`, `agent_stderr.txt`, `run_meta.json`, and
+  `verification.json`) but intentionally omit heavier and/or sensitive artifacts like
+  `preflight.json`, `sandbox/` diagnostics, and per-attempt subdirectories. Each fixture directory
   includes `FIXTURE_NOTICE.md` describing what is intentionally missing.
 
 ## File-level contract
