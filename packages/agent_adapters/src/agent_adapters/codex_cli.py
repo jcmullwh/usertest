@@ -68,7 +68,8 @@ def validate_codex_personality_config_overrides(
     Validate Codex config overrides for personality/model_messages consistency.
 
     Codex warns and silently falls back to base instructions when personality is requested but
-    model_messages is absent.
+    model_messages is absent. The runner treats this as an invalid configuration to keep behavior
+    deterministic.
     """
 
     overrides = [item for item in config_overrides if isinstance(item, str)]
@@ -106,7 +107,7 @@ def validate_codex_personality_config_overrides(
         return CodexPersonalityConfigIssue(
             message=(
                 "Codex personality was requested but model_messages is missing. "
-                "Codex will warn and fall back to base instructions."
+                "This runner will fail fast to avoid silently falling back to base instructions."
             ),
             hint=(
                 "Add model_messages in configs/agents.yaml agents.codex.config_overrides "

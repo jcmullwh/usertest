@@ -454,7 +454,7 @@ def test_run_once_fails_fast_when_agent_auth_missing(
     assert expected_env_var in str(hints.get("env", ""))
 
 
-def test_run_once_warns_when_codex_personality_missing_model_messages(tmp_path: Path) -> None:
+def test_run_once_fails_when_codex_personality_missing_model_messages(tmp_path: Path) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
     target = tmp_path / "target_repo"
     target.mkdir()
@@ -476,16 +476,16 @@ def test_run_once_warns_when_codex_personality_missing_model_messages(tmp_path: 
 
     result = run_once(cfg, RunRequest(repo=str(target), agent="codex", policy="write"))
 
-    assert result.exit_code == 0
-    assert result.report_validation_errors == []
-    payload = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
-    warnings = payload.get("warnings", [])
-    assert isinstance(warnings, list)
+    assert result.exit_code == 1
     assert any(
-        w.get("code") == "codex_model_messages_missing"
-        for w in warnings
-        if isinstance(w, dict)
+        "code=codex_model_messages_missing" in str(line)
+        for line in result.report_validation_errors
     )
+
+    payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert payload.get("type") == "AgentPreflightFailed"
+    assert payload.get("subtype") == "invalid_agent_config"
+    assert payload.get("code") == "codex_model_messages_missing"
 
 
 def test_run_once_fails_fast_when_shell_blocked_in_inspect_policy(tmp_path: Path) -> None:
