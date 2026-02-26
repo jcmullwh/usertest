@@ -10,7 +10,7 @@ import shutil
 import subprocess
 import time
 import traceback
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from json import JSONDecoder
 from pathlib import Path
@@ -1234,6 +1234,67 @@ def _effective_gemini_cli_sandbox(*, policy_value: Any, has_outer_sandbox: bool)
     return True
 
 
+def _gemini_shell_unavailable_reason(*, policy_value: Any, has_outer_sandbox: bool) -> str:
+    """
+    Render a user-facing reason when Gemini `run_shell_command` is enabled but shell execution
+    cannot be provided by either an outer sandbox (runner docker backend) or Gemini's own sandbox.
+    """
+
+    if has_outer_sandbox:
+        return "Gemini shell commands are unavailable: outer sandbox is expected but missing."
+
+    enabled = bool(policy_value) if isinstance(policy_value, bool) else True
+    if not enabled:
+        if _is_windows():
+            return (
+                "run_shell_command requested, but Gemini shell is unavailable under "
+                "`--exec-backend local` on Windows (Gemini sandbox is disabled). "
+                "Use `--exec-backend docker`."
+            )
+        return (
+            "run_shell_command requested, but Gemini sandbox is disabled (gemini.sandbox=false). "
+            "Use `--exec-backend docker` (recommended) or enable gemini.sandbox."
+        )
+
+    try:
+        if Path("/.dockerenv").exists():
+            return (
+                "run_shell_command requested, but Gemini sandbox is unavailable because the "
+                "runner is already inside a container (nested sandbox is disabled). "
+                "Use `--exec-backend docker`."
+            )
+    except OSError:
+        pass
+
+    if _is_windows():
+        return (
+            "run_shell_command requested, but Gemini sandbox is unavailable on Windows for "
+            "headless runs. Use `--exec-backend docker`."
+        )
+
+    return (
+        "run_shell_command requested, but Gemini sandbox is disabled/unavailable. "
+        "Use `--exec-backend docker` (recommended) or enable gemini.sandbox."
+    )
+
+
+def _docker_exec_backend_available() -> bool:
+    docker = shutil.which("docker")
+    if docker is None:
+        return False
+    try:
+        proc = subprocess.run(
+            [docker, "version"],
+            capture_output=True,
+            text=True,
+            timeout=3,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return False
+    return proc.returncode == 0
+
+
 def _gemini_include_directories_for_workspace(*, workspace_dir: Path) -> list[str]:
     """
     Gemini CLI may apply gitignore-like "ignore patterns" to file tools (read/search), which can
@@ -1663,8 +1724,10 @@ def _infer_shell_policy_status(
             return (
                 "blocked",
                 (
-                    "run_shell_command requested, but Gemini sandbox is disabled/unavailable. "
-                    "Use --exec-backend docker (recommended) or enable gemini.sandbox."
+                    _gemini_shell_unavailable_reason(
+                        policy_value=gemini_policy.get("sandbox", True),
+                        has_outer_sandbox=has_outer_sandbox,
+                    )
                 ),
                 allowed_tools,
             )
@@ -2819,19 +2882,85 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             gemini_policy=gemini_policy,
             has_outer_sandbox=(request.exec_backend == "docker"),
         )
+
+        if (
+            request.agent == "gemini"
+            and bool(resolved_inputs.mission.requires_shell)
+            and str(request.exec_backend) == "local"
+            and shell_status == "blocked"
+            and isinstance(allowed_tools, list)
+            and "run_shell_command" in allowed_tools
+        ):
+            effective_gemini_sandbox = _effective_gemini_cli_sandbox(
+                policy_value=gemini_policy.get("sandbox", True),
+                has_outer_sandbox=False,
+            )
+            if not effective_gemini_sandbox and _docker_exec_backend_available():
+                preflight_warnings.append(
+                    {
+                        "code": "gemini_exec_backend_autoselected",
+                        "agent": request.agent,
+                        "message": (
+                            "Mission requires shell commands, but Gemini sandbox is unavailable "
+                            "under `--exec-backend local`; auto-selecting `--exec-backend docker`."
+                        ),
+                        "details": {"from": "local", "to": "docker"},
+                    }
+                )
+                request = replace(request, exec_backend="docker")
+                shell_status, shell_reason, allowed_tools = _infer_shell_policy_status(
+                    agent=request.agent,
+                    claude_policy=claude_policy,
+                    gemini_policy=gemini_policy,
+                    has_outer_sandbox=True,
+                )
+
         if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
             suggested_policy = (
                 "write" if bool(resolved_inputs.mission.requires_edits) else "inspect"
             )
-            message = (
-                f"Mission '{effective_spec.mission_id}' requires shell commands, but "
-                f"policy '{request.policy}' for agent '{request.agent}' blocks shell commands."
+            suggested_exec_backend = str(request.exec_backend or "local").strip() or "local"
+
+            gemini_local_sandbox_available = True
+            if request.agent == "gemini" and suggested_exec_backend == "local":
+                gemini_local_sandbox_available = _effective_gemini_cli_sandbox(
+                    policy_value=gemini_policy.get("sandbox", True),
+                    has_outer_sandbox=False,
+                )
+                if not gemini_local_sandbox_available:
+                    suggested_exec_backend = "docker"
+
+            blocked_by_backend = (
+                request.agent == "gemini"
+                and isinstance(allowed_tools, list)
+                and "run_shell_command" in allowed_tools
+                and not gemini_local_sandbox_available
             )
-            hint = (
-                "Use --policy write (allows edits + shell)."
-                if suggested_policy == "write"
-                else "Use --policy inspect (read-only + shell)."
-            )
+
+            if blocked_by_backend:
+                message = (
+                    f"Mission '{effective_spec.mission_id}' requires shell commands, but "
+                    "Gemini shell execution is unavailable under `--exec-backend local` "
+                    "(Gemini sandbox disabled/unavailable)."
+                )
+                hint = "Rerun with `--exec-backend docker` (recommended)."
+                if bool(resolved_inputs.mission.requires_edits) and not allow_edits:
+                    suggested_policy = "write"
+                else:
+                    suggested_policy = request.policy
+            else:
+                message = (
+                    f"Mission '{effective_spec.mission_id}' requires shell commands, but "
+                    f"policy '{request.policy}' for agent '{request.agent}' blocks shell commands."
+                )
+                hint = (
+                    "Use `--policy write` (allows edits + shell)."
+                    if suggested_policy == "write"
+                    else "Use `--policy inspect` (read-only + shell)."
+                )
+                if suggested_exec_backend == "docker" and str(request.exec_backend) == "local":
+                    hint = f"{hint} Also add `--exec-backend docker`."
+
             suggested_command_parts: list[str] = [
                 "python",
                 "-m",
@@ -2853,8 +2982,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
             if effective_spec.mission_id:
                 suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
-            if request.exec_backend != "local":
-                suggested_command_parts.extend(["--exec-backend", request.exec_backend])
+            if suggested_exec_backend != "local":
+                suggested_command_parts.extend(["--exec-backend", suggested_exec_backend])
             suggested_command = " ".join(suggested_command_parts)
             _write_json(
                 run_dir / "preflight.json",
@@ -2958,10 +3087,51 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
 
         if request.policy in {"inspect", "write"} and shell_status == "blocked":
-            message = (
-                f"Policy '{request.policy}' for agent '{request.agent}' blocks shell commands. "
-                "Fix configs/policies.yaml or pick a policy that enables shell command execution."
-            )
+            hint: str | None = None
+            suggested_command: str | None = None
+            if (
+                request.agent == "gemini"
+                and str(request.exec_backend) == "local"
+                and isinstance(allowed_tools, list)
+                and "run_shell_command" in allowed_tools
+            ):
+                message = (
+                    f"Policy '{request.policy}' enables Gemini shell commands, but shell "
+                    "execution is unavailable under `--exec-backend local` "
+                    "(Gemini sandbox disabled/unavailable)."
+                )
+                hint = "Rerun with `--exec-backend docker` (recommended)."
+                suggested_command_parts: list[str] = [
+                    "python",
+                    "-m",
+                    "usertest.cli",
+                    "run",
+                    "--repo-root",
+                    ".",
+                    "--repo",
+                    json.dumps(request.repo, ensure_ascii=False),
+                    "--agent",
+                    request.agent,
+                    "--policy",
+                    request.policy,
+                    "--exec-backend",
+                    "docker",
+                ]
+                if request.ref:
+                    suggested_command_parts.extend(
+                        ["--ref", json.dumps(request.ref, ensure_ascii=False)]
+                    )
+                if effective_spec.persona_id:
+                    suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
+                if effective_spec.mission_id:
+                    suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
+                suggested_command = " ".join(suggested_command_parts)
+            else:
+                message = (
+                    f"Policy '{request.policy}' for agent '{request.agent}' blocks shell "
+                    "commands. Fix configs/policies.yaml or pick a policy that enables shell "
+                    "command execution."
+                )
             _write_json(
                 run_dir / "preflight.json",
                 {
@@ -2989,6 +3159,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "agent": request.agent,
                     "capability": "shell_commands",
                     "message": message,
+                    **({"hint": hint} if hint else {}),
+                    **(
+                        {"suggested_command": suggested_command}
+                        if suggested_command
+                        else {}
+                    ),
                     "preflight": {
                         "capabilities": {
                             "shell_commands": {
@@ -3316,9 +3492,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 shell_available = (sandbox is not None) or effective_gemini_sandbox
                 if shell_enabled and not shell_available:
                     shell_status = "blocked"
-                    shell_reason = (
-                        "run_shell_command requested, but Gemini sandbox is disabled/unavailable. "
-                        "Use --exec-backend docker (recommended) or enable gemini.sandbox."
+                    shell_reason = _gemini_shell_unavailable_reason(
+                        policy_value=gemini_policy.get("sandbox", True),
+                        has_outer_sandbox=(sandbox is not None),
                     )
                 else:
                     shell_status = "allowed" if shell_enabled else "blocked"
@@ -3551,15 +3727,48 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 suggested_policy = (
                     "write" if bool(resolved_inputs.mission.requires_edits) else "inspect"
                 )
-                message = (
-                    f"Mission '{effective_spec.mission_id}' requires shell commands, but "
-                    f"policy '{request.policy}' for agent '{request.agent}' blocks shell commands."
+                suggested_exec_backend = str(request.exec_backend or "local").strip() or "local"
+
+                gemini_local_sandbox_available = True
+                if request.agent == "gemini" and suggested_exec_backend == "local":
+                    gemini_local_sandbox_available = _effective_gemini_cli_sandbox(
+                        policy_value=gemini_policy.get("sandbox", True),
+                        has_outer_sandbox=False,
+                    )
+                    if not gemini_local_sandbox_available:
+                        suggested_exec_backend = "docker"
+
+                blocked_by_backend = (
+                    request.agent == "gemini"
+                    and isinstance(allowed_tools, list)
+                    and "run_shell_command" in allowed_tools
+                    and not gemini_local_sandbox_available
                 )
-                hint = (
-                    "Use --policy write (allows edits + shell)."
-                    if suggested_policy == "write"
-                    else "Use --policy inspect (read-only + shell)."
-                )
+
+                if blocked_by_backend:
+                    message = (
+                        f"Mission '{effective_spec.mission_id}' requires shell commands, but "
+                        "Gemini shell execution is unavailable under `--exec-backend local` "
+                        "(Gemini sandbox disabled/unavailable)."
+                    )
+                    hint = "Rerun with `--exec-backend docker` (recommended)."
+                    if bool(resolved_inputs.mission.requires_edits) and not allow_edits:
+                        suggested_policy = "write"
+                    else:
+                        suggested_policy = request.policy
+                else:
+                    message = (
+                        f"Mission '{effective_spec.mission_id}' requires shell commands, but "
+                        f"policy '{request.policy}' for agent '{request.agent}' "
+                        "blocks shell commands."
+                    )
+                    hint = (
+                        "Use `--policy write` (allows edits + shell)."
+                        if suggested_policy == "write"
+                        else "Use `--policy inspect` (read-only + shell)."
+                    )
+                    if suggested_exec_backend == "docker" and str(request.exec_backend) == "local":
+                        hint = f"{hint} Also add `--exec-backend docker`."
                 suggested_command_parts: list[str] = [
                     "python",
                     "-m",
@@ -3581,8 +3790,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
                 if effective_spec.mission_id:
                     suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
-                if request.exec_backend != "local":
-                    suggested_command_parts.extend(["--exec-backend", request.exec_backend])
+                if suggested_exec_backend != "local":
+                    suggested_command_parts.extend(["--exec-backend", suggested_exec_backend])
                 suggested_command = " ".join(suggested_command_parts)
                 _write_json(
                     run_dir / "error.json",
@@ -3652,11 +3861,55 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
 
             if request.policy in {"inspect", "write"} and shell_status == "blocked":
-                message = (
-                    f"Policy '{request.policy}' for agent '{request.agent}' blocks shell commands. "
-                    "Fix configs/policies.yaml or pick a policy that enables "
-                    "shell command execution."
-                )
+                hint: str | None = None
+                suggested_command: str | None = None
+                if (
+                    request.agent == "gemini"
+                    and str(request.exec_backend) == "local"
+                    and isinstance(allowed_tools, list)
+                    and "run_shell_command" in allowed_tools
+                ):
+                    message = (
+                        f"Policy '{request.policy}' enables Gemini shell commands, but shell "
+                        "execution is unavailable under `--exec-backend local` "
+                        "(Gemini sandbox disabled/unavailable)."
+                    )
+                    hint = "Rerun with `--exec-backend docker` (recommended)."
+                    suggested_command_parts: list[str] = [
+                        "python",
+                        "-m",
+                        "usertest.cli",
+                        "run",
+                        "--repo-root",
+                        ".",
+                        "--repo",
+                        json.dumps(request.repo, ensure_ascii=False),
+                        "--agent",
+                        request.agent,
+                        "--policy",
+                        request.policy,
+                        "--exec-backend",
+                        "docker",
+                    ]
+                    if request.ref:
+                        suggested_command_parts.extend(
+                            ["--ref", json.dumps(request.ref, ensure_ascii=False)]
+                        )
+                    if effective_spec.persona_id:
+                        suggested_command_parts.extend(
+                            ["--persona-id", effective_spec.persona_id]
+                        )
+                    if effective_spec.mission_id:
+                        suggested_command_parts.extend(
+                            ["--mission-id", effective_spec.mission_id]
+                        )
+                    suggested_command = " ".join(suggested_command_parts)
+                else:
+                    message = (
+                        f"Policy '{request.policy}' for agent '{request.agent}' blocks shell "
+                        "commands. Fix configs/policies.yaml or pick a policy that enables shell "
+                        "command execution."
+                    )
                 _write_json(
                     run_dir / "error.json",
                     {
@@ -3665,6 +3918,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "agent": request.agent,
                         "capability": "shell_commands",
                         "message": message,
+                        **({"hint": hint} if hint else {}),
+                        **(
+                            {"suggested_command": suggested_command}
+                            if suggested_command
+                            else {}
+                        ),
                         "preflight": {
                             "capabilities": {
                                 "shell_commands": {
