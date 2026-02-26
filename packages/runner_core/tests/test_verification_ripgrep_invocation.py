@@ -35,7 +35,12 @@ def test_verification_ripgrep_inserts_e_for_unexpected_leading_dash_pattern_on_w
         calls.append(list(argv))
         if argv and argv[0] == "rg" and "-e" not in argv:
             token = next((t for t in argv[1:] if t.startswith("--")), argv[1])
-            return _Proc(argv, returncode=2, stdout="", stderr=_ripgrep_unexpected_arg_stderr(token))
+            return _Proc(
+                argv,
+                returncode=2,
+                stdout="",
+                stderr=_ripgrep_unexpected_arg_stderr(token),
+            )
         return _Proc(argv, returncode=0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(runner_mod.subprocess, "run", _fake_run)
@@ -80,7 +85,12 @@ def test_verification_ripgrep_inserts_e_inside_docker_command_prefix(
         inner = argv[rg_idx:]
         if "-e" not in inner:
             token = next((t for t in inner[1:] if t.startswith("--")), inner[1])
-            return _Proc(argv, returncode=2, stdout="", stderr=_ripgrep_unexpected_arg_stderr(token))
+            return _Proc(
+                argv,
+                returncode=2,
+                stdout="",
+                stderr=_ripgrep_unexpected_arg_stderr(token),
+            )
         return _Proc(argv, returncode=0, stdout="ok\n", stderr="")
 
     monkeypatch.setattr(runner_mod.subprocess, "run", _fake_run)
@@ -103,4 +113,3 @@ def test_verification_ripgrep_inserts_e_inside_docker_command_prefix(
     cmd0 = summary["commands"][0]
     assert cmd0["argv"] == calls[1]
     assert cmd0["rewritten"] is True
-
