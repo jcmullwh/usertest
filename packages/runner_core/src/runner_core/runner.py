@@ -1902,6 +1902,106 @@ def _verification_shell_argv(*, command_prefix: list[str], command: str) -> list
     return ["sh", "-lc", command]
 
 
+_VERIFICATION_SHELL_CONTROL_TOKENS: frozenset[str] = frozenset(
+    {
+        "|",
+        "||",
+        "&&",
+        ";",
+        "<",
+        ">",
+        ">>",
+        "2>",
+        "2>>",
+        "1>",
+        "1>>",
+        "&>",
+    }
+)
+
+_RIPGREP_UNEXPECTED_ARGUMENT_RE = re.compile(
+    r"Found argument '([^']+)' which wasn't expected",
+    re.IGNORECASE,
+)
+
+
+def _split_verification_command(command: str, *, prefer_posix: bool) -> list[str]:
+    posix_order = (True, False) if prefer_posix else (False, True)
+    for posix in posix_order:
+        try:
+            return shlex.split(command, posix=posix)
+        except ValueError:
+            continue
+    return command.split()
+
+
+def _looks_like_ripgrep_argv(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    exe = str(argv[0] or "").replace("\\", "/").strip()
+    if not exe:
+        return False
+    base = exe.rsplit("/", 1)[-1].lower()
+    return base in {"rg", "rg.exe"}
+
+
+def _maybe_prepare_ripgrep_direct_exec(
+    *,
+    command_prefix: list[str],
+    command: str,
+) -> tuple[list[str], list[str]] | None:
+    prefer_posix = bool(command_prefix) or (not _is_windows())
+    parsed = _split_verification_command(command, prefer_posix=prefer_posix)
+    if not _looks_like_ripgrep_argv(parsed):
+        return None
+    if any(token in _VERIFICATION_SHELL_CONTROL_TOKENS for token in parsed[1:]):
+        # This looks like it relies on a shell (pipes, redirects, chaining).
+        return None
+    return command_prefix, parsed
+
+
+def _maybe_rewrite_ripgrep_unexpected_argument(
+    *,
+    argv: list[str],
+    stderr_text: str,
+) -> tuple[list[str], dict[str, Any]] | None:
+    """
+    If ripgrep treated a leading-dash pattern as an option and errored, retry by inserting
+    `-e` immediately before the unexpected token.
+
+    This enables patterns like `--skip-install` and `--skip-install|--use-pythonpath` to be
+    treated as patterns, not flags.
+    """
+
+    if not argv:
+        return None
+    if "-e" in argv or "--regexp" in argv or "--" in argv:
+        return None
+
+    match = _RIPGREP_UNEXPECTED_ARGUMENT_RE.search(stderr_text or "")
+    if match is None:
+        return None
+    token = match.group(1)
+    if not token or not token.startswith("-"):
+        return None
+
+    try:
+        idx = argv.index(token)
+    except ValueError:
+        return None
+    if idx == 0:
+        return None
+
+    rewritten = [*argv[:idx], "-e", token, *argv[idx + 1 :]]
+    meta: dict[str, Any] = {
+        "kind": "ripgrep_unexpected_argument_to_regexp",
+        "token": token,
+        "original_argv": list(argv),
+        "rewritten_argv": list(rewritten),
+    }
+    return rewritten, meta
+
+
 _VERIFICATION_REJECTION_SENTINELS: frozenset[str] = frozenset({"rejected"})
 
 
@@ -2207,6 +2307,7 @@ def _run_verification_commands(
         stderr_text = ""
         exit_code: int = 0
         argv: list[str] | None = None
+        ripgrep_rewritten = False
 
         if rejected_sentinel:
             exit_code = 126
@@ -2218,21 +2319,75 @@ def _run_verification_commands(
                 "executing it.\n"
             )
         else:
-            argv = _verification_shell_argv(command_prefix=command_prefix, command=effective_cmd)
             try:
-                proc = subprocess.run(
-                    argv,
-                    capture_output=True,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    cwd=str(cwd),
-                    check=False,
-                    timeout=timeout_seconds,
+                direct = _maybe_prepare_ripgrep_direct_exec(
+                    command_prefix=command_prefix,
+                    command=effective_cmd,
                 )
-                exit_code = int(proc.returncode or 0)
-                stdout_text = proc.stdout or ""
-                stderr_text = proc.stderr or ""
+                if direct is not None:
+                    prefix, inner_argv = direct
+                    argv = [*prefix, *inner_argv]
+                    proc = subprocess.run(
+                        argv,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        cwd=str(cwd),
+                        check=False,
+                        timeout=timeout_seconds,
+                    )
+                    exit_code = int(proc.returncode or 0)
+                    stdout_text = proc.stdout or ""
+                    stderr_text = proc.stderr or ""
+
+                    if exit_code != 0:
+                        retry = _maybe_rewrite_ripgrep_unexpected_argument(
+                            argv=inner_argv,
+                            stderr_text=stderr_text,
+                        )
+                        if retry is not None:
+                            rewritten_inner, rg_meta = retry
+                            argv = [*prefix, *rewritten_inner]
+                            proc = subprocess.run(
+                                argv,
+                                capture_output=True,
+                                text=True,
+                                encoding="utf-8",
+                                errors="replace",
+                                cwd=str(cwd),
+                                check=False,
+                                timeout=timeout_seconds,
+                            )
+                            exit_code = int(proc.returncode or 0)
+                            stdout_text = proc.stdout or ""
+                            stderr_text = proc.stderr or ""
+                            ripgrep_rewritten = True
+                            if rewrite_meta is None:
+                                rewrite_meta = rg_meta
+                            else:
+                                rewrite_meta = {
+                                    "kind": "multi",
+                                    "rewrites": [rewrite_meta, rg_meta],
+                                }
+                else:
+                    argv = _verification_shell_argv(
+                        command_prefix=command_prefix,
+                        command=effective_cmd,
+                    )
+                    proc = subprocess.run(
+                        argv,
+                        capture_output=True,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        cwd=str(cwd),
+                        check=False,
+                        timeout=timeout_seconds,
+                    )
+                    exit_code = int(proc.returncode or 0)
+                    stdout_text = proc.stdout or ""
+                    stderr_text = proc.stderr or ""
             except subprocess.TimeoutExpired as exc:
                 timed_out = True
                 exit_code = 124
@@ -2247,6 +2402,9 @@ def _run_verification_commands(
                 stderr_text = (stderr_text.rstrip() + "\n" if stderr_text else "") + (
                     f"[runner] Verification command timed out after {timeout_seconds} seconds.\n"
                 )
+
+        if ripgrep_rewritten:
+            rewritten = True
 
         wall_seconds = max(0.0, time.monotonic() - cmd_started_monotonic)
         try:
