@@ -287,6 +287,23 @@ class DockerSandbox:
                 raise ValueError("cache_mode='warm' requires spec.cache_dir.")
             cache_mount = "/cache"
             spec.cache_dir.mkdir(parents=True, exist_ok=True)
+
+            # Best-effort: create a minimal cache directory layout expected by the
+            # built-in sandbox_cli image.
+            #
+            # The sandbox_cli Dockerfile links common tool caches to:
+            #   /cache/pip
+            #   /cache/pdm
+            #   /cache/pdm-share
+            # If these targets don't exist in a fresh host cache dir, some tools can
+            # mis-handle the symlink path and error.
+            for rel in ("pip", "pdm", "pdm-share"):
+                try:
+                    (spec.cache_dir / rel).mkdir(parents=True, exist_ok=True)
+                except OSError:
+                    # If we can't create these directories (permissions, etc), proceed.
+                    # The container may still be able to create what it needs.
+                    pass
             mounts.append(
                 MountSpec(
                     host_path=spec.cache_dir.resolve(),
