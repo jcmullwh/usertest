@@ -160,6 +160,13 @@ _FAILURE_SUBTYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "provider_quota_exceeded",
+        (
+            re.compile(r"out of extra usage", re.IGNORECASE),
+            re.compile(r"extra usage.*\bresets?\b", re.IGNORECASE),
+        ),
+    ),
+    (
         "provider_capacity",
         (
             re.compile(r"\b429\b", re.IGNORECASE),
@@ -232,6 +239,7 @@ _NON_RETRYABLE_PROVIDER_CAPACITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"insufficient[_ -]?quota", re.IGNORECASE),
     re.compile(r"quota exceeded", re.IGNORECASE),
     re.compile(r"hit your limit", re.IGNORECASE),
+    re.compile(r"out of extra usage", re.IGNORECASE),
     re.compile(r"billing", re.IGNORECASE),
     re.compile(r"payment required", re.IGNORECASE),
     re.compile(r"upgrade (plan|account)", re.IGNORECASE),
@@ -273,6 +281,61 @@ _GEMINI_METRICS_RECORDING_LINE_RE = re.compile(
     ),
     re.IGNORECASE,
 )
+
+_CLAUDE_OUT_OF_EXTRA_USAGE_RE = re.compile(r"out of extra usage", re.IGNORECASE)
+_CLAUDE_RESET_EXTRACT_RE = re.compile(
+    r"\bresets?\b[: ]+(?P<when>.+)",
+    re.IGNORECASE,
+)
+_CLAUDE_IANA_TZ_IN_PARENS_RE = re.compile(r"\((?P<tz>[A-Za-z_]+/[A-Za-z_]+)\)")
+
+
+def _extract_claude_quota_exhaustion(text: str) -> dict[str, Any] | None:
+    if not isinstance(text, str) or not text.strip():
+        return None
+    if not _CLAUDE_OUT_OF_EXTRA_USAGE_RE.search(text):
+        return None
+
+    reset_raw: str | None = None
+    m = _CLAUDE_RESET_EXTRACT_RE.search(text)
+    if m is not None:
+        candidate = m.group("when").strip()
+        reset_raw = candidate if candidate else None
+
+    tz: str | None = None
+    for source in (reset_raw, text):
+        if not source:
+            continue
+        tz_m = _CLAUDE_IANA_TZ_IN_PARENS_RE.search(source)
+        if tz_m is not None:
+            tz = tz_m.group("tz")
+            break
+
+    return {
+        "provider": "claude",
+        "reason": "out_of_extra_usage",
+        "reset_raw": reset_raw,
+        "reset_timezone": tz,
+    }
+
+
+def _format_claude_quota_exhaustion_stderr(
+    *,
+    provider_message: str,
+    reset_raw: str | None,
+    reset_timezone: str | None,
+) -> str:
+    lines: list[str] = [
+        "[agent_quota_exceeded] Claude quota/usage exhausted (out of extra usage).",
+    ]
+    if isinstance(reset_raw, str) and reset_raw.strip():
+        lines.append(f"reset_time={reset_raw.strip()}")
+    if isinstance(reset_timezone, str) and reset_timezone.strip():
+        lines.append(f"reset_timezone={reset_timezone.strip()}")
+    lines.append("hint=Retry after the reset time or reduce usage/concurrency.")
+    if provider_message.strip():
+        lines.extend(["", "[provider_message]", provider_message.strip()])
+    return "\n".join(lines).strip()
 _GEMINI_PROVIDER_CAPACITY_MODEL_RE = re.compile(
     r"No capacity available for model\s+(?P<model>[A-Za-z0-9_.:-]+)",
     re.IGNORECASE,
@@ -4948,7 +5011,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             last_message_truncated = False
             if len(last_message_excerpt) > 4000:
                 last_message_excerpt = last_message_excerpt[:4000] + "\n...[truncated]..."
-            last_message_truncated = True
+                last_message_truncated = True
 
             combined_text = "\n".join([x for x in (stderr_text, last_message_text) if x])
             failure_subtype = _classify_failure_subtype(combined_text)
@@ -5008,7 +5071,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
             last_message_size_chars = len(last_message_text)
 
-            if not stderr_text:
+            quota_exhaustion: dict[str, Any] | None = None
+            if request.agent == "claude":
+                quota_exhaustion = _extract_claude_quota_exhaustion(combined_text)
+
+            if not stderr_text and quota_exhaustion is not None and last_message_text.strip():
+                stderr_text = _format_claude_quota_exhaustion_stderr(
+                    provider_message=last_message_text,
+                    reset_raw=quota_exhaustion.get("reset_raw"),
+                    reset_timezone=quota_exhaustion.get("reset_timezone"),
+                )
+                try:
+                    stderr_path.write_text(stderr_text.rstrip() + "\n", encoding="utf-8")
+                except OSError:
+                    pass
+            elif not stderr_text:
                 synthetic_lines = [
                     "[synthetic_stderr] No stderr captured from agent process.",
                     f"agent={request.agent}",
@@ -5039,29 +5116,40 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             else:
                 run_errors = [f"{request.agent} exited with code {agent_exit_code}"]
 
-            _write_json(
-                run_dir / "error.json",
-                {
-                    "type": "AgentExecFailed",
-                    "exit_code": agent_exit_code,
-                    "stderr": "\n".join(run_errors).strip(),
-                    "stderr_synthesized": stderr_was_empty,
-                    "artifacts": {
-                        "raw_events": raw_events_path.name,
-                        "last_message": last_message_path.name,
-                        "stderr": stderr_path.name,
-                    },
-                    **({"subtype": failure_subtype} if failure_subtype is not None else {}),
-                    **(
-                        {
-                            "last_message": last_message_excerpt,
-                            "last_message_truncated": last_message_truncated,
-                        }
-                        if last_message_excerpt
-                        else {}
-                    ),
+            error_payload: dict[str, Any] = {
+                "type": "AgentExecFailed",
+                "exit_code": agent_exit_code,
+                "stderr": "\n".join(run_errors).strip(),
+                "stderr_synthesized": stderr_was_empty,
+                "artifacts": {
+                    "raw_events": raw_events_path.name,
+                    "last_message": last_message_path.name,
+                    "stderr": stderr_path.name,
                 },
-            )
+                **({"subtype": failure_subtype} if failure_subtype is not None else {}),
+                **(
+                    {
+                        "last_message": last_message_excerpt,
+                        "last_message_truncated": last_message_truncated,
+                    }
+                    if last_message_excerpt
+                    else {}
+                ),
+            }
+            if quota_exhaustion is not None:
+                error_payload = {
+                    **error_payload,
+                    "type": "AgentQuotaExceeded",
+                    "code": "claude_out_of_extra_usage",
+                    "provider": "claude",
+                    "provider_message": last_message_text.strip() or stderr_text.strip(),
+                    "reset_time": {
+                        "raw": quota_exhaustion.get("reset_raw"),
+                        "timezone": quota_exhaustion.get("reset_timezone"),
+                    },
+                }
+
+            _write_json(run_dir / "error.json", error_payload)
 
         normalized_events_path = run_dir / "normalized_events.jsonl"
         raw_ts_f = None
