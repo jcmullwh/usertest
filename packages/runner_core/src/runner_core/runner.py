@@ -2132,15 +2132,86 @@ _VERIFICATION_REJECTION_SENTINELS: frozenset[str] = frozenset({"rejected"})
 
 
 def _looks_like_verification_rejection_sentinel(command: str) -> bool:
-    token = (command or "").strip()
-    if not token:
+    """
+    Detect tool/policy rejection tokens that should never be executed as a shell command.
+
+    Some environments wrap shell execution through common launchers (cmd/sh/powershell). If a
+    policy layer mistakenly forwards a status token like `rejected` into the execution path, it
+    may appear as an inner command (e.g., `cmd /c rejected`). Treat these as structured failures
+    and block dispatch rather than letting the shell emit confusing "not recognized" errors.
+    """
+
+    def _normalize_token(raw: str) -> str:
+        token = (raw or "").strip()
+        if not token:
+            return ""
+        # Common renderings include quotes/backticks and PowerShell's leading `&`.
+        while token.startswith("&"):
+            token = token[1:].lstrip()
+        if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'", "`"}:
+            token = token[1:-1].strip()
+        return token.strip().lower()
+
+    def _is_rejection_token(raw: str) -> bool:
+        normalized = _normalize_token(raw)
+        return bool(normalized and normalized in _VERIFICATION_REJECTION_SENTINELS)
+
+    def _unwrap_once(raw: str) -> str | None:
+        argv = _split_verification_command(raw, prefer_posix=True)
+        if not argv:
+            return None
+        if argv[0] == "&" and len(argv) >= 2:
+            return " ".join(argv[1:])
+
+        exe = str(argv[0] or "").replace("\\", "/").strip()
+        if not exe:
+            return None
+        base = exe.rsplit("/", 1)[-1].lower()
+
+        if base in {"bash", "sh"}:
+            for flag in ("-lc", "-c"):
+                if len(argv) >= 3 and argv[1] == flag:
+                    inner = argv[2]
+                    return inner if isinstance(inner, str) and inner.strip() else None
+            return None
+
+        if base in {"cmd", "cmd.exe"}:
+            if len(argv) >= 3 and argv[1].lower() == "/c":
+                inner = argv[2]
+                return inner if isinstance(inner, str) and inner.strip() else None
+            return None
+
+        if base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+            lowered = [str(t).lower() if isinstance(t, str) else "" for t in argv]
+            for flag in ("-command", "-c"):
+                try:
+                    idx = lowered.index(flag)
+                except ValueError:
+                    continue
+                if idx + 1 < len(argv):
+                    inner = argv[idx + 1]
+                    return inner if isinstance(inner, str) and inner.strip() else None
+            return None
+
+        return None
+
+    raw = (command or "").strip()
+    if not raw:
         return False
-    lowered = token.lower()
-    if lowered in _VERIFICATION_REJECTION_SENTINELS:
+    if _is_rejection_token(raw):
         return True
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
-        inner = token[1:-1].strip().lower()
-        return inner in _VERIFICATION_REJECTION_SENTINELS
+
+    # Unwrap common shell wrappers a few times so `cmd /c rejected` is treated as a sentinel.
+    current: str | None = raw
+    for _ in range(3):
+        if current is None:
+            break
+        inner = _unwrap_once(current)
+        if inner is None:
+            break
+        if _is_rejection_token(inner):
+            return True
+        current = inner
     return False
 
 
@@ -2350,6 +2421,7 @@ def _run_verification_commands(
             isinstance(c, str)
             and c.strip()
             and c.strip().replace("\\", "/").lower().startswith("bash ")
+            and not _looks_like_verification_rejection_sentinel(c)
             for c in commands
         ):
             windows_bash_probe = _probe_windows_bash_usable()

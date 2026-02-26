@@ -7,7 +7,22 @@ import pytest
 import runner_core.runner as runner
 
 
-@pytest.mark.parametrize("command", ["rejected", "'rejected'", '"rejected"'])
+@pytest.mark.parametrize(
+    "command",
+    [
+        "rejected",
+        "'rejected'",
+        '"rejected"',
+        "`rejected`",
+        "& rejected",
+        "sh -lc rejected",
+        "bash -lc rejected",
+        "cmd /c rejected",
+        "cmd.exe /c rejected",
+        "powershell -Command rejected",
+        "pwsh -c rejected",
+    ],
+)
 def test_run_verification_commands_does_not_execute_rejection_sentinel(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, command: str
 ) -> None:
