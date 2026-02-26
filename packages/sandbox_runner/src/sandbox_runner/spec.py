@@ -32,6 +32,9 @@ class SandboxSpec:
     cache_dir: Path | None = None
 
     env_allowlist: list[str] = field(default_factory=list)
+    # Explicit environment variables to set inside the sandbox container.
+    # These take precedence over env_allowlist keys when both specify the same key.
+    env_overrides: dict[str, str] = field(default_factory=dict)
     extra_mounts: list[MountSpec] = field(default_factory=list)
     resources: ResourceSpec | None = None
 

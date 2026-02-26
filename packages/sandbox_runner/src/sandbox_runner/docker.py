@@ -8,13 +8,26 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Mapping
 
 from sandbox_runner.image_hash import compute_image_hash
 from sandbox_runner.spec import MountSpec, ResourceSpec, SandboxInstance, SandboxSpec
 
 _DEFAULT_DOCKER_IMAGE_REPO = "sandbox-runner"
 _DOCKER_TIMEOUT_ENV = "SANDBOX_RUNNER_DOCKER_TIMEOUT_SECONDS"
+_SAFE_ENV_KEYS_FOR_META: frozenset[str] = frozenset(
+    {
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "PIP_CACHE_DIR",
+        "PIP_BUILD_DIR",
+        "PIP_NO_CACHE_DIR",
+        "PIP_DISABLE_PIP_VERSION_CHECK",
+        "PIP_NO_INPUT",
+        "PYTEST_ADDOPTS",
+    }
+)
 
 
 def _sanitize_container_name(name: str) -> str:
@@ -112,16 +125,49 @@ def _mount_args(mounts: list[MountSpec]) -> list[str]:
     return out
 
 
-def _env_args(env_allowlist: list[str]) -> list[str]:
+def _env_args_with_overrides(
+    env_allowlist: list[str],
+    env_overrides: Mapping[str, str] | None,
+) -> list[str]:
+    overrides: dict[str, str] = {}
+    if env_overrides:
+        for key, value in env_overrides.items():
+            if not isinstance(key, str) or not key.strip():
+                continue
+            if not isinstance(value, str):
+                continue
+            overrides[key] = value
+
     out: list[str] = []
     for key in env_allowlist:
         if not isinstance(key, str) or not key.strip():
+            continue
+        if key in overrides:
             continue
         value = os.environ.get(key)
         if value is None:
             continue
         out.extend(["-e", f"{key}={value}"])
+
+    for key in sorted(overrides):
+        out.extend(["-e", f"{key}={overrides[key]}"])
     return out
+
+
+def _env_overrides_meta(env_overrides: Mapping[str, str] | None) -> dict[str, Any]:
+    if not env_overrides:
+        return {"env_overrides_keys": [], "env_overrides_safe": {}}
+    keys: list[str] = []
+    safe: dict[str, str] = {}
+    for key, value in env_overrides.items():
+        if not isinstance(key, str) or not key.strip():
+            continue
+        keys.append(key)
+        if key in _SAFE_ENV_KEYS_FOR_META and isinstance(value, str):
+            safe[key] = value
+    keys_sorted = sorted({k for k in keys if k.strip()})
+    safe_sorted = {k: safe[k] for k in sorted(safe)}
+    return {"env_overrides_keys": keys_sorted, "env_overrides_safe": safe_sorted}
 
 
 @dataclass
@@ -328,7 +374,7 @@ class DockerSandbox:
             "-d",
             "--name",
             container_name,
-            *_env_args(spec.env_allowlist),
+            *_env_args_with_overrides(spec.env_allowlist, spec.env_overrides),
             *_resource_args(spec.resources),
             *network_args,
             *_mount_args(mounts),
@@ -378,6 +424,7 @@ class DockerSandbox:
             "network_mode": spec.network_mode,
             "docker_timeout_seconds": docker_timeout_seconds,
             "env_allowlist": [k for k in spec.env_allowlist if isinstance(k, str) and k.strip()],
+            **_env_overrides_meta(getattr(spec, "env_overrides", None)),
             "extra_mounts": [
                 {
                     "host_path": str(m.host_path),
