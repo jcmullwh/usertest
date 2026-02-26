@@ -401,9 +401,6 @@ _KNOWN_TRANSIENT_PDM_LOCAL_PATH_MARKERS: tuple[str, ...] = (
     "no such file or directory",
 )
 
-_VIRTUALENV_COPY_CONFIG_TEXT = "[virtualenv]\ncopies = true\n"
-_virtualenv_copy_config_path: Path | None = None
-
 
 def _is_pdm_install_command(argv: list[str]) -> bool:
     if len(argv) < 2:
@@ -421,68 +418,6 @@ def _looks_like_transient_pdm_local_path_failure(*, stdout: str, stderr: str) ->
     if "normalized-events" not in text and "normalized_events" not in text:
         return False
     return any(marker in text for marker in _KNOWN_TRANSIENT_PDM_LOCAL_PATH_MARKERS)
-
-
-def _looks_like_virtualenv_symlink_permission_failure(*, stdout: str, stderr: str) -> bool:
-    text = "\n".join(x for x in (stdout, stderr) if x).lower()
-    if not text:
-        return False
-    if "permissionerror" not in text:
-        return False
-    if "operation not permitted" not in text:
-        return False
-    # Typical failure when the venv is created on a filesystem that disallows symlinks (common for some mounts).
-    if "->" not in text:
-        return False
-    if "bin/python" not in text:
-        return False
-    return True
-
-
-def _ensure_virtualenv_copy_config_file() -> Path | None:
-    """
-    Create (or reuse) a virtualenv config file that forces copies instead of symlinks.
-
-    This is used as a best-effort workaround for environments where creating symlinks inside the repo mount is not
-    permitted (for example certain Docker bind mounts on Windows hosts).
-    """
-    global _virtualenv_copy_config_path
-    if _virtualenv_copy_config_path is not None:
-        return _virtualenv_copy_config_path
-
-    try:
-        tmp_dir = Path(tempfile.gettempdir())
-        tmp_dir.mkdir(parents=True, exist_ok=True)
-        path = tmp_dir / "scaffold_virtualenv_copies.ini"
-        path.write_text(_VIRTUALENV_COPY_CONFIG_TEXT, encoding="utf-8")
-    except OSError as exc:
-        _eprint(f"WARNING: failed to write virtualenv config file for copies mode: {exc}")
-        _virtualenv_copy_config_path = None
-        return None
-
-    _virtualenv_copy_config_path = path
-    return path
-
-
-def _ensure_symlink_target_dir(path: Path) -> None:
-    """
-    Best-effort: if `path` is a symlink to a location under `/cache`, ensure the target directory exists.
-
-    Some runner images symlink tool caches (e.g. PDM) into `/cache/*` for warm-cache mode, but the target directory
-    may not exist yet.
-    """
-    try:
-        if not path.is_symlink():
-            return
-        target_raw = os.readlink(path)
-        target = Path(target_raw)
-        if not target.is_absolute():
-            target = (path.parent / target).resolve()
-        if not str(target).startswith("/cache/"):
-            return
-        target.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        return
 
 
 def _emit_captured_process_output(cp: subprocess.CompletedProcess[str]) -> None:
@@ -506,16 +441,7 @@ def _run_manifest_task(
     if task_name != "install" or not _is_pdm_install_command(cmd):
         return _run(cmd, cwd=cwd)
 
-    env: dict[str, str] | None = None
-    config_path = _ensure_virtualenv_copy_config_file()
-    if config_path is not None:
-        env = dict(os.environ)
-        env.setdefault("VIRTUALENV_CONFIG_FILE", str(config_path))
-
-    # If PDM's cache is symlinked into `/cache` (warm-cache mode), ensure the backing directory exists.
-    _ensure_symlink_target_dir(Path.home() / ".cache" / "pdm")
-
-    first = _run(cmd, cwd=cwd, capture=True, env=env)
+    first = _run(cmd, cwd=cwd, capture=True)
     _emit_captured_process_output(first)
     if first.returncode == 0:
         return first
@@ -524,25 +450,7 @@ def _run_manifest_task(
         stdout=first.stdout or "",
         stderr=first.stderr or "",
     ):
-        if not _looks_like_virtualenv_symlink_permission_failure(
-            stdout=first.stdout or "",
-            stderr=first.stderr or "",
-        ):
-            return first
-
-        config_path = _ensure_virtualenv_copy_config_file()
-        if config_path is None:
-            return first
-
-        _eprint(
-            "WARNING: virtualenv symlink permission failure detected for "
-            f"project '{project_id}'. Retrying install with copies mode."
-        )
-        env = dict(os.environ)
-        env.setdefault("VIRTUALENV_CONFIG_FILE", str(config_path))
-        second = _run(cmd, cwd=cwd, capture=True, env=env)
-        _emit_captured_process_output(second)
-        return second
+        return first
 
     _eprint(
         "WARNING: transient PDM local-path resolution failure detected for "
