@@ -1,6 +1,7 @@
 [CmdletBinding()]
 param(
-    [switch]$SkipToolChecks
+    [switch]$SkipToolChecks,
+    [switch]$RequirePip
 )
 
 $ErrorActionPreference = 'Stop'
@@ -23,12 +24,16 @@ try {
 
     if ($SkipToolChecks) {
         Write-Host '==> Scaffold doctor (tool checks skipped)'
-        & $pythonCmd tools/scaffold/scaffold.py doctor --skip-tool-checks
+        $doctorArgs = @('doctor', '--skip-tool-checks')
     }
     else {
         Write-Host '==> Scaffold doctor'
-        & $pythonCmd tools/scaffold/scaffold.py doctor
+        $doctorArgs = @('doctor')
     }
+    if ($RequirePip) {
+        $doctorArgs += '--require-pip'
+    }
+    & $pythonCmd tools/scaffold/scaffold.py @doctorArgs
     $exitCode = $LASTEXITCODE
 }
 finally {
@@ -36,4 +41,3 @@ finally {
 }
 
 exit $exitCode
-

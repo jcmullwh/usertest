@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SKIP_TOOL_CHECKS=0
+REQUIRE_PIP=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -9,9 +10,13 @@ while [[ $# -gt 0 ]]; do
       SKIP_TOOL_CHECKS=1
       shift
       ;;
+    --require-pip)
+      REQUIRE_PIP=1
+      shift
+      ;;
     *)
       echo "Unknown argument: $1" >&2
-      echo "Usage: scripts/doctor.sh [--skip-tool-checks]" >&2
+      echo "Usage: scripts/doctor.sh [--skip-tool-checks] [--require-pip]" >&2
       exit 2
       ;;
   esac
@@ -33,9 +38,14 @@ fi
 
 if [[ "${SKIP_TOOL_CHECKS}" -eq 1 ]]; then
   echo "==> Scaffold doctor (tool checks skipped)"
-  "${PYTHON_BIN}" tools/scaffold/scaffold.py doctor --skip-tool-checks
+  EXTRA_ARGS=("--skip-tool-checks")
 else
   echo "==> Scaffold doctor"
-  "${PYTHON_BIN}" tools/scaffold/scaffold.py doctor
+  EXTRA_ARGS=()
 fi
 
+if [[ "${REQUIRE_PIP}" -eq 1 ]]; then
+  EXTRA_ARGS+=("--require-pip")
+fi
+
+"${PYTHON_BIN}" tools/scaffold/scaffold.py doctor "${EXTRA_ARGS[@]}"

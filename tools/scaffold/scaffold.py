@@ -368,6 +368,12 @@ def _pip_remediation_hint(*, python_exe: str) -> str:
     return " ".join(parts)
 
 
+def _pdm_remediation_hint(*, python_exe: str, pip_ok: bool) -> str:
+    if pip_ok:
+        return f"Install PDM (try): {python_exe} -m pip install -U pdm"
+    return f"Install pip first ({_pip_remediation_hint(python_exe=python_exe)}) then: {python_exe} -m pip install -U pdm"
+
+
 def _git_remediation_hint() -> str:
     if os.name == "nt":
         return "Install Git and ensure 'git' is on PATH (for example: winget install -e --id Git.Git)."
@@ -1271,8 +1277,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     projects = _load_projects(repo_root)
 
     errors: list[str] = []
+    warnings: list[str] = []
     next_actions: list[str] = []
     skip_tool_checks = bool(getattr(args, "skip_tool_checks", False))
+    require_pip = bool(getattr(args, "require_pip", False))
 
     baseline_timeout_seconds = 3.0
     baseline: dict[str, Any] = {
@@ -1300,7 +1308,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         timeout_seconds=baseline_timeout_seconds,
     )
     baseline["pip"] = {
-        "required": False,
+        "required": require_pip,
         "ok": ok,
         "probe": "python -m pip",
         "version": version_line,
@@ -1309,9 +1317,12 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if not ok:
         details_parts = [p for p in (version_line, err) if p]
         details = "; ".join(details_parts) if details_parts else "unknown_error"
-        # `pip` is helpful for onboarding and remediation (e.g., installing PDM), but it's not required to validate a
-        # scaffold manifest. Some managed environments (including PDM/virtualenv-backed ones) may not ship `pip`.
+        if require_pip:
+            errors.append(f"pip is required but not usable: {details}")
+        else:
+            warnings.append(f"pip is not usable: {details}")
         next_actions.append(_pip_remediation_hint(python_exe=sys.executable))
+    pip_ok = bool(baseline["pip"]["ok"])
 
     git_path = _which("git")
     if git_path is None:
@@ -1351,6 +1362,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         }
         if bash_required and not skip_tool_checks:
             errors.append("bash is required (for scripts/smoke.sh) but was not found on PATH")
+            next_actions.append(_bash_remediation_hint())
+        elif not bash_required:
+            warnings.append("bash was not found on PATH (bash-based scripts will not work)")
+            next_actions.append(_bash_remediation_hint())
     else:
         ok, version_line, err = _probe_tool_version(
             argv=[bash_path, "-lc", "echo ok"],
@@ -1369,6 +1384,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             errors.append(f"bash is required (for scripts/smoke.sh) but not usable: {details}")
             next_actions.append(_bash_remediation_hint())
         elif not ok:
+            warnings.append(f"bash is not usable: {err or 'unknown_error'}")
             next_actions.append(_bash_remediation_hint())
 
     required_tools: dict[str, list[str]] = {}
@@ -1470,6 +1486,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
                 entry.update({"probe": "shim", "ok": ok, "version": version, "error": err})
             elif resolved is None:
                 entry.update({"probe": "path", "ok": False, "version": None, "error": "missing"})
+                entry["remediation"] = _pdm_remediation_hint(python_exe=sys.executable, pip_ok=pip_ok)
             else:
                 ok, version, err = _probe_tool_version(
                     argv=[resolved, "--version"],
@@ -1507,7 +1524,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     report_path = _write_doctor_tool_report(repo_root=repo_root, payload=tool_report)
 
-    _eprint(f"Doctor: {'PASS' if not errors else 'FAIL'}")
+    if errors:
+        status = "FAIL"
+    elif warnings:
+        status = "PASS (with warnings)"
+    else:
+        status = "PASS"
+    _eprint(f"Doctor: {status}")
     _eprint(f"Repo: {repo_root}")
     _eprint("==> Baseline preflight")
     py = cast(dict[str, Any], baseline.get("python", {}))
@@ -1518,7 +1541,11 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     tmp_suffix = f" ({tmp.get('error')})" if tmp.get("error") else ""
     _eprint(f"    - temp: {'OK' if bool(tmp.get('ok')) else 'NOT OK'} ({tmp.get('dir') or 'unknown'}){tmp_suffix}")
     pip = cast(dict[str, Any], baseline.get("pip", {}))
-    _eprint(f"    - pip: {'OK' if bool(pip.get('ok')) else 'NOT OK'} ({pip.get('version') or pip.get('error') or 'unknown'})")
+    pip_required = bool(pip.get("required"))
+    pip_label = "pip (required)" if pip_required else "pip (optional)"
+    _eprint(
+        f"    - {pip_label}: {'OK' if bool(pip.get('ok')) else 'NOT OK'} ({pip.get('version') or pip.get('error') or 'unknown'})"
+    )
     git = cast(dict[str, Any], baseline.get("git", {}))
     _eprint(f"    - git: {'OK' if bool(git.get('ok')) else 'NOT OK'} ({git.get('version') or git.get('error') or 'unknown'})")
     bash = cast(dict[str, Any], baseline.get("bash", {}))
@@ -1552,11 +1579,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         _eprint("==> Problems")
         for e in errors:
             _eprint(f"    - {e}")
-        actions = _dedup_preserve_order([a for a in next_actions if a.strip()])
-        if actions:
-            _eprint("==> Next actions")
-            for a in actions:
-                _eprint(f"    - {a}")
+    if warnings:
+        _eprint("==> Warnings")
+        for w in warnings:
+            _eprint(f"    - {w}")
+    actions = _dedup_preserve_order([a for a in next_actions if a.strip()])
+    if actions and (errors or warnings):
+        _eprint("==> Next actions")
+        for a in actions:
+            _eprint(f"    - {a}")
+    if errors:
         return 1
 
     print("OK")
@@ -2015,6 +2047,11 @@ def build_parser() -> argparse.ArgumentParser:
             "Skip checking that task command binaries are on PATH. "
             "This keeps manifest/config validation while allowing pip-first flows without pdm."
         ),
+    )
+    p_doctor.add_argument(
+        "--require-pip",
+        action="store_true",
+        help="Require 'python -m pip' to be usable (fails doctor if pip is missing).",
     )
     p_doctor.set_defaults(func=cmd_doctor)
 

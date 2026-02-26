@@ -97,6 +97,7 @@ The monorepo is managed by `tools/scaffold/scaffold.py` (manifest-driven task ru
 ### Requirements
 
 - Python 3.11+ (CI currently runs 3.11; newer versions are best-effort)
+- `pip` (via `python -m pip`; if missing, try `python -m ensurepip --upgrade`)
 - `git`
 - Optional: GitHub CLI (`gh`) (needed for `usertest-implement run --pr`)
 - At least one of: agent CLIs on PATH + credentials
