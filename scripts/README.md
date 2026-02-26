@@ -33,6 +33,12 @@ Use strict preflight mode when needed:
 
 In strict mode, missing `pdm` is treated as a failure instead of a skip.
 
+### PowerShell parse preflight
+
+To validate that a `.ps1` file parses cleanly (and to print line/column diagnostics on failure):
+
+- `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\parse_preflight.ps1 .\scripts\smoke.ps1`
+
 See the repo root `README.md` for copy/paste invocations.
 
 ---

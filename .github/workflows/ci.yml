@@ -257,6 +257,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-
 
+      - name: PowerShell parse preflight (Windows PowerShell)
+        shell: powershell
+        run: .\scripts\parse_preflight.ps1 .\scripts\smoke.ps1
+
+      - name: PowerShell parse preflight (pwsh)
+        shell: pwsh
+        run: .\scripts\parse_preflight.ps1 .\scripts\smoke.ps1
+
       - name: Smoke script (help + smoke tests)
         shell: pwsh
         run: .\scripts\smoke.ps1

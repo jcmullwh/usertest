@@ -28,6 +28,7 @@ function Invoke-Step {
 function Write-Err {
     param(
         [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
         [string]$Message
     )
     [Console]::Error.WriteLine($Message)
