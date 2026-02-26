@@ -127,6 +127,27 @@ If you want API-key auth for Codex instead:
 python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker --exec-use-api-key-auth --exec-env OPENAI_API_KEY
 ```
 
+### Docker cache (`--exec-cache`)
+
+Docker runs can optionally mount a persistent host cache directory at `/cache` inside the container:
+
+- `--exec-cache cold` (default): no persistent host cache mount; `/cache` is per-container and discarded.
+- `--exec-cache warm`: mounts a host directory at `/cache` so caches survive across runs.
+
+In the built-in `sandbox_cli` image, heavyweight tool caches are wired into `/cache` (notably `pip` and `pdm`),
+so `warm` mainly speeds up repeated installs across runs.
+
+Defaults:
+
+- Host cache directory: `<repo_root>/runs/_cache/usertest` (when `--exec-cache warm` and `--exec-cache-dir` is not set)
+- Container mount point: `/cache`
+
+Example (override the host cache directory):
+
+```text
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker --exec-cache warm --exec-cache-dir runs/_cache/usertest-ci
+```
+
 ---
 
 ## Usertesting a published package (fresh install)

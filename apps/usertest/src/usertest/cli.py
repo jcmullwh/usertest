@@ -42,6 +42,18 @@ _EXEC_NETWORK_HELP = (
     "(codex/claude/gemini) from reaching their APIs."
 )
 
+_EXEC_CACHE_HELP = (
+    "Docker sandbox cache mode (default: cold). "
+    "Only applies when `--exec-backend docker`. "
+    "cold: do not mount a persistent host cache (/cache is per-container and discarded). "
+    "warm: mount a host directory at /cache (persists across runs; used for pip + PDM caches)."
+)
+
+_EXEC_CACHE_DIR_HELP = (
+    "Host directory mounted at /cache when `--exec-cache warm` "
+    "(default: <repo_root>/runs/_cache/usertest)."
+)
+
 
 def _from_source_import_remediation(*, missing_module: str) -> str:
     return (
@@ -841,12 +853,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--exec-cache",
         choices=["cold", "warm"],
         default="cold",
-        help="Cache mode for docker runs.",
+        help=_EXEC_CACHE_HELP,
     )
     run_p.add_argument(
         "--exec-cache-dir",
         type=Path,
-        help="Host cache directory (defaults to runs/_cache/usertest when --exec-cache warm).",
+        help=_EXEC_CACHE_DIR_HELP,
     )
     run_p.add_argument(
         "--exec-env",
@@ -1018,8 +1030,13 @@ def build_parser() -> argparse.ArgumentParser:
         default="open",
         help=_EXEC_NETWORK_HELP,
     )
-    batch_p.add_argument("--exec-cache", choices=["cold", "warm"], default="cold")
-    batch_p.add_argument("--exec-cache-dir", type=Path)
+    batch_p.add_argument(
+        "--exec-cache",
+        choices=["cold", "warm"],
+        default="cold",
+        help=_EXEC_CACHE_HELP,
+    )
+    batch_p.add_argument("--exec-cache-dir", type=Path, help=_EXEC_CACHE_DIR_HELP)
     batch_p.add_argument("--exec-env", action="append", default=[])
     batch_auth_group = batch_p.add_mutually_exclusive_group()
     batch_auth_group.add_argument(
@@ -1119,8 +1136,13 @@ def build_parser() -> argparse.ArgumentParser:
             default="open",
             help=_EXEC_NETWORK_HELP,
         )
-        p.add_argument("--exec-cache", choices=["cold", "warm"], default="cold")
-        p.add_argument("--exec-cache-dir", type=Path)
+        p.add_argument(
+            "--exec-cache",
+            choices=["cold", "warm"],
+            default="cold",
+            help=_EXEC_CACHE_HELP,
+        )
+        p.add_argument("--exec-cache-dir", type=Path, help=_EXEC_CACHE_DIR_HELP)
         p.add_argument(
             "--exec-env",
             action="append",
