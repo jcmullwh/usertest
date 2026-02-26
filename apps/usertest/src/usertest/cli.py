@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import dataclasses
+import itertools
 import json
 import os
 import re
@@ -11,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, cast
 
@@ -1180,7 +1181,10 @@ def build_parser() -> argparse.ArgumentParser:
     report_p.add_argument(
         "--recompute-metrics",
         action="store_true",
-        help="Regenerate normalized_events.jsonl and metrics.json from raw_events.jsonl.",
+        help=(
+            "Overwrite normalized_events.jsonl and regenerate metrics.json from raw_events.jsonl. "
+            "For reproducibility, an existing normalized_events.jsonl timestamp stream is reused when available."
+        ),
     )
     report_p.add_argument(
         "--repo-root",
@@ -3452,6 +3456,58 @@ def _cmd_report(args: argparse.Namespace) -> int:
     run_dir = run_dir.resolve()
 
     if args.recompute_metrics:
+        def _parse_ts(ts: str) -> datetime | None:
+            ts = ts.strip()
+            if not ts:
+                return None
+            if ts.endswith("Z"):
+                ts = ts[:-1] + "+00:00"
+            try:
+                dt = datetime.fromisoformat(ts)
+            except ValueError:
+                return None
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt
+
+        def _reproducible_ts_iter(existing: list[str]) -> Iterator[str] | None:
+            cleaned = [ts.strip() for ts in existing if isinstance(ts, str) and ts.strip()]
+            if not cleaned:
+                return None
+
+            last_raw = cleaned[-1]
+            last_dt = _parse_ts(last_raw)
+
+            def _iter() -> Iterator[str]:
+                yield from cleaned
+                if last_dt is None:
+                    yield from itertools.repeat(last_raw)
+                else:
+                    base = last_dt.replace(microsecond=0)
+                    for i in itertools.count(1):
+                        yield (base + timedelta(seconds=i)).isoformat()
+
+            return _iter()
+
+        def _read_last_ts_from_jsonl(path: Path) -> str | None:
+            last: str | None = None
+            try:
+                with path.open("r", encoding="utf-8") as f:
+                    for line in f:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = json.loads(line)
+                        except json.JSONDecodeError:
+                            continue
+                        ts = obj.get("ts")
+                        if isinstance(ts, str) and ts.strip():
+                            last = ts.strip()
+            except OSError:
+                return None
+            return last
+
         raw_events_path = run_dir / "raw_events.jsonl"
         if not raw_events_path.exists():
             raise FileNotFoundError(f"Missing {raw_events_path}")
@@ -3489,25 +3545,29 @@ def _cmd_report(args: argparse.Namespace) -> int:
         ts_iter: Iterator[str] | None = None
         raw_ts_f = None
         raw_ts_iter: Iterator[str] | None = None
-        raw_events_ts_path = raw_events_path.with_suffix(".ts.jsonl")
-        if raw_events_ts_path.exists():
-            try:
-                raw_ts_f = raw_events_ts_path.open("r", encoding="utf-8")
-                raw_ts_iter = (line.strip() for line in raw_ts_f if line.strip())
-            except OSError:
-                raw_ts_f = None
-                raw_ts_iter = None
-        elif normalized_events_path.exists():
+
+        # Recompute is an overwrite of normalized_events.jsonl. For reproducibility, prefer
+        # reusing the existing normalized event timestamps (when present) so that re-running
+        # `--recompute-metrics` on unchanged inputs produces minimal diffs.
+        if normalized_events_path.exists():
             try:
                 ts_values: list[str] = []
                 for event in iter_events_jsonl(normalized_events_path):
                     ts = event.get("ts")
                     if isinstance(ts, str) and ts.strip():
                         ts_values.append(ts.strip())
-                if ts_values:
-                    ts_iter = iter(ts_values)
+                ts_iter = _reproducible_ts_iter(ts_values)
             except Exception:  # noqa: BLE001
                 ts_iter = None
+
+        raw_events_ts_path = raw_events_path.with_suffix(".ts.jsonl")
+        if ts_iter is None and raw_events_ts_path.exists():
+            try:
+                raw_ts_f = raw_events_ts_path.open("r", encoding="utf-8")
+                raw_ts_iter = (line.strip() for line in raw_ts_f if line.strip())
+            except OSError:
+                raw_ts_f = None
+                raw_ts_iter = None
         try:
             if agent_name == "codex":
                 normalize_codex_events(
@@ -3541,6 +3601,22 @@ def _cmd_report(args: argparse.Namespace) -> int:
             if raw_ts_f is not None:
                 raw_ts_f.close()
 
+        write_file_ts_iter: Iterator[str] | None = ts_iter
+        if write_file_ts_iter is None:
+            last_ts = _read_last_ts_from_jsonl(normalized_events_path)
+            if isinstance(last_ts, str) and last_ts.strip():
+                last_dt = _parse_ts(last_ts)
+
+                def _iter_write_file_ts() -> Iterator[str]:
+                    if last_dt is None:
+                        yield from itertools.repeat(last_ts.strip())
+                    else:
+                        base = last_dt.replace(microsecond=0)
+                        for i in itertools.count(1):
+                            yield (base + timedelta(seconds=i)).isoformat()
+
+                write_file_ts_iter = _iter_write_file_ts()
+
         diff_numstat: list[dict[str, Any]] = []
         diff_numstat_path = run_dir / "diff_numstat.json"
         if diff_numstat_path.exists():
@@ -3572,7 +3648,9 @@ def _cmd_report(args: argparse.Namespace) -> int:
                                             "lines_added": lines_added,
                                             "lines_removed": lines_removed,
                                         },
-                                        ts=next(ts_iter, None) if ts_iter is not None else None,
+                                        ts=next(write_file_ts_iter)
+                                        if write_file_ts_iter is not None
+                                        else None,
                                     ),
                                     ensure_ascii=False,
                                 )
