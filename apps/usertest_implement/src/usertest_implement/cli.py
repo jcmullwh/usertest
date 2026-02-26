@@ -27,24 +27,25 @@ except ModuleNotFoundError as exc:
 
 def _from_source_import_remediation(*, missing_module: str) -> str:
     return (
-        f"Missing import `{missing_module}`.\n"
-        "This usually means you're running from source without editable installs or PYTHONPATH.\n"
-        "\n"
-        "Fix (from repo root):\n"
-        "  python -m pip install -r requirements-dev.txt\n"
-        "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
-        "  macOS/Linux: source scripts/set_pythonpath.sh\n"
-        "\n"
-        "Or install editables (recommended):\n"
-        "  python -m pip install -e apps/usertest_implement\n"
+        f"Missing import `{missing_module}`. "
+        "Hint: from repo root, run `source scripts/set_pythonpath.sh` (macOS/Linux) "
+        "or `. .\\scripts\\set_pythonpath.ps1` (PowerShell); "
+        "or install deps: `python -m pip install -r requirements-dev.txt && pip install -e apps/usertest_implement`."
     )
+
+
+def _is_missing_module(exc: ModuleNotFoundError, module: str) -> bool:
+    name = getattr(exc, "name", None)
+    if not name:
+        return False
+    return name == module or name.startswith(f"{module}.")
 
 
 try:
     from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
     from runner_core.pathing import slugify
 except ModuleNotFoundError as exc:
-    if exc.name == "runner_core":
+    if _is_missing_module(exc, "runner_core"):
         raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
     raise
 
@@ -61,7 +62,7 @@ try:
         select_next_ticket_path,
     )
 except ModuleNotFoundError as exc:
-    if exc.name == "usertest_implement":
+    if _is_missing_module(exc, "usertest_implement"):
         raise SystemExit(_from_source_import_remediation(missing_module="usertest_implement")) from exc
     raise
 

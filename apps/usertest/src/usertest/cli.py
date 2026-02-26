@@ -57,17 +57,18 @@ _EXEC_CACHE_DIR_HELP = (
 
 def _from_source_import_remediation(*, missing_module: str) -> str:
     return (
-        f"Missing import `{missing_module}`.\n"
-        "This usually means you're running from source without editable installs or PYTHONPATH.\n"
-        "\n"
-        "Fix (from repo root):\n"
-        "  python -m pip install -r requirements-dev.txt\n"
-        "  PowerShell: . .\\scripts\\set_pythonpath.ps1\n"
-        "  macOS/Linux: source scripts/set_pythonpath.sh\n"
-        "\n"
-        "Or install editables (recommended):\n"
-        "  python -m pip install -e apps/usertest\n"
+        f"Missing import `{missing_module}`. "
+        "Hint: from repo root, run `source scripts/set_pythonpath.sh` (macOS/Linux) "
+        "or `. .\\scripts\\set_pythonpath.ps1` (PowerShell); "
+        "or install deps: `python -m pip install -r requirements-dev.txt && pip install -e apps/usertest`."
     )
+
+
+def _is_missing_module(exc: ModuleNotFoundError, module: str) -> bool:
+    name = getattr(exc, "name", None)
+    if not name:
+        return False
+    return name == module or name.startswith(f"{module}.")
 
 
 try:
@@ -77,7 +78,7 @@ try:
         normalize_gemini_events,
     )
 except ModuleNotFoundError as exc:
-    if exc.name == "agent_adapters":
+    if _is_missing_module(exc, "agent_adapters"):
         raise SystemExit(_from_source_import_remediation(missing_module="agent_adapters")) from exc
     raise
 
@@ -92,14 +93,14 @@ try:
         write_issue_analysis,
     )
 except ModuleNotFoundError as exc:
-    if exc.name == "reporter":
+    if _is_missing_module(exc, "reporter"):
         raise SystemExit(_from_source_import_remediation(missing_module="reporter")) from exc
     raise
 
 try:
     from run_artifacts.history import iter_report_history, write_report_history_jsonl
 except ModuleNotFoundError as exc:
-    if exc.name == "run_artifacts":
+    if _is_missing_module(exc, "run_artifacts"):
         raise SystemExit(_from_source_import_remediation(missing_module="run_artifacts")) from exc
     raise
 
@@ -110,9 +111,9 @@ try:
     from runner_core.run_spec import RunSpecError, resolve_effective_run_inputs
     from runner_core.target_acquire import acquire_target
 except ModuleNotFoundError as exc:
-    if exc.name == "runner_core":
+    if _is_missing_module(exc, "runner_core"):
         raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
-    if exc.name == "sandbox_runner":
+    if _is_missing_module(exc, "sandbox_runner"):
         raise SystemExit(_from_source_import_remediation(missing_module="sandbox_runner")) from exc
     raise
 

@@ -113,6 +113,9 @@ If you prefer to manage your environment manually, you must install dependencies
    python -m usertest.cli --help
    ```
 
+If you see a `Missing import ...` message with a hint to run `scripts/set_pythonpath.*`, you’re running from a
+monorepo checkout without the required `PYTHONPATH` configuration.
+
 ---
 
 ## Agent setup (first real run)

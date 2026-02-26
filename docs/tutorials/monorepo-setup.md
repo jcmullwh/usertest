@@ -127,6 +127,8 @@ If you intentionally don’t want editable installs, you can run from source usi
 - Windows PowerShell: `. .\scripts\set_pythonpath.ps1`
 - macOS/Linux: `source scripts/set_pythonpath.sh`
 
+If you forget this step, the CLIs will fail fast with a short `Missing import ...` hint pointing back at these scripts.
+
 ---
 
 ## The smoke scripts

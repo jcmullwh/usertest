@@ -74,6 +74,9 @@ If you prefer to manage your environment manually, you must install dependencies
 
 Success signal: the command prints help output.
 
+If you see a `Missing import ...` message with a hint to run `scripts/set_pythonpath.*`, you’re running from a
+monorepo checkout without the required `PYTHONPATH` configuration.
+
 ## Repo structure
 
 This is a **monorepo** managed by `tools/scaffold/scaffold.py` (manifest-driven task runner and project generator). It is intentionally structured to facilitate iteration, experimentation, and evolution of the overarching project, particularly by agentic contributors.
