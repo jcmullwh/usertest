@@ -3372,7 +3372,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 # Gemini CLI doesn't support an explicit "append to system prompt" mechanism.
                 # Emulate append by concatenating the requested append content into the effective
                 # system prompt file, then pass that file as the Gemini system prompt.
-                assert staged_system_prompt is not None, "preflight should block append without base"
+                assert staged_system_prompt is not None, (
+                    "preflight should block append without base"
+                )
                 if append_src_path is not None:
                     append_payload = append_src_path.read_text(encoding="utf-8")
                 else:

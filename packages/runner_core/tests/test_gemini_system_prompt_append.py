@@ -222,6 +222,7 @@ def test_gemini_system_prompt_append_without_base_prompt_fails_preflight(tmp_pat
     _write(target / "README.md", "# hi\n")
 
     invoked_marker = tmp_path / "invoked.txt"
+    invoked_marker_json = json.dumps(str(invoked_marker), ensure_ascii=False)
     dummy_script = tmp_path / "dummy_gemini.py"
     dummy_script.write_text(
         "\n".join(
@@ -232,7 +233,7 @@ def test_gemini_system_prompt_append_without_base_prompt_fails_preflight(tmp_pat
                 "",
                 "",
                 "def main() -> int:",
-                f"    Path({json.dumps(str(invoked_marker), ensure_ascii=False)}).write_text('yes')",
+                f"    Path({invoked_marker_json}).write_text('yes')",
                 "    return 0",
                 "",
                 "",
