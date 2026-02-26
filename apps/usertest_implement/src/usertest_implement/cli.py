@@ -363,6 +363,23 @@ def _infer_git_root(path: Path) -> Path | None:
     return None
 
 
+def _git_remote_url(*, repo_dir: Path, remote_name: str) -> str | None:
+    remote = remote_name.strip() or "origin"
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo_dir), "remote", "get-url", remote],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return None
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    return out if out else None
+
+
 def _default_backlog_runs_dir(repo_root: Path) -> Path:
     return repo_root / "runs" / "usertest"
 
@@ -725,8 +742,10 @@ def _run_selected_ticket(
     selected: SelectedTicket,
 ) -> int:
     repo_input: str | None = None
+    repo_is_explicit = False
     if isinstance(args.repo, str) and args.repo.strip():
         repo_input = args.repo.strip()
+        repo_is_explicit = True
     elif selected.owner_root is not None:
         repo_input = str(selected.owner_root)
     elif selected.idea_path is not None:
@@ -760,28 +779,79 @@ def _run_selected_ticket(
         verification_timeout_seconds = None
 
     wants_handoff = bool(args.commit) or bool(args.push) or bool(args.pr)
+
+    # For ticket implementation workflows that create branches/PRs, it's easy to accidentally run
+    # the next ticket off whatever branch your local repo currently has checked out.
+    #
+    # Default to the PR base branch (dev by default) unless the user explicitly provided --ref.
+    effective_ref = args.ref
+    if wants_handoff and (effective_ref is None or not str(effective_ref).strip()):
+        base = str(getattr(args, "base_branch", "") or "").strip()
+        if base:
+            effective_ref = base
+
+    # Similarly, when a ticket is being turned into a PR, prefer cloning from the repo's
+    # configured remote (e.g. origin) so merged changes on the base branch are picked up even
+    # if the local checkout is behind.
+    effective_repo_input = repo_input
+    if (
+        wants_handoff
+        and not repo_is_explicit
+        and isinstance(repo_input, str)
+        and _looks_like_local_path(repo_input)
+    ):
+        repo_path = Path(repo_input).expanduser()
+        git_root = _infer_git_root(repo_path)
+        if git_root is not None:
+            remote_url = _git_remote_url(
+                repo_dir=git_root,
+                remote_name=str(getattr(args, "remote_name", "origin") or "origin"),
+            )
+            if remote_url is not None:
+                effective_repo_input = remote_url
+
     if wants_handoff and not verification_commands and not bool(getattr(args, "skip_verify", False)):
-        lint_gate = "python tools/scaffold/scaffold.py run --all --fix lint"
+        install_gate = "python tools/scaffold/scaffold.py run --all --skip-missing install"
+        lint_gate = "python tools/scaffold/scaffold.py run --all --skip-missing lint"
+        test_gate = "python tools/scaffold/scaffold.py run --all --skip-missing test"
+
         if str(args.exec_backend).strip().lower() == "docker":
+            scaffold_prefix = (
+                'PYTHON_BIN=python; command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python3; '
+                '"$PYTHON_BIN" tools/scaffold/scaffold.py run --all --skip-missing '
+            )
             verification_commands = [
                 "bash ./scripts/smoke.sh",
-                (
-                    'PYTHON_BIN=python; command -v "$PYTHON_BIN" >/dev/null 2>&1 || '
-                    'PYTHON_BIN=python3; "$PYTHON_BIN" tools/scaffold/scaffold.py run --all --fix lint'
-                ),
+                f"{scaffold_prefix}install",
+                f"{scaffold_prefix}lint",
+                f"{scaffold_prefix}test",
             ]
         elif os.name == "nt":
             verification_commands = [
                 "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1",
+                install_gate,
                 lint_gate,
+                test_gate,
             ]
         else:
-            verification_commands = ["bash ./scripts/smoke.sh", lint_gate]
+            verification_commands = [
+                "bash ./scripts/smoke.sh",
+                install_gate,
+                lint_gate,
+                test_gate,
+            ]
+
+    exec_cache = str(getattr(args, "exec_cache", "cold") or "cold")
+    exec_cache_dir = getattr(args, "exec_cache_dir", None)
+    if exec_cache_dir is not None:
+        exec_cache_dir = exec_cache_dir.resolve()
+    if exec_cache == "warm" and exec_cache_dir is None:
+        exec_cache_dir = repo_root / "runs" / "_cache" / "usertest_implement"
 
     ticket_blob = _compose_ticket_blob(selected)
     request = RunRequest(
-        repo=repo_input,
-        ref=args.ref,
+        repo=str(effective_repo_input),
+        ref=effective_ref,
         agent=str(args.agent),
         policy=str(args.policy),
         persona_id=args.persona_id,
@@ -795,6 +865,8 @@ def _run_selected_ticket(
         verification_timeout_seconds=verification_timeout_seconds,
         exec_backend=str(args.exec_backend),
         exec_keep_container=bool(args.exec_keep_container),
+        exec_cache=exec_cache,
+        exec_cache_dir=exec_cache_dir,
         exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
         exec_use_target_sandbox_cli_install=bool(args.exec_use_target_sandbox_cli_install),
     )
@@ -1412,6 +1484,24 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         help="Keep Docker container after the run (default: enabled).",
     )
 
+    parser.add_argument(
+        "--exec-cache",
+        choices=["cold", "warm"],
+        default="warm",
+        help=(
+            "Docker sandbox cache mode (default: warm). "
+            "When warm, a host directory is mounted at /cache inside the sandbox."
+        ),
+    )
+    parser.add_argument(
+        "--exec-cache-dir",
+        type=Path,
+        help=(
+            "Host cache directory mounted at /cache when --exec-cache warm. "
+            "Defaults to <repo_root>/runs/_cache/usertest_implement."
+        ),
+    )
+
     parser.add_argument("--dry-run", action="store_true")
 
     parser.add_argument(
@@ -1421,7 +1511,8 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         default=[],
         help=(
             "Repeatable verification command gate that must pass before handing off "
-            "(default: run scripts/smoke.{ps1,sh} then tools/scaffold/scaffold.py run --all --fix lint "
+            "(default: run scripts/smoke.{ps1,sh} then scaffold install/lint/test across the repo "
+            "(tools/scaffold/scaffold.py run --all ...) "
             "when --commit/--push/--pr)."
         ),
     )
