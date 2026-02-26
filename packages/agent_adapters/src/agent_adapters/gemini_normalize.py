@@ -71,7 +71,7 @@ def _safe_relpath(path: Path, root: Path) -> str:
 
 
 def _normalize_workspace_mount(workspace_mount: str | None) -> str | None:
-    if workspace_mount is None:
+    if not isinstance(workspace_mount, str):
         return None
     mount = workspace_mount.strip().replace("\\", "/").rstrip("/")
     if not mount:
@@ -191,6 +191,19 @@ def normalize_gemini_events(
                 )
                 out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
+            if not isinstance(payload, dict):
+                _flush_message()
+                event = make_event(
+                    "error",
+                    {
+                        "category": "raw_non_object_json_line",
+                        "message": raw_line,
+                        "payload_type": type(payload).__name__,
+                    },
+                    ts=_next_ts(),
+                )
+                out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                continue
 
             event_type = payload.get("type")
 
@@ -213,6 +226,27 @@ def normalize_gemini_events(
                 tool_id = payload.get("tool_id")
                 name = payload.get("tool_name")
                 params = payload.get("parameters")
+                if isinstance(tool_id, str) and tool_id and not (isinstance(name, str) and name):
+                    event = make_event(
+                        "error",
+                        {
+                            "category": "tool_use_missing_tool_name",
+                            "message": f"tool_id={tool_id}",
+                        },
+                        ts=_next_ts(),
+                    )
+                    out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
+                if not (isinstance(tool_id, str) and tool_id) and isinstance(name, str) and name:
+                    event = make_event(
+                        "error",
+                        {
+                            "category": "tool_use_missing_tool_id",
+                            "message": f"tool_name={name}",
+                        },
+                        ts=_next_ts(),
+                    )
+                    out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
                 if isinstance(tool_id, str) and tool_id and isinstance(name, str):
                     tool_uses[tool_id] = {
                         "name": name,
@@ -227,6 +261,15 @@ def normalize_gemini_events(
             _flush_message()
             tool_id = payload.get("tool_id")
             if not isinstance(tool_id, str) or not tool_id:
+                event = make_event(
+                    "error",
+                    {
+                        "category": "tool_result_missing_tool_id",
+                        "message": raw_line,
+                    },
+                    ts=_next_ts(),
+                )
+                out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
                 continue
 
             tool_use = tool_uses.pop(tool_id, None)

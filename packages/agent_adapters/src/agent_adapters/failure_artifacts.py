@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -86,24 +87,38 @@ def write_command_failure_artifacts(
     }
 
 
+
+def _tool_failure_slug(tool_name: Any) -> str:
+    raw = tool_name if isinstance(tool_name, str) else ""
+    cleaned = raw.strip().lower()
+    if not cleaned:
+        return "unknown"
+    slug = re.sub(r"[^a-z0-9]+", "_", cleaned).strip("_")
+    return slug or "unknown"
+
+
 def write_tool_failure_artifacts(
     *,
     run_dir: Path,
     failure_index: int,
-    tool_name: str,
+    tool_name: Any,
     tool_input: dict[str, Any],
     error_text: str | None,
     extracted: dict[str, Any] | None = None,
     context_text: str | None = None,
     preview_text: str | None = None,
 ) -> dict[str, str]:
-    rel_dir = Path("tool_failures") / f"tool_{int(failure_index):02d}_{tool_name.strip().lower()}"
+    slug = _tool_failure_slug(tool_name)
+    rel_dir = Path("tool_failures") / f"tool_{int(failure_index):02d}_{slug}"
     abs_dir = run_dir / rel_dir
     abs_dir.mkdir(parents=True, exist_ok=True)
 
+    tool_name_s = tool_name.strip() if isinstance(tool_name, str) else ""
+    if not tool_name_s:
+        tool_name_s = "unknown"
     payload: dict[str, Any] = {
         "schema_version": 1,
-        "tool": tool_name,
+        "tool": tool_name_s,
         "input": tool_input,
     }
     if error_text is not None:
@@ -126,4 +141,3 @@ def write_tool_failure_artifacts(
     if preview_text is not None:
         out["preview"] = (rel_dir / "preview.txt").as_posix()
     return out
-

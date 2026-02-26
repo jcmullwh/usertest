@@ -176,3 +176,33 @@ def test_normalize_gemini_events_merges_delta_messages(tmp_path: Path) -> None:
     commands = [e for e in events if e["type"] == "run_command"]
     assert len(commands) == 1
     assert commands[0].get("ts") == "2026-02-01T00:00:03+00:00"
+
+
+def test_normalize_gemini_events_handles_missing_tool_name(tmp_path: Path) -> None:
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "tool_use",
+                        "tool_name": None,
+                        "tool_id": "t1",
+                        "parameters": {"command": "echo hi"},
+                    }
+                ),
+                json.dumps({"type": "tool_result", "tool_id": "t1", "status": "success"}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    normalized = tmp_path / "normalized.jsonl"
+    normalize_gemini_events(raw_events_path=raw, normalized_events_path=normalized)
+
+    events = list(iter_events_jsonl(normalized))
+    error_categories = [
+        e.get("data", {}).get("category") for e in events if e.get("type") == "error"
+    ]
+    assert "tool_use_missing_tool_name" in error_categories
