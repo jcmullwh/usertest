@@ -12,7 +12,8 @@ def test_classify_known_stderr_warnings_detects_warning_only_payload() -> None:
                 "occurrences=3 classification=capability_notice"
             ),
             (
-                "note=PowerShell shell snapshot metadata isn't available yet; continuing without it."
+                "hint=PowerShell shell snapshot unsupported; "
+                "continuing without shell snapshot metadata."
             ),
         ]
     )

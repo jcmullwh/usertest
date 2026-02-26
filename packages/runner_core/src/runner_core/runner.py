@@ -715,8 +715,8 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
                         "classification=capability_notice"
                     ),
                     (
-                        "note=PowerShell shell snapshot metadata isn't available yet; "
-                        "continuing without it."
+                        "hint=PowerShell shell snapshot unsupported; "
+                        "continuing without shell snapshot metadata."
                     ),
                 ]
             )
