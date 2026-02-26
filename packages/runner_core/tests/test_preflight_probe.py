@@ -477,7 +477,10 @@ def test_run_once_fails_when_codex_personality_missing_model_messages(tmp_path: 
     result = run_once(cfg, RunRequest(repo=str(target), agent="codex", policy="write"))
 
     assert result.exit_code == 1
-    assert any("code=codex_model_messages_missing" in str(line) for line in result.report_validation_errors)
+    assert any(
+        "code=codex_model_messages_missing" in str(line)
+        for line in result.report_validation_errors
+    )
 
     payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
     assert payload.get("type") == "AgentPreflightFailed"
