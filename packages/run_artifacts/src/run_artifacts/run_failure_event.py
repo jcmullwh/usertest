@@ -77,6 +77,17 @@ def classify_failure_kind(
 ) -> tuple[bool, str]:
     status_lower = status.strip().lower() if isinstance(status, str) else ""
     if error is not None:
+        err_type = error.get("type")
+        err_subtype = error.get("subtype")
+        err_code = error.get("code")
+        if err_type == "AgentQuotaExceeded":
+            return True, "quota_exhausted"
+        if err_subtype == "provider_quota_exceeded":
+            return True, "quota_exhausted"
+        if isinstance(err_code, str) and err_code.strip().lower() in {
+            "claude_out_of_extra_usage",
+        }:
+            return True, "quota_exhausted"
         return True, "error"
     if validation_errors:
         return True, "report_validation_error"
