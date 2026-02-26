@@ -1490,14 +1490,15 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         default="warm",
         help=(
             "Docker sandbox cache mode (default: warm). "
-            "When warm, a host directory is mounted at /cache inside the sandbox."
+            "warm: mount a host directory at /cache (persists across runs; used for pip + PDM caches). "
+            "cold: do not mount a persistent host cache (/cache is per-container and discarded)."
         ),
     )
     parser.add_argument(
         "--exec-cache-dir",
         type=Path,
         help=(
-            "Host cache directory mounted at /cache when --exec-cache warm. "
+            "Host directory mounted at /cache when --exec-cache warm. "
             "Defaults to <repo_root>/runs/_cache/usertest_implement."
         ),
     )
