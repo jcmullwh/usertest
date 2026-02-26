@@ -411,6 +411,13 @@ def _is_pdm_install_command(argv: list[str]) -> bool:
     return argv[1].strip().lower() == "install"
 
 
+def _is_pdm_command(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    cmd_name = Path(argv[0]).name.lower()
+    return cmd_name in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}
+
+
 def _looks_like_transient_pdm_local_path_failure(*, stdout: str, stderr: str) -> bool:
     text = "\n".join(x for x in (stdout, stderr) if x).lower()
     if not text:
@@ -438,16 +445,26 @@ def _run_manifest_task(
     task_name: str,
     project_id: str,
 ) -> subprocess.CompletedProcess[str]:
-    if task_name != "install" or not _is_pdm_install_command(cmd):
-        return _run(cmd, cwd=cwd)
+    env: dict[str, str] | None = None
+    if _is_pdm_command(cmd):
+        env = dict(os.environ)
+        # Avoid in-project `.venv` on bind mounts / filesystem layers that can produce undeletable or un-renamable
+        # entries when `virtualenv` attempts symlinks. Keeping venvs under XDG dirs (pointed at /tmp) is more robust.
+        env.setdefault("PDM_VENV_IN_PROJECT", "0")
+        env.setdefault("XDG_DATA_HOME", "/tmp/scaffold_xdg_data")
+        env.setdefault("XDG_STATE_HOME", "/tmp/scaffold_xdg_state")
+        env.setdefault("XDG_CACHE_HOME", "/tmp/scaffold_xdg_cache")
+        # Some environments (including certain containerized/CI setups) disallow creating symlinks inside bind mounts.
+        # PDM's default `venv.backend=virtualenv` may attempt to symlink the interpreter into the venv, which fails with
+        # `PermissionError: [Errno 1] Operation not permitted`.
+        #
+        # `virtualenv` honors `VIRTUALENV_COPIES=1` and will copy instead of symlinking, making `pdm` tasks more reliable.
+        env.setdefault("VIRTUALENV_COPIES", "1")
 
-    env = dict(os.environ)
-    # Some environments (including certain containerized/CI setups) disallow creating symlinks inside bind mounts.
-    # PDM's default `venv.backend=virtualenv` may attempt to symlink the interpreter into the venv, which fails with
-    # `PermissionError: [Errno 1] Operation not permitted`.
-    #
-    # `virtualenv` honors `VIRTUALENV_COPIES=1` and will copy instead of symlinking, making installs more reliable.
-    env.setdefault("VIRTUALENV_COPIES", "1")
+    if task_name != "install" or not _is_pdm_install_command(cmd):
+        if env is None:
+            return _run(cmd, cwd=cwd)
+        return _run(cmd, cwd=cwd, env=env)
 
     first = _run(cmd, cwd=cwd, capture=True, env=env)
     _emit_captured_process_output(first)
