@@ -5233,7 +5233,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 and not last_message_text.strip()
                 and raw_events_path.exists()
             ):
-                raw_events_plaintext_excerpt = _extract_raw_events_plaintext_excerpt(raw_events_path)
+                raw_events_plaintext_excerpt = _extract_raw_events_plaintext_excerpt(
+                    raw_events_path
+                )
 
             last_message_excerpt = last_message_text
             last_message_truncated = False
