@@ -7,7 +7,7 @@ def test_classify_known_stderr_warnings_detects_warning_only_payload() -> None:
     text = "\n".join(
         [
             (
-                "[codex_warning_summary] "
+                "[codex_notice_summary] "
                 "code=shell_snapshot_powershell_unsupported "
                 "occurrences=3 classification=capability_notice"
             ),
