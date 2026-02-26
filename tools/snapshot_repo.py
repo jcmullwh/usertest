@@ -14,6 +14,9 @@ class SnapshotError(RuntimeError):
     pass
 
 
+PLAN_EXCLUDED_GITIGNORE_PATHS_LIMIT = 20
+
+
 @dataclass(frozen=True)
 class SnapshotPlan:
     """
@@ -559,7 +562,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Create a zip snapshot of the repo using git's standard excludes (.gitignore, etc). "
             "Archive entries use repo-relative paths. "
-            "By default, `.gitignore` files themselves are excluded from the archive."
+            "Note: by default, `.gitignore` files themselves are excluded from the archive "
+            "(use --include-gitignore-files to include them)."
         ),
         formatter_class=argparse.RawTextHelpFormatter,
         epilog=(
@@ -737,6 +741,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"- dry_run: {bool(args.dry_run)}")
     print(f"- files: {len(plan.files)}")
     print(f"- excluded_gitignores: {len(plan.excluded_gitignores)}")
+    if plan.excluded_gitignores:
+        excluded_gitignore_paths = sorted(plan.excluded_gitignores)
+        shown = excluded_gitignore_paths[:PLAN_EXCLUDED_GITIGNORE_PATHS_LIMIT]
+        remaining = len(excluded_gitignore_paths) - len(shown)
+        print("- excluded_gitignore_paths:")
+        for rel in shown:
+            print(f"  - {rel}")
+        if remaining:
+            print(f"  - ... (+{remaining} more)")
     print(f"- excluded_ignored: {len(plan.excluded_ignored)}")
     print(f"- excluded_outputs: {len(plan.excluded_outputs)}")
     print(f"- excluded_untracked: {plan.excluded_untracked_count}")

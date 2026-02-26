@@ -342,6 +342,82 @@ def test_snapshot_repo_plan_output_tracked_only_counts_untracked_excluded(tmp_pa
     )
 
 
+def test_snapshot_repo_plan_output_lists_excluded_gitignore_paths(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    target_repo = tmp_path / "repo_plan_gitignore_paths"
+    target_repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "-C", str(target_repo), "init"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    (target_repo / "file.txt").write_text("ok", encoding="utf-8")
+    (target_repo / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+
+    (target_repo / "sub").mkdir(parents=True, exist_ok=True)
+    (target_repo / "sub" / ".gitignore").write_text("ignored2.txt\n", encoding="utf-8")
+
+    subprocess.run(
+        ["git", "-C", str(target_repo), "add", "file.txt", ".gitignore", "sub/.gitignore"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    proc = _run_snapshot_repo(
+        repo_root=repo_root,
+        args=["--repo-root", str(target_repo), "--plan-only"],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    normalized = _normalize_snapshot_plan(proc.stdout)
+    assert "- excluded_gitignores: 2\n" in normalized
+    assert "- excluded_gitignore_paths:\n" in normalized
+    assert "  - .gitignore\n" in normalized
+    assert "  - sub/.gitignore\n" in normalized
+
+
+def test_snapshot_repo_plan_output_caps_excluded_gitignore_paths(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+
+    target_repo = tmp_path / "repo_plan_gitignore_paths_cap"
+    target_repo.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        ["git", "-C", str(target_repo), "init"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    (target_repo / "file.txt").write_text("ok", encoding="utf-8")
+    (target_repo / ".gitignore").write_text("ignored.txt\n", encoding="utf-8")
+
+    for i in range(22):
+        (target_repo / f"d{i:02d}").mkdir(parents=True, exist_ok=True)
+        (target_repo / f"d{i:02d}" / ".gitignore").write_text(f"ignored{i}.txt\n", encoding="utf-8")
+
+    subprocess.run(
+        ["git", "-C", str(target_repo), "add", "."],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+    proc = _run_snapshot_repo(
+        repo_root=repo_root,
+        args=["--repo-root", str(target_repo), "--plan-only"],
+    )
+    assert proc.returncode == 0, proc.stderr
+
+    normalized = _normalize_snapshot_plan(proc.stdout)
+    assert "- excluded_gitignores: 23\n" in normalized
+    assert "  - ... (+3 more)\n" in normalized
+    assert "  - d21/.gitignore\n" not in normalized
+
+
 def test_snapshot_repo_list_included_is_deterministic_and_sorted(tmp_path: Path) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
 
