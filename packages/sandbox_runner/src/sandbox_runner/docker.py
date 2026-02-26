@@ -6,9 +6,10 @@ import re
 import subprocess
 import time
 import uuid
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 
 from sandbox_runner.image_hash import compute_image_hash
 from sandbox_runner.spec import MountSpec, ResourceSpec, SandboxInstance, SandboxSpec
