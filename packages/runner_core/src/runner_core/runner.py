@@ -288,6 +288,54 @@ _CLAUDE_RESET_EXTRACT_RE = re.compile(
     re.IGNORECASE,
 )
 _CLAUDE_IANA_TZ_IN_PARENS_RE = re.compile(r"\((?P<tz>[A-Za-z_]+/[A-Za-z_]+)\)")
+_RAW_EVENTS_PLAINTEXT_EXCERPT_TAIL_BYTES = 24_000
+_RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS = 4_000
+
+
+def _read_tail_text(path: Path, *, max_bytes: int) -> str:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size <= 0:
+        return ""
+    offset = max(0, size - max(1, int(max_bytes)))
+    try:
+        with path.open("rb") as f:
+            f.seek(offset)
+            data = f.read()
+    except OSError:
+        return ""
+    if not data:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
+def _extract_raw_events_plaintext_excerpt(raw_events_path: Path) -> str:
+    tail = _read_tail_text(raw_events_path, max_bytes=_RAW_EVENTS_PLAINTEXT_EXCERPT_TAIL_BYTES)
+    if not tail.strip():
+        return ""
+
+    kept: list[str] = []
+    for line in tail.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            kept.append(stripped)
+            continue
+        if isinstance(parsed, dict):
+            continue
+        kept.append(stripped)
+
+    if not kept:
+        return ""
+    text = "\n".join(kept).strip()
+    if len(text) > _RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS:
+        text = text[-_RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS :]
+    return text
 
 
 def _extract_claude_quota_exhaustion(text: str) -> dict[str, Any] | None:
@@ -5179,13 +5227,25 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 except OSError:
                     last_message_text = ""
 
+            raw_events_plaintext_excerpt = ""
+            if (
+                request.agent == "claude"
+                and not last_message_text.strip()
+                and raw_events_path.exists()
+            ):
+                raw_events_plaintext_excerpt = _extract_raw_events_plaintext_excerpt(raw_events_path)
+
             last_message_excerpt = last_message_text
             last_message_truncated = False
             if len(last_message_excerpt) > 4000:
                 last_message_excerpt = last_message_excerpt[:4000] + "\n...[truncated]..."
                 last_message_truncated = True
 
-            combined_text = "\n".join([x for x in (stderr_text, last_message_text) if x])
+            provider_message_text = last_message_text
+            if not provider_message_text.strip() and raw_events_plaintext_excerpt.strip():
+                provider_message_text = raw_events_plaintext_excerpt.strip()
+
+            combined_text = "\n".join([x for x in (stderr_text, provider_message_text) if x])
             failure_subtype = _classify_failure_subtype(combined_text)
             if (
                 stderr_text
@@ -5247,9 +5307,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             if request.agent == "claude":
                 quota_exhaustion = _extract_claude_quota_exhaustion(combined_text)
 
-            if not stderr_text and quota_exhaustion is not None and last_message_text.strip():
+            if not stderr_text and quota_exhaustion is not None and provider_message_text.strip():
                 stderr_text = _format_claude_quota_exhaustion_stderr(
-                    provider_message=last_message_text,
+                    provider_message=provider_message_text,
                     reset_raw=quota_exhaustion.get("reset_raw"),
                     reset_timezone=quota_exhaustion.get("reset_timezone"),
                 )
@@ -5275,6 +5335,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     )
                 if last_message_excerpt:
                     synthetic_lines.extend(["", "[agent_last_message]", last_message_excerpt])
+                elif raw_events_plaintext_excerpt.strip():
+                    synthetic_lines.extend(
+                        ["", "[raw_events_plaintext_excerpt]", raw_events_plaintext_excerpt.strip()]
+                    )
                 stderr_text = "\n".join(synthetic_lines).strip()
                 try:
                     stderr_path.write_text(stderr_text + "\n", encoding="utf-8")
@@ -5314,7 +5378,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "type": "AgentQuotaExceeded",
                     "code": "claude_out_of_extra_usage",
                     "provider": "claude",
-                    "provider_message": last_message_text.strip() or stderr_text.strip(),
+                    "provider_message": provider_message_text.strip() or stderr_text.strip(),
                     "reset_time": {
                         "raw": quota_exhaustion.get("reset_raw"),
                         "timezone": quota_exhaustion.get("reset_timezone"),

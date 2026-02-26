@@ -12,6 +12,9 @@ from typing import Any
 from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
 from agent_adapters.events import utc_now_iso
 
+_PLAINTEXT_FALLBACK_TAIL_BYTES = 24_000
+_PLAINTEXT_FALLBACK_MAX_CHARS = 4_000
+
 
 @dataclass(frozen=True)
 class ClaudePrintResult:
@@ -46,6 +49,52 @@ def _iter_json_lines(path: Path) -> Iterator[dict[str, Any]]:
                 continue
             if isinstance(payload, dict):
                 yield payload
+
+
+def _read_tail_text(path: Path, *, max_bytes: int) -> str:
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return ""
+    if size <= 0:
+        return ""
+    offset = max(0, size - max(1, int(max_bytes)))
+    try:
+        with path.open("rb") as f:
+            f.seek(offset)
+            data = f.read()
+    except OSError:
+        return ""
+    if not data:
+        return ""
+    return data.decode("utf-8", errors="replace")
+
+
+def _extract_plaintext_fallback(raw_events_path: Path) -> str:
+    tail = _read_tail_text(raw_events_path, max_bytes=_PLAINTEXT_FALLBACK_TAIL_BYTES)
+    if not tail.strip():
+        return ""
+
+    kept: list[str] = []
+    for line in tail.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            kept.append(stripped)
+            continue
+        if isinstance(parsed, dict):
+            continue
+        kept.append(stripped)
+
+    if not kept:
+        return ""
+    text = "\n".join(kept).strip()
+    if len(text) > _PLAINTEXT_FALLBACK_MAX_CHARS:
+        text = text[-_PLAINTEXT_FALLBACK_MAX_CHARS :]
+    return text
 
 
 def _extract_last_message_text(raw_events_path: Path) -> str:
@@ -90,7 +139,9 @@ def _extract_last_message_text(raw_events_path: Path) -> str:
         if parts:
             last_text = "".join(parts)
 
-    return last_text or ""
+    if isinstance(last_text, str) and last_text.strip():
+        return last_text
+    return _extract_plaintext_fallback(raw_events_path) or ""
 
 
 def run_claude_print(
