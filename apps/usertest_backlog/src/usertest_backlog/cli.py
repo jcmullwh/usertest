@@ -17,27 +17,54 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+_WINDOWS_OFFLINE_FIRST_SUCCESS_CMD = (
+    r"powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1"
+)
+_POSIX_OFFLINE_FIRST_SUCCESS_CMD = "bash ./scripts/offline_first_success.sh"
+
+
+def _one_command_first_success_remediation() -> str:
+    return (
+        "Quick fix (recommended): from repo root, run ONE of:\n"
+        f"  - Windows PowerShell: `{_WINDOWS_OFFLINE_FIRST_SUCCESS_CMD}`\n"
+        f"  - macOS/Linux: `{_POSIX_OFFLINE_FIRST_SUCCESS_CMD}`"
+    )
+
+
+def _missing_dependency_remediation(*, dependency: str, import_name: str) -> str:
+    return (
+        f"Missing dependency `{dependency}` (import name: `{import_name}`).\n"
+        f"{_one_command_first_success_remediation()}\n"
+        "Manual fix: `python -m pip install -r requirements-dev.txt`."
+    )
+
+
+def _missing_dependency_remediation_simple(*, dependency: str) -> str:
+    return (
+        f"Missing dependency `{dependency}`.\n"
+        f"{_one_command_first_success_remediation()}\n"
+        "Manual fix: `python -m pip install -r requirements-dev.txt`."
+    )
+
+
 try:
     import yaml
 except ModuleNotFoundError as exc:
     raise SystemExit(
-        "Missing dependency `pyyaml` (import name: `yaml`). "
-        "Fix: `python -m pip install -r requirements-dev.txt`."
+        _missing_dependency_remediation(dependency="pyyaml", import_name="yaml")
     ) from exc
 try:
     import jsonschema  # noqa: F401
 except ModuleNotFoundError as exc:
-    raise SystemExit(
-        "Missing dependency `jsonschema`. "
-        "Fix: `python -m pip install -r requirements-dev.txt`."
-    ) from exc
+    raise SystemExit(_missing_dependency_remediation_simple(dependency="jsonschema")) from exc
 
 def _from_source_import_remediation(*, missing_module: str) -> str:
     return (
-        f"Missing import `{missing_module}`. "
-        "Hint: from repo root, run `source scripts/set_pythonpath.sh` (macOS/Linux) "
-        "or `. .\\scripts\\set_pythonpath.ps1` (PowerShell); "
-        "or install deps: `python -m pip install -r requirements-dev.txt && pip install -e apps/usertest_backlog`."
+        f"Missing import `{missing_module}`.\n"
+        f"{_one_command_first_success_remediation()}\n"
+        "Manual fix (from repo root): install deps + configure PYTHONPATH:\n"
+        "  - macOS/Linux: `python -m pip install -r requirements-dev.txt && source scripts/set_pythonpath.sh`\n"
+        "  - PowerShell: `python -m pip install -r requirements-dev.txt; . .\\scripts\\set_pythonpath.ps1`"
     )
 
 
