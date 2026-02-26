@@ -47,6 +47,7 @@ _TRUST_SOURCE_WEIGHTS: dict[str, float] = {
     "report_validation_error": 0.90,
     "agent_stderr_artifact": 0.85,
     "capability_warning_artifact": 0.20,
+    "capability_notice_artifact": 0.20,
     "agent_last_message_artifact": 0.75,
     "confusion_point": 0.70,
     "suggested_change": 0.65,
@@ -247,6 +248,8 @@ def _infer_severity_hint(*, source: str, text: str, priority: str | None = None)
             return "medium"
         return "high"
     if source == "capability_warning_artifact":
+        return "low"
+    if source == "capability_notice_artifact":
         return "low"
     if source == "confidence_missing":
         return "low"
@@ -823,6 +826,25 @@ def extract_backlog_atoms(
                 warning_codes = warning_meta.get("codes")
                 warning_counts = warning_meta.get("counts")
                 if warning_only and isinstance(warning_codes, list):
+                    if warning_codes == ["shell_snapshot_powershell_unsupported"]:
+                        _emit(
+                            "capability_notice_artifact",
+                            (
+                                "Known capability notice in agent stderr: "
+                                "PowerShell shell snapshot metadata unavailable (expected)."
+                            ),
+                            warning_codes=warning_codes,
+                            warning_counts=warning_counts
+                            if isinstance(warning_counts, dict)
+                            else None,
+                            excerpt_head=excerpt_head,
+                            excerpt_tail=excerpt_tail,
+                            truncated=truncated,
+                            capture_error=capture.error,
+                            artifact_ref=_artifact_ref_public(capture),
+                            severity_hint="low",
+                        )
+                        continue
                     _emit(
                         "capability_warning_artifact",
                         (

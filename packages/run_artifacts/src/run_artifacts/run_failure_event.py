@@ -12,6 +12,9 @@ _CODEX_MODEL_REFRESH_TIMEOUT_WARNING_CODE = "codex_model_refresh_timeout"
 _BASH_TOOL_PREFLIGHT_SLOW_WARNING_CODE = "bash_tool_preflight_slow"
 
 _SHELL_SNAPSHOT_WARNING_HINT = (
+    "note=PowerShell shell snapshot metadata isn't available yet; continuing without it."
+)
+_SHELL_SNAPSHOT_WARNING_HINT_LEGACY = (
     "hint=PowerShell shell snapshot unsupported; continuing without shell snapshot metadata."
 )
 _TURN_METADATA_TIMEOUT_HINT = (
@@ -112,6 +115,7 @@ def classify_known_stderr_warnings(text: str) -> dict[str, Any]:
             "shell snapshot not supported yet for powershell" in lowered
             or f"code={_SHELL_SNAPSHOT_WARNING_CODE}" in lowered
             or lowered == _SHELL_SNAPSHOT_WARNING_HINT.lower()
+            or lowered == _SHELL_SNAPSHOT_WARNING_HINT_LEGACY.lower()
         ):
             counts[_SHELL_SNAPSHOT_WARNING_CODE] += 1
             continue

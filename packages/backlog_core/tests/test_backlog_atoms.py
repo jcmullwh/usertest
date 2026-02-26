@@ -391,10 +391,9 @@ def test_extract_backlog_atoms_reclassifies_known_warning_only_stderr(tmp_path: 
     (run_dir / "agent_stderr.txt").write_text(
         "\n".join(
             [
-                "[codex_warning_summary] code=shell_snapshot_powershell_unsupported "
+                "[codex_notice_summary] code=shell_snapshot_powershell_unsupported "
                 "occurrences=4 classification=capability_notice",
-                "hint=PowerShell shell snapshot unsupported; "
-                "continuing without shell snapshot metadata.",
+                "note=PowerShell shell snapshot metadata isn't available yet; continuing without it.",
             ]
         )
         + "\n",
@@ -417,12 +416,12 @@ def test_extract_backlog_atoms_reclassifies_known_warning_only_stderr(tmp_path: 
     atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
     sources = {item["source"] for item in atoms_doc["atoms"]}
     assert "agent_stderr_artifact" not in sources
-    assert "capability_warning_artifact" in sources
-    warning_atom = next(
-        atom for atom in atoms_doc["atoms"] if atom.get("source") == "capability_warning_artifact"
+    assert "capability_notice_artifact" in sources
+    notice_atom = next(
+        atom for atom in atoms_doc["atoms"] if atom.get("source") == "capability_notice_artifact"
     )
-    assert warning_atom.get("severity_hint") == "low"
-    assert "shell_snapshot_powershell_unsupported" in warning_atom.get("warning_codes", [])
+    assert notice_atom.get("severity_hint") == "low"
+    assert "shell_snapshot_powershell_unsupported" in notice_atom.get("warning_codes", [])
 
 
 def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path: Path) -> None:

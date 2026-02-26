@@ -709,14 +709,14 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
             lines.extend(
                 [
                     (
-                        "[codex_warning_summary] "
+                        "[codex_notice_summary] "
                         f"code={_CODEX_SHELL_SNAPSHOT_WARNING_CODE} "
                         f"occurrences={shell_snapshot_count} "
                         "classification=capability_notice"
                     ),
                     (
-                        "hint=PowerShell shell snapshot unsupported; "
-                        "continuing without shell snapshot metadata."
+                        "note=PowerShell shell snapshot metadata isn't available yet; "
+                        "continuing without it."
                     ),
                 ]
             )
