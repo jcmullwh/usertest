@@ -1,0 +1,31 @@
+{
+  "attempts": [
+    {
+      "attempt": 1,
+      "attempt_started_utc": "2026-02-14T20:15:00Z",
+      "attempt_finished_utc": "2026-02-14T20:15:05Z",
+      "attempt_wall_seconds": 5.0,
+      "agent_exec_wall_seconds": 5.0,
+      "exit_code": 0,
+      "argv": [
+        "usertest-agent",
+        "--synthetic-fixture"
+      ],
+      "failure_subtype": null,
+      "report_validation_errors": [],
+      "warnings": [],
+      "verification": {
+        "status": "disabled",
+        "passed": null,
+        "summary_path": null
+      },
+      "raw_events_path": "raw_events.jsonl",
+      "last_message_path": "agent_last_message.txt",
+      "stderr_path": "agent_stderr.txt"
+    }
+  ],
+  "rate_limit_retries_configured": 0,
+  "rate_limit_retries_used": 0,
+  "followup_attempts_configured": 0,
+  "followup_attempts_used": 0
+}

@@ -1,0 +1,8 @@
+{
+  "schema_version": 1,
+  "status": "disabled",
+  "skipped": true,
+  "skip_reason": "verification_commands_not_configured",
+  "attempt_number": 1,
+  "commands_configured": []
+}

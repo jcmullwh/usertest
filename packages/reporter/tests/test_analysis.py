@@ -407,6 +407,48 @@ def test_analyze_report_history_preserves_raw_text_and_normalizes_json_wrapper(
     assert "report_json_envelope" in signal["signature"]
 
 
+def test_analyze_report_history_extracts_json_wrapper_from_prose_with_fenced_block(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_g" / "20260108T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "agent_stderr.txt").write_text("", encoding="utf-8")
+
+    last_message_obj = {
+        "schema_version": 1,
+        "persona": {"name": "Quickstart Sprinter"},
+        "mission": "Complete Output (Smoke)",
+        "adoption_decision": {"recommendation": "investigate"},
+        "confusion_points": [{"summary": "No documentation is available."}],
+        "suggested_changes": [{"change": "Add a simple wrapper script."}],
+        "confidence_signals": {"missing": ["Single-command quickstart."]},
+    }
+    report_json = json.dumps(last_message_obj, indent=2, ensure_ascii=False)
+    last_message_text = (
+        "Here is my report.\n\n"
+        "```json\n"
+        f"{report_json}\n"
+        "```\n"
+    )
+    (run_dir / "agent_last_message.txt").write_text(last_message_text, encoding="utf-8")
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_g/20260108T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": None,
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    summary = analyze_report_history(records, repo_root=tmp_path)
+    normalization_counts = summary["totals"]["normalization_counts"]
+    assert normalization_counts["report_json_envelope"] == 1
+
+
 def test_render_issue_analysis_markdown_truncates_preview_but_keeps_signal_pointer() -> None:
     long_text = "x" * 700
     summary = {
