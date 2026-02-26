@@ -91,11 +91,18 @@ If you already have a run directory:
 python -m usertest.cli report --repo-root . --run-dir "RUN_DIR"
 ```
 
-To recompute metrics from the normalized events:
+To recompute metrics (and re-normalize `raw_events.jsonl`):
 
 ```bash
 python -m usertest.cli report --repo-root . --run-dir "RUN_DIR" --recompute-metrics
 ```
+
+Notes:
+
+- `--recompute-metrics` **overwrites** `normalized_events.jsonl` as a side effect.
+- For reproducibility, if `normalized_events.jsonl` already exists its timestamp stream is reused when
+  possible; otherwise timestamps may be derived from `raw_events.ts.jsonl` (if present) or generated
+  at recompute time.
 
 ---
 

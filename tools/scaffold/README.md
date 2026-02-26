@@ -13,6 +13,12 @@ List available kinds and generators, then scaffold a project and run its tasks:
     python tools/scaffold/scaffold.py run install --project billing-api --skip-missing
     python tools/scaffold/scaffold.py run test --project billing-api
 
+## Lint autofix
+
+To run lint in autofix mode across projects (when supported), use `scaffold run` with `--fix`:
+
+    python tools/scaffold/scaffold.py run lint --fix --kind lib
+
 ## Fixing / syncing the manifest
 
 `tools/scaffold/monorepo.toml` is the source of truth for repo-wide tasks and CI. If you update
@@ -32,7 +38,6 @@ Options:
 
 - Always required: `python` on PATH (Python 3.11+ recommended; older Pythons need `tomli` installed to parse TOML).
 - Required only for Cookiecutter-based generators: `cookiecutter` on PATH.
--
 - Required only for external Cookiecutter sources and vendoring: `git` on PATH.
 - Required only for running tasks: whatever commands your `tasks.*` reference (e.g. `poetry`, `uv`, `npm`, `cargo`, `terraform`).
 
