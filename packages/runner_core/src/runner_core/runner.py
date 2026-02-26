@@ -2916,7 +2916,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
 
         if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
-            suggested_policy = "write" if bool(resolved_inputs.mission.requires_edits) else "inspect"
+            suggested_policy = (
+                "write" if bool(resolved_inputs.mission.requires_edits) else "inspect"
+            )
             suggested_exec_backend = str(request.exec_backend or "local").strip() or "local"
 
             gemini_local_sandbox_available = True
@@ -3757,7 +3759,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 else:
                     message = (
                         f"Mission '{effective_spec.mission_id}' requires shell commands, but "
-                        f"policy '{request.policy}' for agent '{request.agent}' blocks shell commands."
+                        f"policy '{request.policy}' for agent '{request.agent}' "
+                        "blocks shell commands."
                     )
                     hint = (
                         "Use `--policy write` (allows edits + shell)."
