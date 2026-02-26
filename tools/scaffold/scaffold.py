@@ -1280,8 +1280,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     warnings: list[str] = []
     next_actions: list[str] = []
     skip_tool_checks = bool(getattr(args, "skip_tool_checks", False))
-    allow_missing_pip = bool(getattr(args, "allow_missing_pip", False))
-    pip_required = not allow_missing_pip
+    require_pip = bool(getattr(args, "require_pip", False))
 
     baseline_timeout_seconds = 3.0
     baseline: dict[str, Any] = {
@@ -1309,7 +1308,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         timeout_seconds=baseline_timeout_seconds,
     )
     baseline["pip"] = {
-        "required": pip_required,
+        "required": require_pip,
         "ok": ok,
         "probe": "python -m pip",
         "version": version_line,
@@ -1318,7 +1317,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if not ok:
         details_parts = [p for p in (version_line, err) if p]
         details = "; ".join(details_parts) if details_parts else "unknown_error"
-        if pip_required:
+        if require_pip:
             errors.append(f"pip is required but not usable: {details}")
         else:
             warnings.append(f"pip is not usable: {details}")
@@ -2050,9 +2049,9 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_doctor.add_argument(
-        "--allow-missing-pip",
+        "--require-pip",
         action="store_true",
-        help="Allow doctor to pass even if 'python -m pip' is not usable (still prints remediation).",
+        help="Require 'python -m pip' to be usable (fails doctor if pip is missing).",
     )
     p_doctor.set_defaults(func=cmd_doctor)
 

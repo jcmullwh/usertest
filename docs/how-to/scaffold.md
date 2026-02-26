@@ -20,11 +20,11 @@ For the full reference (generators, trust model, vendoring), see `tools/scaffold
 python tools/scaffold/scaffold.py doctor
 ```
 
-This checks Python + temp directory health, verifies `python -m pip`, and checks required tools for recorded projects.
-If your environment intentionally does not ship `pip` (pre-provisioned dependencies), you can run:
+This checks Python + temp directory health, reports whether `python -m pip` works, and checks required tools for recorded projects.
+If you want doctor to fail when `pip` is missing, you can run:
 
 ```bash
-python tools/scaffold/scaffold.py doctor --allow-missing-pip
+python tools/scaffold/scaffold.py doctor --require-pip
 ```
 
 ---

@@ -1,7 +1,7 @@
 [CmdletBinding()]
 param(
     [switch]$SkipToolChecks,
-    [switch]$AllowMissingPip
+    [switch]$RequirePip
 )
 
 $ErrorActionPreference = 'Stop'
@@ -30,8 +30,8 @@ try {
         Write-Host '==> Scaffold doctor'
         $doctorArgs = @('doctor')
     }
-    if ($AllowMissingPip) {
-        $doctorArgs += '--allow-missing-pip'
+    if ($RequirePip) {
+        $doctorArgs += '--require-pip'
     }
     & $pythonCmd tools/scaffold/scaffold.py @doctorArgs
     $exitCode = $LASTEXITCODE
