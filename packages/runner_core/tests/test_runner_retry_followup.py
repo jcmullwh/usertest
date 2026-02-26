@@ -307,7 +307,7 @@ def test_run_once_retries_provider_capacity_then_succeeds(
         assert attempt["agent_exec_wall_seconds"] >= 0
 
 
-def test_run_once_retries_provider_capacity_then_succeeds_even_with_codex_personality_warning(
+def test_run_once_fails_fast_when_codex_personality_warning_detected_during_retry_flow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -340,15 +340,17 @@ def test_run_once_retries_provider_capacity_then_succeeds_even_with_codex_person
         ),
     )
 
-    assert result.exit_code == 0
-    assert result.report_validation_errors == []
-    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
-    assert len(attempts["attempts"]) == 2
-    assert attempts["attempts"][0]["failure_subtype"] == "provider_capacity"
+    assert result.exit_code == 1
     assert any(
-        "code=codex_model_messages_missing" in str(line)
-        for line in attempts["attempts"][0].get("warnings", [])
+        "code=codex_model_messages_missing" in str(line) for line in result.report_validation_errors
     )
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert len(attempts["attempts"]) == 1
+    assert attempts["attempts"][0]["failure_subtype"] == "invalid_agent_config"
+
+    error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error_obj.get("type") == "AgentConfigInvalid"
+    assert error_obj.get("code") == "codex_model_messages_missing"
 
 
 def test_run_once_followup_prompt_recovers_invalid_json(
@@ -524,7 +526,7 @@ def test_run_once_verification_rejection_sentinel_fails_fast_without_followup(
     assert error_payload.get("code") == "verification_rejected_sentinel"
 
 
-def test_run_once_verification_followup_runs_even_with_codex_personality_warning(
+def test_run_once_fails_fast_when_codex_personality_warning_detected_during_verification_flow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -584,16 +586,14 @@ def test_run_once_verification_followup_runs_even_with_codex_personality_warning
         ),
     )
 
-    assert result.exit_code == 0
-    assert result.report_validation_errors == []
+    assert result.exit_code == 1
+    assert any(
+        "code=codex_model_messages_missing" in str(line) for line in result.report_validation_errors
+    )
 
     attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
-    assert len(attempts["attempts"]) == 2
-    assert attempts["attempts"][0].get("followup_reason") == "verification_failed"
-    assert any(
-        "code=codex_model_messages_missing" in str(line)
-        for line in attempts["attempts"][0].get("warnings", [])
-    )
+    assert len(attempts["attempts"]) == 1
+    assert attempts["attempts"][0]["failure_subtype"] == "invalid_agent_config"
 
 
 def test_run_once_uses_last_message_for_capacity_failures_with_empty_stderr(

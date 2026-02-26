@@ -688,9 +688,8 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
         for line in text.splitlines():
             lowered = line.lower()
             if _CODEX_PERSONALITY_MISSING_MESSAGES_WARNING in line:
-                if saw_personality_warning:
-                    continue
                 saw_personality_warning = True
+                continue
             if _CODEX_SHELL_SNAPSHOT_WARNING.lower() in lowered:
                 shell_snapshot_count += 1
                 continue
@@ -744,6 +743,20 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
                     _CODEX_MODEL_REFRESH_TIMEOUT_HINT,
                 ]
             )
+        if saw_personality_warning:
+            lines.extend(
+                [
+                    (
+                        "[codex_error_hint] code=codex_model_messages_missing "
+                        "classification=invalid_agent_config"
+                    ),
+                    (
+                        "hint=Codex personality/model_personality was requested but model_messages "
+                        "is missing. Fix your Codex config overrides (configs/agents.yaml or "
+                        "--agent-config) by providing model_messages alongside personality."
+                    ),
+                ]
+            )
         return "\n".join(lines)
 
     return text
@@ -765,49 +778,18 @@ def _sanitize_agent_stderr_file(*, agent: str, path: Path) -> None:
         return
 
 
-def _override_key_matches_suffix(*, key: str, suffix: str) -> bool:
-    normalized = key.strip().lower().replace("-", "_")
-    return normalized == suffix or normalized.endswith("." + suffix)
-
-
-def _strip_codex_personality_overrides(overrides: list[str]) -> list[str]:
-    """
-    Remove personality/model_personality overrides.
-
-    This is used to turn the "personality requested but model_messages missing" situation into a
-    warning-only path (by preventing Codex from receiving an invalid personality config override).
-    """
-
-    kept: list[str] = []
-    for raw in overrides:
-        key_raw, sep, _value_raw = raw.partition("=")
-        key = key_raw.strip()
-        if not sep or not key:
-            kept.append(raw)
-            continue
-        if _override_key_matches_suffix(
-            key=key, suffix="personality"
-        ) or _override_key_matches_suffix(key=key, suffix="model_personality"):
-            continue
-        kept.append(raw)
-    return kept
-
-
 def _codex_personality_warning_lines(*, source: str, warning_line: str | None = None) -> list[str]:
     lines = [
         (
-            "Codex warned that personality was requested but model_messages is missing "
-            "(Codex fell back to base instructions)."
+            "Codex reported that personality was requested but model_messages is missing "
+            "(Codex would fall back to base instructions)."
         ),
         f"source={source}",
         "code=codex_model_messages_missing",
     ]
-    if isinstance(warning_line, str) and warning_line.strip():
-        lines.append(f"warning={warning_line.strip()}")
     lines.append(
         "hint=If you intended to use a personality, provide model_messages alongside "
-        "personality/model_personality (configs/agents.yaml or --agent-config). Otherwise, "
-        "ignore this warning."
+        "personality/model_personality (configs/agents.yaml or --agent-config)."
     )
     return lines
 
@@ -3152,16 +3134,46 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
             personality_issue = validate_codex_personality_config_overrides(combined_overrides)
             if personality_issue is not None:
-                preflight_warnings.append(
+                message = personality_issue.message
+                hint = personality_issue.hint
+                _write_json(
+                    run_dir / "preflight.json",
                     {
+                        "warnings": preflight_warnings,
+                        "agent_config_validation": {
+                            "ok": False,
+                            "issues": [
+                                {
+                                    "code": "codex_model_messages_missing",
+                                    "message": message,
+                                    "hint": hint,
+                                    "details": personality_issue.details,
+                                }
+                            ],
+                        },
+                    },
+                )
+                _write_json(
+                    run_dir / "error.json",
+                    {
+                        "type": "AgentPreflightFailed",
+                        "subtype": "invalid_agent_config",
                         "code": "codex_model_messages_missing",
                         "agent": request.agent,
-                        "message": personality_issue.message,
-                        "hint": personality_issue.hint,
+                        "message": message,
+                        "hint": hint,
                         "details": personality_issue.details,
                     },
                 )
-                combined_overrides = _strip_codex_personality_overrides(list(combined_overrides))
+                return RunResult(
+                    run_dir=run_dir,
+                    exit_code=1,
+                    report_validation_errors=[
+                        message,
+                        "code=codex_model_messages_missing",
+                        f"hint={hint}",
+                    ],
+                )
 
         append_text = request.agent_append_system_prompt
         if isinstance(append_text, str) and not append_text.strip():
@@ -5062,6 +5074,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     ]
                 )
                 failure_subtype = _classify_failure_subtype(failure_text)
+                if codex_personality_warning_detected:
+                    failure_subtype = "invalid_agent_config"
                 attempt_finished_utc = _utc_now_z()
                 attempt_wall_seconds = time.monotonic() - attempt_start_monotonic
                 verification_summary_path: str | None = None
@@ -5113,6 +5127,49 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "stderr_path": stderr_attempt_path.name,
                 }
                 attempts_meta.append(attempt_meta)
+
+                if codex_personality_warning_detected:
+                    message = (
+                        "Codex reported that personality was requested but model_messages is "
+                        "missing. Aborting to avoid silently running with base instructions."
+                    )
+                    hint = (
+                        "Provide model_messages alongside personality/model_personality in your "
+                        "Codex config (configs/agents.yaml agents.codex.config_overrides or "
+                        "--agent-config)."
+                    )
+                    forced_exit_code = 1
+                    if not (run_dir / "error.json").exists():
+                        _write_json(
+                            run_dir / "error.json",
+                            {
+                                "type": "AgentConfigInvalid",
+                                "subtype": "invalid_agent_config",
+                                "code": "codex_model_messages_missing",
+                                "agent": request.agent,
+                                "message": message,
+                                "hint": hint,
+                                "details": {
+                                    "source": "agent_stderr",
+                                },
+                            },
+                        )
+
+                    selected_raw_events_path = raw_events_attempt_path
+                    selected_raw_events_ts_path = raw_events_attempt_ts_path
+                    selected_last_message_path = last_message_attempt_path
+                    selected_stderr_path = stderr_attempt_path
+                    selected_stderr_text = attempt_stderr_text
+                    selected_last_message_text = attempt_last_text
+                    selected_verification_summary_path = attempt_verification_summary_path
+                    selected_verification_errors = list(attempt_verification_errors)
+                    report_json = attempt_report_json
+                    report_validation_errors = [
+                        message,
+                        "code=codex_model_messages_missing",
+                        f"hint={hint}",
+                    ]
+                    break
 
                 retry_reason: str | None = None
                 if agent_exit_code != 0 and rate_limit_retry_count < rate_limit_retries:
@@ -5498,7 +5555,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     },
                 }
 
-            _write_json(run_dir / "error.json", error_payload)
+            if not (run_dir / "error.json").exists():
+                _write_json(run_dir / "error.json", error_payload)
 
         normalized_events_path = run_dir / "normalized_events.jsonl"
         raw_ts_f = None
