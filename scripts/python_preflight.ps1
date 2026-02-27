@@ -117,6 +117,73 @@ function _Get-WindowsPy0pInterpreters {
     return $out
 }
 
+function _Get-CommonWindowsPythonCandidatePaths {
+    [CmdletBinding()]
+    param()
+
+    $candidates = @()
+
+    foreach ($ver in @("313", "312", "311")) {
+        $candidates += "C:\\Python$ver\\python.exe"
+    }
+
+    $localAppData = $env:LOCALAPPDATA
+    if ($localAppData) {
+        foreach ($ver in @("313", "312", "311")) {
+            $candidates += (Join-Path $localAppData "Programs\\Python\\Python$ver\\python.exe")
+        }
+    }
+
+    $programFiles = $env:ProgramFiles
+    if ($programFiles) {
+        foreach ($ver in @("313", "312", "311")) {
+            $candidates += (Join-Path $programFiles "Python$ver\\python.exe")
+        }
+    }
+
+    $programFilesX86 = ${env:ProgramFiles(x86)}
+    if ($programFilesX86) {
+        foreach ($ver in @("313", "312", "311")) {
+            $candidates += (Join-Path $programFilesX86 "Python$ver\\python.exe")
+        }
+    }
+
+    $existing = @()
+    foreach ($path in $candidates) {
+        if (-not $path) { continue }
+        if (Test-Path -LiteralPath $path) {
+            $existing += $path
+        }
+    }
+
+    return @($existing | Select-Object -Unique)
+}
+
+function _Summarize-MultilineText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text,
+        [Parameter(Mandatory = $false)]
+        [int]$MaxLines = 6,
+        [Parameter(Mandatory = $false)]
+        [int]$MaxChars = 700
+    )
+
+    $t = ($Text -replace "`r`n?", "`n").Trim()
+    if (-not $t) { return "" }
+
+    $lines = $t -split "`n"
+    if ($lines.Count -gt $MaxLines) {
+        $lines = @($lines[0..($MaxLines - 1)] + "...[truncated]...")
+    }
+    $out = ($lines -join "`n").Trim()
+    if ($out.Length -gt $MaxChars) {
+        $out = $out.Substring(0, $MaxChars).TrimEnd() + "...[truncated]..."
+    }
+    return $out
+}
+
 function Test-PythonInterpreter {
     [CmdletBinding()]
     param(
@@ -275,6 +342,12 @@ function Resolve-UsablePython {
         }
     }
 
+    if ($env:OS -eq "Windows_NT") {
+        foreach ($path in (_Get-CommonWindowsPythonCandidatePaths)) {
+            Add-Candidate -Name 'common_python' -CommandPath $path
+        }
+    }
+
     foreach ($candidate in $candidates) {
         $remaining = ($deadline - [DateTime]::UtcNow).TotalSeconds
         if ($remaining -le 0) {
@@ -306,7 +379,8 @@ function Resolve-UsablePython {
             $reasonCode = $probe.ReasonCode
             $reason = $probe.Reason
             if ($reason) {
-                $rejections += "[$name] rejected ($reasonCode): $resolved`n    $reason"
+                $reasonShort = _Summarize-MultilineText -Text $reason
+                $rejections += "[$name] rejected ($reasonCode): $resolved`n    $reasonShort"
             }
             else {
                 $rejections += "[$name] rejected ($reasonCode): $resolved"

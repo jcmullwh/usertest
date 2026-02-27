@@ -1273,7 +1273,7 @@ def _probe_commands_local(
             except subprocess.TimeoutExpired:
                 usable = False
                 reason_code = "unresponsive"
-                reason = "bash probe timed out (2.0s) running `bash -lc \"echo ok\"`."
+                reason = "bash probe timed out (2.0s) while attempting to start bash."
             except OSError as e:
                 usable = False
                 reason_code = "blocked"
