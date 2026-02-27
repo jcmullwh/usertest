@@ -74,14 +74,34 @@ uv, Node, Terraform, …).
 
 You can work with this repo in a few ways. Pick the one that matches your goals.
 
-### Option A: “Monorepo-native” (recommended for maintainers)
+### Option A: "Monorepo-native" (recommended for maintainers)
 
 This matches what CI does and is the best way to run lint/test across multiple projects.
+
+> **PDM prerequisite** — Before using any `pdm` command, ensure PDM is installed and accessible:
+>
+> ```bash
+> # Install PDM (recommended via pipx for isolation, or pip into your active environment):
+> python -m pip install -U pdm
+> # Verify:
+> pdm --version
+> ```
+>
+> PDM also uses the `virtualenv` package to create project venvs. Install it alongside PDM to avoid
+> `VirtualenvCreateError` when running `pdm install -G dev` in container or restricted environments:
+>
+> ```bash
+> python -m pip install -U virtualenv
+> ```
+>
+> If `pdm: command not found`, see the PDM installation guide or run the doctor with tool checks skipped first:
+> `python tools/scaffold/scaffold.py doctor --skip-tool-checks`
 
 1) Ensure you have:
 
 - Python 3.11+
 - `pdm` installed (CI pins a specific version; you can use any recent version locally)
+- `virtualenv` installed (used by PDM to create project venvs; avoids `VirtualenvCreateError` in containers)
 
 2) Run the doctor:
 

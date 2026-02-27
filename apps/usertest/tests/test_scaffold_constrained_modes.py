@@ -219,3 +219,39 @@ def test_scaffold_golden_path_smoke_add_doctor_and_run(
         keep_going=False,
     )
     assert scaffold.cmd_run(test_args) == 0
+
+
+def test_scaffold_pdm_install_sets_venv_backend_when_virtualenv_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scaffold = _load_scaffold_module()
+    monkeypatch.setattr(scaffold, "_virtualenv_importable", lambda: False)
+
+    captured_env: dict[str, str] | None = None
+
+    def _fake_run(
+        cmd: list[str],
+        *,
+        cwd: Path,
+        capture: bool = False,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        nonlocal captured_env
+        assert capture is True
+        assert env is not None
+        captured_env = env
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(scaffold, "_run", _fake_run)
+
+    result = scaffold._run_manifest_task(
+        cmd=["pdm", "install", "-G", "dev"],
+        cwd=tmp_path,
+        task_name="install",
+        project_id="demo",
+    )
+    assert result.returncode == 0
+    assert captured_env is not None
+    assert captured_env["PDM_VENV_BACKEND"] == "venv"
+    assert captured_env["VIRTUALENV_COPIES"] == "1"

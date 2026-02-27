@@ -6,7 +6,6 @@ from pathlib import Path
 import pytest
 import yaml
 from backlog_repo.export import ticket_export_fingerprint
-from runner_core import find_repo_root
 
 from usertest_backlog.cli import _cleanup_stale_ticket_idea_files, main
 
@@ -21,8 +20,42 @@ def _write_yaml(path: Path, obj: object) -> None:
     path.write_text(yaml.safe_dump(obj, sort_keys=False), encoding="utf-8")
 
 
+def _make_repo_root(tmp_path: Path) -> Path:
+    repo_root = tmp_path / "repo_root"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    _write_yaml(repo_root / "configs" / "agents.yaml", {"agents": {}})
+    _write_yaml(repo_root / "configs" / "policies.yaml", {"policies": {}})
+    _write_yaml(
+        repo_root / "configs" / "backlog_policy.yaml",
+        {
+            "backlog_policy": {
+                "surface_area_high": [
+                    "new_command",
+                    "breaking_change",
+                    "new_top_level_mode",
+                    "new_config_schema",
+                    "new_api",
+                ],
+                "breadth_min_for_surface_area_high": {
+                    "missions": 2,
+                    "targets": 2,
+                    "repo_inputs": 2,
+                },
+                "default_stage_for_high_surface_low_breadth": "research_required",
+                "default_stage_for_labeled": "ready_for_ticket",
+                "investigation_steps_for_high_surface_low_breadth": [
+                    "Validate repo intent",
+                    "Check if existing commands/flags can be parameterized",
+                    "Propose a consolidation plan (avoid new top-level commands)",
+                ],
+            }
+        },
+    )
+    return repo_root
+
+
 def test_reports_export_tickets_applies_stage_gates_and_ledger_skip(tmp_path: Path) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
     owner_repo = tmp_path / "owner_repo"
@@ -220,8 +253,40 @@ def test_reports_export_tickets_applies_stage_gates_and_ledger_skip(tmp_path: Pa
     assert "Research / ADR Template" in research_body
 
 
+def test_resolve_owner_repo_root_normalizes_local_and_remote_repo_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from usertest_backlog import cli as backlog_cli
+
+    repo_root = tmp_path / "repo_root"
+    repo_root.mkdir(parents=True, exist_ok=True)
+
+    monkeypatch.setattr(
+        backlog_cli,
+        "_git_remote_urls",
+        lambda _repo_root: ["https://github.com/jcmullwh/usertest.git"],
+    )
+
+    owner_root, owner_input, resolution = backlog_cli._resolve_owner_repo_root(
+        ticket={
+            "repo_inputs_citing": [
+                str(repo_root),
+                "https://github.com/jcmullwh/usertest.git",
+            ]
+        },
+        scope_repo_input=None,
+        cli_repo_input=None,
+        repo_root=repo_root,
+    )
+
+    assert owner_root == repo_root
+    assert owner_input == str(repo_root)
+    assert resolution == "ticket_repo_inputs_citing_normalized"
+
+
 def test_reports_export_tickets_skips_when_plan_ticket_fingerprint_exists(tmp_path: Path) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
     owner_repo = tmp_path / "owner_repo"
@@ -304,7 +369,7 @@ def test_reports_export_tickets_skips_when_plan_ticket_fingerprint_exists(tmp_pa
 def test_reports_export_tickets_cleans_stale_queued_plan_files_when_actioned_plan_exists(
     tmp_path: Path,
 ) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
     owner_repo = tmp_path / "owner_repo"
@@ -417,7 +482,7 @@ def test_cleanup_stale_ticket_idea_files_includes_owner_repo_root_when_no_repo_i
 def test_reports_export_tickets_sweeps_actioned_queue_duplicates_not_in_backlog(
     tmp_path: Path,
 ) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
     owner_repo = tmp_path / "owner_repo"
@@ -500,7 +565,7 @@ def test_reports_export_tickets_sweeps_actioned_queue_duplicates_not_in_backlog(
 def test_reports_export_tickets_sweeps_actioned_bucket_duplicates_not_in_backlog(
     tmp_path: Path,
 ) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
     owner_repo = tmp_path / "owner_repo"
@@ -581,7 +646,7 @@ def test_reports_export_tickets_sweeps_actioned_bucket_duplicates_not_in_backlog
 
 
 def test_reports_export_tickets_attaches_ux_review_and_promotes_docs(tmp_path: Path) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
     owner_repo = tmp_path / "owner_repo"
@@ -702,7 +767,7 @@ def test_reports_export_tickets_attaches_ux_review_and_promotes_docs(tmp_path: P
 def test_reports_export_tickets_promotes_high_surface_ready_ticket_with_docs_recommendation(
     tmp_path: Path,
 ) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
     owner_repo = tmp_path / "owner_repo"
@@ -803,7 +868,7 @@ def test_reports_export_tickets_promotes_high_surface_ready_ticket_with_docs_rec
 
 
 def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_path: Path) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
     owner_repo = tmp_path / "owner_repo"
@@ -923,7 +988,7 @@ def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_
 def test_reports_export_tickets_defers_existing_plan_ticket_and_updates_actions(
     tmp_path: Path,
 ) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
     owner_repo = tmp_path / "owner_repo"
@@ -1044,7 +1109,7 @@ def test_reports_export_tickets_defers_existing_plan_ticket_and_updates_actions(
 
 
 def test_reports_export_tickets_defer_moves_bucket_and_skips_export(tmp_path: Path) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
+    repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
     compiled_dir = runs_dir / "target_a" / "_compiled"
     owner_repo = tmp_path / "owner_repo"
