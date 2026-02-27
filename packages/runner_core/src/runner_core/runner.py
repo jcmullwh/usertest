@@ -3179,64 +3179,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         if isinstance(append_text, str) and not append_text.strip():
             append_text = None
 
-        if request.agent == "gemini" and (
-            request.agent_append_system_prompt_file is not None or append_text is not None
+        if (
+            request.agent == "gemini"
+            and (request.agent_append_system_prompt_file is not None or append_text is not None)
+            and request.agent_system_prompt_file is None
         ):
-            if request.agent_system_prompt_file is None:
-                message = (
-                    "Gemini does not support appending to the system prompt; "
-                    "use --agent-system-prompt-file with a merged prompt instead."
-                )
-                hint = (
-                    "Create a single file that contains your desired base system prompt plus the "
-                    "append content, then pass it via --agent-system-prompt-file (and omit "
-                    "--agent-append-system-prompt*)."
-                )
-                _write_json(
-                    run_dir / "preflight.json",
-                    {
-                        "warnings": preflight_warnings,
-                        "agent_config_validation": {
-                            "ok": False,
-                            "issues": [
-                                {
-                                    "code": "gemini_system_prompt_append_unsupported",
-                                    "message": message,
-                                    "hint": hint,
-                                    "details": {
-                                        "agent_system_prompt_file": None,
-                                        "agent_append_system_prompt": bool(append_text),
-                                        "agent_append_system_prompt_file": str(
-                                            request.agent_append_system_prompt_file
-                                        )
-                                        if request.agent_append_system_prompt_file is not None
-                                        else None,
-                                    },
-                                }
-                            ],
-                        },
-                    },
-                )
-                _write_json(
-                    run_dir / "error.json",
-                    {
-                        "type": "AgentPreflightFailed",
-                        "subtype": "unsupported_feature",
-                        "code": "gemini_system_prompt_append_unsupported",
-                        "agent": request.agent,
-                        "message": message,
-                        "hint": hint,
-                    },
-                )
-                return RunResult(
-                    run_dir=run_dir,
-                    exit_code=1,
-                    report_validation_errors=[
-                        message,
-                        "code=gemini_system_prompt_append_unsupported",
-                        f"hint={hint}",
-                    ],
-                )
+            preflight_warnings.append(
+                {
+                    "code": "gemini_system_prompt_append_autocomposed",
+                    "agent": request.agent,
+                    "message": (
+                        "Gemini CLI does not support appending to the system prompt; "
+                        "composing a replacement system prompt file from append content."
+                    ),
+                }
+            )
 
         catalog_config = load_catalog_config(config.repo_root, acquired.workspace_dir)
 
@@ -3690,11 +3647,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         if append_src_path is not None or append_text is not None:
             if request.agent == "gemini":
                 # Gemini CLI doesn't support an explicit "append to system prompt" mechanism.
-                # Emulate append by concatenating the requested append content into the effective
-                # system prompt file, then pass that file as the Gemini system prompt.
-                assert staged_system_prompt is not None, (
-                    "preflight should block append without base"
-                )
+                # Emulate append by composing a replacement system prompt file and passing that
+                # file as the Gemini system prompt.
+                if staged_system_prompt is None:
+                    staged_system_prompt = _stage_agent_prompt_text(
+                        run_dir=run_dir,
+                        name="system_prompt.md",
+                        text="",
+                    )
                 if append_src_path is not None:
                     append_payload = append_src_path.read_text(encoding="utf-8")
                 else:
