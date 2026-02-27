@@ -1517,6 +1517,25 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             required_tools.setdefault(tool, []).append(f"{project_id}:{task_name}")
 
     tool_timeout_seconds = 4.0
+    # Deterministic preflight summary: pdm availability + chosen install fallback.
+    # Smoke scripts and verification paths can read .scaffold/doctor_tool_report.json
+    # and key on preflight_summary.install_fallback to decide which install path to use.
+    pdm_on_path = _which("pdm") is not None
+    pdm_importable = _pdm_importable()
+    pdm_usable = pdm_on_path or (os.name == "nt" and pdm_importable)
+    if pdm_usable:
+        install_fallback = "pdm"
+    elif pip_ok:
+        install_fallback = "pip"
+    else:
+        install_fallback = "none"
+    preflight_summary: dict[str, Any] = {
+        "pdm_present": pdm_on_path,
+        "pdm_importable": pdm_importable,
+        "pdm_usable": pdm_usable,
+        "pip_ok": pip_ok,
+        "install_fallback": install_fallback,
+    }
     tool_report: dict[str, Any] = {
         "kind": "scaffold_doctor_tool_report",
         "generated_at": (
@@ -1524,6 +1543,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         ),
         "python": {"executable": sys.executable, "version": sys.version.split()[0]},
         "baseline": baseline,
+        "preflight_summary": preflight_summary,
         "tools": {},
     }
 
