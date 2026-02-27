@@ -16,16 +16,16 @@ For the full reference (generators, trust model, vendoring), see `tools/scaffold
 
 ## Validate your environment
 
-```bash
-python tools/scaffold/scaffold.py doctor
-```
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`
+- **macOS / Linux:** `bash ./scripts/doctor.sh`
+- **Direct (any OS):** `python tools/scaffold/scaffold.py doctor`
 
 This checks Python + temp directory health, reports whether `python -m pip` works, and checks required tools for recorded projects.
 If you want doctor to fail when `pip` is missing, you can run:
 
-```bash
-python tools/scaffold/scaffold.py doctor --require-pip
-```
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1 -RequirePip`
+- **macOS / Linux:** `bash ./scripts/doctor.sh --require-pip`
+- **Direct (any OS):** `python tools/scaffold/scaffold.py doctor --require-pip`
 
 ---
 

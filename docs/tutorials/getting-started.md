@@ -15,7 +15,22 @@ The runner can drive multiple agent CLIs (Codex, Claude Code, Gemini) in headles
 
 ---
 
-## Quickstart (one command)
+## Step 0: doctor (recommended)
+
+Run the doctor first to get a one-screen **PASS/FAIL** and copy/paste next actions:
+
+- **Windows PowerShell:**
+  ```powershell
+  powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1
+  ```
+- **macOS / Linux:**
+  ```bash
+  bash ./scripts/doctor.sh
+  ```
+
+---
+
+## Step 1: offline-safe first success (one command)
 
 Run the offline-safe “first success” script (creates a local `.venv`, installs minimal deps, sets `PYTHONPATH`, and re-renders a golden fixture report — **no agents**, **no network calls**):
 

@@ -63,6 +63,75 @@ function _Is-WindowsAppsAliasPath {
     return $PathText.Replace('/', '\').ToLower().Contains('\windowsapps\')
 }
 
+function _Get-CommonWindowsPythonCandidatePaths {
+    [CmdletBinding()]
+    param()
+
+    $candidates = @()
+
+    # Common system-wide installs (often used in CI/sandboxes).
+    foreach ($ver in @("313", "312", "311")) {
+        $candidates += "C:\\Python$ver\\python.exe"
+    }
+
+    # Common per-user installs (python.org installer defaults).
+    $localAppData = $env:LOCALAPPDATA
+    if ($localAppData) {
+        foreach ($ver in @("313", "312", "311")) {
+            $candidates += (Join-Path $localAppData "Programs\\Python\\Python$ver\\python.exe")
+        }
+    }
+
+    # Less common, but sometimes present.
+    $programFiles = $env:ProgramFiles
+    if ($programFiles) {
+        foreach ($ver in @("313", "312", "311")) {
+            $candidates += (Join-Path $programFiles "Python$ver\\python.exe")
+        }
+    }
+    $programFilesX86 = ${env:ProgramFiles(x86)}
+    if ($programFilesX86) {
+        foreach ($ver in @("313", "312", "311")) {
+            $candidates += (Join-Path $programFilesX86 "Python$ver\\python.exe")
+        }
+    }
+
+    $existing = @()
+    foreach ($path in $candidates) {
+        if (-not $path) { continue }
+        if (Test-Path -LiteralPath $path) {
+            $existing += $path
+        }
+    }
+
+    return @($existing | Select-Object -Unique)
+}
+
+function _Summarize-MultilineText {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$Text,
+        [Parameter(Mandatory = $false)]
+        [int]$MaxLines = 6,
+        [Parameter(Mandatory = $false)]
+        [int]$MaxChars = 700
+    )
+
+    $t = ($Text -replace "`r`n?", "`n").Trim()
+    if (-not $t) { return "" }
+
+    $lines = $t -split "`n"
+    if ($lines.Count -gt $MaxLines) {
+        $lines = @($lines[0..($MaxLines - 1)] + "...[truncated]...")
+    }
+    $out = ($lines -join "`n").Trim()
+    if ($out.Length -gt $MaxChars) {
+        $out = $out.Substring(0, $MaxChars).TrimEnd() + "...[truncated]..."
+    }
+    return $out
+}
+
 function Test-PythonInterpreter {
     [CmdletBinding()]
     param(
@@ -168,6 +237,15 @@ function Resolve-UsablePython {
     if (Test-Path -LiteralPath $venvPython) {
         $candidates += @{ Name = "venv"; CommandPath = $venvPython }
     }
+
+    # Some Windows sandboxes have a broken/blocked `python` shim on PATH. As a fallback, probe a small
+    # set of common Python install locations so `scripts/doctor.ps1` remains copy/paste-friendly.
+    if ($env:OS -eq "Windows_NT") {
+        foreach ($path in (_Get-CommonWindowsPythonCandidatePaths)) {
+            $parent = Split-Path -Parent $path
+            $candidates += @{ Name = "python"; CommandPath = $path; DisplayName = "python ($parent)" }
+        }
+    }
     $candidates += @(
         @{ Name = "python"; CommandPath = $null },
         @{ Name = "python3"; CommandPath = $null },
@@ -181,11 +259,13 @@ function Resolve-UsablePython {
         }
 
         $name = $candidate.Name
+        $display = $candidate.DisplayName
+        if (-not $display) { $display = $name }
         $resolved = $candidate.CommandPath
         if (-not $resolved) {
             $cmd = Get-Command $name -ErrorAction SilentlyContinue
             if (-not $cmd) {
-                $rejections += "[$name] not found on PATH"
+                $rejections += "[$display] not found on PATH"
                 continue
             }
             $resolved = $cmd.Source
@@ -193,12 +273,12 @@ function Resolve-UsablePython {
         }
 
         if (-not $resolved) {
-            $rejections += "[$name] could not resolve command path"
+            $rejections += "[$display] could not resolve command path"
             continue
         }
 
         if (_Is-WindowsAppsAliasPath -PathText $resolved) {
-            $rejections += "[$name] rejected WindowsApps alias: $resolved"
+            $rejections += "[$display] rejected WindowsApps alias: $resolved"
             continue
         }
 
@@ -206,7 +286,7 @@ function Resolve-UsablePython {
             $probe = Test-PythonInterpreter -CommandPath $resolved -TimeoutSeconds $remaining
         }
         catch {
-            $rejections += "[$name] interpreter probe failed: $($_.Exception.Message) ($resolved)"
+            $rejections += "[$display] interpreter probe failed: $($_.Exception.Message) ($resolved)"
             continue
         }
 
@@ -214,10 +294,11 @@ function Resolve-UsablePython {
             $reasonCode = $probe.ReasonCode
             $reason = $probe.Reason
             if ($reason) {
-                $rejections += "[$name] rejected ($reasonCode): $resolved`n    $reason"
+                $reasonShort = _Summarize-MultilineText -Text $reason
+                $rejections += "[$display] rejected ($reasonCode): $resolved`n    $reasonShort"
             }
             else {
-                $rejections += "[$name] rejected ($reasonCode): $resolved"
+                $rejections += "[$display] rejected ($reasonCode): $resolved"
             }
             continue
         }

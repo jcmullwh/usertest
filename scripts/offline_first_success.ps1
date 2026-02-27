@@ -55,7 +55,13 @@ try {
         }
     }
 
-    $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
+    try {
+        $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
+    }
+    catch {
+        Write-Err $_.Exception.Message
+        exit 1
+    }
     $pythonCmd = $pythonInfo.CommandPath
     Write-Host "==> Using Python: $($pythonInfo.Name) -> $pythonCmd"
     Write-Host "==> Python executable: $($pythonInfo.Executable)"
