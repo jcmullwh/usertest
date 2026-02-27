@@ -189,6 +189,28 @@ except ModuleNotFoundError as exc:
     raise
 
 try:
+    from usertest_backlog.triage_atoms import (
+        build_implementation_index,
+        build_ticket_status_index,
+        infer_backlog_json,
+        load_atoms_jsonl,
+        load_backlog_json,
+        write_triage_atoms,
+    )
+    from usertest_backlog.triage_atoms import (
+        resolve_embedder as resolve_atoms_embedder,
+    )
+    from usertest_backlog.triage_atoms import (
+        triage_atoms as triage_atoms_report,
+    )
+except ModuleNotFoundError as exc:
+    if exc.name in {"usertest_backlog", "usertest_backlog.triage_atoms"}:
+        raise SystemExit(
+            _from_source_import_remediation(missing_module="usertest_backlog")
+        ) from exc
+    raise
+
+try:
     from usertest_backlog.triage_backlog import (
         load_issue_items,
         triage_issues,
@@ -1172,6 +1194,90 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.75,
         help="Minimum similarity to theme representative during refinement.",
+    )
+
+    triage_atoms_p = sub.add_parser(
+        "triage-atoms",
+        help="Cluster backlog atoms by text and link to tickets + implementation runs.",
+    )
+    triage_atoms_p.add_argument(
+        "--in",
+        dest="atoms_jsonl",
+        type=Path,
+        required=True,
+        help="Path to backlog atoms JSONL (e.g. *.backlog.atoms.jsonl).",
+    )
+    triage_atoms_p.add_argument(
+        "--backlog-json",
+        type=Path,
+        help="Optional backlog JSON path (defaults next to --in when inferred).",
+    )
+    triage_atoms_p.add_argument(
+        "--plans-root",
+        type=Path,
+        help="Repo root containing .agents/plans (default: --repo-root).",
+    )
+    triage_atoms_p.add_argument(
+        "--implementation-root",
+        type=Path,
+        help=(
+            "Implementation run root containing ticket_ref.json (e.g. runs/usertest_implement/usertest). "
+            "If omitted, inferred from backlog.json input.runs_dir + input.target when available."
+        ),
+    )
+    triage_atoms_p.add_argument(
+        "--out-json",
+        type=Path,
+        help="Output JSON path (defaults next to --in).",
+    )
+    triage_atoms_p.add_argument(
+        "--out-md",
+        type=Path,
+        help="Output markdown path (defaults next to --in).",
+    )
+    triage_atoms_p.add_argument(
+        "--repo-root",
+        type=Path,
+        help="Path to monorepo root (auto-detected by default).",
+    )
+    triage_atoms_p.add_argument(
+        "--embedder",
+        choices=["hashing", "openai"],
+        default="hashing",
+        help="Embedding backend for clustering (default: hashing/offline).",
+    )
+    triage_atoms_p.add_argument(
+        "--text-normalization",
+        choices=["raw", "smart"],
+        default="smart",
+        help=(
+            "Atom text normalization mode before clustering (default: smart). "
+            "smart strips the generic 'Command failed: ... command=' wrapper for command_failure atoms."
+        ),
+    )
+    triage_atoms_p.add_argument(
+        "--overall-threshold",
+        type=float,
+        default=0.82,
+        help="Overall similarity threshold for clustering edges (default: 0.82).",
+    )
+    triage_atoms_p.add_argument(
+        "--k",
+        type=int,
+        default=10,
+        help="Top-K neighbor count per item in the similarity graph (default: 10).",
+    )
+    triage_atoms_p.add_argument(
+        "--representative-threshold",
+        type=float,
+        default=0.75,
+        help="Minimum similarity to cluster representative during refinement (default: 0.75).",
+    )
+    triage_atoms_p.add_argument(
+        "--min-cluster-size",
+        type=int,
+        default=2,
+        help="Minimum cluster size to emit (default: 2).",
     )
 
     return parser
@@ -5084,6 +5190,88 @@ def _cmd_triage_prs(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_triage_atoms(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+
+    atoms_jsonl = args.atoms_jsonl
+    if not atoms_jsonl.is_absolute() and not atoms_jsonl.exists():
+        atoms_jsonl = repo_root / atoms_jsonl
+    atoms_jsonl = atoms_jsonl.resolve()
+    if not atoms_jsonl.exists():
+        raise FileNotFoundError(f"Atoms JSONL not found: {atoms_jsonl}")
+
+    backlog_json = _resolve_optional_path(repo_root, args.backlog_json)
+    backlog_json = infer_backlog_json(atoms_jsonl, explicit=backlog_json)
+
+    tickets: list[dict[str, Any]] | None = None
+    backlog_doc: dict[str, Any] | None = None
+    if backlog_json is not None:
+        backlog_json = backlog_json.resolve()
+        backlog_doc = load_backlog_json(backlog_json)
+        tickets_raw = backlog_doc.get("tickets")
+        tickets = (
+            [item for item in tickets_raw if isinstance(item, dict)]
+            if isinstance(tickets_raw, list)
+            else []
+        )
+
+    plans_root = args.plans_root.resolve() if args.plans_root is not None else repo_root
+    ticket_status_by_id = build_ticket_status_index(owner_root=plans_root)
+
+    implementation_root = _resolve_optional_path(repo_root, args.implementation_root)
+    if implementation_root is None and isinstance(backlog_doc, dict):
+        input_meta = backlog_doc.get("input")
+        if isinstance(input_meta, dict):
+            runs_dir_raw = input_meta.get("runs_dir")
+            target_raw = input_meta.get("target")
+            if isinstance(runs_dir_raw, str) and isinstance(target_raw, str):
+                runs_dir = Path(runs_dir_raw)
+                if not runs_dir.is_absolute() and not runs_dir.exists():
+                    runs_dir = repo_root / runs_dir
+                candidate = (runs_dir / target_raw).resolve()
+                if candidate.exists():
+                    implementation_root = candidate
+
+    implementation_runs_by_ticket: dict[str, Any] = {}
+    if implementation_root is not None:
+        implementation_runs_by_ticket = build_implementation_index(
+            repo_root=repo_root,
+            implementation_root=implementation_root,
+        )
+
+    embedder, embedder_meta = resolve_atoms_embedder(args.embedder)
+    report = triage_atoms_report(
+        load_atoms_jsonl(atoms_jsonl),
+        embedder=embedder,
+        text_normalization=args.text_normalization,
+        k=int(args.k),
+        overall_similarity_threshold=float(args.overall_threshold),
+        representative_similarity_threshold=float(args.representative_threshold),
+        min_cluster_size=int(args.min_cluster_size),
+        tickets=tickets,
+        ticket_status_by_id=ticket_status_by_id,
+        implementation_runs_by_ticket=implementation_runs_by_ticket,
+    )
+    report["input"] = {
+        "atoms_jsonl": str(atoms_jsonl),
+        "backlog_json": str(backlog_json) if backlog_json is not None else None,
+        "plans_root": str(plans_root),
+        "implementation_root": str(implementation_root) if implementation_root is not None else None,
+        **embedder_meta,
+    }
+
+    out_json, out_md = write_triage_atoms(
+        report,
+        atoms_jsonl=atoms_jsonl,
+        out_json=args.out_json,
+        out_md=args.out_md,
+    )
+
+    print(str(out_json))
+    print(str(out_md))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the CLI entrypoint dispatch.
 
@@ -5119,6 +5307,8 @@ def main(argv: list[str] | None = None) -> None:
         raise SystemExit(_cmd_triage_prs(args))
     if args.cmd == "triage-backlog":
         raise SystemExit(_cmd_triage_backlog(args))
+    if args.cmd == "triage-atoms":
+        raise SystemExit(_cmd_triage_atoms(args))
     raise SystemExit(2)
 
 
