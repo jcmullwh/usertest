@@ -483,6 +483,13 @@ def _run_manifest_task(
     # `virtualenv` honors `VIRTUALENV_COPIES=1` and will copy instead of symlinking, making installs more reliable.
     env.setdefault("VIRTUALENV_COPIES", "1")
 
+    # On Windows, when an active VIRTUAL_ENV is set, PDM reuses it for all projects. If the entry-point executables
+    # inside that venv are locked by the currently-running process (e.g., this scaffold script itself was launched from
+    # that venv), PDM cannot replace them and raises WinError 32 (file in use). Setting PDM_IGNORE_ACTIVE_VENV=1 causes
+    # PDM to create/use its own per-project venv instead, avoiding the lock contention.
+    if os.name == "nt" and os.environ.get("VIRTUAL_ENV", "").strip():
+        env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+
     # If `virtualenv` is not installed, PDM will raise `VirtualenvCreateError` when attempting to create a project
     # venv. Fall back to PDM's stdlib `venv` backend which is always available. This makes `pdm install` work in
     # container environments where only a bare CPython is present (no `virtualenv` package).

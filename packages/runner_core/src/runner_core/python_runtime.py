@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import shutil
@@ -9,6 +10,8 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+
+_LOG = logging.getLogger(__name__)
 
 _PYTHON_HEALTH_PROBE = (
     "import encodings, json, sys; "
@@ -276,6 +279,7 @@ def select_python_runtime(
     Resolve a usable Python executable path without relying on WindowsApps aliases.
 
     Preference order:
+    - ``USERTEST_PYTHON`` env var (sandbox-provided interpreter, highest priority)
     - workspace `.venv` (created by runner pip-bootstrap and common local workflows)
     - active `VIRTUAL_ENV`
     - registered interpreters (Windows `py -0p`), when available
@@ -295,9 +299,31 @@ def select_python_runtime(
         if key in seen:
             return
         seen.add(key)
-        candidates.append(
-            _probe_python_executable(raw, timeout_seconds=timeout_seconds, source=source)
-        )
+        candidate = _probe_python_executable(raw, timeout_seconds=timeout_seconds, source=source)
+        if candidate.usable:
+            _LOG.debug(
+                "python_runtime: candidate %s (%s) probed OK: executable=%s version=%s",
+                source,
+                raw,
+                candidate.executable,
+                candidate.version,
+            )
+        else:
+            _LOG.debug(
+                "python_runtime: candidate %s (%s) rejected: reason_code=%s reason=%s",
+                source,
+                raw,
+                candidate.reason_code,
+                candidate.reason,
+            )
+        candidates.append(candidate)
+
+    # Highest priority: sandbox-provided interpreter path set by outer runner preflight.
+    # This avoids re-selecting an inaccessible path (external drive, interdicted venv, etc.)
+    # when the harness has already resolved and validated a usable interpreter.
+    sandbox_python_env = os.environ.get("USERTEST_PYTHON", "").strip()
+    if sandbox_python_env:
+        _add(sandbox_python_env, source="sandbox_env")
 
     workspace_venv = workspace_dir / ".venv"
     _add(str(_venv_python_path(workspace_venv)), source="workspace_venv")
@@ -333,6 +359,22 @@ def select_python_runtime(
         if candidate.usable:
             selected = candidate
             break
+
+    if selected is not None:
+        _LOG.debug(
+            "python_runtime: selected interpreter source=%s path=%s version=%s",
+            selected.source,
+            selected.path,
+            selected.version,
+        )
+    else:
+        rejected_summary = "; ".join(
+            f"{c.source}({c.reason_code})" for c in candidates if not c.usable
+        )
+        _LOG.warning(
+            "python_runtime: no usable interpreter found. Rejected candidates: %s",
+            rejected_summary or "(none probed)",
+        )
 
     return PythonRuntimeSelection(selected=selected, candidates=tuple(candidates))
 
