@@ -224,6 +224,10 @@ def _pdm_importable() -> bool:
     return importlib.util.find_spec("pdm") is not None
 
 
+def _virtualenv_importable() -> bool:
+    return importlib.util.find_spec("virtualenv") is not None
+
+
 def _resolve_argv(argv: list[str]) -> list[str]:
     """Resolve argv[0] via PATH for cross-platform execution.
 
@@ -374,6 +378,14 @@ def _pdm_remediation_hint(*, python_exe: str, pip_ok: bool) -> str:
     return f"Install pip first ({_pip_remediation_hint(python_exe=python_exe)}) then: {python_exe} -m pip install -U pdm"
 
 
+def _virtualenv_remediation_hint(*, python_exe: str) -> str:
+    return (
+        f"Install virtualenv (try): {python_exe} -m pip install -U virtualenv"
+        "  (PDM uses virtualenv to create project venvs; without it PDM falls back to stdlib venv"
+        " which may have reduced features or fail in some container environments)"
+    )
+
+
 def _git_remediation_hint() -> str:
     if os.name == "nt":
         return "Install Git and ensure 'git' is on PATH (for example: winget install -e --id Git.Git)."
@@ -454,6 +466,16 @@ def _run_manifest_task(
     #
     # `virtualenv` honors `VIRTUALENV_COPIES=1` and will copy instead of symlinking, making installs more reliable.
     env.setdefault("VIRTUALENV_COPIES", "1")
+
+    # If `virtualenv` is not installed, PDM will raise `VirtualenvCreateError` when attempting to create a project
+    # venv. Fall back to PDM's stdlib `venv` backend which is always available. This makes `pdm install` work in
+    # container environments where only a bare CPython is present (no `virtualenv` package).
+    if not _virtualenv_importable():
+        env.setdefault("PDM_VENV_BACKEND", "venv")
+        _eprint(
+            "INFO: 'virtualenv' package not found; setting PDM_VENV_BACKEND=venv to use stdlib venv backend."
+            f" Install virtualenv for richer venv support: {sys.executable} -m pip install -U virtualenv"
+        )
 
     first = _run(cmd, cwd=cwd, capture=True, env=env)
     _emit_captured_process_output(first)
@@ -1387,6 +1409,23 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             warnings.append(f"bash is not usable: {err or 'unknown_error'}")
             next_actions.append(_bash_remediation_hint())
 
+    # Check virtualenv availability. PDM uses `virtualenv` (when installed) to create project venvs.
+    # When it is missing, PDM raises `VirtualenvCreateError` which blocks `pdm install -G dev` in containers.
+    # This is a warning rather than an error because scaffold auto-falls-back to stdlib venv for pdm install tasks.
+    virtualenv_ok = _virtualenv_importable()
+    baseline["virtualenv"] = {
+        "ok": virtualenv_ok,
+        "probe": "importlib",
+        "note": "optional; PDM uses virtualenv when available; scaffold falls back to stdlib venv when missing",
+    }
+    if not virtualenv_ok and not skip_tool_checks:
+        warnings.append(
+            "virtualenv package is not importable: PDM may raise VirtualenvCreateError when creating project venvs."
+            " scaffold will set PDM_VENV_BACKEND=venv automatically for managed installs, but direct `pdm install`"
+            " calls outside scaffold may still fail."
+        )
+        next_actions.append(_virtualenv_remediation_hint(python_exe=sys.executable))
+
     required_tools: dict[str, list[str]] = {}
     for project in projects:
         project_id = project.get("id")
@@ -1557,6 +1596,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         bash_status = "OK" if bash_ok else ("MISSING" if not bash.get("resolved_path") else "NOT OK")
     bash_label = "bash (required)" if bash_required else "bash (optional)"
     _eprint(f"    - {bash_label}: {bash_status} ({bash.get('version') or bash.get('error') or 'unknown'})")
+    venv_entry = cast(dict[str, Any], baseline.get("virtualenv", {}))
+    venv_ok = bool(venv_entry.get("ok"))
+    venv_status = "OK" if venv_ok else "MISSING (scaffold uses stdlib venv as fallback; direct pdm install may fail)"
+    _eprint(f"    - virtualenv (optional): {venv_status}")
 
     if required_tools:
         _eprint("==> Tool preflight")

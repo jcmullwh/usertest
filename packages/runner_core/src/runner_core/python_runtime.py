@@ -39,6 +39,8 @@ def _probe_failure_reason(stderr_text: str, stdout_text: str) -> tuple[str, str]
         return "missing_stdlib", merged
     if "access is denied" in lowered or "permission denied" in lowered:
         return "access_denied", merged
+    if "cannot be accessed by the system" in lowered:
+        return "access_denied", merged
     if "the system cannot find the file specified" in lowered:
         return "not_found", merged
     return "runtime_probe_failed", merged
@@ -66,6 +68,38 @@ def _windows_where_all(command: str, *, timeout_seconds: float = 2.0) -> list[st
         candidate = line.strip()
         if candidate:
             out.append(candidate)
+    return out
+
+
+_WINDOWS_PY0P_PATH_PATTERN = re.compile(r"([A-Za-z]:\\.*)$")
+
+
+def _windows_py0p_interpreters(*, timeout_seconds: float = 2.0) -> list[str]:
+    if not _is_windows_platform():
+        return []
+    try:
+        proc = subprocess.run(
+            ["py", "-0p"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=max(0.1, float(timeout_seconds)),
+            check=False,
+        )
+    except Exception:
+        return []
+    if proc.returncode != 0:
+        return []
+    out: list[str] = []
+    for raw_line in proc.stdout.splitlines():
+        line = raw_line.rstrip()
+        if not line.strip():
+            continue
+        match = _WINDOWS_PY0P_PATH_PATTERN.search(line)
+        if not match:
+            continue
+        out.append(match.group(1).strip())
     return out
 
 
@@ -244,7 +278,8 @@ def select_python_runtime(
     Preference order:
     - workspace `.venv` (created by runner pip-bootstrap and common local workflows)
     - active `VIRTUAL_ENV`
-    - alternate PATH matches (Windows `where python`) when `python` resolves to WindowsApps alias
+    - registered interpreters (Windows `py -0p`), when available
+    - alternate PATH matches (Windows `where python`)
     - PATH commands (`py`, `python`, `python3`)
     - `sys.executable` (last resort; the runner itself is running under it)
     """
@@ -272,11 +307,20 @@ def select_python_runtime(
         _add(str(_venv_python_path(Path(venv_env))), source="virtual_env")
 
     python_which = shutil.which("python")
-    if include_where_fallbacks and _is_windowsapps_alias(python_which):
-        for entry in _windows_where_all("python"):
+
+    if _is_windows_platform():
+        for entry in _windows_py0p_interpreters(timeout_seconds=min(2.0, timeout_seconds)):
+            _add(entry, source="py_0p")
+
+    if include_where_fallbacks and _is_windows_platform():
+        for entry in _windows_where_all("python", timeout_seconds=min(2.0, timeout_seconds)):
             if _is_windowsapps_alias(entry):
                 continue
             _add(entry, source="where_python")
+        for entry in _windows_where_all("python3", timeout_seconds=min(2.0, timeout_seconds)):
+            if _is_windowsapps_alias(entry):
+                continue
+            _add(entry, source="where_python3")
 
     _add(shutil.which("py"), source="command_py")
     _add(python_which, source="command_python")
@@ -363,7 +407,11 @@ def probe_pytest_module(
                 "Install pytest into the selected interpreter: "
                 f"{python_executable} -m pip install -U pytest"
             )
-        elif "access is denied" in lowered or "permission denied" in lowered:
+        elif (
+            "access is denied" in lowered
+            or "permission denied" in lowered
+            or "cannot be accessed by the system" in lowered
+        ):
             reason_code = "access_denied"
             remediation = (
                 "The selected interpreter cannot be spawned in this environment. "
@@ -464,7 +512,11 @@ def probe_pip_module(
                 "Bootstrap pip for this interpreter (try): "
                 f"{python_executable} -m ensurepip --upgrade"
             )
-        elif "access is denied" in lowered or "permission denied" in lowered:
+        elif (
+            "access is denied" in lowered
+            or "permission denied" in lowered
+            or "cannot be accessed by the system" in lowered
+        ):
             reason_code = "access_denied"
             remediation = (
                 "The selected interpreter cannot be spawned in this environment. "

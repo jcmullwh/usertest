@@ -1448,13 +1448,19 @@ def _resolve_owner_repo_root(
         if len(ticket_repo_inputs) > 1:
             # Some historical runs captured Windows paths with redundant separators
             # (e.g., `I:\\\\code\\\\...`) that show up as distinct strings. If all
-            # candidates resolve to the same local dir, treat them as one owner.
+            # candidates resolve to the same local dir (or to the current repo via a matching
+            # remote), treat them as one owner.
             resolved_owner_keys: dict[str, str] = {}
-            all_local = True
+            all_resolvable = True
             for raw in ticket_repo_inputs:
                 root = _resolve_local_repo_input_root(repo_input=raw, repo_root=repo_root)
+                if root is None and _remote_repo_input_matches_repo_root(
+                    repo_input=raw,
+                    repo_root=repo_root,
+                ):
+                    root = repo_root
                 if root is None:
-                    all_local = False
+                    all_resolvable = False
                     break
                 try:
                     key = os.path.normcase(str(root.resolve()))
@@ -1462,7 +1468,7 @@ def _resolve_owner_repo_root(
                     key = os.path.normcase(str(root))
                 resolved_owner_keys[key] = str(root)
 
-            if all_local and len(resolved_owner_keys) == 1:
+            if all_resolvable and len(resolved_owner_keys) == 1:
                 chosen = next(iter(resolved_owner_keys.values()))
                 source_label = "ticket_repo_inputs_citing_normalized"
             else:

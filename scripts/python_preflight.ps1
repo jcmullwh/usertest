@@ -91,7 +91,11 @@ function Test-PythonInterpreter {
     $lowered = $merged.ToLower()
 
     if (($result.ExitCode -as [int]) -ne 0) {
-        if ($lowered.Contains("access is denied") -or $lowered.Contains("permission denied")) {
+        if (
+            $lowered.Contains("access is denied") -or
+            $lowered.Contains("permission denied") -or
+            $lowered.Contains("cannot be accessed by the system")
+        ) {
             return @{
                 Usable     = $false
                 ReasonCode = "access_denied"

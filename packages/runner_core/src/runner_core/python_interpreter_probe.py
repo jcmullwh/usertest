@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -66,6 +67,8 @@ def _probe_failure_reason(stderr_text: str, stdout_text: str) -> tuple[str, str]
     ):
         return "missing_stdlib", merged
     if "access is denied" in lowered or "permission denied" in lowered:
+        return "access_denied", merged
+    if "cannot be accessed by the system" in lowered:
         return "access_denied", merged
     return "runtime_probe_failed", merged
 
@@ -154,6 +157,69 @@ def resolve_usable_python_interpreter(
     is_windows = _is_windows_platform(force_windows=force_windows)
     timeout = max(0.1, float(timeout_seconds))
 
+    def _windows_where_all(command: str) -> list[str]:
+        if not is_windows:
+            return []
+        try:
+            env = None
+            if path is not None:
+                env = dict(os.environ)
+                env["PATH"] = path
+            proc = subprocess.run(
+                ["where", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=max(0.1, min(2.0, timeout)),
+                check=False,
+                env=env,
+            )
+        except Exception:
+            return []
+        if proc.returncode != 0:
+            return []
+        out: list[str] = []
+        for line in proc.stdout.splitlines():
+            candidate = line.strip()
+            if not candidate:
+                continue
+            out.append(candidate)
+        return out
+
+    def _windows_py0p_interpreters() -> list[str]:
+        if not is_windows:
+            return []
+        try:
+            env = None
+            if path is not None:
+                env = dict(os.environ)
+                env["PATH"] = path
+            proc = subprocess.run(
+                ["py", "-0p"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=max(0.1, min(2.0, timeout)),
+                check=False,
+                env=env,
+            )
+        except Exception:
+            return []
+        if proc.returncode != 0:
+            return []
+        out: list[str] = []
+        for raw_line in proc.stdout.splitlines():
+            line = raw_line.rstrip()
+            if not line.strip():
+                continue
+            match = re.search(r"([A-Za-z]:\\.*)$", line)
+            if not match:
+                continue
+            out.append(match.group(1).strip())
+        return out
+
     ordered: list[str] = []
     if workspace_dir is not None:
         if is_windows:
@@ -168,8 +234,44 @@ def resolve_usable_python_interpreter(
         if sys_exe not in ordered:
             ordered.append(sys_exe)
 
+    expanded: list[str] = []
+    seen: set[str] = set()
+    inserted_py0p = False
+    for cmd in ordered:
+        key = cmd.lower() if is_windows else cmd
+        if key not in seen:
+            expanded.append(cmd)
+            seen.add(key)
+
+        if is_windows and cmd in {"python", "python3"}:
+            for entry in _windows_where_all(cmd):
+                if _is_windowsapps_alias(entry, is_windows=is_windows):
+                    continue
+                ekey = entry.lower()
+                if ekey in seen:
+                    continue
+                expanded.append(entry)
+                seen.add(ekey)
+
+        if is_windows and not inserted_py0p and cmd == "py":
+            inserted_py0p = True
+            for entry in _windows_py0p_interpreters():
+                ekey = entry.lower()
+                if ekey in seen:
+                    continue
+                expanded.append(entry)
+                seen.add(ekey)
+
+    if is_windows and not inserted_py0p:
+        for entry in _windows_py0p_interpreters():
+            ekey = entry.lower()
+            if ekey in seen:
+                continue
+            expanded.append(entry)
+            seen.add(ekey)
+
     probed = probe_python_interpreters(
-        candidate_commands=ordered,
+        candidate_commands=expanded,
         timeout_seconds=timeout,
         force_windows=force_windows,
         path=path,
@@ -177,7 +279,7 @@ def resolve_usable_python_interpreter(
 
     by_command = probed.by_command()
     selected: PythonCandidateProbe | None = None
-    for cmd in ordered:
+    for cmd in expanded:
         candidate = by_command.get(cmd)
         if candidate is not None and candidate.usable:
             selected = candidate
@@ -207,7 +309,23 @@ def probe_python_interpreters(
 
     for command in commands:
         remaining = max(0.1, deadline - time.monotonic())
-        resolved = shutil.which(command, path=path) if path is not None else shutil.which(command)
+        resolved: str | None = None
+        looks_like_path = (
+            ("/" in command)
+            or ("\\" in command)
+            or (os.name == "nt" and ":" in command)
+            or Path(command).is_absolute()
+        )
+        if looks_like_path:
+            try:
+                if Path(command).exists():
+                    resolved = command
+            except OSError:
+                resolved = command
+        else:
+            resolved = (
+                shutil.which(command, path=path) if path is not None else shutil.which(command)
+            )
         if resolved is None:
             candidates.append(
                 PythonCandidateProbe(
