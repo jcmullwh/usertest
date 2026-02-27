@@ -429,6 +429,13 @@ def _is_pdm_install_command(argv: list[str]) -> bool:
     return argv[1].strip().lower() == "install"
 
 
+def _is_pdm_command(argv: list[str]) -> bool:
+    if not argv:
+        return False
+    cmd_name = Path(argv[0]).name.lower()
+    return cmd_name in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}
+
+
 def _looks_like_transient_pdm_local_path_failure(*, stdout: str, stderr: str) -> bool:
     text = "\n".join(x for x in (stdout, stderr) if x).lower()
     if not text:
@@ -456,10 +463,19 @@ def _run_manifest_task(
     task_name: str,
     project_id: str,
 ) -> subprocess.CompletedProcess[str]:
-    if task_name != "install" or not _is_pdm_install_command(cmd):
+    if not _is_pdm_command(cmd):
         return _run(cmd, cwd=cwd)
 
     env = dict(os.environ)
+    # PDM will reuse the currently active virtualenv by default. That's convenient for single-project workflows, but
+    # causes surprising (and on Windows, sometimes broken) behavior when a monorepo task runner invokes PDM across many
+    # projects. For example, `pdm install` may attempt to update the running CLI's own entrypoint executable, which
+    # fails due to Windows file locking.
+    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+
+    if task_name != "install" or not _is_pdm_install_command(cmd):
+        return _run(cmd, cwd=cwd, env=env)
+
     # Some environments (including certain containerized/CI setups) disallow creating symlinks inside bind mounts.
     # PDM's default `venv.backend=virtualenv` may attempt to symlink the interpreter into the venv, which fails with
     # `PermissionError: [Errno 1] Operation not permitted`.
