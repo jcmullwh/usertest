@@ -290,3 +290,65 @@ def test_select_python_runtime_no_candidates_yields_none(
     assert result.selected is None, "Expected no usable interpreter to be found"
     assert all(not c.usable for c in result.candidates if c.present)
 
+
+# ---------------------------------------------------------------------------
+# Regression tests for BLG-012: Windows path backslash preservation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "python_path,input_cmd",
+    [
+        # python.exe at C:\Python313
+        (r"C:\Python313\python.exe", "python -m pytest -q"),
+        # python.exe in C:\Users (common user-install location)
+        (
+            r"C:\Users\jason\AppData\Local\Programs\Python\Python313\python.exe",
+            "python -m pytest",
+        ),
+        # py.exe launcher
+        (
+            r"C:\Users\jason\AppData\Local\Programs\Python\Launcher\py.exe",
+            "python -m pytest --version",
+        ),
+        # pytest command -> -m pytest rewrite
+        (r"C:\Python313\python.exe", "pytest -q"),
+        # Path with spaces
+        (r"C:\Program Files\Python313\python.exe", "python -m pytest"),
+        # WindowsApps/Packages location
+        (
+            r"C:\Users\jason\AppData\Local\Packages\PythonSoftwareFoundation.Python.3.13_qbz5n2kfra8p0\LocalCache\local-packages\Python313\Scripts\python.exe",
+            "python -m pytest",
+        ),
+    ],
+)
+def test_rewrite_verification_command_preserves_windows_backslashes_powershell(
+    python_path: str, input_cmd: str
+) -> None:
+    """
+    Regression for BLG-012: _rewrite_verification_command_for_python must emit the
+    full Windows absolute path with all backslashes intact when is_powershell=True.
+
+    Previously, paths like C:\\Python313\\python.exe could be emitted as
+    C:Python313python.exe if escaping/quoting was broken.
+    """
+    cmd, rewritten = runner_mod._rewrite_verification_command_for_python(
+        input_cmd,
+        python_executable=python_path,
+        is_powershell=True,
+    )
+    assert rewritten is True, f"Expected command to be rewritten for {input_cmd!r}"
+    # The full path must appear in the output with backslashes
+    assert python_path in cmd, (
+        f"Windows path lost or corrupted in rewritten command.\n"
+        f"Python path: {python_path!r}\n"
+        f"Input cmd:   {input_cmd!r}\n"
+        f"Got:         {cmd!r}"
+    )
+    # Specifically check that the drive+backslash pattern is not collapsed
+    drive_prefix = python_path[:3]  # e.g. "C:\\"
+    assert drive_prefix in cmd, (
+        f"Drive+backslash prefix {drive_prefix!r} collapsed in rewritten command.\n"
+        f"Got: {cmd!r}"
+    )
+

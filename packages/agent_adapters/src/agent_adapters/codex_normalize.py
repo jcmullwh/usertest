@@ -27,6 +27,7 @@ READLIKE_COMMANDS = {
 CHAIN_OPERATORS = {"&&", ";", "||", "|"}
 _WINDOWS_DRIVE_POSIX_RE = re.compile(r"^/([a-zA-Z])/(.*)$")
 _WINDOWS_DRIVE_CLEAN_RE = re.compile(r"^([a-zA-Z]):/{2,}")
+_WINDOWS_ABS_PATH_RE = re.compile(r"[A-Za-z]:\\")
 _MAX_OUTPUT_EXCERPT_CHARS = 2_000
 
 
@@ -122,6 +123,16 @@ def _iter_codex_raw_lines(path: Path) -> Iterator[tuple[str, dict[str, Any] | No
 def _split_command(command: str) -> list[str]:
     # Codex commands frequently run through a POSIX shell wrapper (even on Windows hosts when
     # sandboxed). Prefer POSIX parsing but fall back to a conservative split.
+    #
+    # Exception: when the command string contains a Windows absolute path (e.g. C:\Users\...),
+    # POSIX mode treats backslashes as escape characters and corrupts the path separators
+    # (e.g. C:\Users\foo -> C:Usersfoo). For such commands, prefer posix=False so that
+    # backslashes are preserved as literals.
+    if _WINDOWS_ABS_PATH_RE.search(command):
+        try:
+            return shlex.split(command, posix=False)
+        except ValueError:
+            return command.split()
     try:
         return shlex.split(command, posix=True)
     except ValueError:
