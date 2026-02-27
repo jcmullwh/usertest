@@ -70,6 +70,8 @@ mods = [
     "usertest.cli",
     "usertest_backlog",
     "usertest_backlog.cli",
+    "usertest_implement",
+    "usertest_implement.cli",
     "agent_adapters",
     "backlog_core",
     "backlog_miner",
@@ -194,7 +196,7 @@ try {
         else {
             # --no-deps avoids duplicate direct-reference resolver conflicts between local packages.
             Invoke-Step -Name 'Install monorepo packages (editable, no deps)' -Command {
-                & $pythonCmd -m pip install --no-deps -e packages/normalized_events -e packages/agent_adapters -e packages/run_artifacts -e packages/reporter -e packages/sandbox_runner -e packages/runner_core -e packages/triage_engine -e packages/backlog_core -e packages/backlog_miner -e packages/backlog_repo -e apps/usertest -e apps/usertest_backlog
+                & $pythonCmd -m pip install --no-deps -e packages/normalized_events -e packages/agent_adapters -e packages/run_artifacts -e packages/reporter -e packages/sandbox_runner -e packages/runner_core -e packages/triage_engine -e packages/backlog_core -e packages/backlog_miner -e packages/backlog_repo -e apps/usertest -e apps/usertest_backlog -e apps/usertest_implement
             }
         }
     }
@@ -235,8 +237,12 @@ try {
         & $pythonCmd -m usertest_backlog.cli --help
     }
 
+    Invoke-Step -Name 'Implement CLI help smoke' -Command {
+        & $pythonCmd -m usertest_implement.cli --help
+    }
+
     Invoke-Step -Name 'Pytest smoke suite' -Command {
-        & $pythonCmd -m pytest -q apps/usertest/tests/test_smoke.py apps/usertest/tests/test_golden_fixture.py apps/usertest_backlog/tests/test_smoke.py
+        & $pythonCmd -m pytest -q apps/usertest/tests/test_smoke.py apps/usertest/tests/test_golden_fixture.py apps/usertest_backlog/tests/test_smoke.py apps/usertest_implement/tests/test_smoke.py
     }
 
     Write-Host '==> Smoke complete: all checks passed.'
