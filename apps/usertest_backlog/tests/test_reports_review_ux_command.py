@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from runner_core import find_repo_root
 
+from backlog_repo.export import ticket_export_fingerprint
 from usertest_backlog.cli import main
 
 
@@ -104,47 +105,41 @@ def test_reports_review_ux_dry_run_includes_high_surface_ready_tickets(tmp_path:
     compiled_dir = runs_dir / "target_a" / "_compiled"
     backlog_path = compiled_dir / "target_a.backlog.json"
     intent_snapshot_path = compiled_dir / "target_a.intent_snapshot.json"
-
-    _write_json(
-        backlog_path,
+    tickets = [
         {
-            "schema_version": 1,
-            "tickets": [
-                {
-                    "ticket_id": "BLG-002",
-                    "title": "Add `usertest smoke` shortcut command",
-                    "problem": "Operators want a single obvious entry point.",
-                    "severity": "low",
-                    "confidence": 0.5,
-                    "stage": "ready_for_ticket",
-                    "change_surface": {"user_visible": True, "kinds": ["new_command"], "notes": ""},
-                    "breadth": {
-                        "missions": 1,
-                        "targets": 1,
-                        "repo_inputs": 1,
-                        "agents": 1,
-                        "runs": 1,
-                    },
-                },
-                {
-                    "ticket_id": "BLG-003",
-                    "title": "Add extra flag",
-                    "problem": "Make it configurable.",
-                    "severity": "low",
-                    "confidence": 0.5,
-                    "stage": "ready_for_ticket",
-                    "change_surface": {"user_visible": True, "kinds": ["new_flag"], "notes": ""},
-                    "breadth": {
-                        "missions": 1,
-                        "targets": 1,
-                        "repo_inputs": 1,
-                        "agents": 1,
-                        "runs": 1,
-                    },
-                },
-            ],
+            "title": "Add `usertest smoke` shortcut command",
+            "problem": "Operators want a single obvious entry point.",
+            "severity": "low",
+            "confidence": 0.5,
+            "stage": "ready_for_ticket",
+            "change_surface": {"user_visible": True, "kinds": ["new_command"], "notes": ""},
+            "breadth": {
+                "missions": 1,
+                "targets": 1,
+                "repo_inputs": 1,
+                "agents": 1,
+                "runs": 1,
+            },
         },
-    )
+        {
+            "title": "Add extra flag",
+            "problem": "Make it configurable.",
+            "severity": "low",
+            "confidence": 0.5,
+            "stage": "ready_for_ticket",
+            "change_surface": {"user_visible": True, "kinds": ["new_flag"], "notes": ""},
+            "breadth": {
+                "missions": 1,
+                "targets": 1,
+                "repo_inputs": 1,
+                "agents": 1,
+                "runs": 1,
+            },
+        },
+    ]
+    _write_json(backlog_path, {"schema_version": 1, "tickets": tickets})
+    fingerprint_high_surface = ticket_export_fingerprint(tickets[0])
+    fingerprint_not_high_surface = ticket_export_fingerprint(tickets[1])
     _write_json(
         intent_snapshot_path,
         {
@@ -182,5 +177,5 @@ def test_reports_review_ux_dry_run_includes_high_surface_ready_tickets(tmp_path:
     assert doc["tickets_meta"]["review_total"] == 1
 
     prompt_text = prompt_paths[0].read_text(encoding="utf-8")
-    assert "BLG-002" in prompt_text
-    assert "BLG-003" not in prompt_text
+    assert fingerprint_high_surface in prompt_text
+    assert fingerprint_not_high_surface not in prompt_text

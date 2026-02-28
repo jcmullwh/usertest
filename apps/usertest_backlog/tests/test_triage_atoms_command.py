@@ -51,14 +51,12 @@ def test_triage_atoms_clusters_and_links_tickets(tmp_path: Path) -> None:
 
     backlog_json = atoms_dir / "usertest.backlog.json"
     ticket_1 = {
-        "ticket_id": "BLG-001",
         "title": "Fix pytest invocation in sandbox",
         "stage": "ready_for_ticket",
         "severity": "high",
         "evidence_atom_ids": [atom_1["atom_id"], atom_2["atom_id"]],
     }
     ticket_2 = {
-        "ticket_id": "BLG-002",
         "title": "Docs: add PYTHONPATH hint",
         "stage": "triage",
         "severity": "medium",
@@ -86,11 +84,11 @@ def test_triage_atoms_clusters_and_links_tickets(tmp_path: Path) -> None:
     ideas_bucket = tmp_path / ".agents" / "plans" / "1 - ideas"
     complete_bucket.mkdir(parents=True, exist_ok=True)
     ideas_bucket.mkdir(parents=True, exist_ok=True)
-    (complete_bucket / f"20260201_BLG-001_{fp_1}_done.md").write_text(
+    (complete_bucket / f"20260201_{fp_1}_done.md").write_text(
         "# done\n",
         encoding="utf-8",
     )
-    (ideas_bucket / f"20260201_BLG-002_{fp_2}_todo.md").write_text(
+    (ideas_bucket / f"20260201_{fp_2}_todo.md").write_text(
         "# todo\n",
         encoding="utf-8",
     )
@@ -106,7 +104,7 @@ def test_triage_atoms_clusters_and_links_tickets(tmp_path: Path) -> None:
     )
     impl_run_dir.mkdir(parents=True, exist_ok=True)
     (impl_run_dir / "ticket_ref.json").write_text(
-        json.dumps({"schema_version": 1, "ticket_id": "BLG-001", "fingerprint": fp_1}) + "\n",
+        json.dumps({"schema_version": 1, "fingerprint": fp_1}) + "\n",
         encoding="utf-8",
     )
     (impl_run_dir / "timing.json").write_text(
@@ -163,15 +161,15 @@ def test_triage_atoms_clusters_and_links_tickets(tmp_path: Path) -> None:
     assert cluster["tickets_total"] == 2
     assert cluster["representative_text"] == "python -m pytest -q"
 
-    tickets = {t["ticket_id"]: t for t in cluster["tickets"]}
-    assert tickets["BLG-001"]["fingerprint"] == fp_1
-    assert tickets["BLG-001"]["plan"]["plan_buckets"] == ["5 - complete"]
-    assert tickets["BLG-001"]["plan"]["fingerprint"] == fp_1
-    assert tickets["BLG-001"]["implementation_runs"][0]["pr_url"] == "https://example.invalid/p/1"
-    assert tickets["BLG-002"]["fingerprint"] == fp_2
-    assert tickets["BLG-002"]["plan"]["plan_buckets"] == ["1 - ideas"]
-    assert tickets["BLG-002"]["plan"]["fingerprint"] == fp_2
-    assert tickets["BLG-002"]["implementation_runs"] == []
+    tickets = {t["fingerprint"]: t for t in cluster["tickets"]}
+    assert tickets[fp_1]["fingerprint"] == fp_1
+    assert tickets[fp_1]["plan"]["plan_buckets"] == ["5 - complete"]
+    assert tickets[fp_1]["plan"]["fingerprint"] == fp_1
+    assert tickets[fp_1]["implementation_runs"][0]["pr_url"] == "https://example.invalid/p/1"
+    assert tickets[fp_2]["fingerprint"] == fp_2
+    assert tickets[fp_2]["plan"]["plan_buckets"] == ["1 - ideas"]
+    assert tickets[fp_2]["plan"]["fingerprint"] == fp_2
+    assert tickets[fp_2]["implementation_runs"] == []
 
     assert "Atom Cluster Report" in out_md.read_text(encoding="utf-8")
 
@@ -205,7 +203,6 @@ def test_triage_atoms_joins_plans_and_runs_by_fingerprint(tmp_path: Path) -> Non
 
     backlog_json = atoms_dir / "usertest.backlog.json"
     ticket = {
-        "ticket_id": "BLG-001",
         "title": "Fix pytest invocation in sandbox",
         "stage": "ready_for_ticket",
         "severity": "high",
@@ -234,8 +231,8 @@ def test_triage_atoms_joins_plans_and_runs_by_fingerprint(tmp_path: Path) -> Non
     ideas_bucket = tmp_path / ".agents" / "plans" / "1 - ideas"
     complete_bucket.mkdir(parents=True, exist_ok=True)
     ideas_bucket.mkdir(parents=True, exist_ok=True)
-    (ideas_bucket / f"20260201_BLG-001_{fp}_todo.md").write_text("# todo\n", encoding="utf-8")
-    (complete_bucket / f"20260201_BLG-001_{fp_other}_done.md").write_text("# done\n", encoding="utf-8")
+    (ideas_bucket / f"20260201_{fp}_todo.md").write_text("# todo\n", encoding="utf-8")
+    (complete_bucket / f"20260201_{fp_other}_done.md").write_text("# done\n", encoding="utf-8")
 
     impl_run_dir = (
         tmp_path
@@ -248,7 +245,7 @@ def test_triage_atoms_joins_plans_and_runs_by_fingerprint(tmp_path: Path) -> Non
     )
     impl_run_dir.mkdir(parents=True, exist_ok=True)
     (impl_run_dir / "ticket_ref.json").write_text(
-        json.dumps({"schema_version": 1, "ticket_id": "BLG-001", "fingerprint": fp_other}) + "\n",
+        json.dumps({"schema_version": 1, "fingerprint": fp_other}) + "\n",
         encoding="utf-8",
     )
 
@@ -274,8 +271,8 @@ def test_triage_atoms_joins_plans_and_runs_by_fingerprint(tmp_path: Path) -> Non
     payload = json.loads(out_json.read_text(encoding="utf-8"))
     cluster = payload["clusters"][0]
     ticket_out = cluster["tickets"][0]
-    assert ticket_out["ticket_id"] == "BLG-001"
     assert ticket_out["fingerprint"] == fp
+    assert "ticket_id" not in ticket_out
     assert ticket_out["plan"]["plan_buckets"] == ["1 - ideas"]
     assert ticket_out["implementation_runs"] == []
 

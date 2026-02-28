@@ -15,7 +15,6 @@ from backlog_repo.plan_index import (
 @dataclass(frozen=True)
 class TicketIndexEntry:
     fingerprint: str
-    ticket_id: str | None
     paths: list[Path]
     buckets: list[str]
     status: str | None
@@ -33,12 +32,8 @@ def build_ticket_index(*, owner_root: Path) -> dict[str, TicketIndexEntry]:
         buckets = [b for b in buckets_raw if isinstance(b, str) and b.strip()]
         status_raw = meta.get("status")
         status = status_raw if isinstance(status_raw, str) else None
-        ticket_ids_raw = meta.get("ticket_ids", [])
-        ticket_ids = [t for t in ticket_ids_raw if isinstance(t, str) and t.strip()]
-        ticket_id = ticket_ids[0] if ticket_ids else None
         out[fingerprint] = TicketIndexEntry(
             fingerprint=fingerprint,
-            ticket_id=ticket_id,
             paths=paths,
             buckets=buckets,
             status=status,
@@ -219,11 +214,18 @@ def move_ticket_file(
     return dest_path
 
 
+def strip_legacy_source_ticket_lines(markdown: str) -> str:
+    return re.sub(
+        r"(?m)^-\s*Source ticket:\s*`[^`]*`\s*$\n?",
+        "",
+        markdown,
+    )
+
+
 def parse_ticket_markdown_metadata(markdown: str) -> dict[str, str]:
     meta: dict[str, str] = {}
     for key, label in (
         ("fingerprint", "Fingerprint"),
-        ("ticket_id", "Source ticket"),
         ("export_kind", "Export kind"),
         ("stage", "Stage"),
     ):

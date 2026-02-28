@@ -61,7 +61,6 @@ def test_iter_implementation_rows_includes_ticket_and_heuristics(tmp_path: Path)
         {
             "schema_version": 1,
             "fingerprint": "deadbeefdeadbeef",
-            "ticket_id": "BLG-003",
             "title": "Do thing",
         },
     )
@@ -99,7 +98,7 @@ def test_iter_implementation_rows_includes_ticket_and_heuristics(tmp_path: Path)
     assert len(rows) == 1
     row = rows[0]
     assert row["ticket"]["fingerprint"] == "deadbeefdeadbeef"
-    assert row["ticket"]["ticket_id"] == "BLG-003"
+    assert "ticket_id" not in row["ticket"]
     assert row["run"]["duration_seconds"] == 10.0
     assert row["metrics"]["files_written"] == 2
     assert row["heuristics"]["test_runs_total"] == 2

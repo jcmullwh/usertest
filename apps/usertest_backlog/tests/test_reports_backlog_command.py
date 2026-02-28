@@ -376,6 +376,7 @@ def test_reports_backlog_uses_cached_miner_outputs(tmp_path: Path) -> None:
     assert summary["tickets"][0]["change_surface"]["kinds"] == ["docs_change"]
     assert summary["tickets"][0]["stage"] == "ready_for_ticket"
     assert summary["artifacts"]["atom_actions"]["path"] == str(atom_actions_path)
+    fingerprint = summary["tickets"][0]["fingerprint"]
 
     atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
     assert atom_actions_doc["version"] == 1
@@ -386,7 +387,8 @@ def test_reports_backlog_uses_cached_miner_outputs(tmp_path: Path) -> None:
         if item["atom_id"] == "target_a/20260101T000000Z/codex/0:confusion_point:1"
     )
     assert entry["status"] == "ticketed"
-    assert any(isinstance(tid, str) and tid.startswith("TKT-") for tid in entry["ticket_ids"])
+    assert fingerprint in entry["fingerprints"]
+    assert "ticket_ids" not in entry
 
 
 def test_reports_backlog_does_not_ticket_atoms_for_blocked_tickets(tmp_path: Path) -> None:
@@ -495,7 +497,8 @@ def test_reports_backlog_does_not_ticket_atoms_for_blocked_tickets(tmp_path: Pat
         if item["atom_id"] == "target_a/20260101T000000Z/codex/0:confusion_point:1"
     )
     assert entry["status"] == "new"
-    assert entry.get("ticket_ids", []) == []
+    assert entry.get("fingerprints", []) == []
+    assert "ticket_ids" not in entry
 
 
 def test_reports_backlog_ignores_stale_cached_miner_outputs(tmp_path: Path) -> None:

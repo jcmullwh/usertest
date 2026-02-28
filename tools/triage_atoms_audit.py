@@ -6,7 +6,6 @@ import re
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from difflib import SequenceMatcher
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -17,7 +16,7 @@ _EXPORT_PATH_LIKE_RE = re.compile(r"(?:[A-Za-z]:[\\/])?[A-Za-z0-9_.-]+(?:[\\/][A
 _EXPORT_TOKEN_RE = re.compile(r"[a-z0-9_]+")
 
 _PLAN_FILENAME_RE = re.compile(
-    r"^(?P<date>[0-9]{8})_(?P<ticket_id>BLG-[0-9]{3})_(?P<fingerprint>[0-9a-f]{16})_.+\.md$"
+    r"^(?P<date>[0-9]{8})_(?:(?P<legacy_ticket_id>BLG-[0-9]{3})_)?(?P<fingerprint>[0-9a-f]{16})_(?P<slug>.+\.md)$"
 )
 
 
@@ -104,7 +103,6 @@ def _git(*args: str) -> str:
 
 @dataclass(frozen=True)
 class PlanFile:
-    ticket_id: str
     fingerprint: str
     bucket: str
     date_tag: str
@@ -129,33 +127,21 @@ def _normalize_title(title: str) -> str:
     return cleaned
 
 
-def _title_similarity(a: str, b: str) -> float:
-    na = _normalize_title(a).lower()
-    nb = _normalize_title(b).lower()
-    if not na or not nb:
-        return 0.0
-    if na == nb:
-        return 1.0
-    return SequenceMatcher(None, na, nb).ratio()
-
-
 def scan_plan_files(plans_root: Path) -> list[PlanFile]:
     out: list[PlanFile] = []
     for md_path in plans_root.glob("*/*.md"):
         match = _PLAN_FILENAME_RE.match(md_path.name)
         if match is None:
             continue
-        ticket_id = match.group("ticket_id")
         fingerprint = match.group("fingerprint")
         date_tag = match.group("date")
         bucket = md_path.parent.name
         try:
-            title = _extract_first_heading(md_path.read_text(encoding="utf-8"))
+            title = _extract_first_heading(md_path.read_text(encoding="utf-8", errors="replace"))
         except OSError:
             title = ""
         out.append(
             PlanFile(
-                ticket_id=ticket_id,
                 fingerprint=fingerprint,
                 bucket=bucket,
                 date_tag=date_tag,
@@ -170,7 +156,6 @@ def scan_plan_files(plans_root: Path) -> list[PlanFile]:
 class RunRef:
     run_dir: Path
     fingerprint: str | None
-    ticket_id: str | None
     title: str | None
     started_at_utc: str | None
     git_branch: str | None
@@ -214,7 +199,6 @@ def scan_implementation_runs(runs_root: Path) -> list[RunRef]:
             ticket_ref = {}
 
         fingerprint = _coerce_string(ticket_ref.get("fingerprint"))
-        ticket_id = _coerce_string(ticket_ref.get("ticket_id"))
         title = _coerce_string(ticket_ref.get("title"))
 
         started_at = None
@@ -266,7 +250,6 @@ def scan_implementation_runs(runs_root: Path) -> list[RunRef]:
             RunRef(
                 run_dir=run_dir,
                 fingerprint=fingerprint,
-                ticket_id=ticket_id,
                 title=title,
                 started_at_utc=started_at,
                 git_branch=git_branch,
@@ -338,8 +321,6 @@ def _select_patch_needles(added_lines: list[str], *, limit: int) -> list[str]:
         candidate = line.strip()
         if len(candidate) < 12:
             continue
-        if "BLG-" in candidate:
-            continue
         if _NEEDLE_JUNK_RE.match(candidate):
             continue
         lowered = candidate.lower()
@@ -367,6 +348,8 @@ _BUCKET_RANK: dict[str, float] = {
     "0.3 - todos": 0.3,
     "0.1 - deferred": 0.1,
 }
+
+_DONEISH_BUCKETS = {"4 - for_review", "5 - complete", "6 - archived"}
 
 
 def _best_bucket(buckets: set[str]) -> str | None:
@@ -418,26 +401,29 @@ def main() -> int:
     triage = _read_json_object(triage_atoms_json)
     clusters_raw = triage.get("clusters")
     clusters = clusters_raw if isinstance(clusters_raw, list) else []
-    triage_ticket_ids: set[str] = set()
+
+    triage_fingerprints: set[str] = set()
     for cluster in clusters:
         if not isinstance(cluster, dict):
             continue
-        for ticket in cluster.get("tickets", []) if isinstance(cluster.get("tickets"), list) else []:
-            if isinstance(ticket, dict):
-                tid = _coerce_string(ticket.get("ticket_id"))
-                if tid:
-                    triage_ticket_ids.add(tid)
+        tickets = cluster.get("tickets")
+        if not isinstance(tickets, list):
+            continue
+        for ticket in tickets:
+            if not isinstance(ticket, dict):
+                continue
+            fp = _coerce_string(ticket.get("fingerprint"))
+            if fp:
+                triage_fingerprints.add(fp)
 
     atoms_by_id = load_atoms_index(atoms_jsonl)
     plan_files = scan_plan_files(args.plans_root)
     runs = scan_implementation_runs(args.runs_root)
 
     plan_buckets_by_fp: dict[str, set[str]] = {}
-    plan_ticket_ids_by_fp: dict[str, set[str]] = {}
     plan_paths_by_fp: dict[str, list[Path]] = {}
     for pf in plan_files:
         plan_buckets_by_fp.setdefault(pf.fingerprint, set()).add(pf.bucket)
-        plan_ticket_ids_by_fp.setdefault(pf.fingerprint, set()).add(pf.ticket_id)
         plan_paths_by_fp.setdefault(pf.fingerprint, []).append(pf.path)
 
     runs_by_fp: dict[str, list[RunRef]] = {}
@@ -556,13 +542,7 @@ def main() -> int:
         patch_inference_cache[run_dir] = inferred
         return inferred
 
-    # Build ticket rows
     ticket_rows: list[dict[str, Any]] = []
-    collisions_by_ticket_id: dict[str, set[str]] = {}
-
-    for pf in plan_files:
-        collisions_by_ticket_id.setdefault(pf.ticket_id, set()).add(pf.fingerprint)
-
     tickets_considered = 0
     actioned_tickets = 0
     actioned_with_known_fix_time = 0
@@ -571,20 +551,31 @@ def main() -> int:
     missing_plan_fingerprints = 0
     missing_run_fingerprints = 0
 
+    backlog_by_fp: dict[str, dict[str, Any]] = {}
+    backlog_fp_dupes: set[str] = set()
     for ticket in tickets_raw:
         if not isinstance(ticket, dict):
             continue
-        ticket_id = _coerce_string(ticket.get("ticket_id"))
-        if ticket_id is None or ticket_id not in triage_ticket_ids:
+        fp = _coerce_string(ticket.get("fingerprint")) or ticket_export_fingerprint(ticket)
+        if fp in backlog_by_fp:
+            backlog_fp_dupes.add(fp)
+            continue
+        backlog_by_fp[fp] = ticket
+
+    triage_fps_missing_in_backlog = sorted(
+        fp for fp in triage_fingerprints if fp not in backlog_by_fp
+    )
+
+    for fingerprint in sorted(triage_fingerprints):
+        ticket = backlog_by_fp.get(fingerprint)
+        if ticket is None:
             continue
 
         tickets_considered += 1
         title = _coerce_string(ticket.get("title")) or ""
-        fingerprint = ticket_export_fingerprint(ticket)
 
         plan_buckets = plan_buckets_by_fp.get(fingerprint, set())
         best_plan_bucket = _best_bucket(plan_buckets)
-        plan_ticket_ids = sorted(plan_ticket_ids_by_fp.get(fingerprint, set()))
         plan_paths = sorted(plan_paths_by_fp.get(fingerprint, []), key=lambda p: str(p))
 
         if not plan_buckets:
@@ -604,13 +595,17 @@ def main() -> int:
                 dt, subj = commit_meta(run.git_head_commit)
                 if run.git_commit_performed and dt is not None:
                     existing = implemented_commits_by_hash.get(run.git_head_commit)
-                    if existing is None or _SOURCE_RANK.get(existing.get("source", ""), 0) < _SOURCE_RANK["git_ref_head_commit"]:
+                    if (
+                        existing is None
+                        or _SOURCE_RANK.get(existing.get("source", ""), 0)
+                        < _SOURCE_RANK["git_ref_head_commit"]
+                    ):
                         implemented_commits_by_hash[run.git_head_commit] = {
                             "commit": run.git_head_commit,
                             "committed_at_utc": dt.astimezone(timezone.utc),
                             "subject": subj,
                             "source": "git_ref_head_commit",
-                            "evidence": [{"run_dir": str(run.run_dir)}],
+                            "evidence": [],
                         }
                     run_has_impl = True
                 elif run.git_commit_performed and dt is None:
@@ -647,50 +642,48 @@ def main() -> int:
         implemented_commits = sorted(
             implemented_commits_by_hash.values(), key=lambda row: row["committed_at_utc"]
         )
-        latest_fix_time = implemented_commits[-1]["committed_at_utc"] if implemented_commits else None
+        latest_fix_time: datetime | None = (
+            implemented_commits[-1]["committed_at_utc"] if implemented_commits else None
+        )
         latest_fix_commit = implemented_commits[-1]["commit"] if implemented_commits else None
         latest_fix_source = implemented_commits[-1]["source"] if implemented_commits else None
 
-        # Evidence timing
         evidence_atom_ids = _coerce_string_list(ticket.get("evidence_atom_ids"))
         evidence_times: list[datetime] = []
-        post_fix_atoms: list[dict[str, Any]] = []
+        post_fix_atoms_total = 0
         for atom_id in evidence_atom_ids:
             atom = atoms_by_id.get(atom_id)
             if atom is None:
                 continue
-            ts = _parse_iso_dt(_coerce_string(atom.get("timestamp_utc")))
+            ts = _parse_iso_dt(
+                _coerce_string(atom.get("timestamp_utc")) or _coerce_string(atom.get("timestamp"))
+            )
             if ts is not None:
                 evidence_times.append(ts.astimezone(timezone.utc))
             if latest_fix_time is not None and ts is not None:
                 if ts.astimezone(timezone.utc) > latest_fix_time:
-                    post_fix_atoms.append(atom)
+                    post_fix_atoms_total += 1
 
         first_evidence = min(evidence_times).isoformat() if evidence_times else None
         last_evidence = max(evidence_times).isoformat() if evidence_times else None
 
-        is_actioned = best_plan_bucket in {"4 - for_review", "5 - complete", "6 - archived"}
+        is_actioned = best_plan_bucket in _DONEISH_BUCKETS
         if is_actioned:
             actioned_tickets += 1
             if latest_fix_time is None:
                 actioned_with_unknown_fix_time += 1
             else:
                 actioned_with_known_fix_time += 1
-            if post_fix_atoms:
+            if post_fix_atoms_total:
                 actioned_post_fix += 1
 
         ticket_rows.append(
             {
-                "ticket_id": ticket_id,
-                "title": title,
                 "fingerprint": fingerprint,
+                "title": title,
                 "plan_best_bucket": best_plan_bucket,
                 "plan_buckets": sorted(plan_buckets),
-                "plan_ticket_ids_for_fp": plan_ticket_ids,
                 "plan_paths_for_fp": [str(p) for p in plan_paths],
-                "plan_collision_fingerprints_for_ticket_id": sorted(
-                    collisions_by_ticket_id.get(ticket_id, set())
-                ),
                 "runs_total_for_fp": len(ticket_runs),
                 "implemented_commits": [
                     {
@@ -698,7 +691,9 @@ def main() -> int:
                         "committed_at_utc": row["committed_at_utc"].isoformat(),
                         "subject": row.get("subject") or "",
                         "source": row.get("source") or "",
-                        "evidence": row.get("evidence") if isinstance(row.get("evidence"), list) else [],
+                        "evidence": row.get("evidence")
+                        if isinstance(row.get("evidence"), list)
+                        else [],
                     }
                     for row in implemented_commits
                 ],
@@ -722,15 +717,14 @@ def main() -> int:
                 "evidence_atoms_total": len(evidence_atom_ids),
                 "first_evidence_utc": first_evidence,
                 "last_evidence_utc": last_evidence,
-                "post_fix_atoms_total": len(post_fix_atoms),
+                "post_fix_atoms_total": post_fix_atoms_total,
             }
         )
 
-    # Sort by ticket id for stable output
-    ticket_rows.sort(key=lambda r: r["ticket_id"])
+    ticket_rows.sort(key=lambda r: r["fingerprint"])
+    row_by_fp = {row["fingerprint"]: row for row in ticket_rows}
 
-    # Extract what the existing triage_atoms.json claims (ticket_id keyed) for QC/mismatch reporting.
-    reported_by_ticket_id: dict[str, dict[str, Any]] = {}
+    reported_by_fp: dict[str, dict[str, Any]] = {}
     for cluster in clusters:
         if not isinstance(cluster, dict):
             continue
@@ -738,59 +732,53 @@ def main() -> int:
         for t in tickets:
             if not isinstance(t, dict):
                 continue
-            tid = _coerce_string(t.get("ticket_id"))
-            if not tid:
+            fp = _coerce_string(t.get("fingerprint"))
+            if not fp:
                 continue
-            entry = reported_by_ticket_id.setdefault(
-                tid,
+            entry = reported_by_fp.setdefault(
+                fp,
                 {
                     "plan_buckets": set(),
-                    "plan_fingerprints": set(),
                     "impl_runs_count": 0,
                 },
             )
             plan = t.get("plan")
             if isinstance(plan, dict):
-                for bucket in plan.get("plan_buckets", []) if isinstance(plan.get("plan_buckets"), list) else []:
+                for bucket in (
+                    plan.get("plan_buckets", [])
+                    if isinstance(plan.get("plan_buckets"), list)
+                    else []
+                ):
                     if isinstance(bucket, str) and bucket.strip():
                         entry["plan_buckets"].add(bucket.strip())
-                for fp in plan.get("fingerprints", []) if isinstance(plan.get("fingerprints"), list) else []:
-                    if isinstance(fp, str) and fp.strip():
-                        entry["plan_fingerprints"].add(fp.strip())
             impl_runs = t.get("implementation_runs")
             if isinstance(impl_runs, list):
                 entry["impl_runs_count"] = max(entry["impl_runs_count"], len(impl_runs))
 
     mismatches: list[str] = []
     for row in ticket_rows:
-        tid = row["ticket_id"]
-        reported = reported_by_ticket_id.get(tid, {})
+        fp = row["fingerprint"]
+        reported = reported_by_fp.get(fp, {})
         reported_buckets = sorted(reported.get("plan_buckets", set()))
         computed_bucket = row.get("plan_best_bucket")
-        reported_actioned = any(
-            b in {"4 - for_review", "5 - complete", "6 - archived"} for b in reported_buckets
-        )
-        computed_actioned = computed_bucket in {"4 - for_review", "5 - complete", "6 - archived"}
-        if reported_actioned and not computed_actioned:
+        reported_actioned = any(b in _DONEISH_BUCKETS for b in reported_buckets)
+        computed_actioned = computed_bucket in _DONEISH_BUCKETS
+        if reported_actioned != computed_actioned:
             mismatches.append(
-                f"- {tid}: triage_atoms.json reports actioned buckets {reported_buckets}, "
-                f"but computed fingerprint plan best bucket is `{computed_bucket or 'no_plan'}` "
-                f"(likely ticket_id fingerprint collision)."
+                f"- {fp}: triage_atoms.json buckets={reported_buckets or ['none']}, "
+                f"computed_best_bucket=`{computed_bucket or 'no_plan'}`"
             )
         reported_impl = int(reported.get("impl_runs_count") or 0)
         computed_impl = int(row.get("runs_total_for_fp") or 0)
-        if reported_impl > 0 and computed_impl == 0:
+        if (reported_impl > 0) != (computed_impl > 0):
             mismatches.append(
-                f"- {tid}: triage_atoms.json reports {reported_impl} implementation run(s), "
-                f"but none are recorded for the computed fingerprint `{row.get('fingerprint')}`."
+                f"- {fp}: triage_atoms.json implementation_runs={reported_impl}, "
+                f"computed_runs={computed_impl}"
             )
 
-    # Cluster summary (fingerprint-aware plan status)
-    cluster_lines: list[str] = []
-    row_by_ticket_id = {row["ticket_id"]: row for row in ticket_rows}
     clusters_with_actioned = 0
     clusters_with_post_fix = 0
-    clusters_with_collisions = 0
+    cluster_lines: list[str] = []
     for cluster in clusters:
         if not isinstance(cluster, dict):
             continue
@@ -800,52 +788,44 @@ def main() -> int:
         last_seen = _coerce_string(cluster.get("last_seen_utc"))
         last_seen_dt = _parse_iso_dt(last_seen).astimezone(timezone.utc) if last_seen else None
         rep = _coerce_string(cluster.get("representative_text")) or ""
+        tickets = cluster.get("tickets", []) if isinstance(cluster.get("tickets"), list) else []
+
+        cluster_fps: list[str] = []
+        for t in tickets:
+            if isinstance(t, dict):
+                fp = _coerce_string(t.get("fingerprint"))
+                if fp:
+                    cluster_fps.append(fp)
+
+        any_actioned = any(
+            (row_by_fp.get(fp, {}).get("plan_best_bucket") in _DONEISH_BUCKETS) for fp in cluster_fps
+        )
+        if any_actioned:
+            clusters_with_actioned += 1
+
         cluster_lines.append(f"### Cluster {cid}")
         cluster_lines.append(f"- Size: **{size}**")
         if first_seen or last_seen:
-            cluster_lines.append(f"- Seen (UTC): `{first_seen or '?'} \u2192 {last_seen or '?'}`")
+            cluster_lines.append(f"- Seen (UTC): `{first_seen or '?'} -> {last_seen or '?'}`")
         cluster_lines.append(f"- Representative: {rep.splitlines()[0] if rep else ''}")
 
-        tickets = cluster.get("tickets", []) if isinstance(cluster.get("tickets"), list) else []
-        post_fix_ticket_ids: list[str] = []
-        actioned_ticket_ids: list[str] = []
-        collision_ticket_ids: list[str] = []
-        for t in tickets:
-            if not isinstance(t, dict):
-                continue
-            tid = _coerce_string(t.get("ticket_id"))
-            if not tid:
-                continue
-            row = row_by_ticket_id.get(tid)
-            if not row:
-                continue
-            bucket = _coerce_string(row.get("plan_best_bucket"))
-            if bucket in {"4 - for_review", "5 - complete", "6 - archived"}:
-                actioned_ticket_ids.append(tid)
-            collision = row.get("plan_collision_fingerprints_for_ticket_id")
-            if isinstance(collision, list) and len(collision) > 1:
-                collision_ticket_ids.append(tid)
-
-        if actioned_ticket_ids:
-            clusters_with_actioned += 1
-        if collision_ticket_ids:
-            clusters_with_collisions += 1
+        post_fix_fps: list[str] = []
         if last_seen_dt is not None:
-            for t in tickets:
-                if not isinstance(t, dict):
+            for fp in cluster_fps:
+                row = row_by_fp.get(fp)
+                if not row:
                     continue
-                tid = _coerce_string(t.get("ticket_id"))
-                if not tid:
+                best_bucket = row.get("plan_best_bucket")
+                if best_bucket not in _DONEISH_BUCKETS:
                     continue
-                row = row_by_ticket_id.get(tid)
                 fix_ts = _coerce_string(row.get("latest_fix_time_utc")) if row else None
                 fix_dt = _parse_iso_dt(fix_ts).astimezone(timezone.utc) if fix_ts else None
                 if fix_dt is not None and last_seen_dt > fix_dt:
-                    post_fix_ticket_ids.append(tid)
-        if post_fix_ticket_ids:
+                    post_fix_fps.append(fp)
+        if post_fix_fps:
             clusters_with_post_fix += 1
             cluster_lines.append(
-                f"- Tickets with cluster evidence after their latest fix commit: **{len(post_fix_ticket_ids)}** ({', '.join(sorted(set(post_fix_ticket_ids)))})"
+                f"- Tickets with cluster evidence after their latest fix commit: **{len(sorted(set(post_fix_fps)))}** ({', '.join(sorted(set(post_fix_fps)))})"
             )
 
         if tickets:
@@ -853,48 +833,47 @@ def main() -> int:
         for t in tickets:
             if not isinstance(t, dict):
                 continue
-            tid = _coerce_string(t.get("ticket_id")) or "unknown"
+            fp = _coerce_string(t.get("fingerprint")) or "unknown"
             title = _coerce_string(t.get("title")) or ""
-            # Find our computed row for this ticket id.
-            row = row_by_ticket_id.get(tid)
+            row = row_by_fp.get(fp)
             plan_bucket = row.get("plan_best_bucket") if row else None
-            fp = row.get("fingerprint") if row else None
-            collision = row.get("plan_collision_fingerprints_for_ticket_id") if row else None
-            collision_note = ""
-            if isinstance(collision, list) and len(collision) > 1:
-                collision_note = f" (ticket_id has {len(collision)} plan fingerprints)"
-            cluster_lines.append(f"  - {tid} ({plan_bucket or 'no_plan'}) fp={fp or 'unknown'}{collision_note} — {title}")
+            cluster_lines.append(f"  - {fp} ({plan_bucket or 'no_plan'}) - {title}")
         cluster_lines.append("")
 
-    # Write report
     generated_at = datetime.now(timezone.utc).isoformat()
     lines: list[str] = []
     lines.append("# Triage Atoms Audit")
     lines.append("")
     lines.append(f"- Generated (UTC): `{generated_at}`")
     lines.append(f"- Source: `{triage_atoms_json}`")
-    lines.append(f"- Tickets in triage_atoms clusters: **{len(triage_ticket_ids)}**")
+    lines.append(f"- Fingerprints in triage_atoms clusters: **{len(triage_fingerprints)}**")
     lines.append(f"- Tickets audited (present in backlog.json): **{tickets_considered}**")
     lines.append(
         f"- Actioned (best plan bucket in for_review/complete/archived): **{actioned_tickets}**"
     )
     lines.append(f"- Actioned with known latest fix time: **{actioned_with_known_fix_time}**")
     lines.append(f"- Actioned with unknown latest fix time: **{actioned_with_unknown_fix_time}**")
-    lines.append(f"- Actioned with evidence after latest fix commit (known fix time only): **{actioned_post_fix}**")
-    lines.append(f"- Tickets missing any plan file for computed fingerprint: **{missing_plan_fingerprints}**")
-    lines.append(f"- Tickets missing any implementation run for computed fingerprint: **{missing_run_fingerprints}**")
+    lines.append(
+        f"- Actioned with evidence after latest fix commit (known fix time only): **{actioned_post_fix}**"
+    )
+    lines.append(
+        f"- Fingerprints in triage clusters missing from backlog.json: **{len(triage_fps_missing_in_backlog)}**"
+    )
+    lines.append(f"- Tickets missing any plan file for fingerprint: **{missing_plan_fingerprints}**")
+    lines.append(
+        f"- Tickets missing any implementation run for fingerprint: **{missing_run_fingerprints}**"
+    )
+    if backlog_fp_dupes:
+        lines.append(f"- WARNING: duplicate fingerprints in backlog.json: **{len(backlog_fp_dupes)}**")
     lines.append("")
 
     lines.append("## Key Findings")
     lines.append("")
     lines.append(
-        "- This audit joins plans/runs to tickets by **ticket fingerprint** (computed from backlog ticket text)."
+        "- This audit joins plans/runs to tickets by **fingerprint** (computed from ticket text)."
     )
     lines.append(
-        "- The `ticket_id` label is not unique across plan history; joining by `ticket_id` can falsely show a ticket as complete/for_review due to *other* fingerprints."
-    )
-    lines.append(
-        "- When `latest fix time` is `unknown`, this audit does **not** claim \"no post-fix atoms\"; it means the fix time could not be proven from repo history."
+        "- When `latest fix time` is `unknown`, this audit does not claim \"no post-fix atoms\"; it means the fix time could not be proven from repo history."
     )
     lines.append(
         f"- In the current dataset, **{actioned_post_fix} / {actioned_with_known_fix_time}** actioned tickets show evidence atoms occurring after their latest proven fix commit time."
@@ -904,17 +883,12 @@ def main() -> int:
     lines.append("## Ticket Audit")
     lines.append("")
     for row in ticket_rows:
-        tid = row["ticket_id"]
         title = row["title"]
         fp = row["fingerprint"]
         best_bucket = row["plan_best_bucket"] or "no_plan"
-        collisions = row["plan_collision_fingerprints_for_ticket_id"]
-        collision_note = ""
-        if isinstance(collisions, list) and len(collisions) > 1:
-            collision_note = f" (ticket_id has {len(collisions)} plan fingerprints)"
-        lines.append(f"### {tid} — {title}")
+        lines.append(f"### {fp} - {title}")
         lines.append(f"- Fingerprint: `{fp}`")
-        lines.append(f"- Best plan bucket: `{best_bucket}`{collision_note}")
+        lines.append(f"- Best plan bucket: `{best_bucket}`")
         lines.append(f"- Plan buckets for fingerprint: `{', '.join(row['plan_buckets']) or 'none'}`")
         if row["plan_paths_for_fp"]:
             lines.append(f"- Plan paths for fingerprint: `{len(row['plan_paths_for_fp'])}` file(s)")
@@ -927,16 +901,14 @@ def main() -> int:
             lines.append(f"- Latest fix commit: `{row['latest_fix_commit']}`")
 
             if fix_source == "patch_inferred":
-                latest_commit = row.get("latest_fix_commit")
                 evidence: list[dict[str, Any]] = []
                 for c in row["implemented_commits"]:
-                    if isinstance(c, dict) and c.get("commit") == latest_commit:
-                        raw_evidence = c.get("evidence")
-                        if isinstance(raw_evidence, list):
-                            evidence = [e for e in raw_evidence if isinstance(e, dict)]
+                    if c.get("commit") == row.get("latest_fix_commit") and isinstance(
+                        c.get("evidence"), list
+                    ):
+                        evidence = c.get("evidence")  # type: ignore[assignment]
                         break
-                if evidence:
-                    sample = evidence[0]
+                for sample in evidence[:3]:
                     needle = _coerce_string(sample.get("needle")) or ""
                     if len(needle) > 120:
                         needle = needle[:117] + "..."
@@ -953,7 +925,9 @@ def main() -> int:
                 lines.append(
                     "- Latest fix commit time (UTC): `unknown` (no committed implementation run recorded; patch inference found no matching commit)"
                 )
-        lines.append(f"- Evidence atoms: **{row['evidence_atoms_total']}** (first={row['first_evidence_utc']}, last={row['last_evidence_utc']})")
+        lines.append(
+            f"- Evidence atoms: **{row['evidence_atoms_total']}** (first={row['first_evidence_utc']}, last={row['last_evidence_utc']})"
+        )
         lines.append(f"- Post-fix evidence atoms: **{row['post_fix_atoms_total']}**")
         lines.append("")
 
@@ -962,12 +936,15 @@ def main() -> int:
     lines.append(f"- Clusters emitted: **{len(clusters)}**")
     lines.append(f"- Clusters containing any actioned ticket: **{clusters_with_actioned}**")
     lines.append(f"- Clusters with evidence after an actioned ticket fix: **{clusters_with_post_fix}**")
-    lines.append(f"- Clusters containing any ticket_id fingerprint-collision: **{clusters_with_collisions}**")
     lines.append("")
     lines.extend(cluster_lines)
 
     lines.append("## Mismatches vs triage_atoms.json (QC)")
     lines.append("")
+    if triage_fps_missing_in_backlog:
+        lines.append(
+            f"- Fingerprints missing from backlog.json: `{', '.join(triage_fps_missing_in_backlog[:25])}`"
+        )
     if mismatches:
         lines.extend(mismatches)
     else:
@@ -976,13 +953,18 @@ def main() -> int:
 
     lines.append("## Better Plan (avoid repeating false positives)")
     lines.append("")
-    lines.append("- **Immediate workflow**: treat this audit as the source of truth for \"done/for_review\" until triage tooling is fingerprint-aware.")
-    lines.append("- **Fingerprint joins everywhere**: update triage/report tooling to join plan status + implementation runs to tickets via `fingerprint` (computed from ticket text), not via `ticket_id`.")
-    lines.append("- **Surface the collision**: when a `ticket_id` maps to multiple plan fingerprints on disk, emit a loud warning (and show the competing fingerprints + titles) instead of silently merging.")
-    lines.append("- **Link to code reality**: when marking a ticket `for_review`/`complete`, require a commit/PR reference (or explicitly record \"proposed-only\" with the run_dir/patch.diff).")
-    lines.append("- **Post-fix validation gate**: after merge, re-run the smallest verification path that previously produced the atom(s) and confirm no new atoms appear for that fingerprint.")
-    lines.append("- **Regression coverage**: for issues that recur, prefer a unit/integration regression test or a deterministic preflight that fails fast with structured diagnostics.")
-    lines.append("- **Review checklist**: add the \"Failure Analysis Template\" questions to the for_review checklist so fixes are evaluated for scope, assumptions, and root-cause coverage.")
+    lines.append(
+        "- **Link to code reality**: when marking a ticket `for_review`/`complete`, require a commit/PR reference (or explicitly record \"proposed-only\" with the run_dir/patch.diff)."
+    )
+    lines.append(
+        "- **Post-fix validation gate**: after merge, re-run the smallest verification path that previously produced the atom(s) and confirm no new atoms appear for that fingerprint."
+    )
+    lines.append(
+        "- **Regression coverage**: for issues that recur, prefer a unit/integration regression test or a deterministic preflight that fails fast with structured diagnostics."
+    )
+    lines.append(
+        "- **Review checklist**: use the Failure Analysis Template questions when a ticket shows post-fix evidence."
+    )
     lines.append("")
 
     lines.append("## Failure Analysis Template (only when post-fix atoms exist)")
@@ -990,28 +972,17 @@ def main() -> int:
     lines.append("Use this checklist when `post-fix evidence atoms > 0` and the run includes the fix commit:")
     lines.append("")
     lines.append("- Root cause vs symptom: did we fix the underlying invariant or just a surface error message?")
-    lines.append(
-        "- Scope: was the solution too narrow (single shell/OS/agent) compared to the evidence contexts?"
-    )
-    lines.append(
-        "- Assumptions: did we assume tools existed (python/pdm/bash) or paths behaved (Windows backslashes) without verifying?"
-    )
+    lines.append("- Scope: was the solution too narrow compared to the evidence contexts?")
+    lines.append("- Assumptions: did we assume tools existed or paths behaved without verifying?")
     lines.append("- Verification: did we add a regression test or a deterministic preflight that would have caught this?")
-    lines.append(
-        "- Rollout: did we update docs/next-actions so users hit the supported path instead of falling back into the broken one?"
-    )
-    lines.append(
-        "- Instrumentation: did we log enough (resolved paths, selection reasons, stderr/stdout) to quickly differentiate new vs old failure modes?"
-    )
+    lines.append("- Rollout: did we update docs/next-actions so users hit the supported path instead of falling back into the broken one?")
+    lines.append("- Instrumentation: did we log enough to quickly differentiate new vs old failure modes?")
     lines.append("")
 
     lines.append("## QC Checks")
     lines.append("")
     lines.append(
         "- Spot-check any ticket that shows `post-fix evidence atoms > 0` by opening the underlying run dir from the atom id and verifying the repo commit used in that run."
-    )
-    lines.append(
-        "- If triage reports still look wrong, verify whether plan folders contain older fingerprints for the same `ticket_id` label and prefer fingerprint-based joins."
     )
     lines.append("")
 

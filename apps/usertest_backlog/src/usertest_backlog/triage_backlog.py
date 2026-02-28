@@ -125,9 +125,13 @@ def _resolve_group(item: dict[str, Any], group_key: str | None) -> str | None:
 
 
 def _base_global_id(item: dict[str, Any], *, group: str | None, fallback_index: int) -> str:
-    ticket_id = _coerce_string(item.get("ticket_id")) or _coerce_string(item.get("id"))
-    if group and ticket_id:
-        return f"{group}/{ticket_id}"
+    identity = (
+        _coerce_string(item.get("fingerprint"))
+        or _coerce_string(item.get("ticket_id"))
+        or _coerce_string(item.get("id"))
+    )
+    if group and identity:
+        return f"{group}/{identity}"
     return f"issue-{fallback_index + 1:04d}"
 
 

@@ -132,7 +132,10 @@ def test_reports_export_tickets_applies_stage_gates_and_ledger_skip(tmp_path: Pa
     )
 
     actions_path = tmp_path / "backlog_actions.yaml"
+    fingerprint_research = ticket_export_fingerprint(ticket_research)
+    fingerprint_gated = ticket_export_fingerprint(ticket_gated)
     fingerprint_impl = ticket_export_fingerprint(ticket_impl)
+    fingerprint_triage = ticket_export_fingerprint(ticket_triage)
     _write_yaml(
         actions_path,
         {
@@ -156,17 +159,17 @@ def test_reports_export_tickets_applies_stage_gates_and_ledger_skip(tmp_path: Pa
                 {
                     "atom_id": "target_a/20260101T000000Z/codex/0:confusion_point:1",
                     "status": "ticketed",
-                    "ticket_ids": ["BLG-001"],
+                    "fingerprints": [fingerprint_research],
                 },
                 {
                     "atom_id": "target_a/20260102T000000Z/claude/0:report_validation_error:1",
                     "status": "ticketed",
-                    "ticket_ids": ["BLG-002"],
+                    "fingerprints": [fingerprint_gated],
                 },
                 {
                     "atom_id": "target_a/20260103T000000Z/gemini/0:confusion_point:1",
                     "status": "ticketed",
-                    "ticket_ids": ["BLG-004"],
+                    "fingerprints": [fingerprint_triage],
                 },
             ],
         },
@@ -210,24 +213,24 @@ def test_reports_export_tickets_applies_stage_gates_and_ledger_skip(tmp_path: Pa
 
     exports = export_doc["exports"]
     assert isinstance(exports, list)
-    kinds = {item["source_ticket"]["ticket_id"]: item["export_kind"] for item in exports}
-    assert kinds["BLG-001"] == "research"
-    assert kinds["BLG-002"] == "research"
-    assert kinds["BLG-004"] == "implementation"
-    by_ticket = {item["source_ticket"]["ticket_id"]: item for item in exports}
+    kinds = {item["source_ticket"]["fingerprint"]: item["export_kind"] for item in exports}
+    assert kinds[fingerprint_research] == "research"
+    assert kinds[fingerprint_gated] == "research"
+    assert kinds[fingerprint_triage] == "implementation"
+    by_ticket = {item["source_ticket"]["fingerprint"]: item for item in exports}
 
-    owner_research = by_ticket["BLG-001"]["owner_repo"]
+    owner_research = by_ticket[fingerprint_research]["owner_repo"]
     assert isinstance(owner_research, dict)
     assert Path(owner_research["idea_path"]).exists()
     assert str(owner_repo) in owner_research["idea_path"]
 
-    owner_runner = by_ticket["BLG-002"]["owner_repo"]
+    owner_runner = by_ticket[fingerprint_gated]["owner_repo"]
     assert isinstance(owner_runner, dict)
     assert Path(owner_runner["idea_path"]).exists()
     assert str(repo_root) in owner_runner["idea_path"]
     assert owner_runner["resolution"] == "suggested_owner:runner_core"
 
-    owner_triage = by_ticket["BLG-004"]["owner_repo"]
+    owner_triage = by_ticket[fingerprint_triage]["owner_repo"]
     assert isinstance(owner_triage, dict)
     assert Path(owner_triage["idea_path"]).exists()
     assert ".agents/plans/0.5 - to_triage/" in owner_triage["idea_path"].replace("\\", "/")
@@ -248,7 +251,7 @@ def test_reports_export_tickets_applies_stage_gates_and_ledger_skip(tmp_path: Pa
     research_body = next(
         item["body_markdown"]
         for item in exports
-        if item["source_ticket"]["ticket_id"] == "BLG-001"
+        if item["source_ticket"]["fingerprint"] == fingerprint_research
     )
     assert "Research / ADR Template" in research_body
 
@@ -411,12 +414,12 @@ def test_reports_export_tickets_cleans_stale_queued_plan_files_when_actioned_pla
     fingerprint = ticket_export_fingerprint(ticket)
     complete_dir = owner_repo / ".agents" / "plans" / "5 - complete"
     complete_dir.mkdir(parents=True, exist_ok=True)
-    complete_path = complete_dir / f"20260211_BLG-001_{fingerprint}_already-done.md"
+    complete_path = complete_dir / f"20260211_{fingerprint}_already-done.md"
     complete_path.write_text("# Already done\n", encoding="utf-8")
 
     ideas_dir = owner_repo / ".agents" / "plans" / "1 - ideas"
     ideas_dir.mkdir(parents=True, exist_ok=True)
-    stale_idea_path = ideas_dir / f"20260212_BLG-001_{fingerprint}_stale-queue-copy.md"
+    stale_idea_path = ideas_dir / f"20260212_{fingerprint}_stale-queue-copy.md"
     stale_idea_path.write_text("# Stale copy\n", encoding="utf-8")
 
     assert complete_path.exists()
@@ -463,12 +466,12 @@ def test_cleanup_stale_ticket_idea_files_includes_owner_repo_root_when_no_repo_i
     fingerprint = "deadbeef"
     ideas_dir = owner_repo_root / ".agents" / "plans" / "1 - ideas"
     ideas_dir.mkdir(parents=True, exist_ok=True)
-    stale_idea_path = ideas_dir / f"20260212_BLG-001_{fingerprint}_stale-queue-copy.md"
+    stale_idea_path = ideas_dir / f"20260212_{fingerprint}_stale-queue-copy.md"
     stale_idea_path.write_text("# Stale copy\n", encoding="utf-8")
     assert stale_idea_path.exists()
 
     _cleanup_stale_ticket_idea_files(
-        ticket={"ticket_id": "BLG-001"},
+        ticket={},
         fingerprint=fingerprint,
         owner_repo_root=owner_repo_root,
         repo_root=repo_root,
@@ -611,8 +614,8 @@ def test_reports_export_tickets_sweeps_actioned_bucket_duplicates_not_in_backlog
     in_progress_dir.mkdir(parents=True, exist_ok=True)
     complete_dir.mkdir(parents=True, exist_ok=True)
 
-    in_progress_path = in_progress_dir / f"20260212_BLG-999_{stale_fp}_stale-in-progress.md"
-    complete_path = complete_dir / f"20260212_BLG-999_{stale_fp}_done.md"
+    in_progress_path = in_progress_dir / f"20260212_{stale_fp}_stale-in-progress.md"
+    complete_path = complete_dir / f"20260212_{stale_fp}_done.md"
     in_progress_path.write_text("# In progress\n", encoding="utf-8")
     complete_path.write_text("# Done\n", encoding="utf-8")
     assert in_progress_path.exists()
@@ -668,6 +671,7 @@ def test_reports_export_tickets_attaches_ux_review_and_promotes_docs(tmp_path: P
         "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
         "suggested_owner": "docs",
     }
+    fingerprint = ticket_export_fingerprint(ticket)
 
     backlog_path = compiled_dir / "target_a.backlog.json"
     _write_json(
@@ -694,7 +698,7 @@ def test_reports_export_tickets_attaches_ux_review_and_promotes_docs(tmp_path: P
                 "recommendations": [
                     {
                         "recommendation_id": "UX-001",
-                        "ticket_ids": ["BLG-001"],
+                        "fingerprints": [fingerprint],
                         "recommended_approach": "docs",
                         "proposed_change_surface": {
                             "user_visible": True,
@@ -789,6 +793,7 @@ def test_reports_export_tickets_promotes_high_surface_ready_ticket_with_docs_rec
         "breadth": {"missions": 3, "targets": 2, "repo_inputs": 2, "agents": 2, "runs": 8},
         "suggested_owner": "runner_core",
     }
+    fingerprint = ticket_export_fingerprint(ticket)
 
     backlog_path = compiled_dir / "target_a.backlog.json"
     _write_json(
@@ -810,7 +815,7 @@ def test_reports_export_tickets_promotes_high_surface_ready_ticket_with_docs_rec
                 "recommendations": [
                     {
                         "recommendation_id": "UX-001",
-                        "ticket_ids": ["BLG-002"],
+                        "fingerprints": [fingerprint],
                         "recommended_approach": "docs",
                         "rationale": "Prefer docs over new command.",
                         "next_steps": ["Document the existing command flow."],
@@ -894,14 +899,13 @@ def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_
     fingerprint = ticket_export_fingerprint(ticket)
     ready_dir = owner_repo / ".agents" / "plans" / "2 - ready"
     ready_dir.mkdir(parents=True, exist_ok=True)
-    plan_path = ready_dir / f"20260221_BLG-001_{fingerprint}_existing.md"
+    plan_path = ready_dir / f"20260221_{fingerprint}_existing.md"
     plan_path.write_text(
         "\n".join(
             [
                 "# [Research] Existing ticket",
                 "",
                 f"- Fingerprint: `{fingerprint}`",
-                "- Source ticket: `BLG-001`",
                 "",
                 "- Export kind: `research`",
                 "- Stage: `research_required`",
@@ -931,7 +935,7 @@ def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_
                 "recommendations": [
                     {
                         "recommendation_id": "UX-001",
-                        "ticket_ids": ["BLG-001"],
+                        "fingerprints": [fingerprint],
                         "recommended_approach": "docs",
                         "rationale": "A new command isn't necessary.",
                         "next_steps": ["Update docs instead."],
@@ -1013,14 +1017,13 @@ def test_reports_export_tickets_defers_existing_plan_ticket_and_updates_actions(
     fingerprint = ticket_export_fingerprint(ticket)
     ready_dir = owner_repo / ".agents" / "plans" / "2 - ready"
     ready_dir.mkdir(parents=True, exist_ok=True)
-    plan_path = ready_dir / f"20260221_BLG-009_{fingerprint}_existing.md"
+    plan_path = ready_dir / f"20260221_{fingerprint}_existing.md"
     plan_path.write_text(
         "\n".join(
             [
                 "# [Research] Existing ticket",
                 "",
                 f"- Fingerprint: `{fingerprint}`",
-                "- Source ticket: `BLG-009`",
                 "",
                 "- Export kind: `research`",
                 "- Stage: `ready_for_ticket`",
@@ -1050,7 +1053,7 @@ def test_reports_export_tickets_defers_existing_plan_ticket_and_updates_actions(
                 "recommendations": [
                     {
                         "recommendation_id": "UX-001",
-                        "ticket_ids": ["BLG-009"],
+                        "fingerprints": [fingerprint],
                         "recommended_approach": "defer",
                         "rationale": "Defer the new command.",
                         "next_steps": ["No action."],
@@ -1154,7 +1157,7 @@ def test_reports_export_tickets_defer_moves_bucket_and_skips_export(tmp_path: Pa
                 "recommendations": [
                     {
                         "recommendation_id": "UX-001",
-                        "ticket_ids": ["BLG-008"],
+                        "fingerprints": [fingerprint],
                         "recommended_approach": "defer",
                         "rationale": "Already implemented; defer.",
                         "next_steps": ["Re-triage as already implemented."],
@@ -1184,7 +1187,7 @@ def test_reports_export_tickets_defer_moves_bucket_and_skips_export(tmp_path: Pa
                 {
                     "atom_id": "target_a/20260101T000000Z/codex/0:confusion_point:1",
                     "status": "ticketed",
-                    "ticket_ids": ["BLG-008"],
+                    "fingerprints": [fingerprint],
                 }
             ],
         },

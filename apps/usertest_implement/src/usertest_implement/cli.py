@@ -82,6 +82,7 @@ try:
         parse_ticket_markdown_metadata,
         select_next_ticket,
         select_next_ticket_path,
+        strip_legacy_source_ticket_lines,
     )
 except ModuleNotFoundError as exc:
     if _is_missing_module(exc, "usertest_implement"):
@@ -92,7 +93,6 @@ except ModuleNotFoundError as exc:
 @dataclass(frozen=True)
 class SelectedTicket:
     fingerprint: str
-    ticket_id: str | None
     title: str | None
     export_kind: str | None
     owner_root: Path | None
@@ -505,8 +505,7 @@ def _fingerprint_from_text(text: str) -> str:
 def _select_ticket_from_export(
     *,
     tickets_export_path: Path,
-    fingerprint: str | None,
-    ticket_id: str | None,
+    fingerprint: str,
 ) -> SelectedTicket:
     doc = json.loads(tickets_export_path.read_text(encoding="utf-8"))
     if not isinstance(doc, dict):
@@ -520,16 +519,7 @@ def _select_ticket_from_export(
     for idx, export in enumerate(exports):
         export_fp = export.get("fingerprint")
         export_fp_s = export_fp if isinstance(export_fp, str) else None
-        source_ticket = export.get("source_ticket")
-        source_ticket_id: str | None = None
-        if isinstance(source_ticket, dict):
-            tid = source_ticket.get("ticket_id")
-            source_ticket_id = tid if isinstance(tid, str) else None
-
-        if fingerprint is not None and export_fp_s == fingerprint:
-            matches.append((idx, export))
-            continue
-        if ticket_id is not None and source_ticket_id == ticket_id:
+        if export_fp_s == fingerprint:
             matches.append((idx, export))
 
     if not matches:
@@ -547,12 +537,6 @@ def _select_ticket_from_export(
     export_kind = export.get("export_kind")
     export_kind_s = export_kind.strip() if isinstance(export_kind, str) and export_kind.strip() else None
 
-    source_ticket = export.get("source_ticket")
-    tid_s: str | None = None
-    if isinstance(source_ticket, dict):
-        tid = source_ticket.get("ticket_id")
-        tid_s = tid.strip() if isinstance(tid, str) and tid.strip() else None
-
     owner_repo = export.get("owner_repo")
     owner_root: Path | None = None
     idea_path: Path | None = None
@@ -567,10 +551,10 @@ def _select_ticket_from_export(
     body = export.get("body_markdown")
     if not isinstance(body, str) or not body.strip():
         raise ValueError("Export missing body_markdown")
+    body = strip_legacy_source_ticket_lines(body)
 
     return SelectedTicket(
         fingerprint=export_fp.strip(),
-        ticket_id=tid_s,
         title=title_s,
         export_kind=export_kind_s,
         owner_root=owner_root,
@@ -583,9 +567,9 @@ def _select_ticket_from_export(
 
 def _select_ticket_from_path(ticket_path: Path) -> SelectedTicket:
     text = ticket_path.read_text(encoding="utf-8", errors="replace")
+    text = strip_legacy_source_ticket_lines(text)
     meta = parse_ticket_markdown_metadata(text)
     fingerprint = meta.get("fingerprint") or _fingerprint_from_text(text)
-    ticket_id = meta.get("ticket_id")
     title = meta.get("title")
     export_kind = meta.get("export_kind")
 
@@ -601,7 +585,6 @@ def _select_ticket_from_path(ticket_path: Path) -> SelectedTicket:
 
     return SelectedTicket(
         fingerprint=fingerprint,
-        ticket_id=ticket_id,
         title=title,
         export_kind=export_kind,
         owner_root=owner_root,
@@ -616,16 +599,12 @@ def _compose_ticket_blob(selected: SelectedTicket) -> str:
     lines: list[str] = []
     lines.append("# Ticket context")
     lines.append(f"- fingerprint: {selected.fingerprint}")
-    if selected.ticket_id is not None:
-        lines.append(f"- ticket_id: {selected.ticket_id}")
     if selected.title is not None:
         lines.append(f"- title: {selected.title}")
     if selected.export_kind is not None:
         lines.append(f"- export_kind: {selected.export_kind}")
     if selected.owner_root is not None:
         lines.append(f"- owner_repo_root: {selected.owner_root}")
-    if selected.idea_path is not None:
-        lines.append(f"- idea_path: {selected.idea_path}")
     if selected.tickets_export_path is not None:
         lines.append(f"- tickets_export_path: {selected.tickets_export_path}")
     if selected.export_index is not None:
@@ -638,9 +617,8 @@ def _compose_ticket_blob(selected: SelectedTicket) -> str:
 
 
 def _default_branch_name(selected: SelectedTicket) -> str:
-    ticket_part = slugify(selected.ticket_id or "ticket").lower()
     fp_part = selected.fingerprint[:12].lower()
-    return f"backlog/{ticket_part}-{fp_part}"
+    return f"backlog/{fp_part}"
 
 
 def _write_pr_manifest(
@@ -651,7 +629,7 @@ def _write_pr_manifest(
     agent: str,
     model: str | None,
 ) -> tuple[str, str]:
-    title = f"{selected.ticket_id or selected.fingerprint}: {selected.title or 'Implement backlog ticket'}"
+    title = f"{selected.fingerprint}: {selected.title or 'Implement backlog ticket'}"
 
     def _markdown_fence(text: str) -> str:
         max_run = 0
@@ -671,8 +649,6 @@ def _write_pr_manifest(
 
     body_lines: list[str] = []
     body_lines.append(f"Fingerprint: `{selected.fingerprint}`")
-    if selected.ticket_id:
-        body_lines.append(f"Source ticket: `{selected.ticket_id}`")
     body_lines.append(f"Agent: `{agent}`")
     body_lines.append(f"Model: `{model or 'unknown'}`")
     body_lines.append("")
@@ -959,7 +935,6 @@ def _run_selected_ticket(
         {
             "schema_version": 1,
             "fingerprint": selected.fingerprint,
-            "ticket_id": selected.ticket_id,
             "title": selected.title,
             "export_kind": selected.export_kind,
             "tickets_export_path": (
@@ -1022,7 +997,7 @@ def _run_selected_ticket(
     branch = args.branch or _default_branch_name(selected)
     commit_message = (
         args.commit_message
-        or f"{selected.ticket_id or selected.fingerprint}: {selected.title or 'Implement backlog ticket'}"
+        or f"{selected.fingerprint}: {selected.title or 'Implement backlog ticket'}"
     )
 
     git_ref: dict[str, Any] | None = None
@@ -1257,7 +1232,6 @@ def _run_selected_ticket(
         if not ledger_path.is_absolute():
             ledger_path = repo_root / ledger_path
         updates: dict[str, Any] = {
-            "ticket_id": selected.ticket_id,
             "title": selected.title,
             "owner_root": str(selected.owner_root) if selected.owner_root is not None else None,
             "idea_path": str(selected.idea_path) if selected.idea_path is not None else None,
@@ -1340,8 +1314,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
     else:
         selected = _select_ticket_from_export(
             tickets_export_path=args.tickets_export,
-            fingerprint=args.fingerprint,
-            ticket_id=args.ticket_id,
+            fingerprint=str(args.fingerprint),
         )
 
     return _run_selected_ticket(args=args, repo_root=repo_root, cfg=cfg, selected=selected)
@@ -1377,7 +1350,6 @@ def _cmd_tickets_list(args: argparse.Namespace) -> int:
         "tickets": [
             {
                 "fingerprint": e.fingerprint,
-                "ticket_id": e.ticket_id,
                 "paths": [str(p) for p in e.paths],
                 "buckets": e.buckets,
                 "status": e.status,
@@ -1403,7 +1375,6 @@ def _cmd_tickets_next(args: argparse.Namespace) -> int:
         "schema_version": 1,
         "owner_root": str(owner_root),
         "fingerprint": entry.fingerprint,
-        "ticket_id": entry.ticket_id,
         "paths": [str(p) for p in entry.paths],
         "buckets": entry.buckets,
         "status": entry.status,
@@ -1648,8 +1619,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Tickets export JSON path.",
     )
     ticket_group.add_argument("--ticket-path", dest="ticket_path", type=Path, help="Ticket markdown path.")
-    run_p.add_argument("--fingerprint", help="Ticket fingerprint selector (requires --tickets-export).")
-    run_p.add_argument("--ticket-id", help="Ticket id selector (requires --tickets-export).")
+    run_p.add_argument(
+        "--fingerprint",
+        required=False,
+        help="Ticket fingerprint selector (requires --tickets-export).",
+    )
     _add_run_execution_args(run_p)
 
     run_p.set_defaults(func=_cmd_run)
@@ -1752,10 +1726,8 @@ def main(argv: list[str] | None = None) -> int:
         if args.ticket_path is None:
             if args.tickets_export is None:
                 raise SystemExit(2)
-            if bool(args.fingerprint) == bool(args.ticket_id):
-                raise SystemExit(
-                    "Provide exactly one of --fingerprint or --ticket-id with --tickets-export."
-                )
+            if not args.fingerprint:
+                raise SystemExit("Provide --fingerprint with --tickets-export.")
         raise SystemExit(args.func(args))
 
     raise SystemExit(args.func(args))

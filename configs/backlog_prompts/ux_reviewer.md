@@ -29,7 +29,7 @@ Return JSON in this schema:
   "recommendations": [
     {
       "recommendation_id": "UX-001",
-      "ticket_ids": ["BLG-001"],
+      "fingerprints": ["c0ffee1234abc567"],
       "recommended_approach": "docs|parameterize_existing|new_surface|defer",
       "proposed_change_surface": {
         "user_visible": true,

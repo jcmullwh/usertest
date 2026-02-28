@@ -103,7 +103,6 @@ class PlanStatus:
     plan_status: str | None
     plan_buckets: list[str]
     plan_paths: list[str]
-    ticket_ids: list[str]
 
 
 def build_plan_status_index(*, owner_root: Path) -> dict[str, PlanStatus]:
@@ -121,14 +120,12 @@ def build_plan_status_index(*, owner_root: Path) -> dict[str, PlanStatus]:
         plan_status = meta.get("status") if isinstance(meta.get("status"), str) else None
         buckets = [b for b in meta.get("buckets", []) if isinstance(b, str) and b.strip()]
         paths = [p for p in meta.get("paths", []) if isinstance(p, str) and p.strip()]
-        ticket_ids = [t for t in meta.get("ticket_ids", []) if isinstance(t, str) and t.strip()]
 
         out[fingerprint_clean] = PlanStatus(
             fingerprint=fingerprint_clean,
             plan_status=plan_status,
             plan_buckets=sorted(set(buckets)),
             plan_paths=sorted(set(paths)),
-            ticket_ids=sorted(set(ticket_ids)),
         )
     return out
 
@@ -325,20 +322,16 @@ def triage_atoms(
             kept.append(atom)
         atoms = kept
 
-    atom_to_ticket_ids: dict[str, list[str]] = defaultdict(list)
-    tickets_by_id: dict[str, dict[str, Any]] = {}
-    ticket_fingerprint_by_id: dict[str, str] = {}
+    atom_to_fingerprints: dict[str, list[str]] = defaultdict(list)
+    tickets_by_fingerprint: dict[str, dict[str, Any]] = {}
     if tickets is not None:
         for ticket in tickets:
             if not isinstance(ticket, dict):
                 continue
-            ticket_id = _coerce_string(ticket.get("ticket_id"))
-            if ticket_id is None:
-                continue
-            tickets_by_id[ticket_id] = ticket
-            ticket_fingerprint_by_id[ticket_id] = ticket_export_fingerprint(ticket)
+            fingerprint = ticket_export_fingerprint(ticket)
+            tickets_by_fingerprint[fingerprint] = ticket
             for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
-                atom_to_ticket_ids[atom_id].append(ticket_id)
+                atom_to_fingerprints[atom_id].append(fingerprint)
 
     def _atom_text(atom: dict[str, Any]) -> str:
         raw = atom.get("text")
@@ -371,7 +364,7 @@ def triage_atoms(
         severities: Counter[str] = Counter()
         atom_ids: list[str] = []
 
-        ticket_ids: set[str] = set()
+        ticket_fingerprints: set[str] = set()
         atoms_cited_by_ticket: Counter[str] = Counter()
 
         for idx in cluster:
@@ -384,9 +377,9 @@ def triage_atoms(
             sources[_coerce_string(atom.get("source")) or "unknown"] += 1
             severities[_coerce_string(atom.get("severity_hint")) or "unknown"] += 1
 
-            for tid in atom_to_ticket_ids.get(atom_id, []):
-                ticket_ids.add(tid)
-                atoms_cited_by_ticket[tid] += 1
+            for fingerprint in atom_to_fingerprints.get(atom_id, []):
+                ticket_fingerprints.add(fingerprint)
+                atoms_cited_by_ticket[fingerprint] += 1
 
         representative_idx = min(cluster)
         rep_atom = atoms[representative_idx]
@@ -394,9 +387,8 @@ def triage_atoms(
         rep_text = _atom_text(rep_atom)
 
         tickets_payload: list[dict[str, Any]] = []
-        for tid in sorted(ticket_ids):
-            ticket = tickets_by_id.get(tid, {})
-            fingerprint = ticket_fingerprint_by_id.get(tid)
+        for fingerprint in sorted(ticket_fingerprints):
+            ticket = tickets_by_fingerprint.get(fingerprint, {})
             plan = (
                 plan_status_by_fingerprint.get(fingerprint)
                 if plan_status_by_fingerprint and fingerprint is not None
@@ -410,11 +402,10 @@ def triage_atoms(
             tickets_payload.append(
                 {
                     "fingerprint": fingerprint,
-                    "ticket_id": tid,
                     "title": _coerce_string(ticket.get("title")),
                     "stage": _coerce_string(ticket.get("stage")),
                     "severity": _coerce_string(ticket.get("severity")),
-                    "atoms_cited_in_cluster": int(atoms_cited_by_ticket.get(tid, 0)),
+                    "atoms_cited_in_cluster": int(atoms_cited_by_ticket.get(fingerprint, 0)),
                     "plan": (
                         None
                         if plan is None
@@ -468,7 +459,7 @@ def triage_atoms(
                 "atom_ids": atom_ids,
                 "sources": dict(sources),
                 "severity_hints": dict(severities),
-                "tickets_total": len(ticket_ids),
+                "tickets_total": len(ticket_fingerprints),
                 "tickets": tickets_payload,
                 "tickets_plan_status_counts": dict(plan_status_counts),
                 "tickets_plan_bucket_counts": dict(plan_bucket_counts),
@@ -503,7 +494,6 @@ def triage_atoms(
                 plan = ticket.get("plan")
                 entry = {
                     "fingerprint": fingerprint,
-                    "ticket_id": _coerce_string(ticket.get("ticket_id")),
                     "title": _coerce_string(ticket.get("title")),
                     "stage": _coerce_string(ticket.get("stage")),
                     "severity": _coerce_string(ticket.get("severity")),
@@ -686,13 +676,11 @@ def render_triage_atoms_markdown(report: dict[str, Any]) -> str:
             for ticket in tickets[:20]:
                 if not isinstance(ticket, dict):
                     continue
-                tid = _coerce_string(ticket.get("ticket_id")) or "unknown"
-                fingerprint = _coerce_string(ticket.get("fingerprint"))
+                fingerprint = _coerce_string(ticket.get("fingerprint")) or "unknown"
                 title = _coerce_string(ticket.get("title")) or ""
                 cited = int(ticket.get("atoms_cited_in_cluster", 0))
 
-                ticket_hint = f" ({tid})" if fingerprint and tid else ""
-                display_id = (fingerprint or tid or "unknown") + ticket_hint
+                display_id = fingerprint
 
                 bucket_hint = ""
                 plan = ticket.get("plan")
@@ -733,7 +721,6 @@ def render_triage_atoms_markdown(report: dict[str, Any]) -> str:
             if not isinstance(ticket, dict):
                 continue
             fingerprint = _coerce_string(ticket.get("fingerprint")) or "unknown"
-            ticket_id = _coerce_string(ticket.get("ticket_id")) or ""
 
             plan = ticket.get("plan")
             buckets: list[str] = []
@@ -746,8 +733,7 @@ def render_triage_atoms_markdown(report: dict[str, Any]) -> str:
             title = _coerce_string(ticket.get("title")) or ""
             title_part = f" - {title}" if title else ""
 
-            display_id = fingerprint + (f" ({ticket_id})" if ticket_id else "")
-            lines.append(f"- {display_id}{bucket_hint}{title_part}")
+            lines.append(f"- {fingerprint}{bucket_hint}{title_part}")
 
             clusters_list_raw = ticket.get("clusters")
             clusters_list = clusters_list_raw if isinstance(clusters_list_raw, list) else []
