@@ -18,10 +18,12 @@ PLAN_BUCKET_TO_ATOM_STATUS: dict[str, str] = {
     "3 - in_progress": "actioned",
     "4 - for_review": "actioned",
     "5 - complete": "actioned",
+    "6 - archived": "actioned",
     "0.1 - deferred": "actioned",
 }
 
 ACTIONED_PLAN_BUCKET_PRIORITY: list[str] = [
+    "6 - archived",
     "5 - complete",
     "4 - for_review",
     "3 - in_progress",
@@ -36,6 +38,7 @@ PLAN_TICKET_FILENAME_RE = re.compile(
 ATOM_ID_RE = re.compile(
     r"^[A-Za-z0-9_.-]+/[0-9]{8}T[0-9]{6}Z/[A-Za-z0-9_.-]+/[0-9]+:[A-Za-z0-9_.-]+:[0-9]+$"
 )
+DEQUEUED_PLAN_DIRNAMES: tuple[str, ...] = ("_dequeued", "_archive")
 
 
 def _extract_atom_ids_from_ticket_markdown(markdown: str) -> list[str]:
@@ -59,6 +62,124 @@ def _extract_atom_ids_from_ticket_markdown(markdown: str) -> list[str]:
         if ATOM_ID_RE.match(cleaned):
             atom_ids.add(cleaned)
     return sorted(atom_ids)
+
+
+def sync_atom_actions_from_dequeued_plan_folders(
+    *,
+    atom_actions: dict[str, dict[str, Any]],
+    owner_roots: list[Path],
+    generated_at: str,
+) -> dict[str, Any]:
+    """Demote queued/ticketed atom ledger entries based on `_dequeued` plan files.
+
+    Plans moved under `.agents/plans/_dequeued/**` (or `.agents/plans/_archive/**`) are
+    treated as explicitly removed from the active queue. Any referenced atoms are
+    demoted back to `new` so they become eligible for re-mining, while `actioned`
+    atoms are never demoted.
+
+    This is intended to run *before* `sync_atom_actions_from_plan_folders()` so that
+    any atoms still referenced by active queued/actioned plan buckets are promoted
+    back immediately.
+    """
+
+    roots_scanned = 0
+    dequeued_dirs_scanned = 0
+    ticket_files_scanned = 0
+    tickets_without_evidence = 0
+    atom_ids_seen = 0
+    atoms_missing = 0
+    atoms_skipped_actioned = 0
+    atoms_demoted = 0
+
+    for owner_root in owner_roots:
+        plans_dir = owner_root / ".agents" / "plans"
+        if not plans_dir.exists() or not plans_dir.is_dir():
+            continue
+        roots_scanned += 1
+
+        dequeued_dirs: list[Path] = []
+        for dirname in DEQUEUED_PLAN_DIRNAMES:
+            candidate = plans_dir / dirname
+            if candidate.exists() and candidate.is_dir():
+                dequeued_dirs.append(candidate)
+        if not dequeued_dirs:
+            continue
+        dequeued_dirs_scanned += len(dequeued_dirs)
+
+        for dequeued_dir in dequeued_dirs:
+            for md_path in sorted(dequeued_dir.rglob("*.md"), key=lambda p: str(p)):
+                ticket_files_scanned += 1
+
+                try:
+                    markdown = md_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+
+                atom_ids = _extract_atom_ids_from_ticket_markdown(markdown)
+                if not atom_ids:
+                    tickets_without_evidence += 1
+                    continue
+                atom_ids_seen += len(atom_ids)
+
+                for atom_id in atom_ids:
+                    canonical_atom_id = canonicalize_failure_atom_id(atom_id)
+                    derived_from_atom_id: str | None = None
+                    if canonical_atom_id is not None and canonical_atom_id != atom_id:
+                        derived_from_atom_id = atom_id
+                        atom_id = canonical_atom_id
+
+                    existing = atom_actions.get(atom_id)
+                    if existing is None:
+                        atoms_missing += 1
+                        continue
+
+                    old_status_raw = existing.get("status")
+                    old_status = str(old_status_raw) if isinstance(old_status_raw, str) else None
+                    old_status_n = old_status.strip().lower() if old_status else "new"
+                    if old_status_n == "actioned":
+                        atoms_skipped_actioned += 1
+                        continue
+
+                    if old_status_n != "new":
+                        atoms_demoted += 1
+                    existing["status"] = "new"
+                    existing["last_dequeued_at"] = generated_at
+
+                    dequeued_paths = [
+                        item for item in existing.get("dequeued_paths", []) if isinstance(item, str)
+                    ]
+                    dequeued_paths.append(str(md_path))
+                    existing["dequeued_paths"] = sorted_unique_strings(dequeued_paths)
+
+                    dequeued_roots = [
+                        item
+                        for item in existing.get("dequeued_owner_roots", [])
+                        if isinstance(item, str)
+                    ]
+                    dequeued_roots.append(str(owner_root))
+                    existing["dequeued_owner_roots"] = sorted_unique_strings(dequeued_roots)
+
+                    if derived_from_atom_id is not None:
+                        derived = [
+                            item
+                            for item in existing.get("derived_from_atom_ids", [])
+                            if isinstance(item, str)
+                        ]
+                        derived.append(derived_from_atom_id)
+                        existing["derived_from_atom_ids"] = sorted_unique_strings(derived)
+
+                    atom_actions[atom_id] = existing
+
+    return {
+        "roots_scanned": roots_scanned,
+        "dequeued_dirs_scanned": dequeued_dirs_scanned,
+        "ticket_files_scanned": ticket_files_scanned,
+        "tickets_without_evidence": tickets_without_evidence,
+        "atom_ids_seen": atom_ids_seen,
+        "atoms_missing": atoms_missing,
+        "atoms_skipped_actioned": atoms_skipped_actioned,
+        "atoms_demoted": atoms_demoted,
+    }
 
 
 def scan_plan_ticket_index(*, owner_root: Path) -> dict[str, dict[str, Any]]:

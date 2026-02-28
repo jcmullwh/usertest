@@ -130,6 +130,7 @@ def move_ticket_file(
         "3 - in_progress": 1,
         "4 - for_review": 2,
         "5 - complete": 3,
+        "6 - archived": 4,
     }
     to_rank = actioned_rank.get(to_bucket)
     bucket_to_paths: dict[str, list[Path]] = {}

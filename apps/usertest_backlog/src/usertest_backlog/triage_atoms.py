@@ -8,15 +8,25 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
+from backlog_repo.export import ticket_export_fingerprint
 from backlog_repo.plan_index import scan_plan_ticket_index
 from triage_engine import cluster_items_knn
 from triage_engine.embeddings import Embedder, get_default_embedder
-from triage_engine.testing import HashingEmbedder
 
 TextNormalization = Literal["raw", "smart"]
-EmbedderSpec = Literal["hashing", "openai"]
+
+_HASHING_EMBEDDER_TEST_ONLY_NOTE = (
+    "HashingEmbedder is test-only (basic functionality testing only) and must never be used for real "
+    "triage clustering; it does not produce meaningful semantic similarity."
+)
+
+# Triage-atoms requires meaningful semantic embeddings. The CLI intentionally supports only OpenAI embeddings.
+# HashingEmbedder (triage_engine.testing) exists only for basic functionality tests.
+EmbedderSpec = Literal["openai"]
 
 _COMMAND_FAILURE_TEXT_RE = re.compile(r"^Command failed: exit_code=\d+; command=(?P<cmd>.+)$")
+
+_FINGERPRINT_IN_PATH_RE = re.compile(r"(?i)_(?P<fingerprint>[0-9a-f]{16})_")
 
 
 def load_atoms_jsonl(path: Path) -> list[dict[str, Any]]:
@@ -79,28 +89,31 @@ def _normalize_atom_text(text: str, *, mode: TextNormalization) -> str:
 
 
 def resolve_embedder(spec: EmbedderSpec) -> tuple[Embedder, dict[str, Any]]:
-    if spec == "hashing":
-        return HashingEmbedder(), {"embedder": "hashing"}
-    if spec == "openai":
-        return get_default_embedder(), {"embedder": "openai"}
-    raise ValueError(f"Unknown embedder: {spec}")
+    if spec != "openai":
+        raise ValueError(
+            f"Unsupported embedder: {spec!r}. Only 'openai' is supported for triage-atoms. "
+            f"{_HASHING_EMBEDDER_TEST_ONLY_NOTE}"
+        )
+    return get_default_embedder(), {"embedder": "openai"}
 
 
 @dataclass(frozen=True)
-class TicketStatus:
-    ticket_id: str
+class PlanStatus:
+    fingerprint: str
     plan_status: str | None
     plan_buckets: list[str]
     plan_paths: list[str]
-    fingerprints: list[str]
+    ticket_ids: list[str]
 
 
-def build_ticket_status_index(*, owner_root: Path) -> dict[str, TicketStatus]:
+def build_plan_status_index(*, owner_root: Path) -> dict[str, PlanStatus]:
     raw = scan_plan_ticket_index(owner_root=owner_root)
-    by_ticket: dict[str, dict[str, Any]] = {}
-
+    out: dict[str, PlanStatus] = {}
     for fingerprint, meta in raw.items():
-        if not isinstance(fingerprint, str) or not fingerprint.strip():
+        if not isinstance(fingerprint, str):
+            continue
+        fingerprint_clean = fingerprint.strip().lower()
+        if not fingerprint_clean:
             continue
         if not isinstance(meta, dict):
             continue
@@ -110,33 +123,12 @@ def build_ticket_status_index(*, owner_root: Path) -> dict[str, TicketStatus]:
         paths = [p for p in meta.get("paths", []) if isinstance(p, str) and p.strip()]
         ticket_ids = [t for t in meta.get("ticket_ids", []) if isinstance(t, str) and t.strip()]
 
-        for ticket_id in ticket_ids:
-            entry = by_ticket.setdefault(
-                ticket_id,
-                {
-                    "plan_status": None,
-                    "buckets": set(),
-                    "paths": set(),
-                    "fingerprints": set(),
-                },
-            )
-            entry["fingerprints"].add(fingerprint)
-            entry["buckets"].update(buckets)
-            entry["paths"].update(paths)
-            # Prefer actioned when mixed.
-            if entry["plan_status"] is None:
-                entry["plan_status"] = plan_status
-            elif entry["plan_status"] != "actioned" and plan_status == "actioned":
-                entry["plan_status"] = plan_status
-
-    out: dict[str, TicketStatus] = {}
-    for ticket_id, meta in by_ticket.items():
-        out[ticket_id] = TicketStatus(
-            ticket_id=ticket_id,
-            plan_status=meta.get("plan_status"),
-            plan_buckets=sorted(meta.get("buckets", set())),
-            plan_paths=sorted(meta.get("paths", set())),
-            fingerprints=sorted(meta.get("fingerprints", set())),
+        out[fingerprint_clean] = PlanStatus(
+            fingerprint=fingerprint_clean,
+            plan_status=plan_status,
+            plan_buckets=sorted(set(buckets)),
+            plan_paths=sorted(set(paths)),
+            ticket_ids=sorted(set(ticket_ids)),
         )
     return out
 
@@ -195,8 +187,16 @@ def build_implementation_index(
         except Exception:
             continue
 
-        ticket_id = _coerce_string(ticket_ref.get("ticket_id"))
-        if ticket_id is None:
+        fingerprint = _coerce_string(ticket_ref.get("fingerprint"))
+        if fingerprint is None:
+            owner_repo = ticket_ref.get("owner_repo")
+            if isinstance(owner_repo, dict):
+                idea_path = _coerce_string(owner_repo.get("idea_path"))
+                if idea_path is not None:
+                    match = _FINGERPRINT_IN_PATH_RE.search(idea_path)
+                    if match is not None:
+                        fingerprint = match.group("fingerprint").strip().lower()
+        if fingerprint is None:
             continue
 
         run_dir = ticket_ref_path.parent
@@ -241,7 +241,7 @@ def build_implementation_index(
                 raw_list = []
             diff_numstat = [item for item in raw_list if isinstance(item, dict)]
 
-        out[ticket_id].append(
+        out[fingerprint].append(
             ImplementationRun(
                 run_dir=_rel_path(repo_root, run_dir),
                 started_at_utc=started_at,
@@ -254,7 +254,7 @@ def build_implementation_index(
         )
 
     # Sort newest-first when timing is present (else stable by path).
-    for ticket_id, runs in out.items():
+    for fingerprint, runs in out.items():
         runs.sort(
             key=lambda run: (
                 run.started_at_utc is None,
@@ -263,7 +263,7 @@ def build_implementation_index(
             ),
             reverse=True,
         )
-        out[ticket_id] = runs
+        out[fingerprint] = runs
 
     return dict(out)
 
@@ -297,17 +297,37 @@ def triage_atoms(
     atoms: list[dict[str, Any]],
     *,
     embedder: Embedder,
+    embedder_label: str | None = None,
     text_normalization: TextNormalization,
     k: int,
     overall_similarity_threshold: float,
     representative_similarity_threshold: float | None,
     min_cluster_size: int,
+    exclude_sources: list[str] | None = None,
     tickets: list[dict[str, Any]] | None = None,
-    ticket_status_by_id: dict[str, TicketStatus] | None = None,
-    implementation_runs_by_ticket: dict[str, list[ImplementationRun]] | None = None,
+    plan_status_by_fingerprint: dict[str, PlanStatus] | None = None,
+    implementation_runs_by_fingerprint: dict[str, list[ImplementationRun]] | None = None,
 ) -> dict[str, Any]:
+    atoms_input_total = len(atoms)
+    exclude_set = {
+        value.strip().lower()
+        for value in (exclude_sources or [])
+        if isinstance(value, str) and value.strip()
+    }
+    excluded_by_source: Counter[str] = Counter()
+    if exclude_set:
+        kept: list[dict[str, Any]] = []
+        for atom in atoms:
+            source = _coerce_string(atom.get("source")) or ""
+            if source.strip().lower() in exclude_set:
+                excluded_by_source[source.strip().lower() or "unknown"] += 1
+                continue
+            kept.append(atom)
+        atoms = kept
+
     atom_to_ticket_ids: dict[str, list[str]] = defaultdict(list)
     tickets_by_id: dict[str, dict[str, Any]] = {}
+    ticket_fingerprint_by_id: dict[str, str] = {}
     if tickets is not None:
         for ticket in tickets:
             if not isinstance(ticket, dict):
@@ -316,6 +336,7 @@ def triage_atoms(
             if ticket_id is None:
                 continue
             tickets_by_id[ticket_id] = ticket
+            ticket_fingerprint_by_id[ticket_id] = ticket_export_fingerprint(ticket)
             for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
                 atom_to_ticket_ids[atom_id].append(ticket_id)
 
@@ -375,14 +396,20 @@ def triage_atoms(
         tickets_payload: list[dict[str, Any]] = []
         for tid in sorted(ticket_ids):
             ticket = tickets_by_id.get(tid, {})
-            plan = ticket_status_by_id.get(tid) if ticket_status_by_id else None
+            fingerprint = ticket_fingerprint_by_id.get(tid)
+            plan = (
+                plan_status_by_fingerprint.get(fingerprint)
+                if plan_status_by_fingerprint and fingerprint is not None
+                else None
+            )
             impl_runs = (
-                implementation_runs_by_ticket.get(tid, [])
-                if implementation_runs_by_ticket
+                implementation_runs_by_fingerprint.get(fingerprint, [])
+                if implementation_runs_by_fingerprint and fingerprint is not None
                 else []
             )
             tickets_payload.append(
                 {
+                    "fingerprint": fingerprint,
                     "ticket_id": tid,
                     "title": _coerce_string(ticket.get("title")),
                     "stage": _coerce_string(ticket.get("stage")),
@@ -392,9 +419,9 @@ def triage_atoms(
                         None
                         if plan is None
                         else {
+                            "fingerprint": plan.fingerprint,
                             "plan_status": plan.plan_status,
                             "plan_buckets": plan.plan_buckets,
-                            "fingerprints": plan.fingerprints,
                             "paths": plan.plan_paths,
                         }
                     ),
@@ -458,25 +485,94 @@ def triage_atoms(
     for idx, cluster in enumerate(clusters_payload, start=1):
         cluster["cluster_id"] = idx
 
+    tickets_index: dict[str, dict[str, Any]] = {}
+    for cluster in clusters_payload:
+        cid = int(cluster.get("cluster_id", 0))
+        tickets = cluster.get("tickets")
+        if not isinstance(tickets, list):
+            continue
+        for ticket in tickets:
+            if not isinstance(ticket, dict):
+                continue
+            fingerprint = _coerce_string(ticket.get("fingerprint"))
+            if fingerprint is None:
+                continue
+
+            entry = tickets_index.get(fingerprint)
+            if entry is None:
+                plan = ticket.get("plan")
+                entry = {
+                    "fingerprint": fingerprint,
+                    "ticket_id": _coerce_string(ticket.get("ticket_id")),
+                    "title": _coerce_string(ticket.get("title")),
+                    "stage": _coerce_string(ticket.get("stage")),
+                    "severity": _coerce_string(ticket.get("severity")),
+                    "plan": plan if isinstance(plan, dict) else None,
+                    "implementation_runs": (
+                        ticket.get("implementation_runs")
+                        if isinstance(ticket.get("implementation_runs"), list)
+                        else []
+                    ),
+                    "clusters": [],
+                }
+                tickets_index[fingerprint] = entry
+
+            clusters_list = entry.get("clusters")
+            if not isinstance(clusters_list, list):
+                clusters_list = []
+                entry["clusters"] = clusters_list
+
+            clusters_list.append(
+                {
+                    "cluster_id": cid,
+                    "atoms_cited_in_cluster": int(ticket.get("atoms_cited_in_cluster", 0)),
+                    "cluster_size": int(cluster.get("size", 0)),
+                    "tickets_total_in_cluster": int(cluster.get("tickets_total", 0)),
+                    "first_seen_utc": _coerce_string(cluster.get("first_seen_utc")),
+                    "last_seen_utc": _coerce_string(cluster.get("last_seen_utc")),
+                    "representative_text": _coerce_string(cluster.get("representative_text")),
+                }
+            )
+
+    tickets_index_payload: list[dict[str, Any]] = []
+    for fingerprint, entry in sorted(tickets_index.items(), key=lambda kv: kv[0]):
+        clusters_list = entry.get("clusters")
+        if isinstance(clusters_list, list):
+            clusters_list.sort(
+                key=lambda row: (
+                    -int(row.get("atoms_cited_in_cluster", 0)),
+                    int(row.get("cluster_id", 0)),
+                )
+            )
+        tickets_index_payload.append(entry)
+
     generated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    embedder_impl = getattr(embedder, "__class__", type(embedder)).__name__
+    embedder_name = _coerce_string(embedder_label) or embedder_impl
     return {
         "schema_version": 1,
         "generated_at_utc": generated_at,
         "config": {
-            "embedder": getattr(embedder, "__class__", type(embedder)).__name__,
+            "embedder": embedder_name,
+            "embedder_impl": embedder_impl,
             "text_normalization": text_normalization,
             "k": int(k),
             "overall_similarity_threshold": float(overall_similarity_threshold),
             "representative_similarity_threshold": representative_similarity_threshold,
             "min_cluster_size": int(min_cluster_size),
+            "exclude_sources": sorted(exclude_set),
         },
         "totals": {
             "atoms_total": len(atoms),
+            "atoms_total_input": int(atoms_input_total),
+            "atoms_excluded_total": int(sum(excluded_by_source.values())),
+            "atoms_excluded_by_source": dict(excluded_by_source),
             "clusters_total": len(clusters_idx),
             "clusters_emitted": len(clusters_payload),
             "clusters_skipped": int(skipped_clusters),
         },
         "clusters": clusters_payload,
+        "tickets_index": tickets_index_payload,
     }
 
 
@@ -510,10 +606,34 @@ def render_triage_atoms_markdown(report: dict[str, Any]) -> str:
     lines.append("# Atom Cluster Report")
     lines.append("")
     lines.append(f"- Generated (UTC): `{_coerce_string(report.get('generated_at_utc')) or ''}`")
-    lines.append(f"- Atoms: **{int(totals.get('atoms_total', 0))}**")
+    atoms_total = int(totals.get("atoms_total", 0))
+    atoms_input = totals.get("atoms_total_input")
+    atoms_excluded = int(totals.get("atoms_excluded_total", 0))
+    atoms_line = f"- Atoms: **{atoms_total}**"
+    if atoms_input is not None and atoms_excluded > 0:
+        try:
+            atoms_input_i = int(atoms_input)
+        except (TypeError, ValueError):
+            atoms_input_i = None
+        if atoms_input_i is not None:
+            atoms_line += f" (from {atoms_input_i}, excluded {atoms_excluded})"
+    lines.append(atoms_line)
     lines.append(f"- Clusters emitted: **{int(totals.get('clusters_emitted', 0))}**")
     lines.append(f"- Text normalization: `{_coerce_string(cfg.get('text_normalization')) or ''}`")
-    lines.append(f"- Embedder: `{_coerce_string(cfg.get('embedder')) or ''}`")
+    embedder_name = _coerce_string(cfg.get("embedder")) or ""
+    embedder_impl = _coerce_string(cfg.get("embedder_impl"))
+    if embedder_impl and embedder_impl != embedder_name:
+        lines.append(f"- Embedder: `{embedder_name}` (impl: `{embedder_impl}`)")
+    else:
+        lines.append(f"- Embedder: `{embedder_name}`")
+    exclude_sources = cfg.get("exclude_sources")
+    if isinstance(exclude_sources, list):
+        cleaned = [item.strip() for item in exclude_sources if isinstance(item, str) and item.strip()]
+        if cleaned:
+            preview = ", ".join([f"`{item}`" for item in cleaned[:12]])
+            suffix = "" if len(cleaned) <= 12 else ", ..."
+            lines.append(f"- Excluded sources: {preview}{suffix}")
+    lines.append(f"- Note: {_HASHING_EMBEDDER_TEST_ONLY_NOTE}")
     lines.append("")
 
     clusters = clusters_raw if isinstance(clusters_raw, list) else []
@@ -567,8 +687,12 @@ def render_triage_atoms_markdown(report: dict[str, Any]) -> str:
                 if not isinstance(ticket, dict):
                     continue
                 tid = _coerce_string(ticket.get("ticket_id")) or "unknown"
+                fingerprint = _coerce_string(ticket.get("fingerprint"))
                 title = _coerce_string(ticket.get("title")) or ""
                 cited = int(ticket.get("atoms_cited_in_cluster", 0))
+
+                ticket_hint = f" ({tid})" if fingerprint and tid else ""
+                display_id = (fingerprint or tid or "unknown") + ticket_hint
 
                 bucket_hint = ""
                 plan = ticket.get("plan")
@@ -593,11 +717,57 @@ def render_triage_atoms_markdown(report: dict[str, Any]) -> str:
 
                 title_part = f" - {title}" if title else ""
                 lines.append(
-                    f"  - {tid}{bucket_hint} (cites {cited} atom(s)){pr_hint}{title_part}"
+                    f"  - {display_id}{bucket_hint} (cites {cited} atom(s)){pr_hint}{title_part}"
                 )
             if len(tickets) > 20:
                 lines.append(f"  - ... ({len(tickets) - 20} more)")
 
+        lines.append("")
+
+    tickets_index_raw = report.get("tickets_index")
+    tickets_index = tickets_index_raw if isinstance(tickets_index_raw, list) else []
+    if tickets_index:
+        lines.append("## Tickets (unique)")
+        lines.append("")
+        for ticket in tickets_index[:200]:
+            if not isinstance(ticket, dict):
+                continue
+            fingerprint = _coerce_string(ticket.get("fingerprint")) or "unknown"
+            ticket_id = _coerce_string(ticket.get("ticket_id")) or ""
+
+            plan = ticket.get("plan")
+            buckets: list[str] = []
+            if isinstance(plan, dict):
+                buckets = [
+                    b for b in plan.get("plan_buckets", []) if isinstance(b, str) and b.strip()
+                ]
+            bucket_hint = f" ({', '.join(buckets)})" if buckets else ""
+
+            title = _coerce_string(ticket.get("title")) or ""
+            title_part = f" - {title}" if title else ""
+
+            display_id = fingerprint + (f" ({ticket_id})" if ticket_id else "")
+            lines.append(f"- {display_id}{bucket_hint}{title_part}")
+
+            clusters_list_raw = ticket.get("clusters")
+            clusters_list = clusters_list_raw if isinstance(clusters_list_raw, list) else []
+            if clusters_list:
+                parts = []
+                for row in clusters_list[:20]:
+                    if not isinstance(row, dict):
+                        continue
+                    cid = int(row.get("cluster_id", 0))
+                    cited = int(row.get("atoms_cited_in_cluster", 0))
+                    parts.append(f"{cid}(cites {cited})")
+                suffix = (
+                    ""
+                    if len(clusters_list) <= 20
+                    else f", ... (+{len(clusters_list) - 20} more)"
+                )
+                lines.append(f"  - Clusters: {', '.join(parts)}{suffix}")
+
+        if len(tickets_index) > 200:
+            lines.append(f"- ... ({len(tickets_index) - 200} more)")
         lines.append("")
 
     return "\n".join(lines)

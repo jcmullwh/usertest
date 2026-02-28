@@ -14,6 +14,7 @@ from backlog_repo.plan_index import (
     dedupe_actioned_plan_ticket_files,
     dedupe_queued_plan_ticket_files_when_actioned_exists,
     scan_plan_ticket_index,
+    sync_atom_actions_from_dequeued_plan_folders,
     sync_atom_actions_from_plan_folders,
 )
 
@@ -28,6 +29,7 @@ __all__ = [
     "promote_atom_status",
     "scan_plan_ticket_index",
     "sorted_unique_strings",
+    "sync_atom_actions_from_dequeued_plan_folders",
     "sync_atom_actions_from_plan_folders",
     "ticket_export_anchors",
     "ticket_export_fingerprint",
