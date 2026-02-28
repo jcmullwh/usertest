@@ -356,6 +356,7 @@ def _select_patch_needles(added_lines: list[str], *, limit: int) -> list[str]:
 
 
 _BUCKET_RANK: dict[str, float] = {
+    "6 - archived": 6.0,
     "5 - complete": 5.0,
     "4 - for_review": 4.0,
     "3 - in_progress": 3.0,
@@ -668,7 +669,7 @@ def main() -> int:
         first_evidence = min(evidence_times).isoformat() if evidence_times else None
         last_evidence = max(evidence_times).isoformat() if evidence_times else None
 
-        is_actioned = best_plan_bucket in {"4 - for_review", "5 - complete"}
+        is_actioned = best_plan_bucket in {"4 - for_review", "5 - complete", "6 - archived"}
         if is_actioned:
             actioned_tickets += 1
             if latest_fix_time is None:
@@ -766,8 +767,10 @@ def main() -> int:
         reported = reported_by_ticket_id.get(tid, {})
         reported_buckets = sorted(reported.get("plan_buckets", set()))
         computed_bucket = row.get("plan_best_bucket")
-        reported_actioned = any(b in {"4 - for_review", "5 - complete"} for b in reported_buckets)
-        computed_actioned = computed_bucket in {"4 - for_review", "5 - complete"}
+        reported_actioned = any(
+            b in {"4 - for_review", "5 - complete", "6 - archived"} for b in reported_buckets
+        )
+        computed_actioned = computed_bucket in {"4 - for_review", "5 - complete", "6 - archived"}
         if reported_actioned and not computed_actioned:
             mismatches.append(
                 f"- {tid}: triage_atoms.json reports actioned buckets {reported_buckets}, "
@@ -817,7 +820,7 @@ def main() -> int:
             if not row:
                 continue
             bucket = _coerce_string(row.get("plan_best_bucket"))
-            if bucket in {"4 - for_review", "5 - complete"}:
+            if bucket in {"4 - for_review", "5 - complete", "6 - archived"}:
                 actioned_ticket_ids.append(tid)
             collision = row.get("plan_collision_fingerprints_for_ticket_id")
             if isinstance(collision, list) and len(collision) > 1:
@@ -872,7 +875,9 @@ def main() -> int:
     lines.append(f"- Source: `{triage_atoms_json}`")
     lines.append(f"- Tickets in triage_atoms clusters: **{len(triage_ticket_ids)}**")
     lines.append(f"- Tickets audited (present in backlog.json): **{tickets_considered}**")
-    lines.append(f"- Actioned (best plan bucket in for_review/complete): **{actioned_tickets}**")
+    lines.append(
+        f"- Actioned (best plan bucket in for_review/complete/archived): **{actioned_tickets}**"
+    )
     lines.append(f"- Actioned with known latest fix time: **{actioned_with_known_fix_time}**")
     lines.append(f"- Actioned with unknown latest fix time: **{actioned_with_unknown_fix_time}**")
     lines.append(f"- Actioned with evidence after latest fix commit (known fix time only): **{actioned_post_fix}**")

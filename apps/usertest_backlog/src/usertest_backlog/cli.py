@@ -134,6 +134,9 @@ try:
         sorted_unique_strings as _sorted_unique_strings,
     )
     from backlog_repo import (
+        sync_atom_actions_from_dequeued_plan_folders as _sync_atom_actions_from_dequeued_plan_folders,
+    )
+    from backlog_repo import (
         sync_atom_actions_from_plan_folders as _sync_atom_actions_from_plan_folders,
     )
     from backlog_repo import (
@@ -801,7 +804,9 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help=(
             "Skip syncing atom statuses from `.agents/plans/*` folder locations before filtering. "
-            "Default behavior infers `queued`/`actioned` from ticket file locations."
+            "Default behavior infers `queued`/`actioned` from ticket file locations (including "
+            "demoting atoms referenced by `.agents/plans/_dequeued/**` or `.agents/plans/_archive/**` "
+            "back to `new`)."
         ),
     )
 
@@ -4533,11 +4538,17 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         owner_roots = sorted({p.resolve() for p in candidate_roots}, key=lambda p: str(p))
         sync_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         plan_sync_at = sync_at
+        dequeue_sync_meta = _sync_atom_actions_from_dequeued_plan_folders(
+            atom_actions=atom_actions,
+            owner_roots=owner_roots,
+            generated_at=sync_at,
+        )
         plan_sync_meta = _sync_atom_actions_from_plan_folders(
             atom_actions=atom_actions,
             owner_roots=owner_roots,
             generated_at=sync_at,
         )
+        plan_sync_meta["dequeue_sync"] = dequeue_sync_meta
 
     backfill_at = plan_sync_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     backfill_meta = _backfill_failure_event_atoms_from_legacy_entries(
