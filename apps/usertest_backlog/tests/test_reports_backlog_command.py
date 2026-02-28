@@ -194,16 +194,38 @@ def test_reports_backlog_dry_run_writes_outputs(tmp_path: Path) -> None:
     out_json = compiled / "target_a.backlog.json"
     out_md = compiled / "target_a.backlog.md"
     atoms_jsonl = compiled / "target_a.backlog.atoms.jsonl"
+    agent_last_message_atoms_jsonl = (
+        compiled / "target_a.backlog.atoms.agent_last_message_artifact.jsonl"
+    )
 
     assert out_json.exists()
     assert out_md.exists()
     assert atoms_jsonl.exists()
+    assert agent_last_message_atoms_jsonl.exists()
 
     summary = json.loads(out_json.read_text(encoding="utf-8"))
+    assert summary["artifacts"]["atoms_jsonl"] == str(atoms_jsonl)
+    assert summary["artifacts"]["atoms_agent_last_message_artifact_jsonl"] == str(
+        agent_last_message_atoms_jsonl
+    )
     assert summary["totals"]["runs"] == 2
     assert summary["totals"]["miners_total"] == 2
     assert summary["totals"]["source_counts"].get("aggregate_metrics", 0) == 2
     assert summary["totals"]["source_counts"].get("command_failure", 0) == 1
+
+    atom_lines = atoms_jsonl.read_text(encoding="utf-8").splitlines()
+    assert all(
+        json.loads(line).get("source") != "agent_last_message_artifact" for line in atom_lines if line
+    )
+    agent_last_message_lines = agent_last_message_atoms_jsonl.read_text(
+        encoding="utf-8"
+    ).splitlines()
+    assert agent_last_message_lines
+    assert all(
+        json.loads(line).get("source") == "agent_last_message_artifact"
+        for line in agent_last_message_lines
+        if line
+    )
 
     markdown = out_md.read_text(encoding="utf-8")
     assert "Untriaged Tail" in markdown

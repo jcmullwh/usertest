@@ -191,14 +191,12 @@ except ModuleNotFoundError as exc:
 try:
     from usertest_backlog.triage_atoms import (
         build_implementation_index,
-        build_ticket_status_index,
+        build_plan_status_index,
         infer_backlog_json,
         load_atoms_jsonl,
         load_backlog_json,
+        resolve_embedder,
         write_triage_atoms,
-    )
-    from usertest_backlog.triage_atoms import (
-        resolve_embedder as resolve_atoms_embedder,
     )
     from usertest_backlog.triage_atoms import (
         triage_atoms as triage_atoms_report,
@@ -1242,9 +1240,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     triage_atoms_p.add_argument(
         "--embedder",
-        choices=["hashing", "openai"],
-        default="hashing",
-        help="Embedding backend for clustering (default: hashing/offline).",
+        choices=["openai"],
+        default="openai",
+        help=(
+            "Embedding backend for clustering (default: openai). "
+            "HashingEmbedder is test-only (basic functionality testing only) and must never be used for real triage clustering; "
+            "it is intentionally not exposed here."
+        ),
     )
     triage_atoms_p.add_argument(
         "--text-normalization",
@@ -1253,6 +1255,15 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Atom text normalization mode before clustering (default: smart). "
             "smart strips the generic 'Command failed: ... command=' wrapper for command_failure atoms."
+        ),
+    )
+    triage_atoms_p.add_argument(
+        "--exclude-source",
+        action="append",
+        default=[],
+        help=(
+            "Exclude atoms with this `source` value before clustering (repeatable). "
+            "Useful for removing noisy sources like `agent_last_message_artifact`."
         ),
     )
     triage_atoms_p.add_argument(
@@ -4458,6 +4469,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     prompt_manifest = load_prompt_manifest(prompts_dir)
 
     atoms_jsonl = out_json.parent / f"{default_name}.backlog.atoms.jsonl"
+    agent_last_message_atoms_jsonl = (
+        out_json.parent / f"{default_name}.backlog.atoms.agent_last_message_artifact.jsonl"
+    )
     artifacts_dir = out_json.parent / f"{default_name}.backlog_artifacts"
 
     records = list(
@@ -4543,6 +4557,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     }
     excluded_atoms: list[dict[str, Any]] = []
     atoms: list[dict[str, Any]] = []
+    agent_last_message_atoms: list[dict[str, Any]] = []
     excluded_status_counts: dict[str, int] = {}
     for atom in raw_atoms:
         atom_id = _coerce_string(atom.get("atom_id"))
@@ -4554,6 +4569,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         if atom_status in exclude_atom_status_set:
             excluded_atoms.append(atom)
             excluded_status_counts[atom_status] = excluded_status_counts.get(atom_status, 0) + 1
+            continue
+        if _coerce_string(atom.get("source")) == "agent_last_message_artifact":
+            agent_last_message_atoms.append(atom)
             continue
         atoms.append(atom)
 
@@ -4577,6 +4595,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     )
     atoms.extend(aggregate_atoms)
     atoms = add_atom_links(atoms)
+    agent_last_message_atoms = add_atom_links(agent_last_message_atoms)
 
     atom_totals = _summarize_atoms_for_totals(atoms)
     atoms_doc = dict(atoms_doc_raw)
@@ -4589,6 +4608,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         "exclude_statuses": sorted(exclude_atom_status_set),
         "eligible_atoms": len(atoms),
         "eligible_atoms_trackable": eligible_atoms_trackable,
+        "excluded_sources": ["agent_last_message_artifact"],
+        "excluded_source_counts": {"agent_last_message_artifact": len(agent_last_message_atoms)},
+        "excluded_source_atoms_jsonl": str(agent_last_message_atoms_jsonl),
         "synthetic_atoms_added": len(aggregate_atoms),
         "excluded_atoms": len(excluded_atoms),
         "excluded_status_counts": excluded_status_counts,
@@ -4601,6 +4623,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         ],
     }
     write_backlog_atoms(atoms_doc, atoms_jsonl)
+    write_backlog_atoms({"atoms": agent_last_message_atoms}, agent_last_message_atoms_jsonl)
 
     miners = max(0, int(args.miners))
     sample_size = int(args.sample_size)
@@ -4764,6 +4787,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         },
         artifacts={
             "atoms_jsonl": str(atoms_jsonl),
+            "atoms_agent_last_message_artifact_jsonl": str(agent_last_message_atoms_jsonl),
             "artifacts_dir": str(artifacts_dir),
             "prompts_dir": str(prompts_dir),
             "atom_filter": {
@@ -4845,6 +4869,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     print(str(out_json))
     print(str(out_md))
     print(str(atoms_jsonl))
+    print(str(agent_last_message_atoms_jsonl))
     print(json.dumps(summary.get("totals", {}), indent=2, ensure_ascii=False))
     print(json.dumps(summary.get("coverage", {}), indent=2, ensure_ascii=False))
 
@@ -5216,7 +5241,7 @@ def _cmd_triage_atoms(args: argparse.Namespace) -> int:
         )
 
     plans_root = args.plans_root.resolve() if args.plans_root is not None else repo_root
-    ticket_status_by_id = build_ticket_status_index(owner_root=plans_root)
+    plan_status_by_fingerprint = build_plan_status_index(owner_root=plans_root)
 
     implementation_root = _resolve_optional_path(repo_root, args.implementation_root)
     if implementation_root is None and isinstance(backlog_doc, dict):
@@ -5232,31 +5257,34 @@ def _cmd_triage_atoms(args: argparse.Namespace) -> int:
                 if candidate.exists():
                     implementation_root = candidate
 
-    implementation_runs_by_ticket: dict[str, Any] = {}
+    implementation_runs_by_fingerprint: dict[str, Any] = {}
     if implementation_root is not None:
-        implementation_runs_by_ticket = build_implementation_index(
+        implementation_runs_by_fingerprint = build_implementation_index(
             repo_root=repo_root,
             implementation_root=implementation_root,
         )
 
-    embedder, embedder_meta = resolve_atoms_embedder(args.embedder)
+    embedder, embedder_meta = resolve_embedder(args.embedder)
     report = triage_atoms_report(
         load_atoms_jsonl(atoms_jsonl),
         embedder=embedder,
+        embedder_label=args.embedder,
         text_normalization=args.text_normalization,
         k=int(args.k),
         overall_similarity_threshold=float(args.overall_threshold),
         representative_similarity_threshold=float(args.representative_threshold),
         min_cluster_size=int(args.min_cluster_size),
+        exclude_sources=list(args.exclude_source or []),
         tickets=tickets,
-        ticket_status_by_id=ticket_status_by_id,
-        implementation_runs_by_ticket=implementation_runs_by_ticket,
+        plan_status_by_fingerprint=plan_status_by_fingerprint,
+        implementation_runs_by_fingerprint=implementation_runs_by_fingerprint,
     )
     report["input"] = {
         "atoms_jsonl": str(atoms_jsonl),
         "backlog_json": str(backlog_json) if backlog_json is not None else None,
         "plans_root": str(plans_root),
         "implementation_root": str(implementation_root) if implementation_root is not None else None,
+        "exclude_sources": list(args.exclude_source or []),
         **embedder_meta,
     }
 
