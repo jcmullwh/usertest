@@ -70,7 +70,6 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
     )
     selected = implement_cli.SelectedTicket(
         fingerprint="fp",
-        ticket_id="T-1",
         title="Test ticket",
         export_kind=None,
         owner_root=None,
@@ -93,4 +92,3 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
 
     captured = capsys.readouterr()
     assert captured.out.strip().splitlines()[-1] == str(run_dir)
-

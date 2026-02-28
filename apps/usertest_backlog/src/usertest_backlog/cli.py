@@ -1594,11 +1594,11 @@ def _resolve_owner_repo_root(
                 chosen = next(iter(resolved_owner_keys.values()))
                 source_label = "ticket_repo_inputs_citing_normalized"
             else:
-                ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+                fingerprint = ticket_export_fingerprint(ticket)
                 raise ValueError(
                     "Ticket has multiple owning repo candidates; "
                     "split backlog by repo_input first. "
-                    f"ticket_id={ticket_id} repo_inputs={ticket_repo_inputs}"
+                    f"fingerprint={fingerprint} repo_inputs={ticket_repo_inputs}"
                 )
         if chosen is None:
             chosen = ticket_repo_inputs[0]
@@ -1610,21 +1610,21 @@ def _resolve_owner_repo_root(
         chosen = cli_repo_input
 
     if chosen is None:
-        ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+        fingerprint = ticket_export_fingerprint(ticket)
         print(
             "WARNING: ticket has no repo_input context; "
-            f"defaulting owner repo to --repo-root for ticket {ticket_id}.",
+            f"defaulting owner repo to --repo-root for fingerprint {fingerprint}.",
             file=sys.stderr,
         )
         return repo_root, None, "repo_root_fallback"
 
     if _is_remote_repo_input(chosen):
-        ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+        fingerprint = ticket_export_fingerprint(ticket)
         if _remote_repo_input_matches_repo_root(repo_input=chosen, repo_root=repo_root):
             return repo_root, str(repo_root), f"repo_root_remote_match:{source_label}"
         raise ValueError(
             "Cannot write idea file for remote repo_input. "
-            f"ticket_id={ticket_id} repo_input={chosen}"
+            f"fingerprint={fingerprint} repo_input={chosen}"
         )
 
     root_candidate = Path(chosen)
@@ -1634,10 +1634,10 @@ def _resolve_owner_repo_root(
         root_candidate = root_candidate.resolve()
 
     if not root_candidate.exists() or not root_candidate.is_dir():
-        ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
+        fingerprint = ticket_export_fingerprint(ticket)
         raise ValueError(
             "Owning repo path does not exist or is not a directory. "
-            f"ticket_id={ticket_id} repo_input={chosen} resolved={root_candidate}"
+            f"fingerprint={fingerprint} repo_input={chosen} resolved={root_candidate}"
         )
     return root_candidate, chosen, source_label
 
@@ -1660,10 +1660,8 @@ def _write_ticket_idea_file(
     queue_dir.mkdir(parents=True, exist_ok=True)
 
     date_tag = datetime.now(timezone.utc).strftime("%Y%m%d")
-    ticket_id = _coerce_string(ticket.get("ticket_id")) or "ticket"
-    ticket_id_slug = slugify(ticket_id) or "ticket"
     title_slug = slugify(issue_title) or "untitled"
-    filename = f"{date_tag}_{ticket_id_slug}_{fingerprint}_{title_slug[:64]}.md"
+    filename = f"{date_tag}_{fingerprint}_{title_slug[:64]}.md"
 
     lines: list[str] = []
     if isinstance(ux_review_section, str) and ux_review_section.strip():
@@ -1676,7 +1674,6 @@ def _write_ticket_idea_file(
         f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}."
     )
     lines.append(f"- Fingerprint: `{fingerprint}`")
-    lines.append(f"- Source ticket: `{ticket_id}`")
     lines.append("")
     lines.append(body_markdown.rstrip())
     lines.append("")
@@ -1742,13 +1739,7 @@ def _cleanup_stale_ticket_idea_files(
     Remove stale duplicate idea files for this ticket fingerprint from non-owner queues.
     """
 
-    ticket_id = _coerce_string(ticket.get("ticket_id"))
-    if ticket_id is None:
-        return
-    ticket_id_slug = slugify(ticket_id)
-    if not ticket_id_slug:
-        return
-    pattern = f"*_{ticket_id_slug}_{fingerprint}_*.md"
+    pattern = f"*_{fingerprint}_*.md"
 
     candidate_roots: set[Path] = {repo_root.resolve(), owner_repo_root.resolve()}
     for candidate in (
@@ -2133,7 +2124,7 @@ def _backfill_failure_event_atoms_from_legacy_entries(
         existing["status"] = new_status
         existing["last_seen_at"] = generated_at
 
-        for list_key in ("ticket_ids", "queue_paths", "queue_owner_roots", "fingerprints"):
+        for list_key in ("queue_paths", "queue_owner_roots", "fingerprints"):
             values: list[str] = []
             values.extend([item for item in existing.get(list_key, []) if isinstance(item, str)])
             values.extend(
@@ -2171,17 +2162,17 @@ def _update_atom_actions_from_backlog(
     - atom not cited by ticket evidence -> at least `new`
     """
 
-    ticket_ids_by_atom: dict[str, set[str]] = {}
+    fingerprints_by_atom: dict[str, set[str]] = {}
     for ticket in tickets:
         stage = (_coerce_string(ticket.get("stage")) or "triage").strip().lower()
         if stage == "blocked":
             # Blocked tickets are intentionally not treated as "ticket outcomes" for the
             # atom ledger so evidence can accumulate across runs/models and be re-mined.
             continue
-        ticket_id = f"TKT-{ticket_export_fingerprint(ticket)}"
+        fingerprint = ticket_export_fingerprint(ticket)
         for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
-            bucket = ticket_ids_by_atom.setdefault(atom_id, set())
-            bucket.add(ticket_id)
+            bucket = fingerprints_by_atom.setdefault(atom_id, set())
+            bucket.add(fingerprint)
 
     created = 0
     promoted = 0
@@ -2198,7 +2189,7 @@ def _update_atom_actions_from_backlog(
             # in the lifecycle ledger.
             continue
         observed += 1
-        desired = "ticketed" if atom_id in ticket_ids_by_atom else "new"
+        desired = "ticketed" if atom_id in fingerprints_by_atom else "new"
         if desired == "ticketed":
             ticketed_now += 1
         else:
@@ -2236,12 +2227,13 @@ def _update_atom_actions_from_backlog(
         existing["repo_input"] = _coerce_string(atom.get("repo_input")) or existing.get(
             "repo_input"
         )
-        ticket_ids_existing = [
-            item for item in existing.get("ticket_ids", []) if isinstance(item, str)
+        fingerprints_existing = [
+            item for item in existing.get("fingerprints", []) if isinstance(item, str)
         ]
-        if atom_id in ticket_ids_by_atom:
-            ticket_ids_existing.extend(sorted(ticket_ids_by_atom[atom_id]))
-        existing["ticket_ids"] = _sorted_unique_strings(ticket_ids_existing)
+        if atom_id in fingerprints_by_atom:
+            fingerprints_existing.extend(sorted(fingerprints_by_atom[atom_id]))
+        existing["fingerprints"] = _sorted_unique_strings(fingerprints_existing)
+        existing.pop("ticket_ids", None)
         atom_actions[atom_id] = existing
 
     status_counts: dict[str, int] = {}
@@ -2310,11 +2302,12 @@ def _update_atom_actions_from_exports(
         existing["last_queue_at"] = generated_at
         existing["last_export_json"] = str(export_json_path)
 
-        ticket_ids = [item for item in existing.get("ticket_ids", []) if isinstance(item, str)]
-        ticket_id = _coerce_string(ref.get("ticket_id"))
-        if ticket_id is not None:
-            ticket_ids.append(ticket_id)
-        existing["ticket_ids"] = _sorted_unique_strings(ticket_ids)
+        fingerprints = [item for item in existing.get("fingerprints", []) if isinstance(item, str)]
+        fingerprint = _coerce_string(ref.get("fingerprint"))
+        if fingerprint is not None:
+            fingerprints.append(fingerprint)
+        existing["fingerprints"] = _sorted_unique_strings(fingerprints)
+        existing.pop("ticket_ids", None)
 
         queue_paths = [item for item in existing.get("queue_paths", []) if isinstance(item, str)]
         idea_path = _coerce_string(ref.get("idea_path"))
@@ -2329,12 +2322,6 @@ def _update_atom_actions_from_exports(
         if owner_root is not None:
             queue_roots.append(owner_root)
         existing["queue_owner_roots"] = _sorted_unique_strings(queue_roots)
-
-        fingerprints = [item for item in existing.get("fingerprints", []) if isinstance(item, str)]
-        fingerprint = _coerce_string(ref.get("fingerprint"))
-        if fingerprint is not None:
-            fingerprints.append(fingerprint)
-        existing["fingerprints"] = _sorted_unique_strings(fingerprints)
 
         if derived_from_atom_id is not None:
             derived = [
@@ -3033,10 +3020,10 @@ def _render_ux_review_markdown(doc: dict[str, Any]) -> str:
         for rec in rec_list[:80]:
             rec_id = _coerce_string(rec.get("recommendation_id")) or "UX-???"
             approach = _coerce_string(rec.get("recommended_approach")) or "unknown"
-            ticket_ids = rec.get("ticket_ids")
+            fingerprints = rec.get("fingerprints")
             tickets_s = (
-                ", ".join([tid for tid in ticket_ids if isinstance(tid, str) and tid.strip()])
-                if isinstance(ticket_ids, list)
+                ", ".join([fp for fp in fingerprints if isinstance(fp, str) and fp.strip()])
+                if isinstance(fingerprints, list)
                 else ""
             )
             title_bits = f" ({tickets_s})" if tickets_s else ""
@@ -3088,14 +3075,14 @@ def _index_ux_recommendations(doc: dict[str, Any]) -> dict[str, list[dict[str, A
     recs = [item for item in recs_raw if isinstance(item, dict)] if isinstance(recs_raw, list) else []
     out: dict[str, list[dict[str, Any]]] = {}
     for rec in recs:
-        ticket_ids_raw = rec.get("ticket_ids")
-        ticket_ids = (
-            [tid for tid in ticket_ids_raw if isinstance(tid, str) and tid.strip()]
-            if isinstance(ticket_ids_raw, list)
+        fingerprints_raw = rec.get("fingerprints")
+        fingerprints = (
+            [fp for fp in fingerprints_raw if isinstance(fp, str) and fp.strip()]
+            if isinstance(fingerprints_raw, list)
             else []
         )
-        for ticket_id in ticket_ids:
-            out.setdefault(ticket_id.strip(), []).append(rec)
+        for fingerprint in fingerprints:
+            out.setdefault(fingerprint.strip(), []).append(rec)
     return out
 
 
@@ -3117,7 +3104,7 @@ def _render_ux_review_section_for_ticket(
     ux_review_doc: dict[str, Any],
     ux_review_json_path: Path,
     ux_review_md_path: Path,
-    ticket_id: str,
+    fingerprint: str,
     recs: list[dict[str, Any]],
 ) -> str:
     lines: list[str] = []
@@ -3153,7 +3140,7 @@ def _render_ux_review_section_for_ticket(
     for rec in recs[:5]:
         rec_id = _coerce_string(rec.get("recommendation_id")) or "UX-???"
         approach = _coerce_string(rec.get("recommended_approach")) or "unknown"
-        lines.append(f"### {rec_id}: {approach} ({ticket_id})")
+        lines.append(f"### {rec_id}: {approach} ({fingerprint})")
         lines.append("")
 
         rationale = _coerce_string(rec.get("rationale"))
@@ -3515,8 +3502,8 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
     tickets_payload: list[dict[str, Any]] = []
     for ticket in review_tickets:
         payload: dict[str, Any] = {}
+        payload["fingerprint"] = ticket_export_fingerprint(ticket)
         for key in (
-            "ticket_id",
             "title",
             "problem",
             "user_impact",
@@ -3753,7 +3740,6 @@ def _render_export_issue_body(
     str
         Normalized string result.
     """
-    ticket_id = _coerce_string(ticket.get("ticket_id")) or "TKT-unknown"
     title = _coerce_string(ticket.get("title")) or ""
     problem = _coerce_string(ticket.get("problem")) or ""
     user_impact = _coerce_string(ticket.get("user_impact")) or ""
@@ -3767,7 +3753,6 @@ def _render_export_issue_body(
     breadth = breadth_raw if isinstance(breadth_raw, dict) else {}
 
     lines: list[str] = []
-    lines.append(f"- Source ticket: `{ticket_id}`")
     lines.append(f"- Fingerprint: `{fingerprint}`")
     lines.append(f"- Export kind: `{export_kind}`")
     stage = _coerce_string(ticket.get("stage"))
@@ -4062,7 +4047,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     ux_review_json_path = compiled_dir / f"{default_name}.ux_review.json"
     ux_review_md_path = ux_review_json_path.with_suffix(".md")
     ux_review_doc = _load_optional_json_object(ux_review_json_path)
-    ux_recommendations_by_ticket_id = (
+    ux_recommendations_by_fingerprint = (
         _index_ux_recommendations(ux_review_doc) if ux_review_doc is not None else {}
     )
 
@@ -4097,8 +4082,8 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
 
     for ticket in tickets:
         stage = (_coerce_string(ticket.get("stage")) or "triage").strip()
-        ticket_id = _coerce_string(ticket.get("ticket_id")) or "unknown"
-        ux_recs = ux_recommendations_by_ticket_id.get(ticket_id) or []
+        fingerprint = ticket_export_fingerprint(ticket)
+        ux_recs = ux_recommendations_by_fingerprint.get(fingerprint) or []
 
         change_surface_raw = ticket.get("change_surface")
         change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
@@ -4118,7 +4103,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 ux_review_doc=ux_review_doc,
                 ux_review_json_path=ux_review_json_path,
                 ux_review_md_path=ux_review_md_path,
-                ticket_id=ticket_id,
+                fingerprint=fingerprint,
                 recs=ux_recs,
             )
             if stage == "research_required" and ux_approach in ("docs", "parameterize_existing"):
@@ -4141,7 +4126,6 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             skipped_severity += 1
             continue
 
-        fingerprint = ticket_export_fingerprint(ticket)
         if (fingerprint in actions) and not include_actioned:
             skipped_actioned += 1
             continue
@@ -4247,14 +4231,12 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                                 actions[fingerprint] = {
                                     "fingerprint": fingerprint,
                                     "status": "deferred",
-                                    "ticket_id": ticket_id,
                                     "notes": "Deferred by UX review recommendation.",
                                 }
                                 actions_mutated = True
                 for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
                     ref: dict[str, str] = {
                         "atom_id": atom_id,
-                        "ticket_id": ticket_id,
                         "fingerprint": fingerprint,
                         "owner_root": str(owner_repo_root),
                         "desired_status": desired_status,
@@ -4299,7 +4281,6 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                     actions[fingerprint] = {
                         "fingerprint": fingerprint,
                         "status": "deferred",
-                        "ticket_id": ticket_id,
                         "notes": "Deferred by UX review recommendation.",
                     }
                     actions_mutated = True
@@ -4309,7 +4290,6 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             queued_refs.append(
                 {
                     "atom_id": atom_id,
-                    "ticket_id": ticket_id,
                     "fingerprint": fingerprint,
                     "idea_path": str(idea_path),
                     "owner_root": str(owner_repo_root),
@@ -4328,7 +4308,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 "labels": labels,
                 "body_markdown": body,
                 "source_ticket": {
-                    "ticket_id": ticket.get("ticket_id"),
+                    "fingerprint": fingerprint,
                     "stage": stage_effective,
                     "severity": severity,
                 },
@@ -4389,7 +4369,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             "idea_files_written": len(idea_files_written),
             "swept_actioned_queue_dupes_removed": swept_actioned_queue_dupes_removed,
             "swept_actioned_bucket_dupes_removed": swept_actioned_bucket_dupes_removed,
-            "ux_recommendations_loaded": len(ux_recommendations_by_ticket_id),
+            "ux_recommendations_loaded": len(ux_recommendations_by_fingerprint),
             "ux_plan_tickets_updated": ux_plan_tickets_updated,
             "ux_idea_files_updated": ux_idea_files_updated,
             "ux_tickets_deferred": ux_tickets_deferred,

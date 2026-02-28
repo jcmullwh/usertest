@@ -24,7 +24,7 @@ def test_run_dry_run_selects_by_fingerprint(tmp_path: Path) -> None:
                     "labels": [],
                     "body_markdown": "# A\n",
                     "source_ticket": {
-                        "ticket_id": "BLG-001",
+                        "fingerprint": "aaaaaaaaaaaaaaaa",
                         "stage": "ready_for_ticket",
                         "severity": "low",
                     },
@@ -41,7 +41,7 @@ def test_run_dry_run_selects_by_fingerprint(tmp_path: Path) -> None:
                     "labels": [],
                     "body_markdown": "# B\n",
                     "source_ticket": {
-                        "ticket_id": "BLG-002",
+                        "fingerprint": "bbbbbbbbbbbbbbbb",
                         "stage": "ready_for_ticket",
                         "severity": "low",
                     },
@@ -74,10 +74,10 @@ def test_run_dry_run_selects_by_fingerprint(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr or proc.stdout
     payload = json.loads(proc.stdout)
     assert payload["selected_ticket"]["fingerprint"] == "bbbbbbbbbbbbbbbb"
-    assert payload["selected_ticket"]["ticket_id"] == "BLG-002"
+    assert "ticket_id" not in payload["selected_ticket"]
 
 
-def test_run_dry_run_selects_by_ticket_id(tmp_path: Path) -> None:
+def test_run_dry_run_rejects_ticket_id_selector(tmp_path: Path) -> None:
     export_path = tmp_path / "tickets_export.json"
     _write_json(
         export_path,
@@ -91,7 +91,7 @@ def test_run_dry_run_selects_by_ticket_id(tmp_path: Path) -> None:
                     "labels": [],
                     "body_markdown": "# A\n",
                     "source_ticket": {
-                        "ticket_id": "BLG-001",
+                        "fingerprint": "aaaaaaaaaaaaaaaa",
                         "stage": "ready_for_ticket",
                         "severity": "low",
                     },
@@ -121,13 +121,10 @@ def test_run_dry_run_selects_by_ticket_id(tmp_path: Path) -> None:
         text=True,
         check=False,
     )
-    assert proc.returncode == 0, proc.stderr or proc.stdout
-    payload = json.loads(proc.stdout)
-    assert payload["selected_ticket"]["fingerprint"] == "aaaaaaaaaaaaaaaa"
-    assert payload["selected_ticket"]["ticket_id"] == "BLG-001"
+    assert proc.returncode != 0
 
 
-def test_run_dry_run_requires_exactly_one_selector(tmp_path: Path) -> None:
+def test_run_dry_run_requires_fingerprint_with_tickets_export(tmp_path: Path) -> None:
     export_path = tmp_path / "tickets_export.json"
     _write_json(export_path, {"schema_version": 1, "exports": []})
 
@@ -140,10 +137,6 @@ def test_run_dry_run_requires_exactly_one_selector(tmp_path: Path) -> None:
             "--dry-run",
             "--tickets-export",
             str(export_path),
-            "--fingerprint",
-            "aaaaaaaaaaaaaaaa",
-            "--ticket-id",
-            "BLG-001",
         ],
         capture_output=True,
         text=True,
@@ -158,13 +151,13 @@ def test_tickets_run_next_dry_run_defaults_to_implementation_only(tmp_path: Path
     ready_dir.mkdir(parents=True)
 
     impl_fp = "aaaaaaaaaaaaaaaa"
-    (ready_dir / f"20260220_BLG-001_{impl_fp}_implementation.md").write_text(
+    (ready_dir / f"20260220_{impl_fp}_implementation.md").write_text(
         "# Impl\n\n- Export kind: `implementation`\n- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
         encoding="utf-8",
     )
 
     research_fp = "bbbbbbbbbbbbbbbb"
-    (ready_dir / f"20260220_BLG-002_{research_fp}_research.md").write_text(
+    (ready_dir / f"20260220_{research_fp}_research.md").write_text(
         "# Research\n\n- Export kind: `research`\n- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
         encoding="utf-8",
     )
@@ -200,7 +193,7 @@ def test_tickets_run_next_dry_run_ignores_actioned_fingerprints(tmp_path: Path) 
 
     # Fingerprint has both queued + actioned copies -> merged status is actioned.
     stale_fp = "aaaaaaaaaaaaaaaa"
-    name = f"20260220_BLG-001_{stale_fp}_stale.md"
+    name = f"20260220_{stale_fp}_stale.md"
     queued_text = (
         "# Stale queued copy\n\n"
         "- Export kind: `implementation`\n"
@@ -221,7 +214,7 @@ def test_tickets_run_next_dry_run_ignores_actioned_fingerprints(tmp_path: Path) 
     )
 
     good_fp = "bbbbbbbbbbbbbbbb"
-    (ready_dir / f"20260220_BLG-002_{good_fp}_ok.md").write_text(
+    (ready_dir / f"20260220_{good_fp}_ok.md").write_text(
         "# Next\n\n- Export kind: `implementation`\n- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
         encoding="utf-8",
     )

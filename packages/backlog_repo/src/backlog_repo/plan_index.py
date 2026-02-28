@@ -33,12 +33,54 @@ _ACTIONED_BUCKET_RANK: dict[str, int] = {
     bucket: rank for rank, bucket in enumerate(reversed(ACTIONED_PLAN_BUCKET_PRIORITY), start=1)
 }
 PLAN_TICKET_FILENAME_RE = re.compile(
-    r"^(?P<date>[0-9]{8})_(?P<ticket_id>BLG-[0-9]{3})_(?P<fingerprint>[0-9a-f]{16})_.+\.md$"
+    r"^(?P<date>[0-9]{8})_(?:(?P<legacy_ticket_id>BLG-[0-9]{3})_)?(?P<fingerprint>[0-9a-f]{16})_(?P<slug>.+\.md)$"
 )
 ATOM_ID_RE = re.compile(
     r"^[A-Za-z0-9_.-]+/[0-9]{8}T[0-9]{6}Z/[A-Za-z0-9_.-]+/[0-9]+:[A-Za-z0-9_.-]+:[0-9]+$"
 )
 DEQUEUED_PLAN_DIRNAMES: tuple[str, ...] = ("_dequeued", "_archive")
+
+
+def _strip_legacy_source_ticket_lines(markdown: str) -> str:
+    """Remove legacy ``Source ticket`` lines from plan markdown."""
+
+    return re.sub(
+        r"(?m)^-\s*Source ticket:\s*`[^`]*`\s*$\n?",
+        "",
+        markdown,
+    )
+
+
+def _normalize_plan_ticket_file(path: Path) -> Path:
+    """Normalize legacy plan filenames/content to fingerprint-only form."""
+
+    match = PLAN_TICKET_FILENAME_RE.match(path.name)
+    if match is None:
+        return path
+
+    normalized_path = path
+    legacy_ticket_id = match.group("legacy_ticket_id")
+    if legacy_ticket_id:
+        normalized_name = f"{match.group('date')}_{match.group('fingerprint')}_{match.group('slug')}"
+        candidate = path.with_name(normalized_name)
+        if candidate != path:
+            if candidate.exists():
+                path.unlink(missing_ok=True)
+                normalized_path = candidate
+            else:
+                normalized_path = path.replace(candidate)
+
+    try:
+        original = normalized_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return normalized_path
+    updated = _strip_legacy_source_ticket_lines(original)
+    if updated != original:
+        try:
+            normalized_path.write_text(updated, encoding="utf-8")
+        except OSError:
+            return normalized_path
+    return normalized_path
 
 
 def _extract_atom_ids_from_ticket_markdown(markdown: str) -> list[str]:
@@ -193,7 +235,7 @@ def scan_plan_ticket_index(*, owner_root: Path) -> dict[str, dict[str, Any]]:
     Returns
     -------
     dict[str, dict[str, Any]]
-        Mapping keyed by fingerprint with merged status, paths, bucket names, and ticket IDs.
+        Mapping keyed by fingerprint with merged status, paths, and bucket names.
     """
 
     plans_dir = owner_root / ".agents" / "plans"
@@ -207,15 +249,15 @@ def scan_plan_ticket_index(*, owner_root: Path) -> dict[str, dict[str, Any]]:
             continue
 
         for md_path in sorted(bucket_dir.glob("*.md"), key=lambda p: p.name):
+            md_path = _normalize_plan_ticket_file(md_path)
             match = PLAN_TICKET_FILENAME_RE.match(md_path.name)
             if match is None:
                 continue
             fingerprint = match.group("fingerprint")
-            ticket_id = match.group("ticket_id")
 
             meta = index.get(fingerprint)
             if meta is None:
-                meta = {"status": desired_status, "paths": [], "buckets": [], "ticket_ids": []}
+                meta = {"status": desired_status, "paths": [], "buckets": []}
                 index[fingerprint] = meta
 
             status_value = meta.get("status")
@@ -229,10 +271,6 @@ def scan_plan_ticket_index(*, owner_root: Path) -> dict[str, dict[str, Any]]:
             buckets = [item for item in meta.get("buckets", []) if isinstance(item, str)]
             buckets.append(bucket_dir.name)
             meta["buckets"] = sorted_unique_strings(buckets)
-
-            ticket_ids = [item for item in meta.get("ticket_ids", []) if isinstance(item, str)]
-            ticket_ids.append(ticket_id)
-            meta["ticket_ids"] = sorted_unique_strings(ticket_ids)
 
             index[fingerprint] = meta
 
@@ -385,12 +423,12 @@ def sync_atom_actions_from_plan_folders(
             buckets_scanned += 1
 
             for md_path in sorted(bucket_dir.glob("*.md"), key=lambda p: p.name):
+                md_path = _normalize_plan_ticket_file(md_path)
                 match = PLAN_TICKET_FILENAME_RE.match(md_path.name)
                 if match is None:
                     continue
 
                 ticket_files_scanned += 1
-                ticket_id = match.group("ticket_id")
                 fingerprint = match.group("fingerprint")
 
                 try:
@@ -431,12 +469,6 @@ def sync_atom_actions_from_plan_folders(
                     existing["last_seen_at"] = generated_at
                     existing["last_plan_bucket"] = bucket_dir.name
                     existing["last_plan_seen_at"] = generated_at
-
-                    ticket_ids = [
-                        item for item in existing.get("ticket_ids", []) if isinstance(item, str)
-                    ]
-                    ticket_ids.append(ticket_id)
-                    existing["ticket_ids"] = sorted_unique_strings(ticket_ids)
 
                     queue_paths = [
                         item for item in existing.get("queue_paths", []) if isinstance(item, str)

@@ -33,6 +33,42 @@ def _coerce_string(value: Any) -> str | None:
     return cleaned if cleaned else None
 
 
+def _normalize_fingerprints_from_legacy_values(values: Any) -> list[str]:
+    """Coerce legacy fingerprint-like identifiers into canonical fingerprint strings.
+
+    Accepts:
+    - raw 16-char hex fingerprints
+    - legacy backlog atom ticket IDs in ``TKT-<fingerprint>`` form
+
+    Other values (for example ``BLG-001``) are ignored because they are not
+    globally unique and cannot be losslessly mapped back to a fingerprint.
+    """
+
+    raw_values: list[str]
+    if isinstance(values, list):
+        raw_values = [str(value) for value in values if isinstance(value, str)]
+    elif isinstance(values, str):
+        raw_values = [values]
+    elif values is None:
+        raw_values = []
+    else:
+        raw_values = [str(values)]
+
+    out: list[str] = []
+    for raw in raw_values:
+        cleaned = raw.strip().lower()
+        if not cleaned:
+            continue
+        if cleaned.startswith("tkt-"):
+            candidate = cleaned[4:]
+            if len(candidate) == 16 and all(ch in "0123456789abcdef" for ch in candidate):
+                out.append(candidate)
+            continue
+        if len(cleaned) == 16 and all(ch in "0123456789abcdef" for ch in cleaned):
+            out.append(cleaned)
+    return sorted_unique_strings(out)
+
+
 def sorted_unique_strings(values: list[str]) -> list[str]:
     """Return sorted unique non-empty strings.
 
@@ -243,6 +279,16 @@ def load_atom_actions_yaml(path: Path) -> dict[str, dict[str, Any]]:
         item = dict(entry)
         item["atom_id"] = atom_id
         item["status"] = normalize_atom_status(_coerce_string(item.get("status")))
+
+        fingerprints = [
+            value
+            for value in item.get("fingerprints", [])
+            if isinstance(value, str) and value.strip()
+        ]
+        fingerprints.extend(_normalize_fingerprints_from_legacy_values(item.get("ticket_ids")))
+        item["fingerprints"] = sorted_unique_strings(fingerprints)
+        item.pop("ticket_ids", None)
+
         atoms[atom_id] = item
     return atoms
 
@@ -264,11 +310,18 @@ def write_atom_actions_yaml(path: Path, atoms: dict[str, dict[str, Any]]) -> Non
         item["atom_id"] = atom_id
         item["status"] = normalize_atom_status(_coerce_string(item.get("status")))
 
+        fingerprints = [
+            value
+            for value in item.get("fingerprints", [])
+            if isinstance(value, str) and value.strip()
+        ]
+        fingerprints.extend(_normalize_fingerprints_from_legacy_values(item.get("ticket_ids")))
+        item["fingerprints"] = sorted_unique_strings(fingerprints)
+        item.pop("ticket_ids", None)
+
         for list_key in (
-            "ticket_ids",
             "queue_paths",
             "queue_owner_roots",
-            "fingerprints",
             "derived_from_atom_ids",
         ):
             values = item.get(list_key)

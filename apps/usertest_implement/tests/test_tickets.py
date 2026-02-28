@@ -13,7 +13,7 @@ def test_ticket_index_and_move(tmp_path: Path) -> None:
     in_progress_dir.mkdir(parents=True)
 
     fingerprint = "deadbeefdeadbeef"
-    ticket_path = ready_dir / f"20260220_BLG-003_{fingerprint}_fix-something.md"
+    ticket_path = ready_dir / f"20260220_{fingerprint}_fix-something.md"
     ticket_path.write_text(
         "# Fix something\n\n- Fingerprint: `deadbeefdeadbeef`\n",
         encoding="utf-8",
@@ -30,7 +30,6 @@ def test_ticket_index_and_move(tmp_path: Path) -> None:
     assert selected is not None
     entry, _ = selected
     assert entry.fingerprint == fingerprint
-    assert entry.ticket_id == "BLG-003"
 
     dest_dry = move_ticket_file(
         owner_root=owner_root,
@@ -57,14 +56,14 @@ def test_select_next_ticket_path_prefers_research(tmp_path: Path) -> None:
     ready_dir.mkdir(parents=True)
 
     impl_fp = "aaaaaaaaaaaaaaaa"
-    impl_path = ready_dir / f"20260220_BLG-001_{impl_fp}_implementation.md"
+    impl_path = ready_dir / f"20260220_{impl_fp}_implementation.md"
     impl_path.write_text(
         "# Impl\n\n- Export kind: `implementation`\n- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
         encoding="utf-8",
     )
 
     research_fp = "bbbbbbbbbbbbbbbb"
-    research_path = ready_dir / f"20260220_BLG-002_{research_fp}_research.md"
+    research_path = ready_dir / f"20260220_{research_fp}_research.md"
     research_path.write_text(
         "# Research\n\n- Export kind: `research`\n- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
         encoding="utf-8",
@@ -91,7 +90,7 @@ def test_move_ticket_file_dedupes_actioned_buckets_and_prevents_downgrade(tmp_pa
     for_review_dir.mkdir(parents=True)
 
     fingerprint = "deadbeefdeadbeef"
-    name = f"20260220_BLG-003_{fingerprint}_fix-something.md"
+    name = f"20260220_{fingerprint}_fix-something.md"
     complete_path = complete_dir / name
     in_progress_path = in_progress_dir / name
     complete_path.write_text("# Done\n\n- Fingerprint: `deadbeefdeadbeef`\n", encoding="utf-8")
