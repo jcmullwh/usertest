@@ -4,9 +4,9 @@ import json
 from pathlib import Path
 
 import pytest
+from backlog_repo.export import ticket_export_fingerprint
 from runner_core import find_repo_root
 
-from backlog_repo.export import ticket_export_fingerprint
 from usertest_backlog.cli import main
 
 

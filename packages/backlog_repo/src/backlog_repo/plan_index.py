@@ -61,7 +61,10 @@ def _normalize_plan_ticket_file(path: Path) -> Path:
     normalized_path = path
     legacy_ticket_id = match.group("legacy_ticket_id")
     if legacy_ticket_id:
-        normalized_name = f"{match.group('date')}_{match.group('fingerprint')}_{match.group('slug')}"
+        date = match.group("date")
+        fingerprint = match.group("fingerprint")
+        slug = match.group("slug")
+        normalized_name = f"{date}_{fingerprint}_{slug}"
         candidate = path.with_name(normalized_name)
         if candidate != path:
             if candidate.exists():

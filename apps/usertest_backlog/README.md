@@ -60,6 +60,9 @@ Notes:
   to the history file as `<stem>.issue_analysis.json` and `<stem>.issue_analysis.md`.
 - `reports backlog` now runs labelers by default (`--labelers 3`). Use `--labelers 0` only
   when you intentionally want unlabeled tickets (`change_surface.kinds=["unknown"]`).
+- `reports backlog` excludes atoms with prior outcomes by default (`ticketed` + `queued` + `actioned`).
+  To regenerate the backlog while keeping only actioned work excluded, use
+  `--carryover-actioned-only` (demotes `ticketed`/`queued` atoms back to `new` before filtering).
 
 ### PR triage
 

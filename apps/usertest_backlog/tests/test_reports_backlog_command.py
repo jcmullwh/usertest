@@ -215,7 +215,9 @@ def test_reports_backlog_dry_run_writes_outputs(tmp_path: Path) -> None:
 
     atom_lines = atoms_jsonl.read_text(encoding="utf-8").splitlines()
     assert all(
-        json.loads(line).get("source") != "agent_last_message_artifact" for line in atom_lines if line
+        json.loads(line).get("source") != "agent_last_message_artifact"
+        for line in atom_lines
+        if line
     )
     agent_last_message_lines = agent_last_message_atoms_jsonl.read_text(
         encoding="utf-8"
@@ -277,6 +279,78 @@ def test_reports_backlog_prefers_error_json_over_duplicate_validation_error(
     assert source_counts.get("run_failure_event", 0) >= 1
     assert source_counts.get("error_json", 0) == 0
     assert source_counts.get("report_validation_error", 0) == 0
+
+
+def test_reports_backlog_carryover_actioned_only_demotes_ticketed_and_queued_atoms(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    queued_atom_id = "target_a/20260101T000000Z/codex/0:confusion_point:1"
+    _write_yaml(
+        atom_actions_path,
+        {"version": 1, "atoms": [{"atom_id": queued_atom_id, "status": "queued"}]},
+    )
+
+    argv_base = [
+        "reports",
+        "backlog",
+        "--repo-root",
+        str(repo_root),
+        "--runs-dir",
+        str(runs_dir),
+        "--target",
+        "target_a",
+        "--dry-run",
+        "--miners",
+        "0",
+        "--sample-size",
+        "0",
+        "--atom-actions-yaml",
+        str(atom_actions_path),
+        "--skip-plan-folder-sync",
+    ]
+
+    with pytest.raises(SystemExit) as exc:
+        main(argv_base)
+    assert exc.value.code == 0
+
+    compiled = runs_dir / "target_a" / "_compiled"
+    atoms_jsonl = compiled / "target_a.backlog.atoms.jsonl"
+    assert atoms_jsonl.exists()
+
+    atom_ids = {
+        str(json.loads(line).get("atom_id"))
+        for line in atoms_jsonl.read_text(encoding="utf-8").splitlines()
+        if line
+    }
+    assert queued_atom_id not in atom_ids
+
+    atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
+    entry = next(item for item in atom_actions_doc["atoms"] if item["atom_id"] == queued_atom_id)
+    assert entry["status"] == "queued"
+
+    with pytest.raises(SystemExit) as exc:
+        main([*argv_base, "--carryover-actioned-only"])
+    assert exc.value.code == 0
+
+    atom_ids = {
+        str(json.loads(line).get("atom_id"))
+        for line in atoms_jsonl.read_text(encoding="utf-8").splitlines()
+        if line
+    }
+    assert queued_atom_id in atom_ids
+
+    atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
+    entry = next(item for item in atom_actions_doc["atoms"] if item["atom_id"] == queued_atom_id)
+    assert entry["status"] == "new"
+
+    summary = json.loads((compiled / "target_a.backlog.json").read_text(encoding="utf-8"))
+    carryover = summary["artifacts"]["atom_filter"]["carryover"]
+    assert carryover["mode"] == "actioned_only"
+    assert carryover["demoted_atoms"] == 1
 
 
 def test_reports_backlog_uses_cached_miner_outputs(tmp_path: Path) -> None:

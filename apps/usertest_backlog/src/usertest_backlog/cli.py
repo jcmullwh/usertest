@@ -790,13 +790,24 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     reports_backlog_p.add_argument(
+        "--carryover-actioned-only",
+        action="store_true",
+        help=(
+            "Reset atom carryover so only `actioned` atoms remain excluded. "
+            "This demotes `ticketed`/`queued` atoms back to `new` before filtering, allowing "
+            "a backlog regeneration pass without losing actioned history. "
+            "Cannot be combined with --exclude-atom-status."
+        ),
+    )
+    reports_backlog_p.add_argument(
         "--exclude-atom-status",
         action="append",
         choices=sorted(_ATOM_STATUS_ORDER.keys()),
         default=None,
         help=(
             "Atom statuses to exclude from backlog mining (repeatable). "
-            "Default: ticketed + queued + actioned."
+            "Default: ticketed + queued + actioned. "
+            "For actioned-only carryover, prefer --carryover-actioned-only."
         ),
     )
     reports_backlog_p.add_argument(
@@ -4539,6 +4550,32 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         plan_sync_meta["failure_event_backfill"] = backfill_meta
         _write_atom_actions_yaml(atom_actions_path, atom_actions)
 
+    carryover_meta: dict[str, Any] | None = None
+    if bool(getattr(args, "carryover_actioned_only", False)):
+        if args.exclude_atom_status:
+            print(
+                "Cannot combine --carryover-actioned-only with --exclude-atom-status.",
+                file=sys.stderr,
+            )
+            return 2
+        carryover_at = plan_sync_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        demoted_atoms = 0
+        demoted_status_counts: dict[str, int] = {}
+        for entry in atom_actions.values():
+            status = _normalize_atom_status(_coerce_string(entry.get("status")))
+            if status in ("new", "actioned"):
+                continue
+            entry["status"] = "new"
+            entry["carryover_reset_at"] = carryover_at
+            demoted_atoms += 1
+            demoted_status_counts[status] = demoted_status_counts.get(status, 0) + 1
+        carryover_meta = {
+            "mode": "actioned_only",
+            "reset_at": carryover_at,
+            "demoted_atoms": demoted_atoms,
+            "demoted_status_counts": demoted_status_counts,
+        }
+
     # By default, do not re-mine atoms that already produced any ticket outcome.
     exclude_atom_statuses = args.exclude_atom_status or ["ticketed", "queued", "actioned"]
     exclude_atom_status_set = {
@@ -4597,6 +4634,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     atoms_doc["totals"] = totals_dict
     atoms_doc["atom_filter"] = {
         "exclude_statuses": sorted(exclude_atom_status_set),
+        "carryover": carryover_meta,
         "eligible_atoms": len(atoms),
         "eligible_atoms_trackable": eligible_atoms_trackable,
         "excluded_sources": ["agent_last_message_artifact"],

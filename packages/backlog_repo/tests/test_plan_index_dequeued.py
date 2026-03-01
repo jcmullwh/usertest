@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from backlog_repo.plan_index import scan_plan_ticket_index, sync_atom_actions_from_dequeued_plan_folders
+from backlog_repo.plan_index import (
+    scan_plan_ticket_index,
+    sync_atom_actions_from_dequeued_plan_folders,
+)
 
 
 def test_sync_atom_actions_from_dequeued_plan_folders_demotes_queued(tmp_path: Path) -> None:
@@ -25,7 +28,9 @@ def test_sync_atom_actions_from_dequeued_plan_folders_demotes_queued(tmp_path: P
     assert atom_actions[atom_id]["last_dequeued_at"] == "2026-02-28T00:00:00Z"
 
 
-def test_sync_atom_actions_from_dequeued_plan_folders_never_demotes_actioned(tmp_path: Path) -> None:
+def test_sync_atom_actions_from_dequeued_plan_folders_does_not_demote_actioned(
+    tmp_path: Path,
+) -> None:
     owner_root = tmp_path
     dequeued_dir = owner_root / ".agents" / "plans" / "_dequeued"
     dequeued_dir.mkdir(parents=True, exist_ok=True)
