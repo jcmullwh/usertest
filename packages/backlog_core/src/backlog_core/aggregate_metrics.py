@@ -17,6 +17,29 @@ def _coerce_string(value: Any) -> str | None:
     return cleaned if cleaned else None
 
 
+def _command_head(command: str) -> str | None:
+    cleaned = command.strip()
+    if not cleaned:
+        return None
+    if cleaned[0] in {'"', "'"}:
+        quote = cleaned[0]
+        end = cleaned.find(quote, 1)
+        if end > 1:
+            return cleaned[1:end]
+    parts = cleaned.split()
+    return parts[0] if parts else None
+
+
+def _is_ripgrep_no_matches(*, command: str, exit_code: int) -> bool:
+    if exit_code != 1:
+        return False
+    head = _command_head(command)
+    if head is None:
+        return False
+    base = Path(head).name.lower()
+    return base in {"rg", "rg.exe"}
+
+
 def _coerce_int(value: Any) -> int | None:
     if isinstance(value, bool):
         return None
@@ -93,6 +116,8 @@ def _iter_failed_commands_from_metrics(metrics: dict[str, Any]) -> Iterable[dict
         exit_code = item.get("exit_code")
         if command is None or not isinstance(exit_code, int) or exit_code == 0:
             continue
+        if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
+            continue
         out.append(
             {
                 "command": command,
@@ -134,6 +159,8 @@ def _iter_failed_commands_from_events(run_dir: Path) -> Iterable[dict[str, Any]]
                     if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
                         command = " ".join(argv)
                 if command is None:
+                    continue
+                if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
                     continue
                 out.append(
                     {
