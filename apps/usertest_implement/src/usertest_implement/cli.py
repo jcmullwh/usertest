@@ -65,7 +65,6 @@ def _is_missing_module(exc: ModuleNotFoundError, module: str) -> bool:
 
 try:
     from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
-    from runner_core.pathing import slugify
 except ModuleNotFoundError as exc:
     if _is_missing_module(exc, "runner_core"):
         raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc

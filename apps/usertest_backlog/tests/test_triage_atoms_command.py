@@ -4,8 +4,8 @@ import json
 from pathlib import Path
 
 import pytest
-
 from backlog_repo.export import ticket_export_fingerprint
+
 from usertest_backlog.cli import main
 
 
@@ -199,7 +199,10 @@ def test_triage_atoms_joins_plans_and_runs_by_fingerprint(tmp_path: Path) -> Non
         "severity_hint": "high",
         "text": "Command failed: exit_code=2; command=python -m pytest -q",
     }
-    atoms_jsonl.write_text("\n".join([json.dumps(atom_1), json.dumps(atom_2)]) + "\n", encoding="utf-8")
+    atoms_jsonl.write_text(
+        "\n".join([json.dumps(atom_1), json.dumps(atom_2)]) + "\n",
+        encoding="utf-8",
+    )
 
     backlog_json = atoms_dir / "usertest.backlog.json"
     ticket = {
@@ -284,7 +287,10 @@ def test_triage_atoms_can_exclude_sources(tmp_path: Path) -> None:
             [
                 json.dumps(
                     {
-                        "atom_id": "usertest/20260201T000000Z/codex/0:agent_last_message_artifact:1",
+                        "atom_id": (
+                            "usertest/20260201T000000Z/codex/0:"
+                            "agent_last_message_artifact:1"
+                        ),
                         "run_id": "usertest/20260201T000000Z/codex/0",
                         "run_rel": "usertest/20260201T000000Z/codex/0",
                         "run_dir": "runs/usertest_implement/usertest/20260201T000000Z/codex/0",

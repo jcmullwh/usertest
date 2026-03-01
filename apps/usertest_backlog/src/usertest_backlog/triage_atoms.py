@@ -16,12 +16,12 @@ from triage_engine.embeddings import Embedder, get_default_embedder
 TextNormalization = Literal["raw", "smart"]
 
 _HASHING_EMBEDDER_TEST_ONLY_NOTE = (
-    "HashingEmbedder is test-only (basic functionality testing only) and must never be used for real "
-    "triage clustering; it does not produce meaningful semantic similarity."
+    "HashingEmbedder is test-only (basic functionality testing only) and must never be used for "
+    "real triage clustering; it does not produce meaningful semantic similarity."
 )
 
-# Triage-atoms requires meaningful semantic embeddings. The CLI intentionally supports only OpenAI embeddings.
-# HashingEmbedder (triage_engine.testing) exists only for basic functionality tests.
+# Triage-atoms requires meaningful semantic embeddings. The CLI intentionally supports only OpenAI
+# embeddings. HashingEmbedder (triage_engine.testing) exists only for basic functionality tests.
 EmbedderSpec = Literal["openai"]
 
 _COMMAND_FAILURE_TEXT_RE = re.compile(r"^Command failed: exit_code=\d+; command=(?P<cmd>.+)$")
@@ -525,7 +525,7 @@ def triage_atoms(
             )
 
     tickets_index_payload: list[dict[str, Any]] = []
-    for fingerprint, entry in sorted(tickets_index.items(), key=lambda kv: kv[0]):
+    for _fingerprint, entry in sorted(tickets_index.items(), key=lambda kv: kv[0]):
         clusters_list = entry.get("clusters")
         if isinstance(clusters_list, list):
             clusters_list.sort(
@@ -618,7 +618,11 @@ def render_triage_atoms_markdown(report: dict[str, Any]) -> str:
         lines.append(f"- Embedder: `{embedder_name}`")
     exclude_sources = cfg.get("exclude_sources")
     if isinstance(exclude_sources, list):
-        cleaned = [item.strip() for item in exclude_sources if isinstance(item, str) and item.strip()]
+        cleaned = [
+            item.strip()
+            for item in exclude_sources
+            if isinstance(item, str) and item.strip()
+        ]
         if cleaned:
             preview = ", ".join([f"`{item}`" for item in cleaned[:12]])
             suffix = "" if len(cleaned) <= 12 else ", ..."
