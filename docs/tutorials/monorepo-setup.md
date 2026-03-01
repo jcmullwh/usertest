@@ -105,9 +105,9 @@ This matches what CI does and is the best way to run lint/test across multiple p
 
 2) Run the doctor:
 
-```bash
-python tools/scaffold/scaffold.py doctor
-```
+- Windows PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`
+- macOS / Linux: `bash ./scripts/doctor.sh`
+- Direct (any OS): `python tools/scaffold/scaffold.py doctor`
 
 3) Install and test a project (example: the `usertest` CLI project id is `cli`):
 
