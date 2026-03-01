@@ -154,6 +154,29 @@ def _max_command_failure_atoms_per_run() -> int:
     return 10
 
 
+def _command_head(command: str) -> str | None:
+    cleaned = command.strip()
+    if not cleaned:
+        return None
+    if cleaned[0] in {'"', "'"}:
+        quote = cleaned[0]
+        end = cleaned.find(quote, 1)
+        if end > 1:
+            return cleaned[1:end]
+    parts = cleaned.split()
+    return parts[0] if parts else None
+
+
+def _is_ripgrep_no_matches(*, command: str, exit_code: int) -> bool:
+    if exit_code != 1:
+        return False
+    head = _command_head(command)
+    if head is None:
+        return False
+    base = Path(head).name.lower()
+    return base in {"rg", "rg.exe"}
+
+
 def _safe_relpath(path: Path, root: Path) -> str:
     try:
         return str(path.resolve().relative_to(root.resolve())).replace("\\", "/")
@@ -654,6 +677,8 @@ def extract_backlog_atoms(
                     exit_code = item.get("exit_code")
                     if command is None or not isinstance(exit_code, int) or exit_code == 0:
                         continue
+                    if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
+                        continue
                     failed_commands.append(
                         {
                             "command": command,
@@ -702,6 +727,8 @@ def extract_backlog_atoms(
                                 if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
                                     command = " ".join(argv)
                             if command is None:
+                                continue
+                            if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
                                 continue
                             failed_commands.append(
                                 {

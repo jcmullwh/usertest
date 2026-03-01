@@ -443,7 +443,7 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
             "error": None,
             "metrics": {
                 "commands_executed": 3,
-                "commands_failed": 2,
+                "commands_failed": 3,
                 "failed_commands": [
                     {
                         "command": "python -m pip install -e .",
@@ -453,6 +453,10 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
                             "ERROR: Could not find a version that satisfies the requirement ..."
                         ),
                         "output_excerpt_truncated": True,
+                    },
+                    {
+                        "command": "rg -n \"WindowsApps\" README.md docs -S",
+                        "exit_code": 1,
                     },
                     {
                         "command": "python -m pytest -q",
@@ -469,6 +473,9 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
     atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
     failures = [atom for atom in atoms_doc["atoms"] if atom.get("source") == "command_failure"]
     assert len(failures) == 2
+    assert all(
+        not str(atom.get("command", "")).lstrip().lower().startswith("rg ") for atom in failures
+    )
 
     first = failures[0]
     assert first.get("from_metrics") is True
@@ -483,6 +490,45 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
         if atom.get("source") == "command_failure_truncated"
     )
     assert trunc.get("omitted_count") == 3
+
+
+def test_extract_backlog_atoms_ignores_ripgrep_no_matches_from_events(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "normalized_events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "run_command",
+                "data": {
+                    "command": "rg -n \"WindowsApps\" README.md docs -S",
+                    "exit_code": 1,
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    assert [
+        atom
+        for atom in atoms_doc["atoms"]
+        if atom.get("source") in {"command_failure", "command_failure_truncated"}
+    ] == []
 
 
 def test_parse_ticket_list_recovers_array_and_normalizes() -> None:
