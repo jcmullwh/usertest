@@ -74,5 +74,6 @@ python tools/scaffold/scaffold.py run test --all --skip-missing
 ## Common pitfalls
 
 - **The app `usertest` is project id `cli`** (see `tools/scaffold/monorepo.toml`).
+- If `scaffold run lint` fails with a message about missing `ruff`, run installs first (for example: `python tools/scaffold/scaffold.py run install --all`).
 - If you add a project but want to defer installs, use `--no-install`.
 - Some generators require external tools (Cookiecutter, Node, Terraform, …).

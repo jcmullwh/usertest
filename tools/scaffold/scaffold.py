@@ -306,6 +306,36 @@ def _run(
         raise ScaffoldError(f"Failed to execute {argv[0]!r}: {exc}") from exc
 
 
+def _probe(
+    argv: list[str],
+    *,
+    cwd: Path,
+    env: dict[str, str] | None = None,
+) -> subprocess.CompletedProcess[str]:
+    """Run a command without emitting it to stdout/stderr, capturing output for inspection."""
+
+    resolved_argv = _resolve_argv(argv)
+    try:
+        return subprocess.run(
+            resolved_argv,
+            cwd=str(cwd),
+            env=env,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            capture_output=True,
+        )
+    except FileNotFoundError as exc:
+        cmd_name = Path(argv[0]).name
+        hint = ""
+        if cmd_name.lower() in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
+            hint = f" Install PDM: {sys.executable} -m pip install -U pdm"
+        raise ScaffoldError(f"Command not found: {cmd_name!r}.{hint}") from exc
+    except OSError as exc:
+        raise ScaffoldError(f"Failed to execute {argv[0]!r}: {exc}") from exc
+
+
 def _probe_tool_version(*, argv: list[str], timeout_seconds: float) -> tuple[bool, str | None, str | None]:
     """
     Best-effort `--version` probe for a tool.
@@ -725,6 +755,67 @@ def _ruff_check_with_fix(cmd: list[str]) -> list[str] | None:
         if Path(cmd[i]).name.lower() in {"ruff", "ruff.exe", "ruff.cmd", "ruff.bat"} and cmd[i + 1] == "check":
             return [*cmd[: i + 2], "--fix", *cmd[i + 2 :]]
     return None
+
+
+_RUFF_COMMAND_NAMES: set[str] = {"ruff", "ruff.exe", "ruff.cmd", "ruff.bat"}
+
+
+def _looks_like_pdm_run_ruff_check(cmd: list[str]) -> bool:
+    return (
+        len(cmd) >= 4
+        and _is_pdm_command(cmd)
+        and cmd[1] == "run"
+        and Path(cmd[2]).name.lower() in _RUFF_COMMAND_NAMES
+        and cmd[3] == "check"
+    )
+
+
+def _format_run_install_remediation_cmd(
+    args: argparse.Namespace,
+    *,
+    failing_project_id: str,
+) -> str:
+    parts: list[str] = ["python", "tools/scaffold/scaffold.py", "run", "install"]
+    if bool(args.all):
+        parts.append("--all")
+        return " ".join(parts)
+    kind = getattr(args, "kind", None)
+    if kind:
+        parts.extend(["--kind", str(kind)])
+        return " ".join(parts)
+
+    selected_projects = getattr(args, "project", None)
+    if isinstance(selected_projects, list) and selected_projects:
+        for project_id in selected_projects:
+            parts.extend(["--project", str(project_id)])
+        return " ".join(parts)
+
+    parts.extend(["--project", failing_project_id])
+    return " ".join(parts)
+
+
+def _ensure_ruff_available_for_lint(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    project_id: str,
+    remediation_cmd: str,
+) -> None:
+    if not _looks_like_pdm_run_ruff_check(cmd):
+        return
+
+    env = dict(os.environ)
+    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+
+    probe_argv = [cmd[0], "run", cmd[2], "--version"]
+    cp = _probe(probe_argv, cwd=cwd, env=env)
+    if cp.returncode == 0:
+        return
+
+    raise ScaffoldError(
+        f"{project_id}: lint requires 'ruff' but it is not available in this project's PDM environment.\n"
+        f"Remediation: {remediation_cmd}"
+    )
 
 
 def _ensure_unique_project_id(projects: list[dict[str, Any]], project_id: str) -> None:
@@ -1292,6 +1383,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         project_dir = repo_root / path
         if not project_dir.exists():
             raise ScaffoldError(f"{project_id}: project directory does not exist: {path}")
+
+        if task_name == "lint":
+            _ensure_ruff_available_for_lint(
+                cmd=cmd_list,
+                cwd=project_dir,
+                project_id=project_id,
+                remediation_cmd=_format_run_install_remediation_cmd(
+                    args,
+                    failing_project_id=project_id,
+                ),
+            )
 
         cp = _run_manifest_task(
             cmd=cmd_list,

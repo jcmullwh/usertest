@@ -43,6 +43,13 @@ def _run_args(*, fix: bool) -> argparse.Namespace:
 def test_run_lint_fix_prefers_manifest_task(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     repo_root = tmp_path
     monkeypatch.setattr(scaffold, "_repo_root", lambda: repo_root)
+    monkeypatch.setattr(
+        scaffold,
+        "_probe",
+        lambda argv, *, cwd, env=None: subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="", stderr=""
+        ),
+    )
 
     _write(
         repo_root / "tools/scaffold/monorepo.toml",
@@ -80,6 +87,13 @@ tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
 def test_run_lint_fix_inserts_ruff_fix_when_missing(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     repo_root = tmp_path
     monkeypatch.setattr(scaffold, "_repo_root", lambda: repo_root)
+    monkeypatch.setattr(
+        scaffold,
+        "_probe",
+        lambda argv, *, cwd, env=None: subprocess.CompletedProcess(
+            args=argv, returncode=0, stdout="", stderr=""
+        ),
+    )
 
     _write(
         repo_root / "tools/scaffold/monorepo.toml",
