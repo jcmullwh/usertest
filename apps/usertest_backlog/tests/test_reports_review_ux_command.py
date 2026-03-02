@@ -21,6 +21,7 @@ def test_reports_review_ux_dry_run_writes_prompt_and_outputs(tmp_path: Path) -> 
 
     compiled_dir = runs_dir / "target_a" / "_compiled"
     backlog_path = compiled_dir / "target_a.backlog.json"
+    selection_path = compiled_dir / "target_a.solution_selection.json"
     intent_snapshot_path = compiled_dir / "target_a.intent_snapshot.json"
 
     _write_json(
@@ -51,6 +52,41 @@ def test_reports_review_ux_dry_run_writes_prompt_and_outputs(tmp_path: Path) -> 
                     "investigation_steps": ["Validate repo intent"],
                     "success_criteria": ["Existing commands can be parameterized instead."],
                     "suggested_owner": "runner_core",
+                }
+            ],
+        },
+    )
+    _write_json(
+        selection_path,
+        {
+            "schema_version": 1,
+            "stage": "solution_selection",
+            "items": [
+                {
+                    "problem_id": "problem:test",
+                    "title": "Add single-command shortcut for running the full pipeline",
+                    "problem": "Users get confused by multiple steps in docs.",
+                    "severity": "medium",
+                    "confidence": 0.6,
+                    "stage": "research_required",
+                    "needs_ux_review": True,
+                    "selected_option_id": "option:test:most_comprehensive",
+                    "selected_family_id": "most_comprehensive",
+                    "selection_rationale": "Selected option proposes new UX surface; needs review.",
+                    "repo_intent_alignment": "Must align with composable-command intent.",
+                    "why_other_options_were_not_selected": "Other options insufficient for breadth.",
+                    "change_surface": {
+                        "user_visible": True,
+                        "kinds": ["new_command"],
+                        "notes": "Proposes a new command entry point.",
+                    },
+                    "breadth": {
+                        "missions": 1,
+                        "targets": 1,
+                        "repo_inputs": 1,
+                        "agents": 1,
+                        "runs": 1,
+                    },
                 }
             ],
         },
@@ -93,8 +129,9 @@ def test_reports_review_ux_dry_run_writes_prompt_and_outputs(tmp_path: Path) -> 
     doc = json.loads(out_json.read_text(encoding="utf-8"))
     assert doc["status"] == "dry_run"
     assert doc["review"] is None
-    assert doc["tickets_meta"]["research_required_total"] == 1
-    assert doc["tickets_meta"]["high_surface_ready_total"] == 0
+    assert doc["tickets_meta"]["tickets_source"] == "solution_selection"
+    assert doc["tickets_meta"]["tickets_total"] == 1
+    assert doc["tickets_meta"]["needs_ux_review_total"] == 1
     assert doc["tickets_meta"]["review_total"] == 1
 
 
@@ -104,14 +141,16 @@ def test_reports_review_ux_dry_run_includes_high_surface_ready_tickets(tmp_path:
 
     compiled_dir = runs_dir / "target_a" / "_compiled"
     backlog_path = compiled_dir / "target_a.backlog.json"
+    selection_path = compiled_dir / "target_a.solution_selection.json"
     intent_snapshot_path = compiled_dir / "target_a.intent_snapshot.json"
-    tickets = [
+    selections = [
         {
             "title": "Add `usertest smoke` shortcut command",
             "problem": "Operators want a single obvious entry point.",
             "severity": "low",
             "confidence": 0.5,
-            "stage": "ready_for_ticket",
+            "stage": "research_required",
+            "needs_ux_review": True,
             "change_surface": {"user_visible": True, "kinds": ["new_command"], "notes": ""},
             "breadth": {
                 "missions": 1,
@@ -126,8 +165,9 @@ def test_reports_review_ux_dry_run_includes_high_surface_ready_tickets(tmp_path:
             "problem": "Make it configurable.",
             "severity": "low",
             "confidence": 0.5,
-            "stage": "ready_for_ticket",
-            "change_surface": {"user_visible": True, "kinds": ["new_flag"], "notes": ""},
+            "stage": "research_required",
+            "needs_ux_review": False,
+            "change_surface": {"user_visible": True, "kinds": ["docs_change"], "notes": ""},
             "breadth": {
                 "missions": 1,
                 "targets": 1,
@@ -137,9 +177,13 @@ def test_reports_review_ux_dry_run_includes_high_surface_ready_tickets(tmp_path:
             },
         },
     ]
-    _write_json(backlog_path, {"schema_version": 1, "tickets": tickets})
-    fingerprint_high_surface = ticket_export_fingerprint(tickets[0])
-    fingerprint_not_high_surface = ticket_export_fingerprint(tickets[1])
+    _write_json(backlog_path, {"schema_version": 1, "tickets": []})
+    _write_json(
+        selection_path,
+        {"schema_version": 1, "stage": "solution_selection", "items": selections},
+    )
+    fingerprint_high_surface = ticket_export_fingerprint(selections[0])
+    fingerprint_not_high_surface = ticket_export_fingerprint(selections[1])
     _write_json(
         intent_snapshot_path,
         {
@@ -172,8 +216,8 @@ def test_reports_review_ux_dry_run_includes_high_surface_ready_tickets(tmp_path:
     assert prompt_paths
 
     doc = json.loads(out_json.read_text(encoding="utf-8"))
-    assert doc["tickets_meta"]["research_required_total"] == 0
-    assert doc["tickets_meta"]["high_surface_ready_total"] == 1
+    assert doc["tickets_meta"]["tickets_source"] == "solution_selection"
+    assert doc["tickets_meta"]["needs_ux_review_total"] == 1
     assert doc["tickets_meta"]["review_total"] == 1
 
     prompt_text = prompt_paths[0].read_text(encoding="utf-8")

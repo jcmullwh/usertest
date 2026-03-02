@@ -8,11 +8,11 @@ Repo context:
 - Working tree dirty: {{REPO_DIRTY}}
 
 Goal:
-- Consolidate and triage tickets that propose new user-visible surface area and require UX review:
-  - stage == research_required, OR
-  - stage == ready_for_ticket but high_surface_gated == true (high-surface kinds).
+- Consolidate and triage **selected solutions** that require UX review:
+  - `needs_ux_review == true`, AND/OR
+  - `high_surface_gated == true` (high-surface kinds).
 - Prefer solving via docs/examples or parameterizing existing commands/flags rather than adding new top-level commands.
-- Ground every recommendation in evidence breadth (missions/targets/repo_inputs/agents/runs) and the repo intent snapshot.
+- Ground every recommendation in evidence breadth (missions/targets/repo_inputs/agents/runs), the repo intent snapshot, and the selection rationale.
 
 Rules:
 - Use ONLY the provided repo intent, intent snapshot, tickets, and the repository workspace. Do not assume external context beyond these inputs.
@@ -60,5 +60,5 @@ Intent snapshot (machine-produced JSON):
 High-surface kinds (surface_area_high):
 {{SURFACE_AREA_HIGH_JSON}}
 
-Tickets requiring UX review:
+Selected solutions requiring UX review:
 {{TICKETS_JSON}}

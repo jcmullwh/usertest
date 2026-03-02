@@ -1670,15 +1670,88 @@ def render_backlog_markdown(
             user_impact = _coerce_string(ticket.get("user_impact"))
             if user_impact:
                 lines.append(f"- User impact: {user_impact}")
-            proposed_fix = _coerce_string(ticket.get("proposed_fix"))
-            if proposed_fix:
-                lines.append(f"- Proposed fix: {proposed_fix}")
 
-            investigation_steps = _coerce_string_list(ticket.get("investigation_steps"))
-            if investigation_steps:
-                lines.append("- Investigation steps:")
-                for step in investigation_steps[:6]:
-                    lines.append(f"  - {step}")
+            selected_solution_raw = ticket.get("selected_solution")
+            selected_solution = (
+                selected_solution_raw if isinstance(selected_solution_raw, dict) else {}
+            )
+            selected_family_id = _coerce_string(selected_solution.get("selected_family_id"))
+            selected_option_id = (
+                _coerce_string(selected_solution.get("selected_option_id"))
+                or _coerce_string(ticket.get("selected_option_id"))
+            )
+            selected_option_raw = selected_solution.get("selected_option")
+            selected_option = selected_option_raw if isinstance(selected_option_raw, dict) else {}
+            selected_option_summary = _coerce_string(selected_option.get("summary"))
+            selection_rationale = _coerce_string(selected_solution.get("selection_rationale"))
+            if selected_family_id or selected_option_id or selected_option_summary:
+                bits = []
+                if selected_family_id:
+                    bits.append(f"family=`{selected_family_id}`")
+                if selected_option_id:
+                    bits.append(f"option=`{selected_option_id}`")
+                if bits:
+                    lines.append("- Selected solution: " + " | ".join(bits))
+                if selected_option_summary:
+                    lines.append(f"- Selected option summary: {selected_option_summary}")
+                if selection_rationale:
+                    lines.append(f"- Selection rationale: {selection_rationale}")
+
+            change_plan_raw = ticket.get("change_plan")
+            change_plan = change_plan_raw if isinstance(change_plan_raw, dict) else {}
+            change_plan_id = (
+                _coerce_string(change_plan.get("change_plan_id"))
+                or _coerce_string(ticket.get("change_plan_id"))
+            )
+            change_plan_status = _coerce_string(change_plan.get("change_plan_status"))
+            has_change_plan = bool(change_plan_id) or bool(change_plan)
+
+            if has_change_plan:
+                plan_bits = []
+                if change_plan_id:
+                    plan_bits.append(f"`{change_plan_id}`")
+                if change_plan_status:
+                    plan_bits.append(f"status=`{change_plan_status}`")
+                if plan_bits:
+                    lines.append("- Change plan: " + " ".join(plan_bits))
+
+                proposed_fix = _coerce_string(ticket.get("proposed_fix")) or _coerce_string(
+                    change_plan.get("proposed_fix")
+                )
+                if proposed_fix:
+                    lines.append(f"- Proposed fix (planned): {proposed_fix}")
+
+                rollback_notes = _coerce_string(ticket.get("rollback_notes")) or _coerce_string(
+                    change_plan.get("rollback_notes")
+                )
+                if rollback_notes:
+                    lines.append(f"- Rollback notes: {rollback_notes}")
+
+                implementation_steps = _coerce_string_list(
+                    ticket.get("implementation_steps")
+                ) or _coerce_string_list(change_plan.get("implementation_steps"))
+                if implementation_steps:
+                    lines.append("- Implementation steps:")
+                    for step in implementation_steps[:6]:
+                        lines.append(f"  - {step}")
+
+                verification_steps = _coerce_string_list(ticket.get("verification_steps")) or _coerce_string_list(
+                    change_plan.get("verification_steps")
+                )
+                if verification_steps:
+                    lines.append("- Verification steps:")
+                    for step in verification_steps[:6]:
+                        lines.append(f"  - {step}")
+            else:
+                proposed_fix = _coerce_string(ticket.get("proposed_fix"))
+                if proposed_fix:
+                    lines.append(f"- Proposed fix: {proposed_fix}")
+
+                investigation_steps = _coerce_string_list(ticket.get("investigation_steps"))
+                if investigation_steps:
+                    lines.append("- Investigation steps:")
+                    for step in investigation_steps[:6]:
+                        lines.append(f"  - {step}")
 
             success_criteria = _coerce_string_list(ticket.get("success_criteria"))
             if success_criteria:

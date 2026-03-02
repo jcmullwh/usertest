@@ -17,17 +17,19 @@ If you're looking to *run* usertests, use `usertest` instead.
 
 ## Install
 
-From the monorepo root (editable install):
+This repo uses `pdm` (do not use `pip` / `python -m ...` directly).
+
+From the monorepo root:
 
 ```bash
-python -m pip install -r requirements-dev.txt
-python -m pip install -e apps/usertest_backlog
+cd apps/usertest_backlog
+pdm install -d
 ```
 
 Confirm:
 
 ```bash
-usertest-backlog --help
+pdm run usertest-backlog --help
 ```
 
 ---
@@ -58,8 +60,23 @@ Notes:
 - `reports analyze --history <path.jsonl>` reads the compiled JSONL directly.
 - When `--history` is used and `--out-json/--out-md` are omitted, outputs are written next
   to the history file as `<stem>.issue_analysis.json` and `<stem>.issue_analysis.md`.
-- `reports backlog` now runs labelers by default (`--labelers 3`). Use `--labelers 0` only
-  when you intentionally want unlabeled tickets (`change_surface.kinds=["unknown"]`).
+- `reports backlog` runs the **six-stage backlog pipeline** and writes inspectable stage artifacts
+  alongside the final backlog:
+
+  - `*.problem_records.json` / `*.problem_records.md`
+  - `*.prioritized_problems.json` / `*.prioritized_problems.md`
+  - `*.research.json` / `*.research.md`
+  - `*.solution_options.json` / `*.solution_options.md`
+  - `*.solution_selection.json` / `*.solution_selection.md`
+  - `*.change_plans.json` / `*.change_plans.md`
+  - `*.backlog.json` / `*.backlog.md`
+
+  `review-ux` is driven by stage 5 (`*.solution_selection.json`) rather than early-stage tickets.
+- `reports backlog --dry-run` is offline: it does not invoke an agent. It synthesizes deterministic
+  stage outputs so fixtures/tests can validate the full chain end-to-end.
+- Backlog mining knobs from the legacy one-pass miner (`--miners`, `--coverage-miners`,
+  `--bagging-miners`, `--orphan-pass`, `--labelers`, merge flags) are still accepted but are
+  ignored by the six-stage pipeline (the CLI prints a note when they are non-default).
 - `reports backlog` excludes atoms with prior outcomes by default (`ticketed` + `queued` + `actioned`).
   To regenerate the backlog while keeping only actioned work excluded, use
   `--carryover-actioned-only` (demotes `ticketed`/`queued` atoms back to `new` before filtering).
@@ -121,5 +138,6 @@ python tools/scaffold/scaffold.py run lint --project usertest_backlog
 Smoke tests:
 
 ```bash
-python -m pytest -q apps/usertest_backlog/tests/test_smoke.py
+cd apps/usertest_backlog
+pdm run pytest -q tests/test_smoke.py
 ```

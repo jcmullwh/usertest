@@ -32,25 +32,11 @@ pdm run lint
 Dependencies for standalone use:
 - `backlog_miner` imports `agent_adapters`, `backlog_core`, and `runner_core` at runtime.
 - If your package index does not provide those internal packages, install local checkouts first.
-- From a sibling checkout layout, run:
+- From a sibling checkout layout, add them as editable deps using `pdm` (paths relative to this
+  package directory), for example:
 
 ```bash
-python -m pip install -e ../agent_adapters -e ../backlog_core -e ../runner_core
-```
-
-If you need only a runtime install (without dev tooling commands), use:
-
-```bash
-python -m pip install -e .
-```
-
-From a private GitLab PyPI registry (if you publish it):
-
-```bash
-pip install \
-  --index-url "https://<gitlab-host>/api/v4/projects/<project_id>/packages/pypi/simple" \
-  --extra-index-url "https://pypi.org/simple" \
-  "backlog_miner==<version>"
+pdm add -e ../agent_adapters -e ../backlog_core -e ../runner_core
 ```
 
 > Publishing note
@@ -102,6 +88,9 @@ Top-level exports:
 - `run_backlog_prompt(...)`
 - `run_backlog_ensemble(...)`
 - `run_labeler_jobs(...)`
+- `load_pipeline_prompt_manifest(prompts_dir)` (six-stage pipeline manifest v2)
+- `run_stage_prompt_json(...)` (generic stage prompt runner)
+- `run_repro_research_stage(...)` (stage 3 repro+research runner)
 - `MinerJob`, `PromptManifest`
 
 ---
@@ -116,6 +105,23 @@ Typical flow:
 2) `usertest-backlog reports compile` builds a history file.
 3) `backlog_miner` runs prompts over that history.
 4) `backlog_core` renders backlog documents.
+
+---
+
+## Six-stage backlog pipeline
+
+The six-stage backlog pipeline treats each stage as an inspectable artifact boundary.
+
+Key pieces:
+
+- `configs/backlog_prompts/pipeline_manifest.json` (version 2) declares stage templates
+- `backlog_miner.pipeline.load_pipeline_prompt_manifest(...)` validates templates + repo-owned
+  guidance config
+- `backlog_miner.pipeline.run_stage_prompt_json(...)` runs one stage prompt and persists prompt +
+  response artifacts for auditability
+- `backlog_miner.research_runner.run_repro_research_stage(...)` runs stage 3 in an isolated writable
+  workspace via `runner_core.run_once(...)` and extracts a strict `extensions.backlog_repro_research`
+  dossier block from the run report
 
 ---
 

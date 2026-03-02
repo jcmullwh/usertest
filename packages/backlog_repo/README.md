@@ -33,16 +33,7 @@ pdm run lint
 If you need only a runtime install (without dev tooling commands), use:
 
 ```bash
-python -m pip install -e .
-```
-
-From a private GitLab PyPI registry (if you publish it):
-
-```bash
-pip install \
-  --index-url "https://<gitlab-host>/api/v4/projects/<project_id>/packages/pypi/simple" \
-  --extra-index-url "https://pypi.org/simple" \
-  "backlog_repo==<version>"
+pdm install --prod
 ```
 
 > Publishing note
@@ -79,6 +70,8 @@ tier for broader validation passes.
 - export helpers:
   - `ticket_export_anchors(...)`
   - `ticket_export_fingerprint(...)`
+    - These helpers support both legacy top-level fields and six-stage stage-backed tickets
+      (fallbacks via `problem_record` / `selected_solution` / `change_plan`).
 
 ---
 

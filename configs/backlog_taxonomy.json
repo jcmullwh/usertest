@@ -1,0 +1,35 @@
+{
+  "version": 1,
+  "solution_families": [
+    {
+      "family_id": "most_direct",
+      "label": "Most direct",
+      "description": "The smallest, most targeted change that addresses the specific problem instance without restructuring surrounding code or adding new abstractions. Preferred when the problem is well-bounded, the root cause is clear, and the change surface is narrow."
+    },
+    {
+      "family_id": "most_robust",
+      "label": "Most robust",
+      "description": "A change that addresses the specific problem and adds defense-in-depth or broader correctness guarantees. May add validation, error handling, or test coverage beyond the minimum. Preferred when the problem has a plausible recurrence vector or when the direct fix is fragile."
+    },
+    {
+      "family_id": "most_comprehensive",
+      "label": "Most comprehensive",
+      "description": "A change that addresses the class of problem rather than just the observed instance. May involve a modest refactor, a new abstraction, or a policy-level fix. Preferred when research shows a repeated pattern, multiple closely related causes, or when the direct fix would be a band-aid."
+    }
+  ],
+  "prompt_guardrails": {
+    "banned_optimization_adjectives": [
+      "fastest",
+      "quickest",
+      "easiest",
+      "simplest",
+      "lowest-effort",
+      "least-effort",
+      "minimum-effort",
+      "most convenient",
+      "quick-win",
+      "low-hanging"
+    ],
+    "note": "These adjectives are banned from stage prompts unless they appear only through injected taxonomy text. They steer toward expedient solutions rather than correct ones. Use the solution-family labels above to express tradeoffs."
+  }
+}

@@ -15,7 +15,7 @@ If you’re unsure where to start, read `docs/tutorials/getting-started.md`.
 Entry points:
 
 - `usertest …` (installed script)
-- `python -m usertest.cli …` (module invocation)
+- `pdm run usertest …` (from `apps/usertest/` for local dev)
 
 ### Core commands
 
@@ -58,7 +58,7 @@ Most backlog/ticket workflows have moved to `usertest-backlog`.
 Entry points:
 
 - `usertest-backlog …` (installed script)
-- `python -m usertest_backlog.cli …` (module invocation)
+- `pdm run usertest-backlog …` (from `apps/usertest_backlog/` for local dev)
 
 ### Reports workflows
 
@@ -71,6 +71,30 @@ Commands are grouped under `usertest-backlog reports`:
 - `export-tickets` – export tickets (format depends on configured exporter)
 - `backlog` – build/render backlog documents
 
+### Six-stage backlog pipeline (`reports backlog`)
+
+`usertest-backlog reports backlog` runs a six-stage, inspectable pipeline and writes stage artifacts
+next to the final backlog output:
+
+- `*.problem_records.json` / `*.problem_records.md`
+- `*.prioritized_problems.json` / `*.prioritized_problems.md`
+- `*.research.json` / `*.research.md`
+- `*.solution_options.json` / `*.solution_options.md`
+- `*.solution_selection.json` / `*.solution_selection.md`
+- `*.change_plans.json` / `*.change_plans.md`
+- `*.backlog.json` / `*.backlog.md`
+
+`--dry-run` is offline and synthesizes deterministic stage outputs so fixtures/tests can validate the
+full chain end-to-end.
+
+Note: stage 1 problem mining writes its atom payload into each miner workspace as a small
+`atoms.json` manifest plus chunk files under `atoms_chunks/` (for example:
+`*.backlog_artifacts/problem_mining/**/workspace/atoms.json` and
+`*.backlog_artifacts/problem_mining/**/workspace/atoms_chunks/atoms_001.json`). Prompts instruct
+the model to read the manifest and then the chunk files. This avoids oversized prompts while
+preserving full evidence text. The canonical atom stream is still written as JSONL in
+`*.backlog.atoms.jsonl`.
+
 ### PR triage
 
 - `usertest-backlog triage-prs`
@@ -82,7 +106,7 @@ Commands are grouped under `usertest-backlog reports`:
 Entry points:
 
 - `usertest-implement …` (installed script)
-- `python -m usertest_implement.cli …` (module invocation)
+- `pdm run usertest-implement …` (from `apps/usertest_implement/` for local dev)
 
 ### Core command
 
@@ -144,10 +168,13 @@ These CLIs evolve quickly.
 Use:
 
 ```bash
-python -m usertest.cli --help
-python -m usertest.cli run --help
-python -m usertest_backlog.cli --help
-python -m usertest_implement.cli --help
+cd apps/usertest
+pdm run usertest --help
+pdm run usertest run --help
+cd ../usertest_backlog
+pdm run usertest-backlog --help
+cd ../usertest_implement
+pdm run usertest-implement --help
 
 # If you installed the console scripts:
 usertest --help

@@ -3620,11 +3620,16 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 name="system_prompt.md",
                 src_path=src_path,
             )
-            system_prompt_path_for_agent = _agent_path_for_staged_file(
-                staged_system_prompt,
-                run_dir=run_dir,
-                run_dir_mount=backend.run_dir_mount,
-            )
+            if request.agent == "gemini":
+                # Gemini CLI has no system-prompt file flag; agent adapters inject the content
+                # into stdin on the host. Therefore use the host path, not a container mount path.
+                system_prompt_path_for_agent = str(staged_system_prompt)
+            else:
+                system_prompt_path_for_agent = _agent_path_for_staged_file(
+                    staged_system_prompt,
+                    run_dir=run_dir,
+                    run_dir_mount=backend.run_dir_mount,
+                )
 
         append_src_path: Path | None = None
         if request.agent_append_system_prompt_file is not None:
@@ -3672,11 +3677,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
                 staged_system_prompt.write_text(merged_payload, encoding="utf-8")
 
-                system_prompt_path_for_agent = _agent_path_for_staged_file(
-                    staged_system_prompt,
-                    run_dir=run_dir,
-                    run_dir_mount=backend.run_dir_mount,
-                )
+                system_prompt_path_for_agent = str(staged_system_prompt)
             else:
                 if append_src_path is not None:
                     staged_append_system_prompt = _stage_agent_prompt_file(
@@ -4360,10 +4361,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             ):
                 exec_backend = str(getattr(request, "exec_backend", "local") or "local").strip()
 
+                version_timeout_seconds = 2.5
+                # Gemini CLI is a Node-based binary and can exceed the default 2.5s budget,
+                # especially under `docker exec` where process startup overhead is higher.
+                if str(request.agent).strip().lower() == "gemini":
+                    version_timeout_seconds = 8.0
+
                 version_probe = _probe_agent_cli_version(
                     binary=required_agent_binary,
                     command_prefix=command_prefix,
                     env_overrides=agent_env_overrides,
+                    timeout_seconds=version_timeout_seconds,
                 )
                 if not bool(version_probe.get("ok")):
                     message = (

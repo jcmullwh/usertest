@@ -181,6 +181,84 @@ def _make_dummy_codex_binary(tmp_path: Path) -> str:
     return str(wrapper)
 
 
+def _make_dummy_gemini_binary(*, tmp_path: Path, version_sleep_seconds: float) -> str:
+    script = tmp_path / "dummy_gemini.py"
+    script.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "",
+                "import json",
+                "import sys",
+                "import time",
+                "",
+                "",
+                "def main() -> int:",
+                "    argv = sys.argv[1:]",
+                "    if '--version' in argv:",
+                f"        time.sleep({float(version_sleep_seconds):g})",
+                "        print('dummy-gemini 0.0.0')",
+                "        return 0",
+                "",
+                "    # Drain stdin prompt (runner passes full prompt via stdin).",
+                "    _ = sys.stdin.read()",
+                "",
+                "    report = {",
+                "        'schema_version': 1,",
+                "        'persona': {'name': 'Dummy Gemini'},",
+                "        'mission': 'Dummy Gemini Mission',",
+                "        'minimal_mental_model': {'summary': 'ok', 'entry_points': ['README.md']},",
+                "        'confidence_signals': {'found': ['has files'], 'missing': ['none']},",
+                "        'confusion_points': [],",
+                "        'adoption_decision': {",
+                "            'recommendation': 'investigate',",
+                "            'rationale': 'dummy',",
+                "        },",
+                "        'suggested_changes': [],",
+                "    }",
+                "    event = {",
+                "        'type': 'message',",
+                "        'role': 'assistant',",
+                "        'delta': False,",
+                "        'content': json.dumps(report),",
+                "    }",
+                "    print(json.dumps(event))",
+                "    return 0",
+                "",
+                "",
+                "if __name__ == '__main__':",
+                "    raise SystemExit(main())",
+                "",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    if os.name == "nt":
+        wrapper = tmp_path / "dummy_gemini.cmd"
+        wrapper.write_text(
+            "\n".join(
+                [
+                    "@echo off",
+                    f"\"{sys.executable}\" \"{script}\" %*",
+                    "exit /b %ERRORLEVEL%",
+                    "",
+                ]
+            ),
+            encoding="utf-8",
+        )
+        return str(wrapper)
+
+    wrapper = tmp_path / "dummy_gemini.sh"
+    wrapper.write_text(
+        f"#!/bin/sh\nexec \"{sys.executable}\" \"{script}\" \"$@\"\n",
+        encoding="utf-8",
+    )
+    wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
+    return str(wrapper)
+
+
 def test_preflight_command_list_excludes_domain_specific_defaults() -> None:
     commands = _build_preflight_command_list(RunRequest(repo="x"))
     assert "ffmpeg" not in commands
@@ -659,6 +737,49 @@ def test_run_once_marks_present_commands_as_blocked_by_policy_when_shell_is_disa
     remediation = diagnostics.get("dummycmd", {}).get("remediation")
     assert isinstance(remediation, str)
     assert "Enable shell commands in policy" in remediation
+
+
+def test_run_once_allows_slow_gemini_version_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Gemini `--version` can exceed the default 2.5s probe budget; runner should allow it."""
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    dummy_binary = _make_dummy_gemini_binary(tmp_path=tmp_path, version_sleep_seconds=3.0)
+    monkeypatch.setenv("GEMINI_API_KEY", "dummy-key")
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"gemini": {"binary": dummy_binary}},
+        policies={
+            "safe": {
+                "gemini": {
+                    "allow_edits": False,
+                    "sandbox": True,
+                    "approval_mode": "default",
+                    "allowed_tools": ["read_file"],
+                }
+            }
+        },
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="gemini",
+            policy="safe",
+        ),
+    )
+
+    assert result.exit_code == 0
+    report_path = result.run_dir / "report.json"
+    assert report_path.exists()
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    assert report.get("schema_version") == 1
 
 
 def test_run_once_fails_fast_on_invalid_codex_reasoning_effort_override(tmp_path: Path) -> None:

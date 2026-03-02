@@ -169,14 +169,12 @@ def test_gemini_cli_injects_env_for_docker_exec_prefix(tmp_path: Path) -> None:
         stderr_path=tmp_path / "stderr.txt",
         binary=dummy,
         sandbox=True,
-        system_prompt_file="/run_dir/system.md",
         command_prefix=[str(docker), "exec", "-i", "-w", "/workspace", "container"],
         env_overrides={"SENTINEL": "1"},
     )
     assert result.exit_code == 0
     pairs = set(zip(result.argv, result.argv[1:], strict=False))
     assert ("-e", "SENTINEL=1") in pairs
-    assert ("--agent-system-prompt-file", "/run_dir/system.md") in pairs
 
 
 def test_gemini_cli_includes_sandbox_and_allowed_tools(tmp_path: Path) -> None:

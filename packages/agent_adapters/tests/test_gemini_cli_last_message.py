@@ -123,3 +123,53 @@ def test_extract_last_message_text_recovers_json_from_tool_result_code_fence(
     )
     extracted = _extract_last_message_text(raw)
     assert json.loads(extracted) == payload
+
+
+def test_extract_last_message_text_preserves_json_array_from_assistant_message(
+    tmp_path: Path,
+) -> None:
+    payload = [{"k": 1}, {"k": 2}]
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": json.dumps(payload),
+                        "delta": True,
+                    }
+                )
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    extracted = _extract_last_message_text(raw)
+    assert json.loads(extracted) == payload
+
+
+def test_extract_last_message_text_preserves_json_array_from_assistant_message_code_fence(
+    tmp_path: Path,
+) -> None:
+    payload = [{"focus_id": "x", "action": "keep_separate"}]
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": "```json\n" + json.dumps(payload) + "\n```",
+                        "delta": True,
+                    }
+                )
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    extracted = _extract_last_message_text(raw)
+    assert json.loads(extracted) == payload
