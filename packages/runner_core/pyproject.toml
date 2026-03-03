@@ -39,6 +39,14 @@ dev = [
 [tool.pytest.ini_options]
 addopts = "-q"
 testpaths = ["tests"]
+pythonpath = [
+    "src",
+    "../agent_adapters/src",
+    "../normalized_events/src",
+    "../reporter/src",
+    "../sandbox_runner/src",
+    "../run_artifacts/src",
+]
 
 [tool.mypy]
 python_version = "3.11"
@@ -68,4 +76,3 @@ dev = [
     "types-PyYAML>=6.0.0.0",
     "tomlkit>=0.12.0",
 ]
-

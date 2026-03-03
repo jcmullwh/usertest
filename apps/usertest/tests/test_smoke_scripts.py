@@ -25,3 +25,16 @@ def test_smoke_scripts_exist_and_enforce_expected_contract() -> None:
         if path.name == "smoke.sh":
             assert "Smoke preflight failed:" in text
             assert "Choose one setup mode:" in text
+            guard_idx = text.find('echo "==> Import-origin guard smoke"')
+            preflight_call_idx = text.find("  run_skip_install_preflight")
+            assert preflight_call_idx != -1
+            assert guard_idx != -1
+            assert preflight_call_idx < guard_idx
+        else:
+            guard_idx = text.find("Write-Host '==> Import-origin guard smoke'")
+            preflight_call_idx = text.find(
+                "        Invoke-SmokeImportPreflight -PythonCmd $pythonCmd"
+            )
+            assert preflight_call_idx != -1
+            assert guard_idx != -1
+            assert preflight_call_idx < guard_idx
