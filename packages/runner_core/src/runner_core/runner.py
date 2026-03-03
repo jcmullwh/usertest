@@ -249,6 +249,10 @@ _NON_RETRYABLE_PROVIDER_CAPACITY_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"trial (has )?ended", re.IGNORECASE),
 )
 _NON_RETRYABLE_TRANSIENT_NETWORK_PATTERNS: tuple[re.Pattern[str], ...] = ()
+_SCAFFOLD_SCRIPT_PATTERN = re.compile(r"tools[/\\]scaffold[/\\]scaffold\.py", re.IGNORECASE)
+_SCAFFOLD_RUN_PATTERN = re.compile(r"\brun\b", re.IGNORECASE)
+_SCAFFOLD_INSTALL_PATTERN = re.compile(r"\binstall\b", re.IGNORECASE)
+_SCAFFOLD_LINT_OR_TEST_PATTERN = re.compile(r"\b(?:lint|test)\b", re.IGNORECASE)
 
 _GEMINI_STDERR_STRIP_LINES: frozenset[str] = frozenset(
     {
@@ -895,6 +899,125 @@ def _build_preflight_command_list(request: RunRequest) -> list[str]:
         seen.add(cmd)
 
     return merged
+
+
+def _requires_scaffold_install_bootstrap(commands: Sequence[str]) -> bool:
+    has_scaffold_install = False
+    has_scaffold_lint_or_test = False
+    for raw in commands:
+        if not isinstance(raw, str):
+            continue
+        command = raw.strip()
+        if not command:
+            continue
+        if _SCAFFOLD_SCRIPT_PATTERN.search(command) is None:
+            continue
+        if _SCAFFOLD_RUN_PATTERN.search(command) is None:
+            continue
+        if _SCAFFOLD_INSTALL_PATTERN.search(command) is not None:
+            has_scaffold_install = True
+        if _SCAFFOLD_LINT_OR_TEST_PATTERN.search(command) is not None:
+            has_scaffold_lint_or_test = True
+    return has_scaffold_lint_or_test and not has_scaffold_install
+
+
+def _normalize_verification_commands_for_execution(commands: Sequence[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for raw in commands:
+        if not isinstance(raw, str):
+            continue
+        stripped = raw.strip()
+        if stripped:
+            normalized.append(stripped)
+
+    if _requires_scaffold_install_bootstrap(normalized):
+        normalized = [
+            "python tools/scaffold/scaffold.py run install --all --skip-missing",
+            *normalized,
+        ]
+    return tuple(normalized)
+
+
+def _verification_commands_need_source_bootstrap(commands: Sequence[str]) -> bool:
+    for raw in commands:
+        if not isinstance(raw, str):
+            continue
+        command = raw.strip()
+        if not command:
+            continue
+        if _SCAFFOLD_SCRIPT_PATTERN.search(command) is not None and _SCAFFOLD_RUN_PATTERN.search(
+            command
+        ) is not None:
+            return True
+    return verification_commands_need_pytest(tuple(commands))
+
+
+def _workspace_source_relpaths(workspace_dir: Path) -> tuple[str, ...]:
+    relpaths: list[str] = []
+    for parent in ("apps", "packages"):
+        parent_dir = workspace_dir / parent
+        if not parent_dir.is_dir():
+            continue
+        for project_dir in sorted(parent_dir.iterdir(), key=lambda p: p.name):
+            if not project_dir.is_dir():
+                continue
+            src_dir = project_dir / "src"
+            if src_dir.is_dir():
+                relpaths.append(src_dir.relative_to(workspace_dir).as_posix())
+    return tuple(relpaths)
+
+
+def _merge_path_entries(*, entries: Sequence[str], existing: str, sep: str) -> str:
+    out: list[str] = []
+    seen: set[str] = set()
+    for entry in entries:
+        if not isinstance(entry, str):
+            continue
+        cleaned = entry.strip()
+        if not cleaned:
+            continue
+        if cleaned not in seen:
+            out.append(cleaned)
+            seen.add(cleaned)
+    if isinstance(existing, str) and existing.strip():
+        for item in existing.split(sep):
+            cleaned = item.strip()
+            if not cleaned:
+                continue
+            if cleaned in seen:
+                continue
+            out.append(cleaned)
+            seen.add(cleaned)
+    return sep.join(out)
+
+
+def _augment_env_with_workspace_pythonpath(
+    *,
+    env_overrides: dict[str, str] | None,
+    workspace_dir: Path,
+    workspace_mount: str | None,
+) -> dict[str, str] | None:
+    relpaths = _workspace_source_relpaths(workspace_dir)
+    if not relpaths:
+        return env_overrides
+
+    env = dict(env_overrides or {})
+    if workspace_mount:
+        mount_root = workspace_mount.rstrip("/")
+        entries = tuple(f"{mount_root}/{rel}" for rel in relpaths)
+        sep = ":"
+    else:
+        entries = tuple(str(workspace_dir / rel.replace("/", os.sep)) for rel in relpaths)
+        sep = os.pathsep
+
+    merged = _merge_path_entries(
+        entries=entries,
+        existing=env.get("PYTHONPATH", ""),
+        sep=sep,
+    )
+    if merged:
+        env["PYTHONPATH"] = merged
+    return env if env else None
 
 
 def _classify_failure_subtype(text: str) -> str | None:
@@ -2902,6 +3025,7 @@ def _run_verification_commands(
     cwd: Path,
     timeout_seconds: float | None,
     python_executable: str | None,
+    env_overrides: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     attempt_dir_rel = Path("verification") / f"attempt{attempt_number}"
     attempt_dir = run_dir / attempt_dir_rel
@@ -2912,6 +3036,20 @@ def _run_verification_commands(
     results: list[dict[str, Any]] = []
 
     is_powershell = (not command_prefix) and _is_windows()
+    merged_env: dict[str, str] | None = None
+    effective_prefix = list(command_prefix)
+    if env_overrides:
+        safe_overrides = {
+            key: value
+            for key, value in env_overrides.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+        if safe_overrides:
+            if effective_prefix and looks_like_docker_exec_prefix(effective_prefix):
+                effective_prefix = inject_docker_exec_env(effective_prefix, safe_overrides)
+            elif not effective_prefix:
+                merged_env = dict(os.environ)
+                merged_env.update(safe_overrides)
 
     windows_bash_probe: dict[str, Any] | None = None
     if _is_windows() and not command_prefix:
@@ -3018,7 +3156,7 @@ def _run_verification_commands(
         else:
             try:
                 direct = _maybe_prepare_ripgrep_direct_exec(
-                    command_prefix=command_prefix,
+                    command_prefix=effective_prefix,
                     command=effective_cmd,
                 )
                 if direct is not None:
@@ -3033,6 +3171,7 @@ def _run_verification_commands(
                         cwd=str(cwd),
                         check=False,
                         timeout=timeout_seconds,
+                        env=merged_env,
                     )
                     exit_code = int(proc.returncode or 0)
                     stdout_text = proc.stdout or ""
@@ -3055,6 +3194,7 @@ def _run_verification_commands(
                                 cwd=str(cwd),
                                 check=False,
                                 timeout=timeout_seconds,
+                                env=merged_env,
                             )
                             exit_code = int(proc.returncode or 0)
                             stdout_text = proc.stdout or ""
@@ -3069,7 +3209,7 @@ def _run_verification_commands(
                                 }
                 else:
                     argv = _verification_shell_argv(
-                        command_prefix=command_prefix,
+                        command_prefix=effective_prefix,
                         command=effective_cmd,
                     )
                     proc = subprocess.run(
@@ -3081,6 +3221,7 @@ def _run_verification_commands(
                         cwd=str(cwd),
                         check=False,
                         timeout=timeout_seconds,
+                        env=merged_env,
                     )
                     exit_code = int(proc.returncode or 0)
                     stdout_text = proc.stdout or ""
@@ -4085,6 +4226,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             _write_json(run_dir / "target_ref.json", target_ref)
 
         try:
+            effective_verification_commands = _normalize_verification_commands_for_execution(
+                request.verification_commands
+            )
             bootstrap: PipBootstrapResult | None = None
             if is_pip_repo_input(request.repo):
                 pip_spec = parse_pip_repo_input(request.repo)
@@ -4098,8 +4242,28 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     workspace_mount=workspace_mount,
                     installer=pip_spec.installer,
                 )
+            else:
+                requirements_dev = acquired.workspace_dir / "requirements-dev.txt"
+                if requirements_dev.is_file() and _verification_commands_need_source_bootstrap(
+                    effective_verification_commands
+                ):
+                    bootstrap = bootstrap_pip_requirements(
+                        workspace_dir=acquired.workspace_dir,
+                        requirements_relpath="requirements-dev.txt",
+                        run_dir=run_dir,
+                        command_prefix=command_prefix,
+                        workspace_mount=workspace_mount,
+                        installer="pip",
+                    )
+                    bootstrap.meta["source_repo_bootstrap"] = True
 
             agent_env_overrides = dict(bootstrap.env_overrides) if bootstrap is not None else None
+            if _verification_commands_need_source_bootstrap(effective_verification_commands):
+                agent_env_overrides = _augment_env_with_workspace_pythonpath(
+                    env_overrides=agent_env_overrides,
+                    workspace_dir=acquired.workspace_dir,
+                    workspace_mount=workspace_mount,
+                )
             if os.name == "nt" and sandbox is None and bool(resolved_inputs.mission.requires_shell):
                 agent_env_overrides = _ensure_windows_python_on_path(
                     workspace_dir=acquired.workspace_dir,
@@ -4217,7 +4381,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
             python_capability = _validate_python_capability(
                 workspace_dir=acquired.workspace_dir,
-                verification_commands=request.verification_commands,
+                verification_commands=effective_verification_commands,
                 command_prefix=command_prefix,
                 cwd=acquired.workspace_dir,
                 env_overrides=agent_env_overrides,
@@ -4249,7 +4413,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 else None
             )
             pytest_validation_required = verification_commands_need_pytest(
-                request.verification_commands
+                effective_verification_commands
             )
             pip_probe: dict[str, Any] | None = None
             if python_runtime.selected is not None:
@@ -4460,7 +4624,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
 
             if pytest_validation_required and (
-                not verification_commands_may_provision_pytest(request.verification_commands)
+                not verification_commands_may_provision_pytest(effective_verification_commands)
                 and not bool(pytest_probe and pytest_probe.get("passed", False))
             ):
                 remediation = (
@@ -4946,11 +5110,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 exec_backend=request.exec_backend, host_os=host_os
             )
 
-            verification_commands = [
-                cmd.strip()
-                for cmd in request.verification_commands
-                if isinstance(cmd, str) and cmd.strip()
-            ]
+            verification_commands = list(effective_verification_commands)
             verification_timeout_seconds = request.verification_timeout_seconds
             if (
                 verification_timeout_seconds is not None
@@ -5379,6 +5539,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         cwd=acquired.workspace_dir,
                         timeout_seconds=verification_timeout_seconds,
                         python_executable=python_exec_for_verification,
+                        env_overrides=agent_env_overrides,
                     )
                     attempt_verification_passed = bool(
                         attempt_verification_summary.get("passed", False)

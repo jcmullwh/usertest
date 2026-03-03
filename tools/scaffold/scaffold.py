@@ -800,6 +800,7 @@ def _ensure_ruff_available_for_lint(
     cwd: Path,
     project_id: str,
     remediation_cmd: str,
+    install_cmd: list[str] | None,
 ) -> None:
     if not _looks_like_pdm_run_ruff_check(cmd):
         return
@@ -811,6 +812,21 @@ def _ensure_ruff_available_for_lint(
     cp = _probe(probe_argv, cwd=cwd, env=env)
     if cp.returncode == 0:
         return
+
+    if install_cmd is not None:
+        _eprint(
+            f"INFO: {project_id}: lint prerequisites missing; running tasks.install before retrying lint probe."
+        )
+        install_cp = _run_manifest_task(
+            cmd=install_cmd,
+            cwd=cwd,
+            task_name="install",
+            project_id=project_id,
+        )
+        if install_cp.returncode == 0:
+            cp = _probe(probe_argv, cwd=cwd, env=env)
+            if cp.returncode == 0:
+                return
 
     raise ScaffoldError(
         f"{project_id}: lint requires 'ruff' but it is not available in this project's PDM environment.\n"
@@ -1384,6 +1400,34 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not project_dir.exists():
             raise ScaffoldError(f"{project_id}: project directory does not exist: {path}")
 
+        install_cmd_list: list[str] | None = None
+        install_task = tasks.get("install")
+        if install_task is not None:
+            install_cmd_list = _validate_task_cmd(
+                install_task, where=f"projects.{project_id}.tasks.install"
+            )
+
+        if (
+            task_name in {"lint", "test"}
+            and _is_pdm_command(cmd_list)
+            and install_cmd_list is not None
+            and not (project_dir / ".venv").exists()
+        ):
+            _eprint(
+                f"INFO: {project_id}: project venv missing; running tasks.install before {task_name}."
+            )
+            install_cp = _run_manifest_task(
+                cmd=install_cmd_list,
+                cwd=project_dir,
+                task_name="install",
+                project_id=project_id,
+            )
+            if install_cp.returncode != 0:
+                failures.append(f"{project_id}:install ({install_cp.returncode})")
+                if not args.keep_going:
+                    break
+                continue
+
         if task_name == "lint":
             _ensure_ruff_available_for_lint(
                 cmd=cmd_list,
@@ -1393,6 +1437,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                     args,
                     failing_project_id=project_id,
                 ),
+                install_cmd=install_cmd_list if _is_pdm_command(cmd_list) else None,
             )
 
         cp = _run_manifest_task(
