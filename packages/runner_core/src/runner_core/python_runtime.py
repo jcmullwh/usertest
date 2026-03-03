@@ -78,10 +78,16 @@ def _reason_type_for_reason_code(reason_code: str | None) -> str | None:
     return "unknown"
 
 
-def _windows_where_all(command: str, *, timeout_seconds: float = 2.0) -> list[str]:
+def _windows_where_all(
+    command: str, *, timeout_seconds: float = 2.0, path: str | None = None
+) -> list[str]:
     if not _is_windows_platform():
         return []
     try:
+        env: dict[str, str] | None = None
+        if path is not None:
+            env = dict(os.environ)
+            env["PATH"] = path
         proc = subprocess.run(
             ["where", command],
             capture_output=True,
@@ -90,6 +96,7 @@ def _windows_where_all(command: str, *, timeout_seconds: float = 2.0) -> list[st
             errors="replace",
             timeout=max(0.1, float(timeout_seconds)),
             check=False,
+            env=env,
         )
     except Exception:
         return []
@@ -106,10 +113,16 @@ def _windows_where_all(command: str, *, timeout_seconds: float = 2.0) -> list[st
 _WINDOWS_PY0P_PATH_PATTERN = re.compile(r"([A-Za-z]:\\.*)$")
 
 
-def _windows_py0p_interpreters(*, timeout_seconds: float = 2.0) -> list[str]:
+def _windows_py0p_interpreters(
+    *, timeout_seconds: float = 2.0, path: str | None = None
+) -> list[str]:
     if not _is_windows_platform():
         return []
     try:
+        env: dict[str, str] | None = None
+        if path is not None:
+            env = dict(os.environ)
+            env["PATH"] = path
         proc = subprocess.run(
             ["py", "-0p"],
             capture_output=True,
@@ -118,6 +131,7 @@ def _windows_py0p_interpreters(*, timeout_seconds: float = 2.0) -> list[str]:
             errors="replace",
             timeout=max(0.1, float(timeout_seconds)),
             check=False,
+            env=env,
         )
     except Exception:
         return []
@@ -196,6 +210,7 @@ def _probe_python_executable(
     *,
     timeout_seconds: float,
     source: str,
+    env: dict[str, str] | None = None,
 ) -> PythonRuntimeCandidate:
     raw = str(path_text or "").strip()
     if not raw:
@@ -242,6 +257,7 @@ def _probe_python_executable(
             errors="replace",
             timeout=max(0.1, float(timeout_seconds)),
             check=False,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return PythonRuntimeCandidate(
@@ -328,6 +344,7 @@ def select_python_runtime(
     workspace_dir: Path,
     timeout_seconds: float = 5.0,
     include_where_fallbacks: bool = True,
+    environment: dict[str, str] | None = None,
 ) -> PythonRuntimeSelection:
     """
     Resolve a usable Python executable path without relying on WindowsApps aliases.
@@ -340,10 +357,21 @@ def select_python_runtime(
     - alternate PATH matches (Windows `where python`)
     - PATH commands (`py`, `python`, `python3`)
     - `sys.executable` (last resort; the runner itself is running under it)
+
+    When `environment` is provided, discovery/probing runs against that effective environment
+    (including `USERTEST_PYTHON`, `VIRTUAL_ENV`, and `PATH`) to match execution context.
     """
 
     candidates: list[PythonRuntimeCandidate] = []
     seen: set[str] = set()
+    effective_env: dict[str, str] | None = None
+    effective_path: str | None = None
+    if environment is not None:
+        effective_env = dict(os.environ)
+        for key, value in environment.items():
+            if isinstance(key, str) and isinstance(value, str):
+                effective_env[key] = value
+        effective_path = effective_env.get("PATH")
 
     def _add(path_text: str | None, *, source: str) -> None:
         raw = str(path_text or "").strip()
@@ -353,7 +381,12 @@ def select_python_runtime(
         if key in seen:
             return
         seen.add(key)
-        candidate = _probe_python_executable(raw, timeout_seconds=timeout_seconds, source=source)
+        candidate = _probe_python_executable(
+            raw,
+            timeout_seconds=timeout_seconds,
+            source=source,
+            env=effective_env,
+        )
         if candidate.usable:
             _LOG.debug(
                 "python_runtime: candidate %s (%s) probed OK: executable=%s version=%s",
@@ -375,36 +408,62 @@ def select_python_runtime(
     # Highest priority: sandbox-provided interpreter path set by outer runner preflight.
     # This avoids re-selecting an inaccessible path (external drive, interdicted venv, etc.)
     # when the harness has already resolved and validated a usable interpreter.
-    sandbox_python_env = os.environ.get("USERTEST_PYTHON", "").strip()
+    env_lookup = effective_env if effective_env is not None else os.environ
+    sandbox_python_env = str(env_lookup.get("USERTEST_PYTHON", "")).strip()
     if sandbox_python_env:
         _add(sandbox_python_env, source="sandbox_env")
 
     workspace_venv = workspace_dir / ".venv"
     _add(str(_venv_python_path(workspace_venv)), source="workspace_venv")
 
-    venv_env = os.environ.get("VIRTUAL_ENV", "").strip()
+    venv_env = str(env_lookup.get("VIRTUAL_ENV", "")).strip()
     if venv_env:
         _add(str(_venv_python_path(Path(venv_env))), source="virtual_env")
 
-    python_which = shutil.which("python")
+    python_which = (
+        shutil.which("python", path=effective_path)
+        if effective_path is not None
+        else shutil.which("python")
+    )
 
     if _is_windows_platform():
-        for entry in _windows_py0p_interpreters(timeout_seconds=min(2.0, timeout_seconds)):
+        for entry in _windows_py0p_interpreters(
+            timeout_seconds=min(2.0, timeout_seconds),
+            path=effective_path,
+        ):
             _add(entry, source="py_0p")
 
     if include_where_fallbacks and _is_windows_platform():
-        for entry in _windows_where_all("python", timeout_seconds=min(2.0, timeout_seconds)):
+        for entry in _windows_where_all(
+            "python",
+            timeout_seconds=min(2.0, timeout_seconds),
+            path=effective_path,
+        ):
             if _is_windowsapps_alias(entry):
                 continue
             _add(entry, source="where_python")
-        for entry in _windows_where_all("python3", timeout_seconds=min(2.0, timeout_seconds)):
+        for entry in _windows_where_all(
+            "python3",
+            timeout_seconds=min(2.0, timeout_seconds),
+            path=effective_path,
+        ):
             if _is_windowsapps_alias(entry):
                 continue
             _add(entry, source="where_python3")
 
-    _add(shutil.which("py"), source="command_py")
+    _add(
+        shutil.which("py", path=effective_path)
+        if effective_path is not None
+        else shutil.which("py"),
+        source="command_py",
+    )
     _add(python_which, source="command_python")
-    _add(shutil.which("python3"), source="command_python3")
+    _add(
+        shutil.which("python3", path=effective_path)
+        if effective_path is not None
+        else shutil.which("python3"),
+        source="command_python3",
+    )
 
     _add(sys.executable, source="sys_executable")
 

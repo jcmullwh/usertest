@@ -423,12 +423,29 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
         raise AssertionError("healthy_pass missing python_runtime fixture")
     if not isinstance(pip_probe, dict) or not isinstance(pytest_probe, dict):
         raise AssertionError("healthy_pass missing probe fixtures")
+    selected_runtime_path = (
+        runtime_fixture.get("selected", {}).get("path")
+        if isinstance(runtime_fixture.get("selected"), dict)
+        else None
+    )
+    if not isinstance(selected_runtime_path, str) or not selected_runtime_path.strip():
+        raise AssertionError("healthy_pass missing selected runtime path")
 
     _patch_local_probe(monkeypatch, scenario=scenario)
+    runtime_selection = _runtime_selection(runtime_fixture)
+    selection_calls = {"count": 0}
+
+    def _fake_select_python_runtime(
+        *args: Any, **kwargs: Any
+    ) -> runtime_mod.PythonRuntimeSelection:
+        del args, kwargs
+        selection_calls["count"] += 1
+        return runtime_selection
+
     monkeypatch.setattr(
         runner_mod,
         "select_python_runtime",
-        lambda *args, **kwargs: _runtime_selection(runtime_fixture),
+        _fake_select_python_runtime,
     )
     monkeypatch.setattr(
         runner_mod, "probe_pip_module", lambda *args, **kwargs: dict(pip_probe)
@@ -459,7 +476,8 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
         python_executable: str | None,
         execution_shell: str | None = None,
     ) -> dict[str, Any]:
-        del command_prefix, cwd, timeout_seconds, python_executable, execution_shell
+        del command_prefix, cwd, timeout_seconds, execution_shell
+        assert python_executable == selected_runtime_path
         artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
         artifacts_dir = run_dir / artifacts_dir_rel
         artifacts_dir.mkdir(parents=True, exist_ok=True)
@@ -512,6 +530,7 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
 
     assert result.exit_code == 0
     assert not (result.run_dir / "error.json").exists()
+    assert selection_calls["count"] == 1
 
     preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
     assert preflight.get("command_diagnostics", {}).get("python", {}).get("status") == "present"
