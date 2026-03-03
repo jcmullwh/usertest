@@ -466,6 +466,66 @@ def _is_pdm_command(argv: list[str]) -> bool:
     return cmd_name in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}
 
 
+_PDM_BOOTSTRAP_FAILURE_MARKERS: dict[str, tuple[str, ...]] = {
+    "lint": (
+        "command 'ruff' is not found",
+        "ruff not found",
+        "no module named ruff",
+    ),
+    "test": (
+        "command 'pytest' is not found",
+        "pytest not found",
+        "no module named pytest",
+        "importerror while importing test module",
+        "modulenotfounderror: no module named",
+    ),
+}
+_PDM_ENV_NOTE_EMITTED = False
+
+
+def _build_pdm_task_env(*, cmd: list[str], task_name: str) -> dict[str, str]:
+    env = dict(os.environ)
+    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+
+    if task_name == "install" and _is_pdm_install_command(cmd):
+        # Some environments (including certain containerized/CI setups) disallow creating symlinks inside bind
+        # mounts. virtualenv honors this and will copy instead of symlink when set.
+        env.setdefault("VIRTUALENV_COPIES", "1")
+
+    if not _virtualenv_importable():
+        env.setdefault("PDM_VENV_BACKEND", "venv")
+        global _PDM_ENV_NOTE_EMITTED
+        if not _PDM_ENV_NOTE_EMITTED:
+            _eprint(
+                "INFO: 'virtualenv' package not found; setting PDM_VENV_BACKEND=venv to use stdlib venv backend."
+                f" Install virtualenv for richer venv support: {sys.executable} -m pip install -U virtualenv"
+            )
+            _PDM_ENV_NOTE_EMITTED = True
+
+    return env
+
+
+def _looks_like_pdm_bootstrap_prereq_failure(*, task_name: str, stdout: str, stderr: str) -> bool:
+    text = "\n".join(x for x in (stdout, stderr) if x).lower()
+    if not text:
+        return False
+    if "virtualenvcreateerror" in text:
+        return True
+    for marker in _PDM_BOOTSTRAP_FAILURE_MARKERS.get(task_name, ()):
+        if marker in text:
+            return True
+    return False
+
+
+def _summarize_process_output(cp: subprocess.CompletedProcess[str]) -> str:
+    for raw in (cp.stderr or "", cp.stdout or ""):
+        for line in raw.splitlines():
+            cleaned = line.strip()
+            if cleaned:
+                return cleaned
+    return f"command exited with status {cp.returncode}"
+
+
 def _looks_like_transient_pdm_local_path_failure(*, stdout: str, stderr: str) -> bool:
     text = "\n".join(x for x in (stdout, stderr) if x).lower()
     if not text:
@@ -496,32 +556,12 @@ def _run_manifest_task(
     if not _is_pdm_command(cmd):
         return _run(cmd, cwd=cwd)
 
-    env = dict(os.environ)
-    # PDM will reuse the currently active virtualenv by default. That's convenient for single-project workflows, but
-    # causes surprising (and on Windows, sometimes broken) behavior when a monorepo task runner invokes PDM across many
-    # projects. For example, `pdm install` may attempt to update the running CLI's own entrypoint executable, which
-    # fails due to Windows file locking.
-    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+    env = _build_pdm_task_env(cmd=cmd, task_name=task_name)
 
     if task_name != "install" or not _is_pdm_install_command(cmd):
-        return _run(cmd, cwd=cwd, env=env)
-
-    # Some environments (including certain containerized/CI setups) disallow creating symlinks inside bind mounts.
-    # PDM's default `venv.backend=virtualenv` may attempt to symlink the interpreter into the venv, which fails with
-    # `PermissionError: [Errno 1] Operation not permitted`.
-    #
-    # `virtualenv` honors `VIRTUALENV_COPIES=1` and will copy instead of symlinking, making installs more reliable.
-    env.setdefault("VIRTUALENV_COPIES", "1")
-
-    # If `virtualenv` is not installed, PDM will raise `VirtualenvCreateError` when attempting to create a project
-    # venv. Fall back to PDM's stdlib `venv` backend which is always available. This makes `pdm install` work in
-    # container environments where only a bare CPython is present (no `virtualenv` package).
-    if not _virtualenv_importable():
-        env.setdefault("PDM_VENV_BACKEND", "venv")
-        _eprint(
-            "INFO: 'virtualenv' package not found; setting PDM_VENV_BACKEND=venv to use stdlib venv backend."
-            f" Install virtualenv for richer venv support: {sys.executable} -m pip install -U virtualenv"
-        )
+        cp = _run(cmd, cwd=cwd, capture=True, env=env)
+        _emit_captured_process_output(cp)
+        return cp
 
     first = _run(cmd, cwd=cwd, capture=True, env=env)
     _emit_captured_process_output(first)
@@ -776,22 +816,39 @@ def _format_run_install_remediation_cmd(
     failing_project_id: str,
 ) -> str:
     parts: list[str] = ["python", "tools/scaffold/scaffold.py", "run", "install"]
+    include_skip_missing = bool(getattr(args, "skip_missing", False))
     if bool(args.all):
         parts.append("--all")
+        if include_skip_missing:
+            parts.append("--skip-missing")
         return " ".join(parts)
     kind = getattr(args, "kind", None)
     if kind:
         parts.extend(["--kind", str(kind)])
+        if include_skip_missing:
+            parts.append("--skip-missing")
         return " ".join(parts)
 
     selected_projects = getattr(args, "project", None)
     if isinstance(selected_projects, list) and selected_projects:
         for project_id in selected_projects:
             parts.extend(["--project", str(project_id)])
+        if include_skip_missing:
+            parts.append("--skip-missing")
         return " ".join(parts)
 
     parts.extend(["--project", failing_project_id])
+    if include_skip_missing:
+        parts.append("--skip-missing")
     return " ".join(parts)
+
+
+def _fresh_checkout_setup_hint() -> str:
+    return (
+        "Fresh checkout setup: python -m pip install -r requirements-dev.txt. "
+        "If you run monorepo CLIs from source, configure PYTHONPATH via scripts/set_pythonpath.sh "
+        "(or scripts/set_pythonpath.ps1)."
+    )
 
 
 def _ensure_ruff_available_for_lint(
@@ -804,16 +861,29 @@ def _ensure_ruff_available_for_lint(
     if not _looks_like_pdm_run_ruff_check(cmd):
         return
 
-    env = dict(os.environ)
-    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+    env = _build_pdm_task_env(cmd=cmd, task_name="lint")
 
     probe_argv = [cmd[0], "run", cmd[2], "--version"]
     cp = _probe(probe_argv, cwd=cwd, env=env)
     if cp.returncode == 0:
         return
 
+    observed = _summarize_process_output(cp)
+    if _looks_like_pdm_bootstrap_prereq_failure(
+        task_name="lint",
+        stdout=cp.stdout or "",
+        stderr=cp.stderr or "",
+    ):
+        raise ScaffoldError(
+            f"{project_id}: lint preflight failed before bootstrap prerequisites were satisfied.\n"
+            f"Observed: {observed}\n"
+            f"Remediation: {remediation_cmd}\n"
+            + _fresh_checkout_setup_hint()
+        )
+
     raise ScaffoldError(
         f"{project_id}: lint requires 'ruff' but it is not available in this project's PDM environment.\n"
+        f"Observed: {observed}\n"
         f"Remediation: {remediation_cmd}"
     )
 
@@ -1384,24 +1454,82 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not project_dir.exists():
             raise ScaffoldError(f"{project_id}: project directory does not exist: {path}")
 
-        if task_name == "lint":
-            _ensure_ruff_available_for_lint(
-                cmd=cmd_list,
-                cwd=project_dir,
-                project_id=project_id,
-                remediation_cmd=_format_run_install_remediation_cmd(
-                    args,
-                    failing_project_id=project_id,
-                ),
-            )
-
         cp = _run_manifest_task(
             cmd=cmd_list,
             cwd=project_dir,
             task_name=task_name,
             project_id=project_id,
         )
+        initial_bootstrap_failure = (
+            cp.returncode != 0
+            and task_name in {"lint", "test"}
+            and _is_pdm_command(cmd_list)
+            and _looks_like_pdm_bootstrap_prereq_failure(
+                task_name=task_name,
+                stdout=cp.stdout or "",
+                stderr=cp.stderr or "",
+            )
+        )
+        bootstrap_install_attempted = False
+        bootstrap_install_failed = False
+        if initial_bootstrap_failure:
+            install_cmd = tasks.get("install")
+            if install_cmd is not None:
+                install_cmd_list = _validate_task_cmd(install_cmd, where=f"projects.{project_id}.tasks.install")
+                bootstrap_install_attempted = True
+                _eprint(
+                    f"INFO: {project_id}: detected bootstrap prerequisite failure for tasks.{task_name}; "
+                    "running tasks.install and retrying once."
+                )
+                install_cp = _run_manifest_task(
+                    cmd=install_cmd_list,
+                    cwd=project_dir,
+                    task_name="install",
+                    project_id=project_id,
+                )
+                if install_cp.returncode == 0:
+                    cp = _run_manifest_task(
+                        cmd=cmd_list,
+                        cwd=project_dir,
+                        task_name=task_name,
+                        project_id=project_id,
+                    )
+                else:
+                    cp = install_cp
+                    bootstrap_install_failed = True
+
         if cp.returncode != 0:
+            final_bootstrap_failure = (
+                task_name in {"lint", "test"}
+                and _is_pdm_command(cmd_list)
+                and _looks_like_pdm_bootstrap_prereq_failure(
+                    task_name=task_name,
+                    stdout=cp.stdout or "",
+                    stderr=cp.stderr or "",
+                )
+            )
+            if initial_bootstrap_failure and (bootstrap_install_failed or final_bootstrap_failure or not bootstrap_install_attempted):
+                remediation_cmd = _format_run_install_remediation_cmd(
+                    args,
+                    failing_project_id=project_id,
+                )
+                failure_phrase = f"{task_name} failed before bootstrap prerequisites were satisfied."
+                if bootstrap_install_attempted and bootstrap_install_failed:
+                    failure_phrase = (
+                        f"{task_name} failed before bootstrap prerequisites were satisfied "
+                        "(tasks.install failed during automatic bootstrap)."
+                    )
+                elif bootstrap_install_attempted and final_bootstrap_failure:
+                    failure_phrase = (
+                        f"{task_name} failed before bootstrap prerequisites were satisfied "
+                        "(still failing after one automatic tasks.install retry)."
+                    )
+                raise ScaffoldError(
+                    f"{project_id}: {failure_phrase}\n"
+                    f"Observed: {_summarize_process_output(cp)}\n"
+                    f"Remediation: {remediation_cmd}\n"
+                    + _fresh_checkout_setup_hint()
+                )
             failures.append(f"{project_id}:{task_name} ({cp.returncode})")
             if not args.keep_going:
                 break

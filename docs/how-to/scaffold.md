@@ -63,9 +63,11 @@ python tools/scaffold/scaffold.py run test --project my-lib
 python tools/scaffold/scaffold.py run lint --project my-lib
 ```
 
-Run a task across all projects (skipping those without that task):
+Run a task across all projects (skipping those without that task). For first-use bootstrap, run install once before lint/test:
 
 ```bash
+python tools/scaffold/scaffold.py run install --all --skip-missing
+python tools/scaffold/scaffold.py run lint --all --skip-missing
 python tools/scaffold/scaffold.py run test --all --skip-missing
 ```
 
@@ -74,6 +76,6 @@ python tools/scaffold/scaffold.py run test --all --skip-missing
 ## Common pitfalls
 
 - **The app `usertest` is project id `cli`** (see `tools/scaffold/monorepo.toml`).
-- If `scaffold run lint` fails with a message about missing `ruff`, run installs first (for example: `python tools/scaffold/scaffold.py run install --all`).
+- If `scaffold run lint/test` fails with a bootstrap hint, run installs first (for example: `python tools/scaffold/scaffold.py run install --all --skip-missing`).
 - If you add a project but want to defer installs, use `--no-install`.
 - Some generators require external tools (Cookiecutter, Node, Terraform, …).

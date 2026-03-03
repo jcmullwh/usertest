@@ -809,20 +809,20 @@ def _run_selected_ticket(
                 effective_repo_input = remote_url
 
     if wants_handoff and not verification_commands and not bool(getattr(args, "skip_verify", False)):
-        install_gate = "python tools/scaffold/scaffold.py run --all --skip-missing install"
-        lint_gate = "python tools/scaffold/scaffold.py run --all --skip-missing lint"
-        test_gate = "python tools/scaffold/scaffold.py run --all --skip-missing test"
+        install_gate = "python tools/scaffold/scaffold.py run install --all --skip-missing"
+        lint_gate = "python tools/scaffold/scaffold.py run lint --all --skip-missing"
+        test_gate = "python tools/scaffold/scaffold.py run test --all --skip-missing"
 
         if str(args.exec_backend).strip().lower() == "docker":
             scaffold_prefix = (
                 'PYTHON_BIN=python; command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python3; '
-                '"$PYTHON_BIN" tools/scaffold/scaffold.py run --all --skip-missing '
+                '"$PYTHON_BIN" tools/scaffold/scaffold.py run '
             )
             verification_commands = [
                 "bash ./scripts/smoke.sh",
-                f"{scaffold_prefix}install",
-                f"{scaffold_prefix}lint",
-                f"{scaffold_prefix}test",
+                f"{scaffold_prefix}install --all --skip-missing",
+                f"{scaffold_prefix}lint --all --skip-missing",
+                f"{scaffold_prefix}test --all --skip-missing",
             ]
         elif os.name == "nt":
             verification_commands = [
