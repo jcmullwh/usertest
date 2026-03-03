@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tomllib
@@ -255,6 +256,81 @@ def test_scaffold_pdm_install_sets_venv_backend_when_virtualenv_missing(
     assert captured_env is not None
     assert captured_env["PDM_VENV_BACKEND"] == "venv"
     assert captured_env["VIRTUALENV_COPIES"] == "1"
+
+
+def test_scaffold_doctor_marks_virtualenv_unknown_for_external_pdm_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scaffold = _load_scaffold_module()
+
+    fake_root = tmp_path / "repo"
+    (fake_root / "tools" / "scaffold").mkdir(parents=True, exist_ok=True)
+    (fake_root / "packages" / "demo").mkdir(parents=True, exist_ok=True)
+
+    (fake_root / "tools" / "scaffold" / "registry.toml").write_text(
+        "\n".join(
+            [
+                "[kinds.lib]",
+                'output_dir = "packages"',
+                'default_generator = "python_pdm_lib"',
+                "ci = { lint = true, test = true, build = false }",
+                "",
+                "[generators.python_pdm_lib]",
+                'type = "copy"',
+                'source = "tools/templates/internal/python-pdm-lib"',
+                'toolchain = "python"',
+                'package_manager = "pdm"',
+                'tasks.install = ["pdm", "install"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    (fake_root / "tools" / "scaffold" / "monorepo.toml").write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                "",
+                "[[projects]]",
+                'id = "demo"',
+                'kind = "lib"',
+                'path = "packages/demo"',
+                'generator = "python_pdm_lib"',
+                'toolchain = "python"',
+                'package_manager = "pdm"',
+                "ci = { lint = false, test = false, build = false }",
+                'tasks.install = ["pdm", "install"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(scaffold, "_repo_root", lambda: fake_root)
+    monkeypatch.setattr(scaffold, "_pdm_importable", lambda: False)
+    monkeypatch.setattr(scaffold, "_virtualenv_importable", lambda: False)
+    monkeypatch.setattr(
+        scaffold,
+        "_which",
+        lambda cmd: {
+            "pdm": "/usr/bin/pdm",
+            "git": "/usr/bin/git",
+            "bash": "/bin/bash",
+        }.get(cmd),
+    )
+    monkeypatch.setattr(scaffold, "_probe_tool_version", lambda **kwargs: (True, "ok", None))
+
+    doctor_args = scaffold.argparse.Namespace(skip_tool_checks=False, require_pip=False)
+    assert scaffold.cmd_doctor(doctor_args) == 0
+
+    report_path = fake_root / ".scaffold" / "doctor_tool_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    venv_baseline = report["baseline"]["virtualenv"]
+    assert venv_baseline["ok"] is None
+    assert venv_baseline["scope"] == "external_pdm_interpreter_unknown"
+    assert venv_baseline["ok_in_checked_python"] is False
 
 
 def test_scaffold_lint_bootstraps_install_when_ruff_probe_fails(

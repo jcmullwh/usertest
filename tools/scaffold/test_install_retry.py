@@ -35,6 +35,75 @@ def test_does_not_mark_unrelated_install_error_as_transient() -> None:
     assert not scaffold._looks_like_transient_pdm_local_path_failure(stdout="", stderr=stderr)
 
 
+def test_run_manifest_task_injects_ignore_active_venv_for_non_install_pdm(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_env: dict[str, str] | None = None
+
+    def fake_run(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        capture: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        del argv, cwd
+        nonlocal captured_env
+        captured_env = env
+        assert capture is False
+        return subprocess.CompletedProcess(args=["pdm", "run", "pytest", "-q"], returncode=0)
+
+    monkeypatch.setattr(scaffold, "_run", fake_run)
+
+    cp = scaffold._run_manifest_task(
+        cmd=["pdm", "run", "pytest", "-q"],
+        cwd=tmp_path,
+        task_name="test",
+        project_id="demo",
+    )
+    assert cp.returncode == 0
+    assert captured_env is not None
+    assert captured_env["PDM_IGNORE_ACTIVE_VENV"] == "1"
+    assert "VIRTUALENV_COPIES" not in captured_env
+    assert "PDM_VENV_BACKEND" not in captured_env
+
+
+def test_run_manifest_task_injects_install_env_when_virtualenv_available(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured_env: dict[str, str] | None = None
+
+    def fake_run(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        capture: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        del argv, cwd
+        nonlocal captured_env
+        captured_env = env
+        assert capture is True
+        return subprocess.CompletedProcess(args=["pdm", "install"], returncode=0)
+
+    monkeypatch.setattr(scaffold, "_run", fake_run)
+    monkeypatch.setattr(scaffold, "_virtualenv_importable", lambda: True)
+
+    cp = scaffold._run_manifest_task(
+        cmd=["pdm", "install"],
+        cwd=tmp_path,
+        task_name="install",
+        project_id="demo",
+    )
+    assert cp.returncode == 0
+    assert captured_env is not None
+    assert captured_env["PDM_IGNORE_ACTIVE_VENV"] == "1"
+    assert captured_env["VIRTUALENV_COPIES"] == "1"
+    assert "PDM_VENV_BACKEND" not in captured_env
+
+
 def test_run_manifest_task_retries_once_for_known_transient_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
