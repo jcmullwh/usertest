@@ -474,9 +474,10 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
         cwd: Path,
         timeout_seconds: float | None,
         python_executable: str | None,
+        env_overrides: dict[str, str] | None = None,
         execution_shell: str | None = None,
     ) -> dict[str, Any]:
-        del command_prefix, cwd, timeout_seconds, execution_shell
+        del command_prefix, cwd, timeout_seconds, env_overrides, execution_shell
         assert python_executable == selected_runtime_path
         artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
         artifacts_dir = run_dir / artifacts_dir_rel
