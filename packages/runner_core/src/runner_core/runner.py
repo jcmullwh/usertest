@@ -2656,6 +2656,104 @@ def _align_python_command_diagnostics(
             diag["remediation"] = failure.get("remediation")
 
 
+def _validate_python_capability(
+    *,
+    workspace_dir: Path,
+    verification_commands: tuple[str, ...],
+    command_prefix: list[str],
+    cwd: Path,
+    env_overrides: dict[str, str] | None,
+) -> dict[str, Any]:
+    """
+    Single Python capability validator used for both preflight gating and execution rewrites.
+
+    It performs ordered candidate evaluation via `select_python_runtime` and, when verification
+    needs Python, validates effective execution-path usability with a context probe.
+    """
+
+    python_runtime = select_python_runtime(
+        workspace_dir=workspace_dir,
+        environment=env_overrides,
+    )
+    python_runtime_summary = python_runtime.to_dict()
+    python_validation_required = verification_commands_need_python(verification_commands)
+
+    python_context_probe: dict[str, Any] | None = None
+    if python_validation_required and python_runtime.selected is not None:
+        python_context_probe = _probe_python_context_capability(
+            command_prefix=command_prefix,
+            cwd=cwd,
+            env_overrides=env_overrides,
+            python_executable=python_runtime.selected.path if not command_prefix else None,
+        )
+
+    python_validation_enabled = not python_validation_required
+    python_validation_reason_code: str | None = None
+    python_validation_reason_type: str | None = None
+    python_validation_reason: str | None = None
+    if python_validation_required:
+        if python_runtime.selected is None:
+            primary_rejection = _primary_runtime_rejection(python_runtime_summary)
+            python_validation_reason_code = (
+                primary_rejection.get("reason_code")
+                if isinstance(primary_rejection.get("reason_code"), str)
+                else "python_unavailable"
+            )
+            python_validation_reason_type = (
+                primary_rejection.get("reason_type")
+                if isinstance(primary_rejection.get("reason_type"), str)
+                else _reason_type_for_code(python_validation_reason_code)
+            )
+            python_validation_reason = (
+                primary_rejection.get("reason")
+                if isinstance(primary_rejection.get("reason"), str)
+                else None
+            )
+        elif isinstance(python_context_probe, dict):
+            python_validation_enabled = bool(python_context_probe.get("passed", False))
+            if not python_validation_enabled:
+                probe_reason_code = python_context_probe.get("reason_code")
+                python_validation_reason_code = (
+                    probe_reason_code
+                    if isinstance(probe_reason_code, str)
+                    else "runtime_probe_failed"
+                )
+                python_validation_reason_type = _reason_type_for_code(python_validation_reason_code)
+                probe_reason = python_context_probe.get("reason")
+                python_validation_reason = probe_reason if isinstance(probe_reason, str) else None
+        else:
+            python_validation_enabled = False
+            python_validation_reason_code = "runtime_probe_failed"
+            python_validation_reason_type = _reason_type_for_code(python_validation_reason_code)
+            python_validation_reason = (
+                "Python validation was required, but context probe metadata was missing."
+            )
+
+    validated_python_executable: str | None = None
+    if (
+        python_runtime.selected is not None
+        and not command_prefix
+        and (not python_validation_required or python_validation_enabled)
+    ):
+        selected_path = python_runtime.selected.path
+        if isinstance(selected_path, str) and selected_path.strip():
+            validated_python_executable = selected_path.strip()
+
+    return {
+        "runtime_selection": python_runtime,
+        "runtime_summary": python_runtime_summary,
+        "context_probe": python_context_probe,
+        "validation": {
+            "required": python_validation_required,
+            "enabled": python_validation_enabled,
+            "reason_code": python_validation_reason_code,
+            "reason_type": python_validation_reason_type,
+            "reason": python_validation_reason,
+            "validated_python_executable": validated_python_executable,
+        },
+    }
+
+
 def _probe_python_context_capability(
     *,
     command_prefix: list[str],
@@ -4117,10 +4215,38 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             python_interpreter_summary = (
                 python_interpreter_meta if isinstance(python_interpreter_meta, dict) else None
             )
-            python_runtime = select_python_runtime(workspace_dir=acquired.workspace_dir)
-            python_runtime_summary = python_runtime.to_dict()
-            python_validation_required = verification_commands_need_python(
-                request.verification_commands
+            python_capability = _validate_python_capability(
+                workspace_dir=acquired.workspace_dir,
+                verification_commands=request.verification_commands,
+                command_prefix=command_prefix,
+                cwd=acquired.workspace_dir,
+                env_overrides=agent_env_overrides,
+            )
+            python_runtime = python_capability["runtime_selection"]
+            python_runtime_summary = python_capability["runtime_summary"]
+            python_context_probe = python_capability["context_probe"]
+            python_validation = python_capability["validation"]
+            python_validation_required = bool(python_validation.get("required", False))
+            python_validation_enabled = bool(python_validation.get("enabled", False))
+            python_validation_reason_code = (
+                python_validation.get("reason_code")
+                if isinstance(python_validation.get("reason_code"), str)
+                else None
+            )
+            python_validation_reason_type = (
+                python_validation.get("reason_type")
+                if isinstance(python_validation.get("reason_type"), str)
+                else None
+            )
+            python_validation_reason = (
+                python_validation.get("reason")
+                if isinstance(python_validation.get("reason"), str)
+                else None
+            )
+            validated_python_executable_for_execution = (
+                python_validation.get("validated_python_executable")
+                if isinstance(python_validation.get("validated_python_executable"), str)
+                else None
             )
             pytest_validation_required = verification_commands_need_pytest(
                 request.verification_commands
@@ -4147,17 +4273,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     pytest_probe["reason_type"] = _reason_type_for_code(
                         reason_code if isinstance(reason_code, str) else None
                     )
-
-            python_context_probe: dict[str, Any] | None = None
-            if python_validation_required and python_runtime.selected is not None:
-                python_context_probe = _probe_python_context_capability(
-                    command_prefix=command_prefix,
-                    cwd=acquired.workspace_dir,
-                    env_overrides=agent_env_overrides,
-                    python_executable=(
-                        python_runtime.selected.path if not command_prefix else None
-                    ),
-                )
 
             command_diagnostics: dict[str, Any] = {}
             for cmd in effective_probe_commands:
@@ -4251,54 +4366,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 python_validation_required=python_validation_required,
             )
 
-            python_validation_enabled = not python_validation_required
-            python_validation_reason_code: str | None = None
-            python_validation_reason_type: str | None = None
-            python_validation_reason: str | None = None
-            if python_validation_required:
-                if python_runtime.selected is None:
-                    primary_rejection = _primary_runtime_rejection(python_runtime_summary)
-                    python_validation_reason_code = (
-                        primary_rejection.get("reason_code")
-                        if isinstance(primary_rejection.get("reason_code"), str)
-                        else "python_unavailable"
-                    )
-                    python_validation_reason_type = (
-                        primary_rejection.get("reason_type")
-                        if isinstance(primary_rejection.get("reason_type"), str)
-                        else _reason_type_for_code(python_validation_reason_code)
-                    )
-                    python_validation_reason = (
-                        primary_rejection.get("reason")
-                        if isinstance(primary_rejection.get("reason"), str)
-                        else None
-                    )
-                elif isinstance(python_context_probe, dict):
-                    python_validation_enabled = bool(python_context_probe.get("passed", False))
-                    if not python_validation_enabled:
-                        probe_reason_code = python_context_probe.get("reason_code")
-                        python_validation_reason_code = (
-                            probe_reason_code
-                            if isinstance(probe_reason_code, str)
-                            else "runtime_probe_failed"
-                        )
-                        python_validation_reason_type = _reason_type_for_code(
-                            python_validation_reason_code
-                        )
-                        probe_reason = python_context_probe.get("reason")
-                        python_validation_reason = (
-                            probe_reason if isinstance(probe_reason, str) else None
-                        )
-                else:
-                    python_validation_enabled = False
-                    python_validation_reason_code = "runtime_probe_failed"
-                    python_validation_reason_type = _reason_type_for_code(
-                        python_validation_reason_code
-                    )
-                    python_validation_reason = (
-                        "Python validation was required, but context probe metadata was missing."
-                    )
-
             required_agent_binary_present = (
                 preflight_commands_present.get(required_agent_binary)
                 if required_agent_binary is not None
@@ -4325,6 +4392,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "reason_code": python_validation_reason_code,
                         "reason_type": python_validation_reason_type,
                         "reason": python_validation_reason,
+                        "validated_python_executable": validated_python_executable_for_execution,
                     },
                     "pip_probe": pip_probe,
                     "pytest_probe": pytest_probe,
@@ -4377,6 +4445,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "reason_code": python_validation_reason_code,
                                 "reason_type": python_validation_reason_type,
                                 "reason": python_validation_reason,
+                                "validated_python_executable": (
+                                    validated_python_executable_for_execution
+                                ),
                             },
                             "command_diagnostics": command_diagnostics,
                         },
@@ -4419,6 +4490,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "reason_code": python_validation_reason_code,
                                 "reason_type": python_validation_reason_type,
                                 "reason": python_validation_reason,
+                                "validated_python_executable": (
+                                    validated_python_executable_for_execution
+                                ),
                             },
                             "pytest_probe": pytest_probe,
                             "command_diagnostics": command_diagnostics,
@@ -4938,6 +5012,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "reason_code": python_validation_reason_code,
                             "reason_type": python_validation_reason_type,
                             "reason": python_validation_reason,
+                            "validated_python_executable": (
+                                validated_python_executable_for_execution
+                            ),
                         },
                         "pip_probe": pip_probe,
                         "pytest_probe": pytest_probe,
@@ -5290,11 +5367,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     and not attempt_report_validation_errors
                     and verification_commands
                 ):
-                    python_exec_for_verification: str | None = None
-                    if not command_prefix:
-                        selection = select_python_runtime(workspace_dir=acquired.workspace_dir)
-                        if selection.selected is not None and selection.selected.path.strip():
-                            python_exec_for_verification = selection.selected.path
+                    python_exec_for_verification: str | None = (
+                        validated_python_executable_for_execution if not command_prefix else None
+                    )
 
                     attempt_verification_summary = _run_verification_commands(
                         run_dir=run_dir,
