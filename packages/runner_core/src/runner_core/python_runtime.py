@@ -14,8 +14,17 @@ from typing import Any
 _LOG = logging.getLogger(__name__)
 
 _PYTHON_HEALTH_PROBE = (
-    "import encodings, json, sys; "
-    "print(json.dumps({'executable': sys.executable, 'version': sys.version.split()[0]}))"
+    "import encodings, json, os, sys; "
+    "print(json.dumps({"
+    "'executable': sys.executable, "
+    "'version': sys.version.split()[0], "
+    "'prefix': sys.prefix, "
+    "'base_prefix': getattr(sys, 'base_prefix', None), "
+    "'real_prefix': getattr(sys, 'real_prefix', None), "
+    "'exec_prefix': sys.exec_prefix, "
+    "'base_exec_prefix': getattr(sys, 'base_exec_prefix', None), "
+    "'virtual_env': os.environ.get('VIRTUAL_ENV')"
+    "}))"
 )
 
 
@@ -47,6 +56,26 @@ def _probe_failure_reason(stderr_text: str, stdout_text: str) -> tuple[str, str]
     if "the system cannot find the file specified" in lowered:
         return "not_found", merged
     return "runtime_probe_failed", merged
+
+
+def _reason_type_for_reason_code(reason_code: str | None) -> str | None:
+    if not isinstance(reason_code, str) or not reason_code.strip():
+        return None
+    code = reason_code.strip().lower()
+    if code in {"not_found", "windowsapps_alias"}:
+        return "discovery"
+    if code in {"launch_failed", "access_denied", "timeout"}:
+        return "execution"
+    if code in {"pip_missing", "pytest_missing"}:
+        return "dependency"
+    if code in {
+        "missing_stdlib",
+        "runtime_probe_failed",
+        "pip_probe_failed",
+        "pytest_probe_failed",
+    }:
+        return "runtime"
+    return "unknown"
 
 
 def _windows_where_all(command: str, *, timeout_seconds: float = 2.0) -> list[str]:
@@ -122,6 +151,12 @@ class PythonRuntimeCandidate:
     reason: str | None = None
     version: str | None = None
     executable: str | None = None
+    prefix: str | None = None
+    base_prefix: str | None = None
+    real_prefix: str | None = None
+    exec_prefix: str | None = None
+    base_exec_prefix: str | None = None
+    virtual_env: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -130,9 +165,16 @@ class PythonRuntimeCandidate:
             "present": self.present,
             "usable": self.usable,
             "reason_code": self.reason_code,
+            "reason_type": _reason_type_for_reason_code(self.reason_code),
             "reason": self.reason,
             "version": self.version,
             "executable": self.executable,
+            "prefix": self.prefix,
+            "base_prefix": self.base_prefix,
+            "real_prefix": self.real_prefix,
+            "exec_prefix": self.exec_prefix,
+            "base_exec_prefix": self.base_exec_prefix,
+            "virtual_env": self.virtual_env,
         }
 
 
@@ -259,6 +301,12 @@ def _probe_python_executable(
 
     executable = payload.get("executable")
     version = payload.get("version")
+    prefix = payload.get("prefix")
+    base_prefix = payload.get("base_prefix")
+    real_prefix = payload.get("real_prefix")
+    exec_prefix = payload.get("exec_prefix")
+    base_exec_prefix = payload.get("base_exec_prefix")
+    virtual_env = payload.get("virtual_env")
     return PythonRuntimeCandidate(
         source=source,
         path=raw,
@@ -266,6 +314,12 @@ def _probe_python_executable(
         usable=True,
         executable=executable if isinstance(executable, str) else None,
         version=version if isinstance(version, str) else None,
+        prefix=prefix if isinstance(prefix, str) else None,
+        base_prefix=base_prefix if isinstance(base_prefix, str) else None,
+        real_prefix=real_prefix if isinstance(real_prefix, str) else None,
+        exec_prefix=exec_prefix if isinstance(exec_prefix, str) else None,
+        base_exec_prefix=base_exec_prefix if isinstance(base_exec_prefix, str) else None,
+        virtual_env=virtual_env if isinstance(virtual_env, str) else None,
     )
 
 
@@ -478,6 +532,7 @@ def probe_pytest_module(
         "exit_code": exit_code,
         "timed_out": timed_out,
         "reason_code": reason_code,
+        "reason_type": _reason_type_for_reason_code(reason_code),
         "remediation": remediation,
         "stdout_tail": _tail(stdout_text),
         "stderr_tail": _tail(stderr_text),
@@ -583,6 +638,7 @@ def probe_pip_module(
         "exit_code": exit_code,
         "timed_out": timed_out,
         "reason_code": reason_code,
+        "reason_type": _reason_type_for_reason_code(reason_code),
         "remediation": remediation,
         "stdout_tail": _tail(stdout_text),
         "stderr_tail": _tail(stderr_text),
@@ -592,6 +648,10 @@ def probe_pip_module(
 
 _VERIFICATION_PYTEST_CMD_PATTERN = re.compile(r"^(?:&\s*)?pytest(\s|$)", re.IGNORECASE)
 _VERIFICATION_PYTEST_MODULE_PATTERN = re.compile(r"(?:^|\s)-m\s+pytest(?:\s|$)", re.IGNORECASE)
+_VERIFICATION_PYTHON_CMD_PATTERN = re.compile(
+    r"^(?:&\s*)?(?:python|python3|py)(?:\s|$)",
+    re.IGNORECASE,
+)
 _VERIFICATION_INSTALL_PATTERN = re.compile(
     r"\b(pip|pdm|poetry|uv)\b.*\binstall\b",
     re.IGNORECASE,
@@ -603,6 +663,20 @@ def verification_commands_need_pytest(commands: tuple[str, ...]) -> bool:
         if not isinstance(raw, str) or not raw.strip():
             continue
         stripped = raw.strip()
+        if _VERIFICATION_PYTEST_CMD_PATTERN.search(stripped):
+            return True
+        if _VERIFICATION_PYTEST_MODULE_PATTERN.search(stripped):
+            return True
+    return False
+
+
+def verification_commands_need_python(commands: tuple[str, ...]) -> bool:
+    for raw in commands:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        stripped = raw.strip()
+        if _VERIFICATION_PYTHON_CMD_PATTERN.search(stripped):
+            return True
         if _VERIFICATION_PYTEST_CMD_PATTERN.search(stripped):
             return True
         if _VERIFICATION_PYTEST_MODULE_PATTERN.search(stripped):

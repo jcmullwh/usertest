@@ -52,6 +52,13 @@ def _install_no_requirements_mission(target_repo: Path) -> None:
 
 
 def test_verification_command_helpers_detect_pytest_and_provisioning() -> None:
+    assert (
+        runtime_mod.verification_commands_need_python(("python tools/scaffold/scaffold.py",))
+        is True
+    )
+    assert runtime_mod.verification_commands_need_python(("pytest -q",)) is True
+    assert runtime_mod.verification_commands_need_python(("echo hello",)) is False
+
     assert runtime_mod.verification_commands_need_pytest(("pytest -q",)) is True
     assert runtime_mod.verification_commands_need_pytest(("python -m pytest -q",)) is True
     assert runtime_mod.verification_commands_need_pytest(("echo hello",)) is False
@@ -351,4 +358,3 @@ def test_rewrite_verification_command_preserves_windows_backslashes_powershell(
         f"Drive+backslash prefix {drive_prefix!r} collapsed in rewritten command.\n"
         f"Got: {cmd!r}"
     )
-
