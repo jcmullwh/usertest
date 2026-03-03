@@ -4119,6 +4119,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
             python_runtime = select_python_runtime(workspace_dir=acquired.workspace_dir)
             python_runtime_summary = python_runtime.to_dict()
+            preflight_python_executable = (
+                python_runtime.selected.path.strip()
+                if python_runtime.selected is not None
+                and isinstance(python_runtime.selected.path, str)
+                and python_runtime.selected.path.strip()
+                else None
+            )
             python_validation_required = verification_commands_need_python(
                 request.verification_commands
             )
@@ -5290,11 +5297,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     and not attempt_report_validation_errors
                     and verification_commands
                 ):
-                    python_exec_for_verification: str | None = None
-                    if not command_prefix:
-                        selection = select_python_runtime(workspace_dir=acquired.workspace_dir)
-                        if selection.selected is not None and selection.selected.path.strip():
-                            python_exec_for_verification = selection.selected.path
+                    python_exec_for_verification = (
+                        preflight_python_executable if not command_prefix else None
+                    )
 
                     attempt_verification_summary = _run_verification_commands(
                         run_dir=run_dir,

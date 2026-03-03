@@ -261,16 +261,23 @@ def test_two_stage_python_preflight_detects_context_mismatch(
     assert result.exit_code == 1
     preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
     assert preflight.get("commands", {}).get("python") is True
-    assert preflight.get("command_diagnostics", {}).get("python", {}).get("status") == "unusable"
-    assert (
-        preflight.get("command_diagnostics", {}).get("python", {}).get("reason_code")
-        == "launch_failed"
-    )
+    python_diag = preflight.get("command_diagnostics", {}).get("python", {})
+    assert python_diag.get("status") == "unusable"
+    assert python_diag.get("reason_code") == "launch_failed"
+    assert python_diag.get("reason_type") == "execution"
+    assert "blocked in this environment" in str(python_diag.get("remediation", ""))
     assert preflight.get("python_runtime", {}).get("selected") is None
+    python_validation = preflight.get("python_validation", {})
+    assert python_validation.get("required") is True
+    assert python_validation.get("enabled") is False
+    assert python_validation.get("reason_code") == "launch_failed"
+    assert python_validation.get("reason_type") == "execution"
+    assert preflight.get("python_context_probe") is None
 
     error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
     assert error_obj.get("type") == "AgentPreflightFailed"
     assert error_obj.get("subtype") == "python_unavailable"
+    assert "python context preflight failed" in str(error_obj.get("message", "")).lower()
     python_status = (
         error_obj.get("preflight", {})
         .get("command_diagnostics", {})
@@ -281,6 +288,10 @@ def test_two_stage_python_preflight_detects_context_mismatch(
     rejected = error_obj.get("preflight", {}).get("python_runtime", {}).get("rejected", [])
     assert isinstance(rejected, list)
     assert rejected and rejected[0].get("reason_code") == "launch_failed"
+    assert (
+        error_obj.get("preflight", {}).get("python_validation", {}).get("reason_type")
+        == "execution"
+    )
 
 
 def test_two_stage_python_preflight_classifies_windowsapps_backed_venv(
@@ -327,14 +338,26 @@ def test_two_stage_python_preflight_classifies_windowsapps_backed_venv(
     python_diag = preflight.get("command_diagnostics", {}).get("python", {})
     assert python_diag.get("status") == "unusable"
     assert python_diag.get("reason_code") == "windowsapps_alias"
+    assert python_diag.get("reason_type") == "discovery"
     assert "full CPython interpreter" in str(python_diag.get("remediation", ""))
+    python_validation = preflight.get("python_validation", {})
+    assert python_validation.get("reason_code") == "windowsapps_alias"
+    assert python_validation.get("reason_type") == "discovery"
 
     error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
     assert error_obj.get("type") == "AgentPreflightFailed"
     assert error_obj.get("subtype") == "python_unavailable"
+    assert "windowsapps alias" in str(error_obj.get("hint", "")).lower()
     rejected = error_obj.get("preflight", {}).get("python_runtime", {}).get("rejected", [])
     assert isinstance(rejected, list)
     assert any(item.get("reason_code") == "windowsapps_alias" for item in rejected)
+    assert (
+        error_obj.get("preflight", {})
+        .get("command_diagnostics", {})
+        .get("python", {})
+        .get("reason_type")
+        == "discovery"
+    )
 
 
 def test_two_stage_python_preflight_classifies_partial_runtime_pytest_failure(
@@ -400,6 +423,10 @@ def test_two_stage_python_preflight_classifies_partial_runtime_pytest_failure(
     assert result.exit_code == 1
     preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
     assert preflight.get("pytest_probe", {}).get("reason_code") == "pytest_missing"
+    assert preflight.get("pytest_probe", {}).get("reason_type") == "dependency"
+    assert preflight.get("pytest_probe", {}).get("passed") is False
+    assert preflight.get("pip_probe", {}).get("passed") is True
+    assert preflight.get("python_validation", {}).get("enabled") is True
 
     error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
     assert error_obj.get("type") == "AgentPreflightFailed"
@@ -409,6 +436,13 @@ def test_two_stage_python_preflight_classifies_partial_runtime_pytest_failure(
     )
     assert pytest_reason_code == "pytest_missing"
     assert "pip install -U pytest" in str(error_obj.get("hint", ""))
+    assert (
+        error_obj.get("preflight", {}).get("pytest_probe", {}).get("reason_type")
+        == "dependency"
+    )
+    assert "No module named pytest" in str(
+        error_obj.get("preflight", {}).get("pytest_probe", {}).get("stderr_tail", "")
+    )
 
 
 def test_two_stage_python_preflight_pass_path_records_metadata(
@@ -448,6 +482,8 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
         },
     )
 
+    verification_python: str | None = None
+
     def _fake_run_verification_commands(
         *,
         run_dir: Path,
@@ -459,15 +495,19 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
         python_executable: str | None,
         execution_shell: str | None = None,
     ) -> dict[str, Any]:
-        del command_prefix, cwd, timeout_seconds, python_executable, execution_shell
+        nonlocal verification_python
+        del command_prefix, cwd, timeout_seconds, execution_shell
+        verification_python = python_executable
         artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
         artifacts_dir = run_dir / artifacts_dir_rel
         artifacts_dir.mkdir(parents=True, exist_ok=True)
         summary = {
             "schema_version": 1,
+            "attempt": attempt_number,
             "passed": True,
             "wall_seconds": 0.01,
             "artifacts_dir": str(artifacts_dir_rel),
+            "python_executable": python_executable,
             "commands": [
                 {
                     "command": cmd,
@@ -516,4 +556,174 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
     preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
     assert preflight.get("command_diagnostics", {}).get("python", {}).get("status") == "present"
     assert preflight.get("python_runtime", {}).get("selected", {}).get("source") == "sandbox_env"
+    assert (
+        preflight.get("python_runtime", {}).get("selected", {}).get("path")
+        == "/usr/bin/python3.13"
+    )
+    assert preflight.get("python_validation", {}).get("enabled") is True
+    assert preflight.get("pip_probe", {}).get("passed") is True
     assert preflight.get("pytest_probe", {}).get("passed") is True
+    assert verification_python == "/usr/bin/python3.13"
+
+    verification = json.loads((result.run_dir / "verification.json").read_text(encoding="utf-8"))
+    assert verification.get("passed") is True
+    assert verification.get("python_executable") == "/usr/bin/python3.13"
+    commands = verification.get("commands")
+    assert isinstance(commands, list) and commands
+    assert commands[0].get("command") == "pytest -q"
+
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    runs = attempts.get("attempts")
+    assert isinstance(runs, list) and runs
+    assert runs[0].get("verification", {}).get("status") == "passed"
+
+
+def test_two_stage_python_preflight_keeps_verification_interpreter_consistent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = _load_scenario("healthy_pass")
+    preflight_runtime_fixture = scenario.get("python_runtime")
+    pip_probe = scenario.get("pip_probe")
+    pytest_probe = scenario.get("pytest_probe")
+    if not isinstance(preflight_runtime_fixture, dict):
+        raise AssertionError("healthy_pass missing python_runtime fixture")
+    if not isinstance(pip_probe, dict) or not isinstance(pytest_probe, dict):
+        raise AssertionError("healthy_pass missing probe fixtures")
+
+    _patch_local_probe(monkeypatch, scenario=scenario)
+
+    divergent_runtime_fixture = {
+        "selected": {
+            "source": "workspace_venv",
+            "path": "/workspace/.venv/bin/python",
+            "present": True,
+            "usable": True,
+            "reason_code": None,
+            "reason": None,
+            "version": "3.13.99",
+            "executable": "/workspace/.venv/bin/python",
+        },
+        "candidates": [
+            {
+                "source": "workspace_venv",
+                "path": "/workspace/.venv/bin/python",
+                "present": True,
+                "usable": True,
+                "reason_code": None,
+                "reason": None,
+                "version": "3.13.99",
+                "executable": "/workspace/.venv/bin/python",
+            }
+        ],
+    }
+
+    call_count = 0
+
+    def _select_python_runtime(
+        *args: object, **kwargs: object
+    ) -> runtime_mod.PythonRuntimeSelection:
+        nonlocal call_count
+        del args, kwargs
+        call_count += 1
+        if call_count == 1:
+            return _runtime_selection(preflight_runtime_fixture)
+        return _runtime_selection(divergent_runtime_fixture)
+
+    monkeypatch.setattr(runner_mod, "select_python_runtime", _select_python_runtime)
+    monkeypatch.setattr(
+        runner_mod, "probe_pip_module", lambda *args, **kwargs: dict(pip_probe)
+    )
+    monkeypatch.setattr(
+        runner_mod, "probe_pytest_module", lambda *args, **kwargs: dict(pytest_probe)
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_python_context_capability",
+        lambda *args, **kwargs: {
+            "passed": True,
+            "reason_code": None,
+            "reason_type": None,
+            "reason": None,
+            "remediation": None,
+        },
+    )
+
+    verification_python: str | None = None
+
+    def _fake_run_verification_commands(
+        *,
+        run_dir: Path,
+        attempt_number: int,
+        command_prefix: list[str],
+        commands: list[str],
+        cwd: Path,
+        timeout_seconds: float | None,
+        python_executable: str | None,
+        execution_shell: str | None = None,
+    ) -> dict[str, Any]:
+        nonlocal verification_python
+        del command_prefix, cwd, timeout_seconds, execution_shell
+        verification_python = python_executable
+        artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
+        artifacts_dir = run_dir / artifacts_dir_rel
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "schema_version": 1,
+            "attempt": attempt_number,
+            "passed": True,
+            "wall_seconds": 0.01,
+            "artifacts_dir": str(artifacts_dir_rel),
+            "python_executable": python_executable,
+            "commands": [
+                {
+                    "command": cmd,
+                    "argv": ["sh", "-lc", cmd],
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "rejected_sentinel": False,
+                }
+                for cmd in commands
+            ],
+        }
+        (artifacts_dir / "verification.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return summary
+
+    monkeypatch.setattr(runner_mod, "_run_verification_commands", _fake_run_verification_commands)
+
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": _make_dummy_codex_binary(tmp_path)}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            verification_commands=("pytest -q",),
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert call_count == 1
+    preflight_selected = _runtime_selection(preflight_runtime_fixture).selected
+    selected_path = preflight_selected.path if preflight_selected is not None else None
+    assert verification_python == selected_path
+
+    preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight.get("python_runtime", {}).get("selected", {}).get("path") == selected_path
+    verification = json.loads((result.run_dir / "verification.json").read_text(encoding="utf-8"))
+    assert verification.get("python_executable") == selected_path
