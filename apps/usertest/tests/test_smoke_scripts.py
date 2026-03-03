@@ -25,3 +25,12 @@ def test_smoke_scripts_exist_and_enforce_expected_contract() -> None:
         if path.name == "smoke.sh":
             assert "Smoke preflight failed:" in text
             assert "Choose one setup mode:" in text
+            skip_preflight_index = text.index('if [[ "${SKIP_INSTALL}" -eq 1 ]]; then')
+            guard_index = text.index('echo "==> Import-origin guard smoke"')
+            assert skip_preflight_index < guard_index
+        if path.name == "smoke.ps1":
+            assert "Smoke preflight failed:" in text
+            assert "Choose one setup mode:" in text
+            skip_preflight_index = text.index("if ($SkipInstall)")
+            guard_index = text.index("Write-Host '==> Import-origin guard smoke'")
+            assert skip_preflight_index < guard_index

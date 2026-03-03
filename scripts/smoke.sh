@@ -144,6 +144,25 @@ elif [[ "${USE_PYTHONPATH}" -eq 1 ]]; then
   source "${SCRIPT_DIR}/set_pythonpath.sh"
 fi
 
+if [[ "${SKIP_INSTALL}" -eq 1 ]]; then
+  PREFLIGHT_CODE=$'import importlib\n\nmods = [\n    "usertest",\n    "usertest.cli",\n    "usertest_backlog",\n    "usertest_backlog.cli",\n    "usertest_implement",\n    "usertest_implement.cli",\n    "agent_adapters",\n    "backlog_core",\n    "backlog_miner",\n    "backlog_repo",\n    "normalized_events",\n    "reporter",\n    "run_artifacts",\n    "runner_core",\n    "sandbox_runner",\n    "triage_engine",\n]\n\nerrors = []\nfor mod in mods:\n    try:\n        importlib.import_module(mod)\n    except Exception as e:\n        errors.append((mod, f"{type(e).__name__}: {e}"))\n\nif errors:\n    for mod, msg in errors:\n        print(f"{mod}: {msg}")\n    raise SystemExit(1)\n'
+
+  preflight_rc=0
+  preflight_out="$("${PYTHON_BIN}" -c "${PREFLIGHT_CODE}" 2>&1)" || preflight_rc=$?
+  if [[ "${preflight_rc}" -ne 0 ]]; then
+    echo "==> Smoke preflight failed: required imports are not available in this Python environment." >&2
+    if [[ -n "${preflight_out}" ]]; then
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        echo "    - ${line}" >&2
+      done <<<"${preflight_out}"
+    fi
+    echo "" >&2
+    print_skip_install_guidance
+    exit 1
+  fi
+fi
+
 guard_import_origin() {
   local guard_rc=0
   local guard_out=""
@@ -167,25 +186,6 @@ if ! guard_import_origin; then
     fi
   else
     exit "${guard_rc}"
-  fi
-fi
-
-if [[ "${SKIP_INSTALL}" -eq 1 ]]; then
-  PREFLIGHT_CODE=$'import importlib\n\nmods = [\n    "usertest",\n    "usertest.cli",\n    "usertest_backlog",\n    "usertest_backlog.cli",\n    "usertest_implement",\n    "usertest_implement.cli",\n    "agent_adapters",\n    "backlog_core",\n    "backlog_miner",\n    "backlog_repo",\n    "normalized_events",\n    "reporter",\n    "run_artifacts",\n    "runner_core",\n    "sandbox_runner",\n    "triage_engine",\n]\n\nerrors = []\nfor mod in mods:\n    try:\n        importlib.import_module(mod)\n    except Exception as e:\n        errors.append((mod, f"{type(e).__name__}: {e}"))\n\nif errors:\n    for mod, msg in errors:\n        print(f"{mod}: {msg}")\n    raise SystemExit(1)\n'
-
-  preflight_rc=0
-  preflight_out="$("${PYTHON_BIN}" -c "${PREFLIGHT_CODE}" 2>&1)" || preflight_rc=$?
-  if [[ "${preflight_rc}" -ne 0 ]]; then
-    echo "==> Smoke preflight failed: required imports are not available in this Python environment." >&2
-    if [[ -n "${preflight_out}" ]]; then
-      while IFS= read -r line; do
-        [[ -n "${line}" ]] || continue
-        echo "    - ${line}" >&2
-      done <<<"${preflight_out}"
-    fi
-    echo "" >&2
-    print_skip_install_guidance
-    exit 1
   fi
 fi
 
