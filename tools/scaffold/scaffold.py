@@ -486,6 +486,41 @@ def _emit_captured_process_output(cp: subprocess.CompletedProcess[str]) -> None:
             sys.stderr.write("\n")
 
 
+def _discover_monorepo_source_paths(*, repo_root: Path) -> list[str]:
+    entries: list[str] = []
+    for group in ("apps", "packages"):
+        base = repo_root / group
+        if not base.exists() or not base.is_dir():
+            continue
+        for child in sorted(base.iterdir(), key=lambda p: p.name):
+            src = child / "src"
+            if src.exists() and src.is_dir():
+                entries.append(str(src))
+    return entries
+
+
+def _inject_monorepo_pythonpath(*, env: dict[str, str], repo_root: Path) -> None:
+    discovered = _discover_monorepo_source_paths(repo_root=repo_root)
+    if not discovered:
+        return
+
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for item in discovered:
+        if item and item not in seen:
+            ordered.append(item)
+            seen.add(item)
+
+    existing = env.get("PYTHONPATH")
+    if existing:
+        for item in existing.split(os.pathsep):
+            if item and item not in seen:
+                ordered.append(item)
+                seen.add(item)
+
+    env["PYTHONPATH"] = os.pathsep.join(ordered)
+
+
 def _run_manifest_task(
     *,
     cmd: list[str],
@@ -493,10 +528,16 @@ def _run_manifest_task(
     task_name: str,
     project_id: str,
 ) -> subprocess.CompletedProcess[str]:
-    if not _is_pdm_command(cmd):
-        return _run(cmd, cwd=cwd)
+    env: dict[str, str] | None = None
+    if task_name == "test":
+        env = dict(os.environ)
+        _inject_monorepo_pythonpath(env=env, repo_root=_repo_root())
 
-    env = dict(os.environ)
+    if not _is_pdm_command(cmd):
+        return _run(cmd, cwd=cwd, env=env)
+
+    if env is None:
+        env = dict(os.environ)
     # PDM will reuse the currently active virtualenv by default. That's convenient for single-project workflows, but
     # causes surprising (and on Windows, sometimes broken) behavior when a monorepo task runner invokes PDM across many
     # projects. For example, `pdm install` may attempt to update the running CLI's own entrypoint executable, which
@@ -758,6 +799,7 @@ def _ruff_check_with_fix(cmd: list[str]) -> list[str] | None:
 
 
 _RUFF_COMMAND_NAMES: set[str] = {"ruff", "ruff.exe", "ruff.cmd", "ruff.bat"}
+_PYTEST_COMMAND_NAMES: set[str] = {"pytest", "pytest.exe", "pytest.cmd", "pytest.bat"}
 
 
 def _looks_like_pdm_run_ruff_check(cmd: list[str]) -> bool:
@@ -770,6 +812,15 @@ def _looks_like_pdm_run_ruff_check(cmd: list[str]) -> bool:
     )
 
 
+def _looks_like_pdm_run_pytest(cmd: list[str]) -> bool:
+    return (
+        len(cmd) >= 3
+        and _is_pdm_command(cmd)
+        and cmd[1] == "run"
+        and Path(cmd[2]).name.lower() in _PYTEST_COMMAND_NAMES
+    )
+
+
 def _format_run_install_remediation_cmd(
     args: argparse.Namespace,
     *,
@@ -778,20 +829,50 @@ def _format_run_install_remediation_cmd(
     parts: list[str] = ["python", "tools/scaffold/scaffold.py", "run", "install"]
     if bool(args.all):
         parts.append("--all")
-        return " ".join(parts)
-    kind = getattr(args, "kind", None)
-    if kind:
-        parts.extend(["--kind", str(kind)])
-        return " ".join(parts)
+    else:
+        kind = getattr(args, "kind", None)
+        if kind:
+            parts.extend(["--kind", str(kind)])
+        else:
+            selected_projects = getattr(args, "project", None)
+            if isinstance(selected_projects, list) and selected_projects:
+                for project_id in selected_projects:
+                    parts.extend(["--project", str(project_id)])
+            else:
+                parts.extend(["--project", failing_project_id])
 
-    selected_projects = getattr(args, "project", None)
-    if isinstance(selected_projects, list) and selected_projects:
-        for project_id in selected_projects:
-            parts.extend(["--project", str(project_id)])
-        return " ".join(parts)
-
-    parts.extend(["--project", failing_project_id])
+    if bool(getattr(args, "skip_missing", False)):
+        parts.append("--skip-missing")
     return " ".join(parts)
+
+
+def _ensure_pdm_run_tool_available(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    project_id: str,
+    task_name: str,
+    tool_name: str,
+    remediation_cmd: str,
+    skip_missing: bool,
+) -> bool:
+    env = dict(os.environ)
+    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+
+    probe_argv = [cmd[0], "run", cmd[2], "--version"]
+    cp = _probe(probe_argv, cwd=cwd, env=env)
+    if cp.returncode == 0:
+        return True
+
+    msg = (
+        f"{project_id}: {task_name} requires {tool_name!r} but it is not available in this project's PDM environment.\n"
+        f"Remediation: {remediation_cmd}"
+    )
+    if skip_missing:
+        _eprint(f"WARNING: {msg} (skipping)")
+        return False
+
+    raise ScaffoldError(msg)
 
 
 def _ensure_ruff_available_for_lint(
@@ -800,21 +881,41 @@ def _ensure_ruff_available_for_lint(
     cwd: Path,
     project_id: str,
     remediation_cmd: str,
-) -> None:
+    skip_missing: bool,
+) -> bool:
     if not _looks_like_pdm_run_ruff_check(cmd):
-        return
+        return True
 
-    env = dict(os.environ)
-    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+    return _ensure_pdm_run_tool_available(
+        cmd=cmd,
+        cwd=cwd,
+        project_id=project_id,
+        task_name="lint",
+        tool_name="ruff",
+        remediation_cmd=remediation_cmd,
+        skip_missing=skip_missing,
+    )
 
-    probe_argv = [cmd[0], "run", cmd[2], "--version"]
-    cp = _probe(probe_argv, cwd=cwd, env=env)
-    if cp.returncode == 0:
-        return
 
-    raise ScaffoldError(
-        f"{project_id}: lint requires 'ruff' but it is not available in this project's PDM environment.\n"
-        f"Remediation: {remediation_cmd}"
+def _ensure_pytest_available_for_test(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    project_id: str,
+    remediation_cmd: str,
+    skip_missing: bool,
+) -> bool:
+    if not _looks_like_pdm_run_pytest(cmd):
+        return True
+
+    return _ensure_pdm_run_tool_available(
+        cmd=cmd,
+        cwd=cwd,
+        project_id=project_id,
+        task_name="test",
+        tool_name="pytest",
+        remediation_cmd=remediation_cmd,
+        skip_missing=skip_missing,
     )
 
 
@@ -1384,8 +1485,9 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not project_dir.exists():
             raise ScaffoldError(f"{project_id}: project directory does not exist: {path}")
 
+        should_run_task = True
         if task_name == "lint":
-            _ensure_ruff_available_for_lint(
+            should_run_task = _ensure_ruff_available_for_lint(
                 cmd=cmd_list,
                 cwd=project_dir,
                 project_id=project_id,
@@ -1393,7 +1495,21 @@ def cmd_run(args: argparse.Namespace) -> int:
                     args,
                     failing_project_id=project_id,
                 ),
+                skip_missing=bool(args.skip_missing),
             )
+        if task_name == "test":
+            should_run_task = _ensure_pytest_available_for_test(
+                cmd=cmd_list,
+                cwd=project_dir,
+                project_id=project_id,
+                remediation_cmd=_format_run_install_remediation_cmd(
+                    args,
+                    failing_project_id=project_id,
+                ),
+                skip_missing=bool(args.skip_missing),
+            )
+        if not should_run_task:
+            continue
 
         cp = _run_manifest_task(
             cmd=cmd_list,

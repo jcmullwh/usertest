@@ -119,6 +119,7 @@ python tools/scaffold/scaffold.py run test --project cli
 4) Run tasks across all projects (skip those without the task):
 
 ```bash
+python tools/scaffold/scaffold.py run install --all --skip-missing
 python tools/scaffold/scaffold.py run lint --all --skip-missing
 python tools/scaffold/scaffold.py run test --all --skip-missing
 ```

@@ -63,9 +63,11 @@ python tools/scaffold/scaffold.py run test --project my-lib
 python tools/scaffold/scaffold.py run lint --project my-lib
 ```
 
-Run a task across all projects (skipping those without that task):
+Run tasks across all projects in a fresh environment (skip projects that do not define a task):
 
 ```bash
+python tools/scaffold/scaffold.py run install --all --skip-missing
+python tools/scaffold/scaffold.py run lint --all --skip-missing
 python tools/scaffold/scaffold.py run test --all --skip-missing
 ```
 
