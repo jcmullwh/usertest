@@ -261,7 +261,11 @@ def test_two_stage_python_preflight_detects_context_mismatch(
     assert result.exit_code == 1
     preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
     assert preflight.get("commands", {}).get("python") is True
-    assert preflight.get("command_diagnostics", {}).get("python", {}).get("status") == "present"
+    assert preflight.get("command_diagnostics", {}).get("python", {}).get("status") == "unusable"
+    assert (
+        preflight.get("command_diagnostics", {}).get("python", {}).get("reason_code")
+        == "launch_failed"
+    )
     assert preflight.get("python_runtime", {}).get("selected") is None
 
     error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
@@ -273,7 +277,7 @@ def test_two_stage_python_preflight_detects_context_mismatch(
         .get("python", {})
         .get("status")
     )
-    assert python_status == "present"
+    assert python_status == "unusable"
     rejected = error_obj.get("preflight", {}).get("python_runtime", {}).get("rejected", [])
     assert isinstance(rejected, list)
     assert rejected and rejected[0].get("reason_code") == "launch_failed"
@@ -358,6 +362,17 @@ def test_two_stage_python_preflight_classifies_partial_runtime_pytest_failure(
     monkeypatch.setattr(
         runner_mod, "probe_pytest_module", lambda *args, **kwargs: dict(pytest_probe)
     )
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_python_context_capability",
+        lambda *args, **kwargs: {
+            "passed": True,
+            "reason_code": None,
+            "reason_type": None,
+            "reason": None,
+            "remediation": None,
+        },
+    )
 
     repo_root = find_repo_root(Path(__file__).resolve())
     target = tmp_path / "target_repo"
@@ -420,6 +435,17 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
     )
     monkeypatch.setattr(
         runner_mod, "probe_pytest_module", lambda *args, **kwargs: dict(pytest_probe)
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_python_context_capability",
+        lambda *args, **kwargs: {
+            "passed": True,
+            "reason_code": None,
+            "reason_type": None,
+            "reason": None,
+            "remediation": None,
+        },
     )
 
     def _fake_run_verification_commands(

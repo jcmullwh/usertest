@@ -28,6 +28,7 @@ from agent_adapters import (
     validate_codex_reasoning_effort_config_overrides,
 )
 from agent_adapters.codex_config import toml_basic_string
+from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
 from normalized_events import iter_events_jsonl, make_event
 from reporter import (
     compute_metrics,
@@ -64,6 +65,7 @@ from runner_core.python_runtime import (
     select_python_runtime,
     verification_commands_may_provision_pytest,
     verification_commands_need_pytest,
+    verification_commands_need_python,
 )
 from runner_core.run_spec import resolve_effective_run_inputs
 from runner_core.target_acquire import acquire_target
@@ -2526,6 +2528,273 @@ def _tail_text_for_prompt(text: str, *, max_chars: int = 2000) -> str:
     return cleaned[-max_chars:]
 
 
+_PYTHON_CONTEXT_HEALTH_PROBE = (
+    "import encodings, json, os, sys; "
+    "print(json.dumps({"
+    "\"executable\": sys.executable, "
+    "\"version\": sys.version.split()[0], "
+    "\"prefix\": sys.prefix, "
+    "\"base_prefix\": getattr(sys, \"base_prefix\", None), "
+    "\"real_prefix\": getattr(sys, \"real_prefix\", None), "
+    "\"exec_prefix\": sys.exec_prefix, "
+    "\"base_exec_prefix\": getattr(sys, \"base_exec_prefix\", None), "
+    "\"virtual_env\": os.environ.get(\"VIRTUAL_ENV\")"
+    "}))"
+)
+
+
+def _reason_type_for_code(reason_code: str | None) -> str | None:
+    if not isinstance(reason_code, str) or not reason_code.strip():
+        return None
+    code = reason_code.strip().lower()
+    if code in {"not_found", "windowsapps_alias"}:
+        return "discovery"
+    if code in {"launch_failed", "access_denied", "timeout"}:
+        return "execution"
+    if code in {"pip_missing", "pytest_missing"}:
+        return "dependency"
+    if code in {
+        "missing_stdlib",
+        "runtime_probe_failed",
+        "pip_probe_failed",
+        "pytest_probe_failed",
+    }:
+        return "runtime"
+    return "unknown"
+
+
+def _python_probe_remediation(reason_code: str | None) -> str | None:
+    if not isinstance(reason_code, str):
+        return None
+    code = reason_code.strip().lower()
+    if code == "windowsapps_alias":
+        return "Install/select a full CPython interpreter (not a WindowsApps alias), then retry."
+    if code in {"launch_failed", "access_denied"}:
+        return "Python execution is blocked in this environment. Verify sandbox/policy access."
+    if code == "missing_stdlib":
+        return "Selected Python runtime is incomplete (missing stdlib). Reinstall Python."
+    if code == "timeout":
+        return "Python interpreter probe timed out. Verify interpreter health and policy limits."
+    if code == "not_found":
+        return "Python command is unavailable in the effective agent execution context."
+    return "Inspect probe stderr/stdout and selected interpreter metadata in preflight.json."
+
+
+def _primary_runtime_rejection(python_runtime_summary: dict[str, Any]) -> dict[str, Any]:
+    rejected = python_runtime_summary.get("rejected")
+    if isinstance(rejected, list):
+        for item in rejected:
+            if not isinstance(item, dict):
+                continue
+            reason_code = item.get("reason_code")
+            reason = item.get("reason")
+            if isinstance(reason_code, str) and reason_code.strip():
+                return {
+                    "reason_code": reason_code.strip(),
+                    "reason_type": _reason_type_for_code(reason_code),
+                    "reason": reason if isinstance(reason, str) and reason.strip() else None,
+                    "remediation": _python_probe_remediation(reason_code),
+                }
+    return {
+        "reason_code": "python_unavailable",
+        "reason_type": "discovery",
+        "reason": "No usable Python runtime candidate was selected.",
+        "remediation": _python_probe_remediation("not_found"),
+    }
+
+
+def _align_python_command_diagnostics(
+    *,
+    command_diagnostics: dict[str, Any],
+    python_runtime_summary: dict[str, Any],
+    python_context_probe: dict[str, Any] | None,
+    python_validation_required: bool,
+) -> None:
+    selected = python_runtime_summary.get("selected")
+    selected_ok = isinstance(selected, dict)
+
+    failure: dict[str, Any] | None = None
+    if not selected_ok:
+        failure = _primary_runtime_rejection(python_runtime_summary)
+    elif python_validation_required and isinstance(python_context_probe, dict):
+        if not bool(python_context_probe.get("passed", False)):
+            reason_code = python_context_probe.get("reason_code")
+            reason = python_context_probe.get("reason")
+            failure = {
+                "reason_code": (
+                    reason_code if isinstance(reason_code, str) else "runtime_probe_failed"
+                ),
+                "reason_type": _reason_type_for_code(
+                    reason_code if isinstance(reason_code, str) else None
+                ),
+                "reason": reason if isinstance(reason, str) and reason.strip() else None,
+                "remediation": (
+                    python_context_probe.get("remediation")
+                    if isinstance(python_context_probe.get("remediation"), str)
+                    else _python_probe_remediation(
+                        reason_code if isinstance(reason_code, str) else None
+                    )
+                ),
+            }
+
+    if failure is None:
+        return
+
+    for command in ("python", "python3", "py"):
+        diag = command_diagnostics.get(command)
+        if not isinstance(diag, dict):
+            continue
+        if diag.get("status") == "missing":
+            continue
+        diag["usable"] = False
+        diag["status"] = "unusable"
+        diag["reason_code"] = failure.get("reason_code")
+        diag["reason_type"] = failure.get("reason_type")
+        if isinstance(failure.get("reason"), str):
+            diag["reason"] = failure.get("reason")
+        if isinstance(failure.get("remediation"), str):
+            diag["remediation"] = failure.get("remediation")
+
+
+def _probe_python_context_capability(
+    *,
+    command_prefix: list[str],
+    cwd: Path,
+    env_overrides: dict[str, str] | None,
+    python_executable: str | None,
+    timeout_seconds: float = 6.0,
+) -> dict[str, Any]:
+    is_powershell = (not command_prefix) and _is_windows()
+    probe_command = f"python -c {shlex.quote(_PYTHON_CONTEXT_HEALTH_PROBE)}"
+    effective_command = probe_command
+    if not command_prefix:
+        effective_command, _ = _rewrite_verification_command_for_python(
+            probe_command,
+            python_executable=python_executable,
+            is_powershell=is_powershell,
+        )
+
+    merged_env: dict[str, str] | None = None
+    effective_prefix = list(command_prefix)
+    if env_overrides:
+        safe_overrides = {
+            key: value
+            for key, value in env_overrides.items()
+            if isinstance(key, str) and isinstance(value, str)
+        }
+        if safe_overrides:
+            if effective_prefix and looks_like_docker_exec_prefix(effective_prefix):
+                effective_prefix = inject_docker_exec_env(effective_prefix, safe_overrides)
+            elif not effective_prefix:
+                merged_env = dict(os.environ)
+                merged_env.update(safe_overrides)
+
+    argv = _verification_shell_argv(command_prefix=effective_prefix, command=effective_command)
+
+    stdout_text = ""
+    stderr_text = ""
+    exit_code = 0
+    timed_out = False
+    exception: str | None = None
+    payload: dict[str, Any] | None = None
+
+    try:
+        proc = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(cwd),
+            timeout=max(0.1, float(timeout_seconds)),
+            check=False,
+            env=merged_env,
+        )
+        exit_code = int(proc.returncode or 0)
+        stdout_text = proc.stdout or ""
+        stderr_text = proc.stderr or ""
+    except subprocess.TimeoutExpired as exc:
+        timed_out = True
+        exit_code = 124
+        if isinstance(exc.stdout, bytes):
+            stdout_text = exc.stdout.decode("utf-8", "replace")
+        else:
+            stdout_text = exc.stdout or ""
+        if isinstance(exc.stderr, bytes):
+            stderr_text = exc.stderr.decode("utf-8", "replace")
+        else:
+            stderr_text = exc.stderr or ""
+    except OSError as exc:
+        exit_code = 1
+        exception = str(exc)
+
+    if exit_code == 0 and not timed_out and exception is None:
+        for line in reversed(stdout_text.splitlines()):
+            candidate = line.strip()
+            if not candidate:
+                continue
+            try:
+                decoded = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(decoded, dict):
+                payload = decoded
+                break
+
+    merged = "\n".join(value for value in (stderr_text, stdout_text, exception) if value).strip()
+    lowered = merged.lower()
+
+    reason_code: str | None = None
+    reason: str | None = None
+    if timed_out:
+        reason_code = "timeout"
+        reason = "Python context probe timed out."
+    elif exception is not None:
+        reason_code = "launch_failed"
+        reason = exception
+    elif exit_code != 0:
+        if "encodings" in lowered and (
+            "modulenotfounderror" in lowered or "no module named" in lowered
+        ):
+            reason_code = "missing_stdlib"
+        elif "access is denied" in lowered or "permission denied" in lowered:
+            reason_code = "access_denied"
+        elif "cannot be accessed by the system" in lowered:
+            reason_code = "access_denied"
+        elif "windowsapps" in lowered:
+            reason_code = "windowsapps_alias"
+        elif "not found" in lowered or "not recognized" in lowered:
+            reason_code = "not_found"
+        else:
+            reason_code = "runtime_probe_failed"
+        reason = merged or f"Probe command exited with code {exit_code}."
+    elif payload is None:
+        reason_code = "runtime_probe_failed"
+        reason = "Probe command succeeded but did not emit parseable JSON metadata."
+
+    passed = bool(exit_code == 0 and not timed_out and exception is None and payload is not None)
+    reason_type = _reason_type_for_code(reason_code)
+    remediation = _python_probe_remediation(reason_code)
+
+    return {
+        "command": "python -c <health_probe>",
+        "effective_command": effective_command,
+        "argv": argv,
+        "cwd": str(cwd),
+        "passed": passed,
+        "exit_code": exit_code,
+        "timed_out": timed_out,
+        "reason_code": reason_code,
+        "reason_type": reason_type,
+        "reason": reason,
+        "remediation": remediation,
+        "stdout_tail": _tail_text_for_prompt(stdout_text),
+        "stderr_tail": _tail_text_for_prompt(stderr_text),
+        "exception": exception,
+        "metadata": payload,
+    }
+
+
 def _run_verification_commands(
     *,
     run_dir: Path,
@@ -3850,20 +4119,44 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
             python_runtime = select_python_runtime(workspace_dir=acquired.workspace_dir)
             python_runtime_summary = python_runtime.to_dict()
+            python_validation_required = verification_commands_need_python(
+                request.verification_commands
+            )
+            pytest_validation_required = verification_commands_need_pytest(
+                request.verification_commands
+            )
             pip_probe: dict[str, Any] | None = None
             if python_runtime.selected is not None:
                 pip_probe = probe_pip_module(
                     python_executable=python_runtime.selected.path,
                     cwd=acquired.workspace_dir,
                 )
+                if isinstance(pip_probe, dict):
+                    reason_code = pip_probe.get("reason_code")
+                    pip_probe["reason_type"] = _reason_type_for_code(
+                        reason_code if isinstance(reason_code, str) else None
+                    )
             pytest_probe: dict[str, Any] | None = None
-            if (
-                verification_commands_need_pytest(request.verification_commands)
-                and python_runtime.selected is not None
-            ):
+            if pytest_validation_required and python_runtime.selected is not None:
                 pytest_probe = probe_pytest_module(
                     python_executable=python_runtime.selected.path,
                     cwd=acquired.workspace_dir,
+                )
+                if isinstance(pytest_probe, dict):
+                    reason_code = pytest_probe.get("reason_code")
+                    pytest_probe["reason_type"] = _reason_type_for_code(
+                        reason_code if isinstance(reason_code, str) else None
+                    )
+
+            python_context_probe: dict[str, Any] | None = None
+            if python_validation_required and python_runtime.selected is not None:
+                python_context_probe = _probe_python_context_capability(
+                    command_prefix=command_prefix,
+                    cwd=acquired.workspace_dir,
+                    env_overrides=agent_env_overrides,
+                    python_executable=(
+                        python_runtime.selected.path if not command_prefix else None
+                    ),
                 )
 
             command_diagnostics: dict[str, Any] = {}
@@ -3946,9 +4239,65 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "status": status,
                     "resolved_path": resolved_path_s,
                     "reason_code": reason_code_s,
+                    "reason_type": _reason_type_for_code(reason_code_s),
                     "reason": reason_s,
                     "remediation": remediation,
                 }
+
+            _align_python_command_diagnostics(
+                command_diagnostics=command_diagnostics,
+                python_runtime_summary=python_runtime_summary,
+                python_context_probe=python_context_probe,
+                python_validation_required=python_validation_required,
+            )
+
+            python_validation_enabled = not python_validation_required
+            python_validation_reason_code: str | None = None
+            python_validation_reason_type: str | None = None
+            python_validation_reason: str | None = None
+            if python_validation_required:
+                if python_runtime.selected is None:
+                    primary_rejection = _primary_runtime_rejection(python_runtime_summary)
+                    python_validation_reason_code = (
+                        primary_rejection.get("reason_code")
+                        if isinstance(primary_rejection.get("reason_code"), str)
+                        else "python_unavailable"
+                    )
+                    python_validation_reason_type = (
+                        primary_rejection.get("reason_type")
+                        if isinstance(primary_rejection.get("reason_type"), str)
+                        else _reason_type_for_code(python_validation_reason_code)
+                    )
+                    python_validation_reason = (
+                        primary_rejection.get("reason")
+                        if isinstance(primary_rejection.get("reason"), str)
+                        else None
+                    )
+                elif isinstance(python_context_probe, dict):
+                    python_validation_enabled = bool(python_context_probe.get("passed", False))
+                    if not python_validation_enabled:
+                        probe_reason_code = python_context_probe.get("reason_code")
+                        python_validation_reason_code = (
+                            probe_reason_code
+                            if isinstance(probe_reason_code, str)
+                            else "runtime_probe_failed"
+                        )
+                        python_validation_reason_type = _reason_type_for_code(
+                            python_validation_reason_code
+                        )
+                        probe_reason = python_context_probe.get("reason")
+                        python_validation_reason = (
+                            probe_reason if isinstance(probe_reason, str) else None
+                        )
+                else:
+                    python_validation_enabled = False
+                    python_validation_reason_code = "runtime_probe_failed"
+                    python_validation_reason_type = _reason_type_for_code(
+                        python_validation_reason_code
+                    )
+                    python_validation_reason = (
+                        "Python validation was required, but context probe metadata was missing."
+                    )
 
             required_agent_binary_present = (
                 preflight_commands_present.get(required_agent_binary)
@@ -3969,6 +4318,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "required_agent_binary_present": required_agent_binary_present,
                     "python_interpreter": python_interpreter_summary,
                     "python_runtime": python_runtime_summary,
+                    "python_context_probe": python_context_probe,
+                    "python_validation": {
+                        "required": python_validation_required,
+                        "enabled": python_validation_enabled,
+                        "reason_code": python_validation_reason_code,
+                        "reason_type": python_validation_reason_type,
+                        "reason": python_validation_reason,
+                    },
                     "pip_probe": pip_probe,
                     "pytest_probe": pytest_probe,
                     "capabilities": {
@@ -3988,73 +4345,91 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 },
             )
 
-            if verification_commands_need_pytest(request.verification_commands):
-                if python_runtime.selected is None:
-                    _write_json(
-                        run_dir / "error.json",
-                        {
-                            "type": "AgentPreflightFailed",
-                            "subtype": "python_unavailable",
-                            "agent": request.agent,
-                            "message": (
-                                "Verification is configured to run pytest, but no usable Python "
-                                "interpreter could be selected (WindowsApps/Store aliases are "
-                                "rejected)."
-                            ),
-                            "hint": (
-                                "Install a full CPython interpreter and ensure it is executable "
-                                "(not a WindowsApps alias), or create a workspace `.venv` and "
-                                "install deps into it."
-                            ),
-                            "preflight": {
-                                "python_runtime": python_runtime_summary,
-                                "python_interpreter": python_interpreter_summary,
-                                "command_diagnostics": command_diagnostics,
+            if python_validation_required and not python_validation_enabled:
+                probe_remediation = (
+                    python_context_probe.get("remediation")
+                    if isinstance(python_context_probe, dict)
+                    and isinstance(python_context_probe.get("remediation"), str)
+                    else None
+                )
+                hint = probe_remediation or (
+                    "Install a full CPython interpreter and ensure it is executable "
+                    "in the agent execution context (not a WindowsApps alias), then retry."
+                )
+                _write_json(
+                    run_dir / "error.json",
+                    {
+                        "type": "AgentPreflightFailed",
+                        "subtype": "python_unavailable",
+                        "agent": request.agent,
+                        "message": (
+                            "Verification includes Python-dependent commands, but Python context "
+                            "preflight failed in the effective agent execution path."
+                        ),
+                        "hint": hint,
+                        "preflight": {
+                            "python_runtime": python_runtime_summary,
+                            "python_interpreter": python_interpreter_summary,
+                            "python_context_probe": python_context_probe,
+                            "python_validation": {
+                                "required": python_validation_required,
+                                "enabled": python_validation_enabled,
+                                "reason_code": python_validation_reason_code,
+                                "reason_type": python_validation_reason_type,
+                                "reason": python_validation_reason,
                             },
+                            "command_diagnostics": command_diagnostics,
                         },
-                    )
-                    return RunResult(
-                        run_dir=run_dir,
-                        exit_code=1,
-                        report_validation_errors=[],
-                    )
+                    },
+                )
+                return RunResult(
+                    run_dir=run_dir,
+                    exit_code=1,
+                    report_validation_errors=[],
+                )
 
-                if (
-                    not verification_commands_may_provision_pytest(request.verification_commands)
-                    and not bool(pytest_probe and pytest_probe.get("passed", False))
-                ):
-                    remediation = (
-                        pytest_probe.get("remediation")
-                        if isinstance(pytest_probe, dict)
-                        else None
-                    )
-                    _write_json(
-                        run_dir / "error.json",
-                        {
-                            "type": "AgentPreflightFailed",
-                            "subtype": "pytest_unavailable",
-                            "agent": request.agent,
-                            "message": (
-                                "Verification is configured to run pytest, but "
-                                "`python -m pytest --version` failed."
-                            ),
-                            "hint": remediation
-                            or (
-                                "Install pytest into the selected interpreter, or ensure the "
-                                "workspace `.venv` exists and contains pytest."
-                            ),
-                            "preflight": {
-                                "python_runtime": python_runtime_summary,
-                                "pytest_probe": pytest_probe,
-                                "command_diagnostics": command_diagnostics,
+            if pytest_validation_required and (
+                not verification_commands_may_provision_pytest(request.verification_commands)
+                and not bool(pytest_probe and pytest_probe.get("passed", False))
+            ):
+                remediation = (
+                    pytest_probe.get("remediation") if isinstance(pytest_probe, dict) else None
+                )
+                _write_json(
+                    run_dir / "error.json",
+                    {
+                        "type": "AgentPreflightFailed",
+                        "subtype": "pytest_unavailable",
+                        "agent": request.agent,
+                        "message": (
+                            "Verification is configured to run pytest, but "
+                            "`python -m pytest --version` failed."
+                        ),
+                        "hint": remediation
+                        or (
+                            "Install pytest into the selected interpreter, or ensure the "
+                            "workspace `.venv` exists and contains pytest."
+                        ),
+                        "preflight": {
+                            "python_runtime": python_runtime_summary,
+                            "python_context_probe": python_context_probe,
+                            "python_validation": {
+                                "required": python_validation_required,
+                                "enabled": python_validation_enabled,
+                                "reason_code": python_validation_reason_code,
+                                "reason_type": python_validation_reason_type,
+                                "reason": python_validation_reason,
                             },
+                            "pytest_probe": pytest_probe,
+                            "command_diagnostics": command_diagnostics,
                         },
-                    )
-                    return RunResult(
-                        run_dir=run_dir,
-                        exit_code=1,
-                        report_validation_errors=[],
-                    )
+                    },
+                )
+                return RunResult(
+                    run_dir=run_dir,
+                    exit_code=1,
+                    report_validation_errors=[],
+                )
 
             if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
                 suggested_policy = (
@@ -4556,6 +4931,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "command_diagnostics": command_diagnostics,
                         "python_interpreter": python_interpreter_summary,
                         "python_runtime": python_runtime_summary,
+                        "python_context_probe": python_context_probe,
+                        "python_validation": {
+                            "required": python_validation_required,
+                            "enabled": python_validation_enabled,
+                            "reason_code": python_validation_reason_code,
+                            "reason_type": python_validation_reason_type,
+                            "reason": python_validation_reason,
+                        },
                         "pip_probe": pip_probe,
                         "pytest_probe": pytest_probe,
                         "meta": preflight_meta,
