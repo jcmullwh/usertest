@@ -299,6 +299,72 @@ _RAW_EVENTS_PLAINTEXT_EXCERPT_TAIL_BYTES = 24_000
 _RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS = 4_000
 
 
+def _new_codex_metadata_capture_summary() -> dict[str, Any]:
+    return {
+        "shell_snapshot": {
+            "warning_code": _CODEX_SHELL_SNAPSHOT_WARNING_CODE,
+            "warning_occurrences": 0,
+            "missing": False,
+            "attempts_missing": [],
+        },
+        "turn_metadata_header": {
+            "warning_code": _CODEX_TURN_METADATA_TIMEOUT_CODE,
+            "warning_occurrences": 0,
+            "missing": False,
+            "attempts_missing": [],
+        },
+    }
+
+
+def _codex_metadata_capture_from_stderr(stderr_text: str) -> dict[str, Any]:
+    shell_snapshot_warning_occurrences = 0
+    turn_metadata_header_warning_occurrences = 0
+    for line in stderr_text.splitlines():
+        lowered = line.lower()
+        if _CODEX_SHELL_SNAPSHOT_WARNING.lower() in lowered:
+            shell_snapshot_warning_occurrences += 1
+        if "turn metadata" in lowered and "timed out" in lowered and "header" in lowered:
+            turn_metadata_header_warning_occurrences += 1
+
+    return {
+        "shell_snapshot": {
+            "warning_code": _CODEX_SHELL_SNAPSHOT_WARNING_CODE,
+            "warning_occurrences": shell_snapshot_warning_occurrences,
+            "missing": shell_snapshot_warning_occurrences > 0,
+        },
+        "turn_metadata_header": {
+            "warning_code": _CODEX_TURN_METADATA_TIMEOUT_CODE,
+            "warning_occurrences": turn_metadata_header_warning_occurrences,
+            "missing": turn_metadata_header_warning_occurrences > 0,
+        },
+    }
+
+
+def _merge_codex_metadata_capture_summary(
+    *,
+    summary: dict[str, Any],
+    attempt_metadata: dict[str, Any],
+    attempt_number: int,
+) -> None:
+    for key in ("shell_snapshot", "turn_metadata_header"):
+        section = summary.get(key)
+        attempt_section = attempt_metadata.get(key)
+        if not isinstance(section, dict) or not isinstance(attempt_section, dict):
+            continue
+        raw_occurrences = attempt_section.get("warning_occurrences")
+        occurrences = raw_occurrences if isinstance(raw_occurrences, int) else 0
+        if occurrences <= 0:
+            continue
+        section["missing"] = True
+        section["warning_occurrences"] = int(section.get("warning_occurrences", 0)) + occurrences
+        attempts_missing = section.get("attempts_missing")
+        if not isinstance(attempts_missing, list):
+            attempts_missing = []
+            section["attempts_missing"] = attempts_missing
+        if attempt_number not in attempts_missing:
+            attempts_missing.append(attempt_number)
+
+
 def _read_tail_text(path: Path, *, max_bytes: int) -> str:
     try:
         size = path.stat().st_size
@@ -3544,6 +3610,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         "run_started_utc": _utc_now_z(),
         "phases": {},
     }
+    codex_metadata_capture_summary: dict[str, Any] | None = None
+    if request.agent == "codex":
+        codex_metadata_capture_summary = _new_codex_metadata_capture_summary()
+        run_meta["codex_metadata_capture"] = codex_metadata_capture_summary
     agent_phase_start_monotonic: float | None = None
     agent_phase_end_monotonic: float | None = None
     postprocess_phase_start_monotonic: float | None = None
@@ -5474,6 +5544,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     request.agent == "codex"
                     and _CODEX_PERSONALITY_MISSING_MESSAGES_WARNING in raw_attempt_stderr_text
                 )
+                codex_metadata_capture = (
+                    _codex_metadata_capture_from_stderr(raw_attempt_stderr_text)
+                    if request.agent == "codex"
+                    else None
+                )
                 attempt_warnings: list[str] = []
                 if codex_personality_warning_detected:
                     for line in raw_attempt_stderr_text.splitlines():
@@ -5705,6 +5780,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "last_message_path": last_message_attempt_path.name,
                     "stderr_path": stderr_attempt_path.name,
                 }
+                if codex_metadata_capture is not None:
+                    attempt_meta["codex_metadata_capture"] = codex_metadata_capture
+                    if codex_metadata_capture_summary is not None:
+                        _merge_codex_metadata_capture_summary(
+                            summary=codex_metadata_capture_summary,
+                            attempt_metadata=codex_metadata_capture,
+                            attempt_number=attempt_number,
+                        )
                 attempts_meta.append(attempt_meta)
 
                 if codex_personality_warning_detected:
