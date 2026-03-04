@@ -207,10 +207,15 @@ def test_gemini_system_prompt_append_is_composed_into_replacement_file(tmp_path:
             mission_id="m",
             agent_system_prompt_file=base_system_prompt,
             agent_append_system_prompt=append_text,
+            keep_workspace=True,
         ),
     )
     assert result.exit_code == 0
     assert not result.report_validation_errors
+    workspace_ref = json.loads((result.run_dir / "workspace_ref.json").read_text(encoding="utf-8"))
+    workspace_dir = Path(str(workspace_ref["workspace_dir"]))
+    assert (workspace_dir / "append_system_prompt.md").read_text(encoding="utf-8") == append_text
+    assert (workspace_dir / "system_prompt.md").read_text(encoding="utf-8") == expected_merged
 
 
 def test_gemini_system_prompt_append_without_base_prompt_is_supported(tmp_path: Path) -> None:
@@ -292,7 +297,12 @@ def test_gemini_system_prompt_append_without_base_prompt_is_supported(tmp_path: 
             persona_id="p",
             mission_id="m",
             agent_append_system_prompt=append_text,
+            keep_workspace=True,
         ),
     )
     assert result.exit_code == 0
     assert not result.report_validation_errors
+    workspace_ref = json.loads((result.run_dir / "workspace_ref.json").read_text(encoding="utf-8"))
+    workspace_dir = Path(str(workspace_ref["workspace_dir"]))
+    assert (workspace_dir / "append_system_prompt.md").read_text(encoding="utf-8") == append_text
+    assert (workspace_dir / "system_prompt.md").read_text(encoding="utf-8") == expected_merged

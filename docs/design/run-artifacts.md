@@ -133,7 +133,11 @@ Files that are conditionally present:
   present when catalog resolution succeeds.
 - `users.md`: snapshot of target `USERS.md` when present.
 - `preprocess_commit.txt`: present when preprocess logic writes and commits workspace changes.
-- `agent_prompts/*`: present when prompt override/append files are staged.
+- `agent_prompts/*`: canonical staged prompt override/append artifacts when configured.
+- Workspace root prompt mirrors: during execution, the acquired workspace may also include
+  `append_system_prompt.md` (when append content is configured) and `system_prompt.md`
+  (when an effective system prompt file is configured or composed). These are convenience copies
+  for in-workspace agent reads and are not stored under the run directory tree.
 - `sandbox/*`: present when using docker execution backend.
 
 ## Semantics and stability notes
