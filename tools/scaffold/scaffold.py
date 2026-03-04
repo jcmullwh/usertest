@@ -804,6 +804,15 @@ def _looks_like_host_pytest_command(cmd: list[str]) -> bool:
     return len(cmd) >= 3 and cmd_name in _PYTHON_COMMAND_NAMES and cmd[1] == "-m" and cmd[2] == "pytest"
 
 
+def _looks_like_host_ruff_command(cmd: list[str]) -> bool:
+    if not cmd:
+        return False
+    cmd_name = Path(cmd[0]).name.lower()
+    if cmd_name in _RUFF_COMMAND_NAMES:
+        return True
+    return len(cmd) >= 3 and cmd_name in _PYTHON_COMMAND_NAMES and cmd[1] == "-m" and cmd[2] == "ruff"
+
+
 def _pip_probe_ok(*, cwd: Path) -> bool:
     cp = _probe([sys.executable, "-m", "pip", "--version"], cwd=cwd)
     return cp.returncode == 0
@@ -811,6 +820,11 @@ def _pip_probe_ok(*, cwd: Path) -> bool:
 
 def _pytest_probe_ok(*, cwd: Path) -> bool:
     cp = _probe([sys.executable, "-m", "pytest", "--version"], cwd=cwd)
+    return cp.returncode == 0
+
+
+def _ruff_probe_ok(*, cwd: Path) -> bool:
+    cp = _probe([sys.executable, "-m", "ruff", "--version"], cwd=cwd)
     return cp.returncode == 0
 
 
@@ -826,6 +840,7 @@ def _bootstrap_lint_test_prereqs_if_needed(
 
     needs_pdm = False
     needs_host_pytest = False
+    needs_host_ruff = False
     fix_task_name = f"{task_name}_fix"
     for project in projects:
         tasks = project.get("tasks")
@@ -847,12 +862,16 @@ def _bootstrap_lint_test_prereqs_if_needed(
             needs_pdm = True
         if task_name == "test" and _looks_like_host_pytest_command(cmd_list):
             needs_host_pytest = True
+        if task_name == "lint" and _looks_like_host_ruff_command(cmd_list):
+            needs_host_ruff = True
 
     reasons: list[str] = []
     if needs_pdm and _which("pdm") is None and not _pdm_importable():
         reasons.append("pdm")
     if needs_host_pytest and not _pytest_probe_ok(cwd=repo_root):
         reasons.append("pytest")
+    if needs_host_ruff and not _ruff_probe_ok(cwd=repo_root):
+        reasons.append("ruff")
     if not reasons:
         return
 
@@ -892,6 +911,11 @@ def _bootstrap_lint_test_prereqs_if_needed(
         raise ScaffoldError(
             "Auto-bootstrap completed but pytest is still unavailable. "
             f"Install pytest into this interpreter: {sys.executable} -m pip install -U pytest"
+        )
+    if "ruff" in reasons and not _ruff_probe_ok(cwd=repo_root):
+        raise ScaffoldError(
+            "Auto-bootstrap completed but ruff is still unavailable. "
+            f"Install ruff into this interpreter: {sys.executable} -m pip install -U ruff"
         )
 
 
