@@ -115,6 +115,86 @@ def test_run_test_bootstraps_requirements_and_injects_pythonpath(
     assert str(project_dir / "src") in pythonpath
 
 
+def test_run_lint_bootstraps_requirements_and_injects_pythonpath(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path
+    project_dir = repo_root / "demo"
+    (project_dir / "src").mkdir(parents=True)
+    (repo_root / "requirements-dev.txt").write_text("ruff>=0.12.0\n", encoding="utf-8")
+
+    monkeypatch.setattr(scaffold, "_repo_root", lambda: repo_root)
+    monkeypatch.setattr(
+        scaffold,
+        "_load_projects",
+        lambda _: [{"id": "demo", "path": "demo", "tasks": {"lint": ["python", "-m", "ruff", "check", "src"]}}],
+    )
+
+    state = {"bootstrapped": False}
+
+    def fake_probe(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env
+        if argv == [sys.executable, "-m", "pip", "--version"]:
+            return subprocess.CompletedProcess(args=argv, returncode=0, stdout="pip ok", stderr="")
+        if argv == [sys.executable, "-m", "ruff", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0 if state["bootstrapped"] else 1,
+                stdout="ruff 0.12.0\n" if state["bootstrapped"] else "",
+                stderr="" if state["bootstrapped"] else "ruff missing",
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scaffold, "_probe", fake_probe)
+
+    pip_installs: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        capture: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env, capture
+        if argv[:4] == [sys.executable, "-m", "pip", "install"]:
+            pip_installs.append(argv)
+            state["bootstrapped"] = True
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scaffold, "_run", fake_run)
+
+    task_envs: list[dict[str, str] | None] = []
+
+    def fake_run_manifest_task(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        task_name: str,
+        project_id: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cmd, cwd, task_name, project_id
+        task_envs.append(extra_env)
+        return subprocess.CompletedProcess(args=["python", "-m", "ruff", "check", "src"], returncode=0)
+
+    monkeypatch.setattr(scaffold, "_run_manifest_task", fake_run_manifest_task)
+
+    rc = scaffold.cmd_run(_run_args(task="lint"))
+    assert rc == 0
+    assert pip_installs, "Expected requirements bootstrap via pip install."
+    assert task_envs and task_envs[0] is not None
+    pythonpath = task_envs[0].get("PYTHONPATH")
+    assert pythonpath is not None
+    assert str(project_dir / "src") in pythonpath
+
+
 def test_run_test_retries_install_when_pdm_pytest_missing(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
