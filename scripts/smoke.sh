@@ -82,6 +82,27 @@ print_skip_install_guidance() {
   echo "      ${PYTHON_BIN} -m venv .venv && source .venv/bin/activate" >&2
 }
 
+run_skip_install_preflight() {
+  local preflight_code
+  preflight_code=$'import importlib\n\nmods = [\n    "usertest",\n    "usertest.cli",\n    "usertest_backlog",\n    "usertest_backlog.cli",\n    "usertest_implement",\n    "usertest_implement.cli",\n    "agent_adapters",\n    "backlog_core",\n    "backlog_miner",\n    "backlog_repo",\n    "normalized_events",\n    "reporter",\n    "run_artifacts",\n    "runner_core",\n    "sandbox_runner",\n    "triage_engine",\n]\n\nerrors = []\nfor mod in mods:\n    try:\n        importlib.import_module(mod)\n    except Exception as e:\n        errors.append((mod, f"{type(e).__name__}: {e}"))\n\nif errors:\n    for mod, msg in errors:\n        print(f"{mod}: {msg}")\n    raise SystemExit(1)\n'
+
+  local preflight_rc=0
+  local preflight_out=""
+  preflight_out="$("${PYTHON_BIN}" -c "${preflight_code}" 2>&1)" || preflight_rc=$?
+  if [[ "${preflight_rc}" -ne 0 ]]; then
+    echo "==> Smoke preflight failed: required imports are not available in this Python environment." >&2
+    if [[ -n "${preflight_out}" ]]; then
+      while IFS= read -r line; do
+        [[ -n "${line}" ]] || continue
+        echo "    - ${line}" >&2
+      done <<<"${preflight_out}"
+    fi
+    echo "" >&2
+    print_skip_install_guidance
+    exit 1
+  fi
+}
+
 if [[ "${REQUIRE_DOCTOR}" -eq 1 ]]; then
   if ! command -v pdm >/dev/null 2>&1; then
     echo "Scaffold doctor required but pdm was not found on PATH." >&2
@@ -144,6 +165,10 @@ elif [[ "${USE_PYTHONPATH}" -eq 1 ]]; then
   source "${SCRIPT_DIR}/set_pythonpath.sh"
 fi
 
+if [[ "${SKIP_INSTALL}" -eq 1 ]]; then
+  run_skip_install_preflight
+fi
+
 guard_import_origin() {
   local guard_rc=0
   local guard_out=""
@@ -153,8 +178,9 @@ guard_import_origin() {
 }
 
 echo "==> Import-origin guard smoke"
-if ! guard_import_origin; then
-  guard_rc=$?
+guard_rc=0
+guard_import_origin || guard_rc=$?
+if [[ "${guard_rc}" -ne 0 ]]; then
   if [[ "${USE_PYTHONPATH}" -eq 0 ]]; then
     echo "==> WARNING: 'usertest' did not import from this workspace; switching to PYTHONPATH mode."
     echo "    (This commonly happens when another checkout is installed editable in the same interpreter.)"
@@ -162,30 +188,12 @@ if ! guard_import_origin; then
     USE_PYTHONPATH=1
     # shellcheck disable=SC1091
     source "${SCRIPT_DIR}/set_pythonpath.sh"
-    if ! guard_import_origin; then
-      exit $?
+    if [[ "${SKIP_INSTALL}" -eq 1 ]]; then
+      run_skip_install_preflight
     fi
+    guard_import_origin
   else
     exit "${guard_rc}"
-  fi
-fi
-
-if [[ "${SKIP_INSTALL}" -eq 1 ]]; then
-  PREFLIGHT_CODE=$'import importlib\n\nmods = [\n    "usertest",\n    "usertest.cli",\n    "usertest_backlog",\n    "usertest_backlog.cli",\n    "usertest_implement",\n    "usertest_implement.cli",\n    "agent_adapters",\n    "backlog_core",\n    "backlog_miner",\n    "backlog_repo",\n    "normalized_events",\n    "reporter",\n    "run_artifacts",\n    "runner_core",\n    "sandbox_runner",\n    "triage_engine",\n]\n\nerrors = []\nfor mod in mods:\n    try:\n        importlib.import_module(mod)\n    except Exception as e:\n        errors.append((mod, f"{type(e).__name__}: {e}"))\n\nif errors:\n    for mod, msg in errors:\n        print(f"{mod}: {msg}")\n    raise SystemExit(1)\n'
-
-  preflight_rc=0
-  preflight_out="$("${PYTHON_BIN}" -c "${PREFLIGHT_CODE}" 2>&1)" || preflight_rc=$?
-  if [[ "${preflight_rc}" -ne 0 ]]; then
-    echo "==> Smoke preflight failed: required imports are not available in this Python environment." >&2
-    if [[ -n "${preflight_out}" ]]; then
-      while IFS= read -r line; do
-        [[ -n "${line}" ]] || continue
-        echo "    - ${line}" >&2
-      done <<<"${preflight_out}"
-    fi
-    echo "" >&2
-    print_skip_install_guidance
-    exit 1
   fi
 fi
 

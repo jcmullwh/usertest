@@ -205,6 +205,10 @@ try {
         . (Join-Path $PSScriptRoot 'set_pythonpath.ps1')
     }
 
+    if ($SkipInstall) {
+        Invoke-SmokeImportPreflight -PythonCmd $pythonCmd
+    }
+
     Write-Host '==> Import-origin guard smoke'
     & $pythonCmd tools/smoke_import_guard.py --repo-root $repoRoot
     $guardRc = $LASTEXITCODE
@@ -215,6 +219,9 @@ try {
             Write-Host '==> Configure PYTHONPATH via scripts/set_pythonpath.ps1'
             $UsePythonPath = $true
             . (Join-Path $PSScriptRoot 'set_pythonpath.ps1') -RepoRoot $repoRoot
+            if ($SkipInstall) {
+                Invoke-SmokeImportPreflight -PythonCmd $pythonCmd
+            }
             & $pythonCmd tools/smoke_import_guard.py --repo-root $repoRoot
             if ($LASTEXITCODE -ne 0) {
                 exit $LASTEXITCODE
@@ -223,10 +230,6 @@ try {
         else {
             exit $guardRc
         }
-    }
-
-    if ($SkipInstall) {
-        Invoke-SmokeImportPreflight -PythonCmd $pythonCmd
     }
 
     Invoke-Step -Name 'CLI help smoke' -Command {
