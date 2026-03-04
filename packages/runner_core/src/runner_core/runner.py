@@ -269,6 +269,13 @@ _CODEX_SHELL_SNAPSHOT_WARNING_CODE = "shell_snapshot_powershell_unsupported"
 _CODEX_TURN_METADATA_TIMEOUT_CODE = "turn_metadata_header_timeout"
 _CODEX_MODEL_REFRESH_TIMEOUT_CODE = "codex_model_refresh_timeout"
 _CODEX_MODEL_REFRESH_TIMEOUT_HINT = "hint=Codex model refresh timed out; model list may be stale."
+_CODEX_WARNING_SUMMARY_LINE_RE = re.compile(
+    (
+        r"^\[(?:codex_notice_summary|codex_warning_summary)\]\s+"
+        r"code=(?P<code>[a-z0-9_]+)\s+occurrences=(?P<occurrences>\d+)\b"
+    ),
+    re.IGNORECASE,
+)
 _MAX_AGENT_RETRY_DELAY_SECONDS = 60.0
 _READ_FILE_NOT_FOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
@@ -782,6 +789,100 @@ def _sanitize_agent_stderr_file(*, agent: str, path: Path) -> None:
         path.write_text(sanitized, encoding="utf-8")
     except OSError:
         return
+
+
+def _extract_codex_warning_counts(stderr_text: str) -> dict[str, int]:
+    if not isinstance(stderr_text, str) or not stderr_text.strip():
+        return {}
+
+    counts: dict[str, int] = {
+        _CODEX_SHELL_SNAPSHOT_WARNING_CODE: 0,
+        _CODEX_TURN_METADATA_TIMEOUT_CODE: 0,
+        _CODEX_MODEL_REFRESH_TIMEOUT_CODE: 0,
+    }
+
+    for line in stderr_text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+
+        match = _CODEX_WARNING_SUMMARY_LINE_RE.match(stripped)
+        if match is not None:
+            code = match.group("code").strip().lower()
+            if code in counts:
+                try:
+                    occurrences = max(1, int(match.group("occurrences")))
+                except ValueError:
+                    occurrences = 1
+                counts[code] += occurrences
+                continue
+
+        if stripped.lower().startswith("hint="):
+            continue
+
+        lowered = stripped.lower()
+        if (
+            _CODEX_SHELL_SNAPSHOT_WARNING.lower() in lowered
+            or f"code={_CODEX_SHELL_SNAPSHOT_WARNING_CODE}" in lowered
+        ):
+            counts[_CODEX_SHELL_SNAPSHOT_WARNING_CODE] += 1
+            continue
+
+        if (
+            ("turn metadata" in lowered and "timed out" in lowered and "header" in lowered)
+            or f"code={_CODEX_TURN_METADATA_TIMEOUT_CODE}" in lowered
+        ):
+            counts[_CODEX_TURN_METADATA_TIMEOUT_CODE] += 1
+            continue
+
+        if (
+            (
+                "failed to refresh available models" in lowered
+                and "timeout waiting for child process" in lowered
+            )
+            or f"code={_CODEX_MODEL_REFRESH_TIMEOUT_CODE}" in lowered
+        ):
+            counts[_CODEX_MODEL_REFRESH_TIMEOUT_CODE] += 1
+
+    return {code: count for code, count in counts.items() if count > 0}
+
+
+def _build_codex_metadata_capture(status_counts: dict[str, int]) -> dict[str, Any] | None:
+    shell_snapshot_count = max(0, int(status_counts.get(_CODEX_SHELL_SNAPSHOT_WARNING_CODE, 0)))
+    turn_metadata_timeout_count = max(
+        0,
+        int(status_counts.get(_CODEX_TURN_METADATA_TIMEOUT_CODE, 0)),
+    )
+    if shell_snapshot_count <= 0 and turn_metadata_timeout_count <= 0:
+        return None
+
+    warning_counts: dict[str, int] = {}
+    fields: dict[str, dict[str, Any]] = {}
+
+    if shell_snapshot_count > 0:
+        warning_counts[_CODEX_SHELL_SNAPSHOT_WARNING_CODE] = shell_snapshot_count
+        fields["shell_snapshot"] = {
+            "captured": False,
+            "reason": "powershell_unsupported",
+            "warning_code": _CODEX_SHELL_SNAPSHOT_WARNING_CODE,
+            "occurrences": shell_snapshot_count,
+        }
+
+    if turn_metadata_timeout_count > 0:
+        warning_counts[_CODEX_TURN_METADATA_TIMEOUT_CODE] = turn_metadata_timeout_count
+        fields["turn_metadata_header"] = {
+            "captured": False,
+            "reason": "timeout",
+            "warning_code": _CODEX_TURN_METADATA_TIMEOUT_CODE,
+            "occurrences": turn_metadata_timeout_count,
+        }
+
+    return {
+        "schema_version": 1,
+        "warning_codes": sorted(warning_counts),
+        "warning_counts": warning_counts,
+        "fields": fields,
+    }
 
 
 def _codex_personality_warning_lines(*, source: str, warning_line: str | None = None) -> list[str]:
@@ -5427,6 +5528,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             rate_limit_retry_count = 0
             followup_count = 0
             attempts_meta: list[dict[str, Any]] = []
+            codex_warning_counts_total: dict[str, int] = {}
             selected_raw_events_path = raw_events_path
             selected_raw_events_ts_path = raw_events_ts_path
             selected_last_message_path = last_message_path
@@ -5495,6 +5597,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         ).strip()
                     except OSError:
                         attempt_stderr_text = ""
+                attempt_codex_warning_counts: dict[str, int] = {}
+                attempt_codex_metadata_capture: dict[str, Any] | None = None
+                if request.agent == "codex":
+                    attempt_codex_warning_counts = _extract_codex_warning_counts(
+                        attempt_stderr_text
+                    )
+                    for warning_code, warning_count in attempt_codex_warning_counts.items():
+                        if warning_count <= 0:
+                            continue
+                        codex_warning_counts_total[warning_code] = (
+                            codex_warning_counts_total.get(warning_code, 0) + warning_count
+                        )
+                    attempt_codex_metadata_capture = _build_codex_metadata_capture(
+                        attempt_codex_warning_counts
+                    )
 
                 attempt_report_validation_errors: list[str] = []
                 attempt_report_json: dict[str, Any] | None = None
@@ -5705,6 +5822,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "last_message_path": last_message_attempt_path.name,
                     "stderr_path": stderr_attempt_path.name,
                 }
+                if attempt_codex_metadata_capture is not None:
+                    attempt_meta["agent_metadata_capture"] = attempt_codex_metadata_capture
                 attempts_meta.append(attempt_meta)
 
                 if codex_personality_warning_detected:
@@ -5832,6 +5951,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 report_json = attempt_report_json
                 report_validation_errors = attempt_report_validation_errors
                 break
+
+            codex_metadata_capture = _build_codex_metadata_capture(codex_warning_counts_total)
+            if codex_metadata_capture is not None:
+                run_meta["agent_metadata_capture"] = codex_metadata_capture
 
             _write_json(
                 run_dir / "agent_attempts.json",
