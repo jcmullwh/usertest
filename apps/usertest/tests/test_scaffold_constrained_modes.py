@@ -356,8 +356,9 @@ def test_scaffold_lint_bootstraps_install_when_ruff_probe_fails(
         cwd: Path,
         task_name: str,
         project_id: str,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del cwd, project_id
+        del cwd, project_id, extra_env
         install_calls.append((task_name, cmd))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
@@ -370,6 +371,7 @@ def test_scaffold_lint_bootstraps_install_when_ruff_probe_fails(
         project_id="demo",
         remediation_cmd="python tools/scaffold/scaffold.py run install --project demo",
         install_cmd=["pdm", "install"],
+        extra_env=None,
     )
 
     assert probe_calls["count"] == 2
@@ -413,12 +415,18 @@ def test_scaffold_test_bootstraps_install_when_pdm_venv_missing(
         cwd: Path,
         task_name: str,
         project_id: str,
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
-        del cwd, project_id
+        del cwd, project_id, extra_env
         calls.append((task_name, cmd))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(scaffold, "_run_manifest_task", _fake_run_manifest_task)
+    monkeypatch.setattr(
+        scaffold,
+        "_probe",
+        lambda cmd, *, cwd, env=None: subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
 
     args = scaffold.argparse.Namespace(
         task="test",

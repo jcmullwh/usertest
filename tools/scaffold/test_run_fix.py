@@ -72,8 +72,15 @@ tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
 
     calls: list[list[str]] = []
 
-    def fake_run_manifest_task(*, cmd: list[str], cwd: Path, task_name: str, project_id: str):
-        del cwd, task_name, project_id
+    def fake_run_manifest_task(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        task_name: str,
+        project_id: str,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del cwd, task_name, project_id, extra_env
         calls.append(cmd)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
@@ -115,8 +122,15 @@ tasks.lint = ["pdm", "run", "ruff", "check", "."]
 
     calls: list[list[str]] = []
 
-    def fake_run_manifest_task(*, cmd: list[str], cwd: Path, task_name: str, project_id: str):
-        del cwd, task_name, project_id
+    def fake_run_manifest_task(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        task_name: str,
+        project_id: str,
+        extra_env: dict[str, str] | None = None,
+    ):
+        del cwd, task_name, project_id, extra_env
         calls.append(cmd)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
