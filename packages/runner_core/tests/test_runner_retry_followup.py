@@ -96,6 +96,20 @@ def _make_dummy_codex_retry_binary(tmp_path: Path) -> str:
                 "        )",
                 "        sys.stderr.flush()",
                 "",
+                "    metadata_warning = os.environ.get(",
+                "        'DUMMY_INCLUDE_CODEX_METADATA_WARNING', ''",
+                "    ).strip()",
+                "    if metadata_warning and metadata_warning not in {'0', 'false', 'False'}:",
+                "        sys.stderr.write(",
+                "            '2026-02-18T00:00:00Z WARN codex_core::shell_snapshot: '",
+                "            'Shell snapshot not supported yet for PowerShell\\n'",
+                "        )",
+                "        sys.stderr.write(",
+                "            '2026-02-18T00:00:01Z WARN codex_core::turn_metadata: '",
+                "            'timed out after 250ms while building turn metadata header\\n'",
+                "        )",
+                "        sys.stderr.flush()",
+                "",
                 (
                     "    print(json.dumps({'id': str(attempt), 'msg': {'type': 'agent_message', "
                     "'message': f'attempt-{attempt}'}}))"
@@ -351,6 +365,60 @@ def test_run_once_fails_fast_when_codex_personality_warning_detected_during_retr
     error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
     assert error_obj.get("type") == "AgentConfigInvalid"
     assert error_obj.get("code") == "codex_model_messages_missing"
+
+
+def test_run_once_records_codex_metadata_capture_for_capability_warnings(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    state_file = tmp_path / "attempt_state_metadata_warning.txt"
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "always_success")
+    monkeypatch.setenv("DUMMY_INCLUDE_CODEX_METADATA_WARNING", "1")
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=0,
+            agent_followup_attempts=0,
+        ),
+    )
+
+    assert result.exit_code == 0
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert len(attempts["attempts"]) == 1
+    attempt_capture = attempts["attempts"][0].get("codex_metadata_capture")
+    assert isinstance(attempt_capture, dict)
+    assert attempt_capture["shell_snapshot"]["missing"] is True
+    assert attempt_capture["shell_snapshot"]["warning_occurrences"] == 1
+    assert attempt_capture["turn_metadata_header"]["missing"] is True
+    assert attempt_capture["turn_metadata_header"]["warning_occurrences"] == 1
+
+    run_meta = json.loads((result.run_dir / "run_meta.json").read_text(encoding="utf-8"))
+    run_capture = run_meta.get("codex_metadata_capture")
+    assert isinstance(run_capture, dict)
+    assert run_capture["shell_snapshot"]["missing"] is True
+    assert run_capture["shell_snapshot"]["warning_occurrences"] == 1
+    assert run_capture["shell_snapshot"]["attempts_missing"] == [1]
+    assert run_capture["turn_metadata_header"]["missing"] is True
+    assert run_capture["turn_metadata_header"]["warning_occurrences"] == 1
+    assert run_capture["turn_metadata_header"]["attempts_missing"] == [1]
 
 
 def test_run_once_followup_prompt_recovers_invalid_json(
