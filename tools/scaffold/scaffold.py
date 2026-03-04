@@ -1572,23 +1572,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             warnings.append(f"bash is not usable: {err or 'unknown_error'}")
             next_actions.append(_bash_remediation_hint())
 
-    # Check virtualenv availability. PDM uses `virtualenv` (when installed) to create project venvs.
-    # When it is missing, PDM raises `VirtualenvCreateError` which blocks `pdm install -G dev` in containers.
-    # This is a warning rather than an error because scaffold auto-falls-back to stdlib venv for pdm install tasks.
-    virtualenv_ok = _virtualenv_importable()
-    baseline["virtualenv"] = {
-        "ok": virtualenv_ok,
-        "probe": "importlib",
-        "note": "optional; PDM uses virtualenv when available; scaffold falls back to stdlib venv when missing",
-    }
-    if not virtualenv_ok and not skip_tool_checks:
-        warnings.append(
-            "virtualenv package is not importable: PDM may raise VirtualenvCreateError when creating project venvs."
-            " scaffold will set PDM_VENV_BACKEND=venv automatically for managed installs, but direct `pdm install`"
-            " calls outside scaffold may still fail."
-        )
-        next_actions.append(_virtualenv_remediation_hint(python_exe=sys.executable))
-
     required_tools: dict[str, list[str]] = {}
     for project in projects:
         project_id = project.get("id")
@@ -1663,12 +1646,51 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             tool = str(cmd[0])
             required_tools.setdefault(tool, []).append(f"{project_id}:{task_name}")
 
+    pdm_on_path = _which("pdm") is not None
+    pdm_importable = _pdm_importable()
+    pdm_tool_names = {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}
+    pdm_tool_required = any(Path(tool).name.lower() in pdm_tool_names for tool in required_tools)
+    pdm_uses_scaffold_python = os.name == "nt" and pdm_importable
+
+    # Check virtualenv availability. PDM uses `virtualenv` (when installed) to create project venvs.
+    # When pdm resolves to an external interpreter, probing via importlib in this process is advisory only.
+    virtualenv_ok_current = _virtualenv_importable()
+    virtualenv_ok: bool | None = virtualenv_ok_current
+    virtualenv_scope = "scaffold_python"
+    virtualenv_note = "optional; PDM uses virtualenv when available; scaffold falls back to stdlib venv when missing"
+    if pdm_tool_required and pdm_on_path and not pdm_uses_scaffold_python:
+        virtualenv_ok = None
+        virtualenv_scope = "external_pdm_interpreter_unknown"
+        virtualenv_note = (
+            "virtualenv probe reflects scaffold's interpreter only; pdm is expected to run via an external command, "
+            "so pdm's interpreter may differ"
+        )
+        if not virtualenv_ok_current and not skip_tool_checks:
+            warnings.append(
+                "virtualenv package is not importable in scaffold's Python interpreter. pdm is expected to run via "
+                "an external command, so virtualenv availability for pdm is unknown."
+            )
+    elif virtualenv_ok is False and not skip_tool_checks:
+        warnings.append(
+            "virtualenv package is not importable: PDM may raise VirtualenvCreateError when creating project venvs."
+            " scaffold will set PDM_VENV_BACKEND=venv automatically for managed installs, but direct `pdm install`"
+            " calls outside scaffold may still fail."
+        )
+        next_actions.append(_virtualenv_remediation_hint(python_exe=sys.executable))
+
+    baseline["virtualenv"] = {
+        "ok": virtualenv_ok,
+        "probe": "importlib",
+        "scope": virtualenv_scope,
+        "checked_python": sys.executable,
+        "ok_in_checked_python": virtualenv_ok_current,
+        "note": virtualenv_note,
+    }
+
     tool_timeout_seconds = 4.0
     # Deterministic preflight summary: pdm availability + chosen install fallback.
     # Smoke scripts and verification paths can read .scaffold/doctor_tool_report.json
     # and key on preflight_summary.install_fallback to decide which install path to use.
-    pdm_on_path = _which("pdm") is not None
-    pdm_importable = _pdm_importable()
     pdm_usable = pdm_on_path or (os.name == "nt" and pdm_importable)
     if pdm_usable:
         install_fallback = "pdm"
@@ -1780,8 +1802,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     bash_label = "bash (required)" if bash_required else "bash (optional)"
     _eprint(f"    - {bash_label}: {bash_status} ({bash.get('version') or bash.get('error') or 'unknown'})")
     venv_entry = cast(dict[str, Any], baseline.get("virtualenv", {}))
-    venv_ok = bool(venv_entry.get("ok"))
-    venv_status = "OK" if venv_ok else "MISSING (scaffold uses stdlib venv as fallback; direct pdm install may fail)"
+    venv_ok_raw = venv_entry.get("ok")
+    if venv_ok_raw is True:
+        venv_status = "OK"
+    elif venv_ok_raw is False:
+        venv_status = "MISSING (scaffold uses stdlib venv as fallback; direct pdm install may fail)"
+    else:
+        checked_ok = bool(venv_entry.get("ok_in_checked_python"))
+        if checked_ok:
+            venv_status = "UNKNOWN (scaffold python has virtualenv; external pdm interpreter context was not probed)"
+        else:
+            venv_status = (
+                "UNKNOWN (scaffold python lacks virtualenv; external pdm interpreter context was not probed)"
+            )
     _eprint(f"    - virtualenv (optional): {venv_status}")
 
     if required_tools:
