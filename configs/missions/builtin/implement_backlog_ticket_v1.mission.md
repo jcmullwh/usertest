@@ -16,8 +16,11 @@ Implement the requested change described in the backlog ticket.
 
 ## How the ticket is provided
 
-The ticket content is provided as "append system prompt" text and is saved as `append_system_prompt.md`
-in the workspace root (the agent working directory). Treat it as the source-of-truth requirements for this run.
+The ticket content is provided as "append system prompt" text and is saved as
+`append_system_prompt.md` in the workspace root (the agent working directory) for in-run access.
+The canonical staged artifact is also recorded under `<run_dir>/agent_prompts/append_system_prompt.md`.
+Treat the ticket content in this prompt (and `append_system_prompt.md` when present)
+as the source-of-truth requirements for this run.
 
 If `append_system_prompt.md` is missing or unreadable, do **not** spend time scanning the repo for it: the full
 ticket text is already included in this prompt as append system prompt content. Proceed using that text.

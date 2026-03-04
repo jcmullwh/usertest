@@ -4277,6 +4277,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
 
         if staged_system_prompt is not None:
+            _materialize_agent_prompt_into_workspace(
+                workspace_dir=acquired.workspace_dir,
+                name="system_prompt.md",
+                src_path=staged_system_prompt,
+                text=None,
+            )
+
+        if staged_system_prompt is not None:
             try:
                 target_ref["agent_system_prompt_file"] = (
                     staged_system_prompt.resolve().relative_to(run_dir.resolve()).as_posix()
