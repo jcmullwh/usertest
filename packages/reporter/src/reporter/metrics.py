@@ -6,7 +6,6 @@ from pathlib import PurePosixPath
 from typing import Any
 
 DOC_EXTS = {".md", ".rst", ".txt", ".adoc"}
-_MAX_FAILED_COMMANDS = 10
 _MAX_NO_MATCH_COMMANDS = 10
 
 
@@ -140,47 +139,46 @@ def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
                     if is_policy_denial:
                         commands_blocked_by_policy += 1
 
-                    if len(failed_commands) < _MAX_FAILED_COMMANDS:
-                        command = data.get("command")
-                        if not isinstance(command, str) or not command.strip():
-                            argv_list = argv if isinstance(argv, list) else []
-                            command = " ".join(str(tok) for tok in argv_list if tok)
-                        entry: dict[str, Any] = {"command": command, "exit_code": exit_code}
-                        cwd = data.get("cwd")
-                        if isinstance(cwd, str) and cwd.strip():
-                            entry["cwd"] = cwd.strip()
-                        failure_artifacts = data.get("failure_artifacts")
-                        if isinstance(failure_artifacts, dict) and failure_artifacts:
-                            entry["artifacts"] = failure_artifacts
+                    command = data.get("command")
+                    if not isinstance(command, str) or not command.strip():
+                        argv_list = argv if isinstance(argv, list) else []
+                        command = " ".join(str(tok) for tok in argv_list if tok)
+                    entry: dict[str, Any] = {"command": command, "exit_code": exit_code}
+                    cwd = data.get("cwd")
+                    if isinstance(cwd, str) and cwd.strip():
+                        entry["cwd"] = cwd.strip()
+                    failure_artifacts = data.get("failure_artifacts")
+                    if isinstance(failure_artifacts, dict) and failure_artifacts:
+                        entry["artifacts"] = failure_artifacts
 
-                        if lowered_excerpt:
-                            excerpt = str(output_excerpt).strip()
-                            entry["output_excerpt"] = excerpt
-                            if data.get("output_excerpt_truncated") is True:
-                                entry["output_excerpt_truncated"] = True
-                        if is_policy_denial:
-                            entry["failure_category"] = "policy_denial"
-                            argv_list = argv if isinstance(argv, list) else []
-                            has_heredoc = "<<" in command or any(
-                                isinstance(tok, str) and tok.strip().startswith("<<")
-                                for tok in argv_list
+                    if lowered_excerpt:
+                        excerpt = str(output_excerpt).strip()
+                        entry["output_excerpt"] = excerpt
+                        if data.get("output_excerpt_truncated") is True:
+                            entry["output_excerpt_truncated"] = True
+                    if is_policy_denial:
+                        entry["failure_category"] = "policy_denial"
+                        argv_list = argv if isinstance(argv, list) else []
+                        has_heredoc = "<<" in command or any(
+                            isinstance(tok, str) and tok.strip().startswith("<<")
+                            for tok in argv_list
+                        )
+                        if has_heredoc:
+                            entry["policy_category"] = "bash_heredoc_unsupported"
+                            entry["hint"] = (
+                                "Avoid heredocs (for example `<<EOF`) in "
+                                "sandboxed shell commands. "
+                                "Use file tools like write_file/replace "
+                                "for multiline content."
                             )
-                            if has_heredoc:
-                                entry["policy_category"] = "bash_heredoc_unsupported"
-                                entry["hint"] = (
-                                    "Avoid heredocs (for example `<<EOF`) in "
-                                    "sandboxed shell commands. "
-                                    "Use file tools like write_file/replace "
-                                    "for multiline content."
-                                )
-                            else:
-                                entry["policy_category"] = "policy_denied"
-                                entry["hint"] = (
-                                    "This command was blocked by sandbox/policy. "
-                                    "Consult preflight.json for allowed capabilities "
-                                    "or rewrite using file tools."
-                                )
-                        failed_commands.append(entry)
+                        else:
+                            entry["policy_category"] = "policy_denied"
+                            entry["hint"] = (
+                                "This command was blocked by sandbox/policy. "
+                                "Consult preflight.json for allowed capabilities "
+                                "or rewrite using file tools."
+                            )
+                    failed_commands.append(entry)
             for inferred in _infer_files_from_run_command(event):
                 distinct_files_read.add(inferred)
                 if _maybe_doc_path(inferred):
@@ -202,11 +200,6 @@ def compute_metrics(events: Iterable[dict[str, Any]]) -> dict[str, Any]:
 
     if failed_commands_total:
         metrics["failed_commands"] = failed_commands
-        omitted = max(0, int(failed_commands_total) - len(failed_commands))
-        if omitted:
-            metrics["failed_commands_truncated"] = True
-            metrics["failed_commands_omitted_count"] = omitted
-            metrics["failed_commands_max"] = _MAX_FAILED_COMMANDS
 
     if no_match_commands_total:
         metrics["no_match_commands"] = no_match_commands

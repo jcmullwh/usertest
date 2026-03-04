@@ -60,6 +60,32 @@ def test_compute_metrics_adds_hint_for_policy_denied_heredoc_commands() -> None:
     assert "heredoc" in metrics["failed_commands"][0]["hint"].lower()
 
 
+def test_compute_metrics_keeps_all_failed_commands_without_truncation() -> None:
+    events = [
+        {
+            "ts": f"2026-01-01T00:00:{i:02d}Z",
+            "type": "run_command",
+            "data": {
+                "argv": ["cmd", str(i)],
+                "command": f"cmd {i}",
+                "exit_code": 2,
+            },
+        }
+        for i in range(12)
+    ]
+    metrics = compute_metrics(events)
+
+    assert metrics["commands_executed"] == 12
+    assert metrics["commands_failed"] == 12
+    assert len(metrics["failed_commands"]) == 12
+    assert [entry["command"] for entry in metrics["failed_commands"]] == [
+        f"cmd {i}" for i in range(12)
+    ]
+    assert "failed_commands_truncated" not in metrics
+    assert "failed_commands_omitted_count" not in metrics
+    assert "failed_commands_max" not in metrics
+
+
 def test_validate_report_errors() -> None:
     schema = {
         "$schema": "https://json-schema.org/draft/2020-12/schema",
