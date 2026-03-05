@@ -1812,9 +1812,9 @@ def render_backlog_markdown(
                     for step in implementation_steps[:6]:
                         lines.append(f"  - {step}")
 
-                verification_steps = _coerce_string_list(ticket.get("verification_steps")) or _coerce_string_list(
-                    change_plan.get("verification_steps")
-                )
+                verification_steps = _coerce_string_list(
+                    ticket.get("verification_steps")
+                ) or _coerce_string_list(change_plan.get("verification_steps"))
                 if verification_steps:
                     lines.append("- Verification steps:")
                     for step in verification_steps[:6]:

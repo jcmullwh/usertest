@@ -199,7 +199,9 @@ def _extract_json(text: str) -> Any:
                     except json.JSONDecodeError:
                         break
 
-    raise ValueError(f"no_valid_json: could not extract JSON from response text ({len(text)} chars)")
+    raise ValueError(
+        f"no_valid_json: could not extract JSON from response text ({len(text)} chars)"
+    )
 
 
 def _as_list(value: Any) -> list[Any]:
@@ -504,7 +506,10 @@ def _validate_change_plan(item: dict[str, Any]) -> list[str]:
     if isinstance(criteria, list) and len(criteria) == 0:
         warnings.append(f"change_plan_empty_success_criteria: {cid}")
     elif criteria is not None and not isinstance(criteria, list):
-        warnings.append(f"change_plan_invalid_success_criteria_type: {cid}: {type(criteria).__name__}")
+        warnings.append(
+            f"change_plan_invalid_success_criteria_type: {cid}: "
+            f"{type(criteria).__name__}"
+        )
 
     rollback_notes = item.get("rollback_notes")
     if isinstance(rollback_notes, str) and not rollback_notes.strip():

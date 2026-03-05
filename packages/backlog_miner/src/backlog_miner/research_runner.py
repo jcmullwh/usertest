@@ -18,13 +18,14 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from dataclasses import replace
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any
 
 from backlog_core.stage_contracts import build_stage_document, parse_research_dossier_list
-from runner_core import RunRequest, RunnerConfig, run_once
+from runner_core import RunnerConfig, RunRequest, run_once
 
 _LOG = logging.getLogger(__name__)
 
@@ -298,7 +299,9 @@ def run_repro_research_stage(
 
         report_path = run_dir / "report.json"
         if not report_path.exists():
-            raise FileNotFoundError(f"stage3: missing report.json for problem_id={pid}: {report_path}")
+            raise FileNotFoundError(
+                f"stage3: missing report.json for problem_id={pid}: {report_path}"
+            )
 
         report_obj = _load_json_object(report_path)
         ext_raw = report_obj.get("extensions")
@@ -321,7 +324,8 @@ def run_repro_research_stage(
         if ext_block_raw.get("implementation_performed") is True:
             raise ValueError(
                 f"stage3: extensions.{_EXTENSION_KEY}.implementation_performed=true "
-                f"is forbidden (problem_id={pid}); stage 3 is reproduction+research, not implementation. "
+                f"is forbidden (problem_id={pid}); stage 3 is "
+                "reproduction+research, not implementation. "
                 f"See {report_path}."
             )
 

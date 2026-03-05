@@ -218,7 +218,8 @@ def _resolve_optional_template(
         return None
     if not isinstance(value, str):
         raise ValueError(
-            f"load_pipeline_prompt_manifest: expected string for {key!r}, got {type(value).__name__}"
+            "load_pipeline_prompt_manifest: expected string "
+            f"for {key!r}, got {type(value).__name__}"
         )
     path = prompts_dir / value
     if not path.exists():

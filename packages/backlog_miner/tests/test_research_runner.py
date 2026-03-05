@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
-from runner_core import RunResult, RunnerConfig
+from runner_core import RunnerConfig, RunResult
 
 import backlog_miner.research_runner as mod
 
@@ -50,7 +50,9 @@ def test_run_repro_research_stage_dry_run_writes_requests_and_placeholders(tmp_p
     assert requests_path.exists()
 
 
-def test_run_repro_research_stage_rejects_missing_extension(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_repro_research_stage_rejects_missing_extension(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
     guidance_path.parent.mkdir(parents=True, exist_ok=True)
     guidance_path.write_text("# guidance\n", encoding="utf-8")
@@ -90,7 +92,9 @@ def test_run_repro_research_stage_rejects_missing_extension(tmp_path: Path, monk
         )
 
 
-def test_run_repro_research_stage_classifies_suspicious_diff(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_repro_research_stage_classifies_suspicious_diff(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
     guidance_path.parent.mkdir(parents=True, exist_ok=True)
     guidance_path.write_text("# guidance\n", encoding="utf-8")
@@ -125,7 +129,13 @@ def test_run_repro_research_stage_classifies_suspicious_diff(tmp_path: Path, mon
         )
         _write_json(
             run_dir / "diff_numstat.json",
-            [{"path": "packages/example/src/example/core.py", "lines_added": 1, "lines_removed": 0}],
+            [
+                {
+                    "path": "packages/example/src/example/core.py",
+                    "lines_added": 1,
+                    "lines_removed": 0,
+                }
+            ],
         )
         return RunResult(run_dir=run_dir, exit_code=0, report_validation_errors=[])
 

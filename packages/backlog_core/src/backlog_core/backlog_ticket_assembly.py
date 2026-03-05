@@ -29,7 +29,8 @@ from __future__ import annotations
 
 import logging
 from collections import defaultdict
-from typing import Any, Sequence
+from collections.abc import Sequence
+from typing import Any
 
 _LOG = logging.getLogger(__name__)
 
@@ -67,7 +68,11 @@ def _index_by_problem_id(
             continue
         indexed[pid] = dict(item)
     if duplicates:
-        _LOG.warning("%s: duplicate problem_id values (keeping first): %s", kind, sorted(duplicates))
+        _LOG.warning(
+            "%s: duplicate problem_id values (keeping first): %s",
+            kind,
+            sorted(duplicates),
+        )
     return indexed
 
 
@@ -161,7 +166,10 @@ def assemble_backlog_tickets(
     if missing_for_plans or missing_selection_for_plans:
         parts: list[str] = []
         if missing_for_plans:
-            parts.append("missing problem records for change plans: " + ", ".join(missing_for_plans))
+            parts.append(
+                "missing problem records for change plans: "
+                + ", ".join(missing_for_plans)
+            )
         if missing_selection_for_plans:
             parts.append(
                 "missing selection decisions for change plans: "
@@ -299,4 +307,3 @@ def assemble_backlog_tickets(
         tickets.append(ticket)
 
     return tickets
-

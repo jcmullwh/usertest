@@ -15,7 +15,6 @@ import pytest
 
 from backlog_core.relation_review import apply_relation_decisions, rank_stage_related_items
 
-
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -266,7 +265,14 @@ def test_apply_merge_deduplicates_evidence() -> None:
         _make_problem_record("problem:a", evidence_atom_ids=[shared, "run/ts/a:cp:1"]),
         _make_problem_record("problem:b", evidence_atom_ids=[shared, "run/ts/b:cp:1"]),
     ]
-    decisions = [{"action": "merge", "focus_id": "problem:a", "target_ids": ["problem:b"], "rationale": ""}]
+    decisions = [
+        {
+            "action": "merge",
+            "focus_id": "problem:a",
+            "target_ids": ["problem:b"],
+            "rationale": "",
+        }
+    ]
     result = apply_relation_decisions(items, decisions, stage="problem_mining")
     assert result[0]["evidence_atom_ids"].count(shared) == 1
 

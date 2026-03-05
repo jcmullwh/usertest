@@ -262,7 +262,8 @@ def apply_backlog_policy(
         risks_to_add: list[str] = []
         steps_to_add: list[str] = []
 
-        # Guardrail: `ready_for_ticket` is only valid once a selected solution AND a change plan exist.
+        # Guardrail: `ready_for_ticket` is only valid once a selected solution
+        # AND a change plan exist.
         if stage == "ready_for_ticket" and not ready_prereqs:
             new_stage = "research_required"
             risks_to_add.append("missing_change_plan")
@@ -273,7 +274,11 @@ def apply_backlog_policy(
                 risks_to_add.append("overfitting_risk")
                 steps_to_add.extend(list(config.investigation_steps_for_high_surface_low_breadth))
             elif stage == "triage":
-                new_stage = config.default_stage_for_labeled if ready_prereqs else "research_required"
+                new_stage = (
+                    config.default_stage_for_labeled
+                    if ready_prereqs
+                    else "research_required"
+                )
 
         existing_risks = _coerce_string_list(item.get("risks"))
         for risk in risks_to_add:

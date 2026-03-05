@@ -253,7 +253,6 @@ def _build_neighborhoods_no_embedder(
     ]
 
     neighborhoods: list[dict[str, Any]] = []
-    n = len(items)
 
     for i, item in enumerate(items):
         fid = _item_focus_id(item)
@@ -346,7 +345,6 @@ def _build_neighborhoods_with_embedder(
         One neighborhood dict per item in *items*.
     """
     from triage_engine.similarity import build_item_vectors, compute_pair_similarity
-    from triage_engine.text import tokenize
 
     top_k_sem = int(cfg.get("top_k_by_semantic", 3))
     top_k_ev = int(cfg.get("top_k_by_evidence_overlap", 3))

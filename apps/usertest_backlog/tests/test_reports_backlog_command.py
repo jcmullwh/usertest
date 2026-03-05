@@ -822,7 +822,13 @@ def test_reports_backlog_dry_run_writes_prioritized_problems(tmp_path: Path) -> 
     assert len(doc["items"]) >= 1
     assert any(item.get("selected_for_research") is True for item in doc["items"])
 
-    forbidden = {"proposed_fix", "selected_solution", "family_id", "option_id", "implementation_steps"}
+    forbidden = {
+        "proposed_fix",
+        "selected_solution",
+        "family_id",
+        "option_id",
+        "implementation_steps",
+    }
     for item in doc["items"]:
         for field in forbidden:
             assert field not in item, f"priority decision must not contain solution field: {field}"
@@ -876,7 +882,9 @@ def test_reports_backlog_dry_run_writes_research_dossiers(tmp_path: Path) -> Non
     assert doc.get("stage") == "repro_research"
     assert doc.get("input_meta", {}).get("dry_run") is True
     assert isinstance(doc.get("items"), list)
-    assert len(doc["items"]) >= 1, "fixtures should yield at least one selected-for-research problem"
+    assert len(doc["items"]) >= 1, (
+        "fixtures should yield at least one selected-for-research problem"
+    )
 
     for item in doc["items"]:
         assert item.get("implementation_performed") is False
