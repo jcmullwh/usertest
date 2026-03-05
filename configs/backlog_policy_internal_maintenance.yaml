@@ -1,0 +1,33 @@
+backlog_policy:
+  default_stage_for_labeled: ready_for_ticket
+  high_surface_rules:
+    - rule_id: command_surface
+      applies_to_kinds:
+        - new_command
+        - new_top_level_mode
+        - new_config_schema
+      breadth_min:
+        missions: 2
+        targets: 2
+        repo_inputs: 2
+      default_stage_for_low_breadth: research_required
+      investigation_steps:
+        - Validate repo intent
+        - Check if existing commands or flags can be parameterized
+        - Propose a consolidation plan that avoids new top-level commands
+      risk_tag: overfitting_risk
+      review_domain: command_surface
+    - rule_id: behavior_compat
+      applies_to_kinds:
+        - breaking_change
+        - new_api
+      breadth_min:
+        runs: 5
+        agents: 2
+      default_stage_for_low_breadth: research_required
+      investigation_steps:
+        - Validate recurrence breadth across runs and agents
+        - Check compatibility impact within existing surfaces
+        - Prefer loud diagnostics and migration notes over new top-level surface area
+      risk_tag: compatibility_risk
+      review_domain: behavior_compat

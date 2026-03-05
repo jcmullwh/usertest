@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "stages": {
+    "problem_mining": "../backlog_stage_guidance/problem_mining.md",
+    "problem_prioritization": "../backlog_stage_guidance/problem_prioritization.md",
+    "repro_research": "../backlog_stage_guidance/repro_research.md",
+    "solution_optioning": "solution_optioning.md",
+    "solution_selection": "solution_selection.md",
+    "implementation_planning": "../backlog_stage_guidance/implementation_planning.md"
+  }
+}

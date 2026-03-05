@@ -872,6 +872,119 @@ def test_reports_export_tickets_promotes_high_surface_ready_ticket_with_docs_rec
     assert "- Export kind: `implementation`" in idea_text
 
 
+def test_reports_export_tickets_promotes_accept_existing_surface_recommendation(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo_root(tmp_path)
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    ticket = {
+        "ticket_id": "BLG-003",
+        "title": "Fail earlier on incompatible startup capability combinations",
+        "problem": "Runs continue with degraded startup behavior instead of stopping loudly.",
+        "severity": "medium",
+        "confidence": 0.7,
+        "stage": "research_required",
+        "evidence_atom_ids": ["target_a/20260103T000000Z/codex/0:confusion_point:1"],
+        "change_surface": {
+            "user_visible": True,
+            "kinds": ["breaking_change"],
+            "notes": "Existing startup flow becomes stricter.",
+        },
+        "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 2, "runs": 6},
+        "suggested_owner": "runner_core",
+    }
+    fingerprint = ticket_export_fingerprint(ticket)
+
+    backlog_path = compiled_dir / "target_a.backlog.json"
+    _write_json(
+        backlog_path,
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [ticket],
+        },
+    )
+    _write_json(
+        compiled_dir / "target_a.ux_review.json",
+        {
+            "schema_version": 1,
+            "generated_at": "2026-02-21T00:00:00Z",
+            "scope": {"target": "target_a", "repo_input": None},
+            "status": "ok",
+            "review": {
+                "recommendations": [
+                    {
+                        "recommendation_id": "UX-001",
+                        "fingerprints": [fingerprint],
+                        "recommended_approach": "accept_existing_surface",
+                        "review_domain": "behavior_compat",
+                        "breadth_profile": "internal_maintenance",
+                        "decision_basis": {
+                            "context_breadth": {"missions": 1, "targets": 1, "repo_inputs": 1},
+                            "observation_breadth": {"runs": 6, "agents": 2, "personas": 0},
+                            "structurally_constant_dimensions": [
+                                "missions",
+                                "targets",
+                                "repo_inputs",
+                            ],
+                        },
+                        "rationale": (
+                            "Observation breadth supports hardening existing "
+                            "startup behavior."
+                        ),
+                        "next_steps": ["Add migration notes and regression tests."],
+                        "evidence_breadth_summary": {
+                            "missions": 1,
+                            "targets": 1,
+                            "repo_inputs": 1,
+                            "agents": 2,
+                            "runs": 6,
+                        },
+                    }
+                ],
+                "confidence": 0.8,
+            },
+        },
+    )
+
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-dedupe",
+            ]
+        )
+    assert exc.value.code == 0
+
+    out_json = compiled_dir / "target_a.tickets_export.json"
+    export_doc = json.loads(out_json.read_text(encoding="utf-8"))
+    assert export_doc["stats"]["exports_total"] == 1
+    export = export_doc["exports"][0]
+    assert export["export_kind"] == "implementation"
+    assert export["source_ticket"]["stage"] == "ready_for_ticket"
+    assert "ux:accept_existing_surface" in export["labels"]
+
+
 def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_path: Path) -> None:
     repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"
