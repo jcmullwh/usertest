@@ -40,11 +40,13 @@ _SANDBOX_CLI_PYTHON_VERSION_CANDIDATES: tuple[str, ...] = (
 _DEFAULT_DOCKER_CONTEXT_REL = Path(
     "packages/sandbox_runner/src/sandbox_runner/builtins/docker/contexts/sandbox_cli"
 )
+_MAINTENANCE_VENV_CACHE_ROOT = "/cache/usertest_maint_venvs"
 
 
 def _default_sandbox_env_overrides(
     *,
     cache_mode: Literal["cold", "warm"],
+    maintenance_venv_cache_enabled: bool,
 ) -> dict[str, str]:
     """
     Ensure common tooling (pip/pytest/build backends) uses a writable temp root inside the sandbox.
@@ -55,12 +57,18 @@ def _default_sandbox_env_overrides(
     """
 
     pip_cache_dir = "/cache/pip" if cache_mode == "warm" else "/tmp/usertest-pip-cache"
-    return {
+    env = {
         "TMPDIR": "/tmp",
         "TMP": "/tmp",
         "TEMP": "/tmp",
         "PIP_CACHE_DIR": pip_cache_dir,
     }
+    if maintenance_venv_cache_enabled:
+        env["USERTEST_MAINT_VENV_CACHE_ENABLED"] = "1"
+        env["USERTEST_MAINT_VENV_CACHE_ROOT"] = _MAINTENANCE_VENV_CACHE_ROOT
+    else:
+        env["USERTEST_MAINT_VENV_CACHE_ENABLED"] = "0"
+    return env
 
 
 def _copy_builtin_sandbox_cli_context_from_resources(*, run_dir: Path) -> Path | None:
@@ -172,6 +180,9 @@ def prepare_execution_backend(
     cache_dir: Path | None = getattr(request, "exec_cache_dir", None)
     if cache_mode == "warm" and cache_dir is None:
         cache_dir = repo_root / "runs" / "_cache" / "usertest"
+    maintenance_venv_cache_enabled = bool(
+        cache_mode == "warm" and getattr(request, "exec_maintenance_venv_cache", False)
+    )
 
     env_allowlist_raw = getattr(request, "exec_env", ())
     env_allowlist = [str(x) for x in env_allowlist_raw if isinstance(x, str) and x.strip()]
@@ -211,7 +222,10 @@ def prepare_execution_backend(
         cache_mode=cache_mode_typed,
         cache_dir=cache_dir.resolve() if cache_dir is not None else None,
         env_allowlist=env_allowlist,
-        env_overrides=_default_sandbox_env_overrides(cache_mode=cache_mode_typed),
+        env_overrides=_default_sandbox_env_overrides(
+            cache_mode=cache_mode_typed,
+            maintenance_venv_cache_enabled=maintenance_venv_cache_enabled,
+        ),
         extra_mounts=extra_mounts,
         keep_container=keep_container,
         rebuild_image=rebuild_image,

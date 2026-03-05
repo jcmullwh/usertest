@@ -15,7 +15,10 @@ def test_ticket_index_and_move(tmp_path: Path) -> None:
     fingerprint = "deadbeefdeadbeef"
     ticket_path = ready_dir / f"20260220_{fingerprint}_fix-something.md"
     ticket_path.write_text(
-        "# Fix something\n\n- Fingerprint: `deadbeefdeadbeef`\n",
+        "# Fix something\n\n"
+        "- Export kind: `implementation`\n"
+        "- Stage: `ready_for_ticket`\n"
+        "- Fingerprint: `deadbeefdeadbeef`\n",
         encoding="utf-8",
     )
 
@@ -58,14 +61,20 @@ def test_select_next_ticket_path_prefers_research(tmp_path: Path) -> None:
     impl_fp = "aaaaaaaaaaaaaaaa"
     impl_path = ready_dir / f"20260220_{impl_fp}_implementation.md"
     impl_path.write_text(
-        "# Impl\n\n- Export kind: `implementation`\n- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
+        "# Impl\n\n"
+        "- Export kind: `implementation`\n"
+        "- Stage: `ready_for_ticket`\n"
+        "- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
         encoding="utf-8",
     )
 
     research_fp = "bbbbbbbbbbbbbbbb"
     research_path = ready_dir / f"20260220_{research_fp}_research.md"
     research_path.write_text(
-        "# Research\n\n- Export kind: `research`\n- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
+        "# Research\n\n"
+        "- Export kind: `research`\n"
+        "- Stage: `research_required`\n"
+        "- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
         encoding="utf-8",
     )
 
@@ -78,6 +87,41 @@ def test_select_next_ticket_path_prefers_research(tmp_path: Path) -> None:
     assert selected is not None
     _, path = selected
     assert path == research_path
+
+
+def test_select_next_ticket_path_skips_non_stage6_implementation(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    ready_dir = owner_root / ".agents" / "plans" / "2 - ready"
+    ready_dir.mkdir(parents=True)
+
+    triage_fp = "aaaaaaaaaaaaaaaa"
+    (ready_dir / f"20260220_{triage_fp}_triage.md").write_text(
+        "# Triage\n\n"
+        "- Export kind: `implementation`\n"
+        "- Stage: `triage`\n"
+        "- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
+        encoding="utf-8",
+    )
+
+    ready_fp = "bbbbbbbbbbbbbbbb"
+    ready_path = ready_dir / f"20260220_{ready_fp}_ready.md"
+    ready_path.write_text(
+        "# Ready\n\n"
+        "- Export kind: `implementation`\n"
+        "- Stage: `ready_for_ticket`\n"
+        "- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
+        encoding="utf-8",
+    )
+
+    index = build_ticket_index(owner_root=owner_root)
+    selected = select_next_ticket_path(
+        index,
+        bucket_priority=["2 - ready"],
+        kind_priority=["implementation"],
+    )
+    assert selected is not None
+    _, path = selected
+    assert path == ready_path
 
 
 def test_move_ticket_file_dedupes_actioned_buckets_and_prevents_downgrade(tmp_path: Path) -> None:

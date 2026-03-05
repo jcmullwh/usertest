@@ -739,7 +739,9 @@ def test_run_once_marks_present_commands_as_blocked_by_policy_when_shell_is_disa
     assert "Enable shell commands in policy" in remediation
 
 
-def test_run_once_allows_slow_gemini_version_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_once_allows_slow_gemini_version_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Gemini `--version` can exceed the default 2.5s probe budget; runner should allow it."""
     repo_root = find_repo_root(Path(__file__).resolve())
     target = tmp_path / "target_repo"

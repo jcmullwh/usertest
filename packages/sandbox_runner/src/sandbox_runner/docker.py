@@ -8,7 +8,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from sandbox_runner.image_hash import compute_image_hash
@@ -27,6 +27,8 @@ _SAFE_ENV_KEYS_FOR_META: frozenset[str] = frozenset(
         "PIP_DISABLE_PIP_VERSION_CHECK",
         "PIP_NO_INPUT",
         "PYTEST_ADDOPTS",
+        "USERTEST_MAINT_VENV_CACHE_ENABLED",
+        "USERTEST_MAINT_VENV_CACHE_ROOT",
     }
 )
 
@@ -351,6 +353,18 @@ class DockerSandbox:
                     # If we can't create these directories (permissions, etc), proceed.
                     # The container may still be able to create what it needs.
                     pass
+            env_overrides = spec.env_overrides or {}
+            enabled_raw = env_overrides.get("USERTEST_MAINT_VENV_CACHE_ENABLED")
+            root_raw = env_overrides.get("USERTEST_MAINT_VENV_CACHE_ROOT")
+            if str(enabled_raw).strip() == "1" and isinstance(root_raw, str):
+                root = root_raw.strip()
+                posix_root = PurePosixPath(root)
+                rel_parts = posix_root.parts[2:] if posix_root.parts[:2] == ("/", "cache") else ()
+                if rel_parts and ".." not in rel_parts:
+                    try:
+                        (spec.cache_dir / Path(*rel_parts)).mkdir(parents=True, exist_ok=True)
+                    except OSError:
+                        pass
             mounts.append(
                 MountSpec(
                     host_path=spec.cache_dir.resolve(),

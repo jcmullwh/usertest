@@ -112,6 +112,7 @@ class RunRequest:
     exec_network: str = "open"
     exec_cache: str = "cold"
     exec_cache_dir: Path | None = None
+    exec_maintenance_venv_cache: bool = False
     exec_env: tuple[str, ...] = ()
     exec_keep_container: bool = False
     exec_rebuild_image: bool = False
@@ -4525,6 +4526,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "exec_backend": request.exec_backend,
                     "exec_network": request.exec_network,
                     "exec_cache": request.exec_cache,
+                    "exec_maintenance_venv_cache": request.exec_maintenance_venv_cache,
                     "codex": {
                         "sandbox": codex_sandbox_mode,
                         "ask_for_approval": codex_ask_for_approval,
@@ -4550,6 +4552,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "shell": execution_shell,
                         "network": request.exec_network,
                         "cache": request.exec_cache,
+                        "maintenance_venv_cache": request.exec_maintenance_venv_cache,
                         "container_image": getattr(sandbox, "image_tag", None)
                         if sandbox is not None
                         else None,

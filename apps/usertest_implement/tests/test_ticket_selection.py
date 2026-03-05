@@ -152,13 +152,19 @@ def test_tickets_run_next_dry_run_defaults_to_implementation_only(tmp_path: Path
 
     impl_fp = "aaaaaaaaaaaaaaaa"
     (ready_dir / f"20260220_{impl_fp}_implementation.md").write_text(
-        "# Impl\n\n- Export kind: `implementation`\n- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
+        "# Impl\n\n"
+        "- Export kind: `implementation`\n"
+        "- Stage: `ready_for_ticket`\n"
+        "- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
         encoding="utf-8",
     )
 
     research_fp = "bbbbbbbbbbbbbbbb"
     (ready_dir / f"20260220_{research_fp}_research.md").write_text(
-        "# Research\n\n- Export kind: `research`\n- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
+        "# Research\n\n"
+        "- Export kind: `research`\n"
+        "- Stage: `research_required`\n"
+        "- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
         encoding="utf-8",
     )
 
@@ -182,6 +188,58 @@ def test_tickets_run_next_dry_run_defaults_to_implementation_only(tmp_path: Path
     payload = json.loads(proc.stdout)
     assert payload["selected_ticket"]["fingerprint"] == impl_fp
     assert payload["run_request"]["verification_commands"]
+    assert payload["run_request"]["exec_cache"] == "warm"
+    assert payload["run_request"]["exec_maintenance_venv_cache"] is True
+
+
+def test_run_dry_run_can_disable_maintenance_venv_cache(tmp_path: Path) -> None:
+    export_path = tmp_path / "tickets_export.json"
+    _write_json(
+        export_path,
+        {
+            "schema_version": 1,
+            "exports": [
+                {
+                    "fingerprint": "aaaaaaaaaaaaaaaa",
+                    "export_kind": "implementation",
+                    "title": "Ticket A",
+                    "labels": [],
+                    "body_markdown": "# A\n",
+                    "source_ticket": {
+                        "fingerprint": "aaaaaaaaaaaaaaaa",
+                        "stage": "ready_for_ticket",
+                        "severity": "low",
+                    },
+                    "owner_repo": {
+                        "root": str(tmp_path),
+                        "repo_input": str(tmp_path),
+                        "idea_path": str(tmp_path / "a.md"),
+                    },
+                }
+            ],
+        },
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "run",
+            "--dry-run",
+            "--tickets-export",
+            str(export_path),
+            "--fingerprint",
+            "aaaaaaaaaaaaaaaa",
+            "--no-maintenance-venv-cache",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["run_request"]["exec_maintenance_venv_cache"] is False
 
 
 def test_tickets_run_next_dry_run_ignores_actioned_fingerprints(tmp_path: Path) -> None:
@@ -197,6 +255,7 @@ def test_tickets_run_next_dry_run_ignores_actioned_fingerprints(tmp_path: Path) 
     queued_text = (
         "# Stale queued copy\n\n"
         "- Export kind: `implementation`\n"
+        "- Stage: `ready_for_ticket`\n"
         "- Fingerprint: `aaaaaaaaaaaaaaaa`\n"
     )
     (ready_dir / name).write_text(
@@ -206,6 +265,7 @@ def test_tickets_run_next_dry_run_ignores_actioned_fingerprints(tmp_path: Path) 
     actioned_text = (
         "# Actioned copy\n\n"
         "- Export kind: `implementation`\n"
+        "- Stage: `ready_for_ticket`\n"
         "- Fingerprint: `aaaaaaaaaaaaaaaa`\n"
     )
     (complete_dir / name).write_text(
@@ -215,7 +275,10 @@ def test_tickets_run_next_dry_run_ignores_actioned_fingerprints(tmp_path: Path) 
 
     good_fp = "bbbbbbbbbbbbbbbb"
     (ready_dir / f"20260220_{good_fp}_ok.md").write_text(
-        "# Next\n\n- Export kind: `implementation`\n- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
+        "# Next\n\n"
+        "- Export kind: `implementation`\n"
+        "- Stage: `ready_for_ticket`\n"
+        "- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
         encoding="utf-8",
     )
 
@@ -238,3 +301,113 @@ def test_tickets_run_next_dry_run_ignores_actioned_fingerprints(tmp_path: Path) 
     assert proc.returncode == 0, proc.stderr or proc.stdout
     payload = json.loads(proc.stdout)
     assert payload["selected_ticket"]["fingerprint"] == good_fp
+
+
+def test_run_dry_run_rejects_non_stage6_ticket(tmp_path: Path) -> None:
+    export_path = tmp_path / "tickets_export.json"
+    _write_json(
+        export_path,
+        {
+            "schema_version": 1,
+            "exports": [
+                {
+                    "fingerprint": "aaaaaaaaaaaaaaaa",
+                    "export_kind": "implementation",
+                    "title": "Ticket A",
+                    "labels": [],
+                    "body_markdown": "# A\n",
+                    "source_ticket": {
+                        "fingerprint": "aaaaaaaaaaaaaaaa",
+                        "stage": "triage",
+                        "severity": "low",
+                    },
+                    "owner_repo": {
+                        "root": str(tmp_path),
+                        "repo_input": str(tmp_path),
+                        "idea_path": str(tmp_path / "a.md"),
+                    },
+                }
+            ],
+        },
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "run",
+            "--dry-run",
+            "--tickets-export",
+            str(export_path),
+            "--fingerprint",
+            "aaaaaaaaaaaaaaaa",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert "ready_for_ticket" in (proc.stderr + proc.stdout)
+
+
+def test_tickets_run_next_dry_run_skips_research_only_queue(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    ready_dir = owner_root / ".agents" / "plans" / "2 - ready"
+    ready_dir.mkdir(parents=True)
+
+    research_fp = "bbbbbbbbbbbbbbbb"
+    (ready_dir / f"20260220_{research_fp}_research.md").write_text(
+        "# Research\n\n"
+        "- Export kind: `research`\n"
+        "- Stage: `research_required`\n"
+        "- Fingerprint: `bbbbbbbbbbbbbbbb`\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "tickets",
+            "run-next",
+            "--owner-root",
+            str(owner_root),
+            "--no-refresh-backlog",
+            "--dry-run",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    assert "No tickets found." in proc.stdout
+
+
+def test_run_dry_run_rejects_non_stage6_ticket_path(tmp_path: Path) -> None:
+    ticket_path = tmp_path / "ticket.md"
+    ticket_path.write_text(
+        "# Ticket\n\n"
+        "- Export kind: `implementation`\n"
+        "- Stage: `triage`\n"
+        "- Fingerprint: `aaaaaaaaaaaaaaaa`\n",
+        encoding="utf-8",
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "run",
+            "--dry-run",
+            "--ticket-path",
+            str(ticket_path),
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert "ready_for_ticket" in (proc.stderr + proc.stdout)

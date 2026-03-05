@@ -137,6 +137,10 @@ Docker runs can optionally mount a persistent host cache directory at `/cache` i
 In the built-in `sandbox_cli` image, heavyweight tool caches are wired into `/cache` (notably `pip` and `pdm`),
 so `warm` mainly speeds up repeated installs across runs.
 
+`usertest-implement` adds an implement-only maintenance venv cache layer (enabled by default) on top of warm cache.
+That layer stores per-project `.venv` snapshots under `/cache/usertest_maint_venvs` and can make repeated
+`scaffold.py run install --all` steps near-noop when lockfiles are unchanged.
+
 Defaults:
 
 - Host cache directory: `<repo_root>/runs/_cache/usertest` (when `--exec-cache warm` and `--exec-cache-dir` is not set)

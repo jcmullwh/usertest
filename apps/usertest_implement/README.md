@@ -24,13 +24,23 @@ Verification gate:
 
 - When using `--commit/--push/--pr`, `usertest-implement` configures a required verification step before handing off
   (default: `scripts/smoke.ps1` on Windows local runs, `scripts/smoke.sh` otherwise, then
-  `python tools/scaffold/scaffold.py run --all --fix lint`).
+  `python tools/scaffold/scaffold.py run --all --skip-missing install`, then `lint`, then `test`).
 - If the verification gate fails, `usertest-implement` exits non-zero and refuses to `--commit/--push/--pr`
   (unless you pass `--skip-verify`, debugging only).
 - Override the gate with `--verify-command "<cmd>"` (repeatable) and optional `--verify-timeout-seconds`.
 - Disable the default gate with `--skip-verify` (debugging only; expect CI failures).
 - `runner_core` may run follow-up attempts automatically when verification fails; see `agent_attempts.json`
   for the attempt sequence and `verification.json` for the failing command output.
+
+Maintenance install cache (Docker + warm cache):
+
+- `usertest-implement` defaults to `--exec-cache warm`.
+- When Docker + warm cache are active, `usertest-implement` also enables maintenance venv cache reuse by default
+  (`--maintenance-venv-cache`), so scaffold install tasks can restore per-project `.venv` snapshots from `/cache`.
+- Disable this behavior with `--no-maintenance-venv-cache` (forces full reinstall behavior).
+- Cache root inside the container: `/cache/usertest_maint_venvs`.
+- Default host cache root: `<repo_root>/runs/_cache/usertest_implement`.
+- Manual cleanup: delete the host cache directory (or only `usertest_maint_venvs`) when needed.
 
 CI gate (before PR creation):
 
@@ -84,6 +94,8 @@ From a ticket markdown file (for example in `.agents/plans/2 - ready/`):
 usertest-implement run --ticket-path ".agents/plans/2 - ready/<ticket>.md"
 ```
 
+`usertest-implement` only accepts stage-6 implementation tickets (`Export kind: implementation`, `Stage: ready_for_ticket`).
+
 Or from a tickets export JSON:
 
 ```bash
@@ -99,5 +111,6 @@ usertest-implement tickets run-next --backlog-target <target_slug>
 ```
 
 It runs the backlog refresh steps via `usertest-backlog` (backlog → intent-snapshot → review-ux → export-tickets),
-then selects the next local plan ticket (research-first) and runs it. Use `--no-refresh-backlog` for a fast path
-that only selects from existing `.agents/plans/*` tickets.
+exports only `ready_for_ticket` items, then selects the next local plan ticket that is both
+`Export kind: implementation` and `Stage: ready_for_ticket`. Use `--no-refresh-backlog` for a fast path
+that only selects from existing `.agents/plans/*` tickets that match the same stage-6 implementation gate.

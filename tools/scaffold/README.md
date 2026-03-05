@@ -49,9 +49,13 @@ Options:
 
 ## Virtual environments
 
-This tool does not create or manage virtual environments. For Python projects, use whatever per-project environment
-strategy your generator and `tasks.*` imply (Poetry/uv/pip-tools/conda/PDM/venv/etc.). The scaffolder runs tasks exactly
-as recorded in `tools/scaffold/monorepo.toml`.
+This tool does not define project environment strategy; it runs tasks exactly as recorded in
+`tools/scaffold/monorepo.toml`.
+
+For PDM projects, `scaffold run install` executes each project's `tasks.install` command. When maintenance cache env
+vars are present (`USERTEST_MAINT_VENV_CACHE_ENABLED=1` + `USERTEST_MAINT_VENV_CACHE_ROOT=...`), install steps can
+reuse cached `.venv` snapshots keyed by dependency fingerprint. Cache failures are non-fatal and fall back to normal
+install behavior.
 
 ## Configuration model
 
@@ -136,6 +140,8 @@ The repo-level workflow at `.github/workflows/ci.yml` is driven by the manifest:
 - CI installs a pinned PDM version (`2.26.2`) for deterministic behavior.
 - `scaffold.py run install` applies a bounded one-time retry only for a known transient PDM local-path resolution
   signature involving `normalized-events`.
+- When maintenance cache env vars are enabled, `scaffold.py run install` may restore/save per-project `.venv` cache
+  entries and emit INFO lines for `hit`, `miss`, `restore-failed`, and `save-complete` outcomes.
 - The `scaffold_golden_path_smoke` CI job exercises the documented scaffold flow end to end by running
   `doctor -> add -> run install --skip-missing -> run test` on a generated sample app and asserting expected files plus
   manifest entries.

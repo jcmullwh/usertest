@@ -91,6 +91,130 @@ def test_prepare_execution_backend_uses_default_docker_context(
     assert image_context.resolve() == default_context.resolve()
 
 
+def test_prepare_execution_backend_enables_maintenance_venv_cache_env_for_warm_cache(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    _make_default_context(repo_root)
+
+    captured: dict[str, object] = {}
+
+    class _DummyInstance:
+        command_prefix = ["docker", "exec"]
+        workspace_mount = "/workspace"
+
+        def close(self) -> None:
+            return
+
+    class _DummyDockerSandbox:
+        def __init__(
+            self,
+            *,
+            workspace_dir: Path,
+            artifacts_dir: Path,
+            spec: object,
+            container_name: str,
+        ):
+            captured["spec"] = spec
+
+        def start(self) -> _DummyInstance:
+            return _DummyInstance()
+
+    import runner_core.execution_backend as backend_mod
+
+    monkeypatch.setattr(backend_mod, "DockerSandbox", _DummyDockerSandbox)
+
+    req = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_context=None,
+        exec_use_host_agent_login=False,
+        exec_cache="warm",
+        exec_maintenance_venv_cache=True,
+    )
+
+    prepare_execution_backend(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        request=req,
+        workspace_id="w1",
+        agent_cfg={},
+    )
+
+    spec = captured["spec"]
+    env_overrides = spec.env_overrides
+    assert env_overrides["USERTEST_MAINT_VENV_CACHE_ENABLED"] == "1"
+    assert env_overrides["USERTEST_MAINT_VENV_CACHE_ROOT"] == "/cache/usertest_maint_venvs"
+
+
+def test_prepare_execution_backend_disables_maintenance_venv_cache_env_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    _make_default_context(repo_root)
+
+    captured: dict[str, object] = {}
+
+    class _DummyInstance:
+        command_prefix = ["docker", "exec"]
+        workspace_mount = "/workspace"
+
+        def close(self) -> None:
+            return
+
+    class _DummyDockerSandbox:
+        def __init__(
+            self,
+            *,
+            workspace_dir: Path,
+            artifacts_dir: Path,
+            spec: object,
+            container_name: str,
+        ):
+            captured["spec"] = spec
+
+        def start(self) -> _DummyInstance:
+            return _DummyInstance()
+
+    import runner_core.execution_backend as backend_mod
+
+    monkeypatch.setattr(backend_mod, "DockerSandbox", _DummyDockerSandbox)
+
+    req = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_context=None,
+        exec_use_host_agent_login=False,
+        exec_cache="warm",
+        exec_maintenance_venv_cache=False,
+    )
+
+    prepare_execution_backend(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        request=req,
+        workspace_id="w1",
+        agent_cfg={},
+    )
+
+    spec = captured["spec"]
+    env_overrides = spec.env_overrides
+    assert env_overrides["USERTEST_MAINT_VENV_CACHE_ENABLED"] == "0"
+    assert "USERTEST_MAINT_VENV_CACHE_ROOT" not in env_overrides
+
+
 def test_prepare_execution_backend_requires_context_when_default_missing(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
