@@ -49,7 +49,19 @@ def _iter_json_lines(path: Path) -> Iterator[dict[str, Any]]:
                 yield payload
 
 
-def _extract_json_object_candidate(text: str) -> dict[str, Any] | None:
+def _extract_json_value_candidate(text: str) -> dict[str, Any] | list[Any] | None:
+    """Best-effort extraction of a JSON object or array from *text*.
+
+    Gemini CLI runs sometimes emit structured JSON inside assistant messages or tool
+    outputs (for example, backlog stage prompts that demand "Return ONLY JSON").
+    When the final assistant segment is a JSON list (common for stage outputs), we
+    must preserve the full list rather than accidentally extracting the first object.
+
+    This helper:
+    - Strips a single outer Markdown code fence when present.
+    - Prefers parsing the entire string as JSON.
+    - Falls back to scanning for the first decodable JSON value (object or array).
+    """
     raw = text.strip()
     if not raw:
         return None
@@ -66,18 +78,18 @@ def _extract_json_object_candidate(text: str) -> dict[str, Any] | None:
         parsed = json.loads(raw)
     except Exception:
         parsed = None
-    if isinstance(parsed, dict):
+    if isinstance(parsed, (dict, list)):
         return parsed
 
     decoder = JSONDecoder()
     for idx, char in enumerate(raw):
-        if char != "{":
+        if char not in "{[":
             continue
         try:
             parsed_obj, _ = decoder.raw_decode(raw[idx:])
         except Exception:
             continue
-        if isinstance(parsed_obj, dict):
+        if isinstance(parsed_obj, (dict, list)):
             return parsed_obj
     return None
 
@@ -101,7 +113,7 @@ def _extract_last_message_text(raw_events_path: Path) -> str:
     # we want the last contiguous assistant segment, not the entire transcript.
     last_segment: str = ""
     current: str = ""
-    recovered_json_obj: dict[str, Any] | None = None
+    recovered_json_value: dict[str, Any] | list[Any] | None = None
 
     def _flush() -> None:
         nonlocal last_segment, current
@@ -119,18 +131,18 @@ def _extract_last_message_text(raw_events_path: Path) -> str:
             if tool_name == "write_file" and isinstance(params, dict):
                 content = params.get("content")
                 if isinstance(content, str):
-                    candidate = _extract_json_object_candidate(content)
+                    candidate = _extract_json_value_candidate(content)
                     if candidate is not None:
-                        recovered_json_obj = candidate
+                        recovered_json_value = candidate
             continue
 
         if event_type == "tool_result":
             _flush()
             output = obj.get("output")
             if isinstance(output, str):
-                candidate = _extract_json_object_candidate(output)
+                candidate = _extract_json_value_candidate(output)
                 if candidate is not None:
-                    recovered_json_obj = candidate
+                    recovered_json_value = candidate
             continue
 
         if event_type == "message":
@@ -150,11 +162,11 @@ def _extract_last_message_text(raw_events_path: Path) -> str:
             continue
 
     _flush()
-    direct_candidate = _extract_json_object_candidate(last_segment)
+    direct_candidate = _extract_json_value_candidate(last_segment)
     if direct_candidate is not None:
         return json.dumps(direct_candidate, indent=2, ensure_ascii=False)
-    if recovered_json_obj is not None:
-        return json.dumps(recovered_json_obj, indent=2, ensure_ascii=False)
+    if recovered_json_value is not None:
+        return json.dumps(recovered_json_value, indent=2, ensure_ascii=False)
     return last_segment
 
 
@@ -181,6 +193,19 @@ def run_gemini(
     stderr_path.parent.mkdir(parents=True, exist_ok=True)
     raw_events_ts_path = raw_events_path.with_suffix(".ts.jsonl")
 
+    # Gemini CLI (as of v0.30.x) does not support supplying a system prompt via a dedicated
+    # flag. The runner still uses `system_prompt_file` for auditability and for composing
+    # append content; we inject it by prefixing the prompt text.
+    effective_prompt = prompt
+    if system_prompt_file is not None:
+        system_path = Path(system_prompt_file)
+        system_text = system_path.read_text(encoding="utf-8")
+        if system_text and not system_text.endswith("\n"):
+            system_text += "\n"
+        # Preserve the system prompt content verbatim at the top of stdin to avoid losing
+        # formatting and to keep tests deterministic.
+        effective_prompt = system_text + "\n" + prompt
+
     prefix = [p for p in command_prefix if isinstance(p, str) and p]
     resolved_binary = binary if prefix else _resolve_executable(binary)
 
@@ -197,8 +222,6 @@ def run_gemini(
         argv.append("--sandbox")
     if model is not None:
         argv.extend(["--model", model])
-    if system_prompt_file is not None:
-        argv.extend(["--agent-system-prompt-file", str(system_prompt_file)])
 
     tools = [t for t in allowed_tools if isinstance(t, str) and t.strip()]
     for tool in tools:
@@ -249,7 +272,7 @@ def run_gemini(
 
         if proc.stdin is not None:
             try:
-                proc.stdin.write(prompt)
+                proc.stdin.write(effective_prompt)
             except BrokenPipeError:
                 pass
             finally:

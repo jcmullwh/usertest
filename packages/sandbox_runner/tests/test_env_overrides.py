@@ -93,3 +93,56 @@ def test_docker_sandbox_passes_env_overrides_into_container(
     finally:
         sandbox.close()
 
+
+def test_docker_sandbox_creates_maintenance_venv_cache_dir(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_docker_run(
+        argv: list[str],
+        *,
+        cwd: Path | None = None,  # noqa: ARG001
+        check: bool = True,  # noqa: ARG001
+        timeout_seconds: float | None = None,  # noqa: ARG001
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[:2] == ["docker", "version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="[]\n", stderr="")
+        if argv[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="container-id\n", stderr="")
+        if argv[:2] == ["docker", "rm"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected docker invocation: {argv!r}")
+
+    monkeypatch.setattr(docker, "_docker_run", _fake_docker_run)
+
+    context_dir = tmp_path / "context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "Dockerfile").write_text("FROM scratch\n", encoding="utf-8")
+
+    cache_dir = tmp_path / "cache"
+    artifacts_dir = tmp_path / "artifacts"
+    spec = SandboxSpec(
+        backend="docker",
+        image_context_path=context_dir,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        env_overrides={
+            "USERTEST_MAINT_VENV_CACHE_ENABLED": "1",
+            "USERTEST_MAINT_VENV_CACHE_ROOT": "/cache/usertest_maint_venvs",
+        },
+    )
+
+    sandbox = docker.DockerSandbox(
+        workspace_dir=tmp_path / "workspace",
+        artifacts_dir=artifacts_dir,
+        spec=spec,
+        container_name="sandbox-maint-venv-cache-test",
+    ).start()
+    try:
+        assert (cache_dir / "usertest_maint_venvs").is_dir()
+    finally:
+        sandbox.close()

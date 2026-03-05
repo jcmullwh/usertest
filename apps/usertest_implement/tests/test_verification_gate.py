@@ -71,7 +71,8 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
     selected = implement_cli.SelectedTicket(
         fingerprint="fp",
         title="Test ticket",
-        export_kind=None,
+        export_kind="implementation",
+        stage="ready_for_ticket",
         owner_root=None,
         idea_path=None,
         ticket_markdown="# ticket\n",

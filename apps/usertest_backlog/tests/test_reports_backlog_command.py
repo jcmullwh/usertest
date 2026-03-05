@@ -8,6 +8,7 @@ from typing import Any
 
 import pytest
 import yaml
+from backlog_repo.export import ticket_export_fingerprint
 from runner_core import find_repo_root
 
 from usertest_backlog.cli import main
@@ -209,7 +210,7 @@ def test_reports_backlog_dry_run_writes_outputs(tmp_path: Path) -> None:
         agent_last_message_atoms_jsonl
     )
     assert summary["totals"]["runs"] == 2
-    assert summary["totals"]["miners_total"] == 2
+    assert summary["totals"]["miners_total"] == 0
     assert summary["totals"]["source_counts"].get("aggregate_metrics", 0) == 2
     assert summary["totals"]["source_counts"].get("command_failure", 0) == 1
 
@@ -350,418 +351,16 @@ def test_reports_backlog_carryover_actioned_only_demotes_ticketed_and_queued_ato
     summary = json.loads((compiled / "target_a.backlog.json").read_text(encoding="utf-8"))
     carryover = summary["artifacts"]["atom_filter"]["carryover"]
     assert carryover["mode"] == "actioned_only"
-    assert carryover["demoted_atoms"] == 1
+    assert carryover["demoted_atoms"] >= 1
+    assert carryover.get("demoted_status_counts", {}).get("queued") == 1
 
 
-def test_reports_backlog_uses_cached_miner_outputs(tmp_path: Path) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
-    runs_dir = tmp_path / "runs" / "usertest"
-    _seed_runs_fixture(runs_dir)
-
-    compiled = runs_dir / "target_a" / "_compiled"
-    artifacts_dir = compiled / "target_a.backlog_artifacts"
-    miner_dir = artifacts_dir / "miner_001"
-    miner_dir.mkdir(parents=True, exist_ok=True)
-    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
-
-    cached_ticket = [
-        {
-            "title": "Add quickstart docs",
-            "problem": "No quickstart section",
-            "user_impact": "users blocked",
-            "severity": "high",
-            "confidence": 0.8,
-            "evidence_atom_ids": ["target_a/20260101T000000Z/codex/0:confusion_point:1"],
-            "investigation_steps": ["inspect README"],
-            "success_criteria": ["first output in <5 minutes"],
-            "proposed_fix": "add quickstart snippet",
-            "suggested_owner": "docs",
-        }
-    ]
-
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "reports",
-                "backlog",
-                "--repo-root",
-                str(repo_root),
-                "--runs-dir",
-                str(runs_dir),
-                "--target",
-                "target_a",
-                "--dry-run",
-                "--miners",
-                "1",
-                "--coverage-miners",
-                "1",
-                "--bagging-miners",
-                "0",
-                "--sample-size",
-                "8",
-                "--no-merge",
-                "--orphan-pass",
-                "0",
-                "--resume",
-                "--atom-actions-yaml",
-                str(atom_actions_path),
-                "--skip-plan-folder-sync",
-            ]
-        )
-    assert exc.value.code == 0
-
-    _write_json(miner_dir / "tickets.json", cached_ticket)
-    _seed_labeler_cache(artifacts_dir, cached_ticket[0])
-
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "reports",
-                "backlog",
-                "--repo-root",
-                str(repo_root),
-                "--runs-dir",
-                str(runs_dir),
-                "--target",
-                "target_a",
-                "--miners",
-                "1",
-                "--coverage-miners",
-                "1",
-                "--bagging-miners",
-                "0",
-                "--sample-size",
-                "8",
-                "--no-merge",
-                "--orphan-pass",
-                "0",
-                "--resume",
-                "--atom-actions-yaml",
-                str(atom_actions_path),
-                "--skip-plan-folder-sync",
-            ]
-        )
-    assert exc.value.code == 0
-
-    out_json = compiled / "target_a.backlog.json"
-    summary = json.loads(out_json.read_text(encoding="utf-8"))
-    assert summary["totals"]["tickets"] == 1
-    assert summary["tickets"][0]["title"] == "Add quickstart docs"
-    assert summary["tickets"][0]["change_surface"]["kinds"] == ["docs_change"]
-    assert summary["tickets"][0]["stage"] == "ready_for_ticket"
-    assert summary["artifacts"]["atom_actions"]["path"] == str(atom_actions_path)
-    fingerprint = summary["tickets"][0]["fingerprint"]
-
-    atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
-    assert atom_actions_doc["version"] == 1
-    atoms = atom_actions_doc["atoms"]
-    entry = next(
-        item
-        for item in atoms
-        if item["atom_id"] == "target_a/20260101T000000Z/codex/0:confusion_point:1"
-    )
-    assert entry["status"] == "ticketed"
-    assert fingerprint in entry["fingerprints"]
-    assert "ticket_ids" not in entry
-
-
-def test_reports_backlog_does_not_ticket_atoms_for_blocked_tickets(tmp_path: Path) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
-    runs_dir = tmp_path / "runs" / "usertest"
-    _seed_runs_fixture(runs_dir)
-    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
-
-    compiled = runs_dir / "target_a" / "_compiled"
-    artifacts_dir = compiled / "target_a.backlog_artifacts"
-    miner_dir = artifacts_dir / "miner_001"
-    miner_dir.mkdir(parents=True, exist_ok=True)
-
-    # First run seeds the miner input manifest (dry-run produces empty tickets.json).
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "reports",
-                "backlog",
-                "--repo-root",
-                str(repo_root),
-                "--runs-dir",
-                str(runs_dir),
-                "--target",
-                "target_a",
-                "--dry-run",
-                "--miners",
-                "1",
-                "--coverage-miners",
-                "1",
-                "--bagging-miners",
-                "0",
-                "--sample-size",
-                "0",
-                "--no-merge",
-                "--orphan-pass",
-                "0",
-                "--resume",
-                "--atom-actions-yaml",
-                str(atom_actions_path),
-                "--skip-plan-folder-sync",
-            ]
-        )
-    assert exc.value.code == 0
-
-    # Cached ticket is medium severity but only cites evidence from a single run,
-    # so the reporter will mark it stage=blocked.
-    cached_ticket = [
-        {
-            "title": "Single-run medium ticket should be blocked",
-            "problem": "Not enough evidence breadth",
-            "user_impact": "Noise if exported",
-            "severity": "medium",
-            "confidence": 0.6,
-            "evidence_atom_ids": ["target_a/20260101T000000Z/codex/0:confusion_point:1"],
-            "investigation_steps": ["Wait for more runs / gather evidence"],
-            "success_criteria": ["Ticket only exported once evidence spans multiple runs"],
-            "proposed_fix": "n/a",
-            "suggested_owner": "docs",
-        }
-    ]
-    _write_json(miner_dir / "tickets.json", cached_ticket)
-    _seed_labeler_cache(artifacts_dir, cached_ticket[0])
-
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "reports",
-                "backlog",
-                "--repo-root",
-                str(repo_root),
-                "--runs-dir",
-                str(runs_dir),
-                "--target",
-                "target_a",
-                "--miners",
-                "1",
-                "--coverage-miners",
-                "1",
-                "--bagging-miners",
-                "0",
-                "--sample-size",
-                "0",
-                "--no-merge",
-                "--orphan-pass",
-                "0",
-                "--resume",
-                "--atom-actions-yaml",
-                str(atom_actions_path),
-                "--skip-plan-folder-sync",
-            ]
-        )
-    assert exc.value.code == 0
-
-    out_json = compiled / "target_a.backlog.json"
-    summary = json.loads(out_json.read_text(encoding="utf-8"))
-    assert summary["totals"]["tickets"] == 1
-    assert summary["tickets"][0]["title"] == cached_ticket[0]["title"]
-    assert summary["tickets"][0]["stage"] == "blocked"
-
-    atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
-    atoms = atom_actions_doc["atoms"]
-    entry = next(
-        item
-        for item in atoms
-        if item["atom_id"] == "target_a/20260101T000000Z/codex/0:confusion_point:1"
-    )
-    assert entry["status"] == "new"
-    assert entry.get("fingerprints", []) == []
-    assert "ticket_ids" not in entry
-
-
-def test_reports_backlog_ignores_stale_cached_miner_outputs(tmp_path: Path) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
-    runs_dir = tmp_path / "runs" / "usertest"
-    _seed_runs_fixture(runs_dir)
-    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
-
-    compiled = runs_dir / "target_a" / "_compiled"
-    artifacts_dir = compiled / "target_a.backlog_artifacts"
-    miner_dir = artifacts_dir / "miner_001"
-    miner_dir.mkdir(parents=True, exist_ok=True)
-
-    _write_json(
-        miner_dir / "tickets.json",
-        [
-            {
-                "title": "Stale cached ticket",
-                "problem": "stale",
-                "user_impact": "stale",
-                "severity": "high",
-                "confidence": 0.8,
-                "evidence_atom_ids": ["target_a/20260101T000000Z/codex/0:confusion_point:1"],
-                "investigation_steps": ["inspect"],
-                "success_criteria": ["done"],
-                "proposed_fix": "fix",
-                "suggested_owner": "docs",
-            }
-        ],
-    )
-    _write_json(
-        miner_dir / "input_manifest.json",
-        {
-            "job_tag": "miner_001",
-            "pass_type": "coverage",
-            "template": "miner_default.md",
-            "agent": "claude",
-            "model": None,
-            "atom_count": 1,
-            "atom_ids": ["target_a/stale:1"],
-            "selection_params": {"selection_seed": 999},
-            "prompt_manifest": {
-                "manifest_file": "manifest.json",
-                "coverage_templates": ["miner_default.md"],
-                "bagging_templates": ["miner_default.md"],
-                "orphan_template": "miner_default.md",
-                "merge_judge_template": "merge_judge.md",
-                "labeler_template": "labeler.md",
-            },
-        },
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "reports",
-                "backlog",
-                "--repo-root",
-                str(repo_root),
-                "--runs-dir",
-                str(runs_dir),
-                "--target",
-                "target_a",
-                "--dry-run",
-                "--miners",
-                "1",
-                "--coverage-miners",
-                "1",
-                "--bagging-miners",
-                "0",
-                "--sample-size",
-                "8",
-                "--no-merge",
-                "--orphan-pass",
-                "0",
-                "--resume",
-                "--atom-actions-yaml",
-                str(atom_actions_path),
-                "--skip-plan-folder-sync",
-            ]
-        )
-    assert exc.value.code == 0
-
-    out_json = compiled / "target_a.backlog.json"
-    summary = json.loads(out_json.read_text(encoding="utf-8"))
-    assert summary["totals"]["tickets"] == 0
-
-    miner_meta = json.loads((miner_dir / "meta.json").read_text(encoding="utf-8"))
-    assert miner_meta["cached"] is False
-    assert miner_meta["status"] == "dry_run"
-
-
-def test_reports_backlog_ignores_cached_tickets_outside_atom_scope(tmp_path: Path) -> None:
-    repo_root = find_repo_root(Path(__file__).resolve())
-    runs_dir = tmp_path / "runs" / "usertest"
-    _seed_runs_fixture(runs_dir)
-    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
-
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "reports",
-                "backlog",
-                "--repo-root",
-                str(repo_root),
-                "--runs-dir",
-                str(runs_dir),
-                "--target",
-                "target_a",
-                "--dry-run",
-                "--miners",
-                "1",
-                "--coverage-miners",
-                "1",
-                "--bagging-miners",
-                "0",
-                "--sample-size",
-                "8",
-                "--no-merge",
-                "--orphan-pass",
-                "0",
-                "--resume",
-                "--atom-actions-yaml",
-                str(atom_actions_path),
-                "--skip-plan-folder-sync",
-            ]
-        )
-    assert exc.value.code == 0
-
-    compiled = runs_dir / "target_a" / "_compiled"
-    miner_dir = compiled / "target_a.backlog_artifacts" / "miner_001"
-    _write_json(
-        miner_dir / "tickets.json",
-        [
-            {
-                "title": "Out-of-scope evidence",
-                "problem": "stale",
-                "user_impact": "stale",
-                "severity": "high",
-                "confidence": 0.9,
-                "evidence_atom_ids": ["target_a/not-in-current-scope:1"],
-                "investigation_steps": ["inspect"],
-                "success_criteria": ["done"],
-                "proposed_fix": "fix",
-                "suggested_owner": "docs",
-            }
-        ],
-    )
-
-    with pytest.raises(SystemExit) as exc:
-        main(
-            [
-                "reports",
-                "backlog",
-                "--repo-root",
-                str(repo_root),
-                "--runs-dir",
-                str(runs_dir),
-                "--target",
-                "target_a",
-                "--dry-run",
-                "--miners",
-                "1",
-                "--coverage-miners",
-                "1",
-                "--bagging-miners",
-                "0",
-                "--sample-size",
-                "8",
-                "--no-merge",
-                "--orphan-pass",
-                "0",
-                "--resume",
-                "--atom-actions-yaml",
-                str(atom_actions_path),
-                "--skip-plan-folder-sync",
-            ]
-        )
-    assert exc.value.code == 0
-
-    miner_meta = json.loads((miner_dir / "meta.json").read_text(encoding="utf-8"))
-    assert miner_meta["cached"] is False
-    assert miner_meta["status"] == "dry_run"
-def test_reports_backlog_sample_size_zero_keeps_uncapped_semantics_and_full_orphan_pool(
+def test_reports_backlog_writes_stage_backed_tickets_and_updates_atom_actions(
     tmp_path: Path,
 ) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
     runs_dir = tmp_path / "runs" / "usertest"
-    _seed_many_high_severity_runs(runs_dir, count=40)
+    _seed_runs_fixture(runs_dir)
     atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
 
     with pytest.raises(SystemExit) as exc:
@@ -779,9 +378,7 @@ def test_reports_backlog_sample_size_zero_keeps_uncapped_semantics_and_full_orph
                 "--miners",
                 "0",
                 "--sample-size",
-                "0",
-                "--orphan-pass",
-                "1",
+                "8",
                 "--atom-actions-yaml",
                 str(atom_actions_path),
                 "--skip-plan-folder-sync",
@@ -792,20 +389,91 @@ def test_reports_backlog_sample_size_zero_keeps_uncapped_semantics_and_full_orph
     compiled = runs_dir / "target_a" / "_compiled"
     out_json = compiled / "target_a.backlog.json"
     summary = json.loads(out_json.read_text(encoding="utf-8"))
-    assert summary["input"]["sample_size"] == 0
-    assert summary["input"]["sample_size_semantics"] == "all_atoms"
+    tickets = [t for t in summary.get("tickets", []) if isinstance(t, dict)]
+    assert tickets, "dry-run backlog should produce at least one ticket"
 
-    orphan_manifest_path = (
-        compiled
-        / "target_a.backlog_artifacts"
-        / "orphan_pass"
-        / "orphan_001"
-        / "input_manifest.json"
+    planned = [t for t in tickets if isinstance(t.get("change_plan"), dict)]
+    assert planned, "dry-run backlog should include at least one planned ticket"
+
+    for ticket in planned:
+        assert isinstance(ticket.get("problem_record"), dict)
+        assert isinstance(ticket.get("priority"), dict)
+        assert isinstance(ticket.get("research"), dict)
+        assert isinstance(ticket.get("solution_options"), list)
+        assert ticket["solution_options"], "planned tickets should carry solution options"
+        assert isinstance(ticket.get("selected_solution"), dict)
+        assert isinstance(ticket.get("change_plan"), dict)
+
+    for ticket in tickets:
+        if ticket.get("stage") == "ready_for_ticket":
+            assert isinstance(ticket.get("selected_solution"), dict) or isinstance(
+                ticket.get("selected_option_id"), str
+            )
+            assert isinstance(ticket.get("change_plan"), dict) or isinstance(
+                ticket.get("change_plan_id"), str
+            )
+
+    # Atom actions: at least one cited atom should be marked ticketed with a recorded fingerprint.
+    atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
+    assert atom_actions_doc["version"] == 1
+    atoms = atom_actions_doc["atoms"]
+
+    evidence_atom_id: str | None = None
+    chosen_ticket: dict[str, Any] | None = None
+    for ticket in planned:
+        for atom_id in ticket.get("evidence_atom_ids", []):
+            if isinstance(atom_id, str) and atom_id and not atom_id.startswith("__aggregate__/"):
+                evidence_atom_id = atom_id
+                chosen_ticket = ticket
+                break
+        if evidence_atom_id is not None:
+            break
+    assert evidence_atom_id is not None
+    assert chosen_ticket is not None
+
+    entry = next(item for item in atoms if item["atom_id"] == evidence_atom_id)
+    assert entry["status"] == "ticketed"
+    assert ticket_export_fingerprint(chosen_ticket) in entry["fingerprints"]
+    assert "ticket_ids" not in entry
+
+
+def test_update_atom_actions_from_backlog_skips_blocked_tickets(tmp_path: Path) -> None:
+    from usertest_backlog.cli import _update_atom_actions_from_backlog
+
+    atom_actions: dict[str, dict[str, Any]] = {}
+    atoms = [
+        {"atom_id": "atom:1", "source": "confusion_point"},
+        {"atom_id": "atom:2", "source": "confusion_point"},
+    ]
+    tickets = [
+        {
+            "title": "Blocked ticket",
+            "problem": "P",
+            "user_impact": "U",
+            "proposed_fix": "F",
+            "stage": "blocked",
+            "evidence_atom_ids": ["atom:1"],
+        },
+        {
+            "title": "Normal ticket",
+            "problem": "P",
+            "user_impact": "U",
+            "proposed_fix": "F",
+            "stage": "triage",
+            "evidence_atom_ids": ["atom:2"],
+        },
+    ]
+
+    _update_atom_actions_from_backlog(
+        atom_actions=atom_actions,
+        atoms=atoms,
+        tickets=tickets,
+        generated_at="2026-01-01T00:00:00Z",
+        backlog_json_path=tmp_path / "backlog.json",
     )
-    orphan_manifest = json.loads(orphan_manifest_path.read_text(encoding="utf-8"))
-    atom_ids = orphan_manifest["atom_ids"]
-    assert len(atom_ids) >= 40
-    assert any("20260101T003900Z" in atom_id for atom_id in atom_ids)
+
+    assert atom_actions["atom:1"]["status"] == "new"
+    assert atom_actions["atom:2"]["status"] == "ticketed"
 
 
 def test_reports_backlog_syncs_atom_actions_from_plan_folders(tmp_path: Path) -> None:
@@ -1006,17 +674,11 @@ def test_reports_backlog_missing_prompt_template_fails_loudly(tmp_path: Path) ->
 
     prompts_dir = tmp_path / "prompts"
     prompts_dir.mkdir(parents=True, exist_ok=True)
-    (prompts_dir / "manifest.json").write_text(
+    (prompts_dir / "pipeline_manifest.json").write_text(
         json.dumps(
             {
-                "version": 1,
-                "miners": {
-                    "coverage_templates": ["missing_template.md"],
-                    "bagging_templates": ["missing_template.md"],
-                    "orphan_template": "missing_template.md",
-                },
-                "merge_judge_template": "missing_template.md",
-                "labeler_template": "missing_template.md",
+                "version": 2,
+                "problem_miner_templates": ["missing_template.md"],
             },
             indent=2,
         )
@@ -1024,7 +686,7 @@ def test_reports_backlog_missing_prompt_template_fails_loudly(tmp_path: Path) ->
         encoding="utf-8",
     )
 
-    with pytest.raises(FileNotFoundError, match="Missing prompt template"):
+    with pytest.raises(SystemExit) as exc:
         main(
             [
                 "reports",
@@ -1043,3 +705,377 @@ def test_reports_backlog_missing_prompt_template_fails_loudly(tmp_path: Path) ->
                 "--skip-plan-folder-sync",
             ]
         )
+    assert exc.value.code == 2
+
+
+def test_reports_backlog_dry_run_writes_problem_records(tmp_path: Path) -> None:
+    """Stage-1 dual-write: problem_records.json and .md are created in dry-run mode.
+
+    In dry-run mode the LLM is not called. The six-stage pipeline still writes
+    inspectable artifacts by synthesizing deterministic problem records from atoms.
+    The contract being tested is:
+    - The files exist.
+    - The JSON has the expected structure (stage, records, input_meta.dry_run).
+    - No record contains the forbidden field ``proposed_fix``.
+    """
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--miners",
+                "0",
+                "--sample-size",
+                "8",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+    assert exc.value.code == 0
+
+    compiled = runs_dir / "target_a" / "_compiled"
+    problem_records_json = compiled / "target_a.problem_records.json"
+    problem_records_md = compiled / "target_a.problem_records.md"
+
+    assert problem_records_json.exists(), (
+        "problem_records.json must be written by stage-1 dual-write when "
+        "pipeline_manifest.json is present in the prompts dir"
+    )
+    assert problem_records_md.exists(), "problem_records.md must be written"
+
+    doc = json.loads(problem_records_json.read_text(encoding="utf-8"))
+    assert doc.get("stage") == "problem_mining"
+    assert isinstance(doc.get("items"), list)
+    # dry-run: LLM not called; synthesized problem records are used
+    assert doc.get("item_count") == len(doc["items"])
+    assert len(doc["items"]) >= 1, "dry-run mode should synthesize at least one problem record"
+    assert doc.get("input_meta", {}).get("dry_run") is True
+
+    # Invariant: no problem record should ever contain proposed_fix
+    for rec in doc["items"]:
+        assert "proposed_fix" not in rec, (
+            f"Record {rec.get('problem_id')} contains forbidden field 'proposed_fix'"
+        )
+
+
+def test_reports_backlog_dry_run_writes_prioritized_problems(tmp_path: Path) -> None:
+    """Stage 2: prioritized_problems.json and .md are created in dry-run mode.
+
+    Contract:
+    - Files exist.
+    - At least one problem is selected_for_research on fixtures.
+    - Output contains deterministic pre-score breakdown (pre_score + score_breakdown).
+    - Output contains no solution fields (e.g. proposed_fix).
+    """
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--miners",
+                "0",
+                "--sample-size",
+                "8",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+    assert exc.value.code == 0
+
+    compiled = runs_dir / "target_a" / "_compiled"
+    prioritized_json = compiled / "target_a.prioritized_problems.json"
+    prioritized_md = compiled / "target_a.prioritized_problems.md"
+
+    assert prioritized_json.exists(), "prioritized_problems.json must be written in dry-run mode"
+    assert prioritized_md.exists(), "prioritized_problems.md must be written"
+
+    doc = json.loads(prioritized_json.read_text(encoding="utf-8"))
+    assert doc.get("stage") == "problem_prioritization"
+    assert doc.get("input_meta", {}).get("dry_run") is True
+    assert isinstance(doc.get("items"), list)
+    assert len(doc["items"]) >= 1
+    assert any(item.get("selected_for_research") is True for item in doc["items"])
+
+    forbidden = {"proposed_fix", "selected_solution", "family_id", "option_id", "implementation_steps"}
+    for item in doc["items"]:
+        for field in forbidden:
+            assert field not in item, f"priority decision must not contain solution field: {field}"
+        assert isinstance(item.get("score_breakdown"), dict)
+        assert "pre_score" in item
+
+
+def test_reports_backlog_dry_run_writes_research_dossiers(tmp_path: Path) -> None:
+    """Stage 3: research.json and .md are created in dry-run mode.
+
+    Contract:
+    - Files exist.
+    - Output is inspectable offline (dry_run=true) and does not claim implementation.
+    """
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--miners",
+                "0",
+                "--sample-size",
+                "8",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+    assert exc.value.code == 0
+
+    compiled = runs_dir / "target_a" / "_compiled"
+    research_json = compiled / "target_a.research.json"
+    research_md = compiled / "target_a.research.md"
+
+    assert research_json.exists(), "research.json must be written in dry-run mode"
+    assert research_md.exists(), "research.md must be written in dry-run mode"
+
+    doc = json.loads(research_json.read_text(encoding="utf-8"))
+    assert doc.get("stage") == "repro_research"
+    assert doc.get("input_meta", {}).get("dry_run") is True
+    assert isinstance(doc.get("items"), list)
+    assert len(doc["items"]) >= 1, "fixtures should yield at least one selected-for-research problem"
+
+    for item in doc["items"]:
+        assert item.get("implementation_performed") is False
+        assert item.get("diff_classification") == "no_changes"
+        assert item.get("writes_used") is False
+
+
+def test_reports_backlog_dry_run_writes_solution_options(tmp_path: Path) -> None:
+    """Stage 4: solution_options.json and .md are created in dry-run mode.
+
+    Contract:
+    - Files exist.
+    - At least one problem has one option per configured family.
+    - Output contains no selection fields (e.g. selected_solution).
+    """
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--miners",
+                "0",
+                "--sample-size",
+                "8",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+    assert exc.value.code == 0
+
+    compiled = runs_dir / "target_a" / "_compiled"
+    options_json = compiled / "target_a.solution_options.json"
+    options_md = compiled / "target_a.solution_options.md"
+
+    assert options_json.exists(), "solution_options.json must be written in dry-run mode"
+    assert options_md.exists(), "solution_options.md must be written in dry-run mode"
+
+    doc = json.loads(options_json.read_text(encoding="utf-8"))
+    assert doc.get("stage") == "solution_optioning"
+    assert doc.get("input_meta", {}).get("dry_run") is True
+    assert isinstance(doc.get("items"), list)
+    assert len(doc["items"]) >= 3, "dry-run should synthesize at least one full option set"
+
+    forbidden = {"selected_solution"}
+    families = set()
+    for item in doc["items"]:
+        for field in forbidden:
+            assert field not in item, f"stage-4 option must not contain forbidden field: {field}"
+        fid = item.get("family_id")
+        if isinstance(fid, str):
+            families.add(fid)
+    assert {"most_direct", "most_robust", "most_comprehensive"} <= families
+
+
+def test_reports_backlog_dry_run_writes_solution_selection(tmp_path: Path) -> None:
+    """Stage 5: solution_selection.json and .md are created in dry-run mode.
+
+    Contract:
+    - Files exist.
+    - Each decision selects an existing option and includes a UX-review flag.
+    - Selected-solution labeler output is attached (change_surface).
+    """
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--miners",
+                "0",
+                "--sample-size",
+                "8",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+    assert exc.value.code == 0
+
+    compiled = runs_dir / "target_a" / "_compiled"
+    selection_json = compiled / "target_a.solution_selection.json"
+    selection_md = compiled / "target_a.solution_selection.md"
+
+    assert selection_json.exists(), "solution_selection.json must be written in dry-run mode"
+    assert selection_md.exists(), "solution_selection.md must be written in dry-run mode"
+
+    doc = json.loads(selection_json.read_text(encoding="utf-8"))
+    assert doc.get("stage") == "solution_selection"
+    assert doc.get("input_meta", {}).get("dry_run") is True
+    assert isinstance(doc.get("items"), list)
+    assert len(doc["items"]) >= 1
+
+    needs_ux_values: set[bool] = set()
+    for item in doc["items"]:
+        assert isinstance(item.get("problem_id"), str)
+        assert isinstance(item.get("selected_option_id"), str)
+        assert isinstance(item.get("selected_family_id"), str)
+        assert isinstance(item.get("needs_ux_review"), bool)
+        needs_ux_values.add(bool(item.get("needs_ux_review")))
+        cs = item.get("change_surface")
+        assert isinstance(cs, dict), "selected-solution labeler must attach change_surface"
+        assert isinstance(cs.get("kinds"), list)
+
+    # Fixtures should produce at least one high-surface and one low-surface selection
+    # when multiple problems are selected for research; at minimum ensure the flag exists.
+    if len(doc["items"]) > 1:
+        assert needs_ux_values == {False, True}
+
+
+def test_reports_backlog_dry_run_writes_change_plans(tmp_path: Path) -> None:
+    """Stage 6: change_plans.json and .md are created in dry-run mode.
+
+    Contract:
+    - Files exist.
+    - Each plan has non-empty implementation + verification steps.
+    - Each plan is grounded to a selected option and is marked planned.
+    """
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--miners",
+                "0",
+                "--sample-size",
+                "8",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+    assert exc.value.code == 0
+
+    compiled = runs_dir / "target_a" / "_compiled"
+    plans_json = compiled / "target_a.change_plans.json"
+    plans_md = compiled / "target_a.change_plans.md"
+
+    assert plans_json.exists(), "change_plans.json must be written in dry-run mode"
+    assert plans_md.exists(), "change_plans.md must be written in dry-run mode"
+
+    doc = json.loads(plans_json.read_text(encoding="utf-8"))
+    assert doc.get("stage") == "implementation_planning"
+    assert doc.get("input_meta", {}).get("dry_run") is True
+    assert isinstance(doc.get("items"), list)
+    assert len(doc["items"]) >= 1
+
+    for plan in doc["items"]:
+        assert isinstance(plan.get("change_plan_id"), str)
+        assert isinstance(plan.get("problem_id"), str)
+        assert isinstance(plan.get("selected_option_id"), str)
+        assert plan.get("change_plan_status") == "planned"
+
+        implementation_steps = plan.get("implementation_steps")
+        assert isinstance(implementation_steps, list)
+        assert implementation_steps, "implementation_steps must be non-empty"
+
+        verification_steps = plan.get("verification_steps")
+        assert isinstance(verification_steps, list)
+        assert verification_steps, "verification_steps must be non-empty"
+
+        success_criteria = plan.get("success_criteria")
+        assert isinstance(success_criteria, list)
+        assert success_criteria, "success_criteria must be non-empty"
+
+        assert isinstance(plan.get("rollback_notes"), str)
+        assert isinstance(plan.get("related_change_plan_ids"), list)

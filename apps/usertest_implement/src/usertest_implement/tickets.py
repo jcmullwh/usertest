@@ -11,6 +11,11 @@ from backlog_repo.plan_index import (
     scan_plan_ticket_index,
 )
 
+_REQUIRED_STAGE_BY_KIND: dict[str, str] = {
+    "implementation": "ready_for_ticket",
+    "research": "research_required",
+}
+
 
 @dataclass(frozen=True)
 class TicketIndexEntry:
@@ -86,6 +91,7 @@ def select_next_ticket_path(
             if not bucket_paths:
                 continue
             path = sorted(bucket_paths, key=lambda p: str(p))[0]
+            stage: str | None = None
             try:
                 markdown = path.read_text(encoding="utf-8", errors="replace")
             except OSError:
@@ -94,6 +100,17 @@ def select_next_ticket_path(
                 meta = parse_ticket_markdown_metadata(markdown)
                 export_kind_raw = meta.get("export_kind")
                 kind = export_kind_raw.strip().lower() if export_kind_raw else None
+                stage_raw = meta.get("stage")
+                stage = stage_raw.strip().lower() if stage_raw else None
+
+            if kind_priority_clean:
+                if kind is None or kind not in kind_rank:
+                    continue
+
+            required_stage = _REQUIRED_STAGE_BY_KIND.get(kind or "")
+            if required_stage is not None and stage != required_stage:
+                continue
+
             rank = kind_rank.get(kind or "", unknown_rank)
             candidates.append((rank, path.name, entry, path))
         if not candidates:

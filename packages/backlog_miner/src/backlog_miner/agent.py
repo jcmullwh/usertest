@@ -18,6 +18,8 @@ def run_backlog_prompt(
     model: str | None,
     cfg: RunnerConfig,
     workspace_dir: Path | None = None,
+    allowed_tools: list[str] | None = None,
+    include_directories: list[str] | None = None,
 ) -> str:
     """Run a single backlog prompt through the configured agent adapter.
 
@@ -35,6 +37,12 @@ def run_backlog_prompt(
         Optional model override.
     cfg:
         Runner configuration used to resolve agent binaries and policy.
+    allowed_tools:
+        Optional list of tool names to allow for this prompt (agent-specific). When
+        ``None``, the agent backend uses its default tool configuration.
+    include_directories:
+        Optional list of directories that tools are allowed to access (agent-specific).
+        When ``None``, the agent backend uses its default directory policy.
 
     Returns
     -------
@@ -50,4 +58,6 @@ def run_backlog_prompt(
         model=model,
         cfg=cfg,
         workspace_dir=workspace_dir,
+        allowed_tools=allowed_tools,
+        include_directories=include_directories,
     )

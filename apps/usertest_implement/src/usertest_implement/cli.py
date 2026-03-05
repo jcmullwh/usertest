@@ -94,6 +94,7 @@ class SelectedTicket:
     fingerprint: str
     title: str | None
     export_kind: str | None
+    stage: str | None
     owner_root: Path | None
     idea_path: Path | None
     ticket_markdown: str
@@ -494,6 +495,7 @@ def _refresh_backlog_for_ticket_implementation(
     _run_workflow_step(review_cmd, cwd=repo_root, label="reports review-ux")
 
     export_cmd = base + ["reports", "export-tickets", *common]
+    export_cmd.extend(["--stage", "ready_for_ticket"])
     _run_workflow_step(export_cmd, cwd=repo_root, label="reports export-tickets")
 
 
@@ -535,6 +537,10 @@ def _select_ticket_from_export(
     title_s = title.strip() if isinstance(title, str) and title.strip() else None
     export_kind = export.get("export_kind")
     export_kind_s = export_kind.strip() if isinstance(export_kind, str) and export_kind.strip() else None
+    source_ticket_raw = export.get("source_ticket")
+    source_ticket = source_ticket_raw if isinstance(source_ticket_raw, dict) else {}
+    stage_raw = source_ticket.get("stage")
+    stage_s = stage_raw.strip() if isinstance(stage_raw, str) and stage_raw.strip() else None
 
     owner_repo = export.get("owner_repo")
     owner_root: Path | None = None
@@ -556,6 +562,7 @@ def _select_ticket_from_export(
         fingerprint=export_fp.strip(),
         title=title_s,
         export_kind=export_kind_s,
+        stage=stage_s,
         owner_root=owner_root,
         idea_path=idea_path,
         ticket_markdown=body,
@@ -571,6 +578,7 @@ def _select_ticket_from_path(ticket_path: Path) -> SelectedTicket:
     fingerprint = meta.get("fingerprint") or _fingerprint_from_text(text)
     title = meta.get("title")
     export_kind = meta.get("export_kind")
+    stage = meta.get("stage")
 
     owner_root: Path | None = None
     try:
@@ -586,6 +594,7 @@ def _select_ticket_from_path(ticket_path: Path) -> SelectedTicket:
         fingerprint=fingerprint,
         title=title,
         export_kind=export_kind,
+        stage=stage,
         owner_root=owner_root,
         idea_path=ticket_path,
         ticket_markdown=text,
@@ -602,6 +611,8 @@ def _compose_ticket_blob(selected: SelectedTicket) -> str:
         lines.append(f"- title: {selected.title}")
     if selected.export_kind is not None:
         lines.append(f"- export_kind: {selected.export_kind}")
+    if selected.stage is not None:
+        lines.append(f"- stage: {selected.stage}")
     if selected.owner_root is not None:
         lines.append(f"- owner_repo_root: {selected.owner_root}")
     if selected.tickets_export_path is not None:
@@ -618,6 +629,31 @@ def _compose_ticket_blob(selected: SelectedTicket) -> str:
 def _default_branch_name(selected: SelectedTicket) -> str:
     fp_part = selected.fingerprint[:12].lower()
     return f"backlog/{fp_part}"
+
+
+def _require_stage6_implementation_ticket(selected: SelectedTicket) -> None:
+    export_kind = (
+        selected.export_kind.strip().lower()
+        if isinstance(selected.export_kind, str) and selected.export_kind.strip()
+        else None
+    )
+    stage = (
+        selected.stage.strip().lower()
+        if isinstance(selected.stage, str) and selected.stage.strip()
+        else None
+    )
+    if export_kind != "implementation":
+        raise SystemExit(
+            "Ticket is not implementation-ready for `usertest-implement` "
+            f"(fingerprint={selected.fingerprint}, export_kind={selected.export_kind!r}). "
+            "Select a stage-6 implementation ticket (`export_kind=implementation`, `stage=ready_for_ticket`)."
+        )
+    if stage != "ready_for_ticket":
+        raise SystemExit(
+            "Ticket is not stage-6 ready for implementation "
+            f"(fingerprint={selected.fingerprint}, stage={selected.stage!r}). "
+            "Select a ticket with `stage=ready_for_ticket`."
+        )
 
 
 def _write_pr_manifest(
@@ -739,6 +775,8 @@ def _run_selected_ticket(
     cfg: RunnerConfig,
     selected: SelectedTicket,
 ) -> int:
+    _require_stage6_implementation_ticket(selected)
+
     repo_input: str | None = None
     repo_is_explicit = False
     if isinstance(args.repo, str) and args.repo.strip():
@@ -845,6 +883,11 @@ def _run_selected_ticket(
         exec_cache_dir = exec_cache_dir.resolve()
     if exec_cache == "warm" and exec_cache_dir is None:
         exec_cache_dir = repo_root / "runs" / "_cache" / "usertest_implement"
+    maintenance_venv_cache = bool(
+        str(args.exec_backend).strip().lower() == "docker"
+        and exec_cache == "warm"
+        and bool(getattr(args, "maintenance_venv_cache", True))
+    )
 
     ticket_blob = _compose_ticket_blob(selected)
     request = RunRequest(
@@ -865,6 +908,7 @@ def _run_selected_ticket(
         exec_keep_container=bool(args.exec_keep_container),
         exec_cache=exec_cache,
         exec_cache_dir=exec_cache_dir,
+        exec_maintenance_venv_cache=maintenance_venv_cache,
         exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
         exec_use_target_sandbox_cli_install=bool(args.exec_use_target_sandbox_cli_install),
     )
@@ -892,6 +936,8 @@ def _run_selected_ticket(
                 "keep_workspace": request.keep_workspace,
                 "exec_backend": request.exec_backend,
                 "exec_keep_container": request.exec_keep_container,
+                "exec_cache": request.exec_cache,
+                "exec_maintenance_venv_cache": request.exec_maintenance_venv_cache,
                 "verification_commands": list(request.verification_commands),
                 "verification_timeout_seconds": request.verification_timeout_seconds,
             },
@@ -1493,6 +1539,16 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         help=(
             "Host directory mounted at /cache when --exec-cache warm. "
             "Defaults to <repo_root>/runs/_cache/usertest_implement."
+        ),
+    )
+    parser.add_argument(
+        "--maintenance-venv-cache",
+        dest="maintenance_venv_cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable Docker maintenance venv cache reuse for scaffold install tasks when --exec-cache warm "
+            "(default: enabled). Use --no-maintenance-venv-cache to force full reinstalls."
         ),
     )
 

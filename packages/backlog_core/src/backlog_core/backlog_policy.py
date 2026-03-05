@@ -55,6 +55,36 @@ def _coerce_int(value: Any, *, default: int = 0) -> int:
     return default
 
 
+def _has_selected_solution(ticket: dict[str, Any]) -> bool:
+    """Return whether *ticket* has an explicit selected solution.
+
+    The six-stage pipeline treats selection as a prerequisite for promotion to
+    ``ready_for_ticket``. Legacy one-pass tickets may still contain solution-like
+    fields, but they do not satisfy this prerequisite unless a selection marker
+    is present.
+    """
+    if isinstance(ticket.get("selected_solution"), dict):
+        return True
+    selected_option_id = _coerce_string(ticket.get("selected_option_id"))
+    if selected_option_id is not None:
+        return True
+    return False
+
+
+def _has_change_plan(ticket: dict[str, Any]) -> bool:
+    """Return whether *ticket* has an explicit implementation/change plan.
+
+    Stage 6 produces a change plan. Until a plan exists, a ticket should not be
+    considered ``ready_for_ticket`` even if it is labeled.
+    """
+    if isinstance(ticket.get("change_plan"), dict):
+        return True
+    change_plan_id = _coerce_string(ticket.get("change_plan_id"))
+    if change_plan_id is not None:
+        return True
+    return False
+
+
 _DEFAULT_INVESTIGATION_STEPS_HIGH_SURFACE_LOW_BREADTH: tuple[str, ...] = (
     "Validate repo intent",
     "Check if existing commands/flags can be parameterized",
@@ -203,6 +233,8 @@ def apply_backlog_policy(
         if stage not in TICKET_STAGE_ENUM:
             stage = "triage"
 
+        ready_prereqs = _has_selected_solution(item) and _has_change_plan(item)
+
         change_surface_raw = item.get("change_surface")
         change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
         kinds_raw = _coerce_string_list(change_surface.get("kinds"))
@@ -230,13 +262,18 @@ def apply_backlog_policy(
         risks_to_add: list[str] = []
         steps_to_add: list[str] = []
 
+        # Guardrail: `ready_for_ticket` is only valid once a selected solution AND a change plan exist.
+        if stage == "ready_for_ticket" and not ready_prereqs:
+            new_stage = "research_required"
+            risks_to_add.append("missing_change_plan")
+
         if labeled:
             if high_surface and low_breadth and stage != "blocked":
                 new_stage = config.default_stage_for_high_surface_low_breadth
                 risks_to_add.append("overfitting_risk")
                 steps_to_add.extend(list(config.investigation_steps_for_high_surface_low_breadth))
             elif stage == "triage":
-                new_stage = config.default_stage_for_labeled
+                new_stage = config.default_stage_for_labeled if ready_prereqs else "research_required"
 
         existing_risks = _coerce_string_list(item.get("risks"))
         for risk in risks_to_add:

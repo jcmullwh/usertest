@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import warnings
+from dataclasses import replace
 from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
@@ -35,7 +36,7 @@ def _missing_dependency_remediation(*, dependency: str, import_name: str) -> str
     return (
         f"Missing dependency `{dependency}` (import name: `{import_name}`).\n"
         f"{_one_command_first_success_remediation()}\n"
-        "Manual fix: `python -m pip install -r requirements-dev.txt`."
+        "Manual fix (preferred): from `apps/usertest_backlog`, run `pdm install -d`."
     )
 
 
@@ -43,7 +44,7 @@ def _missing_dependency_remediation_simple(*, dependency: str) -> str:
     return (
         f"Missing dependency `{dependency}`.\n"
         f"{_one_command_first_success_remediation()}\n"
-        "Manual fix: `python -m pip install -r requirements-dev.txt`."
+        "Manual fix (preferred): from `apps/usertest_backlog`, run `pdm install -d`."
     )
 
 
@@ -62,9 +63,8 @@ def _from_source_import_remediation(*, missing_module: str) -> str:
     return (
         f"Missing import `{missing_module}`.\n"
         f"{_one_command_first_success_remediation()}\n"
-        "Manual fix (from repo root): install deps + configure PYTHONPATH:\n"
-        "  - macOS/Linux: `python -m pip install -r requirements-dev.txt && source scripts/set_pythonpath.sh`\n"
-        "  - PowerShell: `python -m pip install -r requirements-dev.txt; . .\\scripts\\set_pythonpath.ps1`"
+        "Manual fix (preferred): from `apps/usertest_backlog`, run `pdm install -d` and then\n"
+        "run the CLI via `pdm run usertest-backlog ...`."
     )
 
 
@@ -78,6 +78,7 @@ def _is_missing_module(exc: ModuleNotFoundError, module: str) -> bool:
 try:
     from backlog_core import (
         add_atom_links,
+        assemble_backlog_tickets,
         build_backlog_document,
         extract_backlog_atoms,
         write_backlog,
@@ -91,6 +92,16 @@ except ModuleNotFoundError as exc:
 try:
     from backlog_core.aggregate_metrics import build_aggregate_metrics_atoms
     from backlog_core.backlog_policy import BacklogPolicyConfig, apply_backlog_policy
+    from backlog_core.prioritization import compute_problem_priority_signals
+    from backlog_core.relation_review import apply_relation_decisions, rank_stage_related_items
+    from backlog_core.stage_contracts import (
+        build_stage_document,
+        parse_change_plan_list,
+        parse_priority_decision_list,
+        parse_problem_record_list,
+        parse_solution_option_sets,
+        parse_selection_decisions,
+    )
 except ModuleNotFoundError as exc:
     if _is_missing_module(exc, "backlog_core"):
         raise SystemExit(_from_source_import_remediation(missing_module="backlog_core")) from exc
@@ -98,10 +109,13 @@ except ModuleNotFoundError as exc:
 
 try:
     from backlog_miner import (
-        load_prompt_manifest,
-        run_backlog_ensemble,
         run_backlog_prompt,
-        run_labeler_jobs,
+        run_repro_research_stage,
+    )
+    from backlog_miner.pipeline import (
+        PipelinePromptManifest,
+        load_pipeline_prompt_manifest,
+        run_stage_prompt_json,
     )
 except ModuleNotFoundError as exc:
     if _is_missing_module(exc, "backlog_miner"):
@@ -2462,6 +2476,7 @@ def _cmd_reports_compile(args: argparse.Namespace) -> int:
     cfg = _load_runner_config(repo_root)
 
     runs_dir = args.runs_dir.resolve() if args.runs_dir is not None else cfg.runs_dir
+    cfg = replace(cfg, runs_dir=runs_dir)
     target_slug: str | None = None
     if isinstance(args.target, str) and args.target.strip():
         target_slug = str(args.target).strip()
@@ -3394,6 +3409,22 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         else []
     )
 
+    # Prefer the staged solution-selection artifact when present (milestone 5).
+    # This ensures UX review is driven by selected solutions rather than early miner guesses.
+    tickets_source = "backlog"
+    solution_selection_path = compiled_dir / f"{default_name}.solution_selection.json"
+    solution_selection_doc = _load_optional_json_object(solution_selection_path)
+    if isinstance(solution_selection_doc, dict):
+        sel_items_raw = solution_selection_doc.get("items")
+        sel_items = (
+            [item for item in sel_items_raw if isinstance(item, dict)]
+            if isinstance(sel_items_raw, list)
+            else []
+        )
+        if sel_items:
+            tickets = sel_items
+            tickets_source = "solution_selection"
+
     policy_cfg: BacklogPolicyConfig | None = None
     policy_config_path: Path | None
     if args.policy_config is not None:
@@ -3425,19 +3456,33 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
     review_tickets: list[dict[str, Any]] = []
     research_required_total = 0
     high_surface_ready_total = 0
+    needs_ux_review_total = 0
     for ticket in tickets:
         stage = (_coerce_string(ticket.get("stage")) or "triage").strip()
-        if stage == "research_required":
-            review_tickets.append(ticket)
-            research_required_total += 1
-            continue
-        if stage != "ready_for_ticket":
-            continue
+        needs_ux_review = ticket.get("needs_ux_review") is True
         change_surface_raw = ticket.get("change_surface")
         change_surface = change_surface_raw if isinstance(change_surface_raw, dict) else {}
         kinds = set(_coerce_string_list(change_surface.get("kinds")))
         user_visible = bool(change_surface.get("user_visible"))
-        if user_visible and bool(kinds & surface_area_high):
+        high_surface_gated = bool(user_visible and bool(kinds & surface_area_high))
+
+        if tickets_source == "solution_selection":
+            if needs_ux_review or high_surface_gated:
+                review_tickets.append(ticket)
+            if needs_ux_review:
+                needs_ux_review_total += 1
+            if stage == "research_required":
+                research_required_total += 1
+            if stage == "ready_for_ticket" and high_surface_gated:
+                high_surface_ready_total += 1
+            continue
+
+        # Legacy mode: UX review is driven by ticket stage + high-surface gating.
+        if stage == "research_required":
+            review_tickets.append(ticket)
+            research_required_total += 1
+            continue
+        if stage == "ready_for_ticket" and high_surface_gated:
             review_tickets.append(ticket)
             high_surface_ready_total += 1
 
@@ -3453,6 +3498,9 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "status": "no_research_required_tickets",
             "inputs": {
                 "backlog_json": str(backlog_path),
+                "solution_selection_json": str(solution_selection_path)
+                if tickets_source == "solution_selection"
+                else None,
                 "intent_snapshot_json": intent_snapshot_json_path,
                 "repo_intent_md": str(repo_intent_path),
                 "policy_config": str(policy_config_path),
@@ -3462,7 +3510,9 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
                 "tickets_total": len(tickets),
                 "research_required_total": 0,
                 "high_surface_ready_total": 0,
+                "needs_ux_review_total": 0,
                 "review_total": 0,
+                "tickets_source": tickets_source,
             },
             "review": {"recommendations": [], "confidence": 1.0},
             "artifacts_dir": None,
@@ -3524,6 +3574,13 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "breadth",
             "stage",
             "risks",
+            "selected_option_id",
+            "selected_family_id",
+            "selection_rationale",
+            "repo_intent_alignment",
+            "why_other_options_were_not_selected",
+            "needs_ux_review",
+            "selected_option",
             "proposed_fix",
             "investigation_steps",
             "success_criteria",
@@ -3538,12 +3595,20 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         user_visible = bool(change_surface.get("user_visible"))
         high_surface_gated = bool(user_visible and bool(kinds & surface_area_high))
         payload["high_surface_gated"] = high_surface_gated
-        if stage == "research_required":
-            payload["ux_review_reason"] = "research_required"
-        elif stage == "ready_for_ticket" and high_surface_gated:
-            payload["ux_review_reason"] = "high_surface_ready"
+        if tickets_source == "solution_selection":
+            if ticket.get("needs_ux_review") is True:
+                payload["ux_review_reason"] = "needs_ux_review"
+            elif high_surface_gated:
+                payload["ux_review_reason"] = "high_surface_gated"
+            else:
+                payload["ux_review_reason"] = "unknown"
         else:
-            payload["ux_review_reason"] = "unknown"
+            if stage == "research_required":
+                payload["ux_review_reason"] = "research_required"
+            elif stage == "ready_for_ticket" and high_surface_gated:
+                payload["ux_review_reason"] = "high_surface_ready"
+            else:
+                payload["ux_review_reason"] = "unknown"
         tickets_payload.append(payload)
 
     prompt = _render_template(
@@ -3670,6 +3735,9 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         "prompt_hash": prompt_hash,
         "inputs": {
             "backlog_json": str(backlog_path),
+            "solution_selection_json": str(solution_selection_path)
+            if tickets_source == "solution_selection"
+            else None,
             "intent_snapshot_json": intent_snapshot_json_path,
             "repo_intent_md": str(repo_intent_path),
             "allow_missing_intent_snapshot": allow_missing_snapshot,
@@ -3688,7 +3756,9 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "tickets_total": len(tickets),
             "research_required_total": research_required_total,
             "high_surface_ready_total": high_surface_ready_total,
+            "needs_ux_review_total": needs_ux_review_total,
             "review_total": len(review_tickets),
+            "tickets_source": tickets_source,
         },
         "review": review_obj,
     }
@@ -4406,6 +4476,2197 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     return 0
 
 
+def _render_problem_records_markdown(
+    problem_records: list[dict[str, Any]],
+    *,
+    title: str = "Problem Records",
+) -> str:
+    """Render a list of problem records as a human-readable Markdown document.
+
+    Parameters
+    ----------
+    problem_records:
+        Stage-1 problem record dicts.
+    title:
+        Document title.
+
+    Returns
+    -------
+    str
+        Markdown text.
+    """
+    lines: list[str] = [f"# {title}\n"]
+    if not problem_records:
+        lines.append("_No problem records produced._\n")
+        return "\n".join(lines)
+
+    for rec in problem_records:
+        pid = rec.get("problem_id") or "(no id)"
+        rec_title = rec.get("title") or pid
+        severity = rec.get("severity") or "unknown"
+        confidence = rec.get("confidence")
+        conf_str = f"{float(confidence):.2f}" if isinstance(confidence, (int, float)) else "?"
+        status = rec.get("problem_status") or "identified"
+        lines.append(f"## {rec_title}")
+        lines.append(f"**ID**: `{pid}` | **Severity**: {severity} | "
+                     f"**Confidence**: {conf_str} | **Status**: {status}\n")
+        problem_text = rec.get("problem") or ""
+        if problem_text:
+            lines.append(f"**Problem**: {problem_text}\n")
+        impact = rec.get("user_impact") or ""
+        if impact:
+            lines.append(f"**User impact**: {impact}\n")
+        summary = rec.get("evidence_summary") or ""
+        if summary:
+            lines.append(f"**Evidence summary**: {summary}\n")
+        eids = rec.get("evidence_atom_ids") or []
+        if eids:
+            lines.append(f"**Evidence atoms** ({len(eids)}): "
+                         + ", ".join(f"`{e}`" for e in eids[:8])
+                         + (" …" if len(eids) > 8 else "") + "\n")
+        warn = rec.get("_parse_warning")
+        if warn:
+            lines.append(f"> ⚠ parse warning: {warn}\n")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _synthesize_problem_records_from_atoms(
+    atoms: list[dict[str, Any]],
+    *,
+    max_records: int,
+) -> list[dict[str, Any]]:
+    """Synthesize deterministic problem records from atoms (dry-run mode only).
+
+    The six-stage pipeline uses LLMs for problem mining. In ``--dry-run`` mode the
+    CLI must avoid network calls, but downstream stages (stage 2+) still require
+    problem records in order to produce observable artifacts on offline fixtures.
+
+    This function provides an explicit, inspectable, deterministic approximation:
+    it groups atoms by ``source`` and emits one problem record per source.
+    """
+
+    def _severity_rank(atom: dict[str, Any]) -> int:
+        score_hint = atom.get("severity_score_hint")
+        if isinstance(score_hint, int):
+            return max(0, min(3, score_hint))
+        sev = _coerce_string(atom.get("severity_hint")) or "medium"
+        return {"low": 0, "medium": 1, "high": 2, "blocker": 3}.get(sev, 1)
+
+    def _severity_label(rank: int) -> str:
+        return {0: "low", 1: "medium", 2: "high", 3: "blocker"}.get(rank, "medium")
+
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for atom in atoms:
+        source = _coerce_string(atom.get("source")) or "unknown"
+        grouped.setdefault(source, []).append(atom)
+
+    # Order groups deterministically: higher severity first, then more atoms, then source name.
+    group_order: list[tuple[int, int, str]] = []
+    for source, group_atoms in grouped.items():
+        max_rank = 0
+        for a in group_atoms:
+            max_rank = max(max_rank, _severity_rank(a))
+        group_order.append((max_rank, len(group_atoms), source))
+    group_order.sort(key=lambda t: (-t[0], -t[1], t[2]))
+
+    title_by_source: dict[str, str] = {
+        "run_failure_event": "Run failures observed",
+        "command_failure": "Command failures observed",
+        "confusion_point": "User confusion observed",
+        "suggested_change": "Suggested changes imply gaps",
+        "report_validation_error": "Report validation errors observed",
+    }
+    impact_by_source: dict[str, str] = {
+        "run_failure_event": "Runs fail to complete, blocking progress.",
+        "command_failure": "Commands fail during execution, blocking tasks.",
+        "confusion_point": "Users are confused about expected behavior or usage.",
+        "suggested_change": "Users suggest changes, indicating missing guidance or friction.",
+        "report_validation_error": "Report output is invalid, breaking automation and analysis.",
+    }
+
+    out: list[dict[str, Any]] = []
+    for idx, (_max_rank, _count, source) in enumerate(group_order, start=1):
+        if len(out) >= max_records:
+            break
+        group_atoms = grouped[source]
+        group_atoms_sorted = sorted(
+            group_atoms, key=lambda a: str(a.get("atom_id") or "")
+        )
+        evidence_atom_ids = [
+            atom_id
+            for atom_id in (str(a.get("atom_id") or "").strip() for a in group_atoms_sorted)
+            if atom_id
+        ]
+        if not evidence_atom_ids:
+            continue
+
+        max_rank = 0
+        run_ids: set[str] = set()
+        agents: set[str] = set()
+        for atom in group_atoms_sorted:
+            max_rank = max(max_rank, _severity_rank(atom))
+            run_id = _coerce_string(atom.get("run_id"))
+            if run_id:
+                run_ids.add(run_id)
+            agent = _coerce_string(atom.get("agent"))
+            if agent:
+                agents.add(agent)
+
+        severity = _severity_label(max_rank)
+        distinct_runs = len(run_ids)
+        distinct_agents = len(agents)
+
+        # Confidence heuristic: more breadth and more evidence implies higher confidence.
+        confidence = 0.35 + 0.12 * min(3, max(0, distinct_runs - 1)) + 0.06 * min(
+            4, max(0, len(evidence_atom_ids) - 1)
+        )
+        if severity in {"high", "blocker"}:
+            confidence += 0.10
+        confidence = max(0.0, min(0.90, confidence))
+
+        # Evidence summary: short excerpts from the first few atoms.
+        excerpts: list[str] = []
+        for atom in group_atoms_sorted[:3]:
+            text = _coerce_string(atom.get("text")) or ""
+            if text:
+                excerpt = text if len(text) <= 140 else text[:140] + "..."
+                excerpts.append(excerpt)
+        evidence_summary = " | ".join(excerpts) if excerpts else f"{len(evidence_atom_ids)} atoms"
+
+        slug = slugify(f"dryrun-{source}-{idx}")
+        title = title_by_source.get(source, source.replace("_", " ").strip().title())
+        user_impact = impact_by_source.get(source, "Users are affected by this issue.")
+
+        out.append(
+            {
+                "problem_id": f"problem:{slug}",
+                "title": title,
+                "problem": f"Evidence atoms of type `{source}` indicate a recurring issue.",
+                "user_impact": user_impact,
+                "severity": severity,
+                "confidence": round(confidence, 4),
+                "evidence_atom_ids": evidence_atom_ids,
+                "evidence_summary": evidence_summary,
+                "problem_status": "identified",
+                "_dry_run_synthesized": True,
+                "_dry_run_meta": {
+                    "source": source,
+                    "distinct_runs": distinct_runs,
+                    "distinct_agents": distinct_agents,
+                    "evidence_atoms_cited": len(evidence_atom_ids),
+                },
+            }
+        )
+
+    return out
+
+
+def _atoms_for_problem_mining_prompt(
+    atoms: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Build a compact, prompt-friendly projection of backlog atoms.
+
+    Stage 1 problem mining feeds evidence atoms to an LLM. The raw atom payloads include
+    many fields (paths, metrics hints, etc.) that bloat prompts and can exceed provider
+    limits. Stage 1 only needs a stable identifier and enough context to describe the
+    observed problem from evidence. This helper keeps full evidence text (no truncation)
+    while dropping unrelated metadata to reduce token waste.
+
+    Parameters
+    ----------
+    atoms:
+        Raw evidence atoms extracted from run history.
+
+    Returns
+    -------
+    list[dict[str, Any]]
+        List of compact atom dicts suitable for embedding in stage-1 prompts.
+    """
+
+    compact: list[dict[str, Any]] = []
+    for atom in atoms:
+        atom_id = _coerce_string(atom.get("atom_id"))
+        if atom_id is None:
+            continue
+
+        text = _coerce_string(atom.get("text")) or ""
+
+        linked_raw = atom.get("linked_atom_ids")
+        linked = (
+            [x for x in linked_raw if isinstance(x, str) and x.strip()][:3]
+            if isinstance(linked_raw, list)
+            else []
+        )
+
+        compact.append(
+            {
+                "atom_id": atom_id,
+                "run_rel": _coerce_string(atom.get("run_rel")),
+                "source": _coerce_string(atom.get("source")),
+                "severity_hint": _coerce_string(atom.get("severity_hint")),
+                "text": text,
+                "linked_atom_ids": linked,
+            }
+        )
+
+    return compact
+
+
+def _write_chunked_problem_mining_atoms_workspace(
+    *,
+    workspace_dir: Path,
+    prompt_atoms: list[dict[str, Any]],
+    max_records_per_miner: int,
+    chunk_max_bytes: int = 55_000,
+) -> dict[str, Any]:
+    """Write stage-1 atom payload files into *workspace_dir* and return the manifest.
+
+    Stage 1 miners need access to the full atom evidence text, but provider file-read tools
+    commonly enforce token limits that make a single large JSON file unreadable. To avoid
+    "randomly chopping off text" while still fitting inside tool limits, this helper writes
+    a small manifest file plus multiple chunk files that together contain the full atom list.
+
+    Written files
+    ------------
+    - ``atoms.json`` (manifest; small JSON object)
+    - ``atoms_chunks/atoms_###.json`` (chunk files; each is a JSON array of atom dicts)
+
+    The manifest includes a stable list of chunk files; a prompt can instruct the model to:
+    1) Read ``atoms.json``.
+    2) Read each file listed under ``chunks[*].file``.
+
+    Parameters
+    ----------
+    workspace_dir:
+        Stage-1 miner workspace directory.
+    prompt_atoms:
+        Atom projection returned by ``_atoms_for_problem_mining_prompt``.
+    max_records_per_miner:
+        Upper-bound hint included in the manifest for prompt consumption.
+    chunk_max_bytes:
+        Maximum bytes per chunk file (UTF-8). This value is recorded in the manifest so
+        it is not a silent default.
+
+    Returns
+    -------
+    dict[str, Any]
+        Manifest JSON object written to ``atoms.json``.
+
+    Raises
+    ------
+    ValueError
+        When a single atom payload exceeds ``chunk_max_bytes`` and cannot be chunked
+        further without truncation.
+    """
+    import json as _json
+    from hashlib import sha256
+
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    chunks_dir = workspace_dir / "atoms_chunks"
+    chunks_dir.mkdir(parents=True, exist_ok=True)
+
+    header = "[\n"
+    footer = "]\n"
+    base_bytes = len((header + footer).encode("utf-8"))
+
+    def _atom_line_bytes(atom: dict[str, Any]) -> int:
+        raw = _json.dumps(atom, ensure_ascii=False, separators=(",", ":"))
+        # Worst-case sizing: include a trailing comma even though the last entry will omit it.
+        line = f"  {raw},\n"
+        return len(line.encode("utf-8"))
+
+    chunks: list[list[dict[str, Any]]] = []
+    current: list[dict[str, Any]] = []
+    current_bytes = base_bytes
+
+    for atom in prompt_atoms:
+        atom_bytes = _atom_line_bytes(atom)
+        if atom_bytes + base_bytes > chunk_max_bytes:
+            atom_id = _coerce_string(atom.get("atom_id")) or "(missing atom_id)"
+            raise ValueError(
+                "stage1 atoms chunking failed: a single atom payload is too large for the "
+                f"file-read tool limits (atom_id={atom_id} atom_bytes~{atom_bytes} "
+                f"chunk_max_bytes={chunk_max_bytes}). Refuse to truncate evidence text; "
+                "reduce the atom projection or increase chunk_max_bytes."
+            )
+
+        if current and (current_bytes + atom_bytes) > chunk_max_bytes:
+            chunks.append(current)
+            current = []
+            current_bytes = base_bytes
+
+        current.append(atom)
+        current_bytes += atom_bytes
+
+    if current:
+        chunks.append(current)
+
+    chunk_entries: list[dict[str, Any]] = []
+    total_chunk_bytes = 0
+
+    for idx, atoms_chunk in enumerate(chunks, start=1):
+        rel_path = Path("atoms_chunks") / f"atoms_{idx:03d}.json"
+        chunk_path = workspace_dir / rel_path
+
+        lines: list[str] = ["["]
+        for atom_idx, atom in enumerate(atoms_chunk):
+            raw = _json.dumps(atom, ensure_ascii=False, separators=(",", ":"))
+            suffix = "," if atom_idx < (len(atoms_chunk) - 1) else ""
+            lines.append(f"  {raw}{suffix}")
+        lines.append("]")
+        content = "\n".join(lines) + "\n"
+
+        chunk_path.write_text(content, encoding="utf-8")
+        chunk_bytes = chunk_path.stat().st_size
+        total_chunk_bytes += chunk_bytes
+        chunk_entries.append(
+            {
+                "file": rel_path.as_posix(),
+                "atom_count": len(atoms_chunk),
+                "bytes": chunk_bytes,
+                "sha256": sha256(content.encode("utf-8")).hexdigest(),
+            }
+        )
+
+    manifest = {
+        "schema_version": 1,
+        "format": "chunked_problem_mining_atoms_v1",
+        "max_records_per_miner": int(max_records_per_miner),
+        "total_atom_count": len(prompt_atoms),
+        "chunk_count": len(chunk_entries),
+        "chunk_max_bytes": int(chunk_max_bytes),
+        "total_chunk_bytes": int(total_chunk_bytes),
+        "chunks": chunk_entries,
+    }
+
+    manifest_path = workspace_dir / "atoms.json"
+    manifest_path.write_text(
+        _json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    print(
+        "[stage1] wrote chunked atoms workspace "
+        f"(manifest={manifest_path} chunks={len(chunk_entries)} "
+        f"atoms={len(prompt_atoms)} bytes~{total_chunk_bytes})",
+        file=sys.stderr,
+    )
+
+    return manifest
+
+
+def _run_problem_mining_stage(
+    *,
+    atoms: list[dict[str, Any]],
+    pipeline_manifest: "PipelinePromptManifest",
+    artifacts_dir: Path,
+    out_json: Path,
+    out_md: Path,
+    agent: str,
+    model: str | None,
+    cfg: "RunnerConfig",
+    dry_run: bool,
+    stage_guidance_text: str,
+    max_records_per_miner: int = 20,
+) -> dict[str, Any]:
+    """Run stage 1 problem mining and write the stage artifacts.
+
+    Runs each configured problem-miner template against the full atom list.
+    In dry-run mode no LLM call is made; the CLI writes the prompts and synthesizes a
+    deterministic set of problem records from atoms so downstream stages can run on
+    offline fixtures.
+    The function always writes ``out_json`` and ``out_md``.
+
+    Parameters
+    ----------
+    atoms:
+        Eligible evidence atoms.
+    pipeline_manifest:
+        Loaded pipeline prompt manifest (version 2).
+    artifacts_dir:
+        Base artifacts directory (``*.backlog_artifacts``).
+    out_json:
+        Path for ``*.problem_records.json``.
+    out_md:
+        Path for ``*.problem_records.md``.
+    agent:
+        Agent identifier.
+    model:
+        Optional model override.
+    cfg:
+        Runner configuration.
+    dry_run:
+        When ``True``, skip LLM calls and synthesize deterministic problem records.
+    stage_guidance_text:
+        Problem-mining stage guidance text (injected into prompts).
+    max_records_per_miner:
+        Maximum problem records per miner call.
+
+    Returns
+    -------
+    dict[str, Any]
+        Stage-1 document dict (also written to ``out_json``).
+    """
+    import json as _json
+
+    stage = "problem_mining"
+    stage_artifacts_dir = artifacts_dir / "problem_mining"
+    stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    prompt_atoms = _atoms_for_problem_mining_prompt(atoms)
+    atoms_placeholder = _json.dumps(
+        {"atoms_file": "atoms.json"},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    all_records: list[dict[str, Any]] = []
+    miner_results: list[dict[str, Any]] = []
+
+    for idx, template_path in enumerate(pipeline_manifest.problem_miner_templates, start=1):
+        tag = f"problem_mining_{idx:03d}"
+        miner_out_dir = stage_artifacts_dir / tag
+        miner_out_dir.mkdir(parents=True, exist_ok=True)
+
+        workspace_dir = miner_out_dir / "workspace"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        manifest = _write_chunked_problem_mining_atoms_workspace(
+            workspace_dir=workspace_dir,
+            prompt_atoms=prompt_atoms,
+            max_records_per_miner=max_records_per_miner,
+        )
+        atoms_json_path = workspace_dir / "atoms.json"
+
+        template_text = template_path.read_text(encoding="utf-8")
+        prompt = (
+            template_text
+            .replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+            .replace("{{ATOMS_JSON}}", atoms_placeholder)
+            .replace("{{MAX_RECORDS_PER_MINER}}", str(max_records_per_miner))
+        )
+
+        meta: dict[str, Any] = {
+            "tag": tag,
+            "template": template_path.name,
+            "atom_count": len(atoms),
+            "prompt_atom_count": len(prompt_atoms),
+            "workspace_dir": str(workspace_dir),
+            "atoms_json": str(atoms_json_path),
+            "atoms_json_bytes": atoms_json_path.stat().st_size,
+            "atoms_chunk_count": int(manifest.get("chunk_count") or 0),
+            "atoms_total_chunk_bytes": int(manifest.get("total_chunk_bytes") or 0),
+        }
+
+        if dry_run:
+            print(
+                f"[stage1] dry-run: skipping LLM call for {tag} "
+                f"(template={template_path.name})",
+                file=sys.stderr,
+            )
+            # Write the would-be prompt so developers can inspect it.
+            (miner_out_dir / f"{tag}.prompt.txt").write_text(prompt, encoding="utf-8")
+            meta["prompt_chars"] = len(prompt)
+            meta["status"] = "dry_run"
+            meta["records"] = []
+            miner_results.append(meta)
+            continue
+
+        try:
+            meta["prompt_chars"] = len(prompt)
+            response = run_stage_prompt_json(
+                stage=stage,
+                prompt=prompt,
+                out_dir=miner_out_dir,
+                tag=tag,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                workspace_dir=workspace_dir,
+                allowed_tools=(
+                    ["Read"]
+                    if agent == "claude"
+                    else ["read_file"]
+                    if agent == "gemini"
+                    else []
+                ),
+                include_directories=(
+                    [str(workspace_dir)] if agent == "gemini" else []
+                ),
+            )
+            records, warnings = parse_problem_record_list(response)
+            meta["status"] = "ok"
+            meta["records"] = len(records)
+            meta["warnings"] = warnings
+            all_records.extend(records)
+            print(
+                f"[stage1] {tag}: {len(records)} problem records "
+                f"({len(warnings)} warnings)",
+                file=sys.stderr,
+            )
+        except Exception as exc:  # noqa: BLE001
+            meta["status"] = "error"
+            meta["error"] = str(exc)
+            print(
+                f"[stage1] {tag}: error during problem mining: {exc}",
+                file=sys.stderr,
+            )
+
+        miner_results.append(meta)
+
+    if dry_run:
+        synthesized = _synthesize_problem_records_from_atoms(atoms, max_records=max_records_per_miner)
+        all_records.extend(synthesized)
+        print(
+            f"[stage1] dry-run: synthesized {len(synthesized)} problem records from atoms",
+            file=sys.stderr,
+        )
+
+    # Deduplicate by problem_id (keep first occurrence).
+    seen_ids: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for rec in all_records:
+        pid = rec.get("problem_id") or ""
+        if pid and pid in seen_ids:
+            continue
+        if pid:
+            seen_ids.add(pid)
+        deduped.append(rec)
+
+    stage_doc = build_stage_document(
+        stage,
+        deduped,
+        input_meta={
+            "atom_count": len(atoms),
+            "miner_count": len(pipeline_manifest.problem_miner_templates),
+            "dry_run": dry_run,
+            "dry_run_synthesized_records": len(all_records) if dry_run else 0,
+            "miner_results": miner_results,
+        },
+        artifacts={
+            "problem_records_json": str(out_json),
+            "problem_records_md": str(out_md),
+        },
+    )
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(
+        _json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    title = out_json.stem.removesuffix(".problem_records") or "Problem Records"
+    md_text = _render_problem_records_markdown(
+        deduped,
+        title=f"{title} – Problem Records",
+    )
+    out_md.write_text(md_text, encoding="utf-8")
+
+    print(f"[stage1] wrote {out_json}", file=sys.stderr)
+    print(f"[stage1] wrote {out_md}", file=sys.stderr)
+
+    return stage_doc
+
+
+def _render_prioritized_problems_markdown(
+    priority_decisions: list[dict[str, Any]],
+    *,
+    problem_records_by_id: dict[str, dict[str, Any]],
+    title: str = "Prioritized Problems",
+) -> str:
+    """Render stage-2 prioritization decisions as a human-readable Markdown document."""
+    lines: list[str] = [f"# {title}\n"]
+    if not priority_decisions:
+        lines.append("_No prioritization decisions produced._\n")
+        return "\n".join(lines)
+
+    for dec in priority_decisions:
+        pid = dec.get("problem_id") or "(no id)"
+        rec = problem_records_by_id.get(pid) or {}
+        rec_title = rec.get("title") or pid
+        bucket = dec.get("priority_bucket") or "watch"
+        selected = dec.get("selected_for_research")
+        selected_str = (
+            "true" if selected is True else "false" if selected is False else "?"
+        )
+        pre_score = dec.get("pre_score")
+        pre_str = (
+            f"{float(pre_score):.2f}" if isinstance(pre_score, (int, float)) else "?"
+        )
+        lines.append(f"## {rec_title}")
+        lines.append(
+            f"**ID**: `{pid}` | **Bucket**: {bucket} | "
+            f"**Selected for research**: {selected_str} | **Pre-score**: {pre_str}\n"
+        )
+        rationale = dec.get("priority_rationale") or ""
+        if rationale:
+            lines.append(f"**Rationale**: {rationale}\n")
+        used = dec.get("evidence_atom_ids_used") or []
+        if isinstance(used, list) and used:
+            used_list = [e for e in used if isinstance(e, str) and e.strip()]
+            if used_list:
+                lines.append(
+                    f"**Evidence atoms used** ({len(used_list)}): "
+                    + ", ".join(f"`{e}`" for e in used_list[:10])
+                    + (" …" if len(used_list) > 10 else "")
+                    + "\n"
+                )
+        warn = dec.get("_parse_warning")
+        if warn:
+            lines.append(f"> ⚠ parse warning: {warn}\n")
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _run_problem_prioritization_stage(
+    *,
+    atoms: list[dict[str, Any]],
+    problem_records: list[dict[str, Any]],
+    pipeline_manifest: "PipelinePromptManifest",
+    artifacts_dir: Path,
+    out_json: Path,
+    out_md: Path,
+    agent: str,
+    model: str | None,
+    cfg: "RunnerConfig",
+    dry_run: bool,
+    stage_guidance_text: str,
+) -> dict[str, Any]:
+    """Run stage 2 prioritization and write the stage artifacts."""
+    import json as _json
+
+    stage = "problem_prioritization"
+    stage_artifacts_dir = artifacts_dir / "problem_prioritization"
+    stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    relation_config_raw = yaml.safe_load(
+        pipeline_manifest.relation_review_config_path.read_text(encoding="utf-8")
+    )
+    relation_config = relation_config_raw if isinstance(relation_config_raw, dict) else {}
+
+    neighborhoods = rank_stage_related_items(
+        problem_records,
+        stage=stage,
+        relation_config=relation_config,
+        embedder=None,
+    )
+    priority_signals = compute_problem_priority_signals(problem_records, atoms)
+    signals_by_problem_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in priority_signals
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+
+    problem_records_json = _json.dumps(problem_records, ensure_ascii=False, indent=2)
+    signals_json = _json.dumps(priority_signals, ensure_ascii=False, indent=2)
+    neighborhoods_json = _json.dumps(neighborhoods, ensure_ascii=False, indent=2)
+
+    template_text = pipeline_manifest.template_text(pipeline_manifest.prioritizer_template)
+    prompt = (
+        template_text.replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+        .replace("{{PROBLEM_RECORDS_JSON}}", problem_records_json)
+        .replace("{{PRIORITY_SIGNALS_JSON}}", signals_json)
+        .replace("{{NEIGHBORHOODS_JSON}}", neighborhoods_json)
+    )
+
+    tag = "problem_prioritization_001"
+    run_out_dir = stage_artifacts_dir / tag
+    run_out_dir.mkdir(parents=True, exist_ok=True)
+
+    decisions: list[dict[str, Any]] = []
+    warnings_list: list[str] = []
+    status: str = "ok"
+    error: str | None = None
+
+    if dry_run:
+        status = "dry_run_heuristic"
+        (run_out_dir / f"{tag}.prompt.txt").write_text(prompt, encoding="utf-8")
+        (run_out_dir / f"{tag}.response.txt").write_text(
+            "[dry-run] stage-2 prioritizer prompt not executed (offline mode).\n",
+            encoding="utf-8",
+        )
+        for rec in problem_records:
+            pid = rec.get("problem_id")
+            if not isinstance(pid, str) or not pid.strip():
+                continue
+            signals = signals_by_problem_id.get(pid, {})
+            bucket = signals.get("bucket_candidate") if isinstance(signals, dict) else None
+            bucket_s = bucket if isinstance(bucket, str) else "watch"
+            selected = bucket_s in {"p0", "p1"}
+            pre_score = signals.get("pre_score") if isinstance(signals, dict) else None
+            score_breakdown = (
+                signals.get("score_breakdown") if isinstance(signals, dict) else None
+            )
+            cited = rec.get("evidence_atom_ids") if isinstance(rec.get("evidence_atom_ids"), list) else []
+            cited_ids = [e for e in cited if isinstance(e, str) and e.strip()]
+            decisions.append(
+                {
+                    "problem_id": pid,
+                    "priority_bucket": bucket_s,
+                    "selected_for_research": selected,
+                    "priority_rationale": (
+                        "Dry-run heuristic (offline): selected bucket from deterministic pre-score "
+                        f"(pre_score={pre_score!r})."
+                    ),
+                    "evidence_atom_ids_used": cited_ids,
+                    "priority_status": "prioritized",
+                    "pre_score": pre_score,
+                    "bucket_candidate": bucket_s,
+                    "score_breakdown": score_breakdown,
+                    "_dry_run_synthesized": True,
+                }
+            )
+    else:
+        try:
+            response = run_stage_prompt_json(
+                stage=stage,
+                prompt=prompt,
+                out_dir=run_out_dir,
+                tag=tag,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+            )
+            parsed, parse_warnings = parse_priority_decision_list(response)
+            decisions = parsed
+            warnings_list.extend(parse_warnings)
+        except Exception as exc:  # noqa: BLE001
+            status = "error"
+            error = str(exc)
+            warnings_list.append(f"prioritizer_error: {exc}")
+
+    # Enrich with deterministic signals so the artifact always shows the pre-score breakdown.
+    for dec in decisions:
+        pid = dec.get("problem_id")
+        if not isinstance(pid, str):
+            continue
+        signals = signals_by_problem_id.get(pid)
+        if isinstance(signals, dict):
+            if "pre_score" not in dec:
+                dec["pre_score"] = signals.get("pre_score")
+            if "bucket_candidate" not in dec:
+                dec["bucket_candidate"] = signals.get("bucket_candidate")
+            if "score_breakdown" not in dec:
+                dec["score_breakdown"] = signals.get("score_breakdown")
+
+    # Guardrail: stage 2 must not contain solution fields.
+    forbidden_solution_fields = {
+        "proposed_fix",
+        "selected_solution",
+        "family_id",
+        "option_id",
+        "implementation_steps",
+    }
+    for dec in decisions:
+        pid = dec.get("problem_id") or "(no problem_id)"
+        bad = [k for k in forbidden_solution_fields if k in dec]
+        if bad:
+            warnings_list.append(
+                f"priority_decision_forbidden_solution_fields: {pid}: {', '.join(sorted(bad))}"
+            )
+            existing = dec.get("_parse_warning")
+            msg = "forbidden fields present: " + ", ".join(sorted(bad))
+            if isinstance(existing, str) and existing.strip():
+                dec["_parse_warning"] = existing.strip() + "; " + msg
+            else:
+                dec["_parse_warning"] = msg
+
+    expected_ids = [
+        item.get("problem_id")
+        for item in problem_records
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    ]
+    expected_set = {pid for pid in expected_ids if isinstance(pid, str)}
+    found_set = {
+        pid for pid in (item.get("problem_id") for item in decisions) if isinstance(pid, str)
+    }
+    missing = sorted(expected_set - found_set)
+    if missing:
+        status = "error"
+        warnings_list.append(
+            "prioritizer_missing_problem_ids: missing decisions for: " + ", ".join(missing)
+        )
+
+    stage_doc = build_stage_document(
+        stage,
+        decisions,
+        input_meta={
+            "atom_count": len(atoms),
+            "problem_record_count": len(problem_records),
+            "dry_run": dry_run,
+            "prioritizer_status": status,
+            "prioritizer_error": error,
+            "prioritizer_warnings": warnings_list,
+            "neighborhood_count": len(neighborhoods),
+        },
+        artifacts={
+            "prioritized_problems_json": str(out_json),
+            "prioritized_problems_md": str(out_md),
+            "prioritizer_prompt": str(run_out_dir / f"{tag}.prompt.txt"),
+            "prioritizer_response": str(run_out_dir / f"{tag}.response.txt"),
+        },
+    )
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(
+        _json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    records_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in problem_records
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+    title = out_json.stem.removesuffix(".prioritized_problems") or "Prioritized Problems"
+    out_md.write_text(
+        _render_prioritized_problems_markdown(
+            decisions,
+            problem_records_by_id=records_by_id,
+            title=f"{title} – Prioritized Problems",
+        ),
+        encoding="utf-8",
+    )
+
+    print(f"[stage2] wrote {out_json}", file=sys.stderr)
+    print(f"[stage2] wrote {out_md}", file=sys.stderr)
+    return stage_doc
+
+
+def _render_research_dossiers_markdown(
+    research_dossiers: list[dict[str, Any]],
+    *,
+    problem_records_by_id: dict[str, dict[str, Any]],
+    title: str = "Research Dossiers",
+) -> str:
+    """Render stage-3 research dossiers as a human-readable Markdown document."""
+    lines: list[str] = [f"# {title}\n"]
+    if not research_dossiers:
+        lines.append("_No research dossiers produced._\n")
+        return "\n".join(lines)
+
+    for dossier in research_dossiers:
+        pid = dossier.get("problem_id") or "(no id)"
+        rec = problem_records_by_id.get(str(pid)) or {}
+        rec_title = rec.get("title") or pid
+        status = dossier.get("reproduction_status") or "unknown"
+        diff_cls = dossier.get("diff_classification") or "unknown"
+        impl = dossier.get("implementation_performed")
+        impl_s = "true" if impl is True else "false" if impl is False else "?"
+
+        lines.append(f"## {rec_title}")
+        lines.append(
+            f"**ID**: `{pid}` | **Reproduction**: `{status}` | "
+            f"**Diff**: `{diff_cls}` | **Implementation performed**: {impl_s}\n"
+        )
+
+        writes_used = dossier.get("writes_used")
+        writes_used_s = (
+            "true" if writes_used is True else "false" if writes_used is False else "?"
+        )
+        writes_purpose = dossier.get("writes_purpose") or []
+        purpose_list = (
+            [p for p in writes_purpose if isinstance(p, str) and p.strip()]
+            if isinstance(writes_purpose, list)
+            else []
+        )
+        purpose_s = ", ".join(f"`{p}`" for p in purpose_list) if purpose_list else "`(none)`"
+        lines.append(f"- Writes used: `{writes_used_s}`; purpose: {purpose_s}")
+
+        broader = dossier.get("broader_class_assessment")
+        if isinstance(broader, str) and broader.strip():
+            lines.append(f"- Broader class assessment: `{broader.strip()}`")
+
+        diff_reasons = dossier.get("diff_suspicious_reasons") or []
+        diff_reasons_list = (
+            [r for r in diff_reasons if isinstance(r, str) and r.strip()]
+            if isinstance(diff_reasons, list)
+            else []
+        )
+        if diff_reasons_list:
+            lines.append("- Diff notes:")
+            for r in diff_reasons_list[:12]:
+                lines.append(f"  - {r}")
+
+        hypos = dossier.get("root_cause_hypotheses") or []
+        hypos_list = (
+            [h for h in hypos if isinstance(h, str) and h.strip()]
+            if isinstance(hypos, list)
+            else []
+        )
+        if hypos_list:
+            lines.append("- Root cause hypotheses:")
+            for h in hypos_list[:8]:
+                lines.append(f"  - {h}")
+
+        unknowns = dossier.get("unknowns") or []
+        unknowns_list = (
+            [u for u in unknowns if isinstance(u, str) and u.strip()]
+            if isinstance(unknowns, list)
+            else []
+        )
+        if unknowns_list:
+            lines.append("- Unknowns / next evidence needed:")
+            for u in unknowns_list[:10]:
+                lines.append(f"  - {u}")
+
+        run_dir = dossier.get("run_dir")
+        if isinstance(run_dir, str) and run_dir.strip():
+            lines.append(f"- Run dir: `{run_dir.strip()}`")
+
+        artifacts = dossier.get("artifacts")
+        artifacts_dict = artifacts if isinstance(artifacts, dict) else {}
+        report_json = artifacts_dict.get("report_json")
+        patch_diff = artifacts_dict.get("patch_diff")
+        if isinstance(report_json, str) and report_json.strip():
+            lines.append(f"- report.json: `{report_json.strip()}`")
+        if isinstance(patch_diff, str) and patch_diff.strip():
+            lines.append(f"- patch.diff: `{patch_diff.strip()}`")
+
+        warn = dossier.get("_parse_warning")
+        if isinstance(warn, str) and warn.strip():
+            lines.append(f"> ⚠ parse warning: {warn.strip()}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _run_repro_research_stage(
+    *,
+    repo_root: Path,
+    repo_input: str | None,
+    target_slug: str | None,
+    selected_priority_decisions: list[dict[str, Any]],
+    problem_records: list[dict[str, Any]],
+    artifacts_dir: Path,
+    out_json: Path,
+    out_md: Path,
+    agent: str,
+    model: str | None,
+    cfg: "RunnerConfig",
+    dry_run: bool,
+) -> dict[str, Any]:
+    """Run stage 3 reproduce-plus-research and write the stage artifacts."""
+    import json as _json
+
+    records_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in problem_records
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+
+    selected_payloads: list[dict[str, Any]] = []
+    for dec in selected_priority_decisions:
+        pid = dec.get("problem_id")
+        if not isinstance(pid, str) or not pid.strip():
+            continue
+        rec = records_by_id.get(pid) or {}
+        payload = {
+            "problem_id": pid,
+            "problem_record": rec,
+            "priority_decision": dec,
+        }
+        selected_payloads.append(payload)
+
+    stage_doc = run_repro_research_stage(
+        repo_root=repo_root,
+        repo_input=repo_input,
+        target_slug=target_slug,
+        selected_problems=selected_payloads,
+        artifacts_dir=artifacts_dir,
+        agent=agent,
+        model=model,
+        cfg=cfg,
+        dry_run=dry_run,
+    )
+
+    artifacts = stage_doc.get("artifacts")
+    artifacts_dict = artifacts if isinstance(artifacts, dict) else {}
+    artifacts_dict["research_json"] = str(out_json)
+    artifacts_dict["research_md"] = str(out_md)
+    stage_doc["artifacts"] = artifacts_dict
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(_json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    items_raw = stage_doc.get("items") if isinstance(stage_doc, dict) else None
+    dossiers = (
+        [item for item in items_raw if isinstance(item, dict)]
+        if isinstance(items_raw, list)
+        else []
+    )
+    title = out_json.stem.removesuffix(".research") or "Research"
+    out_md.write_text(
+        _render_research_dossiers_markdown(
+            dossiers,
+            problem_records_by_id=records_by_id,
+            title=f"{title} – Research Dossiers",
+        ),
+        encoding="utf-8",
+    )
+
+    print(f"[stage3] wrote {out_json}", file=sys.stderr)
+    print(f"[stage3] wrote {out_md}", file=sys.stderr)
+    return stage_doc
+
+
+def _render_solution_options_markdown(
+    options: list[dict[str, Any]],
+    *,
+    problem_records_by_id: dict[str, dict[str, Any]],
+    family_order: list[str],
+    family_labels_by_id: dict[str, str],
+    title: str = "Solution Options",
+) -> str:
+    """Render stage-4 solution options as a human-readable Markdown document."""
+    lines: list[str] = [f"# {title}\n"]
+    if not options:
+        lines.append("_No solution options produced._\n")
+        return "\n".join(lines)
+
+    by_problem: dict[str, list[dict[str, Any]]] = {}
+    for opt in options:
+        pid = opt.get("problem_id")
+        if not isinstance(pid, str) or not pid.strip():
+            continue
+        by_problem.setdefault(pid.strip(), []).append(opt)
+
+    for pid in sorted(by_problem):
+        rec = problem_records_by_id.get(pid) or {}
+        rec_title = rec.get("title") or pid
+        lines.append(f"## {rec_title}")
+        lines.append(f"**Problem ID**: `{pid}`\n")
+
+        opts = by_problem[pid]
+        by_family: dict[str, dict[str, Any]] = {}
+        for opt in opts:
+            fid = opt.get("family_id")
+            if isinstance(fid, str) and fid.strip() and fid.strip() not in by_family:
+                by_family[fid.strip()] = opt
+
+        for fid in family_order or sorted(by_family):
+            opt = by_family.get(fid)
+            label = family_labels_by_id.get(fid, fid)
+            lines.append(f"### {label} (`{fid}`)")
+            if opt is None:
+                lines.append("_Missing option for this family._\n")
+                continue
+
+            oid = opt.get("option_id") or "(no option_id)"
+            lines.append(f"- Option ID: `{oid}`")
+            summary = opt.get("summary") or ""
+            if summary:
+                lines.append(f"- Summary: {summary}")
+            cs = opt.get("change_surface_hypothesis") or ""
+            if cs:
+                lines.append(f"- Change surface hypothesis: `{cs}`")
+            tradeoffs = opt.get("tradeoffs") or ""
+            if tradeoffs:
+                lines.append(f"- Tradeoffs: {tradeoffs}")
+            recurrence = opt.get("recurrence_prevention") or ""
+            if recurrence:
+                lines.append(f"- Recurrence prevention: {recurrence}")
+            tests = opt.get("test_implications") or ""
+            if tests:
+                lines.append(f"- Test implications: {tests}")
+            rationale = opt.get("rationale") or ""
+            if rationale:
+                lines.append(f"- Rationale: {rationale}")
+            warn = opt.get("_parse_warning")
+            if isinstance(warn, str) and warn.strip():
+                lines.append(f"> ⚠ parse warning: {warn.strip()}")
+            lines.append("")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _run_solution_optioning_stage(
+    *,
+    repo_root: Path,
+    problem_records: list[dict[str, Any]],
+    priority_decisions: list[dict[str, Any]],
+    research_dossiers: list[dict[str, Any]],
+    pipeline_manifest: "PipelinePromptManifest",
+    artifacts_dir: Path,
+    out_json: Path,
+    out_md: Path,
+    agent: str,
+    model: str | None,
+    cfg: "RunnerConfig",
+    dry_run: bool,
+    stage_guidance_text: str,
+) -> dict[str, Any]:
+    """Run stage 4 solution optioning and write the stage artifacts."""
+    import json as _json
+
+    stage = "solution_optioning"
+    stage_artifacts_dir = artifacts_dir / "solution_optioning"
+    stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    taxonomy = pipeline_manifest.load_taxonomy()
+    families_raw = taxonomy.get("solution_families")
+    families = [f for f in families_raw if isinstance(f, dict)] if isinstance(families_raw, list) else []
+    family_order: list[str] = []
+    family_labels_by_id: dict[str, str] = {}
+    for fam in families:
+        fid = fam.get("family_id")
+        if isinstance(fid, str) and fid.strip():
+            family_order.append(fid.strip())
+            label = fam.get("label")
+            family_labels_by_id[fid.strip()] = (
+                label.strip() if isinstance(label, str) and label.strip() else fid.strip()
+            )
+    known_family_ids = set(family_order)
+    if not known_family_ids:
+        raise ValueError(
+            "solution_optioning: taxonomy.solution_families is empty; "
+            f"check {pipeline_manifest.taxonomy_path}"
+        )
+
+    repo_intent_path = repo_root / "configs" / "repo_intent.md"
+    if not repo_intent_path.exists():
+        raise FileNotFoundError(f"Missing repo intent doc: {repo_intent_path}")
+    repo_intent_text = repo_intent_path.read_text(encoding="utf-8", errors="replace")
+
+    records_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in problem_records
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+    priority_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in priority_decisions
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+
+    # Stable order for artifacts (deterministic).
+    focus_ids = sorted(
+        {
+            str(d.get("problem_id"))
+            for d in research_dossiers
+            if isinstance(d, dict) and isinstance(d.get("problem_id"), str)
+        }
+    )
+
+    template_text = pipeline_manifest.template_text(pipeline_manifest.solution_optioner_template)
+    taxonomy_json = _json.dumps(taxonomy, ensure_ascii=False, indent=2)
+
+    all_options: list[dict[str, Any]] = []
+    warnings_list: list[str] = []
+    status: str = "ok"
+
+    for idx, pid in enumerate(focus_ids, start=1):
+        dossier = next(
+            (d for d in research_dossiers if isinstance(d, dict) and d.get("problem_id") == pid),
+            {},
+        )
+        rec = records_by_id.get(pid) or {}
+        dec = priority_by_id.get(pid) or {}
+
+        prompt = (
+            template_text.replace("{{REPO_INTENT_MD}}", repo_intent_text)
+            .replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+            .replace("{{TAXONOMY_JSON}}", taxonomy_json)
+            .replace("{{PROBLEM_RECORD_JSON}}", _json.dumps(rec, ensure_ascii=False, indent=2))
+            .replace("{{PRIORITY_DECISION_JSON}}", _json.dumps(dec, ensure_ascii=False, indent=2))
+            .replace("{{RESEARCH_DOSSIER_JSON}}", _json.dumps(dossier, ensure_ascii=False, indent=2))
+        )
+
+        tag = f"solution_optioning_{idx:03d}"
+        run_out_dir = stage_artifacts_dir / tag
+        run_out_dir.mkdir(parents=True, exist_ok=True)
+
+        options: list[dict[str, Any]] = []
+        if dry_run:
+            status = "dry_run_synthesized"
+            (run_out_dir / f"{tag}.prompt.txt").write_text(prompt, encoding="utf-8")
+            (run_out_dir / f"{tag}.response.txt").write_text(
+                "[dry-run] stage-4 solution optioner prompt not executed (offline mode).\n",
+                encoding="utf-8",
+            )
+            problem_slug = slugify(pid) or pid.replace(":", "_")
+            for fid in family_order:
+                label = family_labels_by_id.get(fid, fid)
+                opt = {
+                    "option_id": f"option:{problem_slug}:{fid}",
+                    "problem_id": pid,
+                    "family_id": fid,
+                    "summary": f"[dry-run] {label} option for {rec.get('title') or pid}",
+                    "tradeoffs": "dry_run: synthesized option; rerun without --dry-run for real tradeoffs",
+                    "recurrence_prevention": "dry_run: unknown (research not executed)",
+                    "change_surface_hypothesis": "unknown",
+                    "test_implications": "dry_run: add/adjust tests once research is complete",
+                    "rationale": "dry_run: synthesized from staged inputs; no agent executed",
+                    "option_status": "optioned",
+                }
+                options.append(opt)
+            parsed, parse_warnings = parse_solution_option_sets(
+                _json.dumps(options, ensure_ascii=False), known_family_ids=known_family_ids
+            )
+            options = parsed
+            warnings_list.extend(parse_warnings)
+        else:
+            try:
+                response = run_stage_prompt_json(
+                    stage=stage,
+                    prompt=prompt,
+                    out_dir=run_out_dir,
+                    tag=tag,
+                    agent=agent,
+                    model=model,
+                    cfg=cfg,
+                )
+                parsed, parse_warnings = parse_solution_option_sets(
+                    response, known_family_ids=known_family_ids
+                )
+                options = parsed
+                warnings_list.extend(parse_warnings)
+            except Exception as exc:  # noqa: BLE001
+                status = "error"
+                warnings_list.append(f"solution_optioner_error: {pid}: {exc}")
+                continue
+
+        # Enforce exactly one option per family per problem_id.
+        by_family: dict[str, list[dict[str, Any]]] = {}
+        for opt in options:
+            fid = opt.get("family_id")
+            if isinstance(fid, str) and fid.strip():
+                by_family.setdefault(fid.strip(), []).append(opt)
+        for fid in family_order:
+            count = len(by_family.get(fid, []))
+            if count != 1:
+                status = "error"
+                warnings_list.append(
+                    f"solution_optioner_family_count_error: {pid}: {fid}: expected 1, got {count}"
+                )
+        # Attach pid for any malformed options that forgot it.
+        for opt in options:
+            if opt.get("problem_id") is None:
+                opt["problem_id"] = pid
+
+        all_options.extend(options)
+
+    # Relation-review stage after option generation.
+    relation_config_raw = yaml.safe_load(
+        pipeline_manifest.relation_review_config_path.read_text(encoding="utf-8")
+    )
+    relation_config = relation_config_raw if isinstance(relation_config_raw, dict) else {}
+
+    # Build one synthetic item per problem_id for relation review.
+    option_sets: list[dict[str, Any]] = []
+    for pid in focus_ids:
+        rec = records_by_id.get(pid) or {}
+        dossier = next(
+            (d for d in research_dossiers if isinstance(d, dict) and d.get("problem_id") == pid),
+            {},
+        )
+        opts = [o for o in all_options if o.get("problem_id") == pid]
+        joined = " | ".join(
+            [
+                f"{o.get('family_id')}: {o.get('summary')}"
+                for o in opts
+                if isinstance(o, dict) and o.get("summary")
+            ]
+        )
+        option_sets.append(
+            {
+                "problem_id": pid,
+                "title": rec.get("title") or pid,
+                "problem": rec.get("problem") or "",
+                "user_impact": rec.get("user_impact") or "",
+                "evidence_summary": rec.get("evidence_summary") or "",
+                "evidence_atom_ids": rec.get("evidence_atom_ids") or [],
+                "summary": joined,
+                "root_cause_hypotheses": dossier.get("root_cause_hypotheses") or [],
+            }
+        )
+
+    neighborhoods = rank_stage_related_items(
+        option_sets,
+        stage=stage,
+        relation_config=relation_config,
+        embedder=None,
+    )
+
+    allowed_actions = ["merge", "split", "same_cause_group", "keep_separate"]
+    rel_template = pipeline_manifest.template_text(pipeline_manifest.relation_reviewer_template)
+    rel_prompt = (
+        rel_template.replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+        .replace("{{ALLOWED_ACTIONS}}", _json.dumps(allowed_actions, ensure_ascii=False, indent=2))
+        .replace("{{NEIGHBORHOODS_JSON}}", _json.dumps(neighborhoods, ensure_ascii=False, indent=2))
+    )
+    rel_tag = "solution_optioning_relation_review_001"
+    rel_out_dir = stage_artifacts_dir / rel_tag
+    rel_out_dir.mkdir(parents=True, exist_ok=True)
+    relation_decisions: list[dict[str, Any]] = []
+    if dry_run:
+        (rel_out_dir / f"{rel_tag}.prompt.txt").write_text(rel_prompt, encoding="utf-8")
+        (rel_out_dir / f"{rel_tag}.response.txt").write_text(
+            "[dry-run] relation-review prompt not executed (offline mode).\n",
+            encoding="utf-8",
+        )
+    else:
+        try:
+            rel_response = run_stage_prompt_json(
+                stage=stage,
+                prompt=rel_prompt,
+                out_dir=rel_out_dir,
+                tag=rel_tag,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+            )
+            raw = json.loads(rel_response)
+            if not isinstance(raw, list):
+                raise ValueError("relation_reviewer_response_not_a_list")
+            relation_decisions = [d for d in raw if isinstance(d, dict)]
+        except Exception as exc:  # noqa: BLE001
+            status = "error"
+            warnings_list.append(f"solution_optioning_relation_review_error: {exc}")
+            relation_decisions = []
+
+    updated_option_sets = apply_relation_decisions(
+        option_sets,
+        relation_decisions,
+        stage=stage,
+    )
+    kept_ids = {
+        str(item.get("problem_id"))
+        for item in updated_option_sets
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+    if kept_ids:
+        all_options = [
+            opt
+            for opt in all_options
+            if isinstance(opt, dict) and isinstance(opt.get("problem_id"), str) and opt.get("problem_id") in kept_ids
+        ]
+
+    stage_doc = build_stage_document(
+        stage,
+        all_options,
+        input_meta={
+            "problem_record_count": len(problem_records),
+            "priority_decision_count": len(priority_decisions),
+            "research_dossier_count": len(research_dossiers),
+            "family_ids": family_order,
+            "dry_run": dry_run,
+            "solution_optioning_status": status,
+            "solution_optioning_warnings": warnings_list,
+            "relation_review_decisions": len(relation_decisions),
+            "neighborhood_count": len(neighborhoods),
+        },
+        artifacts={
+            "solution_options_json": str(out_json),
+            "solution_options_md": str(out_md),
+            "relation_review_prompt": str(rel_out_dir / f"{rel_tag}.prompt.txt"),
+            "relation_review_response": str(rel_out_dir / f"{rel_tag}.response.txt"),
+        },
+    )
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(_json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    title = out_json.stem.removesuffix(".solution_options") or "Solution Options"
+    out_md.write_text(
+        _render_solution_options_markdown(
+            [item for item in all_options if isinstance(item, dict)],
+            problem_records_by_id=records_by_id,
+            family_order=family_order,
+            family_labels_by_id=family_labels_by_id,
+            title=f"{title} – Solution Options",
+        ),
+        encoding="utf-8",
+    )
+
+    print(f"[stage4] wrote {out_json}", file=sys.stderr)
+    print(f"[stage4] wrote {out_md}", file=sys.stderr)
+    return stage_doc
+
+
+def _render_solution_selection_markdown(
+    decisions: list[dict[str, Any]],
+    *,
+    problem_records_by_id: dict[str, dict[str, Any]],
+    family_labels_by_id: dict[str, str],
+    title: str = "Solution Selection",
+) -> str:
+    """Render stage-5 selection decisions as a human-readable Markdown document."""
+    lines: list[str] = [f"# {title}\n"]
+    if not decisions:
+        lines.append("_No solution selection decisions produced._\n")
+        return "\n".join(lines)
+
+    for dec in decisions:
+        pid = dec.get("problem_id") or "(no problem_id)"
+        rec = problem_records_by_id.get(str(pid)) or {}
+        rec_title = rec.get("title") or pid
+
+        sel_oid = dec.get("selected_option_id") or "(no selected_option_id)"
+        sel_fid = dec.get("selected_family_id") or "(no selected_family_id)"
+        label = family_labels_by_id.get(str(sel_fid), str(sel_fid))
+        needs_ux = dec.get("needs_ux_review")
+        needs_ux_s = "true" if needs_ux is True else "false" if needs_ux is False else "?"
+
+        lines.append(f"## {rec_title}")
+        lines.append(
+            f"**Problem ID**: `{pid}` | **Selected**: `{sel_oid}` | "
+            f"**Family**: {label} (`{sel_fid}`) | **Needs UX review**: {needs_ux_s}\n"
+        )
+
+        rationale = dec.get("selection_rationale") or ""
+        if rationale:
+            lines.append(f"**Rationale**: {rationale}\n")
+        align = dec.get("repo_intent_alignment") or ""
+        if align:
+            lines.append(f"**Repo intent alignment**: {align}\n")
+        other = dec.get("why_other_options_were_not_selected") or ""
+        if other:
+            lines.append(f"**Why not other options**: {other}\n")
+
+        change_surface = dec.get("change_surface")
+        cs = change_surface if isinstance(change_surface, dict) else {}
+        kinds = cs.get("kinds") or []
+        kinds_list = (
+            [k for k in kinds if isinstance(k, str) and k.strip()] if isinstance(kinds, list) else []
+        )
+        if kinds_list:
+            lines.append(
+                "- Labeled change surface: "
+                + ", ".join(f"`{k}`" for k in kinds_list[:8])
+                + (" …" if len(kinds_list) > 8 else "")
+            )
+        comp = dec.get("component")
+        if isinstance(comp, str) and comp.strip():
+            lines.append(f"- Component: `{comp.strip()}`")
+        risk = dec.get("intent_risk")
+        if isinstance(risk, str) and risk.strip():
+            lines.append(f"- Intent risk: `{risk.strip()}`")
+
+        warn = dec.get("_parse_warning")
+        if isinstance(warn, str) and warn.strip():
+            lines.append(f"> ⚠ parse warning: {warn.strip()}")
+
+        lines.append("")
+
+    return "\n".join(lines)
+
+
+def _run_solution_selection_stage(
+    *,
+    repo_root: Path,
+    atoms: list[dict[str, Any]],
+    problem_records: list[dict[str, Any]],
+    research_dossiers: list[dict[str, Any]],
+    solution_options: list[dict[str, Any]],
+    pipeline_manifest: "PipelinePromptManifest",
+    artifacts_dir: Path,
+    out_json: Path,
+    out_md: Path,
+    agent: str,
+    model: str | None,
+    cfg: "RunnerConfig",
+    dry_run: bool,
+    stage_guidance_text: str,
+) -> dict[str, Any]:
+    """Run stage 5 solution selection + selected-solution labeler and write artifacts."""
+    import json as _json
+
+    stage = "solution_selection"
+    stage_artifacts_dir = artifacts_dir / "solution_selection"
+    stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    taxonomy = pipeline_manifest.load_taxonomy()
+    families_raw = taxonomy.get("solution_families")
+    families = [f for f in families_raw if isinstance(f, dict)] if isinstance(families_raw, list) else []
+    family_order: list[str] = []
+    family_labels_by_id: dict[str, str] = {}
+    for fam in families:
+        fid = fam.get("family_id")
+        if isinstance(fid, str) and fid.strip():
+            family_order.append(fid.strip())
+            label = fam.get("label")
+            family_labels_by_id[fid.strip()] = (
+                label.strip() if isinstance(label, str) and label.strip() else fid.strip()
+            )
+
+    repo_intent_path = repo_root / "configs" / "repo_intent.md"
+    if not repo_intent_path.exists():
+        raise FileNotFoundError(f"Missing repo intent doc: {repo_intent_path}")
+    repo_intent_text = repo_intent_path.read_text(encoding="utf-8", errors="replace")
+
+    records_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in problem_records
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+    dossiers_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in research_dossiers
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+    options_by_problem: dict[str, list[dict[str, Any]]] = {}
+    options_by_id: dict[str, dict[str, Any]] = {}
+    for opt in solution_options:
+        pid = opt.get("problem_id")
+        oid = opt.get("option_id")
+        if isinstance(pid, str) and pid.strip() and isinstance(oid, str) and oid.strip():
+            options_by_problem.setdefault(pid.strip(), []).append(opt)
+            options_by_id[oid.strip()] = opt
+
+    focus_ids = sorted(options_by_problem.keys())
+
+    selector_template = pipeline_manifest.template_text(pipeline_manifest.solution_selector_template)
+    labeler_template = pipeline_manifest.template_text(
+        pipeline_manifest.selected_solution_labeler_template
+    )
+
+    atoms_by_id: dict[str, dict[str, Any]] = {
+        str(a.get("atom_id")): a
+        for a in atoms
+        if isinstance(a, dict) and isinstance(a.get("atom_id"), str)
+    }
+
+    decisions: list[dict[str, Any]] = []
+    warnings_list: list[str] = []
+    status: str = "ok"
+
+    for idx, pid in enumerate(focus_ids, start=1):
+        rec = records_by_id.get(pid) or {}
+        dossier = dossiers_by_id.get(pid) or {}
+        opts = options_by_problem.get(pid) or []
+
+        prompt = (
+            selector_template.replace("{{REPO_INTENT_MD}}", repo_intent_text)
+            .replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+            .replace("{{PROBLEM_RECORD_JSON}}", _json.dumps(rec, ensure_ascii=False, indent=2))
+            .replace("{{RESEARCH_DOSSIER_JSON}}", _json.dumps(dossier, ensure_ascii=False, indent=2))
+            .replace("{{SOLUTION_OPTIONS_JSON}}", _json.dumps(opts, ensure_ascii=False, indent=2))
+        )
+
+        tag = f"solution_selection_{idx:03d}"
+        run_out_dir = stage_artifacts_dir / tag
+        run_out_dir.mkdir(parents=True, exist_ok=True)
+
+        selected_dec: dict[str, Any] | None = None
+        if dry_run:
+            status = "dry_run_synthesized"
+            (run_out_dir / f"{tag}.prompt.txt").write_text(prompt, encoding="utf-8")
+            (run_out_dir / f"{tag}.response.txt").write_text(
+                "[dry-run] stage-5 solution selector prompt not executed (offline mode).\n",
+                encoding="utf-8",
+            )
+            # Deterministic selection: first problem selects the most comprehensive family
+            # (drives a high-surface UX-review test), others select most direct.
+            preferred_family = (
+                "most_comprehensive" if idx == 1 else "most_direct"
+            )
+            chosen = next((o for o in opts if o.get("family_id") == preferred_family), None)
+            if chosen is None:
+                chosen = opts[0] if opts else None
+            if chosen is None:
+                status = "error"
+                warnings_list.append(f"solution_selection_no_options: {pid}")
+                continue
+            fid = chosen.get("family_id") or "unknown"
+            oid = chosen.get("option_id") or "(no option_id)"
+            needs_ux = bool(fid == "most_comprehensive" or "new_command" in str(chosen.get("change_surface_hypothesis") or ""))
+            candidate = {
+                "problem_id": pid,
+                "selected_option_id": oid,
+                "selected_family_id": fid,
+                "selection_rationale": "dry_run: synthesized selection; rerun without --dry-run for real rationale",
+                "repo_intent_alignment": "dry_run: synthesized",
+                "why_other_options_were_not_selected": "dry_run: synthesized",
+                "needs_ux_review": needs_ux,
+                "selection_status": "selected",
+            }
+            parsed, parse_warnings = parse_selection_decisions(
+                _json.dumps([candidate], ensure_ascii=False)
+            )
+            selected_dec = parsed[0] if parsed else None
+            warnings_list.extend(parse_warnings)
+        else:
+            try:
+                response = run_stage_prompt_json(
+                    stage=stage,
+                    prompt=prompt,
+                    out_dir=run_out_dir,
+                    tag=tag,
+                    agent=agent,
+                    model=model,
+                    cfg=cfg,
+                )
+                parsed, parse_warnings = parse_selection_decisions(response)
+                warnings_list.extend(parse_warnings)
+                # Expect exactly one decision for this problem.
+                selected_dec = next(
+                    (d for d in parsed if d.get("problem_id") == pid),
+                    (parsed[0] if parsed else None),
+                )
+            except Exception as exc:  # noqa: BLE001
+                status = "error"
+                warnings_list.append(f"solution_selector_error: {pid}: {exc}")
+                continue
+
+        if selected_dec is None:
+            status = "error"
+            warnings_list.append(f"solution_selector_missing_decision: {pid}")
+            continue
+
+        selected_option_id = selected_dec.get("selected_option_id")
+        selected_option = (
+            options_by_id.get(str(selected_option_id))
+            if isinstance(selected_option_id, str)
+            else None
+        )
+        if selected_option is not None:
+            selected_dec["selected_option"] = selected_option
+
+        # Run selected-solution labeler (post-selection).
+        evidence_ids = rec.get("evidence_atom_ids") if isinstance(rec.get("evidence_atom_ids"), list) else []
+        evidence_ids_s = [e for e in evidence_ids if isinstance(e, str) and e.strip()]
+        evidence_atoms_preview: list[dict[str, Any]] = []
+        for eid in evidence_ids_s[:12]:
+            atom = atoms_by_id.get(eid)
+            if atom is None:
+                continue
+            preview = {
+                "atom_id": atom.get("atom_id"),
+                "run_rel": atom.get("run_rel"),
+                "source": atom.get("source"),
+                "severity_hint": atom.get("severity_hint"),
+                "text": atom.get("text"),
+                "artifact_ref": atom.get("artifact_ref"),
+            }
+            evidence_atoms_preview.append(preview)
+
+        selected_payload = {
+            "problem_id": pid,
+            "title": rec.get("title") or pid,
+            "problem": rec.get("problem") or "",
+            "user_impact": rec.get("user_impact") or "",
+            "selected_option_id": selected_dec.get("selected_option_id"),
+            "selected_family_id": selected_dec.get("selected_family_id"),
+            "selection_rationale": selected_dec.get("selection_rationale"),
+            "selected_option": selected_option or {},
+        }
+        labeler_prompt = (
+            labeler_template.replace(
+                "{{SELECTED_SOLUTION_JSON}}",
+                _json.dumps(selected_payload, ensure_ascii=False, indent=2),
+            )
+            .replace(
+                "{{EVIDENCE_ATOMS_JSON}}",
+                _json.dumps(evidence_atoms_preview, ensure_ascii=False, indent=2),
+            )
+        )
+
+        labeler_tag = f"selected_solution_labeler_{idx:03d}"
+        labeler_out_dir = stage_artifacts_dir / labeler_tag
+        labeler_out_dir.mkdir(parents=True, exist_ok=True)
+
+        label_obj: dict[str, Any] | None = None
+        if dry_run:
+            (labeler_out_dir / f"{labeler_tag}.prompt.txt").write_text(
+                labeler_prompt, encoding="utf-8"
+            )
+            (labeler_out_dir / f"{labeler_tag}.response.txt").write_text(
+                "[dry-run] selected-solution labeler prompt not executed (offline mode).\n",
+                encoding="utf-8",
+            )
+            # Deterministic label: comprehensive → new_command; otherwise docs_change.
+            fid = str(selected_dec.get("selected_family_id") or "")
+            if fid == "most_comprehensive":
+                label_obj = {
+                    "change_surface": {
+                        "user_visible": True,
+                        "kinds": ["new_command"],
+                        "notes": "dry_run: synthesized label for comprehensive option",
+                    },
+                    "component": "unknown",
+                    "intent_risk": "med",
+                    "confidence": 0.5,
+                    "evidence_atom_ids_used": evidence_ids_s[:1],
+                }
+            else:
+                label_obj = {
+                    "change_surface": {
+                        "user_visible": True,
+                        "kinds": ["docs_change"],
+                        "notes": "dry_run: synthesized label for non-comprehensive option",
+                    },
+                    "component": "docs",
+                    "intent_risk": "low",
+                    "confidence": 0.5,
+                    "evidence_atom_ids_used": evidence_ids_s[:1],
+                }
+        else:
+            try:
+                response = run_stage_prompt_json(
+                    stage="selected_solution_labeler",
+                    prompt=labeler_prompt,
+                    out_dir=labeler_out_dir,
+                    tag=labeler_tag,
+                    agent=agent,
+                    model=model,
+                    cfg=cfg,
+                )
+                raw_label = json.loads(response)
+                if isinstance(raw_label, dict):
+                    label_obj = raw_label
+                else:
+                    raise ValueError("selected_solution_labeler_response_not_a_dict")
+            except Exception as exc:  # noqa: BLE001
+                status = "error"
+                warnings_list.append(f"selected_solution_labeler_error: {pid}: {exc}")
+                label_obj = None
+
+        if isinstance(label_obj, dict):
+            # Merge labeler output into the selection decision payload.
+            if "change_surface" in label_obj:
+                selected_dec["change_surface"] = label_obj.get("change_surface")
+            if "component" in label_obj:
+                selected_dec["component"] = label_obj.get("component")
+            if "intent_risk" in label_obj:
+                selected_dec["intent_risk"] = label_obj.get("intent_risk")
+            if "confidence" in label_obj:
+                selected_dec["labeler_confidence"] = label_obj.get("confidence")
+            if "evidence_atom_ids_used" in label_obj:
+                selected_dec["evidence_atom_ids_used"] = label_obj.get("evidence_atom_ids_used")
+
+        # Enrich with problem narrative fields so downstream tools can treat this as a ticket-like payload.
+        for key in (
+            "title",
+            "problem",
+            "user_impact",
+            "severity",
+            "confidence",
+            "evidence_atom_ids",
+            "evidence_summary",
+        ):
+            if key in rec and key not in selected_dec:
+                selected_dec[key] = rec.get(key)
+
+        # Compute evidence breadth from cited atoms (UX review + policy gating need this).
+        missions: set[str] = set()
+        targets: set[str] = set()
+        repo_inputs: set[str] = set()
+        agents: set[str] = set()
+        personas: set[str] = set()
+        runs: set[str] = set()
+        for eid in evidence_ids_s:
+            atom = atoms_by_id.get(eid)
+            if atom is None:
+                continue
+            for mid in [_coerce_string(atom.get("mission_id"))]:
+                if mid is not None:
+                    missions.add(mid)
+            for t in [_coerce_string(atom.get("target_slug"))]:
+                if t is not None:
+                    targets.add(t)
+            for ri in [_coerce_string(atom.get("repo_input"))]:
+                if ri is not None:
+                    repo_inputs.add(ri)
+            for ag in [_coerce_string(atom.get("agent"))]:
+                if ag is not None:
+                    agents.add(ag)
+            for pid_s in [_coerce_string(atom.get("persona_id"))]:
+                if pid_s is not None:
+                    personas.add(pid_s)
+            for rr in [_coerce_string(atom.get("run_rel"))]:
+                if rr is not None:
+                    runs.add(rr)
+        selected_dec["breadth"] = {
+            "missions": len(missions),
+            "targets": len(targets),
+            "repo_inputs": len(repo_inputs),
+            "agents": len(agents),
+            "personas": len(personas),
+            "runs": len(runs),
+        }
+
+        # Stage gating: after selection but before planning, items are still research_required.
+        if "stage" not in selected_dec:
+            selected_dec["stage"] = "research_required"
+
+        decisions.append(selected_dec)
+
+    stage_doc = build_stage_document(
+        stage,
+        decisions,
+        input_meta={
+            "problem_record_count": len(problem_records),
+            "research_dossier_count": len(research_dossiers),
+            "option_count": len(solution_options),
+            "decision_count": len(decisions),
+            "dry_run": dry_run,
+            "solution_selection_status": status,
+            "solution_selection_warnings": warnings_list,
+            "labeler_prompt_template": str(pipeline_manifest.selected_solution_labeler_template)
+            if pipeline_manifest.selected_solution_labeler_template is not None
+            else None,
+        },
+        artifacts={
+            "solution_selection_json": str(out_json),
+            "solution_selection_md": str(out_md),
+        },
+    )
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(_json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    title = out_json.stem.removesuffix(".solution_selection") or "Solution Selection"
+    out_md.write_text(
+        _render_solution_selection_markdown(
+            decisions,
+            problem_records_by_id=records_by_id,
+            family_labels_by_id=family_labels_by_id,
+            title=f"{title} – Solution Selection",
+        ),
+        encoding="utf-8",
+    )
+
+    print(f"[stage5] wrote {out_json}", file=sys.stderr)
+    print(f"[stage5] wrote {out_md}", file=sys.stderr)
+    return stage_doc
+
+
+def _render_change_plans_markdown(
+    plans: list[dict[str, Any]],
+    *,
+    problem_records_by_id: dict[str, dict[str, Any]],
+    title: str,
+) -> str:
+    """Render stage 6 change plans to a Markdown summary."""
+
+    lines: list[str] = []
+    lines.append(f"# {title}")
+    lines.append("")
+
+    if not plans:
+        lines.append("_No change plans were produced._")
+        lines.append("")
+        return "\n".join(lines)
+
+    by_problem: dict[str, list[dict[str, Any]]] = {}
+    for plan in plans:
+        pid = plan.get("problem_id")
+        if isinstance(pid, str) and pid.strip():
+            by_problem.setdefault(pid.strip(), []).append(plan)
+
+    for pid in sorted(by_problem):
+        rec = problem_records_by_id.get(pid) or {}
+        problem_title = _coerce_string(rec.get("title")) or pid
+        lines.append(f"## {problem_title}")
+        lines.append("")
+        lines.append(f"**Problem ID**: `{pid}`")
+        lines.append("")
+
+        for plan in by_problem[pid]:
+            cid = _coerce_string(plan.get("change_plan_id")) or "(no change_plan_id)"
+            lines.append(f"### {cid}")
+            lines.append("")
+
+            status = _coerce_string(plan.get("change_plan_status")) or "planned"
+            lines.append(f"- Status: `{status}`")
+
+            owner = _coerce_string(plan.get("suggested_owner"))
+            if owner:
+                lines.append(f"- Suggested owner: `{owner}`")
+
+            selected_option_id = _coerce_string(plan.get("selected_option_id"))
+            if selected_option_id:
+                lines.append(f"- Selected option ID: `{selected_option_id}`")
+
+            proposed_fix = _coerce_string(plan.get("proposed_fix"))
+            if proposed_fix:
+                lines.append(f"- Proposed fix: {proposed_fix}")
+
+            rollback_notes = _coerce_string(plan.get("rollback_notes"))
+            if rollback_notes:
+                lines.append(f"- Rollback notes: {rollback_notes}")
+
+            related_ids = _coerce_string_list(plan.get("related_change_plan_ids"))
+            if related_ids:
+                rel_s = ", ".join(f"`{rid}`" for rid in related_ids[:8])
+                lines.append(f"- Related change plans: {rel_s}")
+
+            implementation_steps = _coerce_string_list(plan.get("implementation_steps"))
+            if implementation_steps:
+                lines.append("- Implementation steps:")
+                for step in implementation_steps[:12]:
+                    lines.append(f"  - {step}")
+
+            verification_steps = _coerce_string_list(plan.get("verification_steps"))
+            if verification_steps:
+                lines.append("- Verification steps:")
+                for step in verification_steps[:12]:
+                    lines.append(f"  - {step}")
+
+            success_criteria = _coerce_string_list(plan.get("success_criteria"))
+            if success_criteria:
+                lines.append("- Success criteria:")
+                for criterion in success_criteria[:12]:
+                    lines.append(f"  - {criterion}")
+
+            warn = _coerce_string(plan.get("_parse_warning"))
+            if warn:
+                lines.append(f"> ⚠ parse warning: {warn}")
+
+            lines.append("")
+
+        lines.append("")
+
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _run_implementation_planning_stage(
+    *,
+    repo_root: Path,
+    problem_records: list[dict[str, Any]],
+    research_dossiers: list[dict[str, Any]],
+    solution_options: list[dict[str, Any]],
+    selection_decisions: list[dict[str, Any]],
+    pipeline_manifest: "PipelinePromptManifest",
+    artifacts_dir: Path,
+    out_json: Path,
+    out_md: Path,
+    agent: str,
+    model: str | None,
+    cfg: "RunnerConfig",
+    dry_run: bool,
+    stage_guidance_text: str,
+) -> dict[str, Any]:
+    """Run stage 6 implementation planning and write the stage artifacts."""
+    import json as _json
+
+    stage = "implementation_planning"
+    stage_artifacts_dir = artifacts_dir / stage
+    stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
+
+    template_path = pipeline_manifest.change_planner_template
+    if template_path is None:
+        raise ValueError(
+            "implementation_planning: pipeline_manifest.json is missing change_planner_template"
+        )
+
+    repo_intent_path = repo_root / "configs" / "repo_intent.md"
+    if not repo_intent_path.exists():
+        raise FileNotFoundError(f"Missing repo intent doc: {repo_intent_path}")
+    repo_intent_text = repo_intent_path.read_text(encoding="utf-8", errors="replace")
+
+    records_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in problem_records
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+    dossiers_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in research_dossiers
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+    options_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("option_id")): item
+        for item in solution_options
+        if isinstance(item, dict) and isinstance(item.get("option_id"), str)
+    }
+    decisions_by_problem: dict[str, dict[str, Any]] = {
+        str(item.get("problem_id")): item
+        for item in selection_decisions
+        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
+    }
+
+    focus_ids = sorted(decisions_by_problem)
+    template_text = pipeline_manifest.template_text(template_path)
+
+    all_plans: list[dict[str, Any]] = []
+    warnings_list: list[str] = []
+    status: str = "ok"
+
+    for idx, pid in enumerate(focus_ids, start=1):
+        decision_raw = decisions_by_problem.get(pid) or {}
+        decision: dict[str, Any] = dict(decision_raw)
+
+        selected_option_id = _coerce_string(decision.get("selected_option_id"))
+        if selected_option_id and "selected_option" not in decision:
+            opt = options_by_id.get(selected_option_id)
+            if opt is not None:
+                decision["selected_option"] = opt
+
+        if selected_option_id is not None and not isinstance(decision.get("selected_option"), dict):
+            warnings_list.append(f"implementation_planning_missing_selected_option: {pid}")
+
+        rec = records_by_id.get(pid) or {}
+        dossier = dossiers_by_id.get(pid) or {}
+
+        prompt = (
+            template_text.replace("{{REPO_INTENT_MD}}", repo_intent_text)
+            .replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+            .replace("{{PROBLEM_RECORD_JSON}}", _json.dumps(rec, ensure_ascii=False, indent=2))
+            .replace("{{RESEARCH_DOSSIER_JSON}}", _json.dumps(dossier, ensure_ascii=False, indent=2))
+            .replace("{{SELECTION_DECISION_JSON}}", _json.dumps(decision, ensure_ascii=False, indent=2))
+        )
+
+        tag = f"implementation_planning_{idx:03d}"
+        run_out_dir = stage_artifacts_dir / tag
+        run_out_dir.mkdir(parents=True, exist_ok=True)
+
+        parsed_plans: list[dict[str, Any]] = []
+        if dry_run:
+            status = "dry_run_synthesized"
+            (run_out_dir / f"{tag}.prompt.txt").write_text(prompt, encoding="utf-8")
+            (run_out_dir / f"{tag}.response.txt").write_text(
+                "[dry-run] stage-6 change planner prompt not executed (offline mode).\n",
+                encoding="utf-8",
+            )
+
+            slug = pid.removeprefix("problem:").strip() or pid.strip()
+            plan1_id = f"plan:{slug}:1"
+
+            base_plan = {
+                "change_plan_id": plan1_id,
+                "problem_id": pid,
+                "selected_option_id": selected_option_id or "(no selected_option_id)",
+                "title": _coerce_string(rec.get("title")) or f"Plan for {pid}",
+                "problem": _coerce_string(rec.get("problem")) or "dry_run: synthesized problem summary",
+                "user_impact": _coerce_string(rec.get("user_impact")) or "dry_run: synthesized user impact",
+                "proposed_fix": (
+                    _coerce_string(decision.get("selected_option", {}).get("summary"))
+                    if isinstance(decision.get("selected_option"), dict)
+                    else None
+                )
+                or "dry_run: synthesized proposed fix",
+                "implementation_steps": [
+                    "Identify change location(s) based on research dossier",
+                    "Apply the selected approach with minimal surface area",
+                ],
+                "verification_steps": [
+                    "Run relevant unit/integration tests",
+                    "Re-run the failing scenario (or fixture) to confirm resolution",
+                ],
+                "success_criteria": [
+                    "The original failure no longer reproduces",
+                    "A regression test prevents recurrence",
+                ],
+                "rollback_notes": "Revert the change set and remove the regression test if needed.",
+                "suggested_owner": _coerce_string(decision.get("component"))
+                or _coerce_string(rec.get("suggested_owner"))
+                or "unknown",
+                "change_plan_status": "planned",
+                "related_change_plan_ids": [],
+                "_dry_run_synthesized": True,
+            }
+
+            plans_payload: list[dict[str, Any]] = [base_plan]
+
+            # Exercise split-plan handling: when the selected family is comprehensive, synthesize
+            # a second plan that focuses on verification/docs, cross-linked via related IDs.
+            if _coerce_string(decision.get("selected_family_id")) == "most_comprehensive":
+                plan2_id = f"plan:{slug}:2"
+                plans_payload[0]["related_change_plan_ids"] = [plan2_id]
+                plans_payload.append(
+                    {
+                        **base_plan,
+                        "change_plan_id": plan2_id,
+                        "title": f"{base_plan['title']} (follow-up verification)",
+                        "implementation_steps": [
+                            "Add focused regression tests for edge cases",
+                            "Update docs/help text if user-visible behavior changed",
+                        ],
+                        "verification_steps": [
+                            "Run full test suite (or relevant subset) to confirm no regressions",
+                        ],
+                        "success_criteria": [
+                            "Tests cover the class of failure described in research",
+                        ],
+                        "related_change_plan_ids": [plan1_id],
+                    }
+                )
+
+            parsed_plans, parse_warnings = parse_change_plan_list(
+                _json.dumps(plans_payload, ensure_ascii=False)
+            )
+            warnings_list.extend(parse_warnings)
+        else:
+            try:
+                response = run_stage_prompt_json(
+                    stage=stage,
+                    prompt=prompt,
+                    out_dir=run_out_dir,
+                    tag=tag,
+                    agent=agent,
+                    model=model,
+                    cfg=cfg,
+                )
+                parsed_plans, parse_warnings = parse_change_plan_list(response)
+                warnings_list.extend(parse_warnings)
+            except Exception as exc:  # noqa: BLE001
+                status = "error"
+                warnings_list.append(f"change_planner_error: {pid}: {exc}")
+                continue
+
+        for plan in parsed_plans:
+            plan_pid = _coerce_string(plan.get("problem_id"))
+            if plan_pid is not None and plan_pid != pid:
+                warnings_list.append(
+                    f"change_plan_problem_id_mismatch: expected={pid} got={plan_pid}"
+                )
+            plan_oid = _coerce_string(plan.get("selected_option_id"))
+            if selected_option_id is not None and plan_oid is not None and plan_oid != selected_option_id:
+                warnings_list.append(
+                    f"change_plan_selected_option_id_mismatch: problem_id={pid} "
+                    f"expected={selected_option_id} got={plan_oid}"
+                )
+            all_plans.append(plan)
+
+    stage_doc = build_stage_document(
+        stage,
+        all_plans,
+        input_meta={
+            "problem_record_count": len(problem_records),
+            "research_dossier_count": len(research_dossiers),
+            "option_count": len(solution_options),
+            "decision_count": len(selection_decisions),
+            "change_plan_count": len(all_plans),
+            "dry_run": dry_run,
+            "implementation_planning_status": status,
+            "implementation_planning_warnings": warnings_list,
+            "change_planner_prompt_template": str(template_path),
+        },
+        artifacts={
+            "change_plans_json": str(out_json),
+            "change_plans_md": str(out_md),
+        },
+    )
+
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_md.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(_json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    title = out_json.stem.removesuffix(".change_plans") or "Change Plans"
+    out_md.write_text(
+        _render_change_plans_markdown(
+            all_plans,
+            problem_records_by_id=records_by_id,
+            title=f"{title} – Change Plans",
+        ),
+        encoding="utf-8",
+    )
+
+    print(f"[stage6] wrote {out_json}", file=sys.stderr)
+    print(f"[stage6] wrote {out_md}", file=sys.stderr)
+    return stage_doc
+
+
 def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     """Execute the `reports backlog` command handler.
 
@@ -4462,7 +6723,6 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         )
     else:
         prompts_dir = repo_root / "configs" / "backlog_prompts"
-    prompt_manifest = load_prompt_manifest(prompts_dir)
 
     atoms_jsonl = out_json.parent / f"{default_name}.backlog.atoms.jsonl"
     agent_last_message_atoms_jsonl = (
@@ -4654,35 +6914,52 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     write_backlog_atoms(atoms_doc, atoms_jsonl)
     write_backlog_atoms({"atoms": agent_last_message_atoms}, agent_last_message_atoms_jsonl)
 
-    miners = max(0, int(args.miners))
     sample_size = int(args.sample_size)
     if sample_size < 0:
         raise ValueError("--sample-size must be >= 0")
     sample_size_semantics = "all_atoms" if sample_size == 0 else "fixed_sample"
-    coverage_miners = max(0, int(args.coverage_miners))
-    bagging_miners = (
-        max(0, int(args.bagging_miners))
-        if args.bagging_miners is not None
-        else max(0, miners - coverage_miners)
-    )
-    max_tickets_per_miner = max(1, int(args.max_tickets_per_miner))
-    orphan_pass = max(0, int(args.orphan_pass))
     seed = int(args.seed)
     resume = bool(args.resume)
     force = bool(args.force)
     dry_run = bool(args.dry_run)
-    no_merge = bool(args.no_merge)
+    agent = str(args.agent)
+    model = str(args.model) if isinstance(args.model, str) and args.model.strip() else None
+
+    legacy_one_pass_flags: list[str] = []
+    if int(args.miners) != 10:
+        legacy_one_pass_flags.append(f"--miners={int(args.miners)}")
+    if int(args.sample_size) != 120:
+        legacy_one_pass_flags.append(f"--sample-size={int(args.sample_size)}")
+    if int(args.coverage_miners) != 3:
+        legacy_one_pass_flags.append(f"--coverage-miners={int(args.coverage_miners)}")
+    if args.bagging_miners is not None:
+        legacy_one_pass_flags.append(f"--bagging-miners={int(args.bagging_miners)}")
+    if int(args.max_tickets_per_miner) != 12:
+        legacy_one_pass_flags.append(f"--max-tickets-per-miner={int(args.max_tickets_per_miner)}")
+    if int(args.orphan_pass) != 1:
+        legacy_one_pass_flags.append(f"--orphan-pass={int(args.orphan_pass)}")
+    if seed != 0:
+        legacy_one_pass_flags.append(f"--seed={seed}")
+    if not resume:
+        legacy_one_pass_flags.append("--no-resume")
+    if force:
+        legacy_one_pass_flags.append("--force")
+    if bool(args.no_merge):
+        legacy_one_pass_flags.append("--no-merge")
     merge_candidate_threshold = float(args.merge_candidate_threshold)
     if not (0.0 <= merge_candidate_threshold <= 1.0):
         raise ValueError("--merge-candidate-threshold must be in [0, 1]")
-    merge_keep_anchor_pairs = bool(args.merge_keep_anchor_pairs)
-    agent = str(args.agent)
-    model = str(args.model) if isinstance(args.model, str) and args.model.strip() else None
-    labelers = max(0, int(args.labelers))
-    if labelers == 0:
+    if merge_candidate_threshold != 0.65:
+        legacy_one_pass_flags.append(f"--merge-candidate-threshold={merge_candidate_threshold:g}")
+    if bool(args.merge_keep_anchor_pairs):
+        legacy_one_pass_flags.append("--merge-keep-anchor-pairs")
+    if int(args.labelers) != 3:
+        legacy_one_pass_flags.append(f"--labelers={int(args.labelers)}")
+
+    if legacy_one_pass_flags:
         print(
-            "WARNING: --labelers=0 disables ticket labeling; tickets keep "
-            "change_surface.kinds=['unknown'] and policy stage promotion will not run.",
+            "[backlog] NOTE: legacy one-pass knobs are ignored by the six-stage pipeline: "
+            + " ".join(legacy_one_pass_flags),
             file=sys.stderr,
         )
 
@@ -4706,68 +6983,237 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             )
         policy_cfg = BacklogPolicyConfig.from_dict(policy_root)
 
-    ensemble = run_backlog_ensemble(
-        atoms=atoms,
-        artifacts_dir=artifacts_dir,
-        prompts_dir=prompts_dir,
-        prompt_manifest=prompt_manifest,
-        agent=agent,
-        model=model,
-        cfg=cfg,
-        miners=miners,
-        sample_size=sample_size,
-        coverage_miners=coverage_miners,
-        bagging_miners=bagging_miners,
-        max_tickets_per_miner=max_tickets_per_miner,
-        seed=seed,
-        resume=resume,
-        force=force,
-        dry_run=dry_run,
-        no_merge=no_merge,
-        merge_candidate_overall_threshold=merge_candidate_threshold,
-        merge_keep_anchor_pairs=merge_keep_anchor_pairs,
-        orphan_pass=orphan_pass,
-    )
+    # ---------------------------------------------------------------------------
+    # Six-stage backlog pipeline (canonical, milestone 6).
+    # ---------------------------------------------------------------------------
+    pipeline_manifest_path = prompts_dir / "pipeline_manifest.json"
+    if not pipeline_manifest_path.exists():
+        print(
+            f"Missing six-stage pipeline manifest: {pipeline_manifest_path} "
+            "(expected under --prompts-dir).",
+            file=sys.stderr,
+        )
+        return 2
 
-    tickets_raw = ensemble.get("tickets")
-    tickets = (
-        [item for item in tickets_raw if isinstance(item, dict)]
-        if isinstance(tickets_raw, list)
-        else []
-    )
-    miners_meta = ensemble.get("miners_meta")
-    miners_meta_dict = miners_meta if isinstance(miners_meta, dict) else {}
+    try:
+        pipeline_manifest = load_pipeline_prompt_manifest(prompts_dir)
+    except (FileNotFoundError, ValueError) as exc:
+        print(str(exc), file=sys.stderr)
+        return 2
 
-    labelers_meta_dict: dict[str, Any] = {}
-    if labelers > 0 and tickets:
-        atoms_by_id = {
-            atom_id: atom
-            for atom in atoms
-            for atom_id in [atom.get("atom_id")]
-            if isinstance(atom_id, str) and atom_id
-        }
-        labeled = run_labeler_jobs(
-            tickets=tickets,
-            atoms_by_id=atoms_by_id,
-            prompts_dir=prompts_dir,
-            prompt_manifest=prompt_manifest,
+    problem_records_json = out_json.parent / f"{default_name}.problem_records.json"
+    problem_records_md = out_json.parent / f"{default_name}.problem_records.md"
+    prioritized_json = out_json.parent / f"{default_name}.prioritized_problems.json"
+    prioritized_md = out_json.parent / f"{default_name}.prioritized_problems.md"
+    research_json = out_json.parent / f"{default_name}.research.json"
+    research_md = out_json.parent / f"{default_name}.research.md"
+    solution_options_json = out_json.parent / f"{default_name}.solution_options.json"
+    solution_options_md = out_json.parent / f"{default_name}.solution_options.md"
+    solution_selection_json = out_json.parent / f"{default_name}.solution_selection.json"
+    solution_selection_md = out_json.parent / f"{default_name}.solution_selection.md"
+    change_plans_json = out_json.parent / f"{default_name}.change_plans.json"
+    change_plans_md = out_json.parent / f"{default_name}.change_plans.md"
+
+    try:
+        stage1_guidance = pipeline_manifest.load_stage_guidance("problem_mining")
+        stage1_doc = _run_problem_mining_stage(
+            atoms=atoms,
+            pipeline_manifest=pipeline_manifest,
             artifacts_dir=artifacts_dir,
+            out_json=problem_records_json,
+            out_md=problem_records_md,
             agent=agent,
             model=model,
             cfg=cfg,
-            labelers=labelers,
-            resume=resume,
-            force=force,
+            dry_run=dry_run,
+            stage_guidance_text=stage1_guidance,
+        )
+
+        items1_raw = stage1_doc.get("items") if isinstance(stage1_doc, dict) else None
+        problem_records = (
+            [item for item in items1_raw if isinstance(item, dict)]
+            if isinstance(items1_raw, list)
+            else []
+        )
+
+        stage2_guidance = pipeline_manifest.load_stage_guidance("problem_prioritization")
+        stage2_doc = _run_problem_prioritization_stage(
+            atoms=atoms,
+            problem_records=problem_records,
+            pipeline_manifest=pipeline_manifest,
+            artifacts_dir=artifacts_dir,
+            out_json=prioritized_json,
+            out_md=prioritized_md,
+            agent=agent,
+            model=model,
+            cfg=cfg,
+            dry_run=dry_run,
+            stage_guidance_text=stage2_guidance,
+        )
+
+        items2_raw = stage2_doc.get("items") if isinstance(stage2_doc, dict) else None
+        priority_decisions = (
+            [item for item in items2_raw if isinstance(item, dict)]
+            if isinstance(items2_raw, list)
+            else []
+        )
+        selected_priority = [dec for dec in priority_decisions if dec.get("selected_for_research") is True]
+
+        resolved_repo_input = repo_input
+        if resolved_repo_input is None:
+            raw_repo_inputs: list[str] = []
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                target_ref = record.get("target_ref")
+                if not isinstance(target_ref, dict):
+                    continue
+                candidate = _coerce_string(target_ref.get("repo_input"))
+                if candidate is not None:
+                    raw_repo_inputs.append(candidate)
+
+            normalized_repo_inputs: dict[str, str] = {}
+            for candidate in sorted(set(raw_repo_inputs)):
+                resolved = candidate.strip()
+                norm_key = resolved
+                if _looks_like_local_repo_input(resolved):
+                    resolved_path = _resolve_local_repo_root(repo_root, resolved) or Path(resolved).expanduser()
+                    try:
+                        resolved_path = resolved_path.resolve()
+                    except OSError:
+                        pass
+                    resolved = str(resolved_path)
+                    norm_key = os.path.normcase(os.path.normpath(resolved))
+                if norm_key not in normalized_repo_inputs:
+                    normalized_repo_inputs[norm_key] = resolved
+
+            if len(normalized_repo_inputs) == 1:
+                resolved_repo_input = next(iter(normalized_repo_inputs.values()))
+                print(
+                    f"[stage3] inferred repo_input from run history: {resolved_repo_input}",
+                    file=sys.stderr,
+                )
+            elif len(normalized_repo_inputs) > 1:
+                preview = ", ".join(list(normalized_repo_inputs.values())[:4])
+                suffix = " …" if len(normalized_repo_inputs) > 4 else ""
+                print(
+                    "[stage3] WARNING: multiple repo_inputs found in run history; "
+                    "provide --repo-input to enable stage 3 repro+research. "
+                    f"(unique_after_normalization={len(normalized_repo_inputs)} preview={preview}{suffix})",
+                    file=sys.stderr,
+                )
+
+        stage3_doc = _run_repro_research_stage(
+            repo_root=repo_root,
+            repo_input=resolved_repo_input,
+            target_slug=target_slug,
+            selected_priority_decisions=selected_priority,
+            problem_records=problem_records,
+            artifacts_dir=artifacts_dir,
+            out_json=research_json,
+            out_md=research_md,
+            agent=agent,
+            model=model,
+            cfg=cfg,
             dry_run=dry_run,
         )
-        tickets_raw = labeled.get("tickets")
-        tickets = (
-            [item for item in tickets_raw if isinstance(item, dict)]
-            if isinstance(tickets_raw, list)
-            else tickets
+
+        items3_raw = stage3_doc.get("items") if isinstance(stage3_doc, dict) else None
+        research_dossiers = (
+            [item for item in items3_raw if isinstance(item, dict)]
+            if isinstance(items3_raw, list)
+            else []
         )
-        labelers_meta = labeled.get("labelers_meta")
-        labelers_meta_dict = labelers_meta if isinstance(labelers_meta, dict) else {}
+
+        stage4_guidance = pipeline_manifest.load_stage_guidance("solution_optioning")
+        stage4_doc = _run_solution_optioning_stage(
+            repo_root=repo_root,
+            problem_records=problem_records,
+            priority_decisions=priority_decisions,
+            research_dossiers=research_dossiers,
+            pipeline_manifest=pipeline_manifest,
+            artifacts_dir=artifacts_dir,
+            out_json=solution_options_json,
+            out_md=solution_options_md,
+            agent=agent,
+            model=model,
+            cfg=cfg,
+            dry_run=dry_run,
+            stage_guidance_text=stage4_guidance,
+        )
+
+        items4_raw = stage4_doc.get("items") if isinstance(stage4_doc, dict) else None
+        solution_options = (
+            [item for item in items4_raw if isinstance(item, dict)]
+            if isinstance(items4_raw, list)
+            else []
+        )
+
+        stage5_guidance = pipeline_manifest.load_stage_guidance("solution_selection")
+        stage5_doc = _run_solution_selection_stage(
+            repo_root=repo_root,
+            atoms=atoms,
+            problem_records=problem_records,
+            research_dossiers=research_dossiers,
+            solution_options=solution_options,
+            pipeline_manifest=pipeline_manifest,
+            artifacts_dir=artifacts_dir,
+            out_json=solution_selection_json,
+            out_md=solution_selection_md,
+            agent=agent,
+            model=model,
+            cfg=cfg,
+            dry_run=dry_run,
+            stage_guidance_text=stage5_guidance,
+        )
+
+        items5_raw = stage5_doc.get("items") if isinstance(stage5_doc, dict) else None
+        selection_decisions = (
+            [item for item in items5_raw if isinstance(item, dict)]
+            if isinstance(items5_raw, list)
+            else []
+        )
+
+        stage6_guidance = pipeline_manifest.load_stage_guidance("implementation_planning")
+        stage6_doc = _run_implementation_planning_stage(
+            repo_root=repo_root,
+            problem_records=problem_records,
+            research_dossiers=research_dossiers,
+            solution_options=solution_options,
+            selection_decisions=selection_decisions,
+            pipeline_manifest=pipeline_manifest,
+            artifacts_dir=artifacts_dir,
+            out_json=change_plans_json,
+            out_md=change_plans_md,
+            agent=agent,
+            model=model,
+            cfg=cfg,
+            dry_run=dry_run,
+            stage_guidance_text=stage6_guidance,
+        )
+
+        items6_raw = stage6_doc.get("items") if isinstance(stage6_doc, dict) else None
+        change_plans = (
+            [item for item in items6_raw if isinstance(item, dict)]
+            if isinstance(items6_raw, list)
+            else []
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"[backlog] ERROR: six-stage backlog pipeline failed: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        tickets = assemble_backlog_tickets(
+            problem_records=problem_records,
+            priority_decisions=priority_decisions,
+            research_dossiers=research_dossiers,
+            solution_option_sets=solution_options,
+            selection_decisions=selection_decisions,
+            change_plans=change_plans,
+        )
+    except ValueError as exc:
+        print(f"[backlog] ERROR: ticket assembly failed: {exc}", file=sys.stderr)
+        return 2
 
     eligible_atom_ids = {
         atom_id
@@ -4797,22 +7243,15 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             "repo_input": repo_input,
             "agent": agent,
             "model": model,
-            "miners": miners,
-            "sample_size": sample_size,
-            "sample_size_semantics": sample_size_semantics,
-            "exclude_atom_statuses": sorted(exclude_atom_status_set),
-            "coverage_miners": coverage_miners,
-            "bagging_miners": bagging_miners,
-            "max_tickets_per_miner": max_tickets_per_miner,
+            "dry_run": dry_run,
             "resume": resume,
             "force": force,
             "seed": seed,
-            "no_merge": no_merge,
-            "merge_candidate_overall_threshold": merge_candidate_threshold,
-            "merge_keep_anchor_pairs": merge_keep_anchor_pairs,
-            "orphan_pass": orphan_pass,
-            "dry_run": dry_run,
-            "labelers": labelers,
+            "sample_size": sample_size,
+            "sample_size_semantics": sample_size_semantics,
+            "exclude_atom_statuses": sorted(exclude_atom_status_set),
+            "pipeline_manifest_path": str(pipeline_manifest_path),
+            "pipeline_manifest_version": int(getattr(pipeline_manifest, "version", 2)),
         },
         artifacts={
             "atoms_jsonl": str(atoms_jsonl),
@@ -4823,17 +7262,16 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 **(atoms_doc.get("atom_filter") or {}),
                 "dropped_tickets_excluded_atoms": dropped_tickets_excluded_atoms,
             },
-            "prompt_manifest": {
-                "path": str(prompts_dir / "manifest.json"),
-                "coverage_templates": list(prompt_manifest.coverage_templates),
-                "bagging_templates": list(prompt_manifest.bagging_templates),
-                "orphan_template": prompt_manifest.orphan_template,
-                "merge_judge_template": prompt_manifest.merge_judge_template,
-                "labeler_template": prompt_manifest.labeler_template,
+            "six_stage_pipeline": {
+                "problem_records_json": str(problem_records_json),
+                "prioritized_problems_json": str(prioritized_json),
+                "research_json": str(research_json),
+                "solution_options_json": str(solution_options_json),
+                "solution_selection_json": str(solution_selection_json),
+                "change_plans_json": str(change_plans_json),
             },
-            "labelers_meta": labelers_meta_dict,
         },
-        miners_meta=miners_meta_dict,
+        miners_meta={},
     )
 
     if policy_cfg is not None:
@@ -4902,20 +7340,6 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     print(json.dumps(summary.get("totals", {}), indent=2, ensure_ascii=False))
     print(json.dumps(summary.get("coverage", {}), indent=2, ensure_ascii=False))
 
-    miners_meta = summary.get("miners_meta") if isinstance(summary, dict) else None
-    miners_failed = 0
-    if isinstance(miners_meta, dict):
-        try:
-            miners_failed = int(miners_meta.get("miners_failed") or 0)
-        except (TypeError, ValueError):
-            miners_failed = 0
-    if miners_failed:
-        print(
-            f"[backlog] WARNING: {miners_failed} miner job(s) failed to parse. "
-            f"See: {artifacts_dir / 'miners'}",
-            file=sys.stderr,
-        )
-        return 2
     return 0
 
 

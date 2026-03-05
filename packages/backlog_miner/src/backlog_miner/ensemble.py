@@ -1226,6 +1226,8 @@ def run_backlog_prompt(
     model: str | None,
     cfg: RunnerConfig,
     workspace_dir: Path | None = None,
+    allowed_tools: list[str] | None = None,
+    include_directories: list[str] | None = None,
 ) -> str:
     """Execute a single backlog prompt and persist raw agent artifacts.
 
@@ -1243,6 +1245,12 @@ def run_backlog_prompt(
         Optional model override.
     cfg:
         Runner configuration.
+    allowed_tools:
+        Optional list of tool names to allow for this prompt (agent-specific). When
+        ``None``, the agent backend uses its default tool configuration.
+    include_directories:
+        Optional list of directories that tools are allowed to access (agent-specific).
+        When ``None``, the agent backend uses its default directory policy.
 
     Returns
     -------
@@ -1276,6 +1284,8 @@ def run_backlog_prompt(
                 stderr_path=stderr_path,
                 model=model,
                 cfg=cfg,
+                allowed_tools=allowed_tools,
+                include_directories=include_directories,
             )
             return _read_text(last_message_path)
 
@@ -1288,6 +1298,8 @@ def run_backlog_prompt(
         stderr_path=stderr_path,
         model=model,
         cfg=cfg,
+        allowed_tools=allowed_tools,
+        include_directories=include_directories,
     )
 
     return _read_text(last_message_path)
@@ -1303,7 +1315,13 @@ def _run_agent_in_workspace(
     stderr_path: Path,
     model: str | None,
     cfg: RunnerConfig,
+    allowed_tools: list[str] | None = None,
+    include_directories: list[str] | None = None,
 ) -> None:
+    tools = [t for t in (allowed_tools or []) if isinstance(t, str) and t.strip()]
+    include_dirs = [
+        d for d in (include_directories or []) if isinstance(d, str) and d.strip()
+    ]
     if agent == "codex":
         with _codex_host_login_env():
             run_codex_exec(
@@ -1330,7 +1348,7 @@ def _run_agent_in_workspace(
             binary=_agent_binary(cfg, "claude", "claude"),
             output_format=_agent_output_format(cfg, "claude"),
             model=model,
-            allowed_tools=[],
+            allowed_tools=tools,
             permission_mode=None,
         )
         return
@@ -1346,7 +1364,8 @@ def _run_agent_in_workspace(
             sandbox=False,
             model=model,
             approval_mode="default",
-            allowed_tools=[],
+            allowed_tools=tools,
+            include_directories=include_dirs,
         )
         return
     raise ValueError(f"Unsupported backlog agent: {agent!r}")
