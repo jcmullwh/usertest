@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 """Deterministic pre-scoring for stage-2 backlog problem prioritization.
 
 This module computes *pre-score signals* from evidence only. The pre-score is an input
@@ -10,6 +8,8 @@ Design goals:
 - Human-readable: include a score breakdown and raw counts.
 - Evidence-driven: use only stage-1 problem records + referenced evidence atoms.
 """
+
+from __future__ import annotations
 
 from collections.abc import Sequence
 from typing import Any
@@ -165,7 +165,10 @@ def compute_problem_priority_signals(
         runs_score = min(1.0, distinct_runs / 3.0)  # 1.0 at 3 distinct runs
         agents_score = min(1.0, distinct_agents / 2.0)  # 1.0 at 2 agents
         missions_score = min(1.0, distinct_missions / 2.0)  # 1.0 at 2 missions
-        breadth_score = max(0.0, min(1.0, 0.55 * runs_score + 0.30 * agents_score + 0.15 * missions_score))
+        breadth_score = max(
+            0.0,
+            min(1.0, 0.55 * runs_score + 0.30 * agents_score + 0.15 * missions_score),
+        )
 
         # Recurrence within the observed evidence (independent of LLM confidence).
         recurrence_score = min(1.0, evidence_count / 6.0)  # 1.0 at 6 cited atoms
@@ -199,7 +202,11 @@ def compute_problem_priority_signals(
 
         # Bucket thresholds are intentionally conservative. Severe + broad issues
         # should climb quickly; narrow low-confidence issues should fall to watch.
-        if severity_score >= 0.95 and (breadth_score >= 0.45 or recurrence_score >= 0.60) and pre_score >= 0.75:
+        if (
+            severity_score >= 0.95
+            and (breadth_score >= 0.45 or recurrence_score >= 0.60)
+            and pre_score >= 0.75
+        ):
             bucket = "p0"
         elif pre_score >= 0.60 or (
             severity_score >= 0.80 and source_strength_score >= 0.85 and trust_score >= 0.60

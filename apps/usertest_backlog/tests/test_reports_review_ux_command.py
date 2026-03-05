@@ -74,7 +74,9 @@ def test_reports_review_ux_dry_run_writes_prompt_and_outputs(tmp_path: Path) -> 
                     "selected_family_id": "most_comprehensive",
                     "selection_rationale": "Selected option proposes new UX surface; needs review.",
                     "repo_intent_alignment": "Must align with composable-command intent.",
-                    "why_other_options_were_not_selected": "Other options insufficient for breadth.",
+                    "why_other_options_were_not_selected": (
+                        "Other options insufficient for breadth."
+                    ),
                     "change_surface": {
                         "user_visible": True,
                         "kinds": ["new_command"],

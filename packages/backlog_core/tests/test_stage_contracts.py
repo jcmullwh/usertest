@@ -11,6 +11,7 @@ These tests assert observable behavior for each stage parser:
 from __future__ import annotations
 
 import json
+
 import pytest
 
 from backlog_core.stage_contracts import (
@@ -23,7 +24,6 @@ from backlog_core.stage_contracts import (
     parse_selection_decisions,
     parse_solution_option_sets,
 )
-
 
 # ---------------------------------------------------------------------------
 # _extract_json helpers
