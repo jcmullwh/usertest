@@ -2911,7 +2911,14 @@ def _reason_type_for_code(reason_code: str | None) -> str | None:
     code = reason_code.strip().lower()
     if code in {"not_found", "windowsapps_alias"}:
         return "discovery"
-    if code in {"launch_failed", "access_denied", "timeout", "blocked", "unresponsive"}:
+    if code in {
+        "launch_failed",
+        "access_denied",
+        "timeout",
+        "blocked",
+        "unresponsive",
+        "context_mismatch",
+    }:
         return "execution"
     if code in {"pip_missing", "pytest_missing", "pdm_missing"}:
         return "dependency"
@@ -2945,6 +2952,11 @@ def _python_probe_remediation(reason_code: str | None) -> str | None:
         return "Python interpreter probe timed out. Verify interpreter health and policy limits."
     if code == "not_found":
         return "Python command is unavailable in the effective agent execution context."
+    if code == "context_mismatch":
+        return (
+            "Selected Python runtime does not match the effective execution context. "
+            "Clear leaked host runtime hints or select a backend-local interpreter."
+        )
     return "Inspect probe stderr/stdout and selected interpreter metadata in preflight.json."
 
 
@@ -2952,8 +2964,16 @@ def _tool_command_probe_remediation(command_name: str, reason_code: str | None) 
     code = reason_code.strip().lower() if isinstance(reason_code, str) else None
     if command_name == "pytest" and code in {"not_found", "pytest_missing"}:
         return "Install pytest into the selected interpreter/environment, then retry."
-    if command_name == "pdm" and code in {"not_found", "pdm_missing"}:
-        return "Install `pdm` into the selected interpreter/environment, then retry."
+    if command_name == "pdm" and code in {
+        "not_found",
+        "pdm_missing",
+        "probe_failed",
+        "pdm_probe_failed",
+    }:
+        return (
+            "Install `pdm` into the selected interpreter/environment "
+            "(python -m pip install -U pdm), then retry."
+        )
     return _python_probe_remediation(reason_code)
 
 
@@ -3346,8 +3366,167 @@ def _python_interpreter_summary_from_toolchain_commands(
         "candidates": candidates,
         "rejected": [candidate for candidate in candidates if not bool(candidate.get("usable"))],
     }
+_REMOTE_RUNTIME_HINT_ENV_KEYS: tuple[str, ...] = (
+    "VIRTUAL_ENV",
+    "USERTEST_PYTHON",
+    "PDM_PYTHON",
+    "UV_PYTHON",
+    "PYTHONHOME",
+    "__PYVENV_LAUNCHER__",
+    "CONDA_PREFIX",
+)
 
 
+def _normalize_runtime_path_key(path_text: str | None) -> str | None:
+    if not isinstance(path_text, str):
+        return None
+    raw = path_text.strip()
+    if not raw:
+        return None
+    normalized = raw.replace("\\", "/")
+    return normalized.lower() if _is_windows() else normalized
+
+
+def _context_verified_runtime_candidate(
+    python_context_probe: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    probe_passed = bool(
+        isinstance(python_context_probe, dict)
+        and python_context_probe.get("passed", False)
+    )
+    if not probe_passed:
+        return None
+    metadata = (
+        python_context_probe.get("metadata")
+        if isinstance(python_context_probe.get("metadata"), dict)
+        else None
+    )
+    if metadata is None:
+        return None
+    executable = metadata.get("executable")
+    executable_s = executable.strip() if isinstance(executable, str) else ""
+    if not executable_s:
+        return None
+
+    candidate: dict[str, Any] = {
+        "source": "context_verified",
+        "path": executable_s,
+        "present": True,
+        "usable": True,
+        "reason_code": None,
+        "reason_type": None,
+        "reason": None,
+    }
+    for key in (
+        "version",
+        "executable",
+        "prefix",
+        "base_prefix",
+        "real_prefix",
+        "exec_prefix",
+        "base_exec_prefix",
+        "virtual_env",
+    ):
+        value = metadata.get(key)
+        candidate[key] = value if isinstance(value, str) else None
+    return candidate
+
+
+def _rebuild_runtime_summary(runtime_summary: dict[str, Any]) -> dict[str, Any]:
+    candidates = runtime_summary.get("candidates")
+    candidate_list = (
+        [item for item in candidates if isinstance(item, dict)]
+        if isinstance(candidates, list)
+        else []
+    )
+    selected = runtime_summary.get("selected")
+    selected_dict = dict(selected) if isinstance(selected, dict) else None
+    return {
+        "selected": selected_dict,
+        "candidates": candidate_list,
+        "rejected": [item for item in candidate_list if not bool(item.get("usable", False))],
+    }
+
+
+def _reconcile_python_runtime_summary_with_context(
+    *,
+    python_runtime_summary: dict[str, Any],
+    python_context_probe: dict[str, Any] | None,
+    prefer_context_selection: bool,
+) -> dict[str, Any]:
+    summary = _rebuild_runtime_summary(python_runtime_summary)
+    selected = summary.get("selected")
+    selected_dict = dict(selected) if isinstance(selected, dict) else None
+    verified_candidate = _context_verified_runtime_candidate(python_context_probe)
+    selected_path_key = _normalize_runtime_path_key(
+        selected_dict.get("path") if isinstance(selected_dict, dict) else None
+    )
+
+    if verified_candidate is not None and prefer_context_selection:
+        verified_path_key = _normalize_runtime_path_key(verified_candidate.get("path"))
+        candidates: list[dict[str, Any]] = [verified_candidate]
+        if selected_dict is not None and selected_path_key != verified_path_key:
+            demoted = dict(selected_dict)
+            demoted["usable"] = False
+            demoted["reason_code"] = "context_mismatch"
+            demoted["reason_type"] = _reason_type_for_code("context_mismatch")
+            demoted["reason"] = (
+                "Host-selected interpreter does not match the execution backend verified runtime."
+            )
+            candidates.append(demoted)
+        for candidate in summary.get("candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            candidate_path_key = _normalize_runtime_path_key(candidate.get("path"))
+            if candidate_path_key == verified_path_key:
+                continue
+            if selected_path_key is not None and candidate_path_key == selected_path_key:
+                continue
+            candidates.append(dict(candidate))
+        return _rebuild_runtime_summary({"selected": verified_candidate, "candidates": candidates})
+
+    probe_failed = isinstance(python_context_probe, dict) and not bool(
+        python_context_probe.get("passed", False)
+    )
+    if probe_failed:
+        if selected_dict is None:
+            return summary
+        reason_code = python_context_probe.get("reason_code")
+        reason_code_s = reason_code if isinstance(reason_code, str) else "runtime_probe_failed"
+        reason = python_context_probe.get("reason")
+        demoted = dict(selected_dict)
+        demoted["usable"] = False
+        demoted["reason_code"] = reason_code_s
+        demoted["reason_type"] = _reason_type_for_code(reason_code_s)
+        demoted["reason"] = (
+            reason
+            if isinstance(reason, str) and reason.strip()
+            else "Execution-context verification failed."
+        )
+        candidates = [demoted]
+        for candidate in summary.get("candidates", []):
+            if not isinstance(candidate, dict):
+                continue
+            candidate_path_key = _normalize_runtime_path_key(candidate.get("path"))
+            if selected_path_key is not None and candidate_path_key == selected_path_key:
+                continue
+            candidates.append(dict(candidate))
+        return _rebuild_runtime_summary({"selected": None, "candidates": candidates})
+
+    return summary
+
+
+def _sanitize_runtime_env_overrides(
+    *,
+    env_overrides: dict[str, str] | None,
+    command_prefix: list[str],
+) -> dict[str, str]:
+    sanitized = dict(env_overrides or {})
+    if command_prefix:
+        for key in _REMOTE_RUNTIME_HINT_ENV_KEYS:
+            sanitized.setdefault(key, "")
+        sanitized.setdefault("PATH", "")
+    return sanitized
 def _primary_runtime_rejection(python_runtime_summary: dict[str, Any]) -> dict[str, Any]:
     rejected = python_runtime_summary.get("rejected")
     if isinstance(rejected, list):
@@ -3377,6 +3556,8 @@ def _align_python_command_diagnostics(
     python_runtime_summary: dict[str, Any],
     python_context_probe: dict[str, Any] | None,
     python_validation_required: bool,
+    prefer_context_selection: bool,
+    validated_python_executable: str | None,
 ) -> None:
     selected = python_runtime_summary.get("selected")
     selected_ok = isinstance(selected, dict)
@@ -3384,7 +3565,7 @@ def _align_python_command_diagnostics(
     failure: dict[str, Any] | None = None
     if not selected_ok:
         failure = _primary_runtime_rejection(python_runtime_summary)
-    elif python_validation_required and isinstance(python_context_probe, dict):
+    elif isinstance(python_context_probe, dict):
         if not bool(python_context_probe.get("passed", False)):
             reason_code = python_context_probe.get("reason_code")
             reason = python_context_probe.get("reason")
@@ -3406,16 +3587,37 @@ def _align_python_command_diagnostics(
             }
 
     if failure is None:
+        if prefer_context_selection:
+            python_diag = command_diagnostics.get("python")
+            if not isinstance(python_diag, dict):
+                python_diag = {}
+                command_diagnostics["python"] = python_diag
+            if isinstance(validated_python_executable, str) and validated_python_executable.strip():
+                python_diag["present"] = True
+                python_diag["usable"] = True
+                python_diag["status"] = "present"
+                python_diag["resolved_path"] = validated_python_executable.strip()
+                python_diag["reason_code"] = None
+                python_diag["reason_type"] = None
+                python_diag["reason"] = None
+                python_diag["remediation"] = None
+            for command in ("python3", "py"):
+                diag = command_diagnostics.get(command)
+                if isinstance(diag, dict):
+                    diag["resolved_path"] = None
         return
 
     for command in ("python", "python3", "py", "pdm"):
         diag = command_diagnostics.get(command)
         if not isinstance(diag, dict):
             continue
-        if diag.get("status") == "missing":
+        if diag.get("status") == "missing" and not prefer_context_selection:
             continue
         diag["usable"] = False
         diag["status"] = "unusable"
+        if prefer_context_selection:
+            diag["present"] = False
+            diag["resolved_path"] = None
         diag["reason_code"] = failure.get("reason_code")
         diag["reason_type"] = failure.get("reason_type")
         if isinstance(failure.get("reason"), str):
@@ -3662,37 +3864,60 @@ def _validate_python_capability(
     needs Python, validates effective execution-path usability with a context probe.
     """
 
-    runtime_env_overrides = dict(env_overrides or {})
-    if command_prefix:
-        # For remote backends (for example docker exec), host-only runtime hints can leak across
-        # boundary (for example external-drive VIRTUAL_ENV). Clear by default unless explicitly
-        # provided by the backend bootstrap.
-        runtime_env_overrides.setdefault("VIRTUAL_ENV", "")
-        runtime_env_overrides.setdefault("USERTEST_PYTHON", "")
+    prefer_context_selection = bool(command_prefix)
+    runtime_env_overrides = _sanitize_runtime_env_overrides(
+        env_overrides=env_overrides,
+        command_prefix=command_prefix,
+    )
 
     python_runtime = select_python_runtime(
         workspace_dir=workspace_dir,
-        include_sys_executable=not command_prefix,
+        include_where_fallbacks=not prefer_context_selection,
+        include_sys_executable=not prefer_context_selection,
         environment=runtime_env_overrides or None,
     )
     python_runtime_summary = python_runtime.to_dict()
     python_validation_required = verification_commands_need_python(verification_commands)
 
     python_context_probe: dict[str, Any] | None = None
-    if python_validation_required and python_runtime.selected is not None:
+    python_admissibility_probe_required = (
+        prefer_context_selection or python_runtime.selected is not None
+    )
+    if python_admissibility_probe_required:
         python_context_probe = _probe_python_context_capability(
             command_prefix=command_prefix,
             cwd=cwd,
-            env_overrides=env_overrides,
-            python_executable=python_runtime.selected.path if not command_prefix else None,
+            env_overrides=runtime_env_overrides or None,
+            python_executable=(
+                python_runtime.selected.path
+                if (python_runtime.selected is not None and not prefer_context_selection)
+                else None
+            ),
         )
+    python_runtime_summary = _reconcile_python_runtime_summary_with_context(
+        python_runtime_summary=python_runtime_summary,
+        python_context_probe=python_context_probe,
+        prefer_context_selection=prefer_context_selection,
+    )
+    verified_context_candidate = _context_verified_runtime_candidate(python_context_probe)
 
-    python_validation_enabled = not python_validation_required
+    python_validation_enabled = True
     python_validation_reason_code: str | None = None
     python_validation_reason_type: str | None = None
     python_validation_reason: str | None = None
-    if python_validation_required:
-        if python_runtime.selected is None:
+    if isinstance(python_context_probe, dict):
+        python_validation_enabled = verified_context_candidate is not None
+        if not python_validation_enabled:
+            probe_reason_code = python_context_probe.get("reason_code")
+            python_validation_reason_code = (
+                probe_reason_code if isinstance(probe_reason_code, str) else "runtime_probe_failed"
+            )
+            python_validation_reason_type = _reason_type_for_code(python_validation_reason_code)
+            probe_reason = python_context_probe.get("reason")
+            python_validation_reason = probe_reason if isinstance(probe_reason, str) else None
+    elif python_validation_required:
+        python_validation_enabled = False
+        if python_runtime_summary.get("selected") is None:
             primary_rejection = _primary_runtime_rejection(python_runtime_summary)
             python_validation_reason_code = (
                 primary_rejection.get("reason_code")
@@ -3709,35 +3934,20 @@ def _validate_python_capability(
                 if isinstance(primary_rejection.get("reason"), str)
                 else None
             )
-        elif isinstance(python_context_probe, dict):
-            python_validation_enabled = bool(python_context_probe.get("passed", False))
-            if not python_validation_enabled:
-                probe_reason_code = python_context_probe.get("reason_code")
-                python_validation_reason_code = (
-                    probe_reason_code
-                    if isinstance(probe_reason_code, str)
-                    else "runtime_probe_failed"
-                )
-                python_validation_reason_type = _reason_type_for_code(python_validation_reason_code)
-                probe_reason = python_context_probe.get("reason")
-                python_validation_reason = probe_reason if isinstance(probe_reason, str) else None
         else:
-            python_validation_enabled = False
             python_validation_reason_code = "runtime_probe_failed"
             python_validation_reason_type = _reason_type_for_code(python_validation_reason_code)
             python_validation_reason = (
                 "Python validation was required, but context probe metadata was missing."
             )
 
-    validated_python_executable: str | None = None
-    if (
-        python_runtime.selected is not None
-        and not command_prefix
-        and (not python_validation_required or python_validation_enabled)
-    ):
-        selected_path = python_runtime.selected.path
-        if isinstance(selected_path, str) and selected_path.strip():
-            validated_python_executable = selected_path.strip()
+    validated_python_executable = (
+        verified_context_candidate.get("path")
+        if isinstance(verified_context_candidate, dict)
+        and isinstance(verified_context_candidate.get("path"), str)
+        and verified_context_candidate.get("path")
+        else None
+    )
 
     return {
         "runtime_selection": python_runtime,
@@ -5734,6 +5944,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 python_runtime_summary=python_runtime_summary,
                 python_context_probe=python_context_probe,
                 python_validation_required=python_validation_required,
+                prefer_context_selection=bool(command_prefix),
+                validated_python_executable=validated_python_executable_for_execution,
             )
 
             required_agent_binary_present = (

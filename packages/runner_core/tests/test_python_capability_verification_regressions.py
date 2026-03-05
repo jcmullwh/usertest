@@ -269,7 +269,10 @@ def _run_fixture_backed_toolchain_case(
         monkeypatch.setattr(
             runner_mod,
             "_probe_python_context_capability",
-            lambda *args, **kwargs: dict(context_probe),
+            lambda *args, **kwargs: _context_probe_with_runtime_metadata(
+                dict(context_probe),
+                runtime_selection.selected,
+            ),
         )
 
     pip_probe = scenario.get("pip_probe")
@@ -371,6 +374,31 @@ def _run_fixture_backed_toolchain_case(
     )
 
     return result, runtime_selection, verification_python_executables, verification_calls
+
+
+def _context_probe_with_runtime_metadata(
+    context_probe: dict[str, Any],
+    selected_runtime: runtime_mod.PythonRuntimeCandidate | None,
+) -> dict[str, Any]:
+    probe = dict(context_probe)
+    if not bool(probe.get("passed", False)):
+        return probe
+    metadata = probe.get("metadata")
+    if isinstance(metadata, dict):
+        return probe
+    if selected_runtime is None:
+        return probe
+    probe["metadata"] = {
+        "executable": selected_runtime.path,
+        "version": selected_runtime.version,
+        "prefix": selected_runtime.prefix,
+        "base_prefix": selected_runtime.base_prefix,
+        "real_prefix": selected_runtime.real_prefix,
+        "exec_prefix": selected_runtime.exec_prefix,
+        "base_exec_prefix": selected_runtime.base_exec_prefix,
+        "virtual_env": selected_runtime.virtual_env,
+    }
+    return probe
 
 
 @pytest.mark.parametrize(
@@ -795,6 +823,11 @@ def test_two_stage_python_preflight_classifies_partial_runtime_pytest_failure(
         raise AssertionError("partial_runtime_pytest_missing missing python_runtime fixture")
     if not isinstance(pip_probe, dict) or not isinstance(pytest_probe, dict):
         raise AssertionError("partial_runtime_pytest_missing missing probe fixtures")
+    selected_runtime_path = (
+        runtime_fixture.get("selected", {}).get("path")
+        if isinstance(runtime_fixture.get("selected"), dict)
+        else None
+    )
 
     _patch_local_probe(monkeypatch, scenario=scenario)
     monkeypatch.setattr(
@@ -817,6 +850,10 @@ def test_two_stage_python_preflight_classifies_partial_runtime_pytest_failure(
             "reason_type": None,
             "reason": None,
             "remediation": None,
+            "metadata": {
+                "executable": selected_runtime_path,
+                "version": runtime_fixture.get("selected", {}).get("version"),
+            },
         },
     )
 
@@ -933,6 +970,10 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
             "reason_type": None,
             "reason": None,
             "remediation": None,
+            "metadata": {
+                "executable": selected_runtime_path,
+                "version": runtime_fixture.get("selected", {}).get("version"),
+            },
         },
     )
 
@@ -1047,6 +1088,7 @@ def test_validate_python_capability_clears_host_runtime_hints_for_docker_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed_environment: dict[str, str] = {}
+    observed_flags: dict[str, bool] = {}
     expected_selection = runtime_mod.PythonRuntimeSelection(selected=None, candidates=tuple())
 
     def _fake_select_python_runtime(
@@ -1057,8 +1099,10 @@ def test_validate_python_capability_clears_host_runtime_hints_for_docker_prefix(
         include_sys_executable: bool = True,
         environment: dict[str, str] | None = None,
     ) -> runtime_mod.PythonRuntimeSelection:
-        del workspace_dir, timeout_seconds, include_where_fallbacks, include_sys_executable
+        del workspace_dir, timeout_seconds
         observed_environment.clear()
+        observed_flags["include_where_fallbacks"] = include_where_fallbacks
+        observed_flags["include_sys_executable"] = include_sys_executable
         if isinstance(environment, dict):
             observed_environment.update(environment)
         return expected_selection
@@ -1074,10 +1118,96 @@ def test_validate_python_capability_clears_host_runtime_hints_for_docker_prefix(
     )
 
     assert capability["runtime_selection"] == expected_selection
+    assert observed_flags == {
+        "include_where_fallbacks": False,
+        "include_sys_executable": False,
+    }
     assert observed_environment.get("FOO") == "bar"
     assert observed_environment.get("PATH") == "/usr/bin"
     assert observed_environment.get("VIRTUAL_ENV") == ""
     assert observed_environment.get("USERTEST_PYTHON") == ""
+    assert observed_environment.get("PDM_PYTHON") == ""
+    assert observed_environment.get("UV_PYTHON") == ""
+    assert observed_environment.get("PYTHONHOME") == ""
+    assert observed_environment.get("__PYVENV_LAUNCHER__") == ""
+    assert observed_environment.get("CONDA_PREFIX") == ""
+
+
+def test_validate_python_capability_prefers_context_verified_runtime_for_docker_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime_selection = runtime_mod.PythonRuntimeSelection(
+        selected=runtime_mod.PythonRuntimeCandidate(
+            source="virtual_env",
+            path=r"C:\external\venv\Scripts\python.exe",
+            present=True,
+            usable=True,
+            version="3.13.2",
+            executable=r"C:\external\venv\Scripts\python.exe",
+        ),
+        candidates=(
+            runtime_mod.PythonRuntimeCandidate(
+                source="virtual_env",
+                path=r"C:\external\venv\Scripts\python.exe",
+                present=True,
+                usable=True,
+                version="3.13.2",
+                executable=r"C:\external\venv\Scripts\python.exe",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "select_python_runtime",
+        lambda *args, **kwargs: runtime_selection,
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_python_context_capability",
+        lambda *args, **kwargs: {
+            "passed": True,
+            "reason_code": None,
+            "reason_type": None,
+            "reason": None,
+            "remediation": None,
+            "metadata": {
+                "executable": "/usr/bin/python3.13",
+                "version": "3.13.2",
+                "prefix": "/usr",
+                "base_prefix": "/usr",
+                "real_prefix": None,
+                "exec_prefix": "/usr",
+                "base_exec_prefix": "/usr",
+                "virtual_env": "/workspace/.venv",
+            },
+        },
+    )
+
+    capability = runner_mod._validate_python_capability(
+        workspace_dir=tmp_path,
+        verification_commands=("python -m pytest -q",),
+        command_prefix=["docker", "exec", "-i", "sandbox"],
+        cwd=tmp_path,
+        env_overrides={"PATH": "/usr/bin"},
+    )
+
+    runtime_summary = capability["runtime_summary"]
+    selected = runtime_summary.get("selected", {})
+    assert selected.get("source") == "context_verified"
+    assert selected.get("path") == "/usr/bin/python3.13"
+    rejected = runtime_summary.get("rejected", [])
+    assert isinstance(rejected, list)
+    assert any(
+        item.get("path") == r"C:\external\venv\Scripts\python.exe"
+        and item.get("reason_code") == "context_mismatch"
+        for item in rejected
+        if isinstance(item, dict)
+    )
+    validation = capability["validation"]
+    assert validation.get("required") is True
+    assert validation.get("enabled") is True
+    assert validation.get("validated_python_executable") == "/usr/bin/python3.13"
 
 
 def test_two_stage_python_preflight_docker_context_probe_failure_skips_runtime_metadata_probes(
