@@ -39,7 +39,8 @@ Options:
 - Always required: `python` on PATH (Python 3.11+ recommended; older Pythons need `tomli` installed to parse TOML).
 - Required only for Cookiecutter-based generators: `cookiecutter` on PATH.
 - Required only for external Cookiecutter sources and vendoring: `git` on PATH.
-- Required only for running tasks: whatever commands your `tasks.*` reference (e.g. `poetry`, `uv`, `npm`, `cargo`, `terraform`).
+- Required only for most running tasks: whatever commands your `tasks.*` reference (e.g. `poetry`, `uv`, `npm`, `cargo`, `terraform`).
+- For `scaffold run lint|test`, scaffold auto-bootstraps missing host prerequisites from `requirements-dev.txt` (for example `pdm`, `pytest`, `ruff`) and injects repo `src/` paths into `PYTHONPATH`.
 
 ## Cookiecutter sources
 

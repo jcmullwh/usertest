@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tomllib
@@ -255,3 +256,189 @@ def test_scaffold_pdm_install_sets_venv_backend_when_virtualenv_missing(
     assert captured_env is not None
     assert captured_env["PDM_VENV_BACKEND"] == "venv"
     assert captured_env["VIRTUALENV_COPIES"] == "1"
+
+
+def test_scaffold_doctor_marks_virtualenv_unknown_for_external_pdm_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scaffold = _load_scaffold_module()
+
+    fake_root = tmp_path / "repo"
+    (fake_root / "tools" / "scaffold").mkdir(parents=True, exist_ok=True)
+    (fake_root / "packages" / "demo").mkdir(parents=True, exist_ok=True)
+
+    (fake_root / "tools" / "scaffold" / "registry.toml").write_text(
+        "\n".join(
+            [
+                "[kinds.lib]",
+                'output_dir = "packages"',
+                'default_generator = "python_pdm_lib"',
+                "ci = { lint = true, test = true, build = false }",
+                "",
+                "[generators.python_pdm_lib]",
+                'type = "copy"',
+                'source = "tools/templates/internal/python-pdm-lib"',
+                'toolchain = "python"',
+                'package_manager = "pdm"',
+                'tasks.install = ["pdm", "install"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    (fake_root / "tools" / "scaffold" / "monorepo.toml").write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                "",
+                "[[projects]]",
+                'id = "demo"',
+                'kind = "lib"',
+                'path = "packages/demo"',
+                'generator = "python_pdm_lib"',
+                'toolchain = "python"',
+                'package_manager = "pdm"',
+                "ci = { lint = false, test = false, build = false }",
+                'tasks.install = ["pdm", "install"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(scaffold, "_repo_root", lambda: fake_root)
+    monkeypatch.setattr(scaffold, "_pdm_importable", lambda: False)
+    monkeypatch.setattr(scaffold, "_virtualenv_importable", lambda: False)
+    monkeypatch.setattr(
+        scaffold,
+        "_which",
+        lambda cmd: {
+            "pdm": "/usr/bin/pdm",
+            "git": "/usr/bin/git",
+            "bash": "/bin/bash",
+        }.get(cmd),
+    )
+    monkeypatch.setattr(scaffold, "_probe_tool_version", lambda **kwargs: (True, "ok", None))
+
+    doctor_args = scaffold.argparse.Namespace(skip_tool_checks=False, require_pip=False)
+    assert scaffold.cmd_doctor(doctor_args) == 0
+
+    report_path = fake_root / ".scaffold" / "doctor_tool_report.json"
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    venv_baseline = report["baseline"]["virtualenv"]
+    assert venv_baseline["ok"] is None
+    assert venv_baseline["scope"] == "external_pdm_interpreter_unknown"
+    assert venv_baseline["ok_in_checked_python"] is False
+
+
+def test_scaffold_lint_bootstraps_install_when_ruff_probe_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scaffold = _load_scaffold_module()
+
+    probe_calls = {"count": 0}
+    install_calls: list[tuple[str, list[str]]] = []
+
+    def _fake_probe(
+        cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env
+        probe_calls["count"] += 1
+        rc = 0 if probe_calls["count"] >= 2 else 1
+        return subprocess.CompletedProcess(cmd, rc, "", "")
+
+    def _fake_run_manifest_task(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        task_name: str,
+        project_id: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, project_id, extra_env
+        install_calls.append((task_name, cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(scaffold, "_probe", _fake_probe)
+    monkeypatch.setattr(scaffold, "_run_manifest_task", _fake_run_manifest_task)
+
+    scaffold._ensure_ruff_available_for_lint(
+        cmd=["pdm", "run", "ruff", "check", "."],
+        cwd=tmp_path,
+        project_id="demo",
+        remediation_cmd="python tools/scaffold/scaffold.py run install --project demo",
+        install_cmd=["pdm", "install"],
+        extra_env=None,
+    )
+
+    assert probe_calls["count"] == 2
+    assert install_calls == [("install", ["pdm", "install"])]
+
+
+def test_scaffold_test_bootstraps_install_when_pdm_venv_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scaffold = _load_scaffold_module()
+
+    fake_root = tmp_path / "repo"
+    (fake_root / "tools" / "scaffold").mkdir(parents=True, exist_ok=True)
+    (fake_root / "packages" / "demo").mkdir(parents=True, exist_ok=True)
+
+    (fake_root / "tools" / "scaffold" / "monorepo.toml").write_text(
+        "\n".join(
+            [
+                "schema_version = 1",
+                "",
+                "[[projects]]",
+                'id = "demo"',
+                'kind = "lib"',
+                'path = "packages/demo"',
+                'tasks.install = ["pdm", "install"]',
+                'tasks.test = ["pdm", "run", "pytest", "-q"]',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(scaffold, "_repo_root", lambda: fake_root)
+
+    calls: list[tuple[str, list[str]]] = []
+
+    def _fake_run_manifest_task(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        task_name: str,
+        project_id: str,
+        extra_env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, project_id, extra_env
+        calls.append((task_name, cmd))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(scaffold, "_run_manifest_task", _fake_run_manifest_task)
+    monkeypatch.setattr(
+        scaffold,
+        "_probe",
+        lambda cmd, *, cwd, env=None: subprocess.CompletedProcess(cmd, 0, "", ""),
+    )
+
+    args = scaffold.argparse.Namespace(
+        task="test",
+        all=False,
+        kind=None,
+        project=["demo"],
+        skip_missing=False,
+        keep_going=False,
+    )
+
+    assert scaffold.cmd_run(args) == 0
+    assert calls == [
+        ("install", ["pdm", "install"]),
+        ("test", ["pdm", "run", "pytest", "-q"]),
+    ]

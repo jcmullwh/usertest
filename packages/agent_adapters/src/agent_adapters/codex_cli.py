@@ -248,6 +248,33 @@ def _rewrite_refresh_token_reused_stderr(path: Path) -> None:
     path.write_text("\n".join(summary_lines), encoding="utf-8", newline="\n")
 
 
+def _stderr_contains_refresh_token_reused(path: Path, *, full_scan: bool) -> bool:
+    needle = _CODEX_REFRESH_TOKEN_REUSED_SUBSTRING.encode("utf-8")
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size <= 0:
+        return False
+
+    read_size = size if full_scan else min(size, 8192)
+    try:
+        with path.open("rb") as stderr_reader:
+            if not full_scan and size > read_size:
+                stderr_reader.seek(size - read_size)
+            overlap = b""
+            while True:
+                chunk = stderr_reader.read(65536)
+                if not chunk:
+                    return False
+                haystack = overlap + chunk
+                if needle in haystack:
+                    return True
+                overlap = haystack[-(len(needle) - 1) :] if len(needle) > 1 else b""
+    except OSError:
+        return False
+
+
 def _prepare_codex_argv_and_env(
     *,
     argv: list[str],
@@ -443,26 +470,15 @@ def run_codex_exec(
             if not saw_refresh_token_reused and (time.monotonic() - last_auth_scan) > 0.2:
                 last_auth_scan = time.monotonic()
                 try:
-                    if stderr_path.exists():
-                        tail = ""
-                        try:
-                            size = stderr_path.stat().st_size
-                        except OSError:
-                            size = 0
-                        if size > 0:
-                            with stderr_path.open("rb") as stderr_reader:
-                                if size > 8192:
-                                    stderr_reader.seek(size - 8192)
-                                tail = stderr_reader.read(8192).decode("utf-8", errors="replace")
-                        if _CODEX_REFRESH_TOKEN_REUSED_SUBSTRING in tail:
-                            saw_refresh_token_reused = True
-                            stderr_f.write(
-                                f"\n{_CODEX_REFRESH_TOKEN_REUSED_MARKER}\n"
-                                "Codex returned a non-retriable auth error. Terminating early.\n"
-                            )
-                            stderr_f.flush()
-                            proc.kill()
-                            break
+                    if _stderr_contains_refresh_token_reused(stderr_path, full_scan=False):
+                        saw_refresh_token_reused = True
+                        stderr_f.write(
+                            f"\n{_CODEX_REFRESH_TOKEN_REUSED_MARKER}\n"
+                            "Codex returned a non-retriable auth error. Terminating early.\n"
+                        )
+                        stderr_f.flush()
+                        proc.kill()
+                        break
                 except Exception:
                     pass
 
@@ -521,6 +537,10 @@ def run_codex_exec(
         except Exception:
             pass
 
+    if not saw_refresh_token_reused:
+        saw_refresh_token_reused = _stderr_contains_refresh_token_reused(
+            stderr_path, full_scan=True
+        )
     if saw_refresh_token_reused:
         _rewrite_refresh_token_reused_stderr(stderr_path)
 

@@ -96,6 +96,9 @@ This matches what CI does and is the best way to run lint/test across multiple p
 >
 > If `pdm: command not found`, see the PDM installation guide or run the doctor with tool checks skipped first:
 > `python tools/scaffold/scaffold.py doctor --skip-tool-checks`
+>
+> For first-use validation, `python tools/scaffold/scaffold.py run lint|test ...` can bootstrap missing host
+> prereqs from `requirements-dev.txt` and inject repo `src/` paths into `PYTHONPATH` automatically.
 
 1) Ensure you have:
 

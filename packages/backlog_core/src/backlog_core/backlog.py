@@ -177,6 +177,86 @@ def _is_ripgrep_no_matches(*, command: str, exit_code: int) -> bool:
     return base in {"rg", "rg.exe"}
 
 
+def _command_failure_entry_identity(entry: dict[str, Any]) -> str | None:
+    command = _coerce_string(entry.get("command"))
+    exit_code = entry.get("exit_code")
+    if command is None or not isinstance(exit_code, int) or exit_code == 0:
+        return None
+
+    cwd = _coerce_string(entry.get("cwd"))
+    cwd_key = cwd.replace("\\", "/").lower() if cwd is not None else ""
+
+    # Prefer artifacts for identity when present because they encode per-failure paths.
+    artifact_key = ""
+    artifacts = entry.get("artifacts")
+    if isinstance(artifacts, dict) and artifacts:
+        try:
+            artifact_key = json.dumps(artifacts, sort_keys=True, ensure_ascii=False)
+        except TypeError:
+            artifact_key = ""
+    if not artifact_key:
+        excerpt = _coerce_string(entry.get("output_excerpt"))
+        artifact_key = excerpt or ""
+
+    return f"{exit_code}|{_normalize_dedupe_key(command)}|{cwd_key}|{artifact_key}"
+
+
+def _extract_failed_commands_from_events(
+    *,
+    events_path: Path,
+    max_items: int | None = None,
+) -> list[dict[str, Any]]:
+    failed_commands: list[dict[str, Any]] = []
+    try:
+        with events_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                raw = line.strip()
+                if not raw:
+                    continue
+                try:
+                    event = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict):
+                    continue
+                if _coerce_string(event.get("type")) != "run_command":
+                    continue
+                data = event.get("data")
+                if not isinstance(data, dict):
+                    continue
+                exit_code = data.get("exit_code")
+                if not isinstance(exit_code, int) or exit_code == 0:
+                    continue
+                command = _coerce_string(data.get("command"))
+                if command is None:
+                    argv = data.get("argv")
+                    if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
+                        command = " ".join(argv)
+                if command is None:
+                    continue
+                if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
+                    continue
+                failed_commands.append(
+                    {
+                        "command": command,
+                        "exit_code": exit_code,
+                        "cwd": _coerce_string(data.get("cwd")),
+                        "artifacts": data.get("failure_artifacts")
+                        if isinstance(data.get("failure_artifacts"), dict)
+                        else None,
+                        "output_excerpt": _coerce_string(data.get("output_excerpt")),
+                        "output_excerpt_truncated": data.get("output_excerpt_truncated") is True,
+                        "from_events": True,
+                    }
+                )
+                if max_items is not None and len(failed_commands) >= max_items:
+                    break
+    except OSError:
+        return []
+
+    return failed_commands
+
+
 def _safe_relpath(path: Path, root: Path) -> str:
     try:
         return str(path.resolve().relative_to(root.resolve())).replace("\\", "/")
@@ -667,6 +747,8 @@ def extract_backlog_atoms(
 
         failed_commands: list[dict[str, Any]] = []
         failed_commands_omitted_hint: int | None = None
+        metrics_failed_commands_count: int | None = None
+        metrics_failed_commands_truncated = False
         if metrics is not None:
             failed_raw = metrics.get("failed_commands")
             if isinstance(failed_raw, list):
@@ -693,61 +775,56 @@ def extract_backlog_atoms(
                             "from_metrics": True,
                         }
                     )
+            commands_failed = metrics.get("commands_failed")
+            if isinstance(commands_failed, int) and commands_failed >= 0:
+                metrics_failed_commands_count = commands_failed
             if metrics.get("failed_commands_truncated") is True:
+                metrics_failed_commands_truncated = True
                 omitted = metrics.get("failed_commands_omitted_count")
                 if isinstance(omitted, int) and omitted > 0:
                     failed_commands_omitted_hint = omitted
 
-        if not failed_commands:
-            events_path = run_dir / "normalized_events.jsonl"
-            if events_path.exists():
-                try:
-                    with events_path.open("r", encoding="utf-8") as f:
-                        for line in f:
-                            raw = line.strip()
-                            if not raw:
-                                continue
-                            try:
-                                event = json.loads(raw)
-                            except json.JSONDecodeError:
-                                continue
-                            if not isinstance(event, dict):
-                                continue
-                            if _coerce_string(event.get("type")) != "run_command":
-                                continue
-                            data = event.get("data")
-                            if not isinstance(data, dict):
-                                continue
-                            exit_code = data.get("exit_code")
-                            if not isinstance(exit_code, int) or exit_code == 0:
-                                continue
-                            command = _coerce_string(data.get("command"))
-                            if command is None:
-                                argv = data.get("argv")
-                                if isinstance(argv, list) and all(isinstance(a, str) for a in argv):
-                                    command = " ".join(argv)
-                            if command is None:
-                                continue
-                            if _is_ripgrep_no_matches(command=command, exit_code=exit_code):
-                                continue
-                            failed_commands.append(
-                                {
-                                    "command": command,
-                                    "exit_code": exit_code,
-                                    "cwd": _coerce_string(data.get("cwd")),
-                                    "artifacts": data.get("failure_artifacts")
-                                    if isinstance(data.get("failure_artifacts"), dict)
-                                    else None,
-                                    "output_excerpt": _coerce_string(data.get("output_excerpt")),
-                                    "output_excerpt_truncated": data.get("output_excerpt_truncated")
-                                    is True,
-                                    "from_events": True,
-                                }
-                            )
-                            if len(failed_commands) >= max_command_failure_atoms:
-                                break
-                except OSError:
-                    failed_commands = []
+        metrics_incomplete = False
+        if metrics_failed_commands_truncated:
+            metrics_incomplete = True
+        elif failed_commands_omitted_hint is not None and failed_commands_omitted_hint > 0:
+            metrics_incomplete = True
+        elif (
+            metrics_failed_commands_count is not None
+            and metrics_failed_commands_count > len(failed_commands)
+        ):
+            metrics_incomplete = True
+
+        events_path = run_dir / "normalized_events.jsonl"
+        if not failed_commands and events_path.exists():
+            failed_commands = _extract_failed_commands_from_events(
+                events_path=events_path,
+                max_items=max_command_failure_atoms,
+            )
+        elif failed_commands and metrics_incomplete and events_path.exists():
+            event_failed_commands = _extract_failed_commands_from_events(events_path=events_path)
+            if event_failed_commands:
+                deduped: list[dict[str, Any]] = []
+                seen_identities: set[str] = set()
+                for entry in failed_commands:
+                    identity = _command_failure_entry_identity(entry)
+                    if identity is not None and identity in seen_identities:
+                        continue
+                    if identity is not None:
+                        seen_identities.add(identity)
+                    deduped.append(entry)
+                for entry in event_failed_commands:
+                    identity = _command_failure_entry_identity(entry)
+                    if identity is not None and identity in seen_identities:
+                        continue
+                    if identity is not None:
+                        seen_identities.add(identity)
+                    deduped.append(entry)
+                failed_commands = deduped
+                omitted_after_reconcile = len(failed_commands) - max_command_failure_atoms
+                failed_commands_omitted_hint = (
+                    omitted_after_reconcile if omitted_after_reconcile > 0 else None
+                )
 
         if failed_commands:
             emitted = 0

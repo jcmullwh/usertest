@@ -492,6 +492,172 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
     assert trunc.get("omitted_count") == 3
 
 
+def test_extract_backlog_atoms_reconciles_incomplete_metrics_with_events(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    events = [
+        {
+            "type": "run_command",
+            "data": {
+                "command": "python -m pip install -e .",
+                "exit_code": 1,
+                "cwd": "C:/ws",
+                "output_excerpt": "ERROR: could not build wheels",
+                "failure_artifacts": {
+                    "stderr": "command_failures/cmd_01/stderr.txt",
+                },
+            },
+        },
+        {
+            "type": "run_command",
+            "data": {
+                "command": "python -m pytest -q",
+                "exit_code": 2,
+                "output_excerpt": "ImportError: No module named foo",
+                "failure_artifacts": {
+                    "stderr": "command_failures/cmd_02/stderr.txt",
+                },
+            },
+        },
+        {
+            "type": "run_command",
+            "data": {
+                "command": "python tools/scaffold/scaffold.py run test --all",
+                "exit_code": 1,
+                "output_excerpt": "FAILED tests/test_example.py::test_x",
+                "failure_artifacts": {
+                    "stderr": "command_failures/cmd_03/stderr.txt",
+                },
+            },
+        },
+        {
+            "type": "run_command",
+            "data": {
+                "command": "python -m pip install -e .",
+                "exit_code": 1,
+                "cwd": "C:/ws",
+                "output_excerpt": "ERROR: could not build wheels",
+                "failure_artifacts": {
+                    "stderr": "command_failures/cmd_01/stderr.txt",
+                },
+            },
+        },
+    ]
+    (run_dir / "normalized_events.jsonl").write_text(
+        "\n".join(json.dumps(event, ensure_ascii=False) for event in events) + "\n",
+        encoding="utf-8",
+    )
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+            "metrics": {
+                "commands_executed": 3,
+                "commands_failed": 3,
+                "failed_commands": [
+                    {
+                        "command": "python -m pip install -e .",
+                        "exit_code": 1,
+                        "cwd": "C:/ws",
+                        "output_excerpt": "ERROR: could not build wheels",
+                        "artifacts": {
+                            "stderr": "command_failures/cmd_01/stderr.txt",
+                        },
+                    }
+                ],
+                "failed_commands_truncated": True,
+                "failed_commands_omitted_count": 2,
+            },
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    failures = [atom for atom in atoms_doc["atoms"] if atom.get("source") == "command_failure"]
+    assert [atom.get("command") for atom in failures] == [
+        "python -m pip install -e .",
+        "python -m pytest -q",
+        "python tools/scaffold/scaffold.py run test --all",
+    ]
+    assert len(failures) == 3
+    assert failures[0].get("from_metrics") is True
+    assert failures[0].get("from_events") is None
+    assert failures[1].get("from_events") is True
+    assert failures[2].get("from_events") is True
+    assert [
+        atom
+        for atom in atoms_doc["atoms"]
+        if atom.get("source") == "command_failure_truncated"
+    ] == []
+
+
+def test_extract_backlog_atoms_does_not_reconcile_complete_metrics_with_events(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "normalized_events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "run_command",
+                "data": {
+                    "command": "python -m pip install -e .",
+                    "exit_code": 1,
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n"
+        + json.dumps(
+            {
+                "type": "run_command",
+                "data": {
+                    "command": "python -m pytest -q",
+                    "exit_code": 2,
+                },
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+            "metrics": {
+                "commands_executed": 1,
+                "commands_failed": 1,
+                "failed_commands": [
+                    {
+                        "command": "python -m pip install -e .",
+                        "exit_code": 1,
+                    }
+                ],
+            },
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    failures = [atom for atom in atoms_doc["atoms"] if atom.get("source") == "command_failure"]
+    assert [atom.get("command") for atom in failures] == ["python -m pip install -e ."]
+    assert failures[0].get("from_metrics") is True
+    assert failures[0].get("from_events") is None
+
+
 def test_extract_backlog_atoms_ignores_ripgrep_no_matches_from_events(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
     run_dir.mkdir(parents=True, exist_ok=True)

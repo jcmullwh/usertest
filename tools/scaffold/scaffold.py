@@ -240,12 +240,13 @@ def _resolve_argv(argv: list[str]) -> list[str]:
         raise ScaffoldError("Internal error: empty argv")
 
     cmd = argv[0]
+    has_sep = any(sep and sep in cmd for sep in ("/", "\\", os.path.sep, os.path.altsep))
+    cmd_name = Path(cmd).name.lower()
 
     # Windows-only: `pdm` can hang at import time on hosts where stdlib `platform.system()` hangs due to WMI queries.
     # We route pdm invocations through a shim that disables WMI-backed platform queries.
     if os.name == "nt":
-        cmd_name = Path(cmd).name.lower()
-        if cmd_name in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
+        if cmd_name in _PDM_COMMAND_NAMES:
             shim = _repo_root() / "tools" / "pdm_shim.py"
             if not shim.exists():
                 raise ScaffoldError(f"Missing PDM shim: {shim}")
@@ -256,7 +257,11 @@ def _resolve_argv(argv: list[str]) -> list[str]:
             # Fall back to invoking `pdm` directly. This keeps `scaffold` usable when PDM is installed in a different
             # interpreter than the one running scaffold.
 
-    if any(sep and sep in cmd for sep in ("/", "\\", os.path.sep, os.path.altsep)):
+    # Non-Windows fallback: if `pdm` is importable but no entrypoint is on PATH, run via `python -m pdm`.
+    if os.name != "nt" and not has_sep and cmd_name in _PDM_COMMAND_NAMES and _which(cmd) is None and _pdm_importable():
+        return [sys.executable, "-m", "pdm", *argv[1:]]
+
+    if has_sep:
         return argv
 
     resolved = _which(cmd)
@@ -754,13 +759,16 @@ def _install_cache_save(*, state: _InstallCacheState, project_dir: Path, project
         shutil.rmtree(temp_entry, ignore_errors=True)
     finally:
         _release_best_effort_lock(lock_path=state.lock_path, lock_fd=lock_fd)
+_PDM_COMMAND_NAMES: set[str] = {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}
+_PYTEST_COMMAND_NAMES: set[str] = {"pytest", "pytest.exe", "pytest.cmd", "pytest.bat"}
+_PYTHON_COMMAND_NAMES: set[str] = {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}
 
 
 def _is_pdm_install_command(argv: list[str]) -> bool:
     if len(argv) < 2:
         return False
     cmd_name = Path(argv[0]).name.lower()
-    if cmd_name not in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}:
+    if cmd_name not in _PDM_COMMAND_NAMES:
         return False
     return argv[1].strip().lower() == "install"
 
@@ -769,7 +777,7 @@ def _is_pdm_command(argv: list[str]) -> bool:
     if not argv:
         return False
     cmd_name = Path(argv[0]).name.lower()
-    return cmd_name in {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}
+    return cmd_name in _PDM_COMMAND_NAMES
 
 
 def _looks_like_transient_pdm_local_path_failure(*, stdout: str, stderr: str) -> bool:
@@ -798,11 +806,18 @@ def _run_manifest_task(
     cwd: Path,
     task_name: str,
     project_id: str,
+    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     if not _is_pdm_command(cmd):
-        return _run(cmd, cwd=cwd)
+        if not extra_env:
+            return _run(cmd, cwd=cwd)
+        env = dict(os.environ)
+        env.update(extra_env)
+        return _run(cmd, cwd=cwd, env=env)
 
     env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
     # PDM will reuse the currently active virtualenv by default. That's convenient for single-project workflows, but
     # causes surprising (and on Windows, sometimes broken) behavior when a monorepo task runner invokes PDM across many
     # projects. For example, `pdm install` may attempt to update the running CLI's own entrypoint executable, which
@@ -1100,6 +1115,163 @@ def _looks_like_pdm_run_ruff_check(cmd: list[str]) -> bool:
     )
 
 
+def _looks_like_pdm_run_pytest(cmd: list[str]) -> bool:
+    return (
+        len(cmd) >= 3
+        and _is_pdm_command(cmd)
+        and cmd[1] == "run"
+        and Path(cmd[2]).name.lower() in _PYTEST_COMMAND_NAMES
+    )
+
+
+def _looks_like_host_pytest_command(cmd: list[str]) -> bool:
+    if not cmd:
+        return False
+    cmd_name = Path(cmd[0]).name.lower()
+    if cmd_name in _PYTEST_COMMAND_NAMES:
+        return True
+    return len(cmd) >= 3 and cmd_name in _PYTHON_COMMAND_NAMES and cmd[1] == "-m" and cmd[2] == "pytest"
+
+
+def _looks_like_host_ruff_command(cmd: list[str]) -> bool:
+    if not cmd:
+        return False
+    cmd_name = Path(cmd[0]).name.lower()
+    if cmd_name in _RUFF_COMMAND_NAMES:
+        return True
+    return len(cmd) >= 3 and cmd_name in _PYTHON_COMMAND_NAMES and cmd[1] == "-m" and cmd[2] == "ruff"
+
+
+def _pip_probe_ok(*, cwd: Path) -> bool:
+    cp = _probe([sys.executable, "-m", "pip", "--version"], cwd=cwd)
+    return cp.returncode == 0
+
+
+def _pytest_probe_ok(*, cwd: Path) -> bool:
+    cp = _probe([sys.executable, "-m", "pytest", "--version"], cwd=cwd)
+    return cp.returncode == 0
+
+
+def _ruff_probe_ok(*, cwd: Path) -> bool:
+    cp = _probe([sys.executable, "-m", "ruff", "--version"], cwd=cwd)
+    return cp.returncode == 0
+
+
+def _bootstrap_lint_test_prereqs_if_needed(
+    *,
+    repo_root: Path,
+    task_name: str,
+    projects: list[dict[str, Any]],
+    fix: bool,
+) -> None:
+    if task_name not in {"lint", "test"}:
+        return
+
+    needs_pdm = False
+    needs_host_pytest = False
+    needs_host_ruff = False
+    fix_task_name = f"{task_name}_fix"
+    for project in projects:
+        tasks = project.get("tasks")
+        if not isinstance(tasks, dict):
+            continue
+
+        cmd = tasks.get(fix_task_name) if fix else tasks.get(task_name)
+        if cmd is None and fix:
+            cmd = tasks.get(task_name)
+        if cmd is None:
+            continue
+
+        try:
+            cmd_list = _validate_task_cmd(cmd, where=f"projects.{project.get('id')}.tasks.{task_name}")
+        except ScaffoldError:
+            continue
+
+        if _is_pdm_command(cmd_list):
+            needs_pdm = True
+        if task_name == "test" and _looks_like_host_pytest_command(cmd_list):
+            needs_host_pytest = True
+        if task_name == "lint" and _looks_like_host_ruff_command(cmd_list):
+            needs_host_ruff = True
+
+    reasons: list[str] = []
+    if needs_pdm and _which("pdm") is None and not _pdm_importable():
+        reasons.append("pdm")
+    if needs_host_pytest and not _pytest_probe_ok(cwd=repo_root):
+        reasons.append("pytest")
+    if needs_host_ruff and not _ruff_probe_ok(cwd=repo_root):
+        reasons.append("ruff")
+    if not reasons:
+        return
+
+    requirements_path = repo_root / "requirements-dev.txt"
+    if not requirements_path.exists():
+        joined = ", ".join(reasons)
+        raise ScaffoldError(
+            f"Missing requirements-dev.txt; cannot auto-bootstrap {joined} for scaffold run {task_name}."
+        )
+
+    if not _pip_probe_ok(cwd=repo_root):
+        _eprint("INFO: pip is unavailable; attempting ensurepip bootstrap for lint/test prerequisites.")
+        ensure_cp = _run([sys.executable, "-m", "ensurepip", "--upgrade"], cwd=repo_root)
+        if ensure_cp.returncode != 0 or not _pip_probe_ok(cwd=repo_root):
+            raise ScaffoldError(
+                "pip is required to auto-bootstrap lint/test prerequisites but could not be initialized."
+                f" {_pip_remediation_hint(python_exe=sys.executable)}"
+            )
+
+    _eprint(
+        "INFO: bootstrapping lint/test prerequisites via requirements-dev.txt"
+        f" (missing: {', '.join(reasons)})."
+    )
+    install_cp = _run([sys.executable, "-m", "pip", "install", "-r", str(requirements_path)], cwd=repo_root)
+    if install_cp.returncode != 0:
+        raise ScaffoldError(
+            "Failed to install lint/test prerequisites from requirements-dev.txt "
+            f"(exit {install_cp.returncode})."
+        )
+
+    if "pdm" in reasons and _which("pdm") is None and not _pdm_importable():
+        raise ScaffoldError(
+            "Auto-bootstrap completed but 'pdm' is still unavailable. "
+            f"Install pdm into this interpreter: {sys.executable} -m pip install -U pdm"
+        )
+    if "pytest" in reasons and not _pytest_probe_ok(cwd=repo_root):
+        raise ScaffoldError(
+            "Auto-bootstrap completed but pytest is still unavailable. "
+            f"Install pytest into this interpreter: {sys.executable} -m pip install -U pytest"
+        )
+    if "ruff" in reasons and not _ruff_probe_ok(cwd=repo_root):
+        raise ScaffoldError(
+            "Auto-bootstrap completed but ruff is still unavailable. "
+            f"Install ruff into this interpreter: {sys.executable} -m pip install -U ruff"
+        )
+
+
+def _collect_repo_src_paths(*, repo_root: Path, projects: list[dict[str, Any]]) -> list[str]:
+    src_paths: list[str] = []
+    for project in projects:
+        project_path = project.get("path")
+        if not isinstance(project_path, str) or not project_path:
+            continue
+        src_dir = repo_root / project_path / "src"
+        if src_dir.exists():
+            src_paths.append(str(src_dir))
+    return _dedup_preserve_order(src_paths)
+
+
+def _build_lint_test_env(*, repo_root: Path, projects: list[dict[str, Any]], task_name: str) -> dict[str, str] | None:
+    if task_name not in {"lint", "test"}:
+        return None
+    src_paths = _collect_repo_src_paths(repo_root=repo_root, projects=projects)
+    if not src_paths:
+        return None
+    existing = os.environ.get("PYTHONPATH")
+    if existing:
+        src_paths.append(existing)
+    return {"PYTHONPATH": os.pathsep.join(src_paths)}
+
+
 def _format_run_install_remediation_cmd(
     args: argparse.Namespace,
     *,
@@ -1130,11 +1302,15 @@ def _ensure_ruff_available_for_lint(
     cwd: Path,
     project_id: str,
     remediation_cmd: str,
+    install_cmd: list[str] | None,
+    extra_env: dict[str, str] | None,
 ) -> None:
     if not _looks_like_pdm_run_ruff_check(cmd):
         return
 
     env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
     env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
 
     probe_argv = [cmd[0], "run", cmd[2], "--version"]
@@ -1142,8 +1318,68 @@ def _ensure_ruff_available_for_lint(
     if cp.returncode == 0:
         return
 
+    if install_cmd is not None:
+        _eprint(
+            f"INFO: {project_id}: lint prerequisites missing; running tasks.install before retrying lint probe."
+        )
+        install_cp = _run_manifest_task(
+            cmd=install_cmd,
+            cwd=cwd,
+            task_name="install",
+            project_id=project_id,
+            extra_env=extra_env,
+        )
+        if install_cp.returncode == 0:
+            cp = _probe(probe_argv, cwd=cwd, env=env)
+            if cp.returncode == 0:
+                return
+
     raise ScaffoldError(
         f"{project_id}: lint requires 'ruff' but it is not available in this project's PDM environment.\n"
+        f"Remediation: {remediation_cmd}"
+    )
+
+
+def _ensure_pytest_available_for_test(
+    *,
+    cmd: list[str],
+    cwd: Path,
+    project_id: str,
+    remediation_cmd: str,
+    install_cmd: list[str] | None,
+    extra_env: dict[str, str] | None,
+) -> None:
+    if not _looks_like_pdm_run_pytest(cmd):
+        return
+
+    env = dict(os.environ)
+    if extra_env:
+        env.update(extra_env)
+    env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
+
+    probe_argv = [cmd[0], "run", cmd[2], "--version"]
+    cp = _probe(probe_argv, cwd=cwd, env=env)
+    if cp.returncode == 0:
+        return
+
+    if install_cmd is not None:
+        _eprint(
+            f"INFO: {project_id}: test prerequisites missing; running tasks.install before retrying pytest probe."
+        )
+        install_cp = _run_manifest_task(
+            cmd=install_cmd,
+            cwd=cwd,
+            task_name="install",
+            project_id=project_id,
+            extra_env=extra_env,
+        )
+        if install_cp.returncode == 0:
+            cp = _probe(probe_argv, cwd=cwd, env=env)
+            if cp.returncode == 0:
+                return
+
+    raise ScaffoldError(
+        f"{project_id}: test requires 'pytest' but it is not available in this project's task environment.\n"
         f"Remediation: {remediation_cmd}"
     )
 
@@ -1649,6 +1885,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     _validate_task_name(args.task, where="scaffold run")
     fix = bool(getattr(args, "fix", False))
+    task_name = str(args.task)
 
     selectors = [bool(args.all), bool(args.kind), bool(args.project)]
     if sum(1 for x in selectors if x) != 1:
@@ -1666,6 +1903,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         if missing:
             raise ScaffoldError(f"Unknown project id(s): {', '.join(sorted(str(x) for x in missing))}")
 
+    _bootstrap_lint_test_prereqs_if_needed(
+        repo_root=repo_root,
+        task_name=task_name,
+        projects=selected,
+        fix=fix,
+    )
+    lint_test_env = _build_lint_test_env(repo_root=repo_root, projects=selected, task_name=task_name)
+
     failures: list[str] = []
     for project in selected:
         project_id = project.get("id")
@@ -1674,7 +1919,6 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not isinstance(project_id, str) or not isinstance(path, str) or not isinstance(tasks, dict):
             raise ScaffoldError("Invalid project entry in monorepo.toml")
 
-        task_name = str(args.task)
         fix_task_name = f"{task_name}_fix"
 
         cmd = tasks.get(fix_task_name) if fix else tasks.get(task_name)
@@ -1714,6 +1958,35 @@ def cmd_run(args: argparse.Namespace) -> int:
         if not project_dir.exists():
             raise ScaffoldError(f"{project_id}: project directory does not exist: {path}")
 
+        install_cmd_list: list[str] | None = None
+        install_task = tasks.get("install")
+        if install_task is not None:
+            install_cmd_list = _validate_task_cmd(
+                install_task, where=f"projects.{project_id}.tasks.install"
+            )
+
+        if (
+            task_name in {"lint", "test"}
+            and _is_pdm_command(cmd_list)
+            and install_cmd_list is not None
+            and not (project_dir / ".venv").exists()
+        ):
+            _eprint(
+                f"INFO: {project_id}: project venv missing; running tasks.install before {task_name}."
+            )
+            install_cp = _run_manifest_task(
+                cmd=install_cmd_list,
+                cwd=project_dir,
+                task_name="install",
+                project_id=project_id,
+                extra_env=lint_test_env,
+            )
+            if install_cp.returncode != 0:
+                failures.append(f"{project_id}:install ({install_cp.returncode})")
+                if not args.keep_going:
+                    break
+                continue
+
         if task_name == "lint":
             _ensure_ruff_available_for_lint(
                 cmd=cmd_list,
@@ -1723,6 +1996,21 @@ def cmd_run(args: argparse.Namespace) -> int:
                     args,
                     failing_project_id=project_id,
                 ),
+                install_cmd=install_cmd_list if _is_pdm_command(cmd_list) else None,
+                extra_env=lint_test_env,
+            )
+
+        if task_name == "test":
+            _ensure_pytest_available_for_test(
+                cmd=cmd_list,
+                cwd=project_dir,
+                project_id=project_id,
+                remediation_cmd=_format_run_install_remediation_cmd(
+                    args,
+                    failing_project_id=project_id,
+                ),
+                install_cmd=install_cmd_list if _is_pdm_command(cmd_list) else None,
+                extra_env=lint_test_env,
             )
 
         cp = _run_manifest_task(
@@ -1730,6 +2018,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             cwd=project_dir,
             task_name=task_name,
             project_id=project_id,
+            extra_env=lint_test_env,
         )
         if cp.returncode != 0:
             failures.append(f"{project_id}:{task_name} ({cp.returncode})")
@@ -1857,23 +2146,6 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             warnings.append(f"bash is not usable: {err or 'unknown_error'}")
             next_actions.append(_bash_remediation_hint())
 
-    # Check virtualenv availability. PDM uses `virtualenv` (when installed) to create project venvs.
-    # When it is missing, PDM raises `VirtualenvCreateError` which blocks `pdm install -G dev` in containers.
-    # This is a warning rather than an error because scaffold auto-falls-back to stdlib venv for pdm install tasks.
-    virtualenv_ok = _virtualenv_importable()
-    baseline["virtualenv"] = {
-        "ok": virtualenv_ok,
-        "probe": "importlib",
-        "note": "optional; PDM uses virtualenv when available; scaffold falls back to stdlib venv when missing",
-    }
-    if not virtualenv_ok and not skip_tool_checks:
-        warnings.append(
-            "virtualenv package is not importable: PDM may raise VirtualenvCreateError when creating project venvs."
-            " scaffold will set PDM_VENV_BACKEND=venv automatically for managed installs, but direct `pdm install`"
-            " calls outside scaffold may still fail."
-        )
-        next_actions.append(_virtualenv_remediation_hint(python_exe=sys.executable))
-
     required_tools: dict[str, list[str]] = {}
     for project in projects:
         project_id = project.get("id")
@@ -1948,12 +2220,51 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             tool = str(cmd[0])
             required_tools.setdefault(tool, []).append(f"{project_id}:{task_name}")
 
+    pdm_on_path = _which("pdm") is not None
+    pdm_importable = _pdm_importable()
+    pdm_tool_names = {"pdm", "pdm.exe", "pdm.cmd", "pdm.bat"}
+    pdm_tool_required = any(Path(tool).name.lower() in pdm_tool_names for tool in required_tools)
+    pdm_uses_scaffold_python = os.name == "nt" and pdm_importable
+
+    # Check virtualenv availability. PDM uses `virtualenv` (when installed) to create project venvs.
+    # When pdm resolves to an external interpreter, probing via importlib in this process is advisory only.
+    virtualenv_ok_current = _virtualenv_importable()
+    virtualenv_ok: bool | None = virtualenv_ok_current
+    virtualenv_scope = "scaffold_python"
+    virtualenv_note = "optional; PDM uses virtualenv when available; scaffold falls back to stdlib venv when missing"
+    if pdm_tool_required and pdm_on_path and not pdm_uses_scaffold_python:
+        virtualenv_ok = None
+        virtualenv_scope = "external_pdm_interpreter_unknown"
+        virtualenv_note = (
+            "virtualenv probe reflects scaffold's interpreter only; pdm is expected to run via an external command, "
+            "so pdm's interpreter may differ"
+        )
+        if not virtualenv_ok_current and not skip_tool_checks:
+            warnings.append(
+                "virtualenv package is not importable in scaffold's Python interpreter. pdm is expected to run via "
+                "an external command, so virtualenv availability for pdm is unknown."
+            )
+    elif virtualenv_ok is False and not skip_tool_checks:
+        warnings.append(
+            "virtualenv package is not importable: PDM may raise VirtualenvCreateError when creating project venvs."
+            " scaffold will set PDM_VENV_BACKEND=venv automatically for managed installs, but direct `pdm install`"
+            " calls outside scaffold may still fail."
+        )
+        next_actions.append(_virtualenv_remediation_hint(python_exe=sys.executable))
+
+    baseline["virtualenv"] = {
+        "ok": virtualenv_ok,
+        "probe": "importlib",
+        "scope": virtualenv_scope,
+        "checked_python": sys.executable,
+        "ok_in_checked_python": virtualenv_ok_current,
+        "note": virtualenv_note,
+    }
+
     tool_timeout_seconds = 4.0
     # Deterministic preflight summary: pdm availability + chosen install fallback.
     # Smoke scripts and verification paths can read .scaffold/doctor_tool_report.json
     # and key on preflight_summary.install_fallback to decide which install path to use.
-    pdm_on_path = _which("pdm") is not None
-    pdm_importable = _pdm_importable()
     pdm_usable = pdm_on_path or (os.name == "nt" and pdm_importable)
     if pdm_usable:
         install_fallback = "pdm"
@@ -2065,8 +2376,19 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     bash_label = "bash (required)" if bash_required else "bash (optional)"
     _eprint(f"    - {bash_label}: {bash_status} ({bash.get('version') or bash.get('error') or 'unknown'})")
     venv_entry = cast(dict[str, Any], baseline.get("virtualenv", {}))
-    venv_ok = bool(venv_entry.get("ok"))
-    venv_status = "OK" if venv_ok else "MISSING (scaffold uses stdlib venv as fallback; direct pdm install may fail)"
+    venv_ok_raw = venv_entry.get("ok")
+    if venv_ok_raw is True:
+        venv_status = "OK"
+    elif venv_ok_raw is False:
+        venv_status = "MISSING (scaffold uses stdlib venv as fallback; direct pdm install may fail)"
+    else:
+        checked_ok = bool(venv_entry.get("ok_in_checked_python"))
+        if checked_ok:
+            venv_status = "UNKNOWN (scaffold python has virtualenv; external pdm interpreter context was not probed)"
+        else:
+            venv_status = (
+                "UNKNOWN (scaffold python lacks virtualenv; external pdm interpreter context was not probed)"
+            )
     _eprint(f"    - virtualenv (optional): {venv_status}")
 
     if required_tools:

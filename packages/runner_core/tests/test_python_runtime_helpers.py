@@ -52,6 +52,13 @@ def _install_no_requirements_mission(target_repo: Path) -> None:
 
 
 def test_verification_command_helpers_detect_pytest_and_provisioning() -> None:
+    assert (
+        runtime_mod.verification_commands_need_python(("python tools/scaffold/scaffold.py",))
+        is True
+    )
+    assert runtime_mod.verification_commands_need_python(("pytest -q",)) is True
+    assert runtime_mod.verification_commands_need_python(("echo hello",)) is False
+
     assert runtime_mod.verification_commands_need_pytest(("pytest -q",)) is True
     assert runtime_mod.verification_commands_need_pytest(("python -m pytest -q",)) is True
     assert runtime_mod.verification_commands_need_pytest(("echo hello",)) is False
@@ -291,6 +298,54 @@ def test_select_python_runtime_no_candidates_yields_none(
     assert all(not c.usable for c in result.candidates if c.present)
 
 
+def test_select_python_runtime_honors_environment_overrides(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    sandbox_python = tmp_path / "sandbox_python.exe"
+    sandbox_python.write_bytes(b"")
+    payload = json.dumps({"executable": str(sandbox_python), "version": "3.13.1"})
+    observed_env: dict[str, str] = {}
+
+    def _mock_run(
+        args: list[str],
+        *,
+        capture_output: bool = False,
+        text: bool = False,
+        encoding: str = "utf-8",
+        errors: str = "replace",
+        timeout: float = 5.0,
+        check: bool = False,
+        env: dict[str, str] | None = None,
+        **kwargs: object,
+    ) -> subprocess.CompletedProcess[str]:
+        del capture_output, text, encoding, errors, timeout, check, kwargs
+        if args[0] == str(sandbox_python):
+            observed_env.update(env or {})
+            return subprocess.CompletedProcess(
+                args=args, returncode=0, stdout=payload + "\n", stderr=""
+            )
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="not found")
+
+    monkeypatch.setattr(runtime_mod.subprocess, "run", _mock_run)
+    monkeypatch.setattr(runtime_mod.shutil, "which", lambda *args, **kwargs: None)
+    monkeypatch.delenv("USERTEST_PYTHON", raising=False)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+
+    result = runtime_mod.select_python_runtime(
+        workspace_dir=workspace_dir,
+        timeout_seconds=1.0,
+        environment={"USERTEST_PYTHON": str(sandbox_python)},
+    )
+
+    assert result.selected is not None
+    assert result.selected.source == "sandbox_env"
+    assert observed_env.get("USERTEST_PYTHON") == str(sandbox_python)
+
+
 # ---------------------------------------------------------------------------
 # Regression tests for BLG-012: Windows path backslash preservation
 # ---------------------------------------------------------------------------
@@ -351,4 +406,3 @@ def test_rewrite_verification_command_preserves_windows_backslashes_powershell(
         f"Drive+backslash prefix {drive_prefix!r} collapsed in rewritten command.\n"
         f"Got: {cmd!r}"
     )
-

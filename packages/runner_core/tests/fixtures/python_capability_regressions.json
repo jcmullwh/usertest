@@ -1,0 +1,426 @@
+{
+  "context_mismatch": {
+    "preflight": {
+      "commands": {
+        "python": true,
+        "python3": true,
+        "py": false
+      },
+      "command_probe_details": {
+        "python": {
+          "command": "python",
+          "resolved_path": "/usr/bin/python3.13",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null
+        },
+        "python3": {
+          "command": "python3",
+          "resolved_path": "/usr/bin/python3.13",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null
+        },
+        "py": {
+          "command": "py",
+          "resolved_path": null,
+          "present": false,
+          "usable": false,
+          "reason_code": "not_found",
+          "reason": "`py` was not found on PATH."
+        }
+      },
+      "python_interpreter": {
+        "selected": {
+          "command": "python",
+          "resolved_path": "/usr/bin/python3.13",
+          "version": "3.13.2",
+          "executable": "/usr/bin/python3.13"
+        },
+        "candidates": [
+          {
+            "command": "python",
+            "resolved_path": "/usr/bin/python3.13",
+            "present": true,
+            "usable": true,
+            "reason_code": null,
+            "reason": null,
+            "version": "3.13.2",
+            "executable": "/usr/bin/python3.13"
+          },
+          {
+            "command": "python3",
+            "resolved_path": "/usr/bin/python3.13",
+            "present": true,
+            "usable": true,
+            "reason_code": null,
+            "reason": null,
+            "version": "3.13.2",
+            "executable": "/usr/bin/python3.13"
+          },
+          {
+            "command": "py",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`py` was not found on PATH.",
+            "version": null,
+            "executable": null
+          }
+        ],
+        "rejected": [
+          {
+            "command": "py",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`py` was not found on PATH.",
+            "version": null,
+            "executable": null
+          }
+        ]
+      }
+    },
+    "python_runtime": {
+      "selected": null,
+      "candidates": [
+        {
+          "source": "workspace_venv",
+          "path": "/workspace/.venv/bin/python",
+          "present": true,
+          "usable": false,
+          "reason_code": "launch_failed",
+          "reason": "[Errno 13] Permission denied",
+          "version": null,
+          "executable": null
+        },
+        {
+          "source": "command_python",
+          "path": "/usr/bin/python3.13",
+          "present": true,
+          "usable": false,
+          "reason_code": "launch_failed",
+          "reason": "[Errno 13] Permission denied",
+          "version": null,
+          "executable": null
+        }
+      ]
+    }
+  },
+  "windowsapps_venv_unusable": {
+    "preflight": {
+      "commands": {
+        "python": false,
+        "python3": false,
+        "py": false
+      },
+      "command_probe_details": {
+        "python": {
+          "command": "python",
+          "resolved_path": "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe",
+          "present": true,
+          "usable": false,
+          "reason_code": "windowsapps_alias",
+          "reason": "Resolved to a WindowsApps launcher alias. Install/select a full Python interpreter and retry."
+        },
+        "python3": {
+          "command": "python3",
+          "resolved_path": "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps\\python3.exe",
+          "present": true,
+          "usable": false,
+          "reason_code": "windowsapps_alias",
+          "reason": "Resolved to a WindowsApps launcher alias. Install/select a full Python interpreter and retry."
+        },
+        "py": {
+          "command": "py",
+          "resolved_path": null,
+          "present": false,
+          "usable": false,
+          "reason_code": "not_found",
+          "reason": "`py` was not found on PATH."
+        }
+      },
+      "python_interpreter": {
+        "selected": null,
+        "candidates": [
+          {
+            "command": "python",
+            "resolved_path": "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe",
+            "present": true,
+            "usable": false,
+            "reason_code": "windowsapps_alias",
+            "reason": "Resolved to a WindowsApps launcher alias. Install/select a full Python interpreter and retry.",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "python3",
+            "resolved_path": "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps\\python3.exe",
+            "present": true,
+            "usable": false,
+            "reason_code": "windowsapps_alias",
+            "reason": "Resolved to a WindowsApps launcher alias. Install/select a full Python interpreter and retry.",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "py",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`py` was not found on PATH.",
+            "version": null,
+            "executable": null
+          }
+        ],
+        "rejected": [
+          {
+            "command": "python",
+            "resolved_path": "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe",
+            "present": true,
+            "usable": false,
+            "reason_code": "windowsapps_alias",
+            "reason": "Resolved to a WindowsApps launcher alias. Install/select a full Python interpreter and retry.",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "python3",
+            "resolved_path": "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps\\python3.exe",
+            "present": true,
+            "usable": false,
+            "reason_code": "windowsapps_alias",
+            "reason": "Resolved to a WindowsApps launcher alias. Install/select a full Python interpreter and retry.",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "py",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`py` was not found on PATH.",
+            "version": null,
+            "executable": null
+          }
+        ]
+      }
+    },
+    "python_runtime": {
+      "selected": null,
+      "candidates": [
+        {
+          "source": "virtual_env",
+          "path": "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps\\python.exe",
+          "present": true,
+          "usable": false,
+          "reason_code": "windowsapps_alias",
+          "reason": "Resolved to a WindowsApps launcher alias. Install/select a full Python interpreter and retry.",
+          "version": null,
+          "executable": null
+        },
+        {
+          "source": "command_python3",
+          "path": "C:\\Users\\tester\\AppData\\Local\\Microsoft\\WindowsApps\\python3.exe",
+          "present": true,
+          "usable": false,
+          "reason_code": "windowsapps_alias",
+          "reason": "Resolved to a WindowsApps launcher alias. Install/select a full Python interpreter and retry.",
+          "version": null,
+          "executable": null
+        }
+      ]
+    }
+  },
+  "partial_runtime_pytest_missing": {
+    "preflight": {
+      "commands": {
+        "python": true,
+        "python3": true,
+        "py": false
+      },
+      "command_probe_details": {
+        "python": {
+          "command": "python",
+          "resolved_path": "C:\\Python313\\python.exe",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null
+        },
+        "python3": {
+          "command": "python3",
+          "resolved_path": "C:\\Python313\\python.exe",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null
+        },
+        "py": {
+          "command": "py",
+          "resolved_path": null,
+          "present": false,
+          "usable": false,
+          "reason_code": "not_found",
+          "reason": "`py` was not found on PATH."
+        }
+      }
+    },
+    "python_runtime": {
+      "selected": {
+        "source": "sandbox_env",
+        "path": "C:\\Python313\\python.exe",
+        "present": true,
+        "usable": true,
+        "reason_code": null,
+        "reason": null,
+        "version": "3.13.2",
+        "executable": "C:\\Python313\\python.exe"
+      },
+      "candidates": [
+        {
+          "source": "sandbox_env",
+          "path": "C:\\Python313\\python.exe",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null,
+          "version": "3.13.2",
+          "executable": "C:\\Python313\\python.exe"
+        }
+      ]
+    },
+    "pip_probe": {
+      "command": "python -m pip --version",
+      "argv": [
+        "C:\\Python313\\python.exe",
+        "-m",
+        "pip",
+        "--version"
+      ],
+      "python_executable": "C:\\Python313\\python.exe",
+      "cwd": "/workspace",
+      "passed": true,
+      "exit_code": 0,
+      "timed_out": false,
+      "reason_code": null,
+      "remediation": null,
+      "stdout_tail": "pip 25.0 from C:\\\\Python313\\\\Lib\\\\site-packages\\\\pip",
+      "stderr_tail": "",
+      "exception": null
+    },
+    "pytest_probe": {
+      "command": "python -m pytest --version",
+      "argv": [
+        "C:\\Python313\\python.exe",
+        "-m",
+        "pytest",
+        "--version"
+      ],
+      "python_executable": "C:\\Python313\\python.exe",
+      "cwd": "/workspace",
+      "passed": false,
+      "exit_code": 1,
+      "timed_out": false,
+      "reason_code": "pytest_missing",
+      "remediation": "Install pytest into the selected interpreter: C:\\Python313\\python.exe -m pip install -U pytest",
+      "stdout_tail": "",
+      "stderr_tail": "C:\\Python313\\python.exe: No module named pytest",
+      "exception": null
+    }
+  },
+  "healthy_pass": {
+    "preflight": {
+      "commands": {
+        "python": true,
+        "python3": true
+      },
+      "command_probe_details": {
+        "python": {
+          "command": "python",
+          "resolved_path": "/usr/bin/python3.13",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null
+        },
+        "python3": {
+          "command": "python3",
+          "resolved_path": "/usr/bin/python3.13",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null
+        }
+      }
+    },
+    "python_runtime": {
+      "selected": {
+        "source": "sandbox_env",
+        "path": "/usr/bin/python3.13",
+        "present": true,
+        "usable": true,
+        "reason_code": null,
+        "reason": null,
+        "version": "3.13.2",
+        "executable": "/usr/bin/python3.13"
+      },
+      "candidates": [
+        {
+          "source": "sandbox_env",
+          "path": "/usr/bin/python3.13",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null,
+          "version": "3.13.2",
+          "executable": "/usr/bin/python3.13"
+        }
+      ]
+    },
+    "pip_probe": {
+      "command": "python -m pip --version",
+      "argv": [
+        "/usr/bin/python3.13",
+        "-m",
+        "pip",
+        "--version"
+      ],
+      "python_executable": "/usr/bin/python3.13",
+      "cwd": "/workspace",
+      "passed": true,
+      "exit_code": 0,
+      "timed_out": false,
+      "reason_code": null,
+      "remediation": null,
+      "stdout_tail": "pip 25.0 from /usr/lib/python3/dist-packages/pip",
+      "stderr_tail": "",
+      "exception": null
+    },
+    "pytest_probe": {
+      "command": "python -m pytest --version",
+      "argv": [
+        "/usr/bin/python3.13",
+        "-m",
+        "pytest",
+        "--version"
+      ],
+      "python_executable": "/usr/bin/python3.13",
+      "cwd": "/workspace",
+      "passed": true,
+      "exit_code": 0,
+      "timed_out": false,
+      "reason_code": null,
+      "remediation": null,
+      "stdout_tail": "pytest 8.4.2",
+      "stderr_tail": "",
+      "exception": null
+    }
+  }
+}

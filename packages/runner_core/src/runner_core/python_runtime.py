@@ -14,8 +14,17 @@ from typing import Any
 _LOG = logging.getLogger(__name__)
 
 _PYTHON_HEALTH_PROBE = (
-    "import encodings, json, sys; "
-    "print(json.dumps({'executable': sys.executable, 'version': sys.version.split()[0]}))"
+    "import encodings, json, os, sys; "
+    "print(json.dumps({"
+    "'executable': sys.executable, "
+    "'version': sys.version.split()[0], "
+    "'prefix': sys.prefix, "
+    "'base_prefix': getattr(sys, 'base_prefix', None), "
+    "'real_prefix': getattr(sys, 'real_prefix', None), "
+    "'exec_prefix': sys.exec_prefix, "
+    "'base_exec_prefix': getattr(sys, 'base_exec_prefix', None), "
+    "'virtual_env': os.environ.get('VIRTUAL_ENV')"
+    "}))"
 )
 
 
@@ -49,10 +58,36 @@ def _probe_failure_reason(stderr_text: str, stdout_text: str) -> tuple[str, str]
     return "runtime_probe_failed", merged
 
 
-def _windows_where_all(command: str, *, timeout_seconds: float = 2.0) -> list[str]:
+def _reason_type_for_reason_code(reason_code: str | None) -> str | None:
+    if not isinstance(reason_code, str) or not reason_code.strip():
+        return None
+    code = reason_code.strip().lower()
+    if code in {"not_found", "windowsapps_alias"}:
+        return "discovery"
+    if code in {"launch_failed", "access_denied", "timeout"}:
+        return "execution"
+    if code in {"pip_missing", "pytest_missing"}:
+        return "dependency"
+    if code in {
+        "missing_stdlib",
+        "runtime_probe_failed",
+        "pip_probe_failed",
+        "pytest_probe_failed",
+    }:
+        return "runtime"
+    return "unknown"
+
+
+def _windows_where_all(
+    command: str, *, timeout_seconds: float = 2.0, path: str | None = None
+) -> list[str]:
     if not _is_windows_platform():
         return []
     try:
+        env: dict[str, str] | None = None
+        if path is not None:
+            env = dict(os.environ)
+            env["PATH"] = path
         proc = subprocess.run(
             ["where", command],
             capture_output=True,
@@ -61,6 +96,7 @@ def _windows_where_all(command: str, *, timeout_seconds: float = 2.0) -> list[st
             errors="replace",
             timeout=max(0.1, float(timeout_seconds)),
             check=False,
+            env=env,
         )
     except Exception:
         return []
@@ -77,10 +113,16 @@ def _windows_where_all(command: str, *, timeout_seconds: float = 2.0) -> list[st
 _WINDOWS_PY0P_PATH_PATTERN = re.compile(r"([A-Za-z]:\\.*)$")
 
 
-def _windows_py0p_interpreters(*, timeout_seconds: float = 2.0) -> list[str]:
+def _windows_py0p_interpreters(
+    *, timeout_seconds: float = 2.0, path: str | None = None
+) -> list[str]:
     if not _is_windows_platform():
         return []
     try:
+        env: dict[str, str] | None = None
+        if path is not None:
+            env = dict(os.environ)
+            env["PATH"] = path
         proc = subprocess.run(
             ["py", "-0p"],
             capture_output=True,
@@ -89,6 +131,7 @@ def _windows_py0p_interpreters(*, timeout_seconds: float = 2.0) -> list[str]:
             errors="replace",
             timeout=max(0.1, float(timeout_seconds)),
             check=False,
+            env=env,
         )
     except Exception:
         return []
@@ -122,6 +165,12 @@ class PythonRuntimeCandidate:
     reason: str | None = None
     version: str | None = None
     executable: str | None = None
+    prefix: str | None = None
+    base_prefix: str | None = None
+    real_prefix: str | None = None
+    exec_prefix: str | None = None
+    base_exec_prefix: str | None = None
+    virtual_env: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -130,9 +179,16 @@ class PythonRuntimeCandidate:
             "present": self.present,
             "usable": self.usable,
             "reason_code": self.reason_code,
+            "reason_type": _reason_type_for_reason_code(self.reason_code),
             "reason": self.reason,
             "version": self.version,
             "executable": self.executable,
+            "prefix": self.prefix,
+            "base_prefix": self.base_prefix,
+            "real_prefix": self.real_prefix,
+            "exec_prefix": self.exec_prefix,
+            "base_exec_prefix": self.base_exec_prefix,
+            "virtual_env": self.virtual_env,
         }
 
 
@@ -154,6 +210,7 @@ def _probe_python_executable(
     *,
     timeout_seconds: float,
     source: str,
+    env: dict[str, str] | None = None,
 ) -> PythonRuntimeCandidate:
     raw = str(path_text or "").strip()
     if not raw:
@@ -200,6 +257,7 @@ def _probe_python_executable(
             errors="replace",
             timeout=max(0.1, float(timeout_seconds)),
             check=False,
+            env=env,
         )
     except subprocess.TimeoutExpired:
         return PythonRuntimeCandidate(
@@ -259,6 +317,12 @@ def _probe_python_executable(
 
     executable = payload.get("executable")
     version = payload.get("version")
+    prefix = payload.get("prefix")
+    base_prefix = payload.get("base_prefix")
+    real_prefix = payload.get("real_prefix")
+    exec_prefix = payload.get("exec_prefix")
+    base_exec_prefix = payload.get("base_exec_prefix")
+    virtual_env = payload.get("virtual_env")
     return PythonRuntimeCandidate(
         source=source,
         path=raw,
@@ -266,6 +330,12 @@ def _probe_python_executable(
         usable=True,
         executable=executable if isinstance(executable, str) else None,
         version=version if isinstance(version, str) else None,
+        prefix=prefix if isinstance(prefix, str) else None,
+        base_prefix=base_prefix if isinstance(base_prefix, str) else None,
+        real_prefix=real_prefix if isinstance(real_prefix, str) else None,
+        exec_prefix=exec_prefix if isinstance(exec_prefix, str) else None,
+        base_exec_prefix=base_exec_prefix if isinstance(base_exec_prefix, str) else None,
+        virtual_env=virtual_env if isinstance(virtual_env, str) else None,
     )
 
 
@@ -274,6 +344,7 @@ def select_python_runtime(
     workspace_dir: Path,
     timeout_seconds: float = 5.0,
     include_where_fallbacks: bool = True,
+    environment: dict[str, str] | None = None,
 ) -> PythonRuntimeSelection:
     """
     Resolve a usable Python executable path without relying on WindowsApps aliases.
@@ -286,10 +357,21 @@ def select_python_runtime(
     - alternate PATH matches (Windows `where python`)
     - PATH commands (`py`, `python`, `python3`)
     - `sys.executable` (last resort; the runner itself is running under it)
+
+    When `environment` is provided, discovery/probing runs against that effective environment
+    (including `USERTEST_PYTHON`, `VIRTUAL_ENV`, and `PATH`) to match execution context.
     """
 
     candidates: list[PythonRuntimeCandidate] = []
     seen: set[str] = set()
+    effective_env: dict[str, str] | None = None
+    effective_path: str | None = None
+    if environment is not None:
+        effective_env = dict(os.environ)
+        for key, value in environment.items():
+            if isinstance(key, str) and isinstance(value, str):
+                effective_env[key] = value
+        effective_path = effective_env.get("PATH")
 
     def _add(path_text: str | None, *, source: str) -> None:
         raw = str(path_text or "").strip()
@@ -299,7 +381,12 @@ def select_python_runtime(
         if key in seen:
             return
         seen.add(key)
-        candidate = _probe_python_executable(raw, timeout_seconds=timeout_seconds, source=source)
+        candidate = _probe_python_executable(
+            raw,
+            timeout_seconds=timeout_seconds,
+            source=source,
+            env=effective_env,
+        )
         if candidate.usable:
             _LOG.debug(
                 "python_runtime: candidate %s (%s) probed OK: executable=%s version=%s",
@@ -321,36 +408,62 @@ def select_python_runtime(
     # Highest priority: sandbox-provided interpreter path set by outer runner preflight.
     # This avoids re-selecting an inaccessible path (external drive, interdicted venv, etc.)
     # when the harness has already resolved and validated a usable interpreter.
-    sandbox_python_env = os.environ.get("USERTEST_PYTHON", "").strip()
+    env_lookup = effective_env if effective_env is not None else os.environ
+    sandbox_python_env = str(env_lookup.get("USERTEST_PYTHON", "")).strip()
     if sandbox_python_env:
         _add(sandbox_python_env, source="sandbox_env")
 
     workspace_venv = workspace_dir / ".venv"
     _add(str(_venv_python_path(workspace_venv)), source="workspace_venv")
 
-    venv_env = os.environ.get("VIRTUAL_ENV", "").strip()
+    venv_env = str(env_lookup.get("VIRTUAL_ENV", "")).strip()
     if venv_env:
         _add(str(_venv_python_path(Path(venv_env))), source="virtual_env")
 
-    python_which = shutil.which("python")
+    python_which = (
+        shutil.which("python", path=effective_path)
+        if effective_path is not None
+        else shutil.which("python")
+    )
 
     if _is_windows_platform():
-        for entry in _windows_py0p_interpreters(timeout_seconds=min(2.0, timeout_seconds)):
+        for entry in _windows_py0p_interpreters(
+            timeout_seconds=min(2.0, timeout_seconds),
+            path=effective_path,
+        ):
             _add(entry, source="py_0p")
 
     if include_where_fallbacks and _is_windows_platform():
-        for entry in _windows_where_all("python", timeout_seconds=min(2.0, timeout_seconds)):
+        for entry in _windows_where_all(
+            "python",
+            timeout_seconds=min(2.0, timeout_seconds),
+            path=effective_path,
+        ):
             if _is_windowsapps_alias(entry):
                 continue
             _add(entry, source="where_python")
-        for entry in _windows_where_all("python3", timeout_seconds=min(2.0, timeout_seconds)):
+        for entry in _windows_where_all(
+            "python3",
+            timeout_seconds=min(2.0, timeout_seconds),
+            path=effective_path,
+        ):
             if _is_windowsapps_alias(entry):
                 continue
             _add(entry, source="where_python3")
 
-    _add(shutil.which("py"), source="command_py")
+    _add(
+        shutil.which("py", path=effective_path)
+        if effective_path is not None
+        else shutil.which("py"),
+        source="command_py",
+    )
     _add(python_which, source="command_python")
-    _add(shutil.which("python3"), source="command_python3")
+    _add(
+        shutil.which("python3", path=effective_path)
+        if effective_path is not None
+        else shutil.which("python3"),
+        source="command_python3",
+    )
 
     _add(sys.executable, source="sys_executable")
 
@@ -478,6 +591,7 @@ def probe_pytest_module(
         "exit_code": exit_code,
         "timed_out": timed_out,
         "reason_code": reason_code,
+        "reason_type": _reason_type_for_reason_code(reason_code),
         "remediation": remediation,
         "stdout_tail": _tail(stdout_text),
         "stderr_tail": _tail(stderr_text),
@@ -583,6 +697,7 @@ def probe_pip_module(
         "exit_code": exit_code,
         "timed_out": timed_out,
         "reason_code": reason_code,
+        "reason_type": _reason_type_for_reason_code(reason_code),
         "remediation": remediation,
         "stdout_tail": _tail(stdout_text),
         "stderr_tail": _tail(stderr_text),
@@ -592,6 +707,10 @@ def probe_pip_module(
 
 _VERIFICATION_PYTEST_CMD_PATTERN = re.compile(r"^(?:&\s*)?pytest(\s|$)", re.IGNORECASE)
 _VERIFICATION_PYTEST_MODULE_PATTERN = re.compile(r"(?:^|\s)-m\s+pytest(?:\s|$)", re.IGNORECASE)
+_VERIFICATION_PYTHON_CMD_PATTERN = re.compile(
+    r"^(?:&\s*)?(?:python|python3|py)(?:\s|$)",
+    re.IGNORECASE,
+)
 _VERIFICATION_INSTALL_PATTERN = re.compile(
     r"\b(pip|pdm|poetry|uv)\b.*\binstall\b",
     re.IGNORECASE,
@@ -603,6 +722,20 @@ def verification_commands_need_pytest(commands: tuple[str, ...]) -> bool:
         if not isinstance(raw, str) or not raw.strip():
             continue
         stripped = raw.strip()
+        if _VERIFICATION_PYTEST_CMD_PATTERN.search(stripped):
+            return True
+        if _VERIFICATION_PYTEST_MODULE_PATTERN.search(stripped):
+            return True
+    return False
+
+
+def verification_commands_need_python(commands: tuple[str, ...]) -> bool:
+    for raw in commands:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        stripped = raw.strip()
+        if _VERIFICATION_PYTHON_CMD_PATTERN.search(stripped):
+            return True
         if _VERIFICATION_PYTEST_CMD_PATTERN.search(stripped):
             return True
         if _VERIFICATION_PYTEST_MODULE_PATTERN.search(stripped):
