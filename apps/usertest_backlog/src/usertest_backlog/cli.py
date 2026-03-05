@@ -22,6 +22,17 @@ _WINDOWS_OFFLINE_FIRST_SUCCESS_CMD = (
     r"powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1"
 )
 _POSIX_OFFLINE_FIRST_SUCCESS_CMD = "bash ./scripts/offline_first_success.sh"
+_BREADTH_PROFILE_EXTERNAL = "external_generalization"
+_BREADTH_PROFILE_INTERNAL = "internal_maintenance"
+_BREADTH_PROFILE_CHOICES = (
+    _BREADTH_PROFILE_EXTERNAL,
+    _BREADTH_PROFILE_INTERNAL,
+)
+_BREADTH_DIMENSIONS = ("runs", "missions", "targets", "repo_inputs", "agents", "personas")
+_BREADTH_CONTEXT_DIMENSIONS = ("missions", "targets", "repo_inputs")
+_BREADTH_OBSERVATION_DIMENSIONS = ("runs", "agents", "personas")
+_REVIEW_DOMAIN_COMMAND_SURFACE = "command_surface"
+_REVIEW_DOMAIN_BEHAVIOR_COMPAT = "behavior_compat"
 
 
 def _one_command_first_success_remediation() -> str:
@@ -676,6 +687,16 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional prompt template directory (defaults to configs/backlog_prompts).",
     )
     reports_backlog_p.add_argument(
+        "--breadth-profile",
+        choices=list(_BREADTH_PROFILE_CHOICES),
+        default=_BREADTH_PROFILE_EXTERNAL,
+        help=(
+            "Breadth interpretation profile. "
+            "Defaults to external_generalization; use internal_maintenance for same-repo "
+            "self-learning runs."
+        ),
+    )
+    reports_backlog_p.add_argument(
         "--agent",
         choices=["claude", "codex", "gemini"],
         default="claude",
@@ -1011,6 +1032,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--prompts-dir",
         type=Path,
         help="Optional prompt template directory (defaults to configs/backlog_prompts).",
+    )
+    reports_review_ux_p.add_argument(
+        "--breadth-profile",
+        choices=list(_BREADTH_PROFILE_CHOICES),
+        default=_BREADTH_PROFILE_EXTERNAL,
+        help=(
+            "Breadth interpretation profile. "
+            "Defaults to external_generalization; use internal_maintenance for same-repo "
+            "self-learning runs."
+        ),
     )
     reports_review_ux_p.add_argument(
         "--agent",
@@ -1365,6 +1396,59 @@ def _resolve_optional_path(repo_root: Path, arg: Path | None) -> Path | None:
     return path.resolve()
 
 
+def _normalize_breadth_profile(value: Any) -> str:
+    profile = _coerce_string(value) or _BREADTH_PROFILE_EXTERNAL
+    if profile not in _BREADTH_PROFILE_CHOICES:
+        return _BREADTH_PROFILE_EXTERNAL
+    return profile
+
+
+def _default_breadth_profile_prompts_dir(repo_root: Path, breadth_profile: str) -> Path:
+    profile = _normalize_breadth_profile(breadth_profile)
+    if profile == _BREADTH_PROFILE_INTERNAL:
+        return repo_root / "configs" / "backlog_prompts_internal_maintenance"
+    return repo_root / "configs" / "backlog_prompts"
+
+
+def _default_breadth_profile_policy_path(repo_root: Path, breadth_profile: str) -> Path:
+    profile = _normalize_breadth_profile(breadth_profile)
+    if profile == _BREADTH_PROFILE_INTERNAL:
+        return repo_root / "configs" / "backlog_policy_internal_maintenance.yaml"
+    return repo_root / "configs" / "backlog_policy.yaml"
+
+
+def _resolve_breadth_profile_paths(
+    *,
+    repo_root: Path,
+    breadth_profile: str,
+    prompts_dir_arg: Path | None,
+    policy_config_arg: Path | None,
+) -> tuple[Path, Path, list[str]]:
+    prompts_dir = (
+        _resolve_optional_path(repo_root, prompts_dir_arg)
+        if prompts_dir_arg is not None
+        else _default_breadth_profile_prompts_dir(repo_root, breadth_profile)
+    )
+    policy_path = (
+        _resolve_optional_path(repo_root, policy_config_arg)
+        if policy_config_arg is not None
+        else _default_breadth_profile_policy_path(repo_root, breadth_profile)
+    )
+
+    warnings_list: list[str] = []
+    if prompts_dir_arg is not None:
+        warnings_list.append(
+            "breadth-profile prompts-dir override active: "
+            f"profile={breadth_profile} prompts_dir={prompts_dir}"
+        )
+    if policy_config_arg is not None:
+        warnings_list.append(
+            "breadth-profile policy-config override active: "
+            f"profile={breadth_profile} policy_config={policy_path}"
+        )
+    return prompts_dir, policy_path, warnings_list
+
+
 def _coerce_string(value: Any) -> str | None:
     """Coerce input into string form.
 
@@ -1404,6 +1488,142 @@ def _coerce_string_list(value: Any) -> list[str]:
         if isinstance(item, str) and item.strip():
             out.append(item.strip())
     return out
+
+
+def _coerce_int(value: Any, *, default: int = 0) -> int:
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return default
+    return default
+
+
+def _coerce_breadth_counts(value: Any) -> dict[str, int]:
+    mapping = value if isinstance(value, dict) else {}
+    return {
+        dim: int(_coerce_int(mapping.get(dim), default=0))
+        for dim in _BREADTH_DIMENSIONS
+    }
+
+
+def compute_problem_breadth(
+    evidence_atom_ids: list[str],
+    atoms_by_id: dict[str, dict[str, Any]],
+) -> dict[str, int]:
+    unique_values: dict[str, set[str]] = {dim: set() for dim in _BREADTH_DIMENSIONS}
+    field_map = {
+        "runs": "run_rel",
+        "missions": "mission_id",
+        "targets": "target_slug",
+        "repo_inputs": "repo_input",
+        "agents": "agent",
+        "personas": "persona_id",
+    }
+    for atom_id in evidence_atom_ids:
+        atom = atoms_by_id.get(atom_id)
+        if atom is None:
+            continue
+        for dim, field_name in field_map.items():
+            value = _coerce_string(atom.get(field_name))
+            if value is not None:
+                unique_values[dim].add(value)
+    return {dim: len(unique_values[dim]) for dim in _BREADTH_DIMENSIONS}
+
+
+def compute_batch_breadth(atoms: list[dict[str, Any]]) -> dict[str, Any]:
+    unique_values: dict[str, set[str]] = {dim: set() for dim in _BREADTH_DIMENSIONS}
+    field_map = {
+        "runs": "run_rel",
+        "missions": "mission_id",
+        "targets": "target_slug",
+        "repo_inputs": "repo_input",
+        "agents": "agent",
+        "personas": "persona_id",
+    }
+    for atom in atoms:
+        if not isinstance(atom, dict):
+            continue
+        for dim, field_name in field_map.items():
+            value = _coerce_string(atom.get(field_name))
+            if value is not None:
+                unique_values[dim].add(value)
+
+    counts = {dim: len(unique_values[dim]) for dim in _BREADTH_DIMENSIONS}
+    struct_const = [dim for dim in _BREADTH_DIMENSIONS if counts.get(dim, 0) == 1]
+    varying = [dim for dim in _BREADTH_DIMENSIONS if counts.get(dim, 0) > 1]
+    return {
+        **counts,
+        "structurally_constant_dimensions": struct_const,
+        "varying_dimensions": varying,
+    }
+
+
+def _coerce_batch_breadth(value: Any) -> dict[str, Any]:
+    counts = _coerce_breadth_counts(value)
+    raw = value if isinstance(value, dict) else {}
+    struct_const = [
+        dim
+        for dim in raw.get("structurally_constant_dimensions", [])
+        if isinstance(dim, str) and dim in _BREADTH_DIMENSIONS
+    ]
+    varying = [
+        dim
+        for dim in raw.get("varying_dimensions", [])
+        if isinstance(dim, str) and dim in _BREADTH_DIMENSIONS
+    ]
+    if not struct_const:
+        struct_const = [dim for dim in _BREADTH_DIMENSIONS if counts.get(dim, 0) == 1]
+    if not varying:
+        varying = [dim for dim in _BREADTH_DIMENSIONS if counts.get(dim, 0) > 1]
+    return {
+        **counts,
+        "structurally_constant_dimensions": struct_const,
+        "varying_dimensions": varying,
+    }
+
+
+def _build_decision_basis(
+    *,
+    problem_breadth: dict[str, int],
+    batch_breadth: dict[str, Any] | None,
+) -> dict[str, Any]:
+    batch = batch_breadth if isinstance(batch_breadth, dict) else {}
+    return {
+        "context_breadth": {
+            dim: int(problem_breadth.get(dim, 0)) for dim in _BREADTH_CONTEXT_DIMENSIONS
+        },
+        "observation_breadth": {
+            dim: int(problem_breadth.get(dim, 0)) for dim in _BREADTH_OBSERVATION_DIMENSIONS
+        },
+        "structurally_constant_dimensions": [
+            dim
+            for dim in batch.get("structurally_constant_dimensions", [])
+            if isinstance(dim, str) and dim in _BREADTH_DIMENSIONS
+        ],
+    }
+
+
+def _infer_review_domain(
+    *,
+    change_surface: dict[str, Any] | None,
+    needs_ux_review: bool = False,
+) -> str:
+    surface = change_surface if isinstance(change_surface, dict) else {}
+    kinds = set(_coerce_string_list(surface.get("kinds")))
+    if kinds & {"new_command", "new_top_level_mode", "new_config_schema", "new_flag"}:
+        return _REVIEW_DOMAIN_COMMAND_SURFACE
+    if kinds & {"breaking_change", "new_api", "behavior_change"}:
+        return _REVIEW_DOMAIN_BEHAVIOR_COMPAT
+    if needs_ux_review:
+        return _REVIEW_DOMAIN_COMMAND_SURFACE
+    return _REVIEW_DOMAIN_BEHAVIOR_COMPAT
 
 
 def _ticket_owner_component(ticket: dict[str, Any]) -> str | None:
@@ -3059,6 +3279,36 @@ def _render_ux_review_markdown(doc: dict[str, Any]) -> str:
                 lines.append("")
                 lines.append(rationale.strip())
                 lines.append("")
+            review_domain = _coerce_string(rec.get("review_domain"))
+            if review_domain:
+                lines.append(f"- Review domain: `{review_domain}`")
+            breadth_profile = _coerce_string(rec.get("breadth_profile"))
+            if breadth_profile:
+                lines.append(f"- Breadth profile: `{breadth_profile}`")
+            decision_basis_raw = rec.get("decision_basis")
+            if isinstance(decision_basis_raw, dict):
+                context_breadth = decision_basis_raw.get("context_breadth")
+                observation_breadth = decision_basis_raw.get("observation_breadth")
+                struct_dims = decision_basis_raw.get("structurally_constant_dimensions")
+                if isinstance(context_breadth, dict):
+                    bits = [
+                        f"{dim}={int(_coerce_int(context_breadth.get(dim), default=0))}"
+                        for dim in _BREADTH_CONTEXT_DIMENSIONS
+                    ]
+                    lines.append(f"- Context breadth: `{', '.join(bits)}`")
+                if isinstance(observation_breadth, dict):
+                    bits = [
+                        f"{dim}={int(_coerce_int(observation_breadth.get(dim), default=0))}"
+                        for dim in _BREADTH_OBSERVATION_DIMENSIONS
+                    ]
+                    lines.append(f"- Observation breadth: `{', '.join(bits)}`")
+                if isinstance(struct_dims, list):
+                    dims = [dim for dim in struct_dims if isinstance(dim, str) and dim.strip()]
+                    if dims:
+                        lines.append(
+                            "- Structurally constant dimensions: "
+                            f"`{', '.join(dims)}`"
+                        )
             next_steps = rec.get("next_steps")
             if isinstance(next_steps, list):
                 steps = [s for s in next_steps if isinstance(s, str) and s.strip()]
@@ -3119,7 +3369,13 @@ def _pick_ux_recommended_approach(recs: list[dict[str, Any]]) -> str | None:
         if isinstance(rec, dict)
     ]
     normalized = {a.strip() for a in approaches if a.strip()}
-    for choice in ("defer", "new_surface", "parameterize_existing", "docs"):
+    for choice in (
+        "defer",
+        "new_surface",
+        "accept_existing_surface",
+        "parameterize_existing",
+        "docs",
+    ):
         if choice in normalized:
             return choice
     return next(iter(sorted(normalized)), None)
@@ -3172,6 +3428,34 @@ def _render_ux_review_section_for_ticket(
         rationale = _coerce_string(rec.get("rationale"))
         if rationale:
             lines.append(rationale.strip())
+            lines.append("")
+        review_domain = _coerce_string(rec.get("review_domain"))
+        if review_domain:
+            lines.append(f"- Review domain: `{review_domain}`")
+        breadth_profile = _coerce_string(rec.get("breadth_profile"))
+        if breadth_profile:
+            lines.append(f"- Breadth profile: `{breadth_profile}`")
+        decision_basis_raw = rec.get("decision_basis")
+        if isinstance(decision_basis_raw, dict):
+            context_breadth = decision_basis_raw.get("context_breadth")
+            observation_breadth = decision_basis_raw.get("observation_breadth")
+            struct_dims = decision_basis_raw.get("structurally_constant_dimensions")
+            if isinstance(context_breadth, dict):
+                bits = [
+                    f"{dim}={int(_coerce_int(context_breadth.get(dim), default=0))}"
+                    for dim in _BREADTH_CONTEXT_DIMENSIONS
+                ]
+                lines.append(f"- Context breadth: `{', '.join(bits)}`")
+            if isinstance(observation_breadth, dict):
+                bits = [
+                    f"{dim}={int(_coerce_int(observation_breadth.get(dim), default=0))}"
+                    for dim in _BREADTH_OBSERVATION_DIMENSIONS
+                ]
+                lines.append(f"- Observation breadth: `{', '.join(bits)}`")
+            if isinstance(struct_dims, list):
+                dims = [dim for dim in struct_dims if isinstance(dim, str) and dim.strip()]
+                if dims:
+                    lines.append(f"- Structurally constant dimensions: `{', '.join(dims)}`")
             lines.append("")
 
         next_steps_raw = rec.get("next_steps")
@@ -3380,13 +3664,17 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
     else:
         out_md = out_json.with_suffix(".md")
 
-    prompts_dir_arg: Path | None = args.prompts_dir
-    if prompts_dir_arg is not None:
-        prompts_dir = (
-            _resolve_optional_path(repo_root, prompts_dir_arg) or prompts_dir_arg.resolve()
+    breadth_profile = _normalize_breadth_profile(getattr(args, "breadth_profile", None))
+    prompts_dir, policy_config_default_path, breadth_profile_warnings = (
+        _resolve_breadth_profile_paths(
+            repo_root=repo_root,
+            breadth_profile=breadth_profile,
+            prompts_dir_arg=args.prompts_dir,
+            policy_config_arg=args.policy_config,
         )
-    else:
-        prompts_dir = repo_root / "configs" / "backlog_prompts"
+    )
+    for warning_text in breadth_profile_warnings:
+        print(f"[review-ux] NOTE: {warning_text}", file=sys.stderr)
 
     template_path = prompts_dir / "ux_reviewer.md"
     if not template_path.exists():
@@ -3414,6 +3702,12 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
     tickets_source = "backlog"
     solution_selection_path = compiled_dir / f"{default_name}.solution_selection.json"
     solution_selection_doc = _load_optional_json_object(solution_selection_path)
+    selection_input_meta = (
+        solution_selection_doc.get("input_meta")
+        if isinstance(solution_selection_doc, dict)
+        and isinstance(solution_selection_doc.get("input_meta"), dict)
+        else {}
+    )
     if isinstance(solution_selection_doc, dict):
         sel_items_raw = solution_selection_doc.get("items")
         sel_items = (
@@ -3424,20 +3718,22 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         if sel_items:
             tickets = sel_items
             tickets_source = "solution_selection"
+    batch_breadth = _coerce_batch_breadth(selection_input_meta.get("batch_breadth"))
+    selection_profile = _coerce_string(selection_input_meta.get("breadth_profile"))
+    if selection_profile is not None and selection_profile != breadth_profile:
+        mismatch_warning = (
+            "breadth-profile mismatch between review-ux CLI and solution-selection artifact: "
+            f"review_ux={breadth_profile} solution_selection={selection_profile}"
+        )
+        breadth_profile_warnings.append(mismatch_warning)
+        print(f"[review-ux] NOTE: {mismatch_warning}", file=sys.stderr)
 
     policy_cfg: BacklogPolicyConfig | None = None
-    policy_config_path: Path | None
-    if args.policy_config is not None:
-        policy_config_path = (
-            _resolve_optional_path(repo_root, args.policy_config) or args.policy_config.resolve()
-        )
-    else:
-        default_policy = repo_root / "configs" / "backlog_policy.yaml"
-        policy_config_path = default_policy if default_policy.exists() else None
+    policy_config_path: Path | None = policy_config_default_path
     if policy_config_path is None or not policy_config_path.exists():
         print(
             "Missing backlog policy config (needed for high-surface gating). "
-            "Provide --policy-config or add configs/backlog_policy.yaml.",
+            f"Provide --policy-config or add {policy_config_default_path}.",
             file=sys.stderr,
         )
         return 2
@@ -3504,6 +3800,8 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
                 "intent_snapshot_json": intent_snapshot_json_path,
                 "repo_intent_md": str(repo_intent_path),
                 "policy_config": str(policy_config_path),
+                "breadth_profile": breadth_profile,
+                "breadth_profile_warnings": breadth_profile_warnings,
             },
             "policy": {"surface_area_high": sorted(surface_area_high)},
             "tickets_meta": {
@@ -3513,6 +3811,13 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
                 "needs_ux_review_total": 0,
                 "review_total": 0,
                 "tickets_source": tickets_source,
+            },
+            "review_meta": {
+                "breadth_profile": breadth_profile,
+                "batch_breadth": batch_breadth,
+                "structurally_constant_batch_dimensions": batch_breadth.get(
+                    "structurally_constant_dimensions", []
+                ),
             },
             "review": {"recommendations": [], "confidence": 1.0},
             "artifacts_dir": None,
@@ -3572,6 +3877,7 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "confidence",
             "change_surface",
             "breadth",
+            "problem_breadth",
             "stage",
             "risks",
             "selected_option_id",
@@ -3585,6 +3891,9 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "investigation_steps",
             "success_criteria",
             "suggested_owner",
+            "breadth_profile",
+            "decision_basis",
+            "review_domain",
         ):
             if key in ticket:
                 payload[key] = ticket.get(key)
@@ -3594,6 +3903,29 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
         kinds = set(_coerce_string_list(change_surface.get("kinds")))
         user_visible = bool(change_surface.get("user_visible"))
         high_surface_gated = bool(user_visible and bool(kinds & surface_area_high))
+        problem_breadth = _coerce_breadth_counts(
+            ticket.get("problem_breadth") if "problem_breadth" in ticket else ticket.get("breadth")
+        )
+        decision_basis = ticket.get("decision_basis")
+        if not isinstance(decision_basis, dict):
+            decision_basis = _build_decision_basis(
+                problem_breadth=problem_breadth,
+                batch_breadth=batch_breadth,
+            )
+        review_domain = _coerce_string(ticket.get("review_domain")) or _infer_review_domain(
+            change_surface=change_surface,
+            needs_ux_review=bool(ticket.get("needs_ux_review") is True),
+        )
+        payload["breadth"] = _coerce_breadth_counts(ticket.get("breadth"))
+        payload["problem_breadth"] = problem_breadth
+        payload["batch_breadth"] = batch_breadth
+        payload["breadth_profile"] = _coerce_string(ticket.get("breadth_profile")) or breadth_profile
+        payload["decision_basis"] = decision_basis
+        payload["review_domain"] = review_domain
+        payload["structurally_constant_batch_dimensions"] = batch_breadth.get(
+            "structurally_constant_dimensions",
+            [],
+        )
         payload["high_surface_gated"] = high_surface_gated
         if tickets_source == "solution_selection":
             if ticket.get("needs_ux_review") is True:
@@ -3742,6 +4074,8 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "repo_intent_md": str(repo_intent_path),
             "allow_missing_intent_snapshot": allow_missing_snapshot,
             "policy_config": str(policy_config_path),
+            "breadth_profile": breadth_profile,
+            "breadth_profile_warnings": breadth_profile_warnings,
         },
         "artifacts_dir": str(artifacts_dir),
         "policy": {"surface_area_high": sorted(surface_area_high)},
@@ -3750,6 +4084,11 @@ def _cmd_reports_review_ux(args: argparse.Namespace) -> int:
             "model": model,
             "cached": used_cached,
             "template_path": _safe_relpath(template_path, repo_root),
+            "breadth_profile": breadth_profile,
+            "batch_breadth": batch_breadth,
+            "structurally_constant_batch_dimensions": batch_breadth.get(
+                "structurally_constant_dimensions", []
+            ),
             "workspace": workspace_meta,
         },
         "tickets_meta": {
@@ -4187,12 +4526,20 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 fingerprint=fingerprint,
                 recs=ux_recs,
             )
-            if stage == "research_required" and ux_approach in ("docs", "parameterize_existing"):
+            if stage == "research_required" and ux_approach in (
+                "docs",
+                "parameterize_existing",
+                "accept_existing_surface",
+            ):
                 stage_override = "ready_for_ticket"
                 export_kind_override = "implementation"
             elif stage == "research_required" and ux_approach == "defer":
                 defer_to_bucket = "0.1 - deferred"
-            elif high_surface_ready and ux_approach in ("docs", "parameterize_existing"):
+            elif high_surface_ready and ux_approach in (
+                "docs",
+                "parameterize_existing",
+                "accept_existing_surface",
+            ):
                 export_kind_override = "implementation"
             elif high_surface_ready and ux_approach == "defer":
                 defer_to_bucket = "0.1 - deferred"
@@ -5589,6 +5936,7 @@ def _render_solution_options_markdown(
 def _run_solution_optioning_stage(
     *,
     repo_root: Path,
+    atoms: list[dict[str, Any]],
     problem_records: list[dict[str, Any]],
     priority_decisions: list[dict[str, Any]],
     research_dossiers: list[dict[str, Any]],
@@ -5600,6 +5948,7 @@ def _run_solution_optioning_stage(
     model: str | None,
     cfg: RunnerConfig,
     dry_run: bool,
+    breadth_profile: str,
     stage_guidance_text: str,
 ) -> dict[str, Any]:
     """Run stage 4 solution optioning and write the stage artifacts."""
@@ -5656,6 +6005,12 @@ def _run_solution_optioning_stage(
 
     template_text = pipeline_manifest.template_text(pipeline_manifest.solution_optioner_template)
     taxonomy_json = _json.dumps(taxonomy, ensure_ascii=False, indent=2)
+    atoms_by_id: dict[str, dict[str, Any]] = {
+        str(a.get("atom_id")): a
+        for a in atoms
+        if isinstance(a, dict) and isinstance(a.get("atom_id"), str)
+    }
+    batch_breadth = compute_batch_breadth(atoms)
 
     all_options: list[dict[str, Any]] = []
     warnings_list: list[str] = []
@@ -5668,11 +6023,41 @@ def _run_solution_optioning_stage(
         )
         rec = records_by_id.get(pid) or {}
         dec = priority_by_id.get(pid) or {}
+        evidence_ids = (
+            rec.get("evidence_atom_ids") if isinstance(rec.get("evidence_atom_ids"), list) else []
+        )
+        evidence_ids_s = [item for item in evidence_ids if isinstance(item, str) and item.strip()]
+        problem_breadth = compute_problem_breadth(evidence_ids_s, atoms_by_id)
+        decision_basis = _build_decision_basis(
+            problem_breadth=problem_breadth,
+            batch_breadth=batch_breadth,
+        )
 
         prompt = (
             template_text.replace("{{REPO_INTENT_MD}}", repo_intent_text)
             .replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
             .replace("{{TAXONOMY_JSON}}", taxonomy_json)
+            .replace("{{BREADTH_PROFILE}}", breadth_profile)
+            .replace(
+                "{{PROBLEM_BREADTH_JSON}}",
+                _json.dumps(problem_breadth, ensure_ascii=False, indent=2),
+            )
+            .replace(
+                "{{BATCH_BREADTH_JSON}}",
+                _json.dumps(batch_breadth, ensure_ascii=False, indent=2),
+            )
+            .replace(
+                "{{STRUCTURALLY_CONSTANT_BATCH_DIMENSIONS_JSON}}",
+                _json.dumps(
+                    batch_breadth.get("structurally_constant_dimensions", []),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+            .replace(
+                "{{DECISION_BASIS_JSON}}",
+                _json.dumps(decision_basis, ensure_ascii=False, indent=2),
+            )
             .replace("{{PROBLEM_RECORD_JSON}}", _json.dumps(rec, ensure_ascii=False, indent=2))
             .replace("{{PRIORITY_DECISION_JSON}}", _json.dumps(dec, ensure_ascii=False, indent=2))
             .replace("{{RESEARCH_DOSSIER_JSON}}", _json.dumps(dossier, ensure_ascii=False, indent=2))
@@ -5857,6 +6242,11 @@ def _run_solution_optioning_stage(
             "research_dossier_count": len(research_dossiers),
             "family_ids": family_order,
             "dry_run": dry_run,
+            "breadth_profile": breadth_profile,
+            "batch_breadth": batch_breadth,
+            "structurally_constant_batch_dimensions": batch_breadth.get(
+                "structurally_constant_dimensions", []
+            ),
             "solution_optioning_status": status,
             "solution_optioning_warnings": warnings_list,
             "relation_review_decisions": len(relation_decisions),
@@ -5974,6 +6364,7 @@ def _run_solution_selection_stage(
     model: str | None,
     cfg: RunnerConfig,
     dry_run: bool,
+    breadth_profile: str,
     stage_guidance_text: str,
 ) -> dict[str, Any]:
     """Run stage 5 solution selection + selected-solution labeler and write artifacts."""
@@ -6033,6 +6424,7 @@ def _run_solution_selection_stage(
         for a in atoms
         if isinstance(a, dict) and isinstance(a.get("atom_id"), str)
     }
+    batch_breadth = compute_batch_breadth(atoms)
 
     decisions: list[dict[str, Any]] = []
     warnings_list: list[str] = []
@@ -6042,10 +6434,40 @@ def _run_solution_selection_stage(
         rec = records_by_id.get(pid) or {}
         dossier = dossiers_by_id.get(pid) or {}
         opts = options_by_problem.get(pid) or []
+        evidence_ids = (
+            rec.get("evidence_atom_ids") if isinstance(rec.get("evidence_atom_ids"), list) else []
+        )
+        evidence_ids_s = [item for item in evidence_ids if isinstance(item, str) and item.strip()]
+        problem_breadth = compute_problem_breadth(evidence_ids_s, atoms_by_id)
+        decision_basis = _build_decision_basis(
+            problem_breadth=problem_breadth,
+            batch_breadth=batch_breadth,
+        )
 
         prompt = (
             selector_template.replace("{{REPO_INTENT_MD}}", repo_intent_text)
             .replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+            .replace("{{BREADTH_PROFILE}}", breadth_profile)
+            .replace(
+                "{{PROBLEM_BREADTH_JSON}}",
+                _json.dumps(problem_breadth, ensure_ascii=False, indent=2),
+            )
+            .replace(
+                "{{BATCH_BREADTH_JSON}}",
+                _json.dumps(batch_breadth, ensure_ascii=False, indent=2),
+            )
+            .replace(
+                "{{STRUCTURALLY_CONSTANT_BATCH_DIMENSIONS_JSON}}",
+                _json.dumps(
+                    batch_breadth.get("structurally_constant_dimensions", []),
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+            )
+            .replace(
+                "{{DECISION_BASIS_JSON}}",
+                _json.dumps(decision_basis, ensure_ascii=False, indent=2),
+            )
             .replace("{{PROBLEM_RECORD_JSON}}", _json.dumps(rec, ensure_ascii=False, indent=2))
             .replace("{{RESEARCH_DOSSIER_JSON}}", _json.dumps(dossier, ensure_ascii=False, indent=2))
             .replace("{{SOLUTION_OPTIONS_JSON}}", _json.dumps(opts, ensure_ascii=False, indent=2))
@@ -6131,8 +6553,6 @@ def _run_solution_selection_stage(
             selected_dec["selected_option"] = selected_option
 
         # Run selected-solution labeler (post-selection).
-        evidence_ids = rec.get("evidence_atom_ids") if isinstance(rec.get("evidence_atom_ids"), list) else []
-        evidence_ids_s = [e for e in evidence_ids if isinstance(e, str) and e.strip()]
         evidence_atoms_preview: list[dict[str, Any]] = []
         for eid in evidence_ids_s[:12]:
             atom = atoms_by_id.get(eid)
@@ -6255,43 +6675,21 @@ def _run_solution_selection_stage(
             if key in rec and key not in selected_dec:
                 selected_dec[key] = rec.get(key)
 
-        # Compute evidence breadth from cited atoms (UX review + policy gating need this).
-        missions: set[str] = set()
-        targets: set[str] = set()
-        repo_inputs: set[str] = set()
-        agents: set[str] = set()
-        personas: set[str] = set()
-        runs: set[str] = set()
-        for eid in evidence_ids_s:
-            atom = atoms_by_id.get(eid)
-            if atom is None:
-                continue
-            for mid in [_coerce_string(atom.get("mission_id"))]:
-                if mid is not None:
-                    missions.add(mid)
-            for t in [_coerce_string(atom.get("target_slug"))]:
-                if t is not None:
-                    targets.add(t)
-            for ri in [_coerce_string(atom.get("repo_input"))]:
-                if ri is not None:
-                    repo_inputs.add(ri)
-            for ag in [_coerce_string(atom.get("agent"))]:
-                if ag is not None:
-                    agents.add(ag)
-            for pid_s in [_coerce_string(atom.get("persona_id"))]:
-                if pid_s is not None:
-                    personas.add(pid_s)
-            for rr in [_coerce_string(atom.get("run_rel"))]:
-                if rr is not None:
-                    runs.add(rr)
-        selected_dec["breadth"] = {
-            "missions": len(missions),
-            "targets": len(targets),
-            "repo_inputs": len(repo_inputs),
-            "agents": len(agents),
-            "personas": len(personas),
-            "runs": len(runs),
-        }
+        selected_dec["breadth"] = dict(problem_breadth)
+        selected_dec["problem_breadth"] = dict(problem_breadth)
+        selected_dec["breadth_profile"] = breadth_profile
+        selected_dec["decision_basis"] = decision_basis
+        selected_dec["batch_breadth"] = batch_breadth
+        selected_dec["structurally_constant_batch_dimensions"] = batch_breadth.get(
+            "structurally_constant_dimensions",
+            [],
+        )
+        selected_dec["review_domain"] = _infer_review_domain(
+            change_surface=selected_dec.get("change_surface")
+            if isinstance(selected_dec.get("change_surface"), dict)
+            else None,
+            needs_ux_review=bool(selected_dec.get("needs_ux_review") is True),
+        )
 
         # Stage gating: after selection but before planning, items are still research_required.
         if "stage" not in selected_dec:
@@ -6308,6 +6706,11 @@ def _run_solution_selection_stage(
             "option_count": len(solution_options),
             "decision_count": len(decisions),
             "dry_run": dry_run,
+            "breadth_profile": breadth_profile,
+            "batch_breadth": batch_breadth,
+            "structurally_constant_batch_dimensions": batch_breadth.get(
+                "structurally_constant_dimensions", []
+            ),
             "solution_selection_status": status,
             "solution_selection_warnings": warnings_list,
             "labeler_prompt_template": str(pipeline_manifest.selected_solution_labeler_template)
@@ -6716,13 +7119,17 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     else:
         atom_actions_path = repo_root / "configs" / "backlog_atom_actions.yaml"
 
-    prompts_dir_arg: Path | None = args.prompts_dir
-    if prompts_dir_arg is not None:
-        prompts_dir = (
-            _resolve_optional_path(repo_root, prompts_dir_arg) or prompts_dir_arg.resolve()
+    breadth_profile = _normalize_breadth_profile(getattr(args, "breadth_profile", None))
+    prompts_dir, policy_config_default_path, breadth_profile_warnings = (
+        _resolve_breadth_profile_paths(
+            repo_root=repo_root,
+            breadth_profile=breadth_profile,
+            prompts_dir_arg=args.prompts_dir,
+            policy_config_arg=args.policy_config,
         )
-    else:
-        prompts_dir = repo_root / "configs" / "backlog_prompts"
+    )
+    for warning_text in breadth_profile_warnings:
+        print(f"[backlog] NOTE: {warning_text}", file=sys.stderr)
 
     atoms_jsonl = out_json.parent / f"{default_name}.backlog.atoms.jsonl"
     agent_last_message_atoms_jsonl = (
@@ -6864,6 +7271,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         atoms.append(atom)
 
     eligible_atoms_trackable = len(atoms)
+    pipeline_batch_breadth = compute_batch_breadth(atoms)
     eligible_run_rels = {
         run_rel
         for atom in atoms
@@ -6964,14 +7372,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         )
 
     policy_cfg: BacklogPolicyConfig | None = None
-    policy_config_path: Path | None
-    if args.policy_config is not None:
-        policy_config_path = (
-            _resolve_optional_path(repo_root, args.policy_config) or args.policy_config.resolve()
-        )
-    else:
-        default_policy = repo_root / "configs" / "backlog_policy.yaml"
-        policy_config_path = default_policy if default_policy.exists() else None
+    policy_config_path: Path | None = policy_config_default_path
     if not bool(args.no_policy) and policy_config_path is not None and policy_config_path.exists():
         policy_root = _load_yaml(policy_config_path).get("backlog_policy")
         if policy_root is None:
@@ -7128,6 +7529,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         stage4_guidance = pipeline_manifest.load_stage_guidance("solution_optioning")
         stage4_doc = _run_solution_optioning_stage(
             repo_root=repo_root,
+            atoms=atoms,
             problem_records=problem_records,
             priority_decisions=priority_decisions,
             research_dossiers=research_dossiers,
@@ -7139,6 +7541,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             model=model,
             cfg=cfg,
             dry_run=dry_run,
+            breadth_profile=breadth_profile,
             stage_guidance_text=stage4_guidance,
         )
 
@@ -7164,6 +7567,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             model=model,
             cfg=cfg,
             dry_run=dry_run,
+            breadth_profile=breadth_profile,
             stage_guidance_text=stage5_guidance,
         )
 
@@ -7243,6 +7647,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             "repo_input": repo_input,
             "agent": agent,
             "model": model,
+            "breadth_profile": breadth_profile,
             "dry_run": dry_run,
             "resume": resume,
             "force": force,
@@ -7250,14 +7655,18 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             "sample_size": sample_size,
             "sample_size_semantics": sample_size_semantics,
             "exclude_atom_statuses": sorted(exclude_atom_status_set),
+            "batch_breadth": pipeline_batch_breadth,
             "pipeline_manifest_path": str(pipeline_manifest_path),
             "pipeline_manifest_version": int(getattr(pipeline_manifest, "version", 2)),
+            "breadth_profile_warnings": breadth_profile_warnings,
         },
         artifacts={
             "atoms_jsonl": str(atoms_jsonl),
             "atoms_agent_last_message_artifact_jsonl": str(agent_last_message_atoms_jsonl),
             "artifacts_dir": str(artifacts_dir),
             "prompts_dir": str(prompts_dir),
+            "breadth_profile": breadth_profile,
+            "batch_breadth": pipeline_batch_breadth,
             "atom_filter": {
                 **(atoms_doc.get("atom_filter") or {}),
                 "dropped_tickets_excluded_atoms": dropped_tickets_excluded_atoms,
@@ -7288,6 +7697,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             artifacts_dict = artifacts if isinstance(artifacts, dict) else {}
             artifacts_dict["policy"] = {
                 "config_path": str(policy_config_path) if policy_config_path is not None else None,
+                "breadth_profile": breadth_profile,
+                "warnings": breadth_profile_warnings,
                 "meta": policy_meta,
             }
             summary["artifacts"] = artifacts_dict

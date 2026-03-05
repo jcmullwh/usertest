@@ -22,6 +22,11 @@ TICKET_STAGE_ENUM: set[str] = {
     "blocked",
 }
 
+_ALLOWED_BREADTH_DIMS: frozenset[str] = frozenset(
+    {"runs", "missions", "targets", "repo_inputs", "agents", "personas"}
+)
+_REVIEW_DOMAIN_ENUM: frozenset[str] = frozenset({"command_surface", "behavior_compat"})
+
 
 def _coerce_string(value: Any) -> str | None:
     if not isinstance(value, str):
@@ -93,6 +98,21 @@ _DEFAULT_INVESTIGATION_STEPS_HIGH_SURFACE_LOW_BREADTH: tuple[str, ...] = (
 
 
 @dataclass(frozen=True)
+class HighSurfaceRule:
+    """Policy rule for a subset of high-surface change kinds."""
+
+    rule_id: str
+    applies_to_kinds: frozenset[str]
+    breadth_min: dict[str, int]
+    default_stage_for_low_breadth: str = "research_required"
+    investigation_steps: tuple[str, ...] = field(
+        default_factory=lambda: _DEFAULT_INVESTIGATION_STEPS_HIGH_SURFACE_LOW_BREADTH
+    )
+    risk_tag: str = "overfitting_risk"
+    review_domain: str = "command_surface"
+
+
+@dataclass(frozen=True)
 class BacklogPolicyConfig:
     """
     Configuration for routing backlog tickets based on structured surface-area + breadth fields.
@@ -101,13 +121,33 @@ class BacklogPolicyConfig:
     YAML/JSON file. The reporter library itself does not assume a particular on-disk format.
     """
 
-    surface_area_high: frozenset[str]
-    breadth_min_for_surface_area_high: dict[str, int]
-    default_stage_for_high_surface_low_breadth: str = "research_required"
+    high_surface_rules: tuple[HighSurfaceRule, ...]
     default_stage_for_labeled: str = "ready_for_ticket"
-    investigation_steps_for_high_surface_low_breadth: tuple[str, ...] = field(
-        default_factory=lambda: _DEFAULT_INVESTIGATION_STEPS_HIGH_SURFACE_LOW_BREADTH
-    )
+
+    @property
+    def surface_area_high(self) -> frozenset[str]:
+        kinds: set[str] = set()
+        for rule in self.high_surface_rules:
+            kinds.update(rule.applies_to_kinds)
+        return frozenset(kinds)
+
+    @property
+    def breadth_min_for_surface_area_high(self) -> dict[str, int]:
+        if not self.high_surface_rules:
+            return {}
+        return dict(self.high_surface_rules[0].breadth_min)
+
+    @property
+    def default_stage_for_high_surface_low_breadth(self) -> str:
+        if not self.high_surface_rules:
+            return "research_required"
+        return self.high_surface_rules[0].default_stage_for_low_breadth
+
+    @property
+    def investigation_steps_for_high_surface_low_breadth(self) -> tuple[str, ...]:
+        if not self.high_surface_rules:
+            return _DEFAULT_INVESTIGATION_STEPS_HIGH_SURFACE_LOW_BREADTH
+        return self.high_surface_rules[0].investigation_steps
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> BacklogPolicyConfig:
@@ -120,52 +160,6 @@ class BacklogPolicyConfig:
             If required fields are missing or invalid.
         """
 
-        surface_area_high_raw = data.get("surface_area_high")
-        if not isinstance(surface_area_high_raw, list) or not surface_area_high_raw:
-            raise ValueError("backlog_policy.surface_area_high must be a non-empty list")
-        surface_area_high = {
-            item.strip()
-            for item in surface_area_high_raw
-            if isinstance(item, str) and item.strip()
-        }
-        unknown = [item for item in surface_area_high if item not in CHANGE_SURFACE_KIND_ENUM]
-        if unknown:
-            raise ValueError(
-                "backlog_policy.surface_area_high contains unknown kinds: "
-                + ", ".join(sorted(unknown))
-            )
-
-        breadth_min_raw = data.get("breadth_min_for_surface_area_high")
-        if not isinstance(breadth_min_raw, dict) or not breadth_min_raw:
-            raise ValueError(
-                "backlog_policy.breadth_min_for_surface_area_high must be a non-empty mapping"
-            )
-        allowed_dims = {"runs", "missions", "targets", "repo_inputs", "agents", "personas"}
-        breadth_min: dict[str, int] = {}
-        for key, raw_value in breadth_min_raw.items():
-            if not isinstance(key, str) or key.strip() not in allowed_dims:
-                raise ValueError(
-                    "backlog_policy.breadth_min_for_surface_area_high key must be one of: "
-                    + ", ".join(sorted(allowed_dims))
-                )
-            value = _coerce_int(raw_value, default=-1)
-            if value < 0:
-                raise ValueError(
-                    "backlog_policy.breadth_min_for_surface_area_high."
-                    f"{key} must be an integer >= 0"
-                )
-            breadth_min[key.strip()] = value
-
-        default_stage = (
-            _coerce_string(data.get("default_stage_for_high_surface_low_breadth"))
-            or "research_required"
-        )
-        if default_stage not in TICKET_STAGE_ENUM:
-            raise ValueError(
-                "backlog_policy.default_stage_for_high_surface_low_breadth must be one of: "
-                + ", ".join(sorted(TICKET_STAGE_ENUM))
-            )
-
         default_stage_labeled = _coerce_string(data.get("default_stage_for_labeled")) or (
             "ready_for_ticket"
         )
@@ -175,25 +169,134 @@ class BacklogPolicyConfig:
                 + ", ".join(sorted(TICKET_STAGE_ENUM))
             )
 
-        steps_raw = data.get("investigation_steps_for_high_surface_low_breadth")
-        if steps_raw is None:
-            steps = _DEFAULT_INVESTIGATION_STEPS_HIGH_SURFACE_LOW_BREADTH
+        rules_raw = data.get("high_surface_rules")
+        if rules_raw is not None:
+            if not isinstance(rules_raw, list) or not rules_raw:
+                raise ValueError("backlog_policy.high_surface_rules must be a non-empty list")
+            rules = tuple(_parse_high_surface_rule(item, idx) for idx, item in enumerate(rules_raw))
         else:
-            steps_list = _coerce_string_list(steps_raw)
-            if not steps_list:
-                raise ValueError(
-                    "backlog_policy.investigation_steps_for_high_surface_low_breadth must be a "
-                    "non-empty list"
-                )
-            steps = tuple(steps_list)
+            rules = (_parse_legacy_high_surface_rule(data),)
 
         return cls(
-            surface_area_high=frozenset(surface_area_high),
-            breadth_min_for_surface_area_high=breadth_min,
-            default_stage_for_high_surface_low_breadth=default_stage,
+            high_surface_rules=rules,
             default_stage_for_labeled=default_stage_labeled,
-            investigation_steps_for_high_surface_low_breadth=steps,
         )
+
+
+def _parse_change_surface_kinds(value: Any, *, field_label: str) -> frozenset[str]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"{field_label} must be a non-empty list")
+    kinds = {item.strip() for item in value if isinstance(item, str) and item.strip()}
+    if not kinds:
+        raise ValueError(f"{field_label} must contain at least one change-surface kind")
+    unknown = [item for item in kinds if item not in CHANGE_SURFACE_KIND_ENUM]
+    if unknown:
+        raise ValueError(
+            f"{field_label} contains unknown kinds: " + ", ".join(sorted(unknown))
+        )
+    return frozenset(kinds)
+
+
+def _parse_breadth_min(value: Any, *, field_label: str) -> dict[str, int]:
+    if not isinstance(value, dict) or not value:
+        raise ValueError(f"{field_label} must be a non-empty mapping")
+    breadth_min: dict[str, int] = {}
+    for key, raw_value in value.items():
+        if not isinstance(key, str) or key.strip() not in _ALLOWED_BREADTH_DIMS:
+            raise ValueError(
+                f"{field_label} key must be one of: " + ", ".join(sorted(_ALLOWED_BREADTH_DIMS))
+            )
+        parsed = _coerce_int(raw_value, default=-1)
+        if parsed < 0:
+            raise ValueError(f"{field_label}.{key} must be an integer >= 0")
+        breadth_min[key.strip()] = parsed
+    return breadth_min
+
+
+def _parse_stage(value: Any, *, field_label: str, default: str) -> str:
+    parsed = _coerce_string(value) or default
+    if parsed not in TICKET_STAGE_ENUM:
+        raise ValueError(
+            f"{field_label} must be one of: " + ", ".join(sorted(TICKET_STAGE_ENUM))
+        )
+    return parsed
+
+
+def _parse_investigation_steps(value: Any, *, field_label: str) -> tuple[str, ...]:
+    if value is None:
+        return _DEFAULT_INVESTIGATION_STEPS_HIGH_SURFACE_LOW_BREADTH
+    steps = _coerce_string_list(value)
+    if not steps:
+        raise ValueError(f"{field_label} must be a non-empty list")
+    return tuple(steps)
+
+
+def _parse_high_surface_rule(raw_rule: Any, idx: int) -> HighSurfaceRule:
+    if not isinstance(raw_rule, dict):
+        raise ValueError(f"backlog_policy.high_surface_rules[{idx}] must be a mapping")
+    prefix = f"backlog_policy.high_surface_rules[{idx}]"
+    rule_id = _coerce_string(raw_rule.get("rule_id")) or f"rule_{idx + 1}"
+    applies_to_kinds = _parse_change_surface_kinds(
+        raw_rule.get("applies_to_kinds"),
+        field_label=f"{prefix}.applies_to_kinds",
+    )
+    breadth_min = _parse_breadth_min(
+        raw_rule.get("breadth_min"),
+        field_label=f"{prefix}.breadth_min",
+    )
+    default_stage = _parse_stage(
+        raw_rule.get("default_stage_for_low_breadth"),
+        field_label=f"{prefix}.default_stage_for_low_breadth",
+        default="research_required",
+    )
+    investigation_steps = _parse_investigation_steps(
+        raw_rule.get("investigation_steps"),
+        field_label=f"{prefix}.investigation_steps",
+    )
+    risk_tag = _coerce_string(raw_rule.get("risk_tag")) or "overfitting_risk"
+    review_domain = _coerce_string(raw_rule.get("review_domain")) or "command_surface"
+    if review_domain not in _REVIEW_DOMAIN_ENUM:
+        raise ValueError(
+            f"{prefix}.review_domain must be one of: " + ", ".join(sorted(_REVIEW_DOMAIN_ENUM))
+        )
+    return HighSurfaceRule(
+        rule_id=rule_id,
+        applies_to_kinds=applies_to_kinds,
+        breadth_min=breadth_min,
+        default_stage_for_low_breadth=default_stage,
+        investigation_steps=investigation_steps,
+        risk_tag=risk_tag,
+        review_domain=review_domain,
+    )
+
+
+def _parse_legacy_high_surface_rule(data: dict[str, Any]) -> HighSurfaceRule:
+    surface_area_high = _parse_change_surface_kinds(
+        data.get("surface_area_high"),
+        field_label="backlog_policy.surface_area_high",
+    )
+    breadth_min = _parse_breadth_min(
+        data.get("breadth_min_for_surface_area_high"),
+        field_label="backlog_policy.breadth_min_for_surface_area_high",
+    )
+    default_stage = _parse_stage(
+        data.get("default_stage_for_high_surface_low_breadth"),
+        field_label="backlog_policy.default_stage_for_high_surface_low_breadth",
+        default="research_required",
+    )
+    investigation_steps = _parse_investigation_steps(
+        data.get("investigation_steps_for_high_surface_low_breadth"),
+        field_label="backlog_policy.investigation_steps_for_high_surface_low_breadth",
+    )
+    return HighSurfaceRule(
+        rule_id="legacy_high_surface",
+        applies_to_kinds=surface_area_high,
+        breadth_min=breadth_min,
+        default_stage_for_low_breadth=default_stage,
+        investigation_steps=investigation_steps,
+        risk_tag="overfitting_risk",
+        review_domain="command_surface",
+    )
 
 
 def apply_backlog_policy(
@@ -223,6 +326,9 @@ def apply_backlog_policy(
         "tickets_research_required": 0,
         "tickets_ready_for_ticket": 0,
         "tickets_unchanged": 0,
+        "rules_total": len(config.high_surface_rules),
+        "rules_matched": {},
+        "rules_low_breadth": {},
     }
 
     updated: list[dict[str, Any]] = []
@@ -243,7 +349,7 @@ def apply_backlog_policy(
             kinds = ["unknown"]
 
         labeled = "unknown" not in kinds
-        high_surface = bool(set(kinds) & config.surface_area_high)
+        kind_set = set(kinds)
 
         breadth_raw = item.get("breadth")
         breadth = breadth_raw if isinstance(breadth_raw, dict) else {}
@@ -252,11 +358,21 @@ def apply_backlog_policy(
             for dim in ("runs", "missions", "targets", "repo_inputs", "agents", "personas")
         }
 
-        low_breadth = False
-        for dim, threshold in config.breadth_min_for_surface_area_high.items():
-            if breadth_counts.get(dim, 0) < threshold:
-                low_breadth = True
-                break
+        matched_rules = [
+            rule for rule in config.high_surface_rules if kind_set & set(rule.applies_to_kinds)
+        ]
+        for rule in matched_rules:
+            meta_rules_matched = meta["rules_matched"]
+            meta_rules_matched[rule.rule_id] = int(meta_rules_matched.get(rule.rule_id, 0)) + 1
+
+        failing_rules: list[HighSurfaceRule] = []
+        for rule in matched_rules:
+            for dim, threshold in rule.breadth_min.items():
+                if breadth_counts.get(dim, 0) < threshold:
+                    failing_rules.append(rule)
+                    meta_rules_low = meta["rules_low_breadth"]
+                    meta_rules_low[rule.rule_id] = int(meta_rules_low.get(rule.rule_id, 0)) + 1
+                    break
 
         new_stage = stage
         risks_to_add: list[str] = []
@@ -269,10 +385,12 @@ def apply_backlog_policy(
             risks_to_add.append("missing_change_plan")
 
         if labeled:
-            if high_surface and low_breadth and stage != "blocked":
-                new_stage = config.default_stage_for_high_surface_low_breadth
-                risks_to_add.append("overfitting_risk")
-                steps_to_add.extend(list(config.investigation_steps_for_high_surface_low_breadth))
+            if matched_rules and failing_rules and stage != "blocked":
+                new_stage = failing_rules[0].default_stage_for_low_breadth
+                for rule in failing_rules:
+                    if rule.risk_tag not in risks_to_add:
+                        risks_to_add.append(rule.risk_tag)
+                    steps_to_add.extend(list(rule.investigation_steps))
             elif stage == "triage":
                 new_stage = (
                     config.default_stage_for_labeled

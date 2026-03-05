@@ -998,6 +998,8 @@ def test_reports_backlog_dry_run_writes_solution_selection(tmp_path: Path) -> No
     doc = json.loads(selection_json.read_text(encoding="utf-8"))
     assert doc.get("stage") == "solution_selection"
     assert doc.get("input_meta", {}).get("dry_run") is True
+    assert doc.get("input_meta", {}).get("breadth_profile") == "external_generalization"
+    assert isinstance(doc.get("input_meta", {}).get("batch_breadth"), dict)
     assert isinstance(doc.get("items"), list)
     assert len(doc["items"]) >= 1
 
@@ -1016,6 +1018,56 @@ def test_reports_backlog_dry_run_writes_solution_selection(tmp_path: Path) -> No
     # when multiple problems are selected for research; at minimum ensure the flag exists.
     if len(doc["items"]) > 1:
         assert needs_ux_values == {False, True}
+
+
+def test_reports_backlog_internal_profile_injects_breadth_context_into_stage5_prompt(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--breadth-profile",
+                "internal_maintenance",
+                "--miners",
+                "0",
+                "--sample-size",
+                "8",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+    assert exc.value.code == 0
+
+    compiled = runs_dir / "target_a" / "_compiled"
+    selection_json = compiled / "target_a.solution_selection.json"
+    artifacts_dir = compiled / "target_a.backlog_artifacts" / "solution_selection"
+
+    doc = json.loads(selection_json.read_text(encoding="utf-8"))
+    assert doc.get("input_meta", {}).get("breadth_profile") == "internal_maintenance"
+    assert isinstance(doc.get("input_meta", {}).get("batch_breadth"), dict)
+    assert "missions" in doc.get("input_meta", {}).get("batch_breadth", {})
+
+    prompt_paths = list(artifacts_dir.glob("solution_selection_*/*.prompt.txt"))
+    assert prompt_paths
+    prompt_text = prompt_paths[0].read_text(encoding="utf-8")
+    assert "Breadth profile: `internal_maintenance`" in prompt_text
+    assert '"runs"' in prompt_text
+    assert '"structurally_constant_dimensions"' in prompt_text
 
 
 def test_reports_backlog_dry_run_writes_change_plans(tmp_path: Path) -> None:

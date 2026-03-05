@@ -225,6 +225,12 @@ def assemble_backlog_tickets(
                 "labeler_confidence",
                 "evidence_atom_ids_used",
                 "breadth",
+                "problem_breadth",
+                "breadth_profile",
+                "decision_basis",
+                "review_domain",
+                "batch_breadth",
+                "structurally_constant_batch_dimensions",
             ):
                 if key in selected_solution:
                     ticket[key] = selected_solution.get(key)
@@ -283,6 +289,12 @@ def assemble_backlog_tickets(
                 "intent_risk",
                 "labeler_confidence",
                 "breadth",
+                "problem_breadth",
+                "breadth_profile",
+                "decision_basis",
+                "review_domain",
+                "batch_breadth",
+                "structurally_constant_batch_dimensions",
             ):
                 if key in selected_solution:
                     ticket[key] = selected_solution.get(key)

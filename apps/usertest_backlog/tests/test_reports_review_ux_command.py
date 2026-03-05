@@ -135,6 +135,7 @@ def test_reports_review_ux_dry_run_writes_prompt_and_outputs(tmp_path: Path) -> 
     assert doc["tickets_meta"]["tickets_total"] == 1
     assert doc["tickets_meta"]["needs_ux_review_total"] == 1
     assert doc["tickets_meta"]["review_total"] == 1
+    assert doc["inputs"]["breadth_profile"] == "external_generalization"
 
 
 def test_reports_review_ux_dry_run_includes_high_surface_ready_tickets(tmp_path: Path) -> None:
@@ -225,3 +226,123 @@ def test_reports_review_ux_dry_run_includes_high_surface_ready_tickets(tmp_path:
     prompt_text = prompt_paths[0].read_text(encoding="utf-8")
     assert fingerprint_high_surface in prompt_text
     assert fingerprint_not_high_surface not in prompt_text
+
+
+def test_reports_review_ux_internal_profile_includes_review_domain_and_accept_existing_surface(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    backlog_path = compiled_dir / "target_a.backlog.json"
+    selection_path = compiled_dir / "target_a.solution_selection.json"
+    intent_snapshot_path = compiled_dir / "target_a.intent_snapshot.json"
+
+    selection_item = {
+        "problem_id": "problem:test-behavior",
+        "title": "Harden existing startup validation",
+        "problem": "Runs currently continue with degraded startup behavior.",
+        "severity": "medium",
+        "confidence": 0.7,
+        "stage": "research_required",
+        "needs_ux_review": False,
+        "selected_option_id": "option:test:most_comprehensive",
+        "selected_family_id": "most_comprehensive",
+        "selection_rationale": (
+            "Repeated cross-run startup degradation supports a class-level "
+            "internal fix."
+        ),
+        "repo_intent_alignment": "Prefer loud failures and reproducible artifacts.",
+        "why_other_options_were_not_selected": "Direct fix leaves broader recurrence risk.",
+        "change_surface": {
+            "user_visible": True,
+            "kinds": ["breaking_change"],
+            "notes": "Existing startup path becomes stricter and can fail earlier.",
+        },
+        "breadth": {
+            "missions": 1,
+            "targets": 1,
+            "repo_inputs": 1,
+            "agents": 2,
+            "runs": 6,
+            "personas": 1,
+        },
+        "problem_breadth": {
+            "missions": 1,
+            "targets": 1,
+            "repo_inputs": 1,
+            "agents": 2,
+            "runs": 6,
+            "personas": 1,
+        },
+        "breadth_profile": "internal_maintenance",
+        "review_domain": "behavior_compat",
+        "decision_basis": {
+            "context_breadth": {"missions": 1, "targets": 1, "repo_inputs": 1},
+            "observation_breadth": {"runs": 6, "agents": 2, "personas": 1},
+            "structurally_constant_dimensions": ["missions", "targets", "repo_inputs"],
+        },
+    }
+    _write_json(backlog_path, {"schema_version": 1, "tickets": []})
+    _write_json(
+        selection_path,
+        {
+            "schema_version": 1,
+            "stage": "solution_selection",
+            "input_meta": {
+                "breadth_profile": "internal_maintenance",
+                "batch_breadth": {
+                    "missions": 1,
+                    "targets": 1,
+                    "repo_inputs": 1,
+                    "agents": 2,
+                    "runs": 6,
+                    "personas": 1,
+                    "structurally_constant_dimensions": ["missions", "targets", "repo_inputs"],
+                    "varying_dimensions": ["agents", "runs"],
+                },
+            },
+            "items": [selection_item],
+        },
+    )
+    _write_json(
+        intent_snapshot_path,
+        {
+            "schema_version": 1,
+            "generated_at": "2026-02-09T00:00:00Z",
+            "scope": {"target": "target_a", "repo_input": None},
+            "commands": [{"command": "usertest reports backlog", "help": "Generate a backlog."}],
+        },
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "review-ux",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--breadth-profile",
+                "internal_maintenance",
+            ]
+        )
+    assert exc.value.code == 0
+
+    out_json = compiled_dir / "target_a.ux_review.json"
+    artifacts_dir = compiled_dir / "target_a.ux_review_artifacts"
+    prompt_paths = list(artifacts_dir.glob("*.dry_run.prompt.txt"))
+    assert prompt_paths
+
+    doc = json.loads(out_json.read_text(encoding="utf-8"))
+    assert doc["inputs"]["breadth_profile"] == "internal_maintenance"
+    assert doc["review_meta"]["breadth_profile"] == "internal_maintenance"
+    prompt_text = prompt_paths[0].read_text(encoding="utf-8")
+    assert "accept_existing_surface" in prompt_text
+    assert '"review_domain": "behavior_compat"' in prompt_text
+    assert '"breadth_profile": "internal_maintenance"' in prompt_text
