@@ -29,6 +29,7 @@ _SAFE_ENV_KEYS_FOR_META: frozenset[str] = frozenset(
         "PYTEST_ADDOPTS",
         "USERTEST_MAINT_VENV_CACHE_ENABLED",
         "USERTEST_MAINT_VENV_CACHE_ROOT",
+        "USERTEST_MAINT_VENV_SEED_ROOT",
     }
 )
 
@@ -182,7 +183,7 @@ class DockerSandboxInstance(SandboxInstance):
 
     container_name: str
     image_tag: str
-    image_hash: str
+    image_hash: str | None
     docker_timeout_seconds: float | None = None
 
     keep_container: bool = False
@@ -246,70 +247,83 @@ class DockerSandbox:
         _ensure_docker_available(timeout_seconds=docker_timeout_seconds)
         _progress("docker available")
 
-        context_dir = spec.image_context_path
-        if context_dir is None:
-            raise ValueError("Docker sandbox requires spec.image_context_path.")
-        context_dir = context_dir.resolve()
-        if not context_dir.exists() or not context_dir.is_dir():
-            raise FileNotFoundError(f"Missing Docker image context directory: {context_dir}")
-
-        dockerfile_path = spec.dockerfile
-        if dockerfile_path is None:
-            dockerfile_path = context_dir / "Dockerfile"
-        elif not dockerfile_path.is_absolute():
-            dockerfile_path = context_dir / dockerfile_path
-        dockerfile_path = dockerfile_path.resolve()
-        if not dockerfile_path.exists() or not dockerfile_path.is_file():
-            raise FileNotFoundError(f"Missing Dockerfile: {dockerfile_path}")
-
-        _progress("compute image hash")
-        image_hash = compute_image_hash(context_dir=context_dir, dockerfile=dockerfile_path)
+        image_ref = spec.image_ref.strip() if isinstance(spec.image_ref, str) else ""
+        context_dir: Path | None = None
+        dockerfile_path: Path | None = None
+        image_hash: str | None = None
         image_repo = spec.image_repo.strip() if isinstance(spec.image_repo, str) else ""
         image_repo = image_repo if image_repo else _DEFAULT_DOCKER_IMAGE_REPO
-        image_tag = f"{image_repo}:{image_hash[:12]}"
-        _progress(f"image tag {image_tag}")
-
-        # Make sure we have somewhere to write build logs, even if the build fails.
         build_log_path = self._artifacts_dir / "docker_build.log"
 
-        if spec.rebuild_image or not _docker_image_exists(
-            image_tag, timeout_seconds=docker_timeout_seconds
-        ):
-            dockerfile_ref = str(dockerfile_path)
-            try:
-                dockerfile_ref = (
-                    dockerfile_path.resolve().relative_to(context_dir.resolve()).as_posix()
+        if image_ref:
+            if spec.rebuild_image:
+                raise ValueError(
+                    "SandboxSpec.rebuild_image is not supported with SandboxSpec.image_ref."
                 )
-            except ValueError:
-                dockerfile_ref = str(dockerfile_path)
-
-            # Stream build output to both the console and a log file so long builds
-            # don't look "hung" when invoked from the CLI.
-            _progress("docker build")
-            rc = _docker_build_streaming(
-                argv=[
-                    "docker",
-                    "build",
-                    "--progress=plain",
-                    "-t",
-                    image_tag,
-                    "-f",
-                    dockerfile_ref,
-                    ".",
-                ],
-                cwd=context_dir,
-                log_path=build_log_path,
-            )
-            if rc != 0:
-                raise RuntimeError(
-                    "Docker image build failed.\n"
-                    f"tag={image_tag}\n"
-                    f"context={context_dir}\n"
-                    f"dockerfile={dockerfile_path}\n"
-                    f"build_log={build_log_path}\n"
-                )
+            image_tag = image_ref
+            _progress(f"use image ref {image_tag}")
         else:
-            _progress("docker build skipped (image exists)")
+            context_dir = spec.image_context_path
+            if context_dir is None:
+                raise ValueError(
+                    "Docker sandbox requires spec.image_context_path or spec.image_ref."
+                )
+            context_dir = context_dir.resolve()
+            if not context_dir.exists() or not context_dir.is_dir():
+                raise FileNotFoundError(f"Missing Docker image context directory: {context_dir}")
+
+            dockerfile_path = spec.dockerfile
+            if dockerfile_path is None:
+                dockerfile_path = context_dir / "Dockerfile"
+            elif not dockerfile_path.is_absolute():
+                dockerfile_path = context_dir / dockerfile_path
+            dockerfile_path = dockerfile_path.resolve()
+            if not dockerfile_path.exists() or not dockerfile_path.is_file():
+                raise FileNotFoundError(f"Missing Dockerfile: {dockerfile_path}")
+
+            _progress("compute image hash")
+            image_hash = compute_image_hash(context_dir=context_dir, dockerfile=dockerfile_path)
+            image_tag = f"{image_repo}:{image_hash[:12]}"
+            _progress(f"image tag {image_tag}")
+
+            if spec.rebuild_image or not _docker_image_exists(
+                image_tag, timeout_seconds=docker_timeout_seconds
+            ):
+                dockerfile_ref = str(dockerfile_path)
+                try:
+                    dockerfile_ref = (
+                        dockerfile_path.resolve().relative_to(context_dir.resolve()).as_posix()
+                    )
+                except ValueError:
+                    dockerfile_ref = str(dockerfile_path)
+
+                # Stream build output to both the console and a log file so long builds
+                # don't look "hung" when invoked from the CLI.
+                _progress("docker build")
+                rc = _docker_build_streaming(
+                    argv=[
+                        "docker",
+                        "build",
+                        "--progress=plain",
+                        "-t",
+                        image_tag,
+                        "-f",
+                        dockerfile_ref,
+                        ".",
+                    ],
+                    cwd=context_dir,
+                    log_path=build_log_path,
+                )
+                if rc != 0:
+                    raise RuntimeError(
+                        "Docker image build failed.\n"
+                        f"tag={image_tag}\n"
+                        f"context={context_dir}\n"
+                        f"dockerfile={dockerfile_path}\n"
+                        f"build_log={build_log_path}\n"
+                    )
+            else:
+                _progress("docker build skipped (image exists)")
 
         container_name = self._container_name or f"sandbox-{uuid.uuid4().hex[:12]}"
         container_name = _sanitize_container_name(container_name)
@@ -428,9 +442,10 @@ class DockerSandbox:
             "backend": "docker",
             "image_tag": image_tag,
             "image_hash": image_hash,
-            "image_repo": image_repo,
-            "context_dir": str(context_dir),
-            "dockerfile": str(dockerfile_path),
+            "image_repo": image_repo if image_hash is not None else None,
+            "image_ref": image_ref or image_tag,
+            "context_dir": str(context_dir) if context_dir is not None else None,
+            "dockerfile": str(dockerfile_path) if dockerfile_path is not None else None,
             "container_name": container_name,
             "workspace_mount": workspace_mount,
             "artifacts_mount": artifacts_mount,

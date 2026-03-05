@@ -4,6 +4,9 @@ import importlib.resources
 import json
 import re
 import shutil
+import subprocess
+import sys
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, cast
 
 import yaml
 from sandbox_runner import DockerSandbox, MountSpec, SandboxInstance, SandboxSpec
+from sandbox_runner.image_hash import compute_image_hash
 
 if TYPE_CHECKING:
     from runner_core.runner import RunRequest
@@ -40,13 +44,49 @@ _SANDBOX_CLI_PYTHON_VERSION_CANDIDATES: tuple[str, ...] = (
 _DEFAULT_DOCKER_CONTEXT_REL = Path(
     "packages/sandbox_runner/src/sandbox_runner/builtins/docker/contexts/sandbox_cli"
 )
-_MAINTENANCE_VENV_CACHE_ROOT = "/cache/usertest_maint_venvs"
+_DEFAULT_MAINTENANCE_DOCKER_CONFIG_REL = Path("configs/maintenance_docker.yaml")
+_INSTALL_CACHE_FINGERPRINT_SCRIPT_REL = Path("tools/scaffold/install_cache_fingerprint.py")
+_MAINTENANCE_CONTEXT_PREPARE_SCRIPT_REL = Path("tools/maintenance_image/prepare_context.py")
+_DEFAULT_MAINTENANCE_CACHE_ROOT_SUBDIR = "usertest_maint_venvs"
+
+
+def _safe_cache_project_id(project_id: str) -> str:
+    # Keep this local so runner_core does not depend on the repo-only tools/ tree at import time.
+    cleaned = "".join(
+        ch if ch.isalnum() or ch in {"_", ".", "-"} else "-" for ch in (project_id or "")
+    ).strip("-.")
+    return cleaned or "project"
+
+
+@dataclass(frozen=True)
+class MaintenanceDockerConfig:
+    local_image_repo: str
+    published_image_repo: str
+    pull_policy: Literal["if_missing", "always", "never"]
+    seed_root: str
+    cache_root_subdir: str
+    publish_branches: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class MaintenanceProfilePreparation:
+    image_ref: str
+    env_hash: str
+    image_source: str
+    image_resolution_seconds: float
+    fingerprint_seconds: float
+    cache_mount_hits: int
+    cache_mounts: list[MountSpec]
+    env_overrides: dict[str, str]
+    metadata: dict[str, Any]
 
 
 def _default_sandbox_env_overrides(
     *,
     cache_mode: Literal["cold", "warm"],
     maintenance_venv_cache_enabled: bool,
+    maintenance_venv_cache_root: str = f"/cache/{_DEFAULT_MAINTENANCE_CACHE_ROOT_SUBDIR}",
+    maintenance_venv_seed_root: str | None = None,
 ) -> dict[str, str]:
     """
     Ensure common tooling (pip/pytest/build backends) uses a writable temp root inside the sandbox.
@@ -65,9 +105,11 @@ def _default_sandbox_env_overrides(
     }
     if maintenance_venv_cache_enabled:
         env["USERTEST_MAINT_VENV_CACHE_ENABLED"] = "1"
-        env["USERTEST_MAINT_VENV_CACHE_ROOT"] = _MAINTENANCE_VENV_CACHE_ROOT
+        env["USERTEST_MAINT_VENV_CACHE_ROOT"] = maintenance_venv_cache_root
     else:
         env["USERTEST_MAINT_VENV_CACHE_ENABLED"] = "0"
+    if maintenance_venv_seed_root is not None and maintenance_venv_seed_root.strip():
+        env["USERTEST_MAINT_VENV_SEED_ROOT"] = maintenance_venv_seed_root.strip()
     return env
 
 
@@ -102,6 +144,486 @@ def _copy_builtin_sandbox_cli_context_from_resources(*, run_dir: Path) -> Path |
     return dest
 
 
+def _normalize_exec_docker_profile(value: object) -> Literal["standard", "maintenance"]:
+    raw = str(value or "standard").strip().lower()
+    if raw not in {"standard", "maintenance"}:
+        raise ValueError(f"Unsupported exec_docker_profile={value!r}")
+    return cast(Literal["standard", "maintenance"], raw)
+
+
+def _load_maintenance_docker_config(*, repo_root: Path) -> MaintenanceDockerConfig:
+    path = (repo_root / _DEFAULT_MAINTENANCE_DOCKER_CONFIG_REL).resolve()
+    try:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except OSError as e:
+        raise FileNotFoundError(f"Missing maintenance Docker config: {path}") from e
+    except yaml.YAMLError as e:
+        raise ValueError(f"Failed to parse maintenance Docker config {path}: {e}") from e
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected YAML mapping in maintenance Docker config: {path}")
+    if raw.get("version") != 1:
+        raise ValueError(
+            f"Unsupported maintenance Docker config version in {path}: {raw.get('version')!r}"
+        )
+    cfg = raw.get("maintenance_docker")
+    if not isinstance(cfg, dict):
+        raise ValueError(f"Missing maintenance_docker mapping in {path}")
+
+    def _require_nonempty_str(key: str) -> str:
+        value = cfg.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"maintenance_docker.{key} must be a non-empty string in {path}")
+        return value.strip()
+
+    pull_policy = _require_nonempty_str("pull_policy").lower()
+    if pull_policy not in {"if_missing", "always", "never"}:
+        raise ValueError(
+            f"maintenance_docker.pull_policy must be one of if_missing|always|never in {path}"
+        )
+    publish_branches_raw = cfg.get("publish_branches")
+    if not isinstance(publish_branches_raw, list) or not all(
+        isinstance(item, str) and item.strip() for item in publish_branches_raw
+    ):
+        raise ValueError(
+            f"maintenance_docker.publish_branches must be a list of non-empty strings in {path}"
+        )
+
+    return MaintenanceDockerConfig(
+        local_image_repo=_require_nonempty_str("local_image_repo"),
+        published_image_repo=_require_nonempty_str("published_image_repo"),
+        pull_policy=cast(Literal["if_missing", "always", "never"], pull_policy),
+        seed_root=_require_nonempty_str("seed_root"),
+        cache_root_subdir=_require_nonempty_str("cache_root_subdir"),
+        publish_branches=tuple(item.strip() for item in publish_branches_raw),
+    )
+
+
+def _run_subprocess(
+    argv: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout_seconds: float | None = None,
+    capture_output: bool = True,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            argv,
+            cwd=str(cwd) if cwd is not None else None,
+            capture_output=capture_output,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=timeout_seconds,
+            check=False,
+        )
+    except FileNotFoundError as e:
+        raise RuntimeError(f"Command not found: {argv[0]}") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(f"Command timed out after {timeout_seconds}s: {' '.join(argv)}") from e
+
+
+def _docker_image_exists_local(*, ref: str, timeout_seconds: float | None) -> bool:
+    proc = _run_subprocess(
+        ["docker", "image", "inspect", ref],
+        timeout_seconds=timeout_seconds,
+    )
+    return proc.returncode == 0
+
+
+def _docker_pull_image(
+    *, ref: str, timeout_seconds: float | None, log_path: Path
+) -> subprocess.CompletedProcess[str]:
+    proc = _run_subprocess(
+        ["docker", "pull", ref],
+        timeout_seconds=timeout_seconds,
+    )
+    log_path.write_text(
+        json.dumps(
+            {
+                "argv": ["docker", "pull", ref],
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return proc
+
+
+def _docker_tag_image(*, source_ref: str, target_ref: str, timeout_seconds: float | None) -> None:
+    proc = _run_subprocess(
+        ["docker", "tag", source_ref, target_ref],
+        timeout_seconds=timeout_seconds,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to tag Docker image.\n"
+            f"source={source_ref}\n"
+            f"target={target_ref}\n"
+            f"stdout:\n{proc.stdout}\n"
+            f"stderr:\n{proc.stderr}\n"
+        )
+
+
+def _git_remote_url(*, repo_dir: Path, remote_name: str = "origin") -> str | None:
+    proc = _run_subprocess(
+        ["git", "-C", str(repo_dir), "remote", "get-url", remote_name.strip() or "origin"],
+        timeout_seconds=10.0,
+    )
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    return out if out else None
+
+
+def _read_json_artifact(path: Path) -> dict[str, Any]:
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(raw, dict):
+        raise ValueError(f"Expected JSON object in {path}")
+    return cast(dict[str, Any], raw)
+
+
+def _prepare_maintenance_image_context(
+    *,
+    repo_root: Path,
+    run_dir: Path,
+    timeout_seconds: float | None,
+) -> tuple[Path, dict[str, Any]]:
+    script_path = (repo_root / _MAINTENANCE_CONTEXT_PREPARE_SCRIPT_REL).resolve()
+    if not script_path.exists():
+        raise FileNotFoundError(f"Missing maintenance context preparation script: {script_path}")
+    sandbox_dir = run_dir / "sandbox"
+    context_dir = sandbox_dir / "maintenance_image_context"
+    metadata_path = sandbox_dir / "maintenance_image_context.json"
+    proc = _run_subprocess(
+        [
+            sys.executable,
+            str(script_path),
+            "--repo-root",
+            str(repo_root),
+            "--output-dir",
+            str(context_dir),
+            "--metadata-out",
+            str(metadata_path),
+        ],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to prepare maintenance Docker context.\n"
+            f"script={script_path}\n"
+            f"stdout:\n{proc.stdout}\n"
+            f"stderr:\n{proc.stderr}\n"
+        )
+    return context_dir, _read_json_artifact(metadata_path)
+
+
+def _compute_install_cache_fingerprints(
+    *,
+    repo_root: Path,
+    run_dir: Path,
+    python_major_minor: str,
+    pdm_version: str,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
+    script_path = (repo_root / _INSTALL_CACHE_FINGERPRINT_SCRIPT_REL).resolve()
+    if not script_path.exists():
+        raise FileNotFoundError(f"Missing install-cache fingerprint script: {script_path}")
+    output_path = run_dir / "sandbox" / "install_cache_fingerprints.json"
+    proc = _run_subprocess(
+        [
+            sys.executable,
+            str(script_path),
+            "--repo-root",
+            str(repo_root),
+            "--all",
+            "--python-major-minor",
+            python_major_minor,
+            "--pdm-version",
+            pdm_version,
+            "--output",
+            str(output_path),
+        ],
+        cwd=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to compute install-cache fingerprints.\n"
+            f"script={script_path}\n"
+            f"stdout:\n{proc.stdout}\n"
+            f"stderr:\n{proc.stderr}\n"
+        )
+    return _read_json_artifact(output_path)
+
+
+def _update_json_artifact(path: Path, updater: Any) -> None:
+    payload: dict[str, Any] = {}
+    if path.exists():
+        payload = _read_json_artifact(path)
+    updated = updater(payload)
+    _write_json(path, updated)
+
+
+def _build_maintenance_image(
+    *,
+    context_dir: Path,
+    local_ref: str,
+    published_ref: str,
+    timeout_seconds: float | None,
+    log_path: Path,
+) -> None:
+    argv = [
+        "docker",
+        "build",
+        "--progress=plain",
+        "-t",
+        local_ref,
+        "-t",
+        published_ref,
+        "-f",
+        "Dockerfile",
+        ".",
+    ]
+    try:
+        with log_path.open("w", encoding="utf-8", newline="\n") as handle:
+            proc = subprocess.run(
+                argv,
+                cwd=str(context_dir),
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+            )
+    except FileNotFoundError as e:
+        raise RuntimeError("Docker CLI not found while building maintenance image.") from e
+    except subprocess.TimeoutExpired as e:
+        raise RuntimeError(
+            "Timed out while building maintenance image.\n"
+            f"context={context_dir}\n"
+            f"log={log_path}\n"
+        ) from e
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to build maintenance Docker image.\n"
+            f"context={context_dir}\n"
+            f"log={log_path}\n"
+            f"local_ref={local_ref}\n"
+            f"published_ref={published_ref}\n"
+        )
+
+
+def _prepare_maintenance_profile(
+    *,
+    repo_root: Path,
+    run_dir: Path,
+    workspace_dir: Path,
+    request: RunRequest,
+    cache_mode: Literal["cold", "warm"],
+    cache_dir: Path | None,
+    maintenance_venv_reuse_enabled: bool,
+    timeout_seconds: float | None,
+) -> MaintenanceProfilePreparation:
+    started = time.monotonic()
+    cfg = _load_maintenance_docker_config(repo_root=repo_root)
+    context_dir, context_meta = _prepare_maintenance_image_context(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        timeout_seconds=timeout_seconds,
+    )
+    dockerfile = context_dir / "Dockerfile"
+    env_hash = compute_image_hash(context_dir=context_dir, dockerfile=dockerfile)
+    tag_suffix = env_hash[:16]
+    local_ref = f"{cfg.local_image_repo}:{tag_suffix}"
+    published_ref = f"{cfg.published_image_repo}:{tag_suffix}"
+    pull_attempted = False
+    build_performed = False
+    image_source = ""
+
+    if bool(getattr(request, "exec_rebuild_image", False)):
+        build_log_path = run_dir / "sandbox" / "maintenance_docker_build.log"
+        _build_maintenance_image(
+            context_dir=context_dir,
+            local_ref=local_ref,
+            published_ref=published_ref,
+            timeout_seconds=timeout_seconds,
+            log_path=build_log_path,
+        )
+        build_performed = True
+        image_source = "built"
+    elif _docker_image_exists_local(ref=local_ref, timeout_seconds=timeout_seconds):
+        image_source = "local"
+    else:
+        if cfg.pull_policy in {"if_missing", "always"}:
+            pull_attempted = True
+            pull_log_path = run_dir / "sandbox" / "maintenance_docker_pull.json"
+            pull_proc = _docker_pull_image(
+                ref=published_ref,
+                timeout_seconds=timeout_seconds,
+                log_path=pull_log_path,
+            )
+            if pull_proc.returncode == 0:
+                if local_ref != published_ref:
+                    _docker_tag_image(
+                        source_ref=published_ref,
+                        target_ref=local_ref,
+                        timeout_seconds=timeout_seconds,
+                    )
+                image_source = "pulled"
+
+        if not image_source:
+            build_log_path = run_dir / "sandbox" / "maintenance_docker_build.log"
+            _build_maintenance_image(
+                context_dir=context_dir,
+                local_ref=local_ref,
+                published_ref=published_ref,
+                timeout_seconds=timeout_seconds,
+                log_path=build_log_path,
+            )
+            build_performed = True
+            image_source = "built"
+
+    fingerprint_start = time.monotonic()
+    python_major_minor = context_meta.get("python_major_minor")
+    pdm_version = context_meta.get("pdm_version")
+    if not isinstance(python_major_minor, str) or not python_major_minor.strip():
+        raise ValueError("Maintenance context metadata missing python_major_minor")
+    if not isinstance(pdm_version, str) or not pdm_version.strip():
+        raise ValueError("Maintenance context metadata missing pdm_version")
+    fingerprints = _compute_install_cache_fingerprints(
+        repo_root=workspace_dir,
+        run_dir=run_dir,
+        python_major_minor=python_major_minor.strip(),
+        pdm_version=pdm_version.strip(),
+        timeout_seconds=timeout_seconds,
+    )
+    fingerprint_seconds = max(0.0, time.monotonic() - fingerprint_start)
+
+    cache_mounts: list[MountSpec] = []
+    cache_mount_hits = 0
+    host_cache_dir = cache_dir.resolve() if cache_dir is not None else None
+    host_cache_root = (
+        host_cache_dir / cfg.cache_root_subdir
+        if cache_mode == "warm" and host_cache_dir is not None and maintenance_venv_reuse_enabled
+        else None
+    )
+    container_cache_root = f"/cache/{cfg.cache_root_subdir}"
+    projects_meta: list[dict[str, Any]] = []
+    raw_projects = fingerprints.get("projects")
+    if not isinstance(raw_projects, list):
+        raise ValueError("Invalid install-cache fingerprint artifact: missing projects list")
+    for project in raw_projects:
+        if not isinstance(project, dict):
+            raise ValueError(f"Invalid install-cache fingerprint entry: {project!r}")
+        project_id = project.get("id")
+        project_path = project.get("path")
+        fingerprint = project.get("fingerprint")
+        if not isinstance(project_id, str) or not project_id.strip():
+            raise ValueError(f"Invalid install-cache fingerprint project id: {project!r}")
+        if not isinstance(project_path, str) or not project_path.strip():
+            raise ValueError(f"Invalid install-cache fingerprint project path: {project!r}")
+        if not isinstance(fingerprint, str) or not fingerprint.strip():
+            raise ValueError(f"Invalid install-cache fingerprint value: {project!r}")
+        host_venv_dir = (
+            host_cache_root / _safe_cache_project_id(project_id) / fingerprint / "venv"
+            if host_cache_root is not None
+            else None
+        )
+        mounted_cache_hit = bool(host_venv_dir is not None and host_venv_dir.is_dir())
+        if mounted_cache_hit and host_venv_dir is not None:
+            cache_mount_hits += 1
+            cache_mounts.append(
+                MountSpec(
+                    host_path=host_venv_dir.resolve(),
+                    container_path=f"/workspace/{project_path}/.venv",
+                    read_only=False,
+                )
+            )
+        projects_meta.append(
+            {
+                "id": project_id,
+                "path": project_path,
+                "fingerprint": fingerprint,
+                "mounted_cache_hit": mounted_cache_hit,
+                "seed_available": bool(maintenance_venv_reuse_enabled),
+            }
+        )
+
+    verification_contract = {"commands": list(getattr(request, "verification_commands", ()) or ())}
+    commands = verification_contract["commands"]
+    if len(commands) >= 4:
+        verification_contract.update(
+            {
+                "smoke": commands[0],
+                "install": commands[1],
+                "lint": commands[2],
+                "test": commands[3],
+            }
+        )
+
+    env_overrides = _default_sandbox_env_overrides(
+        cache_mode=cache_mode,
+        maintenance_venv_cache_enabled=bool(host_cache_root is not None),
+        maintenance_venv_cache_root=container_cache_root,
+        maintenance_venv_seed_root=cfg.seed_root if maintenance_venv_reuse_enabled else None,
+    )
+
+    metadata: dict[str, Any] = {
+        "schema_version": 1,
+        "profile": "maintenance",
+        "eligible": True,
+        "repo_identity": {
+            "local_git_root": str(repo_root),
+            "origin_url": _git_remote_url(repo_dir=repo_root),
+        },
+        "image": {
+            "env_hash": env_hash,
+            "local_ref": local_ref,
+            "published_ref": published_ref,
+            "source": image_source,
+            "pull_attempted": pull_attempted,
+            "build_performed": build_performed,
+            "context_dir": str(context_dir),
+            "context_metadata": context_meta,
+        },
+        "cache": {
+            "host_cache_dir": str(host_cache_dir) if host_cache_dir is not None else None,
+            "container_cache_root": container_cache_root if host_cache_root is not None else None,
+            "seed_root": cfg.seed_root if maintenance_venv_reuse_enabled else None,
+            "projects": projects_meta,
+        },
+        "verification_contract": verification_contract,
+        "timings": {
+            "fingerprint_seconds": fingerprint_seconds,
+            "image_resolution_seconds": max(0.0, time.monotonic() - started),
+            "container_start_seconds": None,
+            "cache_mount_hits": cache_mount_hits,
+            "seed_hits": None,
+            "install_projects_run": None,
+        },
+    }
+
+    return MaintenanceProfilePreparation(
+        image_ref=local_ref,
+        env_hash=env_hash,
+        image_source=image_source,
+        image_resolution_seconds=max(0.0, time.monotonic() - started),
+        fingerprint_seconds=fingerprint_seconds,
+        cache_mount_hits=cache_mount_hits,
+        cache_mounts=cache_mounts,
+        env_overrides=env_overrides,
+        metadata=metadata,
+    )
+
+
 def prepare_execution_backend(
     *,
     repo_root: Path,
@@ -123,45 +645,12 @@ def prepare_execution_backend(
     if backend != "docker":
         raise ValueError(f"Unsupported exec_backend={backend!r}")
 
-    context_dir: Path | None = getattr(request, "exec_docker_context", None)
-    if context_dir is None:
-        default_context = (repo_root / _DEFAULT_DOCKER_CONTEXT_REL).resolve()
-        if default_context.exists() and default_context.is_dir():
-            context_dir = default_context
-        else:
-            copied = _copy_builtin_sandbox_cli_context_from_resources(run_dir=run_dir)
-            if copied is None:
-                raise ValueError(
-                    "exec_backend='docker' requires exec_docker_context "
-                    "(CLI: --exec-docker-context PATH).\n"
-                    f"default_context_checked={default_context}\n"
-                    "default_context_resource="
-                    "sandbox_runner:builtins/docker/contexts/sandbox_cli (missing)"
-                )
-            context_dir = copied
-    context_dir = context_dir.resolve()
-    if not context_dir.exists() or not context_dir.is_dir():
-        raise FileNotFoundError(f"Missing Docker image context directory: {context_dir}")
+    profile = _normalize_exec_docker_profile(getattr(request, "exec_docker_profile", "standard"))
 
     docker_python_raw = getattr(request, "exec_docker_python", "auto")
     docker_python = str(docker_python_raw or "auto").strip().lower()
     if not docker_python:
         docker_python = "auto"
-
-    # Optionally create a per-run sandbox_cli build context:
-    # - inject agent-specific overlays (APT/pip/npm) from configs/agents.yaml
-    # - and/or select a Python base image (auto from target requires-python, or explicit)
-    context_dir = _maybe_prepare_sandbox_cli_context(
-        repo_root=repo_root,
-        run_dir=run_dir,
-        base_context_dir=context_dir,
-        agent_cfg=agent_cfg,
-        target_repo_root=workspace_dir,
-        docker_python=docker_python,
-        use_target_sandbox_cli_install=bool(
-            getattr(request, "exec_use_target_sandbox_cli_install", False)
-        ),
-    )
 
     dockerfile: Path | None = getattr(request, "exec_dockerfile", None)
     if dockerfile is not None and not dockerfile.is_absolute():
@@ -180,8 +669,9 @@ def prepare_execution_backend(
     cache_dir: Path | None = getattr(request, "exec_cache_dir", None)
     if cache_mode == "warm" and cache_dir is None:
         cache_dir = repo_root / "runs" / "_cache" / "usertest"
+    maintenance_venv_reuse_enabled = bool(getattr(request, "exec_maintenance_venv_cache", False))
     maintenance_venv_cache_enabled = bool(
-        cache_mode == "warm" and getattr(request, "exec_maintenance_venv_cache", False)
+        cache_mode == "warm" and maintenance_venv_reuse_enabled
     )
 
     env_allowlist_raw = getattr(request, "exec_env", ())
@@ -214,31 +704,141 @@ def prepare_execution_backend(
                     )
                 )
 
+    context_dir: Path | None = None
+    image_ref: str | None = None
+    env_overrides: dict[str, str]
+    maintenance_profile: MaintenanceProfilePreparation | None = None
+    docker_timeout_seconds = getattr(request, "exec_docker_timeout_seconds", None)
+
+    if profile == "maintenance":
+        if getattr(request, "exec_docker_context", None) is not None:
+            raise ValueError(
+                "exec_docker_profile='maintenance' does not support exec_docker_context."
+            )
+        if dockerfile is not None:
+            raise ValueError("exec_docker_profile='maintenance' does not support exec_dockerfile.")
+        if bool(getattr(request, "exec_use_target_sandbox_cli_install", False)):
+            raise ValueError(
+                "exec_docker_profile='maintenance' does not support "
+                "exec_use_target_sandbox_cli_install."
+            )
+        maintenance_profile = _prepare_maintenance_profile(
+            repo_root=repo_root,
+            run_dir=run_dir,
+            workspace_dir=workspace_dir,
+            request=request,
+            cache_mode=cache_mode_typed,
+            cache_dir=cache_dir,
+            maintenance_venv_reuse_enabled=maintenance_venv_reuse_enabled,
+            timeout_seconds=docker_timeout_seconds,
+        )
+        image_ref = maintenance_profile.image_ref
+        extra_mounts.extend(maintenance_profile.cache_mounts)
+        env_overrides = dict(maintenance_profile.env_overrides)
+        _write_json(sandbox_dir / "maintenance_profile.json", maintenance_profile.metadata)
+    else:
+        context_dir = getattr(request, "exec_docker_context", None)
+        if context_dir is None:
+            default_context = (repo_root / _DEFAULT_DOCKER_CONTEXT_REL).resolve()
+            if default_context.exists() and default_context.is_dir():
+                context_dir = default_context
+            else:
+                copied = _copy_builtin_sandbox_cli_context_from_resources(run_dir=run_dir)
+                if copied is None:
+                    raise ValueError(
+                        "exec_backend='docker' requires exec_docker_context "
+                        "(CLI: --exec-docker-context PATH).\n"
+                        f"default_context_checked={default_context}\n"
+                        "default_context_resource="
+                        "sandbox_runner:builtins/docker/contexts/sandbox_cli (missing)"
+                    )
+                context_dir = copied
+        context_dir = context_dir.resolve()
+        if not context_dir.exists() or not context_dir.is_dir():
+            raise FileNotFoundError(f"Missing Docker image context directory: {context_dir}")
+
+        # Optionally create a per-run sandbox_cli build context:
+        # - inject agent-specific overlays (APT/pip/npm) from configs/agents.yaml
+        # - and/or select a Python base image (auto from target requires-python, or explicit)
+        context_dir = _maybe_prepare_sandbox_cli_context(
+            repo_root=repo_root,
+            run_dir=run_dir,
+            base_context_dir=context_dir,
+            agent_cfg=agent_cfg,
+            target_repo_root=workspace_dir,
+            docker_python=docker_python,
+            use_target_sandbox_cli_install=bool(
+                getattr(request, "exec_use_target_sandbox_cli_install", False)
+            ),
+        )
+        env_overrides = _default_sandbox_env_overrides(
+            cache_mode=cache_mode_typed,
+            maintenance_venv_cache_enabled=maintenance_venv_cache_enabled,
+        )
+
     spec = SandboxSpec(
         backend="docker",
+        image_ref=image_ref,
         image_context_path=context_dir,
         dockerfile=dockerfile,
         network_mode=network_mode,
         cache_mode=cache_mode_typed,
         cache_dir=cache_dir.resolve() if cache_dir is not None else None,
         env_allowlist=env_allowlist,
-        env_overrides=_default_sandbox_env_overrides(
-            cache_mode=cache_mode_typed,
-            maintenance_venv_cache_enabled=maintenance_venv_cache_enabled,
-        ),
+        env_overrides=env_overrides,
         extra_mounts=extra_mounts,
         keep_container=keep_container,
-        rebuild_image=rebuild_image,
-        docker_timeout_seconds=getattr(request, "exec_docker_timeout_seconds", None),
+        rebuild_image=False if profile == "maintenance" else rebuild_image,
+        docker_timeout_seconds=docker_timeout_seconds,
     )
 
     container_name = f"sandbox-{workspace_id}"
+    container_start_monotonic = time.monotonic()
     instance = DockerSandbox(
         workspace_dir=workspace_dir,
         artifacts_dir=sandbox_dir,
         spec=spec,
         container_name=container_name,
     ).start()
+    container_start_seconds = max(0.0, time.monotonic() - container_start_monotonic)
+
+    _update_json_artifact(
+        sandbox_dir / "sandbox.json",
+        lambda payload: {
+            **payload,
+            "docker_profile": profile,
+            "image_ref": image_ref or payload.get("image_ref"),
+            "maintenance_env_hash": (
+                maintenance_profile.env_hash if maintenance_profile is not None else None
+            ),
+            "maintenance_image_source": (
+                maintenance_profile.image_source if maintenance_profile is not None else None
+            ),
+            "maintenance_cache_mount_count": (
+                maintenance_profile.cache_mount_hits if maintenance_profile is not None else 0
+            ),
+        },
+    )
+    if maintenance_profile is not None:
+        _update_json_artifact(
+            sandbox_dir / "maintenance_profile.json",
+            lambda payload: {
+                **payload,
+                "container_name": instance.container_name,
+                "image_ref": instance.image_tag,
+                "timings": {
+                    **(
+                        cast(dict[str, Any], payload.get("timings", {}))
+                        if isinstance(payload.get("timings"), dict)
+                        else {}
+                    ),
+                    "fingerprint_seconds": maintenance_profile.fingerprint_seconds,
+                    "image_resolution_seconds": maintenance_profile.image_resolution_seconds,
+                    "container_start_seconds": container_start_seconds,
+                    "cache_mount_hits": maintenance_profile.cache_mount_hits,
+                },
+            },
+        )
 
     return ExecutionBackendContext(
         sandbox_instance=instance,

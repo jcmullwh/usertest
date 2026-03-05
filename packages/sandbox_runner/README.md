@@ -91,6 +91,7 @@ finally:
 
 - `SandboxSpec`
   - describes backend (`docker`) and image/build settings
+  - `image_ref` can run a prebuilt image directly instead of building from `image_context_path`
   - `env_overrides` can force specific env vars inside the container (e.g., `TMPDIR`, `PIP_CACHE_DIR`)
 - `MountSpec`
   - host → container mounts, with `read_only` support

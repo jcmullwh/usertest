@@ -56,7 +56,8 @@ This tool does not define project environment strategy; it runs tasks exactly as
 For PDM projects, `scaffold run install` executes each project's `tasks.install` command. When maintenance cache env
 vars are present (`USERTEST_MAINT_VENV_CACHE_ENABLED=1` + `USERTEST_MAINT_VENV_CACHE_ROOT=...`), install steps can
 reuse cached `.venv` snapshots keyed by dependency fingerprint. Cache failures are non-fatal and fall back to normal
-install behavior.
+install behavior. When `USERTEST_MAINT_VENV_SEED_ROOT=...` is also present, install steps will try a
+seeded `.venv` restore after host-cache miss and before running a real `pdm install`.
 
 ## Configuration model
 

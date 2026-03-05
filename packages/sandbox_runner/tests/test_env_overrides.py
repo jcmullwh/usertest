@@ -146,3 +146,51 @@ def test_docker_sandbox_creates_maintenance_venv_cache_dir(
         assert (cache_dir / "usertest_maint_venvs").is_dir()
     finally:
         sandbox.close()
+
+
+def test_docker_sandbox_uses_image_ref_without_build_context(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[str]] = []
+
+    def _fake_docker_run(
+        argv: list[str],
+        *,
+        cwd: Path | None = None,  # noqa: ARG001
+        check: bool = True,  # noqa: ARG001
+        timeout_seconds: float | None = None,  # noqa: ARG001
+    ) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        if argv[:2] == ["docker", "version"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="ok\n", stderr="")
+        if argv[:2] == ["docker", "run"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="container-id\n", stderr="")
+        if argv[:2] == ["docker", "rm"]:
+            return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+        raise AssertionError(f"unexpected docker invocation: {argv!r}")
+
+    def _fail_build(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("docker build should not be used when image_ref is provided")
+
+    monkeypatch.setattr(docker, "_docker_run", _fake_docker_run)
+    monkeypatch.setattr(docker, "_docker_build_streaming", _fail_build)
+
+    artifacts_dir = tmp_path / "artifacts"
+    spec = SandboxSpec(
+        backend="docker",
+        image_ref="busybox:1.36",
+    )
+
+    sandbox = docker.DockerSandbox(
+        workspace_dir=tmp_path / "workspace",
+        artifacts_dir=artifacts_dir,
+        spec=spec,
+        container_name="sandbox-image-ref-test",
+    ).start()
+    try:
+        meta = json.loads((artifacts_dir / "sandbox.json").read_text(encoding="utf-8"))
+        assert meta["image_ref"] == "busybox:1.36"
+        assert meta["context_dir"] is None
+        assert meta["dockerfile"] is None
+    finally:
+        sandbox.close()

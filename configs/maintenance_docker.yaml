@@ -1,0 +1,10 @@
+version: 1
+maintenance_docker:
+  local_image_repo: "usertest-maintenance"
+  published_image_repo: "ghcr.io/jcmullwh/usertest-maintenance"
+  pull_policy: "if_missing"
+  seed_root: "/opt/usertest_maint_seed"
+  cache_root_subdir: "usertest_maint_venvs"
+  publish_branches:
+    - "dev"
+    - "main"

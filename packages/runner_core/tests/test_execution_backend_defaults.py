@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -420,3 +421,243 @@ def test_prepare_execution_backend_fails_before_docker_start_when_host_login_mis
             workspace_id="w1",
             agent_cfg={},
         )
+
+
+def test_prepare_execution_backend_maintenance_profile_uses_image_ref_and_updates_artifacts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    captured: dict[str, object] = {}
+
+    class _DummyInstance:
+        command_prefix = ["docker", "exec"]
+        workspace_mount = "/workspace"
+        container_name = "sandbox-maintenance"
+        image_tag = "usertest-maintenance:abc123"
+
+        def close(self) -> None:
+            return
+
+    class _DummyDockerSandbox:
+        def __init__(
+            self,
+            *,
+            workspace_dir: Path,
+            artifacts_dir: Path,
+            spec: object,
+            container_name: str,
+        ):
+            del workspace_dir, container_name
+            captured["spec"] = spec
+            captured["artifacts_dir"] = artifacts_dir
+
+        def start(self) -> _DummyInstance:
+            artifacts_dir = captured["artifacts_dir"]
+            assert isinstance(artifacts_dir, Path)
+            artifacts_dir.mkdir(parents=True, exist_ok=True)
+            (artifacts_dir / "sandbox.json").write_text(
+                json.dumps({"backend": "docker", "image_ref": None}) + "\n",
+                encoding="utf-8",
+            )
+            return _DummyInstance()
+
+    import runner_core.execution_backend as backend_mod
+
+    monkeypatch.setattr(backend_mod, "DockerSandbox", _DummyDockerSandbox)
+    monkeypatch.setattr(
+        backend_mod,
+        "_prepare_maintenance_profile",
+        lambda **_kwargs: backend_mod.MaintenanceProfilePreparation(
+            image_ref="usertest-maintenance:abc123",
+            env_hash="deadbeef" * 8,
+            image_source="local",
+            image_resolution_seconds=1.5,
+            fingerprint_seconds=0.5,
+            cache_mount_hits=1,
+            cache_mounts=[
+                backend_mod.MountSpec(
+                    host_path=tmp_path / "cache" / "demo",
+                    container_path="/workspace/packages/demo/.venv",
+                    read_only=False,
+                )
+            ],
+            env_overrides={
+                "USERTEST_MAINT_VENV_CACHE_ENABLED": "1",
+                "USERTEST_MAINT_VENV_CACHE_ROOT": "/cache/usertest_maint_venvs",
+                "USERTEST_MAINT_VENV_SEED_ROOT": "/opt/usertest_maint_seed",
+            },
+            metadata={
+                "schema_version": 1,
+                "profile": "maintenance",
+                "timings": {
+                    "fingerprint_seconds": 0.5,
+                    "image_resolution_seconds": 1.5,
+                    "container_start_seconds": None,
+                    "cache_mount_hits": 1,
+                    "seed_hits": None,
+                    "install_projects_run": None,
+                },
+            },
+        ),
+    )
+
+    req = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+        exec_use_host_agent_login=False,
+    )
+
+    prepare_execution_backend(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        request=req,
+        workspace_id="w1",
+        agent_cfg={},
+    )
+
+    spec = captured["spec"]
+    assert spec.image_ref == "usertest-maintenance:abc123"
+    assert spec.image_context_path is None
+    assert any(
+        mount.container_path == "/workspace/packages/demo/.venv" for mount in spec.extra_mounts
+    )
+
+    maintenance_meta = json.loads(
+        (run_dir / "sandbox" / "maintenance_profile.json").read_text(encoding="utf-8")
+    )
+    assert maintenance_meta["profile"] == "maintenance"
+    assert maintenance_meta["image_ref"] == "usertest-maintenance:abc123"
+    assert maintenance_meta["timings"]["cache_mount_hits"] == 1
+
+    sandbox_meta = json.loads((run_dir / "sandbox" / "sandbox.json").read_text(encoding="utf-8"))
+    assert sandbox_meta["docker_profile"] == "maintenance"
+    assert sandbox_meta["maintenance_image_source"] == "local"
+    assert sandbox_meta["maintenance_cache_mount_count"] == 1
+
+
+def test_prepare_execution_backend_maintenance_profile_rejects_custom_context(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    custom_context = tmp_path / "context"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+    custom_context.mkdir(parents=True, exist_ok=True)
+
+    req = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+        exec_docker_context=custom_context,
+        exec_use_host_agent_login=False,
+    )
+
+    with pytest.raises(ValueError, match="does not support exec_docker_context"):
+        prepare_execution_backend(
+            repo_root=repo_root,
+            run_dir=run_dir,
+            workspace_dir=workspace_dir,
+            request=req,
+            workspace_id="w1",
+            agent_cfg={},
+        )
+
+
+def test_prepare_maintenance_profile_prefers_local_image_and_plans_cache_mounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    cache_dir = tmp_path / "cache"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    context_dir = run_dir / "sandbox" / "maintenance_image_context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        backend_mod,
+        "_load_maintenance_docker_config",
+        lambda repo_root: backend_mod.MaintenanceDockerConfig(
+            local_image_repo="usertest-maintenance",
+            published_image_repo="ghcr.io/jcmullwh/usertest-maintenance",
+            pull_policy="if_missing",
+            seed_root="/opt/usertest_maint_seed",
+            cache_root_subdir="usertest_maint_venvs",
+            publish_branches=("dev", "main"),
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_prepare_maintenance_image_context",
+        lambda **_kwargs: (
+            context_dir,
+            {"python_major_minor": "3.11", "pdm_version": "2.26.2"},
+        ),
+    )
+    monkeypatch.setattr(backend_mod, "compute_image_hash", lambda **_kwargs: "a" * 64)
+    monkeypatch.setattr(backend_mod, "_docker_image_exists_local", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_pull_image",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("docker pull should not run")),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_build_maintenance_image",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("docker build should not run")),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_compute_install_cache_fingerprints",
+        lambda **_kwargs: {
+            "projects": [
+                {"id": "demo", "path": "packages/demo", "fingerprint": "f" * 64},
+            ]
+        },
+    )
+
+    mounted_venv = cache_dir / "usertest_maint_venvs" / "demo" / ("f" * 64) / "venv"
+    mounted_venv.mkdir(parents=True, exist_ok=True)
+
+    request = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+        verification_commands=("smoke", "install", "lint", "test"),
+    )
+
+    prep = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        maintenance_venv_reuse_enabled=True,
+        timeout_seconds=30.0,
+    )
+
+    assert prep.image_ref == "usertest-maintenance:" + ("a" * 16)
+    assert prep.image_source == "local"
+    assert prep.cache_mount_hits == 1
+    assert prep.cache_mounts[0].container_path == "/workspace/packages/demo/.venv"
+    assert prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ENABLED"] == "1"
+    assert prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ROOT"] == "/cache/usertest_maint_venvs"
+    assert prep.env_overrides["USERTEST_MAINT_VENV_SEED_ROOT"] == "/opt/usertest_maint_seed"

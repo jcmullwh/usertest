@@ -105,6 +105,7 @@ class RunRequest:
     verification_timeout_seconds: float | None = None
 
     exec_backend: str = "local"
+    exec_docker_profile: str = "standard"
     exec_docker_context: Path | None = None
     exec_dockerfile: Path | None = None
     exec_docker_python: str = "auto"
@@ -5244,6 +5245,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "policy": request.policy,
                     "allow_edits": allow_edits,
                     "exec_backend": request.exec_backend,
+                    "exec_docker_profile": request.exec_docker_profile,
                     "exec_network": request.exec_network,
                     "exec_cache": request.exec_cache,
                     "exec_maintenance_venv_cache": request.exec_maintenance_venv_cache,
@@ -5269,6 +5271,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     },
                     "execution_backend": {
                         "backend": request.exec_backend,
+                        "docker_profile": request.exec_docker_profile,
                         "shell": execution_shell,
                         "network": request.exec_network,
                         "cache": request.exec_cache,

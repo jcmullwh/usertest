@@ -25,6 +25,9 @@ Verification gate:
 - When using `--commit/--push/--pr`, `usertest-implement` configures a required verification step before handing off
   (default: `scripts/smoke.ps1` on Windows local runs, `scripts/smoke.sh` otherwise, then
   `python tools/scaffold/scaffold.py run --all --skip-missing install`, then `lint`, then `test`).
+- Same-repo Docker maintenance runs switch the smoke command to
+  `bash ./scripts/smoke.sh --skip-install --use-pythonpath` so the maintenance image handles base
+  environment setup while scaffold remains the install contract.
 - If the verification gate fails, `usertest-implement` exits non-zero and refuses to `--commit/--push/--pr`
   (unless you pass `--skip-verify`, debugging only).
 - Override the gate with `--verify-command "<cmd>"` (repeatable) and optional `--verify-timeout-seconds`.
@@ -37,10 +40,24 @@ Maintenance install cache (Docker + warm cache):
 - `usertest-implement` defaults to `--exec-cache warm`.
 - When Docker + warm cache are active, `usertest-implement` also enables maintenance venv cache reuse by default
   (`--maintenance-venv-cache`), so scaffold install tasks can restore per-project `.venv` snapshots from `/cache`.
+- Same-repo Docker runs now default to `--exec-docker-profile maintenance`, which resolves a dedicated
+  maintenance image (`local -> pull -> build`) and bind-mounts matching cached project `.venv`
+  directories directly into `/workspace/<project>/.venv` instead of copying them into each fresh workspace.
+- On cache miss, the maintenance image can seed `.venv` directories from `/opt/usertest_maint_seed`
+  before scaffold falls through to a real `pdm install`.
 - Disable this behavior with `--no-maintenance-venv-cache` (forces full reinstall behavior).
 - Cache root inside the container: `/cache/usertest_maint_venvs`.
 - Default host cache root: `<repo_root>/runs/_cache/usertest_implement`.
 - Manual cleanup: delete the host cache directory (or only `usertest_maint_venvs`) when needed.
+
+Docker execution profile:
+
+- `--exec-docker-profile maintenance` is only valid for same-repo maintenance targets.
+- `--exec-docker-profile standard` forces the existing generic `sandbox_cli` path even for same-repo
+  runs.
+- If `--exec-docker-profile` is omitted, `usertest-implement` selects:
+  - `maintenance` for same-repo Docker runs
+  - `standard` for external-target Docker runs
 
 CI gate (before PR creation):
 
