@@ -2955,7 +2955,18 @@ def _probe_python_context_capability(
     is_powershell = (not command_prefix) and _is_windows()
     probe_command = f"python -c {shlex.quote(_PYTHON_CONTEXT_HEALTH_PROBE)}"
     effective_command = probe_command
-    if not command_prefix:
+    direct_argv: list[str] | None = None
+    if (
+        not command_prefix
+        and isinstance(python_executable, str)
+        and python_executable.strip()
+    ):
+        selected_python = python_executable.strip()
+        direct_argv = [selected_python, "-c", _PYTHON_CONTEXT_HEALTH_PROBE]
+        effective_command = (
+            f"{shlex.quote(selected_python)} -c <health_probe>"
+        )
+    elif not command_prefix:
         effective_command, _ = _rewrite_verification_command_for_python(
             probe_command,
             python_executable=python_executable,
@@ -2977,7 +2988,11 @@ def _probe_python_context_capability(
                 merged_env = dict(os.environ)
                 merged_env.update(safe_overrides)
 
-    argv = _verification_shell_argv(command_prefix=effective_prefix, command=effective_command)
+    argv = (
+        direct_argv
+        if direct_argv is not None
+        else _verification_shell_argv(command_prefix=effective_prefix, command=effective_command)
+    )
 
     stdout_text = ""
     stderr_text = ""
