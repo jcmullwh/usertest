@@ -12,6 +12,7 @@ import pytest
 import runner_core.python_runtime as runtime_mod
 import runner_core.runner as runner_mod
 from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
+from runner_core.execution_backend import ExecutionBackendContext
 
 _FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "python_capability_regressions.json"
 
@@ -654,3 +655,220 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
     assert python_validation.get("reason_type") is None
     assert python_validation.get("validated_python_executable") == selected_runtime_path
     assert verification_python_executables == [selected_runtime_path]
+
+
+def test_validate_python_capability_clears_host_runtime_hints_for_docker_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed_environment: dict[str, str] = {}
+    expected_selection = runtime_mod.PythonRuntimeSelection(selected=None, candidates=tuple())
+
+    def _fake_select_python_runtime(
+        *,
+        workspace_dir: Path,
+        timeout_seconds: float = 5.0,
+        include_where_fallbacks: bool = True,
+        environment: dict[str, str] | None = None,
+    ) -> runtime_mod.PythonRuntimeSelection:
+        del workspace_dir, timeout_seconds, include_where_fallbacks
+        observed_environment.clear()
+        if isinstance(environment, dict):
+            observed_environment.update(environment)
+        return expected_selection
+
+    monkeypatch.setattr(runner_mod, "select_python_runtime", _fake_select_python_runtime)
+
+    capability = runner_mod._validate_python_capability(
+        workspace_dir=tmp_path,
+        verification_commands=("python -m pytest -q",),
+        command_prefix=["docker", "exec", "-i", "sandbox"],
+        cwd=tmp_path,
+        env_overrides={"PATH": "/usr/bin", "FOO": "bar"},
+    )
+
+    assert capability["runtime_selection"] == expected_selection
+    assert observed_environment.get("FOO") == "bar"
+    assert observed_environment.get("PATH") == "/usr/bin"
+    assert observed_environment.get("VIRTUAL_ENV") == ""
+    assert observed_environment.get("USERTEST_PYTHON") == ""
+
+
+def test_two_stage_python_preflight_docker_context_probe_failure_skips_runtime_metadata_probes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_local_probe(monkeypatch, scenario=_load_scenario("healthy_pass"))
+
+    runtime_selection = runtime_mod.PythonRuntimeSelection(
+        selected=runtime_mod.PythonRuntimeCandidate(
+            source="virtual_env",
+            path=r"C:\external\venv\Scripts\python.exe",
+            present=True,
+            usable=True,
+            version="3.13.2",
+            executable=r"C:\external\venv\Scripts\python.exe",
+        ),
+        candidates=(
+            runtime_mod.PythonRuntimeCandidate(
+                source="virtual_env",
+                path=r"C:\external\venv\Scripts\python.exe",
+                present=True,
+                usable=True,
+                version="3.13.2",
+                executable=r"C:\external\venv\Scripts\python.exe",
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "select_python_runtime",
+        lambda *args, **kwargs: runtime_selection,
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_python_context_capability",
+        lambda *args, **kwargs: {
+            "passed": False,
+            "reason_code": "access_denied",
+            "reason_type": "execution",
+            "reason": "Permission denied",
+            "remediation": "Python execution is blocked in this environment.",
+        },
+    )
+
+    pip_probe_calls = {"count": 0}
+    pytest_probe_calls = {"count": 0}
+
+    def _fake_probe_pip_module(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        pip_probe_calls["count"] += 1
+        return {"passed": False, "reason_code": "pip_probe_failed"}
+
+    def _fake_probe_pytest_module(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        pytest_probe_calls["count"] += 1
+        return {"passed": False, "reason_code": "pytest_probe_failed"}
+
+    monkeypatch.setattr(runner_mod, "probe_pip_module", _fake_probe_pip_module)
+    monkeypatch.setattr(runner_mod, "probe_pytest_module", _fake_probe_pytest_module)
+    monkeypatch.setattr(
+        runner_mod,
+        "prepare_execution_backend",
+        lambda **kwargs: ExecutionBackendContext(
+            sandbox_instance=None,
+            command_prefix=["docker", "exec", "-i", "sandbox"],
+            workspace_mount="/workspace",
+            run_dir_mount="/run_dir",
+        ),
+    )
+
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": str(tmp_path / "missing_codex.exe")}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            verification_commands=("python -m pytest -q",),
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert pip_probe_calls["count"] == 0
+    assert pytest_probe_calls["count"] == 0
+
+    preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight.get("pip_probe") is None
+    assert preflight.get("pytest_probe") is None
+    python_validation = preflight.get("python_validation", {})
+    assert python_validation.get("required") is True
+    assert python_validation.get("enabled") is False
+    assert python_validation.get("validated_python_executable") is None
+
+
+def test_two_stage_python_preflight_optional_verification_bypass_skips_pip_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _patch_local_probe(monkeypatch, scenario=_load_scenario("healthy_pass"))
+
+    runtime_selection = runtime_mod.PythonRuntimeSelection(
+        selected=runtime_mod.PythonRuntimeCandidate(
+            source="command_python",
+            path=sys.executable,
+            present=True,
+            usable=True,
+            version="3.13.2",
+            executable=sys.executable,
+        ),
+        candidates=(
+            runtime_mod.PythonRuntimeCandidate(
+                source="command_python",
+                path=sys.executable,
+                present=True,
+                usable=True,
+                version="3.13.2",
+                executable=sys.executable,
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "select_python_runtime",
+        lambda *args, **kwargs: runtime_selection,
+    )
+
+    pip_probe_calls = {"count": 0}
+
+    def _fake_probe_pip_module(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        del args, kwargs
+        pip_probe_calls["count"] += 1
+        return {"passed": True, "reason_code": None}
+
+    monkeypatch.setattr(runner_mod, "probe_pip_module", _fake_probe_pip_module)
+
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": str(tmp_path / "missing_codex.exe")}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            verification_commands=(),
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert pip_probe_calls["count"] == 0
+
+    preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight.get("pip_probe") is None
+    python_validation = preflight.get("python_validation", {})
+    assert python_validation.get("required") is False
+    assert python_validation.get("enabled") is True
+    assert python_validation.get("validated_python_executable") == sys.executable

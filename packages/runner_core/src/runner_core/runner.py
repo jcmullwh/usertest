@@ -2861,9 +2861,17 @@ def _validate_python_capability(
     needs Python, validates effective execution-path usability with a context probe.
     """
 
+    runtime_env_overrides = dict(env_overrides or {})
+    if command_prefix:
+        # For remote backends (for example docker exec), host-only runtime hints can leak across
+        # boundary (for example external-drive VIRTUAL_ENV). Clear by default unless explicitly
+        # provided by the backend bootstrap.
+        runtime_env_overrides.setdefault("VIRTUAL_ENV", "")
+        runtime_env_overrides.setdefault("USERTEST_PYTHON", "")
+
     python_runtime = select_python_runtime(
         workspace_dir=workspace_dir,
-        environment=env_overrides,
+        environment=runtime_env_overrides or None,
     )
     python_runtime_summary = python_runtime.to_dict()
     python_validation_required = verification_commands_need_python(verification_commands)
@@ -4511,7 +4519,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 effective_verification_commands
             )
             pip_probe: dict[str, Any] | None = None
-            if python_runtime.selected is not None:
+            if (
+                python_validation_required
+                and python_validation_enabled
+                and not command_prefix
+                and python_runtime.selected is not None
+            ):
                 pip_probe = probe_pip_module(
                     python_executable=python_runtime.selected.path,
                     cwd=acquired.workspace_dir,
@@ -4522,7 +4535,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         reason_code if isinstance(reason_code, str) else None
                     )
             pytest_probe: dict[str, Any] | None = None
-            if pytest_validation_required and python_runtime.selected is not None:
+            if (
+                pytest_validation_required
+                and python_validation_enabled
+                and not command_prefix
+                and python_runtime.selected is not None
+            ):
                 pytest_probe = probe_pytest_module(
                     python_executable=python_runtime.selected.path,
                     cwd=acquired.workspace_dir,
