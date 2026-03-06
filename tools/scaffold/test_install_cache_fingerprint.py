@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tools.scaffold.install_cache_common import normalize_pdm_version
+
 
 def _write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -75,3 +77,8 @@ def test_install_cache_fingerprint_cli_reports_manifest_projects(tmp_path: Path)
             },
         }
     ]
+
+
+def test_normalize_pdm_version_accepts_cli_banner() -> None:
+    assert normalize_pdm_version("PDM, version 2.26.2") == "2.26.2"
+    assert normalize_pdm_version(" 2.26.2 ") == "2.26.2"

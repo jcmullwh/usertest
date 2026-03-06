@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -10,6 +11,7 @@ from typing import Any
 
 
 INSTALL_CACHE_SCHEMA_VERSION = 1
+_PDM_VERSION_RE = re.compile(r"(?P<version>\d+(?:\.\d+)+)")
 
 
 @dataclass(frozen=True)
@@ -61,7 +63,17 @@ def probe_pdm_version(*, cwd: Path) -> str:
         return "unknown"
     combined = "\n".join(x for x in (cp.stdout, cp.stderr) if x).strip()
     line = combined.splitlines()[0].strip() if combined else ""
-    return line or "unknown"
+    return normalize_pdm_version(line) or "unknown"
+
+
+def normalize_pdm_version(raw: str | None) -> str:
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        return "unknown"
+    match = _PDM_VERSION_RE.search(cleaned)
+    if match is None:
+        return cleaned
+    return match.group("version")
 
 
 def build_install_cache_payload(
@@ -74,7 +86,7 @@ def build_install_cache_payload(
     pdm_version: str | None = None,
 ) -> dict[str, Any]:
     resolved_python = python_major_minor or f"{sys.version_info.major}.{sys.version_info.minor}"
-    resolved_pdm = pdm_version or probe_pdm_version(cwd=project_dir)
+    resolved_pdm = normalize_pdm_version(pdm_version) if pdm_version else probe_pdm_version(cwd=project_dir)
     return {
         "schema_version": INSTALL_CACHE_SCHEMA_VERSION,
         "project_id": project_id,
