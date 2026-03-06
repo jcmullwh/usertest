@@ -28,7 +28,6 @@ WORKDIR /workspace
 COPY repo_snapshot/ /workspace/
 
 RUN python -m pip install -r requirements-dev.txt \
-    && python -m pip install "$(grep '^pdm==' manifests/pip.txt | tail -n 1)" \
     && python tools/scaffold/scaffold.py run install --all --skip-missing \
     && python tools/scaffold/install_cache_fingerprint.py --repo-root /workspace --all --output /tmp/usertest_maint_seed_manifest.json \
     && python - <<'PY'

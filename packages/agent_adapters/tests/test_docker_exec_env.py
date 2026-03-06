@@ -32,3 +32,20 @@ def test_inject_docker_exec_env_noop_for_non_injectable_prefix() -> None:
 def test_inject_docker_exec_env_noop_for_empty_env() -> None:
     prefix = ["docker", "exec", "-i", "-w", "/workspace", "c1"]
     assert inject_docker_exec_env(prefix, {}) == prefix
+
+
+def test_inject_docker_exec_env_supports_passthrough_names_without_values() -> None:
+    prefix = ["docker", "exec", "-i", "-w", "/workspace", "c1"]
+    env_overrides = {"B": None, "A": "1"}
+    assert inject_docker_exec_env(prefix, env_overrides) == [
+        "docker",
+        "exec",
+        "-i",
+        "-w",
+        "/workspace",
+        "-e",
+        "A=1",
+        "-e",
+        "B",
+        "c1",
+    ]

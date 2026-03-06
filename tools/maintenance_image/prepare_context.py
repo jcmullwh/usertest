@@ -97,7 +97,12 @@ def _copy_repo_snapshot(*, repo_root: Path, output_dir: Path) -> list[str]:
         if not isinstance(raw_path, str) or not raw_path.strip():
             raise SystemExit(f"Invalid project path in scaffold manifest: {project!r}")
         project_rel = Path(raw_path)
-        for rel in (project_rel / "pyproject.toml", project_rel / "pdm.lock", project_rel / "src"):
+        for rel in (
+            project_rel / "pyproject.toml",
+            project_rel / "pdm.lock",
+            project_rel / "README.md",
+            project_rel / "src",
+        ):
             src = repo_root / rel
             if not src.exists():
                 continue
