@@ -24,6 +24,8 @@ the option's tradeoffs and still include the entry.
 - Options that include honest tradeoffs, including recurrence prevention and test
   implications.
 - Options where the change-surface hypothesis is realistic given evidence breadth.
+- Options that solve the underlying mechanism when research shows repeated or shared
+  causes, not just the exact observed symptom.
 
 ## What to avoid
 
@@ -32,6 +34,9 @@ the option's tradeoffs and still include the entry.
 - Do not invent a solution not grounded in the research dossier.
 - Do not include `selected_solution` in this stage's output.
 - Do not describe implementation steps as if selection has happened.
+- Do not frame a hardcoded branch, one-off exception, or narrow special-case workaround
+  as a good option unless the research dossier supports an isolated instance or an
+  intentional boundary.
 
 ## Output contract
 

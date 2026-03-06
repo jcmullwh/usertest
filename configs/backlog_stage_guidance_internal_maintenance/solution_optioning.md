@@ -28,6 +28,8 @@ the option's tradeoffs and still include the entry.
   are structurally constant.
 - `most_comprehensive` may still stay within existing commands, flags, and config
   surfaces when it addresses the problem class rather than only the observed instance.
+- Options that fix the shared mechanism across runs when the evidence shows a repeated
+  pattern, rather than adding one-off branches for each observed case.
 
 ## What to avoid
 
@@ -38,6 +40,8 @@ the option's tradeoffs and still include the entry.
 - Do not describe implementation steps as if selection has happened.
 - Do not smuggle new top-level surface into `most_comprehensive` without cross-context
   evidence breadth.
+- Do not present a hardcoded exception, special-case branch, or case-by-case patch as a
+  strong option when the evidence shows the same mechanism recurring across runs or agents.
 
 ## Output contract
 

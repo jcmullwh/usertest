@@ -13,6 +13,8 @@ chosen.
   `configs/repo_intent.md`.
 - Changes that solve the problem class within existing surfaces when observation breadth
   across runs and agents shows a repeated pattern.
+- Changes that fix the underlying mechanism instead of introducing case-by-case behavior
+  for each observed failure mode.
 - `most_direct` when the recurrence is a single mechanism and the direct fix fully
   resolves it.
 - `most_robust` when the direct fix remains fragile or leaves credible recurrence vectors.
@@ -25,6 +27,8 @@ chosen.
 - Do not select an option based on convenience, ease, or speed. Select based on fit with
   repo intent and evidence.
 - Do not use banned steering terms: fastest, quickest, easiest, simplest, lowest-effort.
+- Do not choose a hardcoded special-case fix when the observed recurrence suggests a
+  shared mechanism that should be handled directly.
 - Do not treat `repeated_variant` alone as an automatic mandate for `most_robust`.
 - Do not require cross-context breadth for internal class-level hardening that stays
   within existing user-visible surfaces.

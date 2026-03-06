@@ -12,6 +12,8 @@ chosen.
 - Changes that are consistent with the existing composable-command philosophy described in
   `configs/repo_intent.md`.
 - Options where the change surface is narrow and the test implications are manageable.
+- Options that fix the underlying mechanism rather than adding a narrow exception when
+  research points to a repeated or shared cause.
 - `most_robust` over `most_direct` when research showed recurrence risk.
 - `most_comprehensive` only when research strongly supports a class-level fix.
 
@@ -21,6 +23,8 @@ chosen.
 - Do not select an option based on convenience, ease, or speed. Select based on fit with
   repo intent and evidence.
 - Do not use banned steering terms: fastest, quickest, easiest, simplest, lowest-effort.
+- Do not choose a hardcoded special-case fix unless the research dossier supports an
+  isolated instance or an intentional product boundary.
 - Do not skip `why_other_options_were_not_selected`. This field is required.
 
 ## UX review trigger

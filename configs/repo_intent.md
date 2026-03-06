@@ -16,6 +16,8 @@ This repository exists to run repeatable, auditable “agent usertests” agains
 
 - Runs must be reproducible and debuggable from artifacts (the transcript is canonical).
 - Prefer loud failures to silent fallbacks.
+- Prefer mechanism-level fixes over special-case branches or hardcoded exceptions in shared logic.
+- Only accept a special-case fix when the evidence shows the issue is genuinely isolated or reflects an intentional product boundary.
 - Avoid mission-specific “local optimum” behavior in shared logic.
 - Tests must run offline (no network calls).
 

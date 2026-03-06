@@ -20,6 +20,8 @@ Rules:
 - Before recommending `new_surface`, verify via the workspace that an equivalent surface does not already exist (docs/examples/flags/subcommands).
 - Do NOT invent new top-level commands/modes/config schemas unless you explicitly justify why existing surfaces cannot be adapted.
 - For `behavior_compat`, do NOT default to docs or parameterization when the real issue is compatibility or hardening inside existing surfaces.
+- Do NOT endorse a recommendation whose implementation would only add a narrow special-case
+  branch or hardcoded exception when the evidence points to a repeated underlying mechanism.
 - Output MUST be JSON only (no markdown, no commentary).
 
 Return JSON in this schema:
