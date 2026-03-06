@@ -167,11 +167,18 @@ def bootstrap_pip_requirements(
 
     if backend_is_docker:
         # A single sh script keeps secrets out of host-side command lines.
-        env_overrides = {
+        env_overrides: dict[str, str | None] = {
             "USERTEST_GITLAB_HOST": gitlab_host or "",
             "USERTEST_GITLAB_INDEX_URL": gitlab_index_url or "",
             "USERTEST_PIP_EXTRA_INDEX_URL": extra_index_url or "",
         }
+        if gitlab_index_url:
+            username = os.environ.get("GITLAB_PYPI_USERNAME", "").strip()
+            password = os.environ.get("GITLAB_PYPI_PASSWORD", "").strip()
+            if username:
+                env_overrides["GITLAB_PYPI_USERNAME"] = None
+            if password:
+                env_overrides["GITLAB_PYPI_PASSWORD"] = None
         prefix = inject_docker_exec_env(command_prefix, env_overrides)
         requested_venv_dir = venv_dir
         requested_venv_python = venv_python

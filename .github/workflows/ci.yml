@@ -27,6 +27,28 @@ jobs:
         run: |
           echo "matrix=$(python tools/scaffold/ci_matrix.py)" >> "$GITHUB_OUTPUT"
 
+  maintenance_image_validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install maintenance image prep deps
+        run: python -m pip install --upgrade pip pyyaml
+
+      - name: Prepare maintenance image context
+        run: |
+          python tools/maintenance_image/prepare_context.py \
+            --repo-root . \
+            --output-dir .tmp/maintenance_image_context \
+            --metadata-out .tmp/maintenance_image_context.json
+
+      - name: Build maintenance image
+        run: docker build --progress=plain -t usertest-maintenance-ci -f .tmp/maintenance_image_context/Dockerfile .tmp/maintenance_image_context
+
   readme_contract:
     runs-on: ubuntu-latest
     steps:

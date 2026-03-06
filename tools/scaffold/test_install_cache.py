@@ -258,6 +258,53 @@ def test_install_cache_restore_failure_falls_back_to_install(
     assert calls == [["pdm", "install"]]
 
 
+def test_install_cache_seed_restore_skips_running_install(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    project_dir = repo_root / "packages" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    _write(project_dir / "pyproject.toml", "[project]\nname='demo'\nversion='0.1.0'\n")
+    _write(project_dir / "pdm.lock", 'lock-version = "4.5.0"\n')
+    monkeypatch.setattr(scaffold, "_repo_root", lambda: repo_root)
+    monkeypatch.setenv("USERTEST_MAINT_VENV_CACHE_ENABLED", "0")
+    monkeypatch.delenv("USERTEST_MAINT_VENV_CACHE_ROOT", raising=False)
+    monkeypatch.setenv("USERTEST_MAINT_VENV_SEED_ROOT", str(tmp_path / "seed"))
+    monkeypatch.setattr(scaffold, "_validate_project_venv", lambda *, project_dir: True)
+
+    state = scaffold._build_install_cache_state(
+        repo_root=repo_root,
+        project_dir=project_dir,
+        project_id="demo",
+        install_cmd=["pdm", "install"],
+        cache_enabled=False,
+    )
+    assert state.seed_venv_dir is not None
+    (state.seed_venv_dir / "marker.txt").parent.mkdir(parents=True, exist_ok=True)
+    (state.seed_venv_dir / "marker.txt").write_text("seeded\n", encoding="utf-8")
+
+    def fail_run(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        capture: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        del argv, cwd, env, capture
+        raise AssertionError("install should not run when a seed venv is available")
+
+    monkeypatch.setattr(scaffold, "_run", fail_run)
+    cp = scaffold._run_manifest_task(
+        cmd=["pdm", "install"],
+        cwd=project_dir,
+        task_name="install",
+        project_id="demo",
+    )
+    assert cp.returncode == 0
+    assert (project_dir / ".venv" / "marker.txt").read_text(encoding="utf-8") == "seeded\n"
+
+
 def test_install_cache_save_populates_cache_entry_after_successful_install(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

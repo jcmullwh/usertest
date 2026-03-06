@@ -11,7 +11,6 @@ import argparse
 import dataclasses
 import datetime as _dt
 import difflib
-import hashlib
 import importlib.util
 import json
 import os
@@ -23,6 +22,31 @@ import tempfile
 from pathlib import Path
 from typing import Any, cast
 from urllib.parse import urlparse
+
+def _load_install_cache_common() -> Any:
+    try:
+        from tools.scaffold import install_cache_common as module
+
+        return module
+    except ModuleNotFoundError:
+        pass
+
+    module_path = Path(__file__).resolve().with_name("install_cache_common.py")
+    spec = importlib.util.spec_from_file_location("install_cache_common", module_path)
+    if spec is None or spec.loader is None:
+        raise ModuleNotFoundError(f"Unable to load install_cache_common from {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules.setdefault(spec.name, module)
+    spec.loader.exec_module(module)
+    return module
+
+
+_install_cache_common = _load_install_cache_common()
+INSTALL_CACHE_SCHEMA_VERSION = _install_cache_common.INSTALL_CACHE_SCHEMA_VERSION
+build_install_cache_fingerprint = _install_cache_common.build_install_cache_fingerprint
+probe_pdm_version = _install_cache_common.probe_pdm_version
+safe_cache_project_id = _install_cache_common.safe_cache_project_id
+sha256_file_or_none = _install_cache_common.sha256_file_or_none
 
 
 def _eprint(*args: object) -> None:
@@ -457,9 +481,8 @@ _KNOWN_TRANSIENT_PDM_LOCAL_PATH_MARKERS: tuple[str, ...] = (
 
 _INSTALL_CACHE_ENABLED_ENV = "USERTEST_MAINT_VENV_CACHE_ENABLED"
 _INSTALL_CACHE_ROOT_ENV = "USERTEST_MAINT_VENV_CACHE_ROOT"
+_INSTALL_CACHE_SEED_ROOT_ENV = "USERTEST_MAINT_VENV_SEED_ROOT"
 _INSTALL_CACHE_LOCAL_META_FILENAME = ".usertest_install_cache.json"
-_INSTALL_CACHE_SCHEMA_VERSION = 1
-_SAFE_CACHE_PROJECT_RE = re.compile(r"[^a-zA-Z0-9_.-]+")
 _PDM_VERSION_FOR_CACHE: str | None = None
 
 
@@ -475,6 +498,10 @@ class _InstallCacheState:
     local_meta_path: Path
     fingerprint: str
     fingerprint_payload: dict[str, Any]
+    seed_root: Path | None
+    seed_project_dir: Path | None
+    seed_entry_dir: Path | None
+    seed_venv_dir: Path | None
 
 
 def _install_cache_enabled() -> bool:
@@ -494,19 +521,22 @@ def _cache_root_from_env() -> Path | None:
         return None
 
 
+def _seed_root_from_env() -> Path | None:
+    raw = os.environ.get(_INSTALL_CACHE_SEED_ROOT_ENV, "").strip()
+    if not raw:
+        return None
+    try:
+        return Path(raw)
+    except OSError:
+        return None
+
+
 def _safe_cache_project_id(project_id: str) -> str:
-    cleaned = _SAFE_CACHE_PROJECT_RE.sub("-", project_id).strip("-.")
-    return cleaned or "project"
+    return safe_cache_project_id(project_id)
 
 
 def _sha256_file_or_none(path: Path) -> str | None:
-    if not path.exists() or not path.is_file():
-        return None
-    digest = hashlib.sha256()
-    with path.open("rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+    return sha256_file_or_none(path)
 
 
 def _project_relpath_for_cache(*, repo_root: Path, project_dir: Path) -> str:
@@ -521,14 +551,7 @@ def _pdm_version_for_cache(*, cwd: Path) -> str:
     global _PDM_VERSION_FOR_CACHE
     if _PDM_VERSION_FOR_CACHE is not None:
         return _PDM_VERSION_FOR_CACHE
-    try:
-        cp = _probe(["pdm", "--version"], cwd=cwd)
-    except ScaffoldError:
-        _PDM_VERSION_FOR_CACHE = "unknown"
-        return _PDM_VERSION_FOR_CACHE
-    combined = "\n".join(x for x in (cp.stdout, cp.stderr) if x).strip()
-    line = combined.splitlines()[0].strip() if combined else ""
-    _PDM_VERSION_FOR_CACHE = line or "unknown"
+    _PDM_VERSION_FOR_CACHE = probe_pdm_version(cwd=cwd)
     return _PDM_VERSION_FOR_CACHE
 
 
@@ -541,18 +564,21 @@ def _build_install_cache_state(
     cache_enabled: bool,
 ) -> _InstallCacheState:
     local_meta_path = project_dir / ".venv" / _INSTALL_CACHE_LOCAL_META_FILENAME
-    payload: dict[str, Any] = {
-        "schema_version": _INSTALL_CACHE_SCHEMA_VERSION,
-        "project_id": project_id,
-        "project_path": _project_relpath_for_cache(repo_root=repo_root, project_dir=project_dir),
-        "pyproject_sha256": _sha256_file_or_none(project_dir / "pyproject.toml"),
-        "pdm_lock_sha256": _sha256_file_or_none(project_dir / "pdm.lock"),
-        "python_major_minor": f"{sys.version_info.major}.{sys.version_info.minor}",
-        "pdm_version": _pdm_version_for_cache(cwd=project_dir),
-        "install_cmd": list(install_cmd),
-    }
-    fingerprint_src = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    fingerprint = hashlib.sha256(fingerprint_src.encode("utf-8")).hexdigest()
+    fingerprint_entry = build_install_cache_fingerprint(
+        repo_root=repo_root,
+        project_dir=project_dir,
+        project_id=project_id,
+        install_cmd=install_cmd,
+        python_major_minor=f"{sys.version_info.major}.{sys.version_info.minor}",
+        pdm_version=_pdm_version_for_cache(cwd=project_dir),
+    )
+    payload = fingerprint_entry.payload
+    fingerprint = fingerprint_entry.fingerprint
+    safe_project_id = _safe_cache_project_id(project_id)
+    seed_root = _seed_root_from_env()
+    seed_project_dir = seed_root / safe_project_id if seed_root is not None else None
+    seed_entry_dir = seed_project_dir / fingerprint if seed_project_dir is not None else None
+    seed_venv_dir = seed_entry_dir / "venv" if seed_entry_dir is not None else None
 
     if not cache_enabled:
         return _InstallCacheState(
@@ -566,6 +592,10 @@ def _build_install_cache_state(
             local_meta_path=local_meta_path,
             fingerprint=fingerprint,
             fingerprint_payload=payload,
+            seed_root=seed_root,
+            seed_project_dir=seed_project_dir,
+            seed_entry_dir=seed_entry_dir,
+            seed_venv_dir=seed_venv_dir,
         )
 
     cache_root = _cache_root_from_env()
@@ -581,9 +611,13 @@ def _build_install_cache_state(
             local_meta_path=local_meta_path,
             fingerprint=fingerprint,
             fingerprint_payload=payload,
+            seed_root=seed_root,
+            seed_project_dir=seed_project_dir,
+            seed_entry_dir=seed_entry_dir,
+            seed_venv_dir=seed_venv_dir,
         )
 
-    project_cache_dir = cache_root / _safe_cache_project_id(project_id)
+    project_cache_dir = cache_root / safe_project_id
     entry_dir = project_cache_dir / fingerprint
     return _InstallCacheState(
         enabled=True,
@@ -596,6 +630,10 @@ def _build_install_cache_state(
         local_meta_path=local_meta_path,
         fingerprint=fingerprint,
         fingerprint_payload=payload,
+        seed_root=seed_root,
+        seed_project_dir=seed_project_dir,
+        seed_entry_dir=seed_entry_dir,
+        seed_venv_dir=seed_venv_dir,
     )
 
 
@@ -633,7 +671,7 @@ def _local_install_metadata_matches(*, state: _InstallCacheState) -> bool:
 
 def _write_local_install_metadata(*, state: _InstallCacheState) -> None:
     payload = {
-        "schema_version": _INSTALL_CACHE_SCHEMA_VERSION,
+        "schema_version": INSTALL_CACHE_SCHEMA_VERSION,
         "fingerprint": state.fingerprint,
         "payload": state.fingerprint_payload,
     }
@@ -698,6 +736,42 @@ def _install_cache_restore(*, state: _InstallCacheState, project_dir: Path, proj
     return True
 
 
+def _install_cache_restore_from_seed(
+    *, state: _InstallCacheState, project_dir: Path, project_id: str
+) -> bool:
+    if state.seed_venv_dir is None:
+        return False
+    if not state.seed_venv_dir.exists():
+        return False
+    restore_parent = project_dir.parent
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=f".maint_venv_seed_{_safe_cache_project_id(project_id)}_",
+            dir=restore_parent,
+        ) as tmp:
+            tmp_path = Path(tmp)
+            staged = tmp_path / "venv"
+            shutil.copytree(state.seed_venv_dir, staged, symlinks=True)
+            target = project_dir / ".venv"
+            if target.exists():
+                shutil.rmtree(target, ignore_errors=True)
+            shutil.move(str(staged), str(target))
+    except OSError as exc:
+        _eprint(f"INFO: {project_id}: maint-venv-seed restore-failed ({exc}).")
+        return False
+    if not _validate_project_venv(project_dir=project_dir):
+        shutil.rmtree(project_dir / ".venv", ignore_errors=True)
+        _eprint(f"INFO: {project_id}: maint-venv-seed restore-failed (invalid venv).")
+        return False
+    try:
+        _write_local_install_metadata(state=state)
+    except OSError as exc:
+        _eprint(f"INFO: {project_id}: maint-venv-seed restore-failed ({exc}).")
+        return False
+    _eprint(f"INFO: {project_id}: maint-venv-seed hit ({state.fingerprint[:12]}).")
+    return True
+
+
 def _acquire_best_effort_lock(lock_path: Path) -> int | None:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_CREAT | os.O_EXCL | os.O_RDWR
@@ -745,7 +819,7 @@ def _install_cache_save(*, state: _InstallCacheState, project_dir: Path, project
         _write_json_file(
             temp_entry / "meta.json",
             {
-                "schema_version": _INSTALL_CACHE_SCHEMA_VERSION,
+                "schema_version": INSTALL_CACHE_SCHEMA_VERSION,
                 "fingerprint": state.fingerprint,
                 "payload": state.fingerprint_payload,
             },
@@ -855,6 +929,8 @@ def _run_manifest_task(
         _eprint(f"INFO: {project_id}: maint-venv-cache hit-local ({cache_state.fingerprint[:12]}).")
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
     if _install_cache_restore(state=cache_state, project_dir=cwd, project_id=project_id):
+        return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
+    if _install_cache_restore_from_seed(state=cache_state, project_dir=cwd, project_id=project_id):
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
     first = _run(cmd, cwd=cwd, capture=True, env=env)

@@ -23,6 +23,7 @@ class ResourceSpec:
 class SandboxSpec:
     backend: Literal["local", "docker"] = "local"
 
+    image_ref: str | None = None
     image_context_path: Path | None = None
     dockerfile: Path | None = None
 

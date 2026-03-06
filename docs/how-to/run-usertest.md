@@ -141,6 +141,16 @@ so `warm` mainly speeds up repeated installs across runs.
 That layer stores per-project `.venv` snapshots under `/cache/usertest_maint_venvs` and can make repeated
 `scaffold.py run install --all` steps near-noop when lockfiles are unchanged.
 
+For same-repo `usertest-implement` Docker runs, the tool now also selects a dedicated maintenance
+image profile by default. That profile:
+
+- resolves a maintenance image from `local -> pull -> build`
+- seeds project `.venv` directories inside the image under `/opt/usertest_maint_seed`
+- bind-mounts matching cached `.venv` directories directly into `/workspace/<project>/.venv`
+
+This profile is intentionally maintenance-only. `usertest` still uses the generic `sandbox_cli`
+path for normal usertest runs against arbitrary targets.
+
 Defaults:
 
 - Host cache directory: `<repo_root>/runs/_cache/usertest` (when `--exec-cache warm` and `--exec-cache-dir` is not set)

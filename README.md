@@ -31,6 +31,9 @@ Once we have all of those target issues, we need to implement them.
 
 - Use the same mechanisms as usertest and usertest-backlog to generate a PR.
 - Track metrics on the implementers to identify rising complexity and tech debt.
+- Same-repo Docker maintenance runs now have a dedicated maintenance image profile with seeded
+  project environments and zero-copy `.venv` cache mounts so repeated maintenance does not spend
+  most of its time reinstalling the monorepo.
 
 ## Quickstart (one command)
 

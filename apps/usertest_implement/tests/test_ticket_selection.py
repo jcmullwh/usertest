@@ -7,6 +7,7 @@ from pathlib import Path
 
 
 def _write_json(path: Path, obj: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
@@ -189,6 +190,7 @@ def test_tickets_run_next_dry_run_defaults_to_implementation_only(tmp_path: Path
     assert payload["selected_ticket"]["fingerprint"] == impl_fp
     assert payload["run_request"]["verification_commands"]
     assert payload["run_request"]["exec_cache"] == "warm"
+    assert payload["run_request"]["exec_docker_profile"] == "standard"
     assert payload["run_request"]["exec_maintenance_venv_cache"] is True
 
 
@@ -240,6 +242,117 @@ def test_run_dry_run_can_disable_maintenance_venv_cache(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr or proc.stdout
     payload = json.loads(proc.stdout)
     assert payload["run_request"]["exec_maintenance_venv_cache"] is False
+
+
+def test_run_dry_run_defaults_to_maintenance_profile_for_same_repo_targets() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    export_path = repo_root / "runs" / "_tmp_ticket_selection_same_repo.json"
+    try:
+        _write_json(
+            export_path,
+            {
+                "schema_version": 1,
+                "exports": [
+                    {
+                        "fingerprint": "cccccccccccccccc",
+                        "export_kind": "implementation",
+                        "title": "Ticket C",
+                        "labels": [],
+                        "body_markdown": "# C\n",
+                        "source_ticket": {
+                            "fingerprint": "cccccccccccccccc",
+                            "stage": "ready_for_ticket",
+                            "severity": "low",
+                        },
+                        "owner_repo": {
+                            "root": str(repo_root),
+                            "repo_input": str(repo_root),
+                            "idea_path": str(
+                                repo_root / ".agents" / "plans" / "2 - ready" / "c.md"
+                            ),
+                        },
+                    }
+                ],
+            },
+        )
+
+        proc = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "usertest_implement.cli",
+                "run",
+                "--dry-run",
+                "--commit",
+                "--tickets-export",
+                str(export_path),
+                "--fingerprint",
+                "cccccccccccccccc",
+            ],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(repo_root),
+        )
+        assert proc.returncode == 0, proc.stderr or proc.stdout
+        payload = json.loads(proc.stdout)
+        assert payload["run_request"]["exec_docker_profile"] == "maintenance"
+        assert payload["run_request"]["exec_docker_profile_eligible"] is True
+        assert payload["run_request"]["verification_commands"][0].startswith(
+            "bash ./scripts/smoke.sh --skip-install --use-pythonpath"
+        )
+    finally:
+        export_path.unlink(missing_ok=True)
+
+
+def test_run_dry_run_rejects_maintenance_profile_for_external_target(tmp_path: Path) -> None:
+    export_path = tmp_path / "tickets_export.json"
+    _write_json(
+        export_path,
+        {
+            "schema_version": 1,
+            "exports": [
+                {
+                    "fingerprint": "dddddddddddddddd",
+                    "export_kind": "implementation",
+                    "title": "Ticket D",
+                    "labels": [],
+                    "body_markdown": "# D\n",
+                    "source_ticket": {
+                        "fingerprint": "dddddddddddddddd",
+                        "stage": "ready_for_ticket",
+                        "severity": "low",
+                    },
+                    "owner_repo": {
+                        "root": str(tmp_path),
+                        "repo_input": str(tmp_path),
+                        "idea_path": str(tmp_path / "d.md"),
+                    },
+                }
+            ],
+        },
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "run",
+            "--dry-run",
+            "--tickets-export",
+            str(export_path),
+            "--fingerprint",
+            "dddddddddddddddd",
+            "--exec-docker-profile",
+            "maintenance",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode != 0
+    assert "same-repo maintenance targets" in (proc.stderr + proc.stdout)
 
 
 def test_tickets_run_next_dry_run_ignores_actioned_fingerprints(tmp_path: Path) -> None:

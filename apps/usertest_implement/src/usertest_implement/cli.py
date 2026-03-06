@@ -403,6 +403,59 @@ def _git_remote_url(*, repo_dir: Path, remote_name: str) -> str | None:
     return out if out else None
 
 
+def _normalize_repo_identity(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    if not cleaned:
+        return None
+    cleaned = cleaned.rstrip("/")
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    return cleaned.lower()
+
+
+def _maintenance_profile_is_eligible(*, repo_root: Path, repo_input: str) -> bool:
+    current_git_root = _infer_git_root(repo_root) or repo_root.resolve()
+    if _looks_like_local_path(repo_input):
+        try:
+            candidate = Path(repo_input).expanduser()
+        except OSError:
+            candidate = None
+        if candidate is not None:
+            target_git_root = _infer_git_root(candidate)
+            if target_git_root is not None and target_git_root.resolve() == current_git_root.resolve():
+                return True
+    current_origin = _normalize_repo_identity(
+        _git_remote_url(repo_dir=current_git_root, remote_name="origin")
+    )
+    requested_origin = _normalize_repo_identity(repo_input)
+    return bool(current_origin is not None and requested_origin == current_origin)
+
+
+def _resolve_exec_docker_profile(
+    *,
+    exec_backend: str,
+    requested_profile: str | None,
+    maintenance_eligible: bool,
+) -> str:
+    backend = exec_backend.strip().lower()
+    if requested_profile is not None and requested_profile.strip():
+        profile = requested_profile.strip().lower()
+        if profile not in {"standard", "maintenance"}:
+            raise SystemExit(f"Unsupported --exec-docker-profile: {requested_profile!r}")
+        if backend != "docker":
+            raise SystemExit("--exec-docker-profile requires --exec-backend docker.")
+        if profile == "maintenance" and not maintenance_eligible:
+            raise SystemExit(
+                "exec_docker_profile='maintenance' is only valid for same-repo maintenance targets."
+            )
+        return profile
+    if backend != "docker":
+        return "standard"
+    return "maintenance" if maintenance_eligible else "standard"
+
+
 def _default_backlog_runs_dir(repo_root: Path) -> Path:
     return repo_root / "runs" / "usertest"
 
@@ -846,18 +899,32 @@ def _run_selected_ticket(
             if remote_url is not None:
                 effective_repo_input = remote_url
 
+    exec_backend = str(args.exec_backend).strip().lower()
+    maintenance_profile_eligible = _maintenance_profile_is_eligible(
+        repo_root=repo_root,
+        repo_input=str(effective_repo_input),
+    )
+    exec_docker_profile = _resolve_exec_docker_profile(
+        exec_backend=exec_backend,
+        requested_profile=getattr(args, "exec_docker_profile", None),
+        maintenance_eligible=maintenance_profile_eligible,
+    )
+
     if wants_handoff and not verification_commands and not bool(getattr(args, "skip_verify", False)):
         install_gate = "python tools/scaffold/scaffold.py run --all --skip-missing install"
         lint_gate = "python tools/scaffold/scaffold.py run --all --skip-missing lint"
         test_gate = "python tools/scaffold/scaffold.py run --all --skip-missing test"
 
-        if str(args.exec_backend).strip().lower() == "docker":
+        if exec_backend == "docker":
             scaffold_prefix = (
                 'PYTHON_BIN=python; command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python3; '
                 '"$PYTHON_BIN" tools/scaffold/scaffold.py run --all --skip-missing '
             )
+            smoke_cmd = "bash ./scripts/smoke.sh"
+            if exec_docker_profile == "maintenance":
+                smoke_cmd = "bash ./scripts/smoke.sh --skip-install --use-pythonpath"
             verification_commands = [
-                "bash ./scripts/smoke.sh",
+                smoke_cmd,
                 f"{scaffold_prefix}install",
                 f"{scaffold_prefix}lint",
                 f"{scaffold_prefix}test",
@@ -884,7 +951,7 @@ def _run_selected_ticket(
     if exec_cache == "warm" and exec_cache_dir is None:
         exec_cache_dir = repo_root / "runs" / "_cache" / "usertest_implement"
     maintenance_venv_cache = bool(
-        str(args.exec_backend).strip().lower() == "docker"
+        exec_backend == "docker"
         and exec_cache == "warm"
         and bool(getattr(args, "maintenance_venv_cache", True))
     )
@@ -904,7 +971,8 @@ def _run_selected_ticket(
         keep_workspace=keep_workspace,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
-        exec_backend=str(args.exec_backend),
+        exec_backend=exec_backend,
+        exec_docker_profile=exec_docker_profile,
         exec_keep_container=bool(args.exec_keep_container),
         exec_cache=exec_cache,
         exec_cache_dir=exec_cache_dir,
@@ -935,6 +1003,8 @@ def _run_selected_ticket(
                 "model": request.model,
                 "keep_workspace": request.keep_workspace,
                 "exec_backend": request.exec_backend,
+                "exec_docker_profile": request.exec_docker_profile,
+                "exec_docker_profile_eligible": maintenance_profile_eligible,
                 "exec_keep_container": request.exec_keep_container,
                 "exec_cache": request.exec_cache,
                 "exec_maintenance_venv_cache": request.exec_maintenance_venv_cache,
@@ -945,7 +1015,7 @@ def _run_selected_ticket(
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return 0
 
-    if str(args.exec_backend).strip().lower() == "docker":
+    if exec_backend == "docker":
         _require_docker_available()
 
     if args.move_on_start and selected.owner_root is not None and selected.idea_path is not None:
@@ -1516,6 +1586,14 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         action="store_false",
     )
     parser.add_argument("--exec-use-target-sandbox-cli-install", action="store_true", default=False)
+    parser.add_argument(
+        "--exec-docker-profile",
+        choices=["standard", "maintenance"],
+        help=(
+            "Docker execution profile. Defaults to maintenance for same-repo maintenance targets "
+            "and standard otherwise."
+        ),
+    )
     parser.add_argument(
         "--exec-keep-container",
         action=argparse.BooleanOptionalAction,
