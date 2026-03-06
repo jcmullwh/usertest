@@ -866,6 +866,11 @@ def _run_selected_ticket(
     verification_timeout_seconds = getattr(args, "verify_timeout_seconds", None)
     if verification_timeout_seconds is not None and verification_timeout_seconds <= 0:
         verification_timeout_seconds = None
+    verification_reuse_mode = str(getattr(args, "verify_reuse", "auto") or "auto").strip().lower()
+    if verification_reuse_mode not in {"auto", "off"}:
+        raise SystemExit(
+            f"--verify-reuse must be one of auto/off; got {getattr(args, 'verify_reuse', None)!r}."
+        )
 
     wants_handoff = bool(args.commit) or bool(args.push) or bool(args.pr)
 
@@ -971,6 +976,7 @@ def _run_selected_ticket(
         keep_workspace=keep_workspace,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
+        verification_reuse_mode=verification_reuse_mode,
         exec_backend=exec_backend,
         exec_docker_profile=exec_docker_profile,
         exec_keep_container=bool(args.exec_keep_container),
@@ -1010,6 +1016,7 @@ def _run_selected_ticket(
                 "exec_maintenance_venv_cache": request.exec_maintenance_venv_cache,
                 "verification_commands": list(request.verification_commands),
                 "verification_timeout_seconds": request.verification_timeout_seconds,
+                "verification_reuse_mode": request.verification_reuse_mode,
             },
         }
         print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -1036,15 +1043,18 @@ def _run_selected_ticket(
     duration_seconds = max(0.0, time.monotonic() - wall_start)
 
     run_dir = result.run_dir
-    _write_json(
-        run_dir / "timing.json",
-        {
-            "schema_version": 1,
-            "started_at": started_at,
-            "finished_at": finished_at,
-            "duration_seconds": duration_seconds,
-        },
-    )
+    timing_payload = {
+        "schema_version": 1,
+        "started_at": started_at,
+        "finished_at": finished_at,
+        "duration_seconds": duration_seconds,
+    }
+    run_meta = _read_json(run_dir / "run_meta.json")
+    if isinstance(run_meta, dict):
+        phases = run_meta.get("phases")
+        if isinstance(phases, dict):
+            timing_payload["phases"] = phases
+    _write_json(run_dir / "timing.json", timing_payload)
     _write_json(
         run_dir / "ticket_ref.json",
         {
@@ -1654,6 +1664,15 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         "--skip-verify",
         action="store_true",
         help="Disable default verification gate (useful for debugging).",
+    )
+    parser.add_argument(
+        "--verify-reuse",
+        choices=["auto", "off"],
+        default="auto",
+        help=(
+            "Reuse a runner-owned in-session final verification pass when available (default: auto). "
+            "Use --verify-reuse off to force a separate post-agent rerun."
+        ),
     )
     parser.add_argument(
         "--ci-timeout-seconds",

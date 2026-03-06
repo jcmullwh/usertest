@@ -162,7 +162,9 @@ def _setup_target_repo(tmp_path: Path) -> Path:
     return target
 
 
-def test_prompt_includes_verification_gate_and_codex_workspace_sandbox_note(tmp_path: Path) -> None:
+def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_note(
+    tmp_path: Path,
+) -> None:
     runner_root = _setup_runner_root(tmp_path)
     target = _setup_target_repo(tmp_path)
     dummy_binary = _make_dummy_codex_binary(tmp_path)
@@ -185,13 +187,15 @@ def test_prompt_includes_verification_gate_and_codex_workspace_sandbox_note(tmp_
             persona_id="p",
             mission_id="m",
             verification_commands=(verify_cmd,),
+            verification_reuse_mode="auto",
         ),
     )
 
     assert result.exit_code == 0
 
     prompt_text = (result.run_dir / "prompt.txt").read_text(encoding="utf-8")
-    assert "Verification gate" in prompt_text
-    assert verify_cmd in prompt_text
+    assert "Final handoff verification" in prompt_text
+    assert "verify_client.ps1" in prompt_text
+    assert verify_cmd not in prompt_text
     assert "Codex workspace sandbox is enabled" in prompt_text
     assert "--exec-backend docker" in prompt_text

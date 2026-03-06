@@ -29,10 +29,14 @@ ticket text is already included in this prompt as append system prompt content. 
 
 1) Read the ticket carefully and restate the concrete requirements.
 2) Make the smallest, most direct code change that satisfies the ticket.
-3) Run relevant validation commands (tests, lint, or a targeted repro) and capture:
+3) Run relevant validation commands (tests, lint, or a targeted repro) while iterating, and capture:
    - the exact commands you ran
    - the results (including failures)
-4) If you cannot fully complete the ticket:
+4) If the prompt includes a runner-provided final handoff verification command, treat that as the
+   canonical final gate:
+   - run it once you believe the work is complete
+   - if it passes, do not make further workspace changes before finishing
+5) If you cannot fully complete the ticket:
    - clearly describe what is blocked
    - propose the smallest next steps a human should take
 
