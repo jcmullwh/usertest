@@ -5,7 +5,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from tools.scaffold.install_cache_common import normalize_pdm_version
+from tools.scaffold.install_cache_common import normalize_pdm_version, sha256_text_file_normalized_or_none
 
 
 def _write(path: Path, text: str) -> None:
@@ -82,3 +82,12 @@ def test_install_cache_fingerprint_cli_reports_manifest_projects(tmp_path: Path)
 def test_normalize_pdm_version_accepts_cli_banner() -> None:
     assert normalize_pdm_version("PDM, version 2.26.2") == "2.26.2"
     assert normalize_pdm_version(" 2.26.2 ") == "2.26.2"
+
+
+def test_text_file_hash_normalizes_line_endings(tmp_path: Path) -> None:
+    lf = tmp_path / "lf.toml"
+    crlf = tmp_path / "crlf.toml"
+    lf.write_bytes(b"[project]\nname='demo'\n")
+    crlf.write_bytes(b"[project]\r\nname='demo'\r\n")
+
+    assert sha256_text_file_normalized_or_none(lf) == sha256_text_file_normalized_or_none(crlf)

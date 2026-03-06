@@ -39,6 +39,17 @@ def sha256_file_or_none(path: Path) -> str | None:
     return digest.hexdigest()
 
 
+def sha256_text_file_normalized_or_none(path: Path) -> str | None:
+    if not path.exists() or not path.is_file():
+        return None
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    normalized = text.replace("\r\n", "\n").replace("\r", "\n")
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()
+
+
 def project_relpath_for_cache(*, repo_root: Path, project_dir: Path) -> str:
     try:
         rel = project_dir.resolve().relative_to(repo_root.resolve())
@@ -91,8 +102,8 @@ def build_install_cache_payload(
         "schema_version": INSTALL_CACHE_SCHEMA_VERSION,
         "project_id": project_id,
         "project_path": project_relpath_for_cache(repo_root=repo_root, project_dir=project_dir),
-        "pyproject_sha256": sha256_file_or_none(project_dir / "pyproject.toml"),
-        "pdm_lock_sha256": sha256_file_or_none(project_dir / "pdm.lock"),
+        "pyproject_sha256": sha256_text_file_normalized_or_none(project_dir / "pyproject.toml"),
+        "pdm_lock_sha256": sha256_text_file_normalized_or_none(project_dir / "pdm.lock"),
         "python_major_minor": resolved_python,
         "pdm_version": resolved_pdm,
         "install_cmd": list(install_cmd),
