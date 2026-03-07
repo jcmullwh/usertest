@@ -194,8 +194,9 @@ def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_
     assert result.exit_code == 0
 
     prompt_text = (result.run_dir / "prompt.txt").read_text(encoding="utf-8")
+    expected_wrapper = "verify_client.ps1" if os.name == "nt" else "verify_client.sh"
     assert "Final handoff verification" in prompt_text
-    assert "verify_client.ps1" in prompt_text
+    assert expected_wrapper in prompt_text
     assert verify_cmd not in prompt_text
     assert "Codex workspace sandbox is enabled" in prompt_text
     assert "--exec-backend docker" in prompt_text

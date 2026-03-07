@@ -112,8 +112,11 @@ class VerificationBrokerAttempt:
         self.responses_dir.mkdir(parents=True, exist_ok=True)
         self._thread.start()
 
-    def stop(self, *, join_timeout_seconds: float = 2.0) -> None:
+    def stop(self, *, join_timeout_seconds: float | None = None) -> None:
         self._stop.set()
+        if join_timeout_seconds is None:
+            self._thread.join()
+            return
         self._thread.join(timeout=join_timeout_seconds)
 
     def latest_success_result(self) -> VerificationBrokerRequestResult | None:
