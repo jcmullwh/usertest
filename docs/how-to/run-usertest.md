@@ -151,6 +151,14 @@ image profile by default. That profile:
 This profile is intentionally maintenance-only. `usertest` still uses the generic `sandbox_cli`
 path for normal usertest runs against arbitrary targets.
 
+For same-repo `usertest-implement` handoff runs, verification now also defaults to reuse mode:
+
+- the prompt exposes one runner-owned final handoff verification command instead of the raw gate commands
+- if that command passes and the workspace is unchanged afterward, the run reuses that proof instead of
+  rerunning the full verification gate after the agent exits
+- the selected verification result is recorded in `verification.json`, and the reuse/fallback decision is
+  recorded in `verification_reuse.json`
+
 Defaults:
 
 - Host cache directory: `<repo_root>/runs/_cache/usertest` (when `--exec-cache warm` and `--exec-cache-dir` is not set)

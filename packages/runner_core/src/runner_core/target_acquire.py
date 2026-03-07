@@ -115,9 +115,13 @@ def _relocate_dest_if_within_source(*, src: Path, dest_dir: Path) -> Path:
     return base / dest_dir.name
 
 
-def _git_clone(*, repo: str, dest_dir: Path) -> None:
+def _git_clone(*, repo: str, dest_dir: Path, no_local: bool = False) -> None:
+    argv = ["git", "clone"]
+    if no_local:
+        argv.append("--no-local")
+    argv.extend([repo, str(dest_dir)])
     proc = subprocess.run(
-        ["git", "clone", repo, str(dest_dir)],
+        argv,
         capture_output=True,
         text=True,
         check=False,
@@ -128,6 +132,10 @@ def _git_clone(*, repo: str, dest_dir: Path) -> None:
     if not msg:
         msg = f"git clone failed (exit {proc.returncode})"
     raise RuntimeError(msg)
+
+
+def _verify_git_workspace_connectivity(*, cwd: Path) -> None:
+    _run_git(["fsck", "--connectivity-only", "--no-dangling"], cwd=cwd)
 
 
 def _is_windows_path_too_long_error(msg: str) -> bool:
@@ -319,7 +327,7 @@ def acquire_target(*, repo: str, dest_dir: Path, ref: str | None) -> AcquiredTar
 
             if git_dir is not None and git_dir.exists():
                 try:
-                    _git_clone(repo=str(src), dest_dir=dest_dir)
+                    _git_clone(repo=str(src), dest_dir=dest_dir, no_local=True)
                 except RuntimeError as e:
                     if _is_windows() and _is_windows_path_too_long_error(str(e)):
                         alt_dest = _relocate_dest_for_windows_longpaths(
@@ -328,12 +336,13 @@ def acquire_target(*, repo: str, dest_dir: Path, ref: str | None) -> AcquiredTar
                             max_dir_rel=None,
                         )
                         alt_dest.parent.mkdir(parents=True, exist_ok=True)
-                        _git_clone(repo=str(src), dest_dir=alt_dest)
+                        _git_clone(repo=str(src), dest_dir=alt_dest, no_local=True)
                         dest_dir = alt_dest
                     else:
                         raise
                 if ref is not None:
                     _run_git(["checkout", ref], cwd=dest_dir)
+                _verify_git_workspace_connectivity(cwd=dest_dir)
                 sha = _run_git(["rev-parse", "HEAD"], cwd=dest_dir)
                 return AcquiredTarget(
                     workspace_dir=dest_dir,

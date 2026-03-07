@@ -189,6 +189,7 @@ def test_tickets_run_next_dry_run_defaults_to_implementation_only(tmp_path: Path
     payload = json.loads(proc.stdout)
     assert payload["selected_ticket"]["fingerprint"] == impl_fp
     assert payload["run_request"]["verification_commands"]
+    assert payload["run_request"]["verification_reuse_mode"] == "auto"
     assert payload["run_request"]["exec_cache"] == "warm"
     assert payload["run_request"]["exec_docker_profile"] == "standard"
     assert payload["run_request"]["exec_maintenance_venv_cache"] is True
@@ -242,6 +243,57 @@ def test_run_dry_run_can_disable_maintenance_venv_cache(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr or proc.stdout
     payload = json.loads(proc.stdout)
     assert payload["run_request"]["exec_maintenance_venv_cache"] is False
+
+
+def test_run_dry_run_can_disable_verification_reuse(tmp_path: Path) -> None:
+    export_path = tmp_path / "tickets_export.json"
+    _write_json(
+        export_path,
+        {
+            "schema_version": 1,
+            "exports": [
+                {
+                    "fingerprint": "eeeeeeeeeeeeeeee",
+                    "export_kind": "implementation",
+                    "title": "Ticket E",
+                    "labels": [],
+                    "body_markdown": "# E\n",
+                    "source_ticket": {
+                        "fingerprint": "eeeeeeeeeeeeeeee",
+                        "stage": "ready_for_ticket",
+                        "severity": "low",
+                    },
+                    "owner_repo": {
+                        "root": str(tmp_path),
+                        "repo_input": str(tmp_path),
+                        "idea_path": str(tmp_path / "e.md"),
+                    },
+                }
+            ],
+        },
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "run",
+            "--dry-run",
+            "--tickets-export",
+            str(export_path),
+            "--fingerprint",
+            "eeeeeeeeeeeeeeee",
+            "--verify-reuse",
+            "off",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["run_request"]["verification_reuse_mode"] == "off"
 
 
 def test_run_dry_run_defaults_to_maintenance_profile_for_same_repo_targets() -> None:
@@ -298,6 +350,7 @@ def test_run_dry_run_defaults_to_maintenance_profile_for_same_repo_targets() -> 
         payload = json.loads(proc.stdout)
         assert payload["run_request"]["exec_docker_profile"] == "maintenance"
         assert payload["run_request"]["exec_docker_profile_eligible"] is True
+        assert payload["run_request"]["verification_reuse_mode"] == "auto"
         assert payload["run_request"]["verification_commands"][0].startswith(
             "bash ./scripts/smoke.sh --skip-install --use-pythonpath"
         )
