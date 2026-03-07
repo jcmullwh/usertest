@@ -8,8 +8,8 @@ profiles:
       agent: codex
       model: null
       policy: write
-      persona_id: null
-      mission_id: implement_backlog_ticket_v1
+      persona_id: thoughtful_maintainer
+      mission_id: implement_maintenance_backlog_ticket_v1
       seed: 0
       agent_config_override: []
       keep_workspace: false

@@ -110,6 +110,8 @@ class _SettingsValueSpec:
 
 
 _SETTINGS_FILENAME = "usertest_implement_settings.yaml"
+_DEFAULT_PERSONA_ID = "thoughtful_maintainer"
+_DEFAULT_MISSION_ID = "implement_maintenance_backlog_ticket_v1"
 _SETTINGS_SECTION_RUN_COMMON = "run_common"
 _SETTINGS_SECTION_RUN = "run"
 _SETTINGS_SECTION_TICKETS_RUN_NEXT = "tickets_run_next"
@@ -1958,8 +1960,8 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--agent", choices=["claude", "codex", "gemini"], default="codex")
     parser.add_argument("--model", help="Optional model override.")
     parser.add_argument("--policy", default="write")
-    parser.add_argument("--persona-id", dest="persona_id")
-    parser.add_argument("--mission-id", dest="mission_id", default="implement_backlog_ticket_v1")
+    parser.add_argument("--persona-id", dest="persona_id", default=_DEFAULT_PERSONA_ID)
+    parser.add_argument("--mission-id", dest="mission_id", default=_DEFAULT_MISSION_ID)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--agent-config-override",
