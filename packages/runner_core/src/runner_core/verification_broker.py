@@ -15,6 +15,9 @@ from typing import Any
 
 from runner_core.workspace_state_hash import WorkspaceStateHash
 
+_SHELL_PROBE_TIMEOUT_SECONDS = 2.0
+_POWERSHELL_PROBE_TIMEOUT_SECONDS = 10.0
+
 
 @dataclass(frozen=True)
 class VerificationBrokerRequestResult:
@@ -119,7 +122,7 @@ def probe_windows_bash_usable() -> dict[str, Any]:
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=2.0,
+            timeout=_SHELL_PROBE_TIMEOUT_SECONDS,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -128,7 +131,10 @@ def probe_windows_bash_usable() -> dict[str, Any]:
             "usable": False,
             "resolved_path": resolved,
             "reason_code": "unresponsive",
-            "reason": "bash probe timed out (2.0s) running `bash -lc \"echo ok\"`.",
+            "reason": (
+                "bash probe timed out "
+                f"({_SHELL_PROBE_TIMEOUT_SECONDS:.1f}s) running `bash -lc \"echo ok\"`."
+            ),
         }
     except OSError as e:
         return {
@@ -181,6 +187,11 @@ def probe_local_verification_launcher(*, launcher: VerificationLauncher) -> dict
         if executable == "powershell"
         else [resolved, "-lc", "echo ok"]
     )
+    probe_timeout = (
+        _POWERSHELL_PROBE_TIMEOUT_SECONDS
+        if executable == "powershell"
+        else _SHELL_PROBE_TIMEOUT_SECONDS
+    )
     try:
         proc = subprocess.run(
             probe_argv,
@@ -188,7 +199,7 @@ def probe_local_verification_launcher(*, launcher: VerificationLauncher) -> dict
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=2.0,
+            timeout=probe_timeout,
             check=False,
         )
     except subprocess.TimeoutExpired:
@@ -198,7 +209,7 @@ def probe_local_verification_launcher(*, launcher: VerificationLauncher) -> dict
             "resolved_path": resolved,
             "reason_code": "unresponsive",
             "reason": (
-                f"{executable} probe timed out (2.0s) running "
+                f"{executable} probe timed out ({probe_timeout:.1f}s) running "
                 + " ".join(shlex.quote(part) for part in probe_argv)
                 + "."
             ),
@@ -536,6 +547,7 @@ class VerificationBrokerAttempt:
         _write_json_atomic(
             response_path,
             {
+                "schema_version": 1,
                 "request_id": result.request_id,
                 "status": result.status,
                 "timed_out": result.timed_out,
@@ -544,6 +556,8 @@ class VerificationBrokerAttempt:
                 "summary_path": result.summary_path,
                 "workspace_hash_after_verification": result.workspace_hash_after_verification,
                 "workspace_hash_mode": result.workspace_hash_mode,
+                "started_utc": result.started_utc,
+                "finished_utc": result.finished_utc,
             },
         )
 
@@ -555,9 +569,12 @@ class VerificationBrokerAttempt:
     ) -> VerificationBrokerClient:
         self.client_root.mkdir(parents=True, exist_ok=True)
         request_dir_for_agent = _agent_path_join(self.attempt_root_for_agent, "requests")
+        response_dir_for_agent = _agent_path_join(self.attempt_root_for_agent, "responses")
         python_payload = _render_client_python(
             request_token=self.request_token,
             request_dir=request_dir_for_agent,
+            response_dir=response_dir_for_agent,
+            wait_timeout_seconds=wait_timeout_seconds,
         )
         self.python_script.write_text(python_payload, encoding="utf-8", newline="\n")
         self.shell_script.write_text(
@@ -602,18 +619,22 @@ def _render_client_python(
     *,
     request_token: str,
     request_dir: str,
+    response_dir: str,
+    wait_timeout_seconds: float,
 ) -> str:
-    request_token_json = json.dumps(request_token)
-    request_dir_json = json.dumps(request_dir)
-    return f"""from __future__ import annotations
+    payload = """from __future__ import annotations
 
 import json
 import sys
+import time
 import uuid
 from pathlib import Path
 
-REQUEST_TOKEN = {request_token_json}
-REQUEST_DIR = Path({request_dir_json})
+REQUEST_TOKEN = __REQUEST_TOKEN__
+REQUEST_DIR = Path(__REQUEST_DIR__)
+RESPONSE_DIR = Path(__RESPONSE_DIR__)
+WAIT_TIMEOUT_SECONDS = __WAIT_TIMEOUT_SECONDS__
+POLL_INTERVAL_SECONDS = 0.2
 
 
 def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
@@ -623,24 +644,92 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
     tmp_path.replace(path)
 
 
+def _load_response(path: Path, request_id: str) -> tuple[dict[str, object] | None, str | None]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        return None, f"invalid broker response JSON for request_id={request_id}: {exc}"
+    if not isinstance(payload, dict):
+        return None, f"invalid broker response payload for request_id={request_id}"
+
+    response_request_id = payload.get("request_id")
+    if isinstance(response_request_id, str) and response_request_id.strip():
+        if response_request_id.strip() != request_id:
+            return (
+                None,
+                "invalid broker response request_id mismatch: "
+                f"expected {request_id}, got {response_request_id.strip()}",
+            )
+
+    status = payload.get("status")
+    if not isinstance(status, str) or not status.strip():
+        return None, f"invalid broker response status for request_id={request_id}"
+    if status.strip() not in {"passed", "failed", "timed_out", "invalid"}:
+        return None, f"invalid broker response status for request_id={request_id}: {status!r}"
+    return payload, None
+
+
+def _render_failure_message(request_id: str, payload: dict[str, object]) -> str:
+    status = str(payload.get("status") or "").strip() or "invalid"
+    failure_reason = str(payload.get("failure_reason") or "").strip()
+    summary_path = str(payload.get("summary_path") or "").strip()
+    artifacts_dir = str(payload.get("artifacts_dir") or "").strip()
+    parts = [f"verification failed (request_id={request_id}, status={status})"]
+    if failure_reason:
+        parts.append(f"failure_reason={failure_reason}")
+    if summary_path:
+        parts.append(f"summary_path={summary_path}")
+    elif artifacts_dir:
+        parts.append(f"artifacts_dir={artifacts_dir}")
+    return "; ".join(parts)
+
+
 def main() -> int:
     request_id = "req_" + uuid.uuid4().hex
-    request_path = REQUEST_DIR / f"{{request_id}}.json"
+    request_path = REQUEST_DIR / f"{request_id}.json"
+    response_path = RESPONSE_DIR / f"{request_id}.json"
     _write_json_atomic(
         request_path,
-        {{
+        {
             "schema_version": 1,
             "request_id": request_id,
             "request_token": REQUEST_TOKEN,
-        }},
+        },
     )
-    print(f"verification requested (request_id={{request_id}})")
-    return 0
+    print(f"verification requested (request_id={request_id})", flush=True)
+
+    deadline = time.monotonic() + float(WAIT_TIMEOUT_SECONDS)
+    while True:
+        if response_path.exists():
+            response_payload, error = _load_response(response_path, request_id)
+            if error is not None:
+                print(error, file=sys.stderr)
+                return 1
+            assert response_payload is not None
+            if str(response_payload.get("status") or "").strip() == "passed":
+                print(f"verification passed (request_id={request_id})", flush=True)
+                return 0
+            print(_render_failure_message(request_id, response_payload), file=sys.stderr)
+            return 1
+        if time.monotonic() >= deadline:
+            print(
+                "verification timed out waiting for broker response "
+                f"(request_id={request_id}, timeout_seconds={WAIT_TIMEOUT_SECONDS:g})",
+                file=sys.stderr,
+            )
+            return 1
+        time.sleep(POLL_INTERVAL_SECONDS)
 
 
 if __name__ == "__main__":
     raise SystemExit(main())
 """
+    return (
+        payload.replace("__REQUEST_TOKEN__", json.dumps(request_token))
+        .replace("__REQUEST_DIR__", json.dumps(request_dir))
+        .replace("__RESPONSE_DIR__", json.dumps(response_dir))
+        .replace("__WAIT_TIMEOUT_SECONDS__", repr(float(wait_timeout_seconds)))
+    )
 
 
 def _render_client_shell_wrapper(*, python_command: str) -> str:
