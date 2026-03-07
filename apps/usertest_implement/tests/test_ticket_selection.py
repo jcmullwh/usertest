@@ -5,10 +5,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+import yaml
+
 
 def _write_json(path: Path, obj: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _write_yaml(path: Path, obj: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(yaml.safe_dump(obj, sort_keys=False), encoding="utf-8")
 
 
 def test_run_dry_run_selects_by_fingerprint(tmp_path: Path) -> None:
@@ -350,12 +357,196 @@ def test_run_dry_run_defaults_to_maintenance_profile_for_same_repo_targets() -> 
         payload = json.loads(proc.stdout)
         assert payload["run_request"]["exec_docker_profile"] == "maintenance"
         assert payload["run_request"]["exec_docker_profile_eligible"] is True
+        assert payload["run_request"]["commit"] is True
+        assert payload["run_request"]["push"] is True
+        assert payload["run_request"]["pr"] is True
+        assert payload["run_request"]["verification_profile"] == "default_handoff"
         assert payload["run_request"]["verification_reuse_mode"] == "auto"
         assert payload["run_request"]["verification_commands"][0].startswith(
             "bash ./scripts/smoke.sh --skip-install --use-pythonpath"
         )
     finally:
         export_path.unlink(missing_ok=True)
+
+
+def test_run_dry_run_applies_settings_profile_and_reports_effective_handoff_flags(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    _write_yaml(repo_root / "configs" / "agents.yaml", {"agents": {}})
+    _write_yaml(repo_root / "configs" / "policies.yaml", {"policies": {}})
+    _write_yaml(
+        repo_root / "configs" / "usertest_implement_settings.yaml",
+        {
+            "version": 1,
+            "default_profile": "default",
+            "profiles": {
+                "default": {
+                    "run_common": {
+                        "exec_backend": "docker",
+                        "verification_profile": "default_handoff",
+                        "verify_reuse": "auto",
+                    },
+                    "run": {},
+                    "tickets_run_next": {},
+                },
+                "custom_profile": {
+                    "run_common": {
+                        "exec_backend": "docker",
+                        "exec_docker_profile": "maintenance",
+                        "verification_profile": "default_handoff",
+                        "commit": True,
+                        "push": False,
+                        "pr": False,
+                    },
+                    "run": {},
+                    "tickets_run_next": {},
+                },
+            },
+        },
+    )
+    export_path = repo_root / "tickets_export.json"
+    _write_json(
+        export_path,
+        {
+            "schema_version": 1,
+            "exports": [
+                {
+                    "fingerprint": "f0f0f0f0f0f0f0f0",
+                    "export_kind": "implementation",
+                    "title": "Ticket F",
+                    "labels": [],
+                    "body_markdown": "# F\n",
+                    "source_ticket": {
+                        "fingerprint": "f0f0f0f0f0f0f0f0",
+                        "stage": "ready_for_ticket",
+                        "severity": "low",
+                    },
+                    "owner_repo": {
+                        "root": str(repo_root),
+                        "repo_input": str(repo_root),
+                        "idea_path": str(repo_root / ".agents" / "plans" / "2 - ready" / "f.md"),
+                    },
+                }
+            ],
+        },
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "--repo-root",
+            str(repo_root),
+            "run",
+            "--dry-run",
+            "--settings-profile",
+            "custom_profile",
+            "--tickets-export",
+            str(export_path),
+            "--fingerprint",
+            "f0f0f0f0f0f0f0f0",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["settings"]["profile"] == "custom_profile"
+    assert payload["settings"]["config_path"].endswith("configs\\usertest_implement_settings.yaml")
+    assert payload["run_request"]["exec_docker_profile"] == "maintenance"
+    assert payload["run_request"]["verification_profile"] == "default_handoff"
+    assert payload["run_request"]["verification_commands"]
+    assert payload["run_request"]["commit"] is True
+    assert payload["run_request"]["push"] is False
+    assert payload["run_request"]["pr"] is False
+
+
+def test_run_dry_run_explicit_flags_override_settings_profile(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    _write_yaml(repo_root / "configs" / "agents.yaml", {"agents": {}})
+    _write_yaml(repo_root / "configs" / "policies.yaml", {"policies": {}})
+    _write_yaml(
+        repo_root / "configs" / "usertest_implement_settings.yaml",
+        {
+            "version": 1,
+            "default_profile": "custom_profile",
+            "profiles": {
+                "custom_profile": {
+                    "run_common": {
+                        "exec_backend": "docker",
+                        "verification_profile": "default_handoff",
+                        "commit": True,
+                        "push": False,
+                        "pr": False,
+                    },
+                    "run": {},
+                    "tickets_run_next": {},
+                }
+            },
+        },
+    )
+    export_path = repo_root / "tickets_export.json"
+    _write_json(
+        export_path,
+        {
+            "schema_version": 1,
+            "exports": [
+                {
+                    "fingerprint": "abababababababab",
+                    "export_kind": "implementation",
+                    "title": "Ticket Override",
+                    "labels": [],
+                    "body_markdown": "# Override\n",
+                    "source_ticket": {
+                        "fingerprint": "abababababababab",
+                        "stage": "ready_for_ticket",
+                        "severity": "low",
+                    },
+                    "owner_repo": {
+                        "root": str(repo_root),
+                        "repo_input": str(repo_root),
+                        "idea_path": str(
+                            repo_root / ".agents" / "plans" / "2 - ready" / "override.md"
+                        ),
+                    },
+                }
+            ],
+        },
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "--repo-root",
+            str(repo_root),
+            "run",
+            "--dry-run",
+            "--tickets-export",
+            str(export_path),
+            "--fingerprint",
+            "abababababababab",
+            "--push",
+            "--pr",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["settings"]["profile"] == "custom_profile"
+    assert payload["run_request"]["commit"] is True
+    assert payload["run_request"]["push"] is True
+    assert payload["run_request"]["pr"] is True
 
 
 def test_run_dry_run_rejects_maintenance_profile_for_external_target(tmp_path: Path) -> None:

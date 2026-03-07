@@ -108,12 +108,37 @@ usertest-implement --help
 
 ## Usage
 
+### Settings profiles
+
+`usertest-implement` can load execution and handoff defaults from
+[configs/usertest_implement_settings.yaml](I:/code/usertest/configs/usertest_implement_settings.yaml).
+
+- Use `--settings <path>` to point at a different file.
+- Use `--settings-profile <name>` to select a profile from that file.
+- If `--settings` is omitted, `usertest-implement` auto-loads
+  `configs/usertest_implement_settings.yaml` when it exists.
+- Explicit CLI flags override settings-file values.
+
+This is the intended place to make `commit/push/pr`, Docker profile, cache mode, verification reuse,
+and `tickets run-next` defaults reviewable instead of hardcoded in helper scripts.
+
+The settings file also makes the verification contract explicit:
+
+- `verification_profile: default_handoff` means "use the standard runner-owned smoke/install/lint/test gate for the current backend/profile".
+- `verification_commands: []` means "no ad hoc overrides"; it does not mean "run no verification".
+
 ### Implement a specific ticket
 
 From a ticket markdown file (for example in `.agents/plans/2 - ready/`):
 
 ```bash
 usertest-implement run --ticket-path ".agents/plans/2 - ready/<ticket>.md"
+```
+
+To use a named execution profile from the settings file:
+
+```bash
+usertest-implement run --settings-profile my_profile --ticket-path ".agents/plans/2 - ready/<ticket>.md"
 ```
 
 `usertest-implement` only accepts stage-6 implementation tickets (`Export kind: implementation`, `Stage: ready_for_ticket`).
