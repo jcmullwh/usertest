@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import os
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 import yaml
+
+_LOCK_TIMEOUT_SECONDS = 60.0
+_LOCK_POLL_SECONDS = 0.1
+_LOCK_STALE_SECONDS = 300.0
 
 
 def _utc_now_z() -> str:
@@ -33,6 +39,7 @@ def load_ledger(path: Path) -> dict[str, Any]:
         "updated_at": updated_at,
         "actions": actions_dict,
     }
+
 
 def update_ledger_doc(
     doc: dict[str, Any],
@@ -77,8 +84,52 @@ def write_ledger(path: Path, doc: dict[str, Any]) -> None:
     )
 
 
+def _acquire_lock(path: Path) -> Path:
+    lock_path = path.with_name(f"{path.name}.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    started = time.monotonic()
+    while True:
+        try:
+            fd = os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError as err:
+            try:
+                age = time.time() - lock_path.stat().st_mtime
+            except OSError:
+                age = None
+            if age is not None and age > _LOCK_STALE_SECONDS:
+                try:
+                    lock_path.unlink()
+                except OSError:
+                    pass
+                continue
+            if time.monotonic() - started > _LOCK_TIMEOUT_SECONDS:
+                raise TimeoutError(
+                    f"Timed out waiting for ledger lock: {lock_path}"
+                ) from err
+            time.sleep(_LOCK_POLL_SECONDS)
+            continue
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(f"pid={os.getpid()}\n")
+                handle.write(f"started_at={_utc_now_z()}\n")
+        except Exception:
+            try:
+                lock_path.unlink()
+            except OSError:
+                pass
+            raise
+        return lock_path
+
+
 def update_ledger_file(path: Path, *, fingerprint: str, updates: dict[str, Any]) -> dict[str, Any]:
-    doc = load_ledger(path)
-    updated = update_ledger_doc(doc, fingerprint=fingerprint, updates=updates)
-    write_ledger(path, updated)
-    return updated
+    lock_path = _acquire_lock(path)
+    try:
+        doc = load_ledger(path)
+        updated = update_ledger_doc(doc, fingerprint=fingerprint, updates=updates)
+        write_ledger(path, updated)
+        return updated
+    finally:
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
