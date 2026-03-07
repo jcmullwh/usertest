@@ -51,6 +51,54 @@ def _make_repo_root(tmp_path: Path) -> Path:
             }
         },
     )
+    _write_yaml(
+        repo_root / "configs" / "backlog_policy_internal_maintenance.yaml",
+        {
+            "backlog_policy": {
+                "surface_area_high": [
+                    "new_command",
+                    "breaking_change",
+                    "new_top_level_mode",
+                    "new_config_schema",
+                    "new_api",
+                ],
+                "high_surface_rules": [
+                    {
+                        "rule_id": "command_surface",
+                        "applies_to_kinds": [
+                            "new_command",
+                            "new_top_level_mode",
+                            "new_config_schema",
+                        ],
+                        "breadth_min": {
+                            "missions": 2,
+                            "targets": 2,
+                            "repo_inputs": 2,
+                        },
+                        "default_stage_for_low_breadth": "research_required",
+                        "investigation_steps": [
+                            "Validate repo intent",
+                            "Check if existing commands/flags can be parameterized",
+                        ],
+                        "risk_tag": "surface_change",
+                        "review_domain": "command_surface",
+                    },
+                    {
+                        "rule_id": "behavior_compat",
+                        "applies_to_kinds": ["breaking_change", "new_api"],
+                        "breadth_min": {"runs": 5, "agents": 2},
+                        "default_stage_for_low_breadth": "research_required",
+                        "investigation_steps": [
+                            "Validate compatibility implications",
+                        ],
+                        "risk_tag": "behavior_change",
+                        "review_domain": "behavior_compat",
+                    },
+                ],
+                "default_stage_for_labeled": "ready_for_ticket",
+            }
+        },
+    )
     return repo_root
 
 
@@ -318,6 +366,7 @@ def test_reports_export_tickets_skips_when_plan_ticket_fingerprint_exists(tmp_pa
         {
             "schema_version": 1,
             "scope": {"repo_input": str(owner_repo)},
+            "input": {"breadth_profile": "internal_maintenance"},
             "tickets": [ticket],
         },
     )
@@ -979,10 +1028,20 @@ def test_reports_export_tickets_promotes_accept_existing_surface_recommendation(
     out_json = compiled_dir / "target_a.tickets_export.json"
     export_doc = json.loads(out_json.read_text(encoding="utf-8"))
     assert export_doc["stats"]["exports_total"] == 1
+    assert export_doc["inputs"]["breadth_profile"] == "internal_maintenance"
+    assert export_doc["inputs"]["policy_config"].endswith(
+        "configs\\backlog_policy_internal_maintenance.yaml"
+    )
     export = export_doc["exports"][0]
     assert export["export_kind"] == "implementation"
     assert export["source_ticket"]["stage"] == "ready_for_ticket"
     assert "ux:accept_existing_surface" in export["labels"]
+    body = export["body_markdown"]
+    assert "## Evidence breadth context" in body
+    assert "- Breadth profile: `internal_maintenance`" in body
+    assert "- Review domain: `behavior_compat`" in body
+    assert "- Observation breadth: `runs=6, agents=2, personas=0`" in body
+    assert "structurally constant context dimensions are not negative evidence" in body
 
 
 def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_path: Path) -> None:
@@ -1098,8 +1157,230 @@ def test_reports_export_tickets_updates_existing_plan_ticket_with_ux_review(tmp_
 
     updated = plan_path.read_text(encoding="utf-8")
     assert "- Export kind: `implementation`" in updated
+
+
+def test_reports_export_tickets_removes_stale_generated_scope_files_for_same_target(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo_root(tmp_path)
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    ticket = {
+        "ticket_id": "BLG-001",
+        "title": "Keep current ticket",
+        "problem": "Current backlog item should remain queued.",
+        "severity": "medium",
+        "confidence": 0.8,
+        "stage": "ready_for_ticket",
+        "evidence_atom_ids": ["target_a/20260101T000000Z/codex/0:confusion_point:1"],
+        "change_surface": {"user_visible": False, "kinds": ["unknown"], "notes": ""},
+        "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
+        "suggested_owner": "docs",
+    }
+    fingerprint = ticket_export_fingerprint(ticket)
+
+    backlog_path = compiled_dir / "target_a.backlog.json"
+    _write_json(
+        backlog_path,
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [ticket],
+        },
+    )
+
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    ideas_dir = owner_repo / ".agents" / "plans" / "1 - ideas"
+    ideas_dir.mkdir(parents=True, exist_ok=True)
+    stale_same_target = ideas_dir / "20260301_deadbeefdeadbeef_old-target-a.md"
+    stale_same_target.write_text(
+        "\n".join(
+            [
+                "# Old target_a ticket",
+                "",
+                (
+                    "Generated by `python -m usertest_backlog.cli reports export-tickets` "
+                    "on 2026-03-01T00:00:00Z."
+                ),
+                "- Fingerprint: `deadbeefdeadbeef`",
+                "- Export scope target: `target_a`",
+                "",
+                "## Evidence atom ids",
+                "",
+                "- `target_a/20260101T000000Z/codex/0:confusion_point:1`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    stale_other_target = ideas_dir / "20260301_feedfacefeedface_old-target-b.md"
+    stale_other_target.write_text(
+        "\n".join(
+            [
+                "# Old target_b ticket",
+                "",
+                (
+                    "Generated by `python -m usertest_backlog.cli reports export-tickets` "
+                    "on 2026-03-01T00:00:00Z."
+                ),
+                "- Fingerprint: `feedfacefeedface`",
+                "- Export scope target: `target_b`",
+                "",
+                "## Evidence atom ids",
+                "",
+                "- `target_b/20260101T000000Z/codex/0:confusion_point:1`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-dedupe",
+            ]
+        )
+    assert exc.value.code == 0
+
+    assert not stale_same_target.exists()
+    assert stale_other_target.exists()
+
+    out_json = compiled_dir / "target_a.tickets_export.json"
+    export_doc = json.loads(out_json.read_text(encoding="utf-8"))
+    assert export_doc["stats"]["swept_scope_stale_generated_removed"] == 1
+    generated_candidates = sorted(ideas_dir.glob(f"*_{fingerprint}_*.md"))
+    assert len(generated_candidates) == 1
+    generated_path = generated_candidates[0]
+    updated = generated_path.read_text(encoding="utf-8")
     assert "- Stage: `ready_for_ticket`" in updated
-    assert "## UX review" in updated
+    assert "- Export scope target: `target_a`" in updated
+
+
+def test_reports_export_tickets_refreshes_existing_generated_queue_ticket(tmp_path: Path) -> None:
+    repo_root = _make_repo_root(tmp_path)
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    ticket = {
+        "ticket_id": "BLG-010",
+        "title": "Refresh generated queue ticket",
+        "problem": (
+            "Existing generated queue ticket should be rewritten with current "
+            "breadth context."
+        ),
+        "severity": "high",
+        "confidence": 0.8,
+        "stage": "ready_for_ticket",
+        "evidence_atom_ids": ["target_a/20260101T000000Z/codex/0:confusion_point:1"],
+        "change_surface": {"user_visible": True, "kinds": ["breaking_change"], "notes": ""},
+        "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 2, "runs": 6},
+        "breadth_profile": "internal_maintenance",
+        "decision_basis": {
+            "context_breadth": {"missions": 1, "targets": 1, "repo_inputs": 1},
+            "observation_breadth": {"runs": 6, "agents": 2, "personas": 0},
+            "structurally_constant_dimensions": ["missions", "targets", "repo_inputs"],
+        },
+        "review_domain": "behavior_compat",
+        "suggested_owner": "docs",
+    }
+    fingerprint = ticket_export_fingerprint(ticket)
+
+    backlog_path = compiled_dir / "target_a.backlog.json"
+    _write_json(
+        backlog_path,
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "input": {"breadth_profile": "internal_maintenance"},
+            "tickets": [ticket],
+        },
+    )
+
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    ideas_dir = owner_repo / ".agents" / "plans" / "1 - ideas"
+    ideas_dir.mkdir(parents=True, exist_ok=True)
+    existing_path = ideas_dir / f"20260301_{fingerprint}_old.md"
+    existing_path.write_text(
+        "\n".join(
+            [
+                "# Old generated ticket",
+                "",
+                (
+                    "Generated by `python -m usertest_backlog.cli reports export-tickets` "
+                    "on 2026-03-01T00:00:00Z."
+                ),
+                f"- Fingerprint: `{fingerprint}`",
+                "",
+                "- Stage: `ready_for_ticket`",
+                "",
+                "## Problem-local evidence breadth (counts)",
+                "",
+                "- missions: 1",
+                "- targets: 1",
+                "- repo_inputs: 1",
+                "- agents: 1",
+                "- runs: 1",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+            ]
+        )
+    assert exc.value.code == 0
+
+    updated = existing_path.read_text(encoding="utf-8")
+    assert "## Evidence breadth context" in updated
+    assert "- Breadth profile: `internal_maintenance`" in updated
+    assert "- Observation breadth: `runs=6, agents=2, personas=0`" in updated
+    assert "- Export scope target: `target_a`" in updated
+
+    out_json = compiled_dir / "target_a.tickets_export.json"
+    export_doc = json.loads(out_json.read_text(encoding="utf-8"))
+    assert export_doc["stats"]["skipped_existing_plan"] == 1
+    assert export_doc["stats"]["generated_queue_files_refreshed"] == 1
 
 
 def test_reports_export_tickets_defers_existing_plan_ticket_and_updates_actions(

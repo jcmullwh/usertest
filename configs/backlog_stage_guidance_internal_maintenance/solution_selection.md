@@ -16,10 +16,16 @@ chosen.
 - Changes that fix the underlying mechanism instead of introducing case-by-case behavior
   for each observed failure mode.
 - `most_direct` when the recurrence is a single mechanism and the direct fix fully
-  resolves it.
-- `most_robust` when the direct fix remains fragile or leaves credible recurrence vectors.
-- `most_comprehensive` when observation breadth strongly supports a class-level fix and
-  that fix can stay within existing command/config surface area.
+  resolves it, even if that mechanism has appeared in multiple runs.
+- `most_robust` when the main value is validation, guardrails, or defense-in-depth on
+  top of the direct fix because the direct fix alone still leaves credible recurrence
+  vectors.
+- `most_comprehensive` when repeated observations point to one subsystem-level gap or
+  missing shared contract, and the comprehensive option fixes that class of failure
+  while staying within existing command/config surface area.
+- When both `most_robust` and `most_comprehensive` stay inside existing surfaces, prefer
+  `most_comprehensive` if it establishes the clearer shared contract, canonical source
+  of truth, or class-level mechanism rather than merely adding guardrails.
 
 ## What to avoid
 
@@ -32,6 +38,13 @@ chosen.
 - Do not treat `repeated_variant` alone as an automatic mandate for `most_robust`.
 - Do not require cross-context breadth for internal class-level hardening that stays
   within existing user-visible surfaces.
+- Do not use `most_robust` as the default middle choice just because `most_direct`
+  seems narrow and `most_comprehensive` seems broader.
+- Do not reject `most_comprehensive` solely because missions, targets, or repo_inputs
+  are structurally 1 in internal-maintenance mode.
+- Do not describe a class-level internal fix as "too broad" when its surface area is
+  still limited to an existing subsystem and the repeated observations are all pointing
+  at the same mechanism.
 - Do not skip `why_other_options_were_not_selected`. This field is required.
 
 ## UX review trigger
