@@ -127,6 +127,14 @@ The settings file also makes the verification contract explicit:
 - `verification_profile: default_handoff` means "use the standard runner-owned smoke/install/lint/test gate for the current backend/profile".
 - `verification_commands: []` means "no ad hoc overrides"; it does not mean "run no verification".
 
+The repo default profile also pins maintenance-oriented execution defaults for `usertest-implement`:
+
+- `persona_id: thoughtful_maintainer`
+- `mission_id: implement_maintenance_backlog_ticket_v1`
+
+If the settings file is absent, the CLI falls back to those same maintenance defaults instead of inheriting the
+global catalog quick-start persona.
+
 ### Implement a specific ticket
 
 From a ticket markdown file (for example in `.agents/plans/2 - ready/`):

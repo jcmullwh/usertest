@@ -360,6 +360,8 @@ def test_run_dry_run_defaults_to_maintenance_profile_for_same_repo_targets() -> 
         assert payload["run_request"]["commit"] is True
         assert payload["run_request"]["push"] is True
         assert payload["run_request"]["pr"] is True
+        assert payload["run_request"]["persona_id"] == "thoughtful_maintainer"
+        assert payload["run_request"]["mission_id"] == "implement_maintenance_backlog_ticket_v1"
         assert payload["run_request"]["verification_profile"] == "default_handoff"
         assert payload["run_request"]["verification_reuse_mode"] == "auto"
         assert payload["run_request"]["verification_commands"][0].startswith(
@@ -396,6 +398,8 @@ def test_run_dry_run_applies_settings_profile_and_reports_effective_handoff_flag
                     "run_common": {
                         "exec_backend": "docker",
                         "exec_docker_profile": "maintenance",
+                        "persona_id": "thoughtful_maintainer",
+                        "mission_id": "implement_maintenance_backlog_ticket_v1",
                         "verification_profile": "default_handoff",
                         "commit": True,
                         "push": False,
@@ -459,11 +463,74 @@ def test_run_dry_run_applies_settings_profile_and_reports_effective_handoff_flag
     assert payload["settings"]["profile"] == "custom_profile"
     assert payload["settings"]["config_path"].endswith("configs\\usertest_implement_settings.yaml")
     assert payload["run_request"]["exec_docker_profile"] == "maintenance"
+    assert payload["run_request"]["persona_id"] == "thoughtful_maintainer"
+    assert payload["run_request"]["mission_id"] == "implement_maintenance_backlog_ticket_v1"
     assert payload["run_request"]["verification_profile"] == "default_handoff"
     assert payload["run_request"]["verification_commands"]
     assert payload["run_request"]["commit"] is True
     assert payload["run_request"]["push"] is False
     assert payload["run_request"]["pr"] is False
+
+
+def test_run_dry_run_uses_maintenance_persona_and_mission_without_settings_file(
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init"], cwd=str(repo_root), check=True, capture_output=True, text=True)
+    _write_yaml(repo_root / "configs" / "agents.yaml", {"agents": {}})
+    _write_yaml(repo_root / "configs" / "policies.yaml", {"policies": {}})
+    export_path = repo_root / "tickets_export.json"
+    _write_json(
+        export_path,
+        {
+            "schema_version": 1,
+            "exports": [
+                {
+                    "fingerprint": "efefefefefefefef",
+                    "export_kind": "implementation",
+                    "title": "Ticket Persona",
+                    "labels": [],
+                    "body_markdown": "# Persona\n",
+                    "source_ticket": {
+                        "fingerprint": "efefefefefefefef",
+                        "stage": "ready_for_ticket",
+                        "severity": "low",
+                    },
+                    "owner_repo": {
+                        "root": str(repo_root),
+                        "repo_input": str(repo_root),
+                        "idea_path": str(repo_root / ".agents" / "plans" / "2 - ready" / "p.md"),
+                    },
+                }
+            ],
+        },
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "--repo-root",
+            str(repo_root),
+            "run",
+            "--dry-run",
+            "--tickets-export",
+            str(export_path),
+            "--fingerprint",
+            "efefefefefefefef",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["settings"]["config_path"] is None
+    assert payload["settings"]["profile"] is None
+    assert payload["run_request"]["persona_id"] == "thoughtful_maintainer"
+    assert payload["run_request"]["mission_id"] == "implement_maintenance_backlog_ticket_v1"
 
 
 def test_run_dry_run_explicit_flags_override_settings_profile(tmp_path: Path) -> None:
