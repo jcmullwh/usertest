@@ -53,7 +53,7 @@ def test_git_clone_supports_no_local_flag(monkeypatch) -> None:
 
     target_acquire._git_clone(repo="C:/src/repo", dest_dir=Path("C:/tmp/dest"), no_local=True)
 
-    assert recorded == [["git", "clone", "--no-local", "C:/src/repo", "C:\\tmp\\dest"]]
+    assert recorded == [["git", "clone", "--no-local", "C:/src/repo", str(Path("C:/tmp/dest"))]]
 
 
 def test_acquire_target_local_git_repo_uses_safe_clone_and_connectivity_check(

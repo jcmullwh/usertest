@@ -5,7 +5,11 @@ import os
 import stat
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+
+import runner_core.runner as runner_mod
 from runner_core import RunnerConfig, RunRequest, run_once
 
 
@@ -200,3 +204,69 @@ def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_
     assert verify_cmd not in prompt_text
     assert "Codex workspace sandbox is enabled" in prompt_text
     assert "--exec-backend docker" in prompt_text
+
+
+def test_verification_broker_handoff_uses_shared_launcher_resolution() -> None:
+    launcher = runner_mod.resolve_verification_launcher(command_prefix=[])
+    argv = runner_mod._verification_shell_argv(command_prefix=[], command="echo ok")
+
+    assert argv[: len(launcher.shell_argv_prefix)] == list(launcher.shell_argv_prefix)
+
+    command = runner_mod._verification_broker_client_command(
+        run_dir=Path("/tmp/run"),
+        run_dir_mount="/run_dir",
+        command_prefix=[],
+    )
+    assert launcher.broker_wrapper_name in command
+
+
+def test_run_once_fails_fast_when_final_broker_launcher_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_binary(tmp_path)
+
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_verification_broker_launcher",
+        lambda **_: (
+            SimpleNamespace(executable="sh"),
+            {
+                "present": True,
+                "usable": False,
+                "resolved_path": r"C:\blocked\sh.exe",
+                "reason_code": "blocked",
+                "reason": "Access is denied",
+            },
+        ),
+    )
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+            verification_commands=("python -c 'import sys; sys.exit(0)'",),
+            verification_reuse_mode="auto",
+        ),
+    )
+
+    assert result.exit_code == 1
+    error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error_obj.get("type") == "VerificationBrokerLauncherUnavailable"
+    assert error_obj.get("subtype") == "verification_broker_launcher_unavailable"
+    assert error_obj.get("launcher") == "sh"
+    assert "launcher=`sh`" in str(error_obj.get("message", ""))
+    assert "Access is denied" in str(error_obj.get("message", ""))

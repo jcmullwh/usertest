@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
+import shutil
+import subprocess
 import threading
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -50,6 +53,185 @@ class VerificationBrokerClient:
     python_script: Path
     shell_script: Path | None
     powershell_script: Path | None
+
+
+@dataclass(frozen=True)
+class VerificationLauncher:
+    executable: str
+    shell_argv_prefix: tuple[str, ...]
+    broker_wrapper_name: str
+
+
+def resolve_verification_launcher(
+    *,
+    command_prefix: Sequence[str],
+    is_windows: bool | None = None,
+) -> VerificationLauncher:
+    windows = os.name == "nt" if is_windows is None else bool(is_windows)
+    if command_prefix:
+        return VerificationLauncher(
+            executable="sh",
+            shell_argv_prefix=("sh", "-lc"),
+            broker_wrapper_name="verify_client.sh",
+        )
+    if windows:
+        return VerificationLauncher(
+            executable="powershell",
+            shell_argv_prefix=("powershell", "-NoProfile", "-NonInteractive", "-Command"),
+            broker_wrapper_name="verify_client.ps1",
+        )
+    return VerificationLauncher(
+        executable="sh",
+        shell_argv_prefix=("sh", "-lc"),
+        broker_wrapper_name="verify_client.sh",
+    )
+
+
+def render_verification_broker_command(
+    *,
+    client_root_for_agent: str,
+    launcher: VerificationLauncher,
+) -> str:
+    script_path = _agent_path_join(client_root_for_agent, launcher.broker_wrapper_name)
+    if launcher.executable == "powershell":
+        return (
+            "powershell -NoProfile -ExecutionPolicy Bypass -File "
+            + _quote_powershell_path(script_path)
+        )
+    return f"sh {shlex.quote(script_path)}"
+
+
+def probe_windows_bash_usable() -> dict[str, Any]:
+    resolved = shutil.which("bash")
+    if resolved is None:
+        return {
+            "present": False,
+            "usable": False,
+            "resolved_path": None,
+            "reason_code": "not_found",
+            "reason": "`bash` was not found on PATH.",
+        }
+
+    try:
+        proc = subprocess.run(
+            [resolved, "-lc", "echo ok"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "present": True,
+            "usable": False,
+            "resolved_path": resolved,
+            "reason_code": "unresponsive",
+            "reason": "bash probe timed out (2.0s) running `bash -lc \"echo ok\"`.",
+        }
+    except OSError as e:
+        return {
+            "present": True,
+            "usable": False,
+            "resolved_path": resolved,
+            "reason_code": "blocked",
+            "reason": f"bash probe failed: {e}",
+        }
+
+    exit_code = int(proc.returncode or 0)
+    if exit_code == 0:
+        return {
+            "present": True,
+            "usable": True,
+            "resolved_path": resolved,
+            "reason_code": None,
+            "reason": None,
+        }
+    stderr = (proc.stderr or "").strip()
+    return {
+        "present": True,
+        "usable": False,
+        "resolved_path": resolved,
+        "reason_code": "probe_failed",
+        "reason": (
+            "bash probe exited non-zero"
+            + (f": {stderr}" if stderr else f" (exit_code={exit_code})")
+        ),
+    }
+
+
+def probe_local_verification_launcher(*, launcher: VerificationLauncher) -> dict[str, Any]:
+    executable = launcher.executable
+    if executable == "sh" and os.name == "nt":
+        return probe_windows_bash_usable()
+
+    resolved = shutil.which(executable)
+    if resolved is None:
+        return {
+            "present": False,
+            "usable": False,
+            "resolved_path": None,
+            "reason_code": "not_found",
+            "reason": f"`{executable}` was not found on PATH.",
+        }
+
+    probe_argv = (
+        [resolved, "-NoProfile", "-NonInteractive", "-Command", "Write-Output ok"]
+        if executable == "powershell"
+        else [resolved, "-lc", "echo ok"]
+    )
+    try:
+        proc = subprocess.run(
+            probe_argv,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "present": True,
+            "usable": False,
+            "resolved_path": resolved,
+            "reason_code": "unresponsive",
+            "reason": (
+                f"{executable} probe timed out (2.0s) running "
+                + " ".join(shlex.quote(part) for part in probe_argv)
+                + "."
+            ),
+        }
+    except OSError as e:
+        return {
+            "present": True,
+            "usable": False,
+            "resolved_path": resolved,
+            "reason_code": "blocked",
+            "reason": f"{executable} probe failed: {e}",
+        }
+
+    exit_code = int(proc.returncode or 0)
+    if exit_code == 0:
+        return {
+            "present": True,
+            "usable": True,
+            "resolved_path": resolved,
+            "reason_code": None,
+            "reason": None,
+        }
+    stderr = (proc.stderr or "").strip()
+    return {
+        "present": True,
+        "usable": False,
+        "resolved_path": resolved,
+        "reason_code": "probe_failed",
+        "reason": (
+            f"{executable} probe exited non-zero"
+            + (f": {stderr}" if stderr else f" (exit_code={exit_code})")
+        ),
+    }
 
 
 class VerificationBrokerAttempt:
@@ -389,23 +571,22 @@ class VerificationBrokerAttempt:
             newline="\n",
         )
 
-        if self.execution_shell == "powershell":
-            powershell_client_path = _agent_path_join(
-                self.client_root_for_agent,
-                "verify_client.ps1",
-            )
-            command = (
-                "powershell -NoProfile -ExecutionPolicy Bypass -File "
-                + _quote_powershell_path(powershell_client_path)
+        launcher = resolve_verification_launcher(
+            command_prefix=(),
+            is_windows=self.execution_shell == "powershell",
+        )
+        if launcher.executable == "powershell":
+            command = render_verification_broker_command(
+                client_root_for_agent=self.client_root_for_agent,
+                launcher=launcher,
             )
             shell_script = None
             powershell_script = self.powershell_script
         else:
-            shell_client_path = _agent_path_join(
-                self.client_root_for_agent,
-                "verify_client.sh",
+            command = render_verification_broker_command(
+                client_root_for_agent=self.client_root_for_agent,
+                launcher=launcher,
             )
-            command = f"sh {shlex.quote(shell_client_path)}"
             shell_script = self.shell_script
             powershell_script = self.powershell_script
 

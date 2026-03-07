@@ -69,7 +69,15 @@ from runner_core.python_runtime import (
 )
 from runner_core.run_spec import resolve_effective_run_inputs
 from runner_core.target_acquire import acquire_target
-from runner_core.verification_broker import VerificationBrokerAttempt
+from runner_core.verification_broker import (
+    VerificationBrokerAttempt,
+    probe_local_verification_launcher,
+    render_verification_broker_command,
+    resolve_verification_launcher,
+)
+from runner_core.verification_broker import (
+    probe_windows_bash_usable as _probe_windows_bash_usable_impl,
+)
 from runner_core.workspace_state_hash import WorkspaceStateHash, compute_workspace_state_hash
 
 
@@ -2224,7 +2232,7 @@ def _verification_broker_client_command(
     *,
     run_dir: Path,
     run_dir_mount: str | None,
-    execution_shell: str,
+    command_prefix: list[str],
 ) -> str:
     client_root = run_dir / "verification_broker" / "client"
     client_root_for_agent = _agent_path_for_staged_file(
@@ -2232,17 +2240,14 @@ def _verification_broker_client_command(
         run_dir=run_dir,
         run_dir_mount=run_dir_mount,
     )
-    shell_family = execution_shell.strip().lower() or "bash"
-    if shell_family == "powershell":
-        script_path = (
-            client_root_for_agent.replace("/", "\\").rstrip("\\") + "\\verify_client.ps1"
-        )
-        return (
-            "powershell -NoProfile -ExecutionPolicy Bypass -File "
-            + _quote_powershell(script_path)
-        )
-    script_path = client_root_for_agent.rstrip("/") + "/verify_client.sh"
-    return f"sh {shlex.quote(script_path)}"
+    launcher = resolve_verification_launcher(
+        command_prefix=command_prefix,
+        is_windows=_is_windows(),
+    )
+    return render_verification_broker_command(
+        client_root_for_agent=client_root_for_agent,
+        launcher=launcher,
+    )
 
 
 def _verification_broker_client_python(
@@ -2257,8 +2262,58 @@ def _verification_broker_client_python(
     return "python"
 
 
-def _quote_powershell(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
+def _probe_verification_broker_launcher(
+    *,
+    command_prefix: list[str],
+    sandbox: Any,
+) -> tuple[Any, dict[str, Any]]:
+    launcher = resolve_verification_launcher(
+        command_prefix=command_prefix,
+        is_windows=_is_windows(),
+    )
+    if command_prefix and sandbox is not None:
+        try:
+            present_map, meta = probe_commands_in_container(
+                command_prefix=command_prefix,
+                commands=[launcher.executable],
+            )
+        except Exception as exc:  # noqa: BLE001
+            return launcher, {
+                "present": False,
+                "usable": False,
+                "resolved_path": None,
+                "reason_code": "probe_failed",
+                "reason": f"launcher preflight probe failed: {exc}",
+            }
+
+        detail = meta.get(launcher.executable) if isinstance(meta, dict) else None
+        detail_dict = detail if isinstance(detail, dict) else {}
+        present = bool(detail_dict.get("present", present_map.get(launcher.executable)))
+        usable = bool(detail_dict.get("usable", present))
+        return launcher, {
+            "present": present,
+            "usable": usable,
+            "resolved_path": (
+                detail_dict.get("resolved_path")
+                if isinstance(detail_dict.get("resolved_path"), str)
+                else None
+            ),
+            "reason_code": (
+                detail_dict.get("reason_code")
+                if isinstance(detail_dict.get("reason_code"), str)
+                else ("not_found" if not present else None)
+            ),
+            "reason": (
+                detail_dict.get("reason")
+                if isinstance(detail_dict.get("reason"), str)
+                else (
+                    f"`{launcher.executable}` was not found in the verification runtime."
+                    if not present
+                    else None
+                )
+            ),
+        }
+    return launcher, probe_local_verification_launcher(launcher=launcher)
 
 
 def _decorate_verification_summary(
@@ -2426,11 +2481,11 @@ def _build_verification_followup_prompt(
 
 
 def _verification_shell_argv(*, command_prefix: list[str], command: str) -> list[str]:
-    if command_prefix:
-        return [*command_prefix, "sh", "-lc", command]
-    if _is_windows():
-        return ["powershell", "-NoProfile", "-NonInteractive", "-Command", command]
-    return ["sh", "-lc", command]
+    launcher = resolve_verification_launcher(
+        command_prefix=command_prefix,
+        is_windows=_is_windows(),
+    )
+    return [*command_prefix, *launcher.shell_argv_prefix, command]
 
 
 _VERIFICATION_SHELL_CONTROL_TOKENS: frozenset[str] = frozenset(
@@ -2621,63 +2676,7 @@ def _looks_like_verification_rejection_sentinel(command: str) -> bool:
 
 
 def _probe_windows_bash_usable() -> dict[str, Any]:
-    resolved = shutil.which("bash")
-    if resolved is None:
-        return {
-            "present": False,
-            "usable": False,
-            "resolved_path": None,
-            "reason_code": "not_found",
-            "reason": "`bash` was not found on PATH.",
-        }
-
-    try:
-        proc = subprocess.run(
-            [resolved, "-lc", "echo ok"],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=2.0,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return {
-            "present": True,
-            "usable": False,
-            "resolved_path": resolved,
-            "reason_code": "unresponsive",
-            "reason": "bash probe timed out (2.0s) running `bash -lc \"echo ok\"`.",
-        }
-    except OSError as e:
-        return {
-            "present": True,
-            "usable": False,
-            "resolved_path": resolved,
-            "reason_code": "blocked",
-            "reason": f"bash probe failed: {e}",
-        }
-
-    exit_code = int(proc.returncode or 0)
-    if exit_code == 0:
-        return {
-            "present": True,
-            "usable": True,
-            "resolved_path": resolved,
-            "reason_code": None,
-            "reason": None,
-        }
-    stderr = (proc.stderr or "").strip()
-    return {
-        "present": True,
-        "usable": False,
-        "resolved_path": resolved,
-        "reason_code": "probe_failed",
-        "reason": (
-            "bash probe exited non-zero"
-            + (f": {stderr}" if stderr else f" (exit_code={exit_code})")
-        ),
-    }
+    return _probe_windows_bash_usable_impl()
 
 
 def _maybe_rewrite_windows_bash_smoke_verification_command(
@@ -5331,15 +5330,62 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "verification_reuse_mode must be one of {'auto', 'off'}; "
                     f"got {request.verification_reuse_mode!r}"
                 )
-            verification_broker_command = (
-                _verification_broker_client_command(
+            verification_broker_command: str | None = None
+            if verification_commands and verification_reuse_mode == "auto":
+                broker_launcher, broker_launcher_probe = _probe_verification_broker_launcher(
+                    command_prefix=command_prefix,
+                    sandbox=sandbox,
+                )
+                if not bool(broker_launcher_probe.get("usable", False)):
+                    launcher_name = broker_launcher.executable
+                    resolved_path = broker_launcher_probe.get("resolved_path")
+                    resolved_path_s = (
+                        resolved_path.strip()
+                        if isinstance(resolved_path, str) and resolved_path.strip()
+                        else None
+                    )
+                    reason = broker_launcher_probe.get("reason")
+                    reason_s = (
+                        reason.strip()
+                        if isinstance(reason, str) and reason.strip()
+                        else "launcher did not pass the runtime availability probe."
+                    )
+                    reason_code = broker_launcher_probe.get("reason_code")
+                    reason_code_s = (
+                        reason_code.strip()
+                        if isinstance(reason_code, str) and reason_code.strip()
+                        else None
+                    )
+                    message = (
+                        "Final verification broker launcher is unavailable in the current "
+                        f"runtime: launcher=`{launcher_name}`; {reason_s}"
+                    )
+                    if resolved_path_s is not None:
+                        message += f" Resolved path: `{resolved_path_s}`."
+                    _write_json(
+                        run_dir / "error.json",
+                        {
+                            "type": "VerificationBrokerLauncherUnavailable",
+                            "subtype": "verification_broker_launcher_unavailable",
+                            "message": message,
+                            "launcher": launcher_name,
+                            "resolved_path": resolved_path_s,
+                            "reason_code": reason_code_s,
+                            "reason": reason_s,
+                            "exec_backend": request.exec_backend,
+                            "verification_reuse_mode": verification_reuse_mode,
+                        },
+                    )
+                    return RunResult(
+                        run_dir=run_dir,
+                        exit_code=1,
+                        report_validation_errors=[message],
+                    )
+                verification_broker_command = _verification_broker_client_command(
                     run_dir=run_dir,
                     run_dir_mount=backend.run_dir_mount,
-                    execution_shell=execution_shell,
+                    command_prefix=command_prefix,
                 )
-                if verification_commands and verification_reuse_mode == "auto"
-                else None
-            )
 
             policy_json = json.dumps(
                 {
