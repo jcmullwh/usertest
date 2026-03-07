@@ -1494,7 +1494,7 @@ def _format_preflight_summary_md(
             )
             lines.append(
                 "  - note: run this once you believe the work is complete; "
-                "do not make further workspace changes after it passes."
+                "do not make further workspace changes after you run it."
             )
         else:
             lines.append("- Verification gate:")
@@ -5708,6 +5708,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 broker_latest_result = None
                 broker_results: list[Any] = []
                 broker_attempt_rows: list[dict[str, Any]] = []
+                broker_request_ids: list[str] = []
                 if verification_commands and verification_reuse_mode == "auto":
                     client_root = run_dir / "verification_broker" / "client"
                     attempt_broker_root = (
@@ -5762,6 +5763,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             acquired.workspace_dir
                         ),
                         utc_now_fn=_utc_now_z,
+                        run_async_verifier=False,
                     )
                     broker_session.start()
                 agent_exec_start_monotonic = time.monotonic()
@@ -5775,6 +5777,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 finally:
                     if broker_session is not None:
                         broker_session.stop()
+                        broker_request_ids = broker_session.request_ids()
                         broker_results = broker_session.results()
                         broker_attempt_rows = broker_session.artifact_rows()
                         broker_latest_success = broker_session.latest_success_result()
@@ -5863,13 +5866,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "disabled" if not verification_commands else "post_agent_rerun"
                 )
                 attempt_verification_workspace_hash: WorkspaceStateHash | None = None
-                attempt_broker_requested = bool(broker_attempt_rows)
+                attempt_broker_requested = bool(broker_attempt_rows or broker_request_ids)
                 attempt_broker_request_id = None
                 attempt_broker_reuse_candidate = False
                 if broker_latest_result is not None:
                     latest_request_id = getattr(broker_latest_result, "request_id", None)
                     if isinstance(latest_request_id, str) and latest_request_id.strip():
                         attempt_broker_request_id = latest_request_id.strip()
+                elif broker_request_ids:
+                    attempt_broker_request_id = broker_request_ids[-1]
                 if (
                     agent_exit_code == 0
                     and not attempt_report_validation_errors
@@ -5921,6 +5926,101 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             )
                         else:
                             broker_reuse_fallback_reason = "workspace_hash_mismatch"
+                    elif verification_reuse_mode == "auto" and broker_request_ids:
+                        request_index = len(broker_request_ids)
+                        request_id = broker_request_ids[-1]
+                        broker_summary = _run_verification_commands(
+                            run_dir=run_dir,
+                            attempt_number=attempt_number,
+                            commands=verification_commands,
+                            command_prefix=command_prefix,
+                            cwd=acquired.workspace_dir,
+                            timeout_seconds=verification_timeout_seconds,
+                            python_executable=python_exec_for_verification,
+                            env_overrides=agent_env_overrides,
+                            artifacts_dir_rel=Path("verification")
+                            / f"attempt{attempt_number}"
+                            / f"broker_request_{request_index:02d}",
+                        )
+                        wall_seconds = broker_summary.get("wall_seconds")
+                        if isinstance(wall_seconds, (int, float)):
+                            verification_broker_seconds_total += max(
+                                0.0, float(wall_seconds)
+                            )
+                        attempt_verification_workspace_hash = compute_workspace_state_hash(
+                            acquired.workspace_dir
+                        )
+                        attempt_broker_request_id = request_id
+                        attempt_verification_source = "broker_reuse"
+                        attempt_verification_summary = _decorate_verification_summary(
+                            broker_summary,
+                            source="broker_reuse",
+                            reused=True,
+                            workspace_hash=attempt_verification_workspace_hash,
+                            broker_request_id=request_id,
+                            broker_artifacts_dir=str(
+                                Path("verification")
+                                / f"attempt{attempt_number}"
+                                / f"broker_request_{request_index:02d}"
+                            ),
+                        )
+                        verification_reuse_requests.append(
+                            {
+                                "request_id": request_id,
+                                "attempt": attempt_number,
+                                "status": (
+                                    "timed_out"
+                                    if any(
+                                        isinstance(command, dict)
+                                        and bool(command.get("timed_out"))
+                                        for command in broker_summary.get("commands", [])
+                                        if isinstance(broker_summary.get("commands"), list)
+                                    )
+                                    else ("passed" if broker_summary.get("passed") else "failed")
+                                ),
+                                "started_utc": broker_summary.get("started_utc"),
+                                "finished_utc": broker_summary.get("finished_utc"),
+                                "workspace_hash_after_verification": (
+                                    attempt_verification_workspace_hash.sha256
+                                ),
+                                "workspace_hash_mode": attempt_verification_workspace_hash.mode,
+                                "artifacts_dir": str(
+                                    Path("verification")
+                                    / f"attempt{attempt_number}"
+                                    / f"broker_request_{request_index:02d}"
+                                ),
+                                "summary_path": str(
+                                    Path("verification")
+                                    / f"attempt{attempt_number}"
+                                    / f"broker_request_{request_index:02d}"
+                                    / "verification.json"
+                                ),
+                                "timed_out": any(
+                                    isinstance(command, dict)
+                                    and bool(command.get("timed_out"))
+                                    for command in broker_summary.get("commands", [])
+                                    if isinstance(broker_summary.get("commands"), list)
+                                ),
+                                "failure_reason": (
+                                    None if broker_summary.get("passed") else "verification_failed"
+                                ),
+                            }
+                        )
+                        verification_reuse_selected_source = "broker_reuse"
+                        verification_reuse_fallback_reason = None
+                        verification_reuse_selected_request_id = request_id
+                        verification_reuse_selected_attempt = attempt_number
+                        verification_reuse_selected_artifacts_dir = str(
+                            Path("verification")
+                            / f"attempt{attempt_number}"
+                            / f"broker_request_{request_index:02d}"
+                        )
+                        verification_reuse_workspace_hash_final = (
+                            attempt_verification_workspace_hash.to_dict()
+                        )
+                        attempt_broker_reuse_candidate = bool(
+                            attempt_verification_summary.get("passed") is True
+                        )
                     elif verification_reuse_mode == "auto":
                         broker_reuse_fallback_reason = (
                             "no_successful_broker_request"

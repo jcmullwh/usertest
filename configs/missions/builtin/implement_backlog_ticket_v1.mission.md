@@ -35,7 +35,7 @@ ticket text is already included in this prompt as append system prompt content. 
 4) If the prompt includes a runner-provided final handoff verification command, treat that as the
    canonical final gate:
    - run it once you believe the work is complete
-   - if it passes, do not make further workspace changes before finishing
+   - once you run it, do not make further workspace changes before finishing
 5) If you cannot fully complete the ticket:
    - clearly describe what is blocked
    - propose the smallest next steps a human should take

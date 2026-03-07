@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -126,6 +126,34 @@ def _verification_command() -> str:
     return 'python -c "print(\'ok\')"'
 
 
+def _run_broker_wrapper(*, run_dir: Path, workspace_dir: Path) -> subprocess.CompletedProcess[str]:
+    client_root = run_dir / "verification_broker" / "client"
+    if os.name == "nt":
+        wrapper = client_root / "verify_client.ps1"
+        return subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(wrapper),
+            ],
+            cwd=str(workspace_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    wrapper = client_root / "verify_client.sh"
+    return subprocess.run(
+        ["sh", str(wrapper)],
+        cwd=str(workspace_dir),
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
 def test_run_once_reuses_broker_verification_without_post_agent_rerun(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -138,15 +166,11 @@ def test_run_once_reuses_broker_verification_without_post_agent_rerun(
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
         run_dir = last_message_path.parent
-        client_script = run_dir / "verification_broker" / "client" / "verify_client.py"
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
-        broker = subprocess.run(
-            [sys.executable, str(client_script)],
-            cwd=str(kwargs["workspace_dir"]),
-            check=False,
-            capture_output=True,
-            text=True,
+        broker = _run_broker_wrapper(
+            run_dir=run_dir,
+            workspace_dir=Path(str(kwargs["workspace_dir"])),
         )
         assert broker.returncode == 0, broker.stderr or broker.stdout
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
@@ -186,7 +210,7 @@ def test_run_once_reuses_broker_verification_without_post_agent_rerun(
     assert reuse["selected_request_id"]
 
 
-def test_run_once_falls_back_to_post_agent_rerun_when_workspace_changes_after_broker_pass(
+def test_run_once_falls_back_to_post_agent_rerun_when_broker_command_not_requested(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -197,20 +221,8 @@ def test_run_once_falls_back_to_post_agent_rerun_when_workspace_changes_after_br
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
-        workspace_dir = Path(str(kwargs["workspace_dir"]))
-        run_dir = last_message_path.parent
-        client_script = run_dir / "verification_broker" / "client" / "verify_client.py"
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
-        broker = subprocess.run(
-            [sys.executable, str(client_script)],
-            cwd=str(workspace_dir),
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert broker.returncode == 0, broker.stderr or broker.stdout
-        (workspace_dir / "README.md").write_text("# changed after verify\n", encoding="utf-8")
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
         return SimpleNamespace(exit_code=0, argv=["codex", "exec"])
 
@@ -245,4 +257,4 @@ def test_run_once_falls_back_to_post_agent_rerun_when_workspace_changes_after_br
 
     reuse = json.loads((result.run_dir / "verification_reuse.json").read_text(encoding="utf-8"))
     assert reuse["selected_source"] == "post_agent_rerun"
-    assert reuse["fallback_reason"] == "workspace_hash_mismatch"
+    assert reuse["fallback_reason"] == "broker_not_requested"
