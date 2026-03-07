@@ -28,8 +28,13 @@ the option's tradeoffs and still include the entry.
   are structurally constant.
 - `most_comprehensive` may still stay within existing commands, flags, and config
   surfaces when it addresses the problem class rather than only the observed instance.
+- When the strongest fix is a shared internal contract, canonical source of truth, or
+  subsystem-level mechanism that still stays within existing surfaces, describe that as
+  `most_comprehensive` rather than reserving that family only for sweeping refactors.
 - Options that fix the shared mechanism across runs when the evidence shows a repeated
   pattern, rather than adding one-off branches for each observed case.
+- Use `most_robust` for guardrails, validation, or defense-in-depth layered around a
+  more direct fix, not as the default label for every shared-mechanism change.
 
 ## What to avoid
 
@@ -42,6 +47,10 @@ the option's tradeoffs and still include the entry.
   evidence breadth.
 - Do not present a hardcoded exception, special-case branch, or case-by-case patch as a
   strong option when the evidence shows the same mechanism recurring across runs or agents.
+- Do not frame `most_comprehensive` as requiring a new command, mode, or major refactor
+  when the class-level fix can remain an internal existing-surface change.
+- Do not use `most_robust` as a catch-all middle option when the actual distinction is
+  between a direct fix and a class-level internal fix.
 
 ## Output contract
 
