@@ -1030,6 +1030,7 @@ def extract_backlog_atoms(
                 error=sanitized_error,
                 report_validation_errors=validation_values,
                 artifacts=artifacts,
+                terminal_artifact_reads=record.get("terminal_artifact_reads"),
                 attachments=attachments,
             )
             _emit(

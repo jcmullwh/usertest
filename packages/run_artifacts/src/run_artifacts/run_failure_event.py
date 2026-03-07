@@ -91,7 +91,12 @@ def classify_failure_kind(
         return True, "error"
     if validation_errors:
         return True, "report_validation_error"
-    if status_lower in {"error", "report_validation_error", "missing_report"}:
+    if status_lower in {
+        "error",
+        "report_validation_error",
+        "missing_report",
+        "terminal_artifact_unreadable",
+    }:
         return True, status_lower
     return False, "unknown"
 
@@ -159,6 +164,7 @@ def render_failure_text(
     error: dict[str, Any] | None,
     report_validation_errors: list[str],
     artifacts: dict[str, Any] | None,
+    terminal_artifact_reads: dict[str, Any] | None = None,
     attachments: list[dict[str, Any]] | None = None,
 ) -> str:
     lines: list[str] = [
@@ -211,6 +217,34 @@ def render_failure_text(
         lines.append("report_validation_errors:")
         for value in report_validation_errors:
             lines.append(f"- {value}")
+
+    if isinstance(terminal_artifact_reads, dict):
+        unreadable_lines: list[str] = []
+        for artifact_path, raw in terminal_artifact_reads.items():
+            if not isinstance(raw, dict):
+                continue
+            exists = raw.get("exists")
+            error_phase = raw.get("error_phase")
+            error_type = raw.get("error_type")
+            error_message = raw.get("error_message")
+            if exists is not True or not isinstance(error_phase, str) or not error_phase:
+                continue
+
+            detail = f"- {artifact_path}: {error_phase}"
+            if isinstance(error_type, str) and error_type.strip():
+                detail += f" {error_type.strip()}"
+            if isinstance(error_message, str) and error_message.strip():
+                detail += f": {error_message.strip()}"
+
+            line = raw.get("error_line")
+            column = raw.get("error_column")
+            if isinstance(line, int) and isinstance(column, int):
+                detail += f" (line {line}, column {column})"
+            unreadable_lines.append(detail)
+
+        if unreadable_lines:
+            lines.append("terminal_artifact_reads:")
+            lines.extend(unreadable_lines)
 
     filenames = extract_artifact_filenames(artifacts)
     if filenames:
