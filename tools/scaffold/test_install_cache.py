@@ -305,6 +305,49 @@ def test_install_cache_seed_restore_skips_running_install(
     assert (project_dir / ".venv" / "marker.txt").read_text(encoding="utf-8") == "seeded\n"
 
 
+def test_install_cache_seed_restore_populates_host_cache_when_enabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    project_dir = repo_root / "packages" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    _write(project_dir / "pyproject.toml", "[project]\nname='demo'\nversion='0.1.0'\n")
+    _write(project_dir / "pdm.lock", 'lock-version = "4.5.0"\n')
+    monkeypatch.setattr(scaffold, "_repo_root", lambda: repo_root)
+    monkeypatch.setenv("USERTEST_MAINT_VENV_CACHE_ENABLED", "1")
+    monkeypatch.setenv("USERTEST_MAINT_VENV_CACHE_ROOT", str(tmp_path / "cache"))
+    monkeypatch.setenv("USERTEST_MAINT_VENV_SEED_ROOT", str(tmp_path / "seed"))
+    monkeypatch.setattr(scaffold, "_validate_project_venv", lambda *, project_dir: True)
+
+    state = _cache_state(repo_root=repo_root, project_dir=project_dir)
+    assert state.seed_venv_dir is not None
+    assert state.venv_cache_dir is not None
+    (state.seed_venv_dir / "marker.txt").parent.mkdir(parents=True, exist_ok=True)
+    (state.seed_venv_dir / "marker.txt").write_text("seeded\n", encoding="utf-8")
+
+    def fail_run(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        capture: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        del argv, cwd, env, capture
+        raise AssertionError("install should not run when a seed venv is available")
+
+    monkeypatch.setattr(scaffold, "_run", fail_run)
+    cp = scaffold._run_manifest_task(
+        cmd=["pdm", "install"],
+        cwd=project_dir,
+        task_name="install",
+        project_id="demo",
+    )
+    assert cp.returncode == 0
+    assert (state.venv_cache_dir / "marker.txt").read_text(encoding="utf-8") == "seeded\n"
+    assert state.entry_meta_path is not None and state.entry_meta_path.exists()
+
+
 def test_install_cache_save_populates_cache_entry_after_successful_install(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

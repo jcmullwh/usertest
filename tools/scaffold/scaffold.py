@@ -931,6 +931,7 @@ def _run_manifest_task(
     if _install_cache_restore(state=cache_state, project_dir=cwd, project_id=project_id):
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
     if _install_cache_restore_from_seed(state=cache_state, project_dir=cwd, project_id=project_id):
+        _install_cache_save(state=cache_state, project_dir=cwd, project_id=project_id)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
     first = _run(cmd, cwd=cwd, capture=True, env=env)
