@@ -2906,7 +2906,7 @@ def _reason_type_for_code(reason_code: str | None) -> str | None:
     code = reason_code.strip().lower()
     if code in {"not_found", "windowsapps_alias"}:
         return "discovery"
-    if code in {"launch_failed", "access_denied", "timeout"}:
+    if code in {"launch_failed", "access_denied", "timeout", "blocked", "unresponsive"}:
         return "execution"
     if code in {"pip_missing", "pytest_missing"}:
         return "dependency"
@@ -2915,6 +2915,7 @@ def _reason_type_for_code(reason_code: str | None) -> str | None:
         "runtime_probe_failed",
         "pip_probe_failed",
         "pytest_probe_failed",
+        "probe_failed",
     }:
         return "runtime"
     return "unknown"
