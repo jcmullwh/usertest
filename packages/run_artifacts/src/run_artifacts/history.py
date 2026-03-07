@@ -4,6 +4,7 @@ import json
 import os
 import re
 from collections.abc import Iterator
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,20 @@ _EMBED_DEFINITION_KEYS = {
     "prompt_template_md",
     "report_schema_json",
 }
+
+
+@dataclass(frozen=True)
+class JsonArtifactReadResult:
+    path: str
+    exists: bool
+    decode_ok: bool | None
+    parse_ok: bool | None
+    value: Any | None
+    error_phase: str | None
+    error_type: str | None
+    error_message: str | None
+    error_line: int | None = None
+    error_column: int | None = None
 
 
 def _parse_timestamp_dirname(name: str) -> str | None:
@@ -143,13 +158,145 @@ def select_recent_run_dirs(
     return [item[2] for item in selected]
 
 
-def _read_json(path: Path) -> Any | None:
+def _read_json_artifact(path: Path) -> JsonArtifactReadResult:
+    rel_path = path.name
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        raw_text = path.read_text(encoding="utf-8")
     except FileNotFoundError:
-        return None
+        return JsonArtifactReadResult(
+            path=rel_path,
+            exists=False,
+            decode_ok=None,
+            parse_ok=None,
+            value=None,
+            error_phase=None,
+            error_type=None,
+            error_message=None,
+        )
+    except UnicodeDecodeError as exc:
+        return JsonArtifactReadResult(
+            path=rel_path,
+            exists=True,
+            decode_ok=False,
+            parse_ok=None,
+            value=None,
+            error_phase="read",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+    except OSError as exc:
+        return JsonArtifactReadResult(
+            path=rel_path,
+            exists=True,
+            decode_ok=False,
+            parse_ok=None,
+            value=None,
+            error_phase="read",
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
+
+    try:
+        value = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        return JsonArtifactReadResult(
+            path=rel_path,
+            exists=True,
+            decode_ok=True,
+            parse_ok=False,
+            value=None,
+            error_phase="parse",
+            error_type=type(exc).__name__,
+            error_message=exc.msg,
+            error_line=exc.lineno,
+            error_column=exc.colno,
+        )
     except Exception:  # noqa: BLE001
-        return None
+        return JsonArtifactReadResult(
+            path=rel_path,
+            exists=True,
+            decode_ok=True,
+            parse_ok=False,
+            value=None,
+            error_phase="parse",
+            error_type="JSONParseError",
+            error_message="Unknown JSON parse failure.",
+        )
+
+    return JsonArtifactReadResult(
+        path=rel_path,
+        exists=True,
+        decode_ok=True,
+        parse_ok=True,
+        value=value,
+        error_phase=None,
+        error_type=None,
+        error_message=None,
+    )
+
+
+def _read_json(path: Path) -> Any | None:
+    return _read_json_artifact(path).value
+
+
+def _artifact_read_details(result: JsonArtifactReadResult) -> dict[str, Any]:
+    details: dict[str, Any] = {
+        "path": result.path,
+        "exists": result.exists,
+        "decode_ok": result.decode_ok,
+        "parse_ok": result.parse_ok,
+        "error_phase": result.error_phase,
+        "error_type": result.error_type,
+        "error_message": result.error_message,
+    }
+    if result.error_line is not None:
+        details["error_line"] = result.error_line
+    if result.error_column is not None:
+        details["error_column"] = result.error_column
+    return details
+
+
+def _terminal_artifact_reads(
+    *,
+    report: JsonArtifactReadResult,
+    error: JsonArtifactReadResult,
+    report_validation_errors: JsonArtifactReadResult,
+) -> dict[str, dict[str, Any]]:
+    return {
+        "report.json": _artifact_read_details(report),
+        "error.json": _artifact_read_details(error),
+        "report_validation_errors.json": _artifact_read_details(report_validation_errors),
+    }
+
+
+def _has_artifact_read_failure(result: JsonArtifactReadResult) -> bool:
+    return result.exists and (result.decode_ok is False or result.parse_ok is False)
+
+
+def _derive_run_status(
+    *,
+    report_read: JsonArtifactReadResult,
+    error_read: JsonArtifactReadResult,
+    report_validation_errors_read: JsonArtifactReadResult,
+) -> tuple[str, dict[str, dict[str, Any]]]:
+    terminal_artifact_reads = _terminal_artifact_reads(
+        report=report_read,
+        error=error_read,
+        report_validation_errors=report_validation_errors_read,
+    )
+
+    if any(
+        _has_artifact_read_failure(result)
+        for result in (report_read, error_read, report_validation_errors_read)
+    ):
+        return "terminal_artifact_unreadable", terminal_artifact_reads
+    if isinstance(error_read.value, dict):
+        return "error", terminal_artifact_reads
+    if report_validation_errors_read.value is not None:
+        return "report_validation_error", terminal_artifact_reads
+    if report_read.value is None:
+        return "missing_report", terminal_artifact_reads
+    return "ok", terminal_artifact_reads
 
 
 def _history_text_policy(max_embed_bytes: int) -> TextCapturePolicy:
@@ -330,11 +477,16 @@ def iter_report_history(
                 continue
 
         effective_run_spec = _read_json(run_dir / "effective_run_spec.json")
-        report = _read_json(run_dir / "report.json")
+        report_read = _read_json_artifact(run_dir / "report.json")
+        report = report_read.value
         metrics = _read_json(run_dir / "metrics.json")
         preflight = _read_json(run_dir / "preflight.json")
-        error = _read_json(run_dir / "error.json")
-        report_validation_errors = _read_json(run_dir / "report_validation_errors.json")
+        error_read = _read_json_artifact(run_dir / "error.json")
+        error = error_read.value
+        report_validation_errors_read = _read_json_artifact(
+            run_dir / "report_validation_errors.json"
+        )
+        report_validation_errors = report_validation_errors_read.value
         run_meta = _read_json(run_dir / "run_meta.json")
         agent_attempts = _read_json(run_dir / "agent_attempts.json")
         ticket_ref = _read_json(run_dir / "ticket_ref.json")
@@ -345,14 +497,11 @@ def iter_report_history(
             exit_code_raw = error.get("exit_code")
             agent_exit_code = exit_code_raw if isinstance(exit_code_raw, int) else None
 
-        if isinstance(error, dict):
-            status = "error"
-        elif report_validation_errors is not None:
-            status = "report_validation_error"
-        elif report is None:
-            status = "missing_report"
-        else:
-            status = "ok"
+        status, terminal_artifact_reads = _derive_run_status(
+            report_read=report_read,
+            error_read=error_read,
+            report_validation_errors_read=report_validation_errors_read,
+        )
 
         embedded: dict[str, Any] = {}
         embedded_capture_manifest: dict[str, Any] = {}
@@ -431,6 +580,7 @@ def iter_report_history(
             "agent_attempts": agent_attempts,
             "ticket_ref": ticket_ref if isinstance(ticket_ref, dict) else None,
             "timing": timing if isinstance(timing, dict) else None,
+            "terminal_artifact_reads": terminal_artifact_reads,
             "embedded": embedded,
             "embedded_capture_manifest": embedded_capture_manifest,
         }
@@ -452,6 +602,7 @@ def write_report_history_jsonl(
         "ok": 0,
         "missing_report": 0,
         "report_validation_error": 0,
+        "terminal_artifact_unreadable": 0,
         "error": 0,
     }
     with out_path.open("w", encoding="utf-8", newline="\n") as f:
@@ -499,11 +650,14 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
 
     target_ref = _read_json(run_dir / "target_ref.json")
     effective_run_spec = _read_json(run_dir / "effective_run_spec.json")
-    report = _read_json(run_dir / "report.json")
+    report_read = _read_json_artifact(run_dir / "report.json")
+    report = report_read.value
     metrics = _read_json(run_dir / "metrics.json")
     preflight = _read_json(run_dir / "preflight.json")
-    error = _read_json(run_dir / "error.json")
-    report_validation_errors = _read_json(run_dir / "report_validation_errors.json")
+    error_read = _read_json_artifact(run_dir / "error.json")
+    error = error_read.value
+    report_validation_errors_read = _read_json_artifact(run_dir / "report_validation_errors.json")
+    report_validation_errors = report_validation_errors_read.value
     run_meta = _read_json(run_dir / "run_meta.json")
     agent_attempts = _read_json(run_dir / "agent_attempts.json")
 
@@ -512,14 +666,11 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
         exit_code_raw = error.get("exit_code")
         agent_exit_code = exit_code_raw if isinstance(exit_code_raw, int) else None
 
-    if isinstance(error, dict):
-        status = "error"
-    elif report_validation_errors is not None:
-        status = "report_validation_error"
-    elif report is None:
-        status = "missing_report"
-    else:
-        status = "ok"
+    status, terminal_artifact_reads = _derive_run_status(
+        report_read=report_read,
+        error_read=error_read,
+        report_validation_errors_read=report_validation_errors_read,
+    )
 
     ts_utc = _parse_timestamp_dirname(ts_dir) if isinstance(ts_dir, str) else None
 
@@ -542,6 +693,7 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
         "report_validation_errors": report_validation_errors,
         "run_meta": run_meta,
         "agent_attempts": agent_attempts,
+        "terminal_artifact_reads": terminal_artifact_reads,
         "embedded": {},
         "embedded_capture_manifest": {},
     }

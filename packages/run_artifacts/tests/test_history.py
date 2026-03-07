@@ -5,6 +5,7 @@ from pathlib import Path
 
 from run_artifacts.history import (
     iter_report_history,
+    load_run_record,
     select_recent_run_dirs,
     write_report_history_jsonl,
 )
@@ -208,3 +209,86 @@ def test_select_recent_run_dirs_orders_and_limits(tmp_path: Path) -> None:
     assert len(selected) == 2
     assert selected[0].parts[-4:] == ("tiktok_vids", "20260102T000000Z", "codex", "0")
     assert selected[1].parts[-4:] == ("tiktok_vids", "20260103T000000Z", "codex", "0")
+
+
+def test_iter_report_history_distinguishes_missing_report_from_unreadable_terminal_artifacts(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+
+    missing_run = runs_dir / "target_a" / "20260101T000000Z" / "codex" / "0"
+    missing_run.mkdir(parents=True)
+    _write_json(missing_run / "target_ref.json", {"repo_input": "C:/repo/target_a"})
+    _write_json(missing_run / "effective_run_spec.json", {})
+
+    bad_report_run = runs_dir / "target_a" / "20260102T000000Z" / "codex" / "0"
+    bad_report_run.mkdir(parents=True)
+    _write_json(bad_report_run / "target_ref.json", {"repo_input": "C:/repo/target_a"})
+    _write_json(bad_report_run / "effective_run_spec.json", {})
+    (bad_report_run / "report.json").write_text("{not-json}\n", encoding="utf-8")
+
+    bad_error_run = runs_dir / "target_a" / "20260103T000000Z" / "codex" / "0"
+    bad_error_run.mkdir(parents=True)
+    _write_json(bad_error_run / "target_ref.json", {"repo_input": "C:/repo/target_a"})
+    _write_json(bad_error_run / "effective_run_spec.json", {})
+    (bad_error_run / "error.json").write_text("{not-json}\n", encoding="utf-8")
+
+    bad_validation_run = runs_dir / "target_a" / "20260104T000000Z" / "codex" / "0"
+    bad_validation_run.mkdir(parents=True)
+    _write_json(bad_validation_run / "target_ref.json", {"repo_input": "C:/repo/target_a"})
+    _write_json(bad_validation_run / "effective_run_spec.json", {})
+    (bad_validation_run / "report_validation_errors.json").write_text(
+        "{not-json}\n",
+        encoding="utf-8",
+    )
+
+    items = list(iter_report_history(runs_dir, target_slug="target_a", embed="none"))
+    assert [item["status"] for item in items] == [
+        "missing_report",
+        "terminal_artifact_unreadable",
+        "terminal_artifact_unreadable",
+        "terminal_artifact_unreadable",
+    ]
+
+    missing_reads = items[0]["terminal_artifact_reads"]
+    assert missing_reads["report.json"]["exists"] is False
+    assert missing_reads["report.json"]["parse_ok"] is None
+
+    bad_report_reads = items[1]["terminal_artifact_reads"]
+    assert bad_report_reads["report.json"]["exists"] is True
+    assert bad_report_reads["report.json"]["error_phase"] == "parse"
+    assert bad_report_reads["report.json"]["error_type"] == "JSONDecodeError"
+
+    bad_error_reads = items[2]["terminal_artifact_reads"]
+    assert bad_error_reads["error.json"]["exists"] is True
+    assert bad_error_reads["error.json"]["error_phase"] == "parse"
+    assert bad_error_reads["error.json"]["error_type"] == "JSONDecodeError"
+
+    bad_validation_reads = items[3]["terminal_artifact_reads"]
+    assert bad_validation_reads["report_validation_errors.json"]["exists"] is True
+    assert bad_validation_reads["report_validation_errors.json"]["error_phase"] == "parse"
+    assert bad_validation_reads["report_validation_errors.json"]["error_type"] == "JSONDecodeError"
+
+    counts = write_report_history_jsonl(
+        runs_dir,
+        out_path=tmp_path / "history.jsonl",
+        target_slug="target_a",
+        embed="none",
+    )
+    assert counts["missing_report"] == 1
+    assert counts["terminal_artifact_unreadable"] == 3
+
+
+def test_load_run_record_includes_terminal_artifact_read_details(tmp_path: Path) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260102T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "target_ref.json", {"repo_input": "C:/repo/target_a"})
+    _write_json(run_dir / "effective_run_spec.json", {})
+    (run_dir / "report.json").write_text("{not-json}\n", encoding="utf-8")
+
+    record = load_run_record(run_dir, runs_dir=runs_dir)
+    assert record is not None
+    assert record["status"] == "terminal_artifact_unreadable"
+    assert record["terminal_artifact_reads"]["report.json"]["exists"] is True
+    assert record["terminal_artifact_reads"]["report.json"]["error_phase"] == "parse"

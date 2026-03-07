@@ -1,4 +1,4 @@
-from run_artifacts import classify_failure_kind
+from run_artifacts import classify_failure_kind, render_failure_text
 
 
 def test_classify_failure_kind_quota_exhausted_for_agent_quota_exceeded() -> None:
@@ -28,3 +28,37 @@ def test_classify_failure_kind_quota_exhausted_for_provider_quota_subtype() -> N
     assert is_failure is True
     assert kind == "quota_exhausted"
 
+
+def test_classify_failure_kind_treats_unreadable_terminal_artifact_as_failure() -> None:
+    is_failure, kind = classify_failure_kind(
+        status="terminal_artifact_unreadable",
+        error=None,
+        validation_errors=[],
+    )
+    assert is_failure is True
+    assert kind == "terminal_artifact_unreadable"
+
+
+def test_render_failure_text_includes_terminal_artifact_read_diagnostics() -> None:
+    text = render_failure_text(
+        failure_kind="terminal_artifact_unreadable",
+        agent="codex",
+        status="terminal_artifact_unreadable",
+        error=None,
+        report_validation_errors=[],
+        artifacts=None,
+        terminal_artifact_reads={
+            "report.json": {
+                "exists": True,
+                "error_phase": "parse",
+                "error_type": "JSONDecodeError",
+                "error_message": "Expecting property name enclosed in double quotes",
+                "error_line": 1,
+                "error_column": 2,
+            }
+        },
+    )
+
+    assert "terminal_artifact_reads:" in text
+    assert "report.json: parse JSONDecodeError" in text
+    assert "line 1, column 2" in text
