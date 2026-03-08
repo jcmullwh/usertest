@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from run_artifacts.capture import CaptureResult, TextCapturePolicy, capture_text_artifact
+from run_artifacts.path_normalization import normalize_agent_path
 from run_artifacts.run_failure_event import (
     classify_failure_kind,
     classify_known_stderr_warnings,
@@ -661,7 +662,7 @@ def extract_backlog_atoms(
         run_dir = Path(run_dir_raw) if isinstance(run_dir_raw, str) else Path(".")
         run_id = str(record.get("run_rel") or run_dir_raw or f"run_{len(run_ids) + 1}")
         run_rel = str(record.get("run_rel") or run_id)
-        run_path_display = str(run_dir).replace("\\", "/")
+        run_path_display = normalize_agent_path(str(run_dir))
         if repo_root is not None and isinstance(run_dir_raw, str):
             run_path_display = _safe_relpath(Path(run_dir_raw), repo_root)
         run_ids.add(run_id)

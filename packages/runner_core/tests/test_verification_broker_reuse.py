@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from run_artifacts.path_normalization import normalize_agent_path
 
 import runner_core.runner as runner_mod
 from runner_core import RunnerConfig, RunRequest, run_once
@@ -211,8 +212,8 @@ def _make_broker_attempt(
         run_dir=run_dir,
         attempt_number=1,
         client_root=client_root,
-        client_root_for_agent=str(client_root),
-        attempt_root_for_agent=str(attempt_root),
+        client_root_for_agent=normalize_agent_path(str(client_root)),
+        attempt_root_for_agent=normalize_agent_path(str(attempt_root)),
         execution_shell="powershell" if os.name == "nt" else "bash",
         python_command=sys.executable,
         verification_timeout_seconds=wait_timeout_seconds,

@@ -76,8 +76,8 @@ def test_parser_smoke() -> None:
     )
     assert args.exec_use_host_agent_login is False
 
-    args = parser.parse_args(["report", "--run-dir", "runs\\x\\y\\codex\\0"])
-    assert args.run_dir == Path("runs\\x\\y\\codex\\0")
+    args = parser.parse_args(["report", "--run-dir", "runs/x/y/codex/0"])
+    assert args.run_dir == Path("runs/x/y/codex/0")
 
     args = parser.parse_args(["reports", "analyze", "--target", "x"])
     assert args.target == "x"
@@ -88,10 +88,10 @@ def test_parser_smoke() -> None:
             "--target",
             "x",
             "--actions",
-            "configs\\issue_actions.json",
+            "configs/issue_actions.json",
         ]
     )
-    assert args.actions == Path("configs\\issue_actions.json")
+    assert args.actions == Path("configs/issue_actions.json")
     with pytest.raises(SystemExit):
         parser.parse_args(["reports", "intent-snapshot", "--target", "x"])
     with pytest.raises(SystemExit):
@@ -101,10 +101,10 @@ def test_parser_smoke() -> None:
     with pytest.raises(SystemExit):
         parser.parse_args(["reports", "backlog", "--target", "x", "--dry-run"])
 
-    args = parser.parse_args(["batch", "--targets", "configs\\targets.yaml"])
+    args = parser.parse_args(["batch", "--targets", "configs/targets.yaml"])
     assert args.exec_use_host_agent_login is True
     args = parser.parse_args(
-        ["batch", "--targets", "configs\\targets.yaml", "--exec-use-api-key-auth"]
+        ["batch", "--targets", "configs/targets.yaml", "--exec-use-api-key-auth"]
     )
     assert args.exec_use_host_agent_login is False
 

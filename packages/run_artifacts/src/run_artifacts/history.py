@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from run_artifacts.capture import TextCapturePolicy, TextExcerpt, capture_text_artifact
+from run_artifacts.path_normalization import normalize_agent_path
 
 _TIMESTAMP_DIR_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
 _EMBED_DEFINITION_KEYS = {
@@ -147,7 +148,7 @@ def select_recent_run_dirs(
                 continue
 
         try:
-            run_rel = str(run_dir.relative_to(runs_dir)).replace("\\", "/")
+            run_rel = normalize_agent_path(str(run_dir.relative_to(runs_dir)))
         except Exception:  # noqa: BLE001
             run_rel = str(run_dir)
 
@@ -463,7 +464,7 @@ def iter_report_history(
         seed = None
 
         try:
-            run_rel = str(run_dir.relative_to(source_path)).replace("\\", "/")
+            run_rel = normalize_agent_path(str(run_dir.relative_to(source_path)))
             parts = run_dir.relative_to(source_path).parts
             if len(parts) >= 4:
                 target, ts_dir, agent, seed = parts[0], parts[1], parts[2], parts[3]
@@ -644,7 +645,7 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
     seed = None
 
     try:
-        run_rel = str(run_dir.relative_to(runs_dir)).replace("\\", "/")
+        run_rel = normalize_agent_path(str(run_dir.relative_to(runs_dir)))
         parts = run_dir.relative_to(runs_dir).parts
         if len(parts) >= 4:
             target, ts_dir, agent, seed = parts[0], parts[1], parts[2], parts[3]
