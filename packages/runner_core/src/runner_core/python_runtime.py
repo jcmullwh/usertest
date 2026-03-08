@@ -7,6 +7,7 @@ import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -28,7 +29,9 @@ _PYTHON_HEALTH_PROBE = (
 )
 
 
-def _is_windows_platform() -> bool:
+def _is_windows_platform(force_windows: bool | None = None) -> bool:
+    if force_windows is not None:
+        return force_windows
     return os.name == "nt"
 
 
@@ -36,8 +39,8 @@ def _normalize_windows_path(path_text: str) -> str:
     return path_text.replace("/", "\\").lower()
 
 
-def _is_windowsapps_alias(path_text: str | None) -> bool:
-    if not _is_windows_platform() or not isinstance(path_text, str):
+def _is_windowsapps_alias(path_text: str | None, *, force_windows: bool | None = None) -> bool:
+    if not _is_windows_platform(force_windows=force_windows) or not isinstance(path_text, str):
         return False
     return "\\windowsapps\\" in _normalize_windows_path(path_text)
 
@@ -149,8 +152,8 @@ def _windows_py0p_interpreters(
     return out
 
 
-def _venv_python_path(venv_dir: Path) -> Path:
-    if _is_windows_platform():
+def _venv_python_path(venv_dir: Path, *, force_windows: bool | None = None) -> Path:
+    if _is_windows_platform(force_windows=force_windows):
         return venv_dir / "Scripts" / "python.exe"
     return venv_dir / "bin" / "python"
 
@@ -205,12 +208,126 @@ class PythonRuntimeSelection:
         }
 
 
+@dataclass(frozen=True)
+class PythonCommandProbe:
+    command: str
+    resolved_path: str | None
+    present: bool
+    usable: bool
+    reason_code: str | None = None
+    reason: str | None = None
+    version: str | None = None
+    executable: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "command": self.command,
+            "resolved_path": self.resolved_path,
+            "present": self.present,
+            "usable": self.usable,
+            "reason_code": self.reason_code,
+            "reason": self.reason,
+            "version": self.version,
+            "executable": self.executable,
+        }
+
+
+@dataclass(frozen=True)
+class PythonCommandProbeResult:
+    selected_command: str | None
+    selected_resolved_path: str | None
+    selected_version: str | None
+    selected_executable: str | None
+    candidates: tuple[PythonCommandProbe, ...]
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "selected": (
+                {
+                    "command": self.selected_command,
+                    "resolved_path": self.selected_resolved_path,
+                    "version": self.selected_version,
+                    "executable": self.selected_executable,
+                }
+                if self.selected_command is not None
+                else None
+            ),
+            "candidates": [candidate.to_dict() for candidate in self.candidates],
+            "rejected": [
+                candidate.to_dict()
+                for candidate in self.candidates
+                if not candidate.usable
+            ],
+        }
+
+    def by_command(self) -> dict[str, PythonCommandProbe]:
+        return {candidate.command: candidate for candidate in self.candidates}
+
+
+@dataclass(frozen=True)
+class PythonToolchainCapabilitySnapshot:
+    command_probes: dict[str, dict[str, Any]]
+    runtime_selection: PythonRuntimeSelection
+    validation: dict[str, Any]
+    context_probe: dict[str, Any] | None = None
+    module_probes: dict[str, dict[str, Any] | None] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        modules = self.module_probes or {}
+        return {
+            "commands": {
+                key: dict(value)
+                for key, value in self.command_probes.items()
+                if isinstance(key, str) and isinstance(value, dict)
+            },
+            "runtime": self.runtime_selection.to_dict(),
+            "validation": dict(self.validation),
+            "context_probe": (
+                dict(self.context_probe)
+                if isinstance(self.context_probe, dict)
+                else None
+            ),
+            "modules": {
+                key: (dict(value) if isinstance(value, dict) else None)
+                for key, value in modules.items()
+                if isinstance(key, str)
+            },
+        }
+
+
+def _coerce_commands(raw: Sequence[str] | None) -> list[str]:
+    values = list(raw) if raw is not None else ["python", "python3", "py"]
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in values:
+        if not isinstance(item, str):
+            continue
+        cmd = item.strip()
+        if not cmd or cmd in seen:
+            continue
+        out.append(cmd)
+        seen.add(cmd)
+    return out
+
+
+def _path_matches_current_interpreter(path_text: str | None) -> bool:
+    if not isinstance(path_text, str) or not path_text.strip():
+        return False
+    current = Path(sys.executable)
+    candidate = Path(path_text)
+    try:
+        return current.resolve(strict=False) == candidate.resolve(strict=False)
+    except OSError:
+        return current.as_posix().lower() == candidate.as_posix().lower()
+
+
 def _probe_python_executable(
     path_text: str,
     *,
     timeout_seconds: float,
     source: str,
     env: dict[str, str] | None = None,
+    assume_present: bool = False,
 ) -> PythonRuntimeCandidate:
     raw = str(path_text or "").strip()
     if not raw:
@@ -224,7 +341,7 @@ def _probe_python_executable(
         )
 
     p = Path(raw)
-    present = p.exists()
+    present = True if assume_present else p.exists()
     if not present:
         return PythonRuntimeCandidate(
             source=source,
@@ -249,15 +366,19 @@ def _probe_python_executable(
         )
 
     try:
+        run_kwargs: dict[str, Any] = {
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": max(0.1, float(timeout_seconds)),
+            "check": False,
+        }
+        if env is not None:
+            run_kwargs["env"] = env
         proc = subprocess.run(
             [raw, "-c", _PYTHON_HEALTH_PROBE],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=max(0.1, float(timeout_seconds)),
-            check=False,
-            env=env,
+            **run_kwargs,
         )
     except subprocess.TimeoutExpired:
         return PythonRuntimeCandidate(
@@ -490,6 +611,256 @@ def select_python_runtime(
         )
 
     return PythonRuntimeSelection(selected=selected, candidates=tuple(candidates))
+
+
+def probe_python_interpreters(
+    *,
+    candidate_commands: Sequence[str] | None = None,
+    timeout_seconds: float = 5.0,
+    force_windows: bool | None = None,
+    path: str | None = None,
+    environment: dict[str, str] | None = None,
+) -> PythonCommandProbeResult:
+    commands = _coerce_commands(candidate_commands)
+    is_windows = _is_windows_platform(force_windows=force_windows)
+    timeout_budget = max(0.1, float(timeout_seconds))
+    candidates: list[PythonCommandProbe] = []
+    effective_env: dict[str, str] | None = None
+    effective_path = path
+    if environment is not None:
+        effective_env = dict(os.environ)
+        for key, value in environment.items():
+            if isinstance(key, str) and isinstance(value, str):
+                effective_env[key] = value
+        if effective_path is None:
+            effective_path = effective_env.get("PATH")
+
+    for command in commands:
+        looks_like_path = (
+            ("/" in command)
+            or ("\\" in command)
+            or (is_windows and ":" in command)
+            or Path(command).is_absolute()
+        )
+        resolved: str | None = None
+        if looks_like_path:
+            try:
+                if Path(command).exists():
+                    resolved = command
+            except OSError:
+                resolved = command
+        else:
+            resolved = (
+                shutil.which(command, path=effective_path)
+                if effective_path is not None
+                else shutil.which(command)
+            )
+
+        if resolved is None:
+            candidates.append(
+                PythonCommandProbe(
+                    command=command,
+                    resolved_path=None,
+                    present=False,
+                    usable=False,
+                    reason_code="not_found",
+                    reason=f"`{command}` was not found on PATH.",
+                )
+            )
+            continue
+
+        if _is_windowsapps_alias(resolved, force_windows=force_windows):
+            candidates.append(
+                PythonCommandProbe(
+                    command=command,
+                    resolved_path=resolved,
+                    present=True,
+                    usable=False,
+                    reason_code="windowsapps_alias",
+                    reason=(
+                        "Resolved to a WindowsApps launcher alias. "
+                        "Install/select a full Python interpreter and retry."
+                    ),
+                )
+            )
+            continue
+
+        candidate = _probe_python_executable(
+            resolved,
+            timeout_seconds=timeout_budget,
+            source=command,
+            env=effective_env,
+            assume_present=not looks_like_path,
+        )
+        candidates.append(
+            PythonCommandProbe(
+                command=command,
+                resolved_path=resolved,
+                present=candidate.present,
+                usable=candidate.usable,
+                reason_code=candidate.reason_code,
+                reason=candidate.reason,
+                version=candidate.version,
+                executable=candidate.executable,
+            )
+        )
+
+    usable = [candidate for candidate in candidates if candidate.usable]
+    usable.sort(
+        key=lambda candidate: (
+            0 if _path_matches_current_interpreter(candidate.resolved_path) else 1,
+            0 if candidate.command == "python" else 1 if candidate.command == "python3" else 2,
+            candidate.command,
+        )
+    )
+    selected = usable[0] if usable else None
+
+    return PythonCommandProbeResult(
+        selected_command=selected.command if selected is not None else None,
+        selected_resolved_path=selected.resolved_path if selected is not None else None,
+        selected_version=selected.version if selected is not None else None,
+        selected_executable=selected.executable if selected is not None else None,
+        candidates=tuple(candidates),
+    )
+
+
+def resolve_usable_python_interpreter(
+    *,
+    workspace_dir: Path | None = None,
+    candidate_commands: Sequence[str] | None = None,
+    timeout_seconds: float = 5.0,
+    force_windows: bool | None = None,
+    include_sys_executable: bool = True,
+    path: str | None = None,
+    environment: dict[str, str] | None = None,
+) -> PythonCommandProbeResult:
+    is_windows = _is_windows_platform(force_windows=force_windows)
+    timeout = max(0.1, float(timeout_seconds))
+    effective_env: dict[str, str] | None = None
+    effective_path = path
+    if environment is not None:
+        effective_env = dict(os.environ)
+        for key, value in environment.items():
+            if isinstance(key, str) and isinstance(value, str):
+                effective_env[key] = value
+        if effective_path is None:
+            effective_path = effective_env.get("PATH")
+
+    def _windows_where_all_for_probe(command: str) -> list[str]:
+        if not is_windows:
+            return []
+        try:
+            env = None
+            if effective_path is not None:
+                env = dict(effective_env or os.environ)
+                env["PATH"] = effective_path
+            proc = subprocess.run(
+                ["where", command],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=max(0.1, min(2.0, timeout)),
+                check=False,
+                env=env,
+            )
+        except Exception:
+            return []
+        if proc.returncode != 0:
+            return []
+        out: list[str] = []
+        for line in proc.stdout.splitlines():
+            candidate = line.strip()
+            if candidate:
+                out.append(candidate)
+        return out
+
+    def _windows_py0p_for_probe() -> list[str]:
+        if not is_windows:
+            return []
+        try:
+            env = None
+            if effective_path is not None:
+                env = dict(effective_env or os.environ)
+                env["PATH"] = effective_path
+            proc = subprocess.run(
+                ["py", "-0p"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=max(0.1, min(2.0, timeout)),
+                check=False,
+                env=env,
+            )
+        except Exception:
+            return []
+        if proc.returncode != 0:
+            return []
+        out: list[str] = []
+        for raw_line in proc.stdout.splitlines():
+            line = raw_line.rstrip()
+            if not line.strip():
+                continue
+            match = _WINDOWS_PY0P_PATH_PATTERN.search(line)
+            if match:
+                out.append(match.group(1).strip())
+        return out
+
+    ordered: list[str] = []
+    if workspace_dir is not None:
+        ordered.append(str(_venv_python_path(workspace_dir / ".venv", force_windows=force_windows)))
+
+    ordered.extend(_coerce_commands(candidate_commands))
+
+    if include_sys_executable and isinstance(sys.executable, str) and sys.executable.strip():
+        sys_exe = str(Path(sys.executable))
+        if sys_exe not in ordered:
+            ordered.append(sys_exe)
+
+    expanded: list[str] = []
+    seen: set[str] = set()
+    inserted_py0p = False
+    for command in ordered:
+        key = command.lower() if is_windows else command
+        if key not in seen:
+            expanded.append(command)
+            seen.add(key)
+
+        if is_windows and command in {"python", "python3"}:
+            for entry in _windows_where_all_for_probe(command):
+                if _is_windowsapps_alias(entry, force_windows=force_windows):
+                    continue
+                entry_key = entry.lower()
+                if entry_key in seen:
+                    continue
+                expanded.append(entry)
+                seen.add(entry_key)
+
+        if is_windows and not inserted_py0p and command == "py":
+            inserted_py0p = True
+            for entry in _windows_py0p_for_probe():
+                entry_key = entry.lower()
+                if entry_key in seen:
+                    continue
+                expanded.append(entry)
+                seen.add(entry_key)
+
+    if is_windows and not inserted_py0p:
+        for entry in _windows_py0p_for_probe():
+            entry_key = entry.lower()
+            if entry_key in seen:
+                continue
+            expanded.append(entry)
+            seen.add(entry_key)
+
+    return probe_python_interpreters(
+        candidate_commands=expanded,
+        timeout_seconds=timeout,
+        force_windows=force_windows,
+        path=effective_path,
+        environment=effective_env,
+    )
 
 
 def probe_pytest_module(

@@ -412,8 +412,8 @@ Golden fixture verification command:
   `Access is denied`), install/select a full CPython interpreter and ensure it takes precedence
   over WindowsApps on PATH (or disable the "App execution aliases" for Python in Windows
   Settings). When `--verify-command` uses pytest, the runner fails fast with actionable details in
-  `preflight.json` (`command_diagnostics`, `python_runtime`, `pytest_probe`) and `error.json`
-  (`python_unavailable` / `pytest_unavailable`).
+  `preflight.json` (`python_toolchain`, derived `command_diagnostics`, `python_runtime`,
+  `pytest_probe`) and `error.json` (`python_unavailable` / `pytest_unavailable`).
 - If you use a Windows-host checkout inside WSL or a Linux container and `git status` shows
   widespread unrelated modifications, it is usually a CRLF/LF line ending mismatch. Mitigations:
   - For new clones: `git config --global core.autocrlf input`
