@@ -494,6 +494,37 @@
           "reason_code": null,
           "reason": null
         }
+      },
+      "python_interpreter": {
+        "selected": {
+          "command": "python",
+          "resolved_path": "/usr/bin/python3.13",
+          "version": "3.13.2",
+          "executable": "/usr/bin/python3.13"
+        },
+        "candidates": [
+          {
+            "command": "python",
+            "resolved_path": "/usr/bin/python3.13",
+            "present": true,
+            "usable": true,
+            "reason_code": null,
+            "reason": null,
+            "version": "3.13.2",
+            "executable": "/usr/bin/python3.13"
+          },
+          {
+            "command": "python3",
+            "resolved_path": "/usr/bin/python3.13",
+            "present": true,
+            "usable": true,
+            "reason_code": null,
+            "reason": null,
+            "version": "3.13.2",
+            "executable": "/usr/bin/python3.13"
+          }
+        ],
+        "rejected": []
       }
     },
     "python_runtime": {
@@ -668,6 +699,112 @@
       "stdout_tail": "pytest 8.4.2",
       "stderr_tail": "",
       "exception": null
+    }
+  },
+  "fully_missing_toolchain": {
+    "preflight": {
+      "commands": {
+        "python": false,
+        "python3": false,
+        "py": false
+      },
+      "command_probe_details": {
+        "python": {
+          "command": "python",
+          "resolved_path": null,
+          "present": false,
+          "usable": false,
+          "reason_code": "not_found",
+          "reason": "`python` was not found on PATH."
+        },
+        "python3": {
+          "command": "python3",
+          "resolved_path": null,
+          "present": false,
+          "usable": false,
+          "reason_code": "not_found",
+          "reason": "`python3` was not found on PATH."
+        },
+        "py": {
+          "command": "py",
+          "resolved_path": null,
+          "present": false,
+          "usable": false,
+          "reason_code": "not_found",
+          "reason": "`py` was not found on PATH."
+        }
+      },
+      "python_interpreter": {
+        "selected": null,
+        "candidates": [
+          {
+            "command": "python",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`python` was not found on PATH.",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "python3",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`python3` was not found on PATH.",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "py",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`py` was not found on PATH.",
+            "version": null,
+            "executable": null
+          }
+        ],
+        "rejected": [
+          {
+            "command": "python",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`python` was not found on PATH.",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "python3",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`python3` was not found on PATH.",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "py",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`py` was not found on PATH.",
+            "version": null,
+            "executable": null
+          }
+        ]
+      }
+    },
+    "python_runtime": {
+      "selected": null,
+      "candidates": []
     }
   }
 }

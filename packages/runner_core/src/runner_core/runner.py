@@ -3086,6 +3086,7 @@ def _validate_python_capability(
 
     python_runtime = select_python_runtime(
         workspace_dir=workspace_dir,
+        include_sys_executable=not command_prefix,
         environment=runtime_env_overrides or None,
     )
     python_runtime_summary = python_runtime.to_dict()

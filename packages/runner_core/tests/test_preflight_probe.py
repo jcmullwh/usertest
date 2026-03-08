@@ -683,6 +683,46 @@ def test_run_once_suggests_write_when_shell_required_and_edits_required(tmp_path
     assert "--mission-id test_requires_shell_with_edits" in suggested_command
 
 
+def test_run_once_marks_pdm_as_unusable_when_version_probe_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    cmd_dir = tmp_path / "bin"
+    cmd_dir.mkdir()
+    if os.name == "nt":
+        pdm = cmd_dir / "pdm.cmd"
+        pdm.write_text("@echo off\nexit /b 1\n", encoding="utf-8")
+        monkeypatch.setenv("PATHEXT", f"{os.environ.get('PATHEXT', '')};.CMD")
+    else:
+        pdm = cmd_dir / "pdm"
+        pdm.write_text("#!/bin/sh\nexit 1\n", encoding="utf-8")
+        pdm.chmod(pdm.stat().st_mode | stat.S_IEXEC)
+    monkeypatch.setenv("PATH", f"{cmd_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": _make_dummy_codex_binary(tmp_path)}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(cfg, RunRequest(repo=str(target), agent="codex", policy="safe"))
+
+    assert result.exit_code == 0
+    payload = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    pdm_diag = payload.get("command_diagnostics", {}).get("pdm", {})
+    assert pdm_diag.get("status") == "unusable"
+    assert pdm_diag.get("reason_code") == "probe_failed"
+    assert "pdm probe exited non-zero" in str(pdm_diag.get("reason", ""))
+    assert "pip install -U pdm" in str(pdm_diag.get("remediation", ""))
+
+
 def test_run_once_marks_present_commands_as_blocked_by_policy_when_shell_is_disabled(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
