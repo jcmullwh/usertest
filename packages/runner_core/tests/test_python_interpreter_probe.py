@@ -276,6 +276,8 @@ def test_resolve_prefers_workspace_venv_python(
 
     monkeypatch.setattr(probe_mod.shutil, "which", _which)
     monkeypatch.setattr(probe_mod.subprocess, "run", _run)
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv("USERTEST_PYTHON", raising=False)
 
     resolved = probe_mod.resolve_usable_python_interpreter(
         workspace_dir=workspace_dir,

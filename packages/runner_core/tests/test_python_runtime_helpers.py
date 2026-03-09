@@ -344,6 +344,30 @@ def test_select_python_runtime_no_candidates_yields_none(
     assert all(not c.usable for c in result.candidates if c.present)
 
 
+def test_select_python_runtime_can_skip_sys_executable_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    monkeypatch.setattr(runtime_mod.shutil, "which", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime_mod, "_windows_py0p_interpreters", lambda **kwargs: [])
+    monkeypatch.setattr(runtime_mod, "_windows_where_all", lambda *args, **kwargs: [])
+    monkeypatch.setattr(runtime_mod.sys, "executable", str(tmp_path / "runner_python"))
+    monkeypatch.delenv("VIRTUAL_ENV", raising=False)
+    monkeypatch.delenv("USERTEST_PYTHON", raising=False)
+
+    result = runtime_mod.select_python_runtime(
+        workspace_dir=workspace_dir,
+        timeout_seconds=1.0,
+        include_sys_executable=False,
+    )
+
+    assert result.selected is None
+    assert all(candidate.source != "sys_executable" for candidate in result.candidates)
+
+
 def test_select_python_runtime_honors_environment_overrides(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -483,7 +507,7 @@ def test_select_python_runtime_rejects_windowsapps_alias_without_host_fallback(
     windowsapps_python.write_text("", encoding="utf-8")
 
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(runtime_mod, "_is_windows_platform", lambda: True)
+    monkeypatch.setattr(runtime_mod, "_is_windows_platform", lambda *args, **kwargs: True)
     monkeypatch.setattr(
         runtime_mod.shutil,
         "which",
@@ -517,7 +541,7 @@ def test_select_python_runtime_classifies_incomplete_runtime_missing_stdlib(
     broken_python.parent.mkdir(parents=True, exist_ok=True)
     broken_python.write_bytes(b"")
 
-    monkeypatch.setattr(runtime_mod, "_is_windows_platform", lambda: True)
+    monkeypatch.setattr(runtime_mod, "_is_windows_platform", lambda *args, **kwargs: True)
     monkeypatch.setattr(runtime_mod.shutil, "which", lambda *args, **kwargs: None)
     monkeypatch.delenv("USERTEST_PYTHON", raising=False)
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
@@ -563,7 +587,19 @@ def test_validate_python_capability_remote_prefix_does_not_use_host_sys_executab
     def _fake_probe_python_context_capability(*args: object, **kwargs: object) -> dict[str, object]:
         del args, kwargs
         context_probe_calls["count"] += 1
-        return {"passed": True}
+        return {
+            "passed": True,
+            "metadata": {
+                "executable": "/usr/bin/python3",
+                "version": "3.13.2",
+                "prefix": "/usr",
+                "base_prefix": "/usr",
+                "exec_prefix": "/usr",
+                "base_exec_prefix": "/usr",
+                "real_prefix": None,
+                "virtual_env": None,
+            },
+        }
 
     monkeypatch.setattr(runtime_mod.shutil, "which", lambda *args, **kwargs: None)
     monkeypatch.setattr(runtime_mod, "_windows_py0p_interpreters", lambda **kwargs: [])
@@ -582,12 +618,12 @@ def test_validate_python_capability_remote_prefix_does_not_use_host_sys_executab
         env_overrides={"PATH": ""},
     )
 
-    assert capability["runtime_summary"].get("selected") is None
+    assert capability["runtime_summary"].get("selected", {}).get("source") == "context_verified"
     assert capability["validation"].get("required") is True
-    assert capability["validation"].get("enabled") is False
-    assert capability["validation"].get("reason_code") == "not_found"
-    assert capability["validation"].get("validated_python_executable") is None
-    assert context_probe_calls["count"] == 0
+    assert capability["validation"].get("enabled") is True
+    assert capability["validation"].get("reason_code") is None
+    assert capability["validation"].get("validated_python_executable") == "/usr/bin/python3"
+    assert context_probe_calls["count"] == 1
 
 
 def test_select_python_runtime_reports_fully_missing_toolchain(
