@@ -2948,6 +2948,15 @@ def _python_probe_remediation(reason_code: str | None) -> str | None:
     return "Inspect probe stderr/stdout and selected interpreter metadata in preflight.json."
 
 
+def _tool_command_probe_remediation(command_name: str, reason_code: str | None) -> str | None:
+    code = reason_code.strip().lower() if isinstance(reason_code, str) else None
+    if command_name == "pytest" and code in {"not_found", "pytest_missing"}:
+        return "Install pytest into the selected interpreter/environment, then retry."
+    if command_name == "pdm" and code in {"not_found", "pdm_missing"}:
+        return "Install `pdm` into the selected interpreter/environment, then retry."
+    return _python_probe_remediation(reason_code)
+
+
 def _prepare_probe_environment(
     *,
     command_prefix: list[str],
@@ -3054,7 +3063,7 @@ def _probe_same_shell_python_command(
                 "reason_code": "not_found",
                 "reason_type": _reason_type_for_code("not_found"),
                 "reason": f"`{command_name}` was not found in the verification runtime.",
-                "remediation": _python_probe_remediation("not_found"),
+                "remediation": _tool_command_probe_remediation(command_name, "not_found"),
             }
 
         if _is_windows() and "\\windowsapps\\" in resolved_path.replace("/", "\\").lower():
@@ -3167,7 +3176,7 @@ def _probe_same_shell_python_command(
         "reason_code": reason_code,
         "reason_type": _reason_type_for_code(reason_code),
         "reason": reason,
-        "remediation": _python_probe_remediation(reason_code),
+        "remediation": _tool_command_probe_remediation(command_name, reason_code),
         "exit_code": exit_code,
         "timed_out": timed_out,
         "stdout_tail": _tail_text_for_prompt(stdout_text),
@@ -3523,7 +3532,8 @@ def _build_python_toolchain_snapshot(
                     else None
                 ),
                 "reason": existing.get("reason"),
-                "remediation": _python_probe_remediation(
+                "remediation": _tool_command_probe_remediation(
+                    name,
                     existing.get("reason_code")
                     if isinstance(existing.get("reason_code"), str)
                     else None
