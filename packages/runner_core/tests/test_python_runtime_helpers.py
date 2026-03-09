@@ -424,17 +424,26 @@ def test_select_python_runtime_rejects_windowsapps_alias_without_host_fallback(
     workspace_dir = tmp_path / "workspace"
     workspace_dir.mkdir()
     windowsapps_python = (
-        r"C:\Users\tester\AppData\Local\Microsoft\WindowsApps\python.exe"
+        tmp_path
+        / "Users"
+        / "tester"
+        / "AppData"
+        / "Local"
+        / "Microsoft"
+        / "WindowsApps"
+        / "python.exe"
     )
+    windowsapps_python.parent.mkdir(parents=True, exist_ok=True)
+    windowsapps_python.write_text("", encoding="utf-8")
 
     monkeypatch.chdir(tmp_path)
-    Path(windowsapps_python).write_text("", encoding="utf-8")
     monkeypatch.setattr(runtime_mod, "_is_windows_platform", lambda: True)
     monkeypatch.setattr(
         runtime_mod.shutil,
         "which",
-        lambda command, path=None: windowsapps_python if command == "python" else None,
+        lambda command, path=None: str(windowsapps_python) if command == "python" else None,
     )
+    monkeypatch.setattr(runtime_mod, "_windows_py0p_interpreters", lambda **kwargs: [])
     monkeypatch.delenv("USERTEST_PYTHON", raising=False)
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
 
@@ -511,6 +520,8 @@ def test_validate_python_capability_remote_prefix_does_not_use_host_sys_executab
         return {"passed": True}
 
     monkeypatch.setattr(runtime_mod.shutil, "which", lambda *args, **kwargs: None)
+    monkeypatch.setattr(runtime_mod, "_windows_py0p_interpreters", lambda **kwargs: [])
+    monkeypatch.setattr(runtime_mod, "_windows_where_all", lambda *args, **kwargs: [])
     monkeypatch.setattr(
         runner_mod,
         "_probe_python_context_capability",

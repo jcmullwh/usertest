@@ -716,7 +716,7 @@ def test_two_stage_python_preflight_classifies_windowsapps_backed_venv(
     assert any(item.get("reason_code") == "windowsapps_alias" for item in rejected)
 
 
-def test_two_stage_python_preflight_reports_fully_missing_toolchain(
+def test_two_stage_python_preflight_reports_fully_missing_toolchain_inline_fixture(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
