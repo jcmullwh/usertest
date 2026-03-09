@@ -1425,6 +1425,7 @@ def _format_preflight_summary_md(
     execution_shell: str,
     shell_status: str,
     python_runtime_summary: dict[str, Any],
+    python_toolchain_capability: dict[str, Any],
     pip_probe: dict[str, Any] | None,
     pytest_probe: dict[str, Any] | None,
     command_diagnostics: dict[str, Any],
@@ -1447,17 +1448,37 @@ def _format_preflight_summary_md(
     py_version = (
         selected_dict.get("version") if isinstance(selected_dict.get("version"), str) else None
     )
-    python_label = "`unavailable`" if not py_path else f"`{py_path}`"
+
+    toolchain_status = python_toolchain_capability.get("toolchain_status", "unknown")
+    interpreter_usable = bool(python_toolchain_capability.get("interpreter_usable", False))
+
+    if not py_path:
+        python_label = "`unavailable`"
+    elif not interpreter_usable:
+        python_label = f"`{py_path}` (UNUSABLE)"
+    else:
+        python_label = f"`{py_path}`"
+
     if py_version:
         python_label += f" ({py_version})"
+
+    if toolchain_status == "blocked":
+        reason_code = python_toolchain_capability.get("reason_code")
+        reason = python_toolchain_capability.get("reason")
+        if reason_code:
+            python_label += f" - BLOCKED: {reason_code}"
+            if reason:
+                python_label += f" ({reason})"
 
     pip_label = "unknown"
     if isinstance(pip_probe, dict):
         pip_ok = bool(pip_probe.get("passed") is True)
         reason_code = pip_probe.get("reason_code")
         reason_code_s = reason_code if isinstance(reason_code, str) and reason_code else None
-        if pip_ok:
+        if pip_ok and interpreter_usable:
             pip_label = "OK"
+        elif not interpreter_usable:
+            pip_label = "BLOCKED (Python unusable)"
         else:
             suffix = f" ({reason_code_s})" if reason_code_s else ""
             pip_label = "NOT OK" + suffix
@@ -1486,8 +1507,10 @@ def _format_preflight_summary_md(
         pytest_ok = bool(pytest_probe.get("passed") is True)
         reason_code = pytest_probe.get("reason_code")
         reason_code_s = reason_code if isinstance(reason_code, str) and reason_code else None
-        if pytest_ok:
+        if pytest_ok and interpreter_usable:
             pytest_label = "OK"
+        elif not interpreter_usable:
+            pytest_label = "BLOCKED (Python unusable)"
         else:
             suffix = f" ({reason_code_s})" if reason_code_s else ""
             pytest_label = "NOT OK" + suffix
@@ -3449,6 +3472,7 @@ def _run_verification_commands(
     cwd: Path,
     timeout_seconds: float | None,
     python_executable: str | None,
+    python_toolchain_capability: dict[str, Any] | None = None,
     env_overrides: dict[str, str] | None = None,
     artifacts_dir_rel: Path | None = None,
     cancel_event: threading.Event | None = None,
@@ -3467,6 +3491,22 @@ def _run_verification_commands(
     started_utc = _utc_now_z()
     started_monotonic = time.monotonic()
     results: list[dict[str, Any]] = []
+
+    toolchain_status = (
+        python_toolchain_capability.get("toolchain_status", "unknown")
+        if isinstance(python_toolchain_capability, dict)
+        else "unknown"
+    )
+    toolchain_reason_code = (
+        python_toolchain_capability.get("reason_code")
+        if isinstance(python_toolchain_capability, dict)
+        else None
+    )
+    toolchain_reason = (
+        python_toolchain_capability.get("reason")
+        if isinstance(python_toolchain_capability, dict)
+        else None
+    )
 
     is_powershell = (not command_prefix) and _is_windows()
     merged_env: dict[str, str] | None = None
@@ -3555,6 +3595,44 @@ def _run_verification_commands(
                     if isinstance(new_cmd, str) and new_cmd.strip():
                         cmd_after_bash_rewrite = new_cmd.strip()
                         bash_rewritten = True
+
+        if toolchain_status == "blocked" and verification_commands_need_python(
+            (cmd_after_bash_rewrite,)
+        ):
+            stdout_text = ""
+            reason_s = f": {toolchain_reason}" if toolchain_reason else ""
+            stderr_text = (
+                f"[runner] Verification command skipped: Python toolchain is blocked "
+                f"({toolchain_reason_code}){reason_s}\n"
+            )
+            try:
+                stdout_path.write_text(stdout_text, encoding="utf-8", newline="\n")
+            except OSError:
+                pass
+            try:
+                stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
+            except OSError:
+                pass
+            result = {
+                "index": idx,
+                "command": cmd_original,
+                "effective_command": None,
+                "rewritten": False,
+                "argv": None,
+                "exit_code": 1,  # Marking as failed since it's a blocked required tool
+                "timed_out": False,
+                "cancelled": False,
+                "skipped": True,
+                "skip_reason": f"toolchain_blocked: {toolchain_reason_code}",
+                "command_started_utc": _utc_now_z(),
+                "wall_seconds": 0.0,
+                "stdout_path": stdout_path.name,
+                "stderr_path": stderr_path.name,
+                "stdout_tail": _tail_text_for_prompt(stdout_text),
+                "stderr_tail": _tail_text_for_prompt(stderr_text),
+            }
+            results.append(result)
+            continue
 
         effective_cmd, python_rewritten = _rewrite_verification_command_for_python(
             cmd_after_bash_rewrite,
@@ -5840,6 +5918,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 execution_shell=execution_shell,
                 shell_status=shell_status,
                 python_runtime_summary=python_runtime_summary,
+                python_toolchain_capability=python_toolchain_capability_summary,
                 pip_probe=pip_probe,
                 pytest_probe=pytest_probe,
                 command_diagnostics=command_diagnostics,
@@ -6153,6 +6232,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             cwd=acquired.workspace_dir,
                             timeout_seconds=verification_timeout_seconds,
                             python_executable=_python_exec_for_verification,
+                            python_toolchain_capability=python_toolchain_capability_summary,
                             env_overrides=agent_env_overrides,
                             cancel_event=cancel_event,
                             deadline_monotonic=deadline_monotonic,
@@ -6398,6 +6478,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "cwd": acquired.workspace_dir,
                             "timeout_seconds": verification_timeout_seconds,
                             "python_executable": python_exec_for_verification,
+                            "python_toolchain_capability": python_toolchain_capability_summary,
                             "env_overrides": agent_env_overrides,
                         }
                         if verification_reuse_mode == "auto":
@@ -7249,6 +7330,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 "cancelled": bool(verification_output_payload.get("cancelled", False)),
             }
             extensions["verification"] = verification_extension
+            extensions["python_toolchain_capability"] = python_toolchain_capability_summary
             _write_json(run_dir / "report.json", report_json)
         elif agent_exit_code != 0 and not report_validation_errors:
             report_validation_errors = run_errors
