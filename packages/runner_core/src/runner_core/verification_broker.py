@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from runner_core.pathing import agent_path_join, normalize_agent_path
 from runner_core.workspace_state_hash import WorkspaceStateHash
 
 _SHELL_PROBE_TIMEOUT_SECONDS = 2.0
@@ -95,7 +96,7 @@ def render_verification_broker_command(
     client_root_for_agent: str,
     launcher: VerificationLauncher,
 ) -> str:
-    script_path = _agent_path_join(client_root_for_agent, launcher.broker_wrapper_name)
+    script_path = agent_path_join(client_root_for_agent, launcher.broker_wrapper_name)
     if launcher.executable == "powershell":
         return (
             "powershell -NoProfile -ExecutionPolicy Bypass -File "
@@ -275,8 +276,8 @@ class VerificationBrokerAttempt:
         self.requests_dir = self.attempt_root / "requests"
         self.responses_dir = self.attempt_root / "responses"
         self.client_root = client_root
-        self.client_root_for_agent = client_root_for_agent.rstrip("/\\")
-        self.attempt_root_for_agent = attempt_root_for_agent.rstrip("/\\")
+        self.client_root_for_agent = normalize_agent_path(client_root_for_agent)
+        self.attempt_root_for_agent = normalize_agent_path(attempt_root_for_agent)
         self.python_script = client_root / "verify_client.py"
         self.shell_script = client_root / "verify_client.sh"
         self.powershell_script = client_root / "verify_client.ps1"
@@ -492,9 +493,11 @@ class VerificationBrokerAttempt:
             return
 
         artifacts_dir = summary.get("artifacts_dir")
-        artifacts_dir_s = artifacts_dir.strip() if isinstance(artifacts_dir, str) else None
+        artifacts_dir_s = (
+            normalize_agent_path(artifacts_dir) if isinstance(artifacts_dir, str) else None
+        )
         summary_path = (
-            str(Path(artifacts_dir_s) / "verification.json") if artifacts_dir_s else None
+            agent_path_join(artifacts_dir_s, "verification.json") if artifacts_dir_s else None
         )
         timed_out = any(
             isinstance(command, dict) and bool(command.get("timed_out"))
@@ -568,8 +571,8 @@ class VerificationBrokerAttempt:
         wait_timeout_seconds: float,
     ) -> VerificationBrokerClient:
         self.client_root.mkdir(parents=True, exist_ok=True)
-        request_dir_for_agent = _agent_path_join(self.attempt_root_for_agent, "requests")
-        response_dir_for_agent = _agent_path_join(self.attempt_root_for_agent, "responses")
+        request_dir_for_agent = agent_path_join(self.attempt_root_for_agent, "requests")
+        response_dir_for_agent = agent_path_join(self.attempt_root_for_agent, "responses")
         python_payload = _render_client_python(
             request_token=self.request_token,
             request_dir=request_dir_for_agent,
@@ -777,14 +780,6 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
     tmp_path.replace(path)
-
-
-def _agent_path_join(root: str, leaf: str) -> str:
-    if root.endswith(("/", "\\")):
-        return f"{root}{leaf}"
-    if "\\" in root and "/" not in root:
-        return f"{root}\\{leaf}"
-    return f"{root}/{leaf}"
 
 
 def _quote_powershell_path(path: str) -> str:

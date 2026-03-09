@@ -10,6 +10,7 @@ from typing import Any, Literal
 
 from backlog_repo.export import ticket_export_fingerprint
 from backlog_repo.plan_index import scan_plan_ticket_index
+from runner_core.pathing import normalize_agent_path
 from triage_engine import cluster_items_knn
 from triage_engine.embeddings import Embedder, get_default_embedder
 
@@ -161,9 +162,10 @@ def _read_json_list(path: Path) -> list[Any]:
 
 def _rel_path(repo_root: Path, path: Path) -> str:
     try:
-        return path.resolve().relative_to(repo_root.resolve()).as_posix()
+        rel = path.resolve().relative_to(repo_root.resolve())
+        return normalize_agent_path(rel)
     except Exception:
-        return path.as_posix()
+        return normalize_agent_path(path)
 
 
 def build_implementation_index(
