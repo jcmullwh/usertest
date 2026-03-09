@@ -7,6 +7,12 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
+from usertest_implement.cli import (
+    SelectedTicket,
+    _resolve_default_branch_name,
+    _should_move_ticket_to_review,
+)
+
 
 def _write_json(path: Path, obj: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -16,6 +22,90 @@ def _write_json(path: Path, obj: object) -> None:
 def _write_yaml(path: Path, obj: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(obj, sort_keys=False), encoding="utf-8")
+
+
+def test_resolve_default_branch_name_uses_rerun_suffix_when_remote_branch_exists(
+    monkeypatch,
+) -> None:
+    selected = SelectedTicket(
+        fingerprint="682b47583ab4e1e1",
+        title="Ticket",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=None,
+        idea_path=None,
+        ticket_markdown="# Ticket\n",
+        tickets_export_path=None,
+        export_index=None,
+    )
+
+    seen: list[str] = []
+
+    def _fake_remote_branch_exists(*, remote_url: str, branch: str) -> bool:
+        seen.append(branch)
+        return branch in {"backlog/682b47583ab4", "backlog/682b47583ab4-rerun-1"}
+
+    monkeypatch.setattr(
+        "usertest_implement.cli._resolve_remote_url_for_push",
+        lambda **_: "https://github.com/jcmullwh/usertest.git",
+    )
+    monkeypatch.setattr(
+        "usertest_implement.cli._remote_branch_exists",
+        _fake_remote_branch_exists,
+    )
+
+    branch = _resolve_default_branch_name(
+        selected=selected,
+        remote_name="origin",
+        remote_url=None,
+        candidate_repo_dirs=[],
+        wants_remote_handoff=True,
+    )
+
+    assert branch == "backlog/682b47583ab4-rerun-2"
+    assert seen == [
+        "backlog/682b47583ab4",
+        "backlog/682b47583ab4-rerun-1",
+        "backlog/682b47583ab4-rerun-2",
+    ]
+
+
+def test_should_move_ticket_to_review_requires_reviewable_handoff_state() -> None:
+    assert _should_move_ticket_to_review(
+        commit_performed=True,
+        push_requested=False,
+        pr_requested=False,
+        push_ref=None,
+        pr_ref=None,
+    )
+    assert not _should_move_ticket_to_review(
+        commit_performed=True,
+        push_requested=True,
+        pr_requested=False,
+        push_ref={"pushed": False},
+        pr_ref=None,
+    )
+    assert _should_move_ticket_to_review(
+        commit_performed=True,
+        push_requested=True,
+        pr_requested=False,
+        push_ref={"pushed": True},
+        pr_ref=None,
+    )
+    assert not _should_move_ticket_to_review(
+        commit_performed=True,
+        push_requested=True,
+        pr_requested=True,
+        push_ref={"pushed": True},
+        pr_ref={"created": False},
+    )
+    assert _should_move_ticket_to_review(
+        commit_performed=True,
+        push_requested=True,
+        pr_requested=True,
+        push_ref={"pushed": True},
+        pr_ref={"created": True},
+    )
 
 
 def test_run_dry_run_selects_by_fingerprint(tmp_path: Path) -> None:

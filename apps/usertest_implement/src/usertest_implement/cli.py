@@ -1043,6 +1043,81 @@ def _default_branch_name(selected: SelectedTicket) -> str:
     return f"backlog/{fp_part}"
 
 
+def _resolve_remote_url_for_push(
+    *,
+    remote_name: str,
+    remote_url: str | None,
+    candidate_repo_dirs: list[Path],
+) -> str | None:
+    if isinstance(remote_url, str) and remote_url.strip():
+        return remote_url.strip()
+    for candidate in candidate_repo_dirs:
+        url = _git_remote_url(repo_dir=candidate, remote_name=remote_name)
+        if isinstance(url, str) and url.strip():
+            return url.strip()
+    return None
+
+
+def _remote_branch_exists(*, remote_url: str, branch: str) -> bool:
+    try:
+        proc = subprocess.run(
+            ["git", "ls-remote", "--heads", remote_url, branch],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError:
+        return False
+    if proc.returncode != 0:
+        return False
+    return bool((proc.stdout or "").strip())
+
+
+def _resolve_default_branch_name(
+    *,
+    selected: SelectedTicket,
+    remote_name: str,
+    remote_url: str | None,
+    candidate_repo_dirs: list[Path],
+    wants_remote_handoff: bool,
+) -> str:
+    base_branch = _default_branch_name(selected)
+    if not wants_remote_handoff:
+        return base_branch
+    resolved_remote_url = _resolve_remote_url_for_push(
+        remote_name=remote_name,
+        remote_url=remote_url,
+        candidate_repo_dirs=candidate_repo_dirs,
+    )
+    if resolved_remote_url is None:
+        return base_branch
+    if not _remote_branch_exists(remote_url=resolved_remote_url, branch=base_branch):
+        return base_branch
+    suffix = 1
+    while True:
+        candidate = f"{base_branch}-rerun-{suffix}"
+        if not _remote_branch_exists(remote_url=resolved_remote_url, branch=candidate):
+            return candidate
+        suffix += 1
+
+
+def _should_move_ticket_to_review(
+    *,
+    commit_performed: bool,
+    push_requested: bool,
+    pr_requested: bool,
+    push_ref: dict[str, Any] | None,
+    pr_ref: dict[str, Any] | None,
+) -> bool:
+    if not commit_performed:
+        return False
+    if pr_requested:
+        return bool(pr_ref is not None and pr_ref.get("created") is True)
+    if push_requested:
+        return bool(push_ref is not None and push_ref.get("pushed") is True)
+    return True
+
+
 def _require_stage6_implementation_ticket(selected: SelectedTicket) -> None:
     export_kind = (
         selected.export_kind.strip().lower()
@@ -1506,7 +1581,22 @@ def _run_selected_ticket(
         if isinstance(ws, str) and ws.strip():
             workspace_dir = Path(ws)
 
-    branch = args.branch or _default_branch_name(selected)
+    push_candidates: list[Path] = []
+    if selected.owner_root is not None and (selected.owner_root / ".git").exists():
+        push_candidates.append(selected.owner_root)
+    if _looks_like_local_path(repo_input) and (Path(repo_input) / ".git").exists():
+        push_candidates.append(Path(repo_input))
+
+    if args.branch:
+        branch = args.branch
+    else:
+        branch = _resolve_default_branch_name(
+            selected=selected,
+            remote_name=str(args.remote_name),
+            remote_url=args.remote_url,
+            candidate_repo_dirs=push_candidates,
+            wants_remote_handoff=bool(args.push or args.pr),
+        )
     commit_message = (
         args.commit_message
         or f"{selected.fingerprint}: {selected.title or 'Implement backlog ticket'}"
@@ -1544,16 +1634,11 @@ def _run_selected_ticket(
             }
             _write_json(run_dir / "push_ref.json", push_ref)
         else:
-            candidates: list[Path] = []
-            if selected.owner_root is not None and (selected.owner_root / ".git").exists():
-                candidates.append(selected.owner_root)
-            if _looks_like_local_path(repo_input) and (Path(repo_input) / ".git").exists():
-                candidates.append(Path(repo_input))
             push_ref = finalize_push(
                 run_dir=run_dir,
                 remote_name=str(args.remote_name),
                 remote_url=args.remote_url,
-                candidate_repo_dirs=candidates,
+                candidate_repo_dirs=push_candidates,
                 branch=branch,
                 force_with_lease=bool(args.force_push),
             )
@@ -1727,7 +1812,13 @@ def _run_selected_ticket(
         args.move_on_commit
         and selected.owner_root is not None
         and selected.idea_path is not None
-        and commit_performed
+        and _should_move_ticket_to_review(
+            commit_performed=commit_performed,
+            push_requested=bool(args.push),
+            pr_requested=bool(args.pr),
+            push_ref=push_ref,
+            pr_ref=pr_ref,
+        )
     ):
         try:
             move_ticket_file(
