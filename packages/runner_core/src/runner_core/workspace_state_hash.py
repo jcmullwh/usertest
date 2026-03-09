@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from runner_core.pathing import normalize_agent_path
+
 HashMode = Literal["git", "filesystem"]
 
 
@@ -56,7 +58,7 @@ def _compute_git_workspace_state_hash(workspace_dir: Path) -> WorkspaceStateHash
     for rel in tracked_and_untracked:
         if not rel or rel.startswith(".git/"):
             continue
-        rel_norm = rel.replace("\\", "/")
+        rel_norm = normalize_agent_path(rel)
         path = workspace_dir / Path(rel_norm)
         if not path.exists() and not path.is_symlink():
             continue
@@ -72,7 +74,7 @@ def _compute_git_workspace_state_hash(workspace_dir: Path) -> WorkspaceStateHash
     for rel in deleted:
         if not rel or rel.startswith(".git/"):
             continue
-        rel_norm = rel.replace("\\", "/")
+        rel_norm = normalize_agent_path(rel)
         deleted_entries.append(rel_norm)
     digest = hashlib.sha256()
     for _rel, encoded in sorted(entries, key=lambda item: item[0]):

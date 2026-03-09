@@ -45,7 +45,12 @@ from runner_core.agent_docs import obfuscate_target_agent_docs
 from runner_core.agent_prompt_files import _materialize_agent_prompt_into_workspace
 from runner_core.catalog import load_catalog_config
 from runner_core.execution_backend import prepare_execution_backend
-from runner_core.pathing import slugify, utc_timestamp_compact
+from runner_core.pathing import (
+    agent_path_join,
+    normalize_agent_path,
+    slugify,
+    utc_timestamp_compact,
+)
 from runner_core.pip_bootstrap import (
     PipBootstrapResult,
     bootstrap_pip_requirements,
@@ -1083,8 +1088,8 @@ def _augment_env_with_workspace_pythonpath(
 
     env = dict(env_overrides or {})
     if workspace_mount:
-        mount_root = workspace_mount.rstrip("/")
-        entries = tuple(f"{mount_root}/{rel}" for rel in relpaths)
+        mount_root = normalize_agent_path(workspace_mount)
+        entries = tuple(agent_path_join(mount_root, rel) for rel in relpaths)
         sep = ":"
     else:
         entries = tuple(str(workspace_dir / rel.replace("/", os.sep)) for rel in relpaths)
@@ -1624,7 +1629,7 @@ def _gemini_include_directories_for_workspace(*, workspace_dir: Path) -> list[st
 
     # Gemini CLI runs inside the runner's Docker sandbox (Linux). Always pass POSIX-style
     # include-directories to avoid `runs\\usertest` being interpreted as a literal path segment.
-    include_rel = (Path("runs") / "usertest").as_posix()
+    include_rel = agent_path_join("runs", "usertest")
     candidate = workspace_dir / "runs" / "usertest"
     if candidate.is_dir():
         return [include_rel]
@@ -2218,16 +2223,14 @@ def _agent_path_for_staged_file(
     if run_dir_mount is None:
         return str(staged_path.resolve())
 
-    mount = run_dir_mount.strip().replace("\\", "/").rstrip("/")
-    if not mount:
+    mount = normalize_agent_path(run_dir_mount)
+    if not mount or mount == ".":
         mount = "/run_dir"
     if not mount.startswith("/"):
         mount = f"/{mount}"
 
     rel = staged_path.resolve().relative_to(run_dir.resolve()).as_posix()
-    if not rel:
-        return mount
-    return f"{mount}/{rel}"
+    return agent_path_join(mount, rel)
 
 
 def _verification_broker_client_command(
@@ -3485,7 +3488,7 @@ def _run_verification_commands(
     summary: dict[str, Any] = {
         "schema_version": 1,
         "attempt": attempt_number,
-        "artifacts_dir": attempt_dir_rel.as_posix(),
+        "artifacts_dir": normalize_agent_path(attempt_dir_rel),
         "started_utc": started_utc,
         "finished_utc": finished_utc,
         "wall_seconds": wall_seconds_total,
@@ -4317,10 +4320,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         workspace_mount = backend.workspace_mount
         # When executing inside a docker sandbox, `workspace_mount` is a POSIX path like
         # `/workspace`. On Windows hosts, `Path("/workspace")` becomes `\\workspace`, which
-        # breaks agents that interpret `--cd` literally. Keep it as a string when mounted.
-        workspace_dir_for_agent: Path | str = (
-            workspace_mount if workspace_mount is not None else acquired.workspace_dir
-        )
+        # break agents that interpret `--cd` literally. Keep it as a string when mounted.
+        workspace_dir_for_agent: Path | str
+        if workspace_mount is not None:
+            workspace_dir_for_agent = normalize_agent_path(workspace_mount)
+        else:
+            workspace_dir_for_agent = acquired.workspace_dir
+
         staged_system_prompt: Path | None = None
         system_prompt_path_for_agent: str | None = None
         if request.agent_system_prompt_file is not None:
