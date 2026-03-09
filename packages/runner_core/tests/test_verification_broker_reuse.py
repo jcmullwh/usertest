@@ -4,6 +4,8 @@ import json
 import os
 import subprocess
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -297,6 +299,161 @@ def test_verification_broker_client_waits_for_async_failure(tmp_path: Path) -> N
     assert "verification.json" in completed.stderr
 
 
+def test_verification_broker_client_surfaces_progress_updates(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+
+    def _verifier(_: int, **kwargs: object) -> dict[str, object]:
+        progress_callback = kwargs["progress_callback"]
+        assert callable(progress_callback)
+        progress_callback(
+            {
+                "phase": "running_command",
+                "message": "running verification command 1/1",
+                "command_index": 1,
+                "command_count": 1,
+                "elapsed_seconds": 0.0,
+                "updated_utc": "2026-03-07T00:00:00Z",
+            },
+            status="running",
+        )
+        time.sleep(0.4)
+        return {
+            "schema_version": 1,
+            "attempt_number": 1,
+            "commands_configured": [_verification_command()],
+            "passed": True,
+            "status": "passed",
+            "terminal_reason": "passed",
+            "started_utc": "2026-03-07T00:00:00Z",
+            "finished_utc": "2026-03-07T00:00:01Z",
+            "wall_seconds": 0.4,
+            "artifacts_dir": "verification/attempt1/broker_request_01",
+            "commands": [
+                {
+                    "command": _verification_command(),
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "cancelled": False,
+                }
+            ],
+        }
+
+    broker = _make_broker_attempt(run_dir=run_dir, verifier=_verifier)
+    broker.start()
+    try:
+        completed = _run_broker_wrapper(run_dir=run_dir, workspace_dir=tmp_path)
+    finally:
+        broker.stop()
+
+    assert completed.returncode == 0, completed.stderr
+    assert "verification status=" in completed.stdout
+    assert "phase=running_command" in completed.stdout
+
+
+def test_verification_broker_stop_cancels_inflight_request(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+
+    def _verifier(_: int, **kwargs: object) -> dict[str, object]:
+        cancel_event = kwargs["cancel_event"]
+        progress_callback = kwargs["progress_callback"]
+        assert isinstance(cancel_event, threading.Event)
+        assert callable(progress_callback)
+        progress_callback(
+            {
+                "phase": "running_command",
+                "message": "waiting for broker cancellation",
+                "command_index": 1,
+                "command_count": 1,
+                "elapsed_seconds": 0.0,
+                "updated_utc": "2026-03-07T00:00:00Z",
+            },
+            status="running",
+        )
+        while not cancel_event.is_set():
+            time.sleep(0.05)
+        return {
+            "schema_version": 1,
+            "attempt_number": 1,
+            "commands_configured": [_verification_command()],
+            "passed": False,
+            "status": "cancelled",
+            "terminal_reason": "cancelled",
+            "cancelled": True,
+            "timed_out": False,
+            "failure_reason": "runner_shutdown",
+            "started_utc": "2026-03-07T00:00:00Z",
+            "finished_utc": "2026-03-07T00:00:01Z",
+            "wall_seconds": 0.2,
+            "artifacts_dir": "verification/attempt1/broker_request_01",
+            "commands": [
+                {
+                    "command": _verification_command(),
+                    "exit_code": 130,
+                    "timed_out": False,
+                    "cancelled": True,
+                }
+            ],
+        }
+
+    broker = _make_broker_attempt(run_dir=run_dir, verifier=_verifier)
+    broker.start()
+    completed_holder: dict[str, subprocess.CompletedProcess[str]] = {}
+
+    def _run_wrapper() -> None:
+        completed_holder["result"] = _run_broker_wrapper(run_dir=run_dir, workspace_dir=tmp_path)
+
+    wrapper_thread = threading.Thread(target=_run_wrapper, daemon=True)
+    wrapper_thread.start()
+    request_path = run_dir / "verification_broker" / "attempt1" / "requests"
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline and not list(request_path.glob("*.json")):
+        time.sleep(0.05)
+
+    started = time.monotonic()
+    broker.stop()
+    stop_seconds = time.monotonic() - started
+    wrapper_thread.join(timeout=5.0)
+
+    assert stop_seconds < 3.0
+    assert "result" in completed_holder
+    completed = completed_holder["result"]
+    assert completed.returncode != 0
+    assert "status=cancelled" in completed.stderr
+
+    response_files = sorted(
+        (run_dir / "verification_broker" / "attempt1" / "responses").glob("*.json")
+    )
+    assert response_files
+    payload = json.loads(response_files[-1].read_text(encoding="utf-8"))
+    assert payload["status"] == "cancelled"
+    assert payload["terminal_reason"] == "cancelled"
+    assert payload["cancel_requested"] is True
+
+
+def test_run_verification_commands_times_out_on_broker_deadline(tmp_path: Path) -> None:
+    command = 'python -c "import time; time.sleep(60)"'
+    started = time.monotonic()
+    summary = runner_mod._run_verification_commands(
+        run_dir=tmp_path,
+        attempt_number=1,
+        commands=[command],
+        command_prefix=[],
+        cwd=tmp_path,
+        timeout_seconds=None,
+        python_executable=sys.executable,
+        deadline_monotonic=time.monotonic() + 0.5,
+        deadline_seconds=0.5,
+    )
+    wall_seconds = time.monotonic() - started
+
+    assert wall_seconds < 10.0
+    assert summary["terminal_reason"] == "timed_out"
+    assert summary["timed_out"] is True
+    commands_out = summary["commands"]
+    assert isinstance(commands_out, list)
+    assert commands_out[0]["timed_out"] is True
+
+
 def test_run_once_reuses_broker_verification_without_post_agent_rerun(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -347,11 +504,14 @@ def test_run_once_reuses_broker_verification_without_post_agent_rerun(
     assert verification["source"] == "broker_reuse"
     assert verification["reused"] is True
     assert verification["passed"] is True
+    assert verification["terminal_reason"] == "passed"
     assert not (result.run_dir / "verification" / "attempt1" / "post_agent_rerun").exists()
 
     reuse = json.loads((result.run_dir / "verification_reuse.json").read_text(encoding="utf-8"))
     assert reuse["selected_source"] == "broker_reuse"
     assert reuse["selected_request_id"]
+    report = json.loads((result.run_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["extensions"]["verification"]["terminal_reason"] == "passed"
 
 
 def test_run_once_uses_latest_broker_result_within_single_attempt(
@@ -535,3 +695,50 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_command_not_request
     reuse = json.loads((result.run_dir / "verification_reuse.json").read_text(encoding="utf-8"))
     assert reuse["selected_source"] == "post_agent_rerun"
     assert reuse["fallback_reason"] == "broker_not_requested"
+
+
+def test_run_once_serializes_failed_terminal_reason_into_report(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    _stub_codex_binary_preflight(monkeypatch)
+
+    def _fake_run_codex_exec(**kwargs: object) -> object:
+        raw_events_path = Path(str(kwargs["raw_events_path"]))
+        last_message_path = Path(str(kwargs["last_message_path"]))
+        stderr_path = Path(str(kwargs["stderr_path"]))
+        raw_events_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
+        return SimpleNamespace(exit_code=0, argv=["codex", "exec"])
+
+    monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": "codex"}},
+        policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+            verification_commands=(_marker_verification_command(),),
+            verification_reuse_mode="off",
+            agent_followup_attempts=0,
+        ),
+    )
+
+    assert result.exit_code == 0
+    verification = json.loads((result.run_dir / "verification.json").read_text(encoding="utf-8"))
+    assert verification["terminal_reason"] == "failed"
+    report = json.loads((result.run_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["extensions"]["verification"]["terminal_reason"] == "failed"

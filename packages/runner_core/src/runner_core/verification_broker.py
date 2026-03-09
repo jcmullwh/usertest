@@ -10,6 +10,7 @@ import time
 import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,11 @@ from runner_core.workspace_state_hash import WorkspaceStateHash
 
 _SHELL_PROBE_TIMEOUT_SECONDS = 2.0
 _POWERSHELL_PROBE_TIMEOUT_SECONDS = 10.0
+_BROKER_DEFAULT_INTERNAL_DEADLINE_SECONDS = 10_800.0
+_BROKER_CLIENT_WAIT_GRACE_SECONDS = 15.0
+_BROKER_STOP_JOIN_TIMEOUT_SECONDS = 10.0
+_BROKER_PROGRESS_HEARTBEAT_SECONDS = 5.0
+_BROKER_TERMINAL_STATUSES = {"passed", "failed", "timed_out", "cancelled"}
 
 
 @dataclass(frozen=True)
@@ -25,14 +31,21 @@ class VerificationBrokerRequestResult:
     request_id: str
     attempt: int
     status: str
+    terminal_reason: str | None
     started_utc: str | None
+    deadline_utc: str | None
+    deadline_seconds: float | None
+    last_updated_utc: str | None
     finished_utc: str | None
     workspace_hash_after_verification: str | None
     workspace_hash_mode: str | None
     artifacts_dir: str | None
     summary_path: str | None
     timed_out: bool
+    cancelled: bool
+    cancel_requested: bool
     failure_reason: str | None
+    progress: dict[str, Any] | None
     verification_summary: dict[str, Any] | None
 
     def to_artifact_dict(self) -> dict[str, Any]:
@@ -40,14 +53,21 @@ class VerificationBrokerRequestResult:
             "request_id": self.request_id,
             "attempt": self.attempt,
             "status": self.status,
+            "terminal_reason": self.terminal_reason,
             "started_utc": self.started_utc,
+            "deadline_utc": self.deadline_utc,
+            "deadline_seconds": self.deadline_seconds,
+            "last_updated_utc": self.last_updated_utc,
             "finished_utc": self.finished_utc,
             "workspace_hash_after_verification": self.workspace_hash_after_verification,
             "workspace_hash_mode": self.workspace_hash_mode,
             "artifacts_dir": self.artifacts_dir,
             "summary_path": self.summary_path,
             "timed_out": self.timed_out,
+            "cancelled": self.cancelled,
+            "cancel_requested": self.cancel_requested,
             "failure_reason": self.failure_reason,
+            "progress": dict(self.progress) if isinstance(self.progress, dict) else None,
         }
 
 
@@ -246,6 +266,58 @@ def probe_local_verification_launcher(*, launcher: VerificationLauncher) -> dict
     }
 
 
+def _is_terminal_status(status: str | None) -> bool:
+    return isinstance(status, str) and status.strip() in _BROKER_TERMINAL_STATUSES
+
+
+def _compute_broker_internal_deadline_seconds(
+    *,
+    verification_timeout_seconds: float | None,
+    verification_command_count: int,
+) -> float:
+    if verification_timeout_seconds is None or verification_timeout_seconds <= 0:
+        return _BROKER_DEFAULT_INTERNAL_DEADLINE_SECONDS
+    command_count = max(1, int(verification_command_count))
+    return max(
+        300.0,
+        float(verification_timeout_seconds) * float(command_count) + 300.0,
+    )
+
+
+def _compute_deadline_utc(started_utc: str | None, *, deadline_seconds: float) -> str | None:
+    if not isinstance(started_utc, str) or not started_utc.strip():
+        return None
+    try:
+        started = datetime.fromisoformat(started_utc.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=timezone.utc)
+    deadline = started + timedelta(seconds=max(0.0, float(deadline_seconds)))
+    return deadline.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _normalize_progress_snapshot(progress: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(progress, dict):
+        return None
+    payload: dict[str, Any] = {}
+    for key in (
+        "sequence",
+        "phase",
+        "message",
+        "command_index",
+        "command_count",
+        "command",
+        "elapsed_seconds",
+        "updated_utc",
+    ):
+        value = progress.get(key)
+        if value is None:
+            continue
+        payload[key] = value
+    return payload or None
+
+
 class VerificationBrokerAttempt:
     def __init__(
         self,
@@ -259,7 +331,7 @@ class VerificationBrokerAttempt:
         python_command: str,
         verification_timeout_seconds: float | None,
         verification_command_count: int,
-        verifier: Callable[[int], dict[str, Any]] | None,
+        verifier: Callable[..., dict[str, Any]] | None,
         workspace_hash_fn: Callable[[], WorkspaceStateHash] | None,
         utc_now_fn: Callable[[], str],
         run_async_verifier: bool = True,
@@ -286,9 +358,15 @@ class VerificationBrokerAttempt:
         self._request_counter = 0
         self._results: list[VerificationBrokerRequestResult] = []
         self._results_lock = threading.Lock()
+        self._active_request_lock = threading.Lock()
+        self._active_cancel_event: threading.Event | None = None
         self._stop = threading.Event()
         self._request_settle_seconds = 2.0
         self._drain_deadline_monotonic: float | None = None
+        self._internal_deadline_seconds = _compute_broker_internal_deadline_seconds(
+            verification_timeout_seconds=verification_timeout_seconds,
+            verification_command_count=verification_command_count,
+        )
         self._thread = (
             threading.Thread(
                 target=self._worker_loop,
@@ -301,8 +379,7 @@ class VerificationBrokerAttempt:
         self._client = self._write_client_files(
             python_command=python_command,
             wait_timeout_seconds=_compute_client_wait_timeout(
-                verification_timeout_seconds=verification_timeout_seconds,
-                verification_command_count=verification_command_count,
+                internal_deadline_seconds=self._internal_deadline_seconds,
             ),
         )
 
@@ -327,9 +404,11 @@ class VerificationBrokerAttempt:
         self._request_settle_seconds = max(0.0, float(request_settle_seconds))
         self._drain_deadline_monotonic = time.monotonic() + self._request_settle_seconds
         self._stop.set()
+        with self._active_request_lock:
+            if self._active_cancel_event is not None:
+                self._active_cancel_event.set()
         if join_timeout_seconds is None:
-            self._thread.join()
-            return
+            join_timeout_seconds = _BROKER_STOP_JOIN_TIMEOUT_SECONDS
         self._thread.join(timeout=join_timeout_seconds)
 
     def latest_success_result(self) -> VerificationBrokerRequestResult | None:
@@ -373,7 +452,7 @@ class VerificationBrokerAttempt:
 
     def _worker_loop(self) -> None:
         while True:
-            processed = self._process_ready_requests()
+            processed = self._process_ready_requests(cancel_pending=self._stop.is_set())
             if self._stop.is_set():
                 if processed or self._has_unprocessed_requests():
                     self._drain_deadline_monotonic = (
@@ -381,6 +460,7 @@ class VerificationBrokerAttempt:
                     )
                 if (
                     not self._has_unprocessed_requests()
+                    and not self._has_active_request()
                     and self._drain_deadline_monotonic is not None
                     and time.monotonic() >= self._drain_deadline_monotonic
                 ):
@@ -390,7 +470,7 @@ class VerificationBrokerAttempt:
             if not processed:
                 self._stop.wait(self._poll_seconds)
 
-    def _process_ready_requests(self) -> bool:
+    def _process_ready_requests(self, *, cancel_pending: bool) -> bool:
         processed_any = False
         if not self.requests_dir.exists():
             return False
@@ -400,7 +480,14 @@ class VerificationBrokerAttempt:
                 continue
             self._processed_ids.add(request_id)
             processed_any = True
-            self._handle_request(request_id=request_id, request_path=request_path)
+            if cancel_pending:
+                self._cancel_request(
+                    request_id=request_id,
+                    request_path=request_path,
+                    reason="runner_shutdown",
+                )
+            else:
+                self._handle_request(request_id=request_id, request_path=request_path)
         return processed_any
 
     def _has_unprocessed_requests(self) -> bool:
@@ -412,22 +499,90 @@ class VerificationBrokerAttempt:
                 return True
         return False
 
+    def _has_active_request(self) -> bool:
+        with self._active_request_lock:
+            return self._active_cancel_event is not None
+
+    def _cancel_request(
+        self,
+        *,
+        request_id: str,
+        request_path: Path,
+        reason: str,
+    ) -> None:
+        response_path = self.responses_dir / f"{request_id}.json"
+        started_utc = self.utc_now_fn()
+        deadline_utc = _compute_deadline_utc(
+            started_utc, deadline_seconds=self._internal_deadline_seconds
+        )
+        result = VerificationBrokerRequestResult(
+            request_id=request_id,
+            attempt=self.attempt_number,
+            status="cancelled",
+            terminal_reason="cancelled",
+            started_utc=started_utc,
+            deadline_utc=deadline_utc,
+            deadline_seconds=self._internal_deadline_seconds,
+            last_updated_utc=self.utc_now_fn(),
+            finished_utc=self.utc_now_fn(),
+            workspace_hash_after_verification=None,
+            workspace_hash_mode=None,
+            artifacts_dir=None,
+            summary_path=None,
+            timed_out=False,
+            cancelled=True,
+            cancel_requested=True,
+            failure_reason=reason,
+            progress={
+                "sequence": 1,
+                "phase": "cancelled",
+                "message": "verification cancelled before execution started",
+                "updated_utc": self.utc_now_fn(),
+            },
+            verification_summary={
+                "schema_version": 1,
+                "attempt": self.attempt_number,
+                "artifacts_dir": None,
+                "started_utc": started_utc,
+                "finished_utc": self.utc_now_fn(),
+                "wall_seconds": 0.0,
+                "passed": False,
+                "status": "cancelled",
+                "terminal_reason": "cancelled",
+                "cancelled": True,
+                "timed_out": False,
+                "failure_reason": reason,
+                "commands": [],
+            },
+        )
+        self._record_result(result=result, response_path=response_path)
+
     def _handle_request(self, *, request_id: str, request_path: Path) -> None:
         response_path = self.responses_dir / f"{request_id}.json"
         started_utc = self.utc_now_fn()
+        deadline_utc = _compute_deadline_utc(
+            started_utc, deadline_seconds=self._internal_deadline_seconds
+        )
         if self.verifier is None or self.workspace_hash_fn is None:
             result = VerificationBrokerRequestResult(
                 request_id=request_id,
                 attempt=self.attempt_number,
-                status="invalid",
+                status="failed",
+                terminal_reason="failed",
                 started_utc=started_utc,
+                deadline_utc=deadline_utc,
+                deadline_seconds=self._internal_deadline_seconds,
+                last_updated_utc=self.utc_now_fn(),
                 finished_utc=self.utc_now_fn(),
                 workspace_hash_after_verification=None,
                 workspace_hash_mode=None,
                 artifacts_dir=None,
                 summary_path=None,
                 timed_out=False,
+                cancelled=False,
+                cancel_requested=False,
                 failure_reason="async_verifier_disabled",
+                progress=None,
                 verification_summary=None,
             )
             self._record_result(result=result, response_path=response_path)
@@ -438,15 +593,22 @@ class VerificationBrokerAttempt:
             result = VerificationBrokerRequestResult(
                 request_id=request_id,
                 attempt=self.attempt_number,
-                status="invalid",
+                status="failed",
+                terminal_reason="failed",
                 started_utc=started_utc,
+                deadline_utc=deadline_utc,
+                deadline_seconds=self._internal_deadline_seconds,
+                last_updated_utc=self.utc_now_fn(),
                 finished_utc=self.utc_now_fn(),
                 workspace_hash_after_verification=None,
                 workspace_hash_mode=None,
                 artifacts_dir=None,
                 summary_path=None,
                 timed_out=False,
+                cancelled=False,
+                cancel_requested=False,
                 failure_reason=f"invalid_request_json: {exc}",
+                progress=None,
                 verification_summary=None,
             )
             self._record_result(result=result, response_path=response_path)
@@ -457,40 +619,132 @@ class VerificationBrokerAttempt:
             result = VerificationBrokerRequestResult(
                 request_id=request_id,
                 attempt=self.attempt_number,
-                status="invalid",
+                status="failed",
+                terminal_reason="failed",
                 started_utc=started_utc,
+                deadline_utc=deadline_utc,
+                deadline_seconds=self._internal_deadline_seconds,
+                last_updated_utc=self.utc_now_fn(),
                 finished_utc=self.utc_now_fn(),
                 workspace_hash_after_verification=None,
                 workspace_hash_mode=None,
                 artifacts_dir=None,
                 summary_path=None,
                 timed_out=False,
+                cancelled=False,
+                cancel_requested=False,
                 failure_reason="invalid_request_token",
+                progress=None,
                 verification_summary=None,
             )
             self._record_result(result=result, response_path=response_path)
             return
 
+        if self._stop.is_set():
+            self._cancel_request(
+                request_id=request_id,
+                request_path=request_path,
+                reason="runner_shutdown",
+            )
+            return
+
+        progress_sequence = 0
+        cancel_event = threading.Event()
+        deadline_monotonic = time.monotonic() + self._internal_deadline_seconds
+
+        def _progress_snapshot(payload: dict[str, Any] | None = None, *, status: str) -> None:
+            nonlocal progress_sequence
+            progress_sequence += 1
+            normalized = _normalize_progress_snapshot(payload)
+            if normalized is None:
+                normalized = {}
+            normalized["sequence"] = progress_sequence
+            normalized.setdefault("updated_utc", self.utc_now_fn())
+            snapshot = VerificationBrokerRequestResult(
+                request_id=request_id,
+                attempt=self.attempt_number,
+                status=status,
+                terminal_reason=None,
+                started_utc=started_utc,
+                deadline_utc=deadline_utc,
+                deadline_seconds=self._internal_deadline_seconds,
+                last_updated_utc=normalized.get("updated_utc"),
+                finished_utc=None,
+                workspace_hash_after_verification=None,
+                workspace_hash_mode=None,
+                artifacts_dir=None,
+                summary_path=None,
+                timed_out=False,
+                cancelled=False,
+                cancel_requested=cancel_event.is_set() or self._stop.is_set(),
+                failure_reason=None,
+                progress=normalized,
+                verification_summary=None,
+            )
+            self._write_response_snapshot(response_path=response_path, result=snapshot)
+
+        with self._active_request_lock:
+            self._active_cancel_event = cancel_event
+        _progress_snapshot(
+            {
+                "phase": "accepted",
+                "message": "verification request accepted; waiting for brokered execution",
+            },
+            status="pending",
+        )
+
         try:
             self._request_counter += 1
-            summary = self.verifier(self._request_counter)
+            _progress_snapshot(
+                {
+                    "phase": "starting",
+                    "message": "verification started",
+                },
+                status="running",
+            )
+            try:
+                summary = self.verifier(
+                    self._request_counter,
+                    cancel_event=cancel_event,
+                    deadline_monotonic=deadline_monotonic,
+                    deadline_utc=deadline_utc,
+                    deadline_seconds=self._internal_deadline_seconds,
+                    progress_callback=_progress_snapshot,
+                )
+            except TypeError as exc:
+                exc_text = str(exc)
+                if "unexpected keyword argument" not in exc_text:
+                    raise
+                summary = self.verifier(self._request_counter)
         except Exception as exc:  # noqa: BLE001
             result = VerificationBrokerRequestResult(
                 request_id=request_id,
                 attempt=self.attempt_number,
-                status="invalid",
+                status="failed",
+                terminal_reason="failed",
                 started_utc=started_utc,
+                deadline_utc=deadline_utc,
+                deadline_seconds=self._internal_deadline_seconds,
+                last_updated_utc=self.utc_now_fn(),
                 finished_utc=self.utc_now_fn(),
                 workspace_hash_after_verification=None,
                 workspace_hash_mode=None,
                 artifacts_dir=None,
                 summary_path=None,
                 timed_out=False,
+                cancelled=False,
+                cancel_requested=cancel_event.is_set(),
                 failure_reason=f"broker_exception: {exc}",
+                progress=None,
                 verification_summary=None,
             )
+            with self._active_request_lock:
+                self._active_cancel_event = None
             self._record_result(result=result, response_path=response_path)
             return
+        finally:
+            with self._active_request_lock:
+                self._active_cancel_event = None
 
         artifacts_dir = summary.get("artifacts_dir")
         artifacts_dir_s = (
@@ -499,45 +753,90 @@ class VerificationBrokerAttempt:
         summary_path = (
             agent_path_join(artifacts_dir_s, "verification.json") if artifacts_dir_s else None
         )
-        timed_out = any(
-            isinstance(command, dict) and bool(command.get("timed_out"))
-            for command in summary.get("commands", [])
-            if isinstance(summary.get("commands"), list)
+        terminal_reason_raw = summary.get("terminal_reason")
+        terminal_reason = (
+            terminal_reason_raw.strip()
+            if isinstance(terminal_reason_raw, str) and terminal_reason_raw.strip()
+            else ("passed" if bool(summary.get("passed", False)) else "failed")
         )
-        passed = bool(summary.get("passed", False))
+        timed_out = bool(summary.get("timed_out", False) or terminal_reason == "timed_out")
+        cancelled = bool(summary.get("cancelled", False) or terminal_reason == "cancelled")
+        passed = terminal_reason == "passed"
         workspace_hash_after_verification: str | None = None
         workspace_hash_mode: str | None = None
         failure_reason: str | None = None
-        status = "passed" if passed else "failed"
+        status = terminal_reason if terminal_reason in _BROKER_TERMINAL_STATUSES else "failed"
 
         if passed:
             state_hash = self.workspace_hash_fn()
             workspace_hash_after_verification = state_hash.sha256
             workspace_hash_mode = state_hash.mode
         else:
-            if timed_out:
+            if cancelled:
+                status = "cancelled"
+                failure_reason = str(summary.get("failure_reason") or "cancelled")
+            elif timed_out:
                 status = "timed_out"
-                failure_reason = "timed_out"
+                failure_reason = str(summary.get("failure_reason") or "timed_out")
             elif _summary_has_rejected_sentinel(summary):
                 failure_reason = "rejected_sentinel"
             else:
-                failure_reason = "verification_failed"
+                failure_reason = str(summary.get("failure_reason") or "verification_failed")
 
         result = VerificationBrokerRequestResult(
             request_id=request_id,
             attempt=self.attempt_number,
             status=status,
+            terminal_reason=status,
             started_utc=started_utc,
+            deadline_utc=deadline_utc,
+            deadline_seconds=self._internal_deadline_seconds,
+            last_updated_utc=self.utc_now_fn(),
             finished_utc=self.utc_now_fn(),
             workspace_hash_after_verification=workspace_hash_after_verification,
             workspace_hash_mode=workspace_hash_mode,
             artifacts_dir=artifacts_dir_s,
             summary_path=summary_path,
             timed_out=timed_out,
+            cancelled=cancelled,
+            cancel_requested=cancel_event.is_set(),
             failure_reason=failure_reason,
+            progress=_normalize_progress_snapshot(summary.get("progress")),
             verification_summary=summary,
         )
         self._record_result(result=result, response_path=response_path)
+
+    def _write_response_snapshot(
+        self,
+        *,
+        response_path: Path,
+        result: VerificationBrokerRequestResult,
+    ) -> None:
+        _write_json_atomic(
+            response_path,
+            {
+                "schema_version": 2,
+                "request_id": result.request_id,
+                "attempt": result.attempt,
+                "status": result.status,
+                "terminal": _is_terminal_status(result.status),
+                "terminal_reason": result.terminal_reason,
+                "timed_out": result.timed_out,
+                "cancelled": result.cancelled,
+                "cancel_requested": result.cancel_requested,
+                "failure_reason": result.failure_reason,
+                "artifacts_dir": result.artifacts_dir,
+                "summary_path": result.summary_path,
+                "workspace_hash_after_verification": result.workspace_hash_after_verification,
+                "workspace_hash_mode": result.workspace_hash_mode,
+                "started_utc": result.started_utc,
+                "deadline_utc": result.deadline_utc,
+                "deadline_seconds": result.deadline_seconds,
+                "last_updated_utc": result.last_updated_utc,
+                "finished_utc": result.finished_utc,
+                "progress": result.progress,
+            },
+        )
 
     def _record_result(
         self,
@@ -547,22 +846,7 @@ class VerificationBrokerAttempt:
     ) -> None:
         with self._results_lock:
             self._results.append(result)
-        _write_json_atomic(
-            response_path,
-            {
-                "schema_version": 1,
-                "request_id": result.request_id,
-                "status": result.status,
-                "timed_out": result.timed_out,
-                "failure_reason": result.failure_reason,
-                "artifacts_dir": result.artifacts_dir,
-                "summary_path": result.summary_path,
-                "workspace_hash_after_verification": result.workspace_hash_after_verification,
-                "workspace_hash_mode": result.workspace_hash_mode,
-                "started_utc": result.started_utc,
-                "finished_utc": result.finished_utc,
-            },
-        )
+        self._write_response_snapshot(response_path=response_path, result=result)
 
     def _write_client_files(
         self,
@@ -667,7 +951,15 @@ def _load_response(path: Path, request_id: str) -> tuple[dict[str, object] | Non
     status = payload.get("status")
     if not isinstance(status, str) or not status.strip():
         return None, f"invalid broker response status for request_id={request_id}"
-    if status.strip() not in {"passed", "failed", "timed_out", "invalid"}:
+    if status.strip() not in {
+        "pending",
+        "running",
+        "cancelling",
+        "passed",
+        "failed",
+        "timed_out",
+        "cancelled",
+    }:
         return None, f"invalid broker response status for request_id={request_id}: {status!r}"
     return payload, None
 
@@ -687,6 +979,33 @@ def _render_failure_message(request_id: str, payload: dict[str, object]) -> str:
     return "; ".join(parts)
 
 
+def _render_progress_message(request_id: str, payload: dict[str, object]) -> str:
+    status = str(payload.get("status") or "").strip() or "pending"
+    progress = payload.get("progress")
+    progress_dict = progress if isinstance(progress, dict) else {}
+    message = str(progress_dict.get("message") or "").strip()
+    phase = str(progress_dict.get("phase") or "").strip()
+    command_index = progress_dict.get("command_index")
+    command_count = progress_dict.get("command_count")
+    elapsed = progress_dict.get("elapsed_seconds")
+    deadline = str(payload.get("deadline_utc") or "").strip()
+
+    parts = [f"verification status={status} (request_id={request_id})"]
+    if phase:
+        parts.append(f"phase={phase}")
+    if message:
+        parts.append(message)
+    if isinstance(command_index, int) and isinstance(command_count, int):
+        parts.append(f"command={command_index}/{command_count}")
+    if isinstance(elapsed, (int, float)):
+        parts.append(f"elapsed={float(elapsed):.1f}s")
+    if deadline:
+        parts.append(f"deadline_utc={deadline}")
+    if bool(payload.get("cancel_requested")):
+        parts.append("cancel_requested=true")
+    return "; ".join(parts)
+
+
 def main() -> int:
     request_id = "req_" + uuid.uuid4().hex
     request_path = REQUEST_DIR / f"{request_id}.json"
@@ -702,6 +1021,8 @@ def main() -> int:
     print(f"verification requested (request_id={request_id})", flush=True)
 
     deadline = time.monotonic() + float(WAIT_TIMEOUT_SECONDS)
+    last_progress_key = ""
+    last_heartbeat_monotonic = 0.0
     while True:
         if response_path.exists():
             response_payload, error = _load_response(response_path, request_id)
@@ -709,11 +1030,38 @@ def main() -> int:
                 print(error, file=sys.stderr)
                 return 1
             assert response_payload is not None
-            if str(response_payload.get("status") or "").strip() == "passed":
+            status = str(response_payload.get("status") or "").strip()
+            terminal = bool(response_payload.get("terminal")) or status in {
+                "passed",
+                "failed",
+                "timed_out",
+                "cancelled",
+            }
+            progress = response_payload.get("progress")
+            progress_dict = progress if isinstance(progress, dict) else {}
+            progress_key = json.dumps(
+                {
+                    "status": status,
+                    "sequence": progress_dict.get("sequence"),
+                    "message": progress_dict.get("message"),
+                    "cancel_requested": bool(response_payload.get("cancel_requested")),
+                },
+                sort_keys=True,
+            )
+            now = time.monotonic()
+            if progress_key != last_progress_key or (
+                not terminal
+                and (now - last_heartbeat_monotonic) >= __HEARTBEAT_SECONDS__
+            ):
+                print(_render_progress_message(request_id, response_payload), flush=True)
+                last_progress_key = progress_key
+                last_heartbeat_monotonic = now
+            if status == "passed":
                 print(f"verification passed (request_id={request_id})", flush=True)
                 return 0
-            print(_render_failure_message(request_id, response_payload), file=sys.stderr)
-            return 1
+            if terminal:
+                print(_render_failure_message(request_id, response_payload), file=sys.stderr)
+                return 1
         if time.monotonic() >= deadline:
             print(
                 "verification timed out waiting for broker response "
@@ -732,6 +1080,7 @@ if __name__ == "__main__":
         .replace("__REQUEST_DIR__", json.dumps(request_dir))
         .replace("__RESPONSE_DIR__", json.dumps(response_dir))
         .replace("__WAIT_TIMEOUT_SECONDS__", repr(float(wait_timeout_seconds)))
+        .replace("__HEARTBEAT_SECONDS__", repr(float(_BROKER_PROGRESS_HEARTBEAT_SECONDS)))
     )
 
 
@@ -766,13 +1115,9 @@ def _summary_has_rejected_sentinel(summary: dict[str, Any]) -> bool:
 
 def _compute_client_wait_timeout(
     *,
-    verification_timeout_seconds: float | None,
-    verification_command_count: int,
+    internal_deadline_seconds: float,
 ) -> float:
-    if verification_timeout_seconds is None or verification_timeout_seconds <= 0:
-        return 10_800.0
-    command_count = max(1, int(verification_command_count))
-    return max(300.0, float(verification_timeout_seconds) * float(command_count) + 300.0)
+    return max(60.0, float(internal_deadline_seconds) + _BROKER_CLIENT_WAIT_GRACE_SECONDS)
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
