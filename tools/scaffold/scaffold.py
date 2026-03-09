@@ -397,6 +397,21 @@ def _probe_tool_version(*, argv: list[str], timeout_seconds: float) -> tuple[boo
     return True, line, None
 
 
+def _probe_bash(*, bash_path: str, timeout_seconds: float) -> tuple[bool, str | None, str | None]:
+    """
+    Probe bash usability without loading slow shell startup files.
+
+    On some Linux CI runners, `bash -lc ...` can hit the timeout because login/profile
+    startup is unexpectedly slow. Prefer a clean shell and retry once on timeout before
+    declaring bash unusable.
+    """
+    argv = [bash_path, "--noprofile", "--norc", "-lc", "printf ok"]
+    ok, version_line, err = _probe_tool_version(argv=argv, timeout_seconds=timeout_seconds)
+    if ok or err != f"timed out after {timeout_seconds:.1f}s":
+        return ok, version_line, err
+    return _probe_tool_version(argv=argv, timeout_seconds=timeout_seconds)
+
+
 def _dedup_preserve_order(items: list[str]) -> list[str]:
     seen: set[str] = set()
     out: list[str] = []
@@ -2203,14 +2218,14 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             warnings.append("bash was not found on PATH (bash-based scripts will not work)")
             next_actions.append(_bash_remediation_hint())
     else:
-        ok, version_line, err = _probe_tool_version(
-            argv=[bash_path, "-lc", "echo ok"],
-            timeout_seconds=2.0,
+        ok, version_line, err = _probe_bash(
+            bash_path=bash_path,
+            timeout_seconds=baseline_timeout_seconds,
         )
         baseline["bash"] = {
             "required": bash_required,
             "ok": ok,
-            "probe": "bash -lc",
+            "probe": "bash --noprofile --norc -lc",
             "resolved_path": bash_path,
             "version": version_line,
             "error": err,
