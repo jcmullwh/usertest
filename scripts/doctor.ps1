@@ -14,6 +14,7 @@ Push-Location $repoRoot
 try {
     $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
     $pythonCmd = $pythonInfo.CommandPath
+    $env:USERTEST_PYTHON = $pythonCmd
     Write-Host "==> Using Python: $($pythonInfo.Name) -> $pythonCmd"
     if ($pythonInfo.Executable) {
         Write-Host "==> Python executable: $($pythonInfo.Executable)"

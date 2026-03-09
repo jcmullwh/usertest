@@ -69,6 +69,7 @@ Push-Location $repoRoot
 try {
     $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
     $pythonCmd = $pythonInfo.CommandPath
+    $env:USERTEST_PYTHON = $pythonCmd
     Write-Host "==> Using Python: $($pythonInfo.Name) -> $pythonCmd"
 
     Write-Host '==> snapshot_repo'

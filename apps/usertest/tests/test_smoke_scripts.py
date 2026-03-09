@@ -5,6 +5,8 @@ from pathlib import Path
 
 def test_smoke_scripts_exist_and_enforce_expected_contract() -> None:
     repo_root = Path(__file__).resolve().parents[3]
+    assert (repo_root / "scripts" / "python_preflight.sh").exists()
+    assert (repo_root / "scripts" / "python_preflight.ps1").exists()
     scripts = [
         repo_root / "scripts" / "smoke.ps1",
         repo_root / "scripts" / "smoke.sh",
@@ -21,8 +23,10 @@ def test_smoke_scripts_exist_and_enforce_expected_contract() -> None:
         assert "packages/run_artifacts" in text
         assert "pip install -U pdm" in text
         assert "tools/smoke_import_guard.py" in text
+        assert "USERTEST_PYTHON" in text
 
         if path.name == "smoke.sh":
+            assert 'source "${SCRIPT_DIR}/python_preflight.sh"' in text
             assert "Smoke preflight failed:" in text
             assert "Choose one setup mode:" in text
             guard_idx = text.find('echo "==> Import-origin guard smoke"')
@@ -31,6 +35,7 @@ def test_smoke_scripts_exist_and_enforce_expected_contract() -> None:
             assert guard_idx != -1
             assert preflight_call_idx < guard_idx
         else:
+            assert "Resolve-UsablePython -RepoRoot $repoRoot" in text
             guard_idx = text.find("Write-Host '==> Import-origin guard smoke'")
             preflight_call_idx = text.find(
                 "        Invoke-SmokeImportPreflight -PythonCmd $pythonCmd"
