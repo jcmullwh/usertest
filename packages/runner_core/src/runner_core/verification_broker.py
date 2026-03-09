@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 from run_artifacts.path_normalization import agent_path_join, normalize_agent_path
+
 from runner_core.workspace_state_hash import WorkspaceStateHash
 
 _SHELL_PROBE_TIMEOUT_SECONDS = 2.0
