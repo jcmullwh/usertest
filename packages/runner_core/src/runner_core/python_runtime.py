@@ -711,6 +711,7 @@ _VERIFICATION_PYTHON_CMD_PATTERN = re.compile(
     r"^(?:&\s*)?(?:python|python3|py)(?:\s|$)",
     re.IGNORECASE,
 )
+_VERIFICATION_PDM_CMD_PATTERN = re.compile(r"^(?:&\s*)?pdm(?:\s|$)", re.IGNORECASE)
 _VERIFICATION_INSTALL_PATTERN = re.compile(
     r"\b(pip|pdm|poetry|uv)\b.*\binstall\b",
     re.IGNORECASE,
@@ -729,7 +730,30 @@ def verification_commands_need_pytest(commands: tuple[str, ...]) -> bool:
     return False
 
 
+def verification_commands_need_pdm(commands: tuple[str, ...]) -> bool:
+    """Return True if any verification command appears to invoke ``pdm`` directly.
+
+    ``pdm`` is a Python-dependent tool: its run/install/test subcommands all
+    require a usable Python runtime.  Callers that need to know whether *any*
+    Python-dependent tool is invoked should prefer
+    :func:`verification_commands_need_python`, which includes this check.
+    """
+    for raw in commands:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        if _VERIFICATION_PDM_CMD_PATTERN.search(raw.strip()):
+            return True
+    return False
+
+
 def verification_commands_need_python(commands: tuple[str, ...]) -> bool:
+    """Return True if any verification command requires a usable Python runtime.
+
+    This includes direct invocations of ``python`` / ``python3`` / ``py`` /
+    ``pytest`` **and** ``pdm`` commands, because ``pdm`` is a Python wrapper
+    whose subcommands (``run``, ``install``, ``test``, etc.) all depend on a
+    functional interpreter.
+    """
     for raw in commands:
         if not isinstance(raw, str) or not raw.strip():
             continue
@@ -739,6 +763,8 @@ def verification_commands_need_python(commands: tuple[str, ...]) -> bool:
         if _VERIFICATION_PYTEST_CMD_PATTERN.search(stripped):
             return True
         if _VERIFICATION_PYTEST_MODULE_PATTERN.search(stripped):
+            return True
+        if _VERIFICATION_PDM_CMD_PATTERN.search(stripped):
             return True
     return False
 
