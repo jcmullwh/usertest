@@ -162,6 +162,11 @@ def _stub_codex_binary_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
             "stderr": "",
         },
     )
+    monkeypatch.setattr(
+        runner_mod,
+        "_agent_auth_present_local",
+        lambda **kwargs: (True, "test_stub"),
+    )
 
 
 def _run_broker_wrapper(*, run_dir: Path, workspace_dir: Path) -> subprocess.CompletedProcess[str]:
