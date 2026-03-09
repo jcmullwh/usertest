@@ -8,9 +8,10 @@ import re
 import shlex
 import shutil
 import subprocess
+import threading
 import time
 import traceback
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from json import JSONDecoder
@@ -2321,6 +2322,36 @@ def _probe_verification_broker_launcher(
     return launcher, probe_local_verification_launcher(launcher=launcher)
 
 
+def _verification_terminal_reason(summary: dict[str, Any]) -> str:
+    terminal_reason = summary.get("terminal_reason")
+    if isinstance(terminal_reason, str) and terminal_reason.strip():
+        return terminal_reason.strip()
+    if bool(summary.get("cancelled")):
+        return "cancelled"
+    if bool(summary.get("timed_out")):
+        return "timed_out"
+    if bool(summary.get("passed")):
+        return "passed"
+    return "failed"
+
+
+def _normalize_verification_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    payload = dict(summary)
+    terminal_reason = _verification_terminal_reason(payload)
+    payload["terminal_reason"] = terminal_reason
+    payload["status"] = str(payload.get("status") or terminal_reason).strip() or terminal_reason
+    payload["passed"] = terminal_reason == "passed"
+    payload["timed_out"] = bool(payload.get("timed_out")) or terminal_reason == "timed_out"
+    payload["cancelled"] = bool(payload.get("cancelled")) or terminal_reason == "cancelled"
+    if terminal_reason == "failed" and not payload.get("failure_reason"):
+        payload["failure_reason"] = "verification_failed"
+    if terminal_reason == "timed_out" and not payload.get("failure_reason"):
+        payload["failure_reason"] = "timed_out"
+    if terminal_reason == "cancelled" and not payload.get("failure_reason"):
+        payload["failure_reason"] = "cancelled"
+    return payload
+
+
 def _decorate_verification_summary(
     summary: dict[str, Any],
     *,
@@ -2330,7 +2361,7 @@ def _decorate_verification_summary(
     broker_request_id: str | None,
     broker_artifacts_dir: str | None,
 ) -> dict[str, Any]:
-    payload = dict(summary)
+    payload = _normalize_verification_summary(summary)
     payload["source"] = source
     payload["reused"] = reused
     payload["workspace_hash"] = workspace_hash.to_dict() if workspace_hash is not None else None
@@ -2358,7 +2389,9 @@ def _coerce_verification_summary_from_broker_result(
         "artifacts_dir": broker_result.artifacts_dir,
         "commands": [],
         "status": broker_result.status,
+        "terminal_reason": broker_result.terminal_reason or broker_result.status,
         "timed_out": broker_result.timed_out,
+        "cancelled": broker_result.cancelled,
         "failure_reason": broker_result.failure_reason,
         "broker_failure_reason": broker_result.failure_reason,
     }
@@ -3216,6 +3249,149 @@ def _probe_python_context_capability(
     }
 
 
+def _terminate_verification_process(proc: subprocess.Popen[str]) -> None:
+    try:
+        proc.terminate()
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=2.0)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    try:
+        proc.kill()
+    except OSError:
+        return
+    try:
+        proc.wait(timeout=5.0)
+    except subprocess.TimeoutExpired:
+        return
+
+
+def _run_verification_subprocess(
+    *,
+    argv: list[str],
+    cwd: Path,
+    env: dict[str, str] | None,
+    stdout_path: Path,
+    stderr_path: Path,
+    timeout_seconds: float | None,
+    deadline_monotonic: float | None,
+    cancel_event: threading.Event | None,
+    progress_callback: Callable[[dict[str, Any]], None] | None,
+    progress_base: dict[str, Any],
+) -> tuple[int, bool, bool]:
+    cancelled = False
+    timed_out = False
+    started_monotonic = time.monotonic()
+    last_progress_monotonic = started_monotonic - 1.0
+
+    # Preserve the legacy `subprocess.run(...)` execution contract for simple one-shot
+    # verification commands. Several bootstrap/rewrite paths and tests rely on that surface,
+    # while the broker lifecycle features still use the polling `Popen` path below.
+    if (
+        timeout_seconds is None
+        and deadline_monotonic is None
+        and cancel_event is None
+        and progress_callback is None
+    ):
+        stdout_text = ""
+        stderr_text = ""
+        exit_code = 0
+        try:
+            proc = subprocess.run(
+                argv,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                cwd=str(cwd),
+                env=env,
+                check=False,
+            )
+            exit_code = int(proc.returncode or 0)
+            stdout_text = proc.stdout or ""
+            stderr_text = proc.stderr or ""
+        except OSError as exc:
+            exit_code = 1
+            stderr_text = f"[runner] Failed to start verification command: {exc}\n"
+
+        stdout_path.write_text(stdout_text, encoding="utf-8", newline="\n")
+        stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
+        return exit_code, False, False
+
+    with stdout_path.open("w", encoding="utf-8", newline="\n") as stdout_handle, stderr_path.open(
+        "w", encoding="utf-8", newline="\n"
+    ) as stderr_handle:
+        proc = subprocess.Popen(
+            argv,
+            stdout=stdout_handle,
+            stderr=stderr_handle,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            cwd=str(cwd),
+            env=env,
+        )
+        exit_code: int | None = None
+        while exit_code is None:
+            exit_code = proc.poll()
+            if exit_code is not None:
+                break
+            now = time.monotonic()
+            elapsed = max(0.0, now - started_monotonic)
+            if progress_callback is not None and (now - last_progress_monotonic) >= 1.0:
+                progress_payload = dict(progress_base)
+                progress_payload["phase"] = "running_command"
+                progress_payload["elapsed_seconds"] = elapsed
+                progress_payload["updated_utc"] = _utc_now_z()
+                progress_callback(progress_payload)
+                last_progress_monotonic = now
+            if cancel_event is not None and cancel_event.is_set():
+                cancelled = True
+                exit_code = 130
+                _terminate_verification_process(proc)
+                break
+            if timeout_seconds is not None and elapsed >= max(0.1, float(timeout_seconds)):
+                timed_out = True
+                exit_code = 124
+                _terminate_verification_process(proc)
+                break
+            if deadline_monotonic is not None and now >= deadline_monotonic:
+                timed_out = True
+                exit_code = 124
+                _terminate_verification_process(proc)
+                break
+            wait_seconds = 0.2
+            if timeout_seconds is not None:
+                wait_seconds = min(wait_seconds, max(0.01, float(timeout_seconds) - elapsed))
+            if deadline_monotonic is not None:
+                wait_seconds = min(wait_seconds, max(0.01, deadline_monotonic - now))
+            if cancel_event is not None:
+                cancel_event.wait(wait_seconds)
+            else:
+                time.sleep(wait_seconds)
+
+        if exit_code is None:
+            exit_code = int(proc.wait())
+
+    if timed_out:
+        with stderr_path.open("a", encoding="utf-8", newline="\n") as stderr_handle:
+            stderr_handle.write(
+                f"[runner] Verification command timed out after {timeout_seconds} seconds.\n"
+                if timeout_seconds is not None
+                else "[runner] Verification command timed out waiting for broker deadline.\n"
+            )
+    elif cancelled:
+        with stderr_path.open("a", encoding="utf-8", newline="\n") as stderr_handle:
+            stderr_handle.write(
+                "[runner] Verification command cancelled because broker shutdown was requested.\n"
+            )
+
+    return int(exit_code or 0), timed_out, cancelled
+
+
 def _run_verification_commands(
     *,
     run_dir: Path,
@@ -3227,6 +3403,10 @@ def _run_verification_commands(
     python_executable: str | None,
     env_overrides: dict[str, str] | None = None,
     artifacts_dir_rel: Path | None = None,
+    cancel_event: threading.Event | None = None,
+    deadline_monotonic: float | None = None,
+    deadline_seconds: float | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     attempt_dir_rel = (
         artifacts_dir_rel
@@ -3258,7 +3438,6 @@ def _run_verification_commands(
 
     windows_bash_probe: dict[str, Any] | None = None
     if _is_windows() and not command_prefix:
-        # Only probe when we might need to rewrite/skip bash-based commands.
         if any(
             isinstance(c, str)
             and c.strip()
@@ -3294,8 +3473,6 @@ def _run_verification_commands(
                 if action == "skip":
                     stdout_text = ""
                     stderr_text = str(decision.get("reason") or "").strip() + "\n"
-                    exit_code = 0
-                    wall_seconds = 0.0
                     try:
                         stdout_path.write_text(stdout_text, encoding="utf-8", newline="\n")
                     except OSError:
@@ -3304,19 +3481,19 @@ def _run_verification_commands(
                         stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
                     except OSError:
                         pass
-
-                    result: dict[str, Any] = {
+                    result = {
                         "index": idx,
                         "command": cmd_original,
                         "effective_command": None,
                         "rewritten": False,
                         "argv": None,
-                        "exit_code": exit_code,
+                        "exit_code": 0,
                         "timed_out": False,
+                        "cancelled": False,
                         "skipped": True,
                         "skip_reason": str(decision.get("reason") or "").strip() or None,
                         "command_started_utc": _utc_now_z(),
-                        "wall_seconds": wall_seconds,
+                        "wall_seconds": 0.0,
                         "stdout_path": stdout_path.name,
                         "stderr_path": stderr_path.name,
                         "stdout_tail": _tail_text_for_prompt(stdout_text),
@@ -3338,16 +3515,27 @@ def _run_verification_commands(
         )
         rewritten = bool(python_rewritten or bash_rewritten)
         rejected_sentinel = _looks_like_verification_rejection_sentinel(effective_cmd)
-
         cmd_started_utc = _utc_now_z()
         cmd_started_monotonic = time.monotonic()
         timed_out = False
-
+        cancelled = False
         stdout_text = ""
         stderr_text = ""
-        exit_code: int = 0
+        exit_code = 0
         argv: list[str] | None = None
         ripgrep_rewritten = False
+        progress_base = {
+            "command_index": idx,
+            "command_count": len(commands),
+            "command": cmd_original,
+            "updated_utc": cmd_started_utc,
+        }
+
+        if progress_callback is not None:
+            starting_progress = dict(progress_base)
+            starting_progress["phase"] = "starting_command"
+            starting_progress["message"] = f"starting verification command {idx}/{len(commands)}"
+            progress_callback(starting_progress)
 
         if rejected_sentinel:
             exit_code = 126
@@ -3358,108 +3546,113 @@ def _run_verification_commands(
                 "[runner] Fix: propagate the rejection as a structured error instead of "
                 "executing it.\n"
             )
-        else:
             try:
-                direct = _maybe_prepare_ripgrep_direct_exec(
+                stdout_path.write_text("", encoding="utf-8", newline="\n")
+            except OSError:
+                pass
+            try:
+                stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
+            except OSError:
+                pass
+        else:
+            direct = _maybe_prepare_ripgrep_direct_exec(
+                command_prefix=effective_prefix,
+                command=effective_cmd,
+            )
+            if direct is not None:
+                prefix, inner_argv = direct
+                argv = [*prefix, *inner_argv]
+                exit_code, timed_out, cancelled = _run_verification_subprocess(
+                    argv=argv,
+                    cwd=cwd,
+                    env=merged_env,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    timeout_seconds=timeout_seconds,
+                    deadline_monotonic=deadline_monotonic,
+                    cancel_event=cancel_event,
+                    progress_callback=progress_callback,
+                    progress_base=progress_base,
+                )
+                try:
+                    stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    stdout_text = ""
+                try:
+                    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    stderr_text = ""
+                if exit_code != 0 and not timed_out and not cancelled:
+                    retry = _maybe_rewrite_ripgrep_unexpected_argument(
+                        argv=inner_argv,
+                        stderr_text=stderr_text,
+                    )
+                    if retry is not None:
+                        rewritten_inner, rg_meta = retry
+                        argv = [*prefix, *rewritten_inner]
+                        exit_code, timed_out, cancelled = _run_verification_subprocess(
+                            argv=argv,
+                            cwd=cwd,
+                            env=merged_env,
+                            stdout_path=stdout_path,
+                            stderr_path=stderr_path,
+                            timeout_seconds=timeout_seconds,
+                            deadline_monotonic=deadline_monotonic,
+                            cancel_event=cancel_event,
+                            progress_callback=progress_callback,
+                            progress_base=progress_base,
+                        )
+                        try:
+                            stdout_text = stdout_path.read_text(
+                                encoding="utf-8", errors="replace"
+                            )
+                        except OSError:
+                            stdout_text = ""
+                        try:
+                            stderr_text = stderr_path.read_text(
+                                encoding="utf-8", errors="replace"
+                            )
+                        except OSError:
+                            stderr_text = ""
+                        ripgrep_rewritten = True
+                        if rewrite_meta is None:
+                            rewrite_meta = rg_meta
+                        else:
+                            rewrite_meta = {
+                                "kind": "multi",
+                                "rewrites": [rewrite_meta, rg_meta],
+                            }
+            else:
+                argv = _verification_shell_argv(
                     command_prefix=effective_prefix,
                     command=effective_cmd,
                 )
-                if direct is not None:
-                    prefix, inner_argv = direct
-                    argv = [*prefix, *inner_argv]
-                    proc = subprocess.run(
-                        argv,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        cwd=str(cwd),
-                        check=False,
-                        timeout=timeout_seconds,
-                        env=merged_env,
-                    )
-                    exit_code = int(proc.returncode or 0)
-                    stdout_text = proc.stdout or ""
-                    stderr_text = proc.stderr or ""
-
-                    if exit_code != 0:
-                        retry = _maybe_rewrite_ripgrep_unexpected_argument(
-                            argv=inner_argv,
-                            stderr_text=stderr_text,
-                        )
-                        if retry is not None:
-                            rewritten_inner, rg_meta = retry
-                            argv = [*prefix, *rewritten_inner]
-                            proc = subprocess.run(
-                                argv,
-                                capture_output=True,
-                                text=True,
-                                encoding="utf-8",
-                                errors="replace",
-                                cwd=str(cwd),
-                                check=False,
-                                timeout=timeout_seconds,
-                                env=merged_env,
-                            )
-                            exit_code = int(proc.returncode or 0)
-                            stdout_text = proc.stdout or ""
-                            stderr_text = proc.stderr or ""
-                            ripgrep_rewritten = True
-                            if rewrite_meta is None:
-                                rewrite_meta = rg_meta
-                            else:
-                                rewrite_meta = {
-                                    "kind": "multi",
-                                    "rewrites": [rewrite_meta, rg_meta],
-                                }
-                else:
-                    argv = _verification_shell_argv(
-                        command_prefix=effective_prefix,
-                        command=effective_cmd,
-                    )
-                    proc = subprocess.run(
-                        argv,
-                        capture_output=True,
-                        text=True,
-                        encoding="utf-8",
-                        errors="replace",
-                        cwd=str(cwd),
-                        check=False,
-                        timeout=timeout_seconds,
-                        env=merged_env,
-                    )
-                    exit_code = int(proc.returncode or 0)
-                    stdout_text = proc.stdout or ""
-                    stderr_text = proc.stderr or ""
-            except subprocess.TimeoutExpired as exc:
-                timed_out = True
-                exit_code = 124
-                if isinstance(exc.stdout, bytes):
-                    stdout_text = exc.stdout.decode("utf-8", "replace")
-                else:
-                    stdout_text = exc.stdout or ""
-                if isinstance(exc.stderr, bytes):
-                    stderr_text = exc.stderr.decode("utf-8", "replace")
-                else:
-                    stderr_text = exc.stderr or ""
-                stderr_text = (stderr_text.rstrip() + "\n" if stderr_text else "") + (
-                    f"[runner] Verification command timed out after {timeout_seconds} seconds.\n"
+                exit_code, timed_out, cancelled = _run_verification_subprocess(
+                    argv=argv,
+                    cwd=cwd,
+                    env=merged_env,
+                    stdout_path=stdout_path,
+                    stderr_path=stderr_path,
+                    timeout_seconds=timeout_seconds,
+                    deadline_monotonic=deadline_monotonic,
+                    cancel_event=cancel_event,
+                    progress_callback=progress_callback,
+                    progress_base=progress_base,
                 )
+                try:
+                    stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    stdout_text = ""
+                try:
+                    stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    stderr_text = ""
 
         if ripgrep_rewritten:
             rewritten = True
 
         wall_seconds = max(0.0, time.monotonic() - cmd_started_monotonic)
-        try:
-            stdout_path.write_text(stdout_text, encoding="utf-8", newline="\n")
-        except OSError:
-            pass
-        try:
-            stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
-        except OSError:
-            pass
-
-        result: dict[str, Any] = {
+        result = {
             "index": idx,
             "command": cmd_original,
             "effective_command": effective_cmd,
@@ -3467,6 +3660,7 @@ def _run_verification_commands(
             "argv": argv,
             "exit_code": exit_code,
             "timed_out": timed_out,
+            "cancelled": cancelled,
             "rejected_sentinel": rejected_sentinel,
             "command_started_utc": cmd_started_utc,
             "wall_seconds": wall_seconds,
@@ -3478,25 +3672,83 @@ def _run_verification_commands(
         }
         results.append(result)
 
+        if progress_callback is not None:
+            finished_progress = dict(progress_base)
+            finished_progress["phase"] = (
+                "cancelled"
+                if cancelled
+                else ("timed_out" if timed_out else "finished_command")
+            )
+            finished_progress["elapsed_seconds"] = wall_seconds
+            finished_progress["updated_utc"] = _utc_now_z()
+            if cancelled:
+                finished_progress["message"] = (
+                    f"verification command {idx}/{len(commands)} cancelled"
+                )
+            elif timed_out:
+                finished_progress["message"] = (
+                    f"verification command {idx}/{len(commands)} timed out"
+                )
+            else:
+                finished_progress["message"] = (
+                    "verification command "
+                    f"{idx}/{len(commands)} finished with exit_code={exit_code}"
+                )
+            progress_callback(finished_progress)
+
         if exit_code != 0:
             break
 
     finished_utc = _utc_now_z()
     wall_seconds_total = max(0.0, time.monotonic() - started_monotonic)
-    passed = bool(results) and all(int(r.get("exit_code") or 0) == 0 for r in results)
+    cancelled_any = any(bool(r.get("cancelled")) for r in results)
+    timed_out_any = any(bool(r.get("timed_out")) for r in results)
+    passed = (
+        bool(results)
+        and not cancelled_any
+        and not timed_out_any
+        and all(int(r.get("exit_code") or 0) == 0 for r in results)
+    )
+    terminal_reason = (
+        "cancelled"
+        if cancelled_any
+        else ("timed_out" if timed_out_any else ("passed" if passed else "failed"))
+    )
+    failure_reason = (
+        None
+        if terminal_reason == "passed"
+        else (
+            "cancelled"
+            if terminal_reason == "cancelled"
+            else ("timed_out" if terminal_reason == "timed_out" else "verification_failed")
+        )
+    )
 
-    summary: dict[str, Any] = {
-        "schema_version": 1,
-        "attempt": attempt_number,
-        "artifacts_dir": normalize_agent_path(attempt_dir_rel),
-        "started_utc": started_utc,
-        "finished_utc": finished_utc,
-        "wall_seconds": wall_seconds_total,
-        "timeout_seconds": timeout_seconds,
-        "python_executable": python_executable,
-        "passed": passed,
-        "commands": results,
-    }
+    summary = _normalize_verification_summary(
+        {
+            "schema_version": 1,
+            "attempt": attempt_number,
+            "artifacts_dir": normalize_agent_path(attempt_dir_rel),
+            "started_utc": started_utc,
+            "finished_utc": finished_utc,
+            "wall_seconds": wall_seconds_total,
+            "timeout_seconds": timeout_seconds,
+            "deadline_seconds": deadline_seconds,
+            "python_executable": python_executable,
+            "passed": passed,
+            "status": terminal_reason,
+            "terminal_reason": terminal_reason,
+            "timed_out": timed_out_any,
+            "cancelled": cancelled_any,
+            "failure_reason": failure_reason,
+            "progress": {
+                "phase": terminal_reason,
+                "message": f"verification finished with terminal_reason={terminal_reason}",
+                "updated_utc": finished_utc,
+            },
+            "commands": results,
+        }
+    )
     _write_json(attempt_dir / "verification.json", summary)
     return summary
 
@@ -5806,9 +6058,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     def _run_broker_verification(
                         request_index: int,
                         *,
+                        cancel_event: threading.Event | None = None,
+                        deadline_monotonic: float | None = None,
+                        deadline_utc: str | None = None,  # noqa: ARG001
+                        deadline_seconds: float | None = None,
+                        progress_callback: Callable[[dict[str, Any]], None] | None = None,
                         _attempt_number: int = attempt_number,
                         _python_exec_for_verification: str | None = python_exec_for_verification,
                     ) -> dict[str, Any]:
+                        broker_progress_callback = (
+                            (
+                                lambda payload: progress_callback(payload, status="running")
+                            )
+                            if progress_callback is not None
+                            else None
+                        )
                         return _run_verification_commands(
                             run_dir=run_dir,
                             attempt_number=_attempt_number,
@@ -5818,6 +6082,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             timeout_seconds=verification_timeout_seconds,
                             python_executable=_python_exec_for_verification,
                             env_overrides=agent_env_overrides,
+                            cancel_event=cancel_event,
+                            deadline_monotonic=deadline_monotonic,
+                            deadline_seconds=deadline_seconds,
+                            progress_callback=broker_progress_callback,
                             artifacts_dir_rel=Path("verification")
                             / f"attempt{_attempt_number}"
                             / f"broker_request_{request_index:02d}",
@@ -6091,6 +6359,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     attempt_verification_passed = bool(
                         attempt_verification_summary.get("passed", False)
                     )
+                    attempt_verification_terminal_reason = _verification_terminal_reason(
+                        attempt_verification_summary
+                    )
                     wall_seconds = attempt_verification_summary.get("wall_seconds")
                     if isinstance(wall_seconds, (int, float)):
                         verification_seconds_total += max(0.0, float(wall_seconds))
@@ -6171,9 +6442,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         )
                     elif not attempt_verification_passed:
                         attempt_verification_errors = [
-                            "verification_failed",
+                            f"verification_{attempt_verification_terminal_reason}",
                             f"artifacts_dir={artifacts_dir}",
                         ]
+                        attempt_verification_errors.append(
+                            f"terminal_reason={attempt_verification_terminal_reason}"
+                        )
                         if attempt_broker_response_failure_reason is not None:
                             attempt_verification_errors.append(
                                 "broker_failure_reason="
@@ -6235,13 +6509,31 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                     else (
                                         "rejected_sentinel"
                                         if attempt_verification_rejected_sentinel
-                                        else ("passed" if attempt_verification_passed else "failed")
+                                        else _verification_terminal_reason(
+                                            attempt_verification_summary
+                                            if isinstance(
+                                                attempt_verification_summary, dict
+                                            )
+                                            else {}
+                                        )
                                     )
                                 )
                             )
                         ),
+                        "terminal_reason": (
+                            _verification_terminal_reason(attempt_verification_summary)
+                            if verification_commands
+                            and isinstance(attempt_verification_summary, dict)
+                            else None
+                        ),
                         "source": attempt_verification_source,
                         "passed": attempt_verification_passed if verification_commands else None,
+                        "failure_reason": (
+                            attempt_verification_summary.get("failure_reason")
+                            if verification_commands
+                            and isinstance(attempt_verification_summary, dict)
+                            else None
+                        ),
                         "rejected_sentinel": attempt_verification_rejected_sentinel
                         if verification_commands
                         else None,
@@ -6488,7 +6780,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
             verification_output_payload: dict[str, Any]
             if selected_verification_summary is not None:
-                verification_output_payload = dict(selected_verification_summary)
+                verification_output_payload = _normalize_verification_summary(
+                    selected_verification_summary
+                )
             else:
                 selected_attempt = attempts_meta[-1] if attempts_meta else {}
                 selected_verification = (
@@ -6509,6 +6803,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 verification_output_payload = {
                     "schema_version": 1,
                     "status": status_s,
+                    "terminal_reason": None,
                     "skipped": True,
                     "skip_reason": skip_reason,
                     "attempt_number": len(attempts_meta),
@@ -6518,6 +6813,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "workspace_hash": None,
                     "broker_request_id": None,
                     "broker_artifacts_dir": None,
+                    "failure_reason": None,
+                    "timed_out": False,
+                    "cancelled": False,
                 }
                 if verification_reuse_mode == "auto" and status_s != "disabled":
                     verification_reuse_selected_source = "post_agent_rerun"
@@ -6870,8 +7168,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 extensions = {}
                 report_json["extensions"] = extensions
             verification_extension = {
+                "status": verification_output_payload.get("status"),
+                "terminal_reason": verification_output_payload.get("terminal_reason"),
+                "failure_reason": verification_output_payload.get("failure_reason"),
                 "source": verification_output_payload.get("source"),
                 "reused": bool(verification_output_payload.get("reused", False)),
+                "timed_out": bool(verification_output_payload.get("timed_out", False)),
+                "cancelled": bool(verification_output_payload.get("cancelled", False)),
             }
             extensions["verification"] = verification_extension
             _write_json(run_dir / "report.json", report_json)
