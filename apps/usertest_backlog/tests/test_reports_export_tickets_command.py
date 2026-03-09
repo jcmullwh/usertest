@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 import yaml
@@ -1029,8 +1029,9 @@ def test_reports_export_tickets_promotes_accept_existing_surface_recommendation(
     export_doc = json.loads(out_json.read_text(encoding="utf-8"))
     assert export_doc["stats"]["exports_total"] == 1
     assert export_doc["inputs"]["breadth_profile"] == "internal_maintenance"
-    assert export_doc["inputs"]["policy_config"].endswith(
-        "configs\\backlog_policy_internal_maintenance.yaml"
+    assert PurePosixPath(export_doc["inputs"]["policy_config"].replace("\\", "/")).parts[-2:] == (
+        "configs",
+        "backlog_policy_internal_maintenance.yaml",
     )
     export = export_doc["exports"][0]
     assert export["export_kind"] == "implementation"
