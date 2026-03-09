@@ -344,6 +344,7 @@ def select_python_runtime(
     workspace_dir: Path,
     timeout_seconds: float = 5.0,
     include_where_fallbacks: bool = True,
+    include_sys_executable: bool = True,
     environment: dict[str, str] | None = None,
 ) -> PythonRuntimeSelection:
     """
@@ -356,7 +357,7 @@ def select_python_runtime(
     - registered interpreters (Windows `py -0p`), when available
     - alternate PATH matches (Windows `where python`)
     - PATH commands (`py`, `python`, `python3`)
-    - `sys.executable` (last resort; the runner itself is running under it)
+    - `sys.executable` (last resort; optional, defaults enabled for local execution)
 
     When `environment` is provided, discovery/probing runs against that effective environment
     (including `USERTEST_PYTHON`, `VIRTUAL_ENV`, and `PATH`) to match execution context.
@@ -465,7 +466,8 @@ def select_python_runtime(
         source="command_python3",
     )
 
-    _add(sys.executable, source="sys_executable")
+    if include_sys_executable:
+        _add(sys.executable, source="sys_executable")
 
     selected: PythonRuntimeCandidate | None = None
     for candidate in candidates:

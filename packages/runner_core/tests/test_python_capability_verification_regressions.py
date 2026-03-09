@@ -716,6 +716,66 @@ def test_two_stage_python_preflight_classifies_windowsapps_backed_venv(
     assert any(item.get("reason_code") == "windowsapps_alias" for item in rejected)
 
 
+def test_two_stage_python_preflight_reports_fully_missing_toolchain_inline_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = _load_scenario("fully_missing_toolchain")
+    runtime_fixture = scenario.get("python_runtime")
+    if not isinstance(runtime_fixture, dict):
+        raise AssertionError("fully_missing_toolchain missing python_runtime fixture")
+
+    _patch_local_probe(monkeypatch, scenario=scenario)
+    monkeypatch.setattr(
+        runner_mod,
+        "select_python_runtime",
+        lambda *args, **kwargs: _runtime_selection(runtime_fixture),
+    )
+
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": str(tmp_path / "missing_codex.exe")}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            verification_commands=("python -m pytest -q",),
+        ),
+    )
+
+    assert result.exit_code == 1
+    preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight.get("command_diagnostics", {}).get("python", {}).get("status") == "missing"
+    assert (
+        preflight.get("command_diagnostics", {}).get("python", {}).get("reason_code")
+        == "not_found"
+    )
+    assert preflight.get("python_runtime", {}).get("selected") is None
+    python_validation = preflight.get("python_validation", {})
+    assert python_validation.get("required") is True
+    assert python_validation.get("enabled") is False
+    assert python_validation.get("reason_code") == "python_unavailable"
+    assert python_validation.get("reason_type") == "discovery"
+    assert python_validation.get("validated_python_executable") is None
+
+    error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error_obj.get("type") == "AgentPreflightFailed"
+    assert error_obj.get("subtype") == "python_unavailable"
+    assert "Python" in str(error_obj.get("message", ""))
+
+
 def test_two_stage_python_preflight_classifies_partial_runtime_pytest_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -890,6 +950,7 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
             "passed": True,
             "wall_seconds": 0.01,
             "artifacts_dir": str(artifacts_dir_rel),
+            "python_executable": python_executable,
             "commands": [
                 {
                     "command": cmd,
@@ -939,6 +1000,10 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
     preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
     assert preflight.get("command_diagnostics", {}).get("python", {}).get("status") == "present"
     assert preflight.get("command_diagnostics", {}).get("python", {}).get("reason_type") is None
+    assert (
+        preflight.get("python_interpreter", {}).get("selected", {}).get("resolved_path")
+        == selected_runtime_path
+    )
     assert preflight.get("python_runtime", {}).get("selected", {}).get("source") == "sandbox_env"
     assert (
         preflight.get("python_runtime", {}).get("selected", {}).get("path")
@@ -955,6 +1020,12 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
     assert python_validation.get("reason_type") is None
     assert python_validation.get("validated_python_executable") == selected_runtime_path
     assert verification_python_executables == [selected_runtime_path]
+    verification = json.loads(
+        (result.run_dir / "verification" / "attempt1" / "verification.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert verification.get("python_executable") == selected_runtime_path
 
 
 def test_validate_python_capability_clears_host_runtime_hints_for_docker_prefix(
@@ -969,9 +1040,10 @@ def test_validate_python_capability_clears_host_runtime_hints_for_docker_prefix(
         workspace_dir: Path,
         timeout_seconds: float = 5.0,
         include_where_fallbacks: bool = True,
+        include_sys_executable: bool = True,
         environment: dict[str, str] | None = None,
     ) -> runtime_mod.PythonRuntimeSelection:
-        del workspace_dir, timeout_seconds, include_where_fallbacks
+        del workspace_dir, timeout_seconds, include_where_fallbacks, include_sys_executable
         observed_environment.clear()
         if isinstance(environment, dict):
             observed_environment.update(environment)
