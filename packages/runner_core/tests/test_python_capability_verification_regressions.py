@@ -300,10 +300,18 @@ def _run_fixture_backed_toolchain_case(
         cwd: Path,
         timeout_seconds: float | None,
         python_executable: str | None,
+        python_toolchain_capability: dict[str, Any] | None = None,
         env_overrides: dict[str, str] | None = None,
         execution_shell: str | None = None,
     ) -> dict[str, Any]:
-        del command_prefix, cwd, timeout_seconds, env_overrides, execution_shell
+        del (
+            command_prefix,
+            cwd,
+            timeout_seconds,
+            python_toolchain_capability,
+            env_overrides,
+            execution_shell,
+        )
         verification_calls["count"] += 1
         verification_python_executables.append(python_executable)
         artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
