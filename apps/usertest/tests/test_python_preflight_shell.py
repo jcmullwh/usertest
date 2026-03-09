@@ -4,6 +4,16 @@ import os
 import subprocess
 from pathlib import Path
 
+import pytest
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason=(
+        "This fake-interpreter bash harness is POSIX-only; "
+        "Windows coverage comes from windows_script_smoke."
+    ),
+)
+
 
 def _write_fake_python(path: Path, *, healthy: bool) -> None:
     if healthy:
