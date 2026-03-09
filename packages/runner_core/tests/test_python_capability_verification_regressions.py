@@ -578,8 +578,9 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
         python_executable: str | None,
         env_overrides: dict[str, str] | None = None,
         execution_shell: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
-        del command_prefix, cwd, timeout_seconds, env_overrides, execution_shell
+        del command_prefix, cwd, timeout_seconds, env_overrides, execution_shell, kwargs
         verification_python_executables.append(python_executable)
         assert python_executable == selected_runtime_path
         artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
