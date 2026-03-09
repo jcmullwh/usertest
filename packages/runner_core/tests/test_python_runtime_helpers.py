@@ -81,6 +81,52 @@ def test_rewrite_verification_command_for_python_powershell() -> None:
     assert rewritten is True
     assert cmd.startswith("& 'C:\\Program Files\\Python\\python.exe' -m pytest")
 
+
+def test_probe_same_shell_wrapper_command_classifies_broken_pdm_wrapper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pdm_path = tmp_path / "pdm"
+    pdm_path.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(
+        runner_mod.shutil,
+        "which",
+        lambda cmd, path=None: str(pdm_path) if cmd == "pdm" else None,
+    )
+
+    def _mock_run(
+        args: list[str],
+        *,
+        capture_output: bool = False,
+        text: bool = False,
+        encoding: str = "utf-8",
+        errors: str = "replace",
+        cwd: str | None = None,
+        timeout: float = 6.0,
+        check: bool = False,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del capture_output, text, encoding, errors, cwd, timeout, check, env
+        assert args == [str(pdm_path), "--version"]
+        return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", _mock_run)
+
+    probe = runner_mod._probe_same_shell_wrapper_command(
+        command_name="pdm",
+        argv_suffix=["--version"],
+        command_prefix=[],
+        cwd=tmp_path,
+        env_overrides=None,
+    )
+
+    assert probe.get("present") is True
+    assert probe.get("usable") is False
+    assert probe.get("status") == "unusable"
+    assert probe.get("reason_code") == "pdm_probe_failed"
+    assert probe.get("reason_type") == "runtime"
+
     cmd, rewritten = runner_mod._rewrite_verification_command_for_python(
         "pytest -q",
         python_executable=r"C:\Program Files\Python\python.exe",

@@ -560,6 +560,10 @@ def test_two_stage_python_preflight_detects_context_mismatch(
 
     assert result.exit_code == 1
     preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    toolchain = preflight.get("python_toolchain", {})
+    assert toolchain.get("runtime", {}).get("selected") is None
+    assert toolchain.get("commands", {}).get("python", {}).get("reason_code") == "launch_failed"
+    assert toolchain.get("validation", {}).get("reason_code") == "launch_failed"
     assert preflight.get("commands", {}).get("python") is True
     python_diag = preflight.get("command_diagnostics", {}).get("python", {})
     assert python_diag.get("status") == "unusable"
@@ -692,6 +696,9 @@ def test_two_stage_python_preflight_classifies_windowsapps_backed_venv(
 
     assert result.exit_code == 1
     preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    toolchain = preflight.get("python_toolchain", {})
+    assert toolchain.get("commands", {}).get("python", {}).get("reason_code") == "windowsapps_alias"
+    assert toolchain.get("runtime", {}).get("selected") is None
     python_diag = preflight.get("command_diagnostics", {}).get("python", {})
     assert python_diag.get("status") == "unusable"
     assert python_diag.get("reason_code") == "windowsapps_alias"
@@ -838,6 +845,9 @@ def test_two_stage_python_preflight_classifies_partial_runtime_pytest_failure(
 
     assert result.exit_code == 1
     preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    toolchain = preflight.get("python_toolchain", {})
+    assert toolchain.get("modules", {}).get("pip", {}).get("passed") is True
+    assert toolchain.get("modules", {}).get("pytest", {}).get("reason_code") == "pytest_missing"
     assert preflight.get("pip_probe", {}).get("passed") is True
     assert preflight.get("pip_probe", {}).get("reason_type") is None
     assert preflight.get("pytest_probe", {}).get("reason_code") == "pytest_missing"
@@ -998,6 +1008,10 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
     assert selection_calls["count"] == 1
 
     preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    toolchain = preflight.get("python_toolchain", {})
+    assert toolchain.get("runtime", {}).get("selected", {}).get("path") == selected_runtime_path
+    assert toolchain.get("modules", {}).get("pip", {}).get("passed") is True
+    assert toolchain.get("modules", {}).get("pytest", {}).get("passed") is True
     assert preflight.get("command_diagnostics", {}).get("python", {}).get("status") == "present"
     assert preflight.get("command_diagnostics", {}).get("python", {}).get("reason_type") is None
     assert (
