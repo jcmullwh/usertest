@@ -493,7 +493,9 @@ class VerificationBrokerAttempt:
             return
 
         artifacts_dir = summary.get("artifacts_dir")
-        artifacts_dir_s = normalize_agent_path(artifacts_dir) if isinstance(artifacts_dir, str) else None
+        artifacts_dir_s = (
+            normalize_agent_path(artifacts_dir) if isinstance(artifacts_dir, str) else None
+        )
         summary_path = (
             agent_path_join(artifacts_dir_s, "verification.json") if artifacts_dir_s else None
         )
