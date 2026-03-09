@@ -335,11 +335,139 @@
       "exception": null
     }
   },
+  "broken_stdlib_runtime": {
+    "preflight": {
+      "commands": {
+        "python": false,
+        "python3": false,
+        "py": false
+      },
+      "command_probe_details": {
+        "python": {
+          "command": "python",
+          "resolved_path": "C:\\Python313\\python.exe",
+          "present": true,
+          "usable": false,
+          "reason_code": "missing_stdlib",
+          "reason": "Fatal Python error: init_fs_encoding\nModuleNotFoundError: No module named 'encodings'"
+        },
+        "python3": {
+          "command": "python3",
+          "resolved_path": "C:\\Python313\\python.exe",
+          "present": true,
+          "usable": false,
+          "reason_code": "missing_stdlib",
+          "reason": "Fatal Python error: init_fs_encoding\nModuleNotFoundError: No module named 'encodings'"
+        },
+        "py": {
+          "command": "py",
+          "resolved_path": null,
+          "present": false,
+          "usable": false,
+          "reason_code": "not_found",
+          "reason": "`py` was not found on PATH."
+        }
+      },
+      "python_interpreter": {
+        "selected": null,
+        "candidates": [
+          {
+            "command": "python",
+            "resolved_path": "C:\\Python313\\python.exe",
+            "present": true,
+            "usable": false,
+            "reason_code": "missing_stdlib",
+            "reason": "Fatal Python error: init_fs_encoding\nModuleNotFoundError: No module named 'encodings'",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "python3",
+            "resolved_path": "C:\\Python313\\python.exe",
+            "present": true,
+            "usable": false,
+            "reason_code": "missing_stdlib",
+            "reason": "Fatal Python error: init_fs_encoding\nModuleNotFoundError: No module named 'encodings'",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "py",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`py` was not found on PATH.",
+            "version": null,
+            "executable": null
+          }
+        ],
+        "rejected": [
+          {
+            "command": "python",
+            "resolved_path": "C:\\Python313\\python.exe",
+            "present": true,
+            "usable": false,
+            "reason_code": "missing_stdlib",
+            "reason": "Fatal Python error: init_fs_encoding\nModuleNotFoundError: No module named 'encodings'",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "python3",
+            "resolved_path": "C:\\Python313\\python.exe",
+            "present": true,
+            "usable": false,
+            "reason_code": "missing_stdlib",
+            "reason": "Fatal Python error: init_fs_encoding\nModuleNotFoundError: No module named 'encodings'",
+            "version": null,
+            "executable": null
+          },
+          {
+            "command": "py",
+            "resolved_path": null,
+            "present": false,
+            "usable": false,
+            "reason_code": "not_found",
+            "reason": "`py` was not found on PATH.",
+            "version": null,
+            "executable": null
+          }
+        ]
+      }
+    },
+    "python_runtime": {
+      "selected": null,
+      "candidates": [
+        {
+          "source": "workspace_venv",
+          "path": "C:\\workspace\\.venv\\Scripts\\python.exe",
+          "present": true,
+          "usable": false,
+          "reason_code": "missing_stdlib",
+          "reason": "Fatal Python error: init_fs_encoding\nModuleNotFoundError: No module named 'encodings'",
+          "version": null,
+          "executable": null
+        },
+        {
+          "source": "command_python",
+          "path": "C:\\Python313\\python.exe",
+          "present": true,
+          "usable": false,
+          "reason_code": "missing_stdlib",
+          "reason": "Fatal Python error: init_fs_encoding\nModuleNotFoundError: No module named 'encodings'",
+          "version": null,
+          "executable": null
+        }
+      ]
+    }
+  },
   "healthy_pass": {
     "preflight": {
       "commands": {
         "python": true,
-        "python3": true
+        "python3": true,
+        "pdm": true
       },
       "command_probe_details": {
         "python": {
@@ -353,6 +481,14 @@
         "python3": {
           "command": "python3",
           "resolved_path": "/usr/bin/python3.13",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null
+        },
+        "pdm": {
+          "command": "pdm",
+          "resolved_path": "/usr/bin/pdm",
           "present": true,
           "usable": true,
           "reason_code": null,
@@ -384,6 +520,13 @@
         }
       ]
     },
+    "context_probe": {
+      "passed": true,
+      "reason_code": null,
+      "reason_type": null,
+      "reason": null,
+      "remediation": null
+    },
     "pip_probe": {
       "command": "python -m pip --version",
       "argv": [
@@ -412,6 +555,110 @@
         "--version"
       ],
       "python_executable": "/usr/bin/python3.13",
+      "cwd": "/workspace",
+      "passed": true,
+      "exit_code": 0,
+      "timed_out": false,
+      "reason_code": null,
+      "remediation": null,
+      "stdout_tail": "pytest 8.4.2",
+      "stderr_tail": "",
+      "exception": null
+    }
+  },
+  "wrapper_present_unusable": {
+    "preflight": {
+      "commands": {
+        "python": true,
+        "python3": true,
+        "pdm": false
+      },
+      "command_probe_details": {
+        "python": {
+          "command": "python",
+          "resolved_path": "C:\\Python313\\python.exe",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null
+        },
+        "python3": {
+          "command": "python3",
+          "resolved_path": "C:\\Python313\\python.exe",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null
+        },
+        "pdm": {
+          "command": "pdm",
+          "resolved_path": "C:\\Python313\\Scripts\\pdm.exe",
+          "present": true,
+          "usable": false,
+          "reason_code": "probe_failed",
+          "reason": "pdm probe exited non-zero: Unable to create process using 'C:\\Python313\\python.exe -m pdm --version': The file cannot be accessed by the system."
+        }
+      }
+    },
+    "python_runtime": {
+      "selected": {
+        "source": "sandbox_env",
+        "path": "C:\\Python313\\python.exe",
+        "present": true,
+        "usable": true,
+        "reason_code": null,
+        "reason": null,
+        "version": "3.13.2",
+        "executable": "C:\\Python313\\python.exe"
+      },
+      "candidates": [
+        {
+          "source": "sandbox_env",
+          "path": "C:\\Python313\\python.exe",
+          "present": true,
+          "usable": true,
+          "reason_code": null,
+          "reason": null,
+          "version": "3.13.2",
+          "executable": "C:\\Python313\\python.exe"
+        }
+      ]
+    },
+    "context_probe": {
+      "passed": true,
+      "reason_code": null,
+      "reason_type": null,
+      "reason": null,
+      "remediation": null
+    },
+    "pip_probe": {
+      "command": "python -m pip --version",
+      "argv": [
+        "C:\\Python313\\python.exe",
+        "-m",
+        "pip",
+        "--version"
+      ],
+      "python_executable": "C:\\Python313\\python.exe",
+      "cwd": "/workspace",
+      "passed": true,
+      "exit_code": 0,
+      "timed_out": false,
+      "reason_code": null,
+      "remediation": null,
+      "stdout_tail": "pip 25.0 from C:\\\\Python313\\\\Lib\\\\site-packages\\\\pip",
+      "stderr_tail": "",
+      "exception": null
+    },
+    "pytest_probe": {
+      "command": "python -m pytest --version",
+      "argv": [
+        "C:\\Python313\\python.exe",
+        "-m",
+        "pytest",
+        "--version"
+      ],
+      "python_executable": "C:\\Python313\\python.exe",
       "cwd": "/workspace",
       "passed": true,
       "exit_code": 0,

@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -218,6 +219,304 @@ def _make_dummy_codex_binary(tmp_path: Path) -> str:
     )
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
     return str(wrapper)
+
+
+@dataclass(frozen=True)
+class _ToolchainMatrixCase:
+    scenario_name: str
+    verification_commands: tuple[str, ...]
+    preflight_required_commands: tuple[str, ...] = ()
+    expect_exit_code: int = 1
+    expect_error_subtype: str | None = None
+    expect_python_status: str | None = None
+    expect_python_reason_code: str | None = None
+    expect_python_reason_type: str | None = None
+    expect_python_validation_enabled: bool = False
+    expect_python_validation_reason_code: str | None = None
+    expect_pdm_status: str | None = None
+    expect_pdm_reason_code: str | None = None
+    expect_pdm_reason_type: str | None = None
+    expect_verification_calls: int = 0
+    expect_verification_artifacts: bool = False
+    expect_report_artifacts: bool = False
+    use_dummy_agent: bool = False
+
+
+def _run_fixture_backed_toolchain_case(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scenario_name: str,
+    verification_commands: tuple[str, ...],
+    preflight_required_commands: tuple[str, ...] = (),
+    use_dummy_agent: bool = False,
+) -> tuple[Any, runtime_mod.PythonRuntimeSelection, list[str | None], dict[str, int]]:
+    scenario = _load_scenario(scenario_name)
+    runtime_fixture = scenario.get("python_runtime")
+    if not isinstance(runtime_fixture, dict):
+        raise AssertionError(f"{scenario_name} missing python_runtime fixture")
+
+    _patch_local_probe(monkeypatch, scenario=scenario)
+    runtime_selection = _runtime_selection(runtime_fixture)
+    monkeypatch.setattr(
+        runner_mod,
+        "select_python_runtime",
+        lambda *args, **kwargs: runtime_selection,
+    )
+
+    context_probe = scenario.get("context_probe")
+    if isinstance(context_probe, dict):
+        monkeypatch.setattr(
+            runner_mod,
+            "_probe_python_context_capability",
+            lambda *args, **kwargs: dict(context_probe),
+        )
+
+    pip_probe = scenario.get("pip_probe")
+    if isinstance(pip_probe, dict):
+        monkeypatch.setattr(
+            runner_mod,
+            "probe_pip_module",
+            lambda *args, **kwargs: dict(pip_probe),
+        )
+
+    pytest_probe = scenario.get("pytest_probe")
+    if isinstance(pytest_probe, dict):
+        monkeypatch.setattr(
+            runner_mod,
+            "probe_pytest_module",
+            lambda *args, **kwargs: dict(pytest_probe),
+        )
+
+    verification_calls = {"count": 0}
+    verification_python_executables: list[str | None] = []
+
+    def _fake_run_verification_commands(
+        *,
+        run_dir: Path,
+        attempt_number: int,
+        command_prefix: list[str],
+        commands: list[str],
+        cwd: Path,
+        timeout_seconds: float | None,
+        python_executable: str | None,
+        python_toolchain_capability: dict[str, Any] | None = None,
+        env_overrides: dict[str, str] | None = None,
+        execution_shell: str | None = None,
+    ) -> dict[str, Any]:
+        del (
+            command_prefix,
+            cwd,
+            timeout_seconds,
+            python_toolchain_capability,
+            env_overrides,
+            execution_shell,
+        )
+        verification_calls["count"] += 1
+        verification_python_executables.append(python_executable)
+        artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
+        artifacts_dir = run_dir / artifacts_dir_rel
+        artifacts_dir.mkdir(parents=True, exist_ok=True)
+        summary = {
+            "schema_version": 1,
+            "passed": True,
+            "wall_seconds": 0.01,
+            "artifacts_dir": str(artifacts_dir_rel),
+            "commands": [
+                {
+                    "command": cmd,
+                    "argv": ["sh", "-lc", cmd],
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "rejected_sentinel": False,
+                }
+                for cmd in commands
+            ],
+        }
+        (artifacts_dir / "verification.json").write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return summary
+
+    monkeypatch.setattr(runner_mod, "_run_verification_commands", _fake_run_verification_commands)
+
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / f"target_repo_{scenario_name}"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    agent_binary = (
+        _make_dummy_codex_binary(tmp_path)
+        if use_dummy_agent
+        else str(tmp_path / "missing_codex.exe")
+    )
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": agent_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            verification_commands=verification_commands,
+            preflight_required_commands=preflight_required_commands,
+        ),
+    )
+
+    return result, runtime_selection, verification_python_executables, verification_calls
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        _ToolchainMatrixCase(
+            scenario_name="healthy_pass",
+            verification_commands=("pytest -q",),
+            expect_exit_code=0,
+            expect_python_status="present",
+            expect_python_validation_enabled=True,
+            expect_pdm_status="present",
+            expect_verification_calls=1,
+            expect_verification_artifacts=True,
+            expect_report_artifacts=True,
+            use_dummy_agent=True,
+        ),
+        _ToolchainMatrixCase(
+            scenario_name="broken_stdlib_runtime",
+            verification_commands=("pytest -q",),
+            expect_exit_code=1,
+            expect_error_subtype="python_unavailable",
+            expect_python_status="unusable",
+            expect_python_reason_code="missing_stdlib",
+            expect_python_reason_type="runtime",
+            expect_python_validation_enabled=False,
+            expect_python_validation_reason_code="missing_stdlib",
+        ),
+        _ToolchainMatrixCase(
+            scenario_name="windowsapps_venv_unusable",
+            verification_commands=("pytest -q",),
+            expect_exit_code=1,
+            expect_error_subtype="python_unavailable",
+            expect_python_status="unusable",
+            expect_python_reason_code="windowsapps_alias",
+            expect_python_reason_type="discovery",
+            expect_python_validation_enabled=False,
+            expect_python_validation_reason_code="windowsapps_alias",
+        ),
+        _ToolchainMatrixCase(
+            scenario_name="wrapper_present_unusable",
+            verification_commands=("pytest -q",),
+            preflight_required_commands=("pdm",),
+            expect_exit_code=1,
+            expect_error_subtype="required_command_unavailable",
+            expect_python_status="present",
+            expect_python_validation_enabled=True,
+            expect_pdm_status="unusable",
+            expect_pdm_reason_code="probe_failed",
+            expect_pdm_reason_type="runtime",
+        ),
+        _ToolchainMatrixCase(
+            scenario_name="context_mismatch",
+            verification_commands=("pytest -q",),
+            expect_exit_code=1,
+            expect_error_subtype="python_unavailable",
+            expect_python_status="unusable",
+            expect_python_reason_code="launch_failed",
+            expect_python_reason_type="execution",
+            expect_python_validation_enabled=False,
+            expect_python_validation_reason_code="launch_failed",
+        ),
+    ],
+    ids=lambda case: case.scenario_name,
+)
+def test_python_toolchain_capability_matrix_offline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    case: _ToolchainMatrixCase,
+) -> None:
+    result, runtime_selection, verification_python_executables, verification_calls = (
+        _run_fixture_backed_toolchain_case(
+            tmp_path=tmp_path,
+            monkeypatch=monkeypatch,
+            scenario_name=case.scenario_name,
+            verification_commands=case.verification_commands,
+            preflight_required_commands=case.preflight_required_commands,
+            use_dummy_agent=case.use_dummy_agent,
+        )
+    )
+
+    assert result.exit_code == case.expect_exit_code
+
+    preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    python_diag = preflight.get("command_diagnostics", {}).get("python", {})
+    if case.expect_python_status is not None:
+        assert python_diag.get("status") == case.expect_python_status
+    if case.expect_python_reason_code is not None:
+        assert python_diag.get("reason_code") == case.expect_python_reason_code
+    if case.expect_python_reason_type is not None:
+        assert python_diag.get("reason_type") == case.expect_python_reason_type
+
+    python_validation = preflight.get("python_validation", {})
+    assert python_validation.get("required") is True
+    assert python_validation.get("enabled") is case.expect_python_validation_enabled
+    assert python_validation.get("reason_code") == case.expect_python_validation_reason_code
+
+    selected_runtime_path = runtime_selection.selected.path if runtime_selection.selected else None
+    if case.expect_python_validation_enabled and selected_runtime_path is not None:
+        assert python_validation.get("validated_python_executable") == selected_runtime_path
+    else:
+        assert python_validation.get("validated_python_executable") is None
+
+    pdm_diag = preflight.get("command_diagnostics", {}).get("pdm", {})
+    if case.expect_pdm_status is not None:
+        assert pdm_diag.get("status") == case.expect_pdm_status
+    if case.expect_pdm_reason_code is not None:
+        assert pdm_diag.get("reason_code") == case.expect_pdm_reason_code
+    if case.expect_pdm_reason_type is not None:
+        assert pdm_diag.get("reason_type") == case.expect_pdm_reason_type
+
+    assert verification_calls["count"] == case.expect_verification_calls
+    if case.expect_verification_calls:
+        assert verification_python_executables == [selected_runtime_path]
+    else:
+        assert verification_python_executables == []
+
+    verification_path = result.run_dir / "verification.json"
+    attempt_verification_path = result.run_dir / "verification" / "attempt1" / "verification.json"
+    assert verification_path.exists() is case.expect_verification_artifacts
+    assert attempt_verification_path.exists() is case.expect_verification_artifacts
+    assert (result.run_dir / "report.json").exists() is case.expect_report_artifacts
+    assert (result.run_dir / "report.md").exists() is case.expect_report_artifacts
+
+    if case.expect_error_subtype is None:
+        assert not (result.run_dir / "error.json").exists()
+        return
+
+    error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error_obj.get("type") == "AgentPreflightFailed"
+    assert error_obj.get("subtype") == case.expect_error_subtype
+    if case.expect_error_subtype == "required_command_unavailable":
+        failure_diag = error_obj.get("failures", {}).get("pdm", {})
+        assert failure_diag.get("status") == case.expect_pdm_status
+        assert failure_diag.get("reason_code") == case.expect_pdm_reason_code
+        assert failure_diag.get("reason_type") == case.expect_pdm_reason_type
+    else:
+        error_python_diag = error_obj.get("preflight", {}).get("command_diagnostics", {}).get(
+            "python", {}
+        )
+        if case.expect_python_status is not None:
+            assert error_python_diag.get("status") == case.expect_python_status
+        if case.expect_python_reason_code is not None:
+            assert error_python_diag.get("reason_code") == case.expect_python_reason_code
+        if case.expect_python_reason_type is not None:
+            assert error_python_diag.get("reason_type") == case.expect_python_reason_type
 
 
 def test_two_stage_python_preflight_detects_context_mismatch(
