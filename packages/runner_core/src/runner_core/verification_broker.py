@@ -25,6 +25,8 @@ _BROKER_CLIENT_WAIT_GRACE_SECONDS = 15.0
 _BROKER_STOP_JOIN_TIMEOUT_SECONDS = 10.0
 _BROKER_PROGRESS_HEARTBEAT_SECONDS = 5.0
 _BROKER_TERMINAL_STATUSES = {"passed", "failed", "timed_out", "cancelled"}
+_JSON_ATOMIC_REPLACE_RETRIES = 10
+_JSON_ATOMIC_REPLACE_RETRY_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -929,7 +931,14 @@ def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, ensure_ascii=False) + "\\n", encoding="utf-8")
-    tmp_path.replace(path)
+    for attempt in range(__JSON_ATOMIC_REPLACE_RETRIES__):
+        try:
+            tmp_path.replace(path)
+            return
+        except PermissionError:
+            if attempt >= (__JSON_ATOMIC_REPLACE_RETRIES__ - 1):
+                raise
+            time.sleep(__JSON_ATOMIC_REPLACE_RETRY_SECONDS__)
 
 
 def _load_response(path: Path, request_id: str) -> tuple[dict[str, object] | None, str | None]:
@@ -1082,6 +1091,11 @@ if __name__ == "__main__":
         .replace("__RESPONSE_DIR__", json.dumps(response_dir))
         .replace("__WAIT_TIMEOUT_SECONDS__", repr(float(wait_timeout_seconds)))
         .replace("__HEARTBEAT_SECONDS__", repr(float(_BROKER_PROGRESS_HEARTBEAT_SECONDS)))
+        .replace("__JSON_ATOMIC_REPLACE_RETRIES__", repr(int(_JSON_ATOMIC_REPLACE_RETRIES)))
+        .replace(
+            "__JSON_ATOMIC_REPLACE_RETRY_SECONDS__",
+            repr(float(_JSON_ATOMIC_REPLACE_RETRY_SECONDS)),
+        )
     )
 
 
@@ -1125,7 +1139,14 @@ def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = path.with_suffix(path.suffix + ".tmp")
     tmp_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    tmp_path.replace(path)
+    for attempt in range(_JSON_ATOMIC_REPLACE_RETRIES):
+        try:
+            tmp_path.replace(path)
+            return
+        except PermissionError:
+            if attempt >= (_JSON_ATOMIC_REPLACE_RETRIES - 1):
+                raise
+            time.sleep(_JSON_ATOMIC_REPLACE_RETRY_SECONDS)
 
 
 def _quote_powershell_path(path: str) -> str:
