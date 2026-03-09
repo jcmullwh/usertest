@@ -211,7 +211,7 @@ def test_select_recent_run_dirs_orders_and_limits(tmp_path: Path) -> None:
     assert selected[1].parts[-4:] == ("tiktok_vids", "20260103T000000Z", "codex", "0")
 
 
-def test_iter_report_history_distinguishes_missing_report_from_unreadable_terminal_artifacts(
+def test_iter_report_history_distinguishes_no_terminal_artifact_from_unreadable_terminal_artifacts(
     tmp_path: Path,
 ) -> None:
     runs_dir = tmp_path / "runs"
@@ -244,7 +244,7 @@ def test_iter_report_history_distinguishes_missing_report_from_unreadable_termin
 
     items = list(iter_report_history(runs_dir, target_slug="target_a", embed="none"))
     assert [item["status"] for item in items] == [
-        "missing_report",
+        "no_terminal_artifact",
         "terminal_artifact_unreadable",
         "terminal_artifact_unreadable",
         "terminal_artifact_unreadable",
@@ -275,7 +275,7 @@ def test_iter_report_history_distinguishes_missing_report_from_unreadable_termin
         target_slug="target_a",
         embed="none",
     )
-    assert counts["missing_report"] == 1
+    assert counts["no_terminal_artifact"] == 1
     assert counts["terminal_artifact_unreadable"] == 3
 
 

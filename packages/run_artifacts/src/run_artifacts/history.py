@@ -295,7 +295,10 @@ def _derive_run_status(
     if report_validation_errors_read.value is not None:
         return "report_validation_error", terminal_artifact_reads
     if report_read.value is None:
-        return "missing_report", terminal_artifact_reads
+        # Neither report.json nor error.json exists (error.json absence implied above).
+        # This indicates a legacy run directory that predates the terminal-artifact contract,
+        # or a run that was interrupted before any terminal artifact was emitted.
+        return "no_terminal_artifact", terminal_artifact_reads
     return "ok", terminal_artifact_reads
 
 
@@ -600,7 +603,7 @@ def write_report_history_jsonl(
     total = 0
     counts: dict[str, int] = {
         "ok": 0,
-        "missing_report": 0,
+        "no_terminal_artifact": 0,
         "report_validation_error": 0,
         "terminal_artifact_unreadable": 0,
         "error": 0,

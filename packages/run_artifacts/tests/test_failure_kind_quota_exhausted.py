@@ -39,6 +39,16 @@ def test_classify_failure_kind_treats_unreadable_terminal_artifact_as_failure() 
     assert kind == "terminal_artifact_unreadable"
 
 
+def test_classify_failure_kind_treats_no_terminal_artifact_as_failure() -> None:
+    is_failure, kind = classify_failure_kind(
+        status="no_terminal_artifact",
+        error=None,
+        validation_errors=[],
+    )
+    assert is_failure is True
+    assert kind == "no_terminal_artifact"
+
+
 def test_render_failure_text_includes_terminal_artifact_read_diagnostics() -> None:
     text = render_failure_text(
         failure_kind="terminal_artifact_unreadable",
