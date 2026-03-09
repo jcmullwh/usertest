@@ -221,11 +221,29 @@ def resolve_usable_python_interpreter(
         return out
 
     ordered: list[str] = []
+    env_lookup = dict(os.environ)
+    if path is not None:
+        env_lookup["PATH"] = path
+
+    sandbox_python = str(env_lookup.get("USERTEST_PYTHON", "")).strip()
+    if sandbox_python:
+        ordered.append(sandbox_python)
+
     if workspace_dir is not None:
         if is_windows:
             ordered.append(str(workspace_dir / ".venv" / "Scripts" / "python.exe"))
         else:
             ordered.append(str(workspace_dir / ".venv" / "bin" / "python"))
+
+    active_venv = str(env_lookup.get("VIRTUAL_ENV", "")).strip()
+    if active_venv:
+        if is_windows:
+            ordered.append(str(Path(active_venv) / "Scripts" / "python.exe"))
+        else:
+            ordered.append(str(Path(active_venv) / "bin" / "python"))
+
+    if is_windows:
+        ordered.extend(_windows_py0p_interpreters())
 
     ordered.extend(_coerce_commands(candidate_commands))
 
@@ -261,14 +279,6 @@ def resolve_usable_python_interpreter(
                     continue
                 expanded.append(entry)
                 seen.add(ekey)
-
-    if is_windows and not inserted_py0p:
-        for entry in _windows_py0p_interpreters():
-            ekey = entry.lower()
-            if ekey in seen:
-                continue
-            expanded.append(entry)
-            seen.add(ekey)
 
     probed = probe_python_interpreters(
         candidate_commands=expanded,
@@ -310,13 +320,18 @@ def probe_python_interpreters(
     for command in commands:
         remaining = max(0.1, deadline - time.monotonic())
         resolved: str | None = None
+        explicit_python = str(os.environ.get("USERTEST_PYTHON", "")).strip()
+        if explicit_python and command in {"python", "python3", "py"}:
+            resolved = explicit_python
         looks_like_path = (
             ("/" in command)
             or ("\\" in command)
             or (os.name == "nt" and ":" in command)
             or Path(command).is_absolute()
         )
-        if looks_like_path:
+        if resolved is not None:
+            pass
+        elif looks_like_path:
             try:
                 if Path(command).exists():
                     resolved = command

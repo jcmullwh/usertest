@@ -19,14 +19,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 cd "${REPO_ROOT}"
 
-PYTHON_BIN="python"
-if ! command -v "${PYTHON_BIN}" >/dev/null 2>&1; then
-  if command -v python3 >/dev/null 2>&1; then
-    PYTHON_BIN="python3"
-  else
-    echo "Neither 'python' nor 'python3' is available on PATH." >&2
-    exit 1
-  fi
+source "${SCRIPT_DIR}/python_preflight.sh"
+usertest_resolve_python "${REPO_ROOT}"
+PYTHON_BIN="${USERTEST_PYTHON_BIN}"
+
+echo "==> Using Python: ${USERTEST_PYTHON_SOURCE} -> ${PYTHON_BIN}"
+if [[ -n "${USERTEST_PYTHON_EXECUTABLE:-}" ]]; then
+  echo "==> Python executable: ${USERTEST_PYTHON_EXECUTABLE}"
+fi
+if [[ -n "${USERTEST_PYTHON_VERSION:-}" ]]; then
+  echo "==> Python version: ${USERTEST_PYTHON_VERSION}"
 fi
 
 VENV_DIR="${REPO_ROOT}/.venv"

@@ -63,6 +63,60 @@ function _Is-WindowsAppsAliasPath {
     return $PathText.Replace('/', '\').ToLower().Contains('\windowsapps\')
 }
 
+function _Get-VenvPythonPath {
+    param([Parameter(Mandatory = $true)][string]$VenvRoot)
+    return Join-Path $VenvRoot 'Scripts\python.exe'
+}
+
+function _Get-WindowsWhereAll {
+    param([Parameter(Mandatory = $true)][string]$CommandName)
+
+    try {
+        $proc = _Invoke-ProcessWithTimeout -FilePath 'where.exe' -Arguments @($CommandName) -TimeoutSeconds 2.0
+    }
+    catch {
+        return @()
+    }
+
+    if ($proc.TimedOut -or ($proc.ExitCode -as [int]) -ne 0) {
+        return @()
+    }
+
+    $out = @()
+    foreach ($line in ([string]$proc.Stdout -split "`r?`n")) {
+        $candidate = $line.Trim()
+        if ($candidate) {
+            $out += $candidate
+        }
+    }
+    return $out
+}
+
+function _Get-WindowsPy0pInterpreters {
+    try {
+        $proc = _Invoke-ProcessWithTimeout -FilePath 'py' -Arguments @('-0p') -TimeoutSeconds 2.0
+    }
+    catch {
+        return @()
+    }
+
+    if ($proc.TimedOut -or ($proc.ExitCode -as [int]) -ne 0) {
+        return @()
+    }
+
+    $out = @()
+    foreach ($line in ([string]$proc.Stdout -split "`r?`n")) {
+        if (-not $line.Trim()) {
+            continue
+        }
+        $match = [regex]::Match($line, '([A-Za-z]:\\.*)$')
+        if ($match.Success) {
+            $out += $match.Groups[1].Value.Trim()
+        }
+    }
+    return $out
+}
+
 function Test-PythonInterpreter {
     [CmdletBinding()]
     param(
@@ -163,16 +217,63 @@ function Resolve-UsablePython {
     $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(0.1, [double]$TimeoutSeconds))
     $rejections = @()
 
-    $venvPython = Join-Path (Join-Path $RepoRoot $VenvDirName) 'Scripts\python.exe'
-    $candidates = @()
-    if (Test-Path -LiteralPath $venvPython) {
-        $candidates += @{ Name = "venv"; CommandPath = $venvPython }
+    $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $candidates = New-Object System.Collections.Generic.List[object]
+
+    function Add-Candidate {
+        param(
+            [Parameter(Mandatory = $true)][string]$Name,
+            [Parameter(Mandatory = $false)][string]$CommandPath
+        )
+        if (-not $CommandPath) {
+            return
+        }
+        $trimmed = $CommandPath.Trim()
+        if (-not $trimmed) {
+            return
+        }
+        if (-not $seen.Add($trimmed)) {
+            return
+        }
+        $null = $candidates.Add(@{ Name = $Name; CommandPath = $trimmed })
     }
-    $candidates += @(
-        @{ Name = "python"; CommandPath = $null },
-        @{ Name = "python3"; CommandPath = $null },
-        @{ Name = "py"; CommandPath = $null }
-    )
+
+    $sandboxPython = [string]$env:USERTEST_PYTHON
+    if ($sandboxPython.Trim()) {
+        Add-Candidate -Name 'sandbox_env' -CommandPath $sandboxPython
+    }
+
+    Add-Candidate -Name 'workspace_venv' -CommandPath (_Get-VenvPythonPath -VenvRoot (Join-Path $RepoRoot $VenvDirName))
+
+    $virtualEnv = [string]$env:VIRTUAL_ENV
+    if ($virtualEnv.Trim()) {
+        Add-Candidate -Name 'virtual_env' -CommandPath (_Get-VenvPythonPath -VenvRoot $virtualEnv)
+    }
+
+    foreach ($entry in (_Get-WindowsPy0pInterpreters)) {
+        Add-Candidate -Name 'py_0p' -CommandPath $entry
+    }
+
+    foreach ($entry in (_Get-WindowsWhereAll -CommandName 'python')) {
+        if (-not (_Is-WindowsAppsAliasPath -PathText $entry)) {
+            Add-Candidate -Name 'where_python' -CommandPath $entry
+        }
+    }
+
+    foreach ($entry in (_Get-WindowsWhereAll -CommandName 'python3')) {
+        if (-not (_Is-WindowsAppsAliasPath -PathText $entry)) {
+            Add-Candidate -Name 'where_python3' -CommandPath $entry
+        }
+    }
+
+    foreach ($commandName in @('py', 'python', 'python3')) {
+        $cmd = Get-Command $commandName -ErrorAction SilentlyContinue
+        if ($cmd) {
+            $resolved = $cmd.Source
+            if (-not $resolved) { $resolved = $cmd.Path }
+            Add-Candidate -Name ("command_" + $commandName) -CommandPath $resolved
+        }
+    }
 
     foreach ($candidate in $candidates) {
         $remaining = ($deadline - [DateTime]::UtcNow).TotalSeconds
@@ -182,15 +283,6 @@ function Resolve-UsablePython {
 
         $name = $candidate.Name
         $resolved = $candidate.CommandPath
-        if (-not $resolved) {
-            $cmd = Get-Command $name -ErrorAction SilentlyContinue
-            if (-not $cmd) {
-                $rejections += "[$name] not found on PATH"
-                continue
-            }
-            $resolved = $cmd.Source
-            if (-not $resolved) { $resolved = $cmd.Path }
-        }
 
         if (-not $resolved) {
             $rejections += "[$name] could not resolve command path"

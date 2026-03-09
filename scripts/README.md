@@ -12,6 +12,7 @@ They are convenience helpers; the “official” monorepo workflow is driven by 
 - `smoke.ps1`
 - `doctor.sh`
 - `doctor.ps1`
+- `python_preflight.sh` (shared bash Python resolver)
 - `python_preflight.ps1` (shared Windows Python resolver)
 
 These run a deterministic checklist used in onboarding and CI verification:
@@ -32,6 +33,9 @@ Use strict preflight mode when needed:
 - `smoke.ps1 -RequireDoctor`
 
 In strict mode, missing `pdm` is treated as a failure instead of a skip.
+
+All of these scripts honor `USERTEST_PYTHON` first. When set, the scripts reuse that explicit
+interpreter decision instead of re-resolving `python` / `python3` from PATH.
 
 ### PowerShell parse preflight
 

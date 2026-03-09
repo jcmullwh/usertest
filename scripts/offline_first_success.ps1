@@ -57,6 +57,7 @@ try {
 
     $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
     $pythonCmd = $pythonInfo.CommandPath
+    $env:USERTEST_PYTHON = $pythonCmd
     Write-Host "==> Using Python: $($pythonInfo.Name) -> $pythonCmd"
     Write-Host "==> Python executable: $($pythonInfo.Executable)"
     if ($pythonInfo.Version) {
