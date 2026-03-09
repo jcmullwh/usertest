@@ -70,6 +70,7 @@ from runner_core.python_runtime import (
     probe_pytest_module,
     select_python_runtime,
     verification_commands_may_provision_pytest,
+    verification_commands_need_pdm,
     verification_commands_need_pytest,
     verification_commands_need_python,
 )
@@ -2973,7 +2974,7 @@ def _align_python_command_diagnostics(
     if failure is None:
         return
 
-    for command in ("python", "python3", "py"):
+    for command in ("python", "python3", "py", "pdm"):
         diag = command_diagnostics.get(command)
         if not isinstance(diag, dict):
             continue
@@ -2987,6 +2988,53 @@ def _align_python_command_diagnostics(
             diag["reason"] = failure.get("reason")
         if isinstance(failure.get("remediation"), str):
             diag["remediation"] = failure.get("remediation")
+        if command == "pdm":
+            # pdm is a Python wrapper; mark its diagnostic with this dependency context so
+            # consumers can distinguish a pdm-specific failure from a Python-runtime failure.
+            diag["python_dependency_blocked"] = True
+
+
+def _build_python_toolchain_capability_summary(
+    *,
+    python_validation_required: bool,
+    python_validation_enabled: bool,
+    python_validation_reason_code: str | None,
+    python_validation_reason_type: str | None,
+    python_validation_reason: str | None,
+    python_context_probe: dict[str, Any] | None,
+    validated_python_executable: str | None,
+    pdm_required: bool,
+) -> dict[str, Any]:
+    """
+    Build the canonical machine-readable Python toolchain capability summary.
+
+    This is the single authoritative record of whether the Python toolchain
+    (interpreter + pdm when applicable) is healthy for the current run.  It is
+    stored in preflight artifacts so that consumers never need to reconstruct
+    the decision from scattered command-level diagnostics.
+    """
+    if not python_validation_required:
+        toolchain_status = "not_required"
+    elif python_validation_enabled:
+        toolchain_status = "healthy"
+    else:
+        toolchain_status = "blocked"
+
+    context_probe_passed: bool | None = None
+    if python_validation_required and isinstance(python_context_probe, dict):
+        context_probe_passed = bool(python_context_probe.get("passed", False))
+
+    return {
+        "toolchain_status": toolchain_status,
+        "python_required": python_validation_required,
+        "pdm_required": pdm_required,
+        "interpreter_usable": python_validation_enabled or not python_validation_required,
+        "context_probe_passed": context_probe_passed,
+        "reason_code": python_validation_reason_code,
+        "reason_type": python_validation_reason_type,
+        "reason": python_validation_reason,
+        "validated_executable": validated_python_executable,
+    }
 
 
 def _validate_python_capability(
@@ -4885,6 +4933,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 if isinstance(python_validation.get("validated_python_executable"), str)
                 else None
             )
+            pdm_validation_required = verification_commands_need_pdm(
+                effective_verification_commands
+            )
             pytest_validation_required = verification_commands_need_pytest(
                 effective_verification_commands
             )
@@ -5019,6 +5070,16 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 else None
             )
 
+            python_toolchain_capability_summary = _build_python_toolchain_capability_summary(
+                python_validation_required=python_validation_required,
+                python_validation_enabled=python_validation_enabled,
+                python_validation_reason_code=python_validation_reason_code,
+                python_validation_reason_type=python_validation_reason_type,
+                python_validation_reason=python_validation_reason,
+                python_context_probe=python_context_probe,
+                validated_python_executable=validated_python_executable_for_execution,
+                pdm_required=pdm_validation_required,
+            )
             _write_json(
                 run_dir / "preflight.json",
                 {
@@ -5041,6 +5102,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "reason": python_validation_reason,
                         "validated_python_executable": validated_python_executable_for_execution,
                     },
+                    "python_toolchain_capability": python_toolchain_capability_summary,
                     "pip_probe": pip_probe,
                     "pytest_probe": pytest_probe,
                     "capabilities": {
@@ -5071,6 +5133,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "Install a full CPython interpreter and ensure it is executable "
                     "in the agent execution context (not a WindowsApps alias), then retry."
                 )
+                blocked_tool_hint = (
+                    " (includes pdm commands which depend on a usable Python runtime)"
+                    if pdm_validation_required
+                    else ""
+                )
                 _write_json(
                     run_dir / "error.json",
                     {
@@ -5078,8 +5145,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "subtype": "python_unavailable",
                         "agent": request.agent,
                         "message": (
-                            "Verification includes Python-dependent commands, but Python context "
-                            "preflight failed in the effective agent execution path."
+                            "Verification includes Python-dependent commands"
+                            + blocked_tool_hint
+                            + ", but Python context preflight failed in the effective agent "
+                            "execution path."
                         ),
                         "hint": hint,
                         "preflight": {
@@ -5096,6 +5165,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                     validated_python_executable_for_execution
                                 ),
                             },
+                            "python_toolchain_capability": python_toolchain_capability_summary,
                             "command_diagnostics": command_diagnostics,
                         },
                     },
@@ -5141,6 +5211,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                     validated_python_executable_for_execution
                                 ),
                             },
+                            "python_toolchain_capability": python_toolchain_capability_summary,
                             "pytest_probe": pytest_probe,
                             "command_diagnostics": command_diagnostics,
                         },
@@ -5740,6 +5811,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 validated_python_executable_for_execution
                             ),
                         },
+                        "python_toolchain_capability": python_toolchain_capability_summary,
                         "pip_probe": pip_probe,
                         "pytest_probe": pytest_probe,
                         "meta": preflight_meta,
