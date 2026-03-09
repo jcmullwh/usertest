@@ -94,7 +94,7 @@ def classify_failure_kind(
     if status_lower in {
         "error",
         "report_validation_error",
-        "missing_report",
+        "no_terminal_artifact",
         "terminal_artifact_unreadable",
     }:
         return True, status_lower
