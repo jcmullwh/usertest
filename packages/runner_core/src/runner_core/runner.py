@@ -39,6 +39,10 @@ from reporter import (
     render_report_markdown,
     validate_report,
 )
+from run_artifacts.path_normalization import (
+    agent_path_for_staged_file,
+    ensure_runs_usertest_exists,
+)
 from sandbox_runner.diagnostics import (
     capture_container_artifacts,
     capture_dns_snapshot,
@@ -84,11 +88,9 @@ from runner_core.verification_broker import (
     VerificationBrokerAttempt,
     VerificationBrokerRequestResult,
     probe_local_verification_launcher,
+    probe_windows_bash_usable,
     render_verification_broker_command,
     resolve_verification_launcher,
-)
-from runner_core.verification_broker import (
-    probe_windows_bash_usable as _probe_windows_bash_usable_impl,
 )
 from runner_core.workspace_state_hash import WorkspaceStateHash, compute_workspace_state_hash
 
@@ -1670,10 +1672,7 @@ def _gemini_include_directories_for_workspace(*, workspace_dir: Path) -> list[st
     # `--include-directories runs/usertest` at process start.
     marker = workspace_dir / "tools" / "scaffold" / "monorepo.toml"
     if marker.exists():
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return []
+        ensure_runs_usertest_exists(workspace_dir)
         return [include_rel]
 
     return []
@@ -2247,22 +2246,6 @@ def _stage_agent_prompt_file(*, run_dir: Path, name: str, src_path: Path) -> Pat
     shutil.copyfile(src_path, dest_path)
     return dest_path
 
-def _agent_path_for_staged_file(
-    staged_path: Path, *, run_dir: Path, run_dir_mount: str | None
-) -> str:
-    if run_dir_mount is None:
-        return str(staged_path.resolve())
-
-    mount = normalize_agent_path(run_dir_mount)
-    if not mount or mount == ".":
-        mount = "/run_dir"
-    if not mount.startswith("/"):
-        mount = f"/{mount}"
-
-    rel = staged_path.resolve().relative_to(run_dir.resolve()).as_posix()
-    return agent_path_join(mount, rel)
-
-
 def _verification_broker_client_command(
     *,
     run_dir: Path,
@@ -2270,7 +2253,7 @@ def _verification_broker_client_command(
     command_prefix: list[str],
 ) -> str:
     client_root = run_dir / "verification_broker" / "client"
-    client_root_for_agent = _agent_path_for_staged_file(
+    client_root_for_agent = agent_path_for_staged_file(
         client_root,
         run_dir=run_dir,
         run_dir_mount=run_dir_mount,
@@ -2768,7 +2751,7 @@ def _looks_like_verification_rejection_sentinel(command: str) -> bool:
 
 
 def _probe_windows_bash_usable() -> dict[str, Any]:
-    return _probe_windows_bash_usable_impl()
+    return probe_windows_bash_usable()
 
 
 def _maybe_rewrite_windows_bash_smoke_verification_command(
@@ -4286,6 +4269,10 @@ def _run_verification_commands(
     attempt_dir = run_dir / attempt_dir_rel
     attempt_dir.mkdir(parents=True, exist_ok=True)
 
+    # Ensure runs/usertest exists in the workspace to satisfy clean-environment
+    # assumptions for verification commands that expect a standard layout.
+    ensure_runs_usertest_exists(cwd)
+
     started_utc = _utc_now_z()
     started_monotonic = time.monotonic()
     results: list[dict[str, Any]] = []
@@ -5521,7 +5508,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 # into stdin on the host. Therefore use the host path, not a container mount path.
                 system_prompt_path_for_agent = str(staged_system_prompt)
             else:
-                system_prompt_path_for_agent = _agent_path_for_staged_file(
+                system_prompt_path_for_agent = agent_path_for_staged_file(
                     staged_system_prompt,
                     run_dir=run_dir,
                     run_dir_mount=backend.run_dir_mount,
@@ -5589,7 +5576,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         text=append_text,
                     )
 
-                append_system_prompt_path_for_agent = _agent_path_for_staged_file(
+                append_system_prompt_path_for_agent = agent_path_for_staged_file(
                     staged_append_system_prompt,
                     run_dir=run_dir,
                     run_dir_mount=backend.run_dir_mount,
@@ -6864,7 +6851,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             ) -> tuple[int, list[str]]:
                 if request.agent == "codex":
                     codex_last_message_for_attempt = (
-                        _agent_path_for_staged_file(
+                        agent_path_for_staged_file(
                             last_message_attempt_path,
                             run_dir=run_dir,
                             run_dir_mount=backend.run_dir_mount,
@@ -7005,12 +6992,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     attempt_broker_root = (
                         run_dir / "verification_broker" / f"attempt{attempt_number}"
                     )
-                    client_root_for_agent = _agent_path_for_staged_file(
+                    client_root_for_agent = agent_path_for_staged_file(
                         client_root,
                         run_dir=run_dir,
                         run_dir_mount=backend.run_dir_mount,
                     )
-                    attempt_root_for_agent = _agent_path_for_staged_file(
+                    attempt_root_for_agent = agent_path_for_staged_file(
                         attempt_broker_root,
                         run_dir=run_dir,
                         run_dir_mount=backend.run_dir_mount,

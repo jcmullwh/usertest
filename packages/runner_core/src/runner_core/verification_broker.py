@@ -14,7 +14,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from runner_core.pathing import agent_path_join, normalize_agent_path
+from run_artifacts.path_normalization import agent_path_join, normalize_agent_path
+
 from runner_core.workspace_state_hash import WorkspaceStateHash
 
 _SHELL_PROBE_TIMEOUT_SECONDS = 2.0
@@ -748,7 +749,7 @@ class VerificationBrokerAttempt:
 
         artifacts_dir = summary.get("artifacts_dir")
         artifacts_dir_s = (
-            normalize_agent_path(artifacts_dir) if isinstance(artifacts_dir, str) else None
+            normalize_agent_path(artifacts_dir.strip()) if isinstance(artifacts_dir, str) else None
         )
         summary_path = (
             agent_path_join(artifacts_dir_s, "verification.json") if artifacts_dir_s else None
