@@ -3556,8 +3556,8 @@ def _align_python_command_diagnostics(
     python_runtime_summary: dict[str, Any],
     python_context_probe: dict[str, Any] | None,
     python_validation_required: bool,
-    prefer_context_selection: bool,
-    validated_python_executable: str | None,
+    prefer_context_selection: bool = False,
+    validated_python_executable: str | None = None,
 ) -> None:
     selected = python_runtime_summary.get("selected")
     selected_ok = isinstance(selected, dict)
