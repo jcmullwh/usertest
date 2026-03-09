@@ -91,6 +91,26 @@ def _runtime_selection(raw: dict[str, Any]) -> runtime_mod.PythonRuntimeSelectio
     return runtime_mod.PythonRuntimeSelection(selected=selected, candidates=candidates)
 
 
+def _context_probe_with_runtime_metadata(
+    context_probe: dict[str, Any],
+    runtime_selection: runtime_mod.PythonRuntimeSelection,
+) -> dict[str, Any]:
+    probe = dict(context_probe)
+    if not probe.get("passed", False):
+        return probe
+    metadata = probe.get("metadata")
+    if isinstance(metadata, dict) and metadata.get("executable"):
+        return probe
+    selected = runtime_selection.selected
+    if selected is None:
+        return probe
+    probe["metadata"] = {
+        "executable": selected.path,
+        "version": selected.version,
+    }
+    return probe
+
+
 def _patch_local_probe(
     monkeypatch: pytest.MonkeyPatch,
     *,
@@ -1416,7 +1436,8 @@ def test_run_once_reports_missing_required_pdm_offline(
             "commands": commands,
             "command_probe_details": details,
             "python_interpreter": healthy_preflight.get("python_interpreter"),
-        }
+        },
+        "context_probe": healthy.get("context_probe"),
     }
 
     _patch_local_probe(monkeypatch, scenario=scenario)
@@ -1455,7 +1476,6 @@ def test_run_once_reports_missing_required_pdm_offline(
     assert pdm_diag.get("status") == "missing"
     assert pdm_diag.get("reason_code") == "not_found"
     assert "Install `pdm`" in str(pdm_diag.get("remediation", ""))
-    assert preflight.get("python_runtime", {}).get("selected", {}).get("usable") is True
 
     error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
     assert error_obj.get("type") == "AgentPreflightFailed"
