@@ -872,3 +872,445 @@ def test_two_stage_python_preflight_optional_verification_bypass_skips_pip_probe
     assert python_validation.get("required") is False
     assert python_validation.get("enabled") is True
     assert python_validation.get("validated_python_executable") == sys.executable
+
+
+def test_run_once_reports_missing_required_pdm_offline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    healthy = _load_scenario("healthy_pass")
+    runtime_fixture = healthy.get("python_runtime")
+    healthy_preflight = healthy.get("preflight")
+    if not isinstance(runtime_fixture, dict) or not isinstance(healthy_preflight, dict):
+        raise AssertionError("healthy_pass fixture missing required sections")
+
+    commands = dict(healthy_preflight.get("commands", {}))
+    commands["pdm"] = False
+    details = dict(healthy_preflight.get("command_probe_details", {}))
+    details["pdm"] = {
+        "command": "pdm",
+        "resolved_path": None,
+        "present": False,
+        "usable": False,
+        "reason_code": "not_found",
+        "reason": "`pdm` was not found on PATH.",
+    }
+    scenario = {
+        "preflight": {
+            "commands": commands,
+            "command_probe_details": details,
+            "python_interpreter": healthy_preflight.get("python_interpreter"),
+        }
+    }
+
+    _patch_local_probe(monkeypatch, scenario=scenario)
+    monkeypatch.setattr(
+        runner_mod,
+        "select_python_runtime",
+        lambda *args, **kwargs: _runtime_selection(runtime_fixture),
+    )
+
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": _make_dummy_codex_binary(tmp_path)}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            preflight_required_commands=("pdm",),
+        ),
+    )
+
+    assert result.exit_code == 1
+    preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    pdm_diag = preflight.get("command_diagnostics", {}).get("pdm", {})
+    assert pdm_diag.get("status") == "missing"
+    assert pdm_diag.get("reason_code") == "not_found"
+    assert "Install `pdm`" in str(pdm_diag.get("remediation", ""))
+    assert preflight.get("python_runtime", {}).get("selected", {}).get("usable") is True
+
+    error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error_obj.get("type") == "AgentPreflightFailed"
+    assert error_obj.get("subtype") == "required_command_unavailable"
+
+
+def test_two_stage_python_preflight_reports_fully_missing_toolchain(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    scenario = {
+        "preflight": {
+            "commands": {
+                "python": False,
+                "python3": False,
+                "py": False,
+            },
+            "command_probe_details": {
+                "python": {
+                    "command": "python",
+                    "resolved_path": None,
+                    "present": False,
+                    "usable": False,
+                    "reason_code": "not_found",
+                    "reason": "`python` was not found on PATH.",
+                },
+                "python3": {
+                    "command": "python3",
+                    "resolved_path": None,
+                    "present": False,
+                    "usable": False,
+                    "reason_code": "not_found",
+                    "reason": "`python3` was not found on PATH.",
+                },
+                "py": {
+                    "command": "py",
+                    "resolved_path": None,
+                    "present": False,
+                    "usable": False,
+                    "reason_code": "not_found",
+                    "reason": "`py` was not found on PATH.",
+                },
+            },
+            "python_interpreter": {
+                "selected": None,
+                "candidates": [
+                    {
+                        "command": "python",
+                        "resolved_path": None,
+                        "present": False,
+                        "usable": False,
+                        "reason_code": "not_found",
+                        "reason": "`python` was not found on PATH.",
+                        "version": None,
+                        "executable": None,
+                    },
+                    {
+                        "command": "python3",
+                        "resolved_path": None,
+                        "present": False,
+                        "usable": False,
+                        "reason_code": "not_found",
+                        "reason": "`python3` was not found on PATH.",
+                        "version": None,
+                        "executable": None,
+                    },
+                    {
+                        "command": "py",
+                        "resolved_path": None,
+                        "present": False,
+                        "usable": False,
+                        "reason_code": "not_found",
+                        "reason": "`py` was not found on PATH.",
+                        "version": None,
+                        "executable": None,
+                    },
+                ],
+                "rejected": [
+                    {
+                        "command": "python",
+                        "resolved_path": None,
+                        "present": False,
+                        "usable": False,
+                        "reason_code": "not_found",
+                        "reason": "`python` was not found on PATH.",
+                        "version": None,
+                        "executable": None,
+                    },
+                    {
+                        "command": "python3",
+                        "resolved_path": None,
+                        "present": False,
+                        "usable": False,
+                        "reason_code": "not_found",
+                        "reason": "`python3` was not found on PATH.",
+                        "version": None,
+                        "executable": None,
+                    },
+                    {
+                        "command": "py",
+                        "resolved_path": None,
+                        "present": False,
+                        "usable": False,
+                        "reason_code": "not_found",
+                        "reason": "`py` was not found on PATH.",
+                        "version": None,
+                        "executable": None,
+                    },
+                ],
+            },
+        },
+    }
+    runtime_fixture = {
+        "selected": None,
+        "candidates": [
+            {
+                "source": "workspace_venv",
+                "path": "/workspace/.venv/bin/python",
+                "present": False,
+                "usable": False,
+                "reason_code": "not_found",
+                "reason": "Interpreter not found at: /workspace/.venv/bin/python",
+            },
+            {
+                "source": "command_python",
+                "path": "/missing/python",
+                "present": False,
+                "usable": False,
+                "reason_code": "not_found",
+                "reason": "Interpreter not found at: /missing/python",
+            },
+            {
+                "source": "command_python3",
+                "path": "/missing/python3",
+                "present": False,
+                "usable": False,
+                "reason_code": "not_found",
+                "reason": "Interpreter not found at: /missing/python3",
+            },
+        ],
+    }
+
+    _patch_local_probe(monkeypatch, scenario=scenario)
+    monkeypatch.setattr(
+        runner_mod,
+        "select_python_runtime",
+        lambda *args, **kwargs: _runtime_selection(runtime_fixture),
+    )
+
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": _make_dummy_codex_binary(tmp_path)}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            verification_commands=('python -c "print(\'ok\')"',),
+        ),
+    )
+
+    assert result.exit_code == 1
+    preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert preflight.get("python_runtime", {}).get("selected") is None
+    python_validation = preflight.get("python_validation", {})
+    assert python_validation.get("required") is True
+    assert python_validation.get("enabled") is False
+    assert python_validation.get("reason_code") == "not_found"
+    assert python_validation.get("reason_type") == "discovery"
+    assert python_validation.get("validated_python_executable") is None
+
+    error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error_obj.get("type") == "AgentPreflightFailed"
+    assert error_obj.get("subtype") == "python_unavailable"
+
+
+def test_run_once_uses_validated_python_for_live_shell_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected_runtime_path = str(tmp_path / "toolchain" / "python")
+    scenario = {
+        "preflight": {
+            "commands": {
+                "python": False,
+                "python3": False,
+                "py": False,
+            },
+            "command_probe_details": {
+                "python": {
+                    "command": "python",
+                    "resolved_path": None,
+                    "present": False,
+                    "usable": False,
+                    "reason_code": "not_found",
+                    "reason": "`python` was not found on PATH.",
+                },
+                "python3": {
+                    "command": "python3",
+                    "resolved_path": None,
+                    "present": False,
+                    "usable": False,
+                    "reason_code": "not_found",
+                    "reason": "`python3` was not found on PATH.",
+                },
+                "py": {
+                    "command": "py",
+                    "resolved_path": None,
+                    "present": False,
+                    "usable": False,
+                    "reason_code": "not_found",
+                    "reason": "`py` was not found on PATH.",
+                },
+            },
+            "python_interpreter": {
+                "selected": None,
+                "candidates": [],
+                "rejected": [],
+            },
+        },
+    }
+    runtime_fixture = {
+        "selected": {
+            "source": "sandbox_env",
+            "path": selected_runtime_path,
+            "present": True,
+            "usable": True,
+            "reason_code": None,
+            "reason": None,
+            "version": "3.13.2",
+            "executable": selected_runtime_path,
+        },
+        "candidates": [
+            {
+                "source": "sandbox_env",
+                "path": selected_runtime_path,
+                "present": True,
+                "usable": True,
+                "reason_code": None,
+                "reason": None,
+                "version": "3.13.2",
+                "executable": selected_runtime_path,
+            }
+        ],
+    }
+    pip_probe = {
+        "command": "python -m pip --version",
+        "argv": [selected_runtime_path, "-m", "pip", "--version"],
+        "python_executable": selected_runtime_path,
+        "cwd": str(tmp_path),
+        "passed": True,
+        "exit_code": 0,
+        "timed_out": False,
+        "reason_code": None,
+        "remediation": None,
+        "stdout_tail": "pip 25.0",
+        "stderr_tail": "",
+        "exception": None,
+    }
+
+    _patch_local_probe(monkeypatch, scenario=scenario)
+    monkeypatch.setattr(
+        runner_mod,
+        "select_python_runtime",
+        lambda *args, **kwargs: _runtime_selection(runtime_fixture),
+    )
+    monkeypatch.setattr(runner_mod, "probe_pip_module", lambda *args, **kwargs: dict(pip_probe))
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_python_context_capability",
+        lambda *args, **kwargs: {
+            "command": "python -c <health_probe>",
+            "effective_command": f"'{selected_runtime_path}' -c <health_probe>",
+            "argv": ["sh", "-lc", f"'{selected_runtime_path}' -c '<health_probe>'"],
+            "cwd": str(tmp_path),
+            "passed": True,
+            "exit_code": 0,
+            "timed_out": False,
+            "reason_code": None,
+            "reason_type": None,
+            "reason": None,
+            "remediation": None,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "exception": None,
+            "metadata": {
+                "executable": selected_runtime_path,
+                "version": "3.13.2",
+                "prefix": str(tmp_path / "toolchain"),
+                "base_prefix": str(tmp_path / "toolchain"),
+                "real_prefix": None,
+                "exec_prefix": str(tmp_path / "toolchain"),
+                "base_exec_prefix": str(tmp_path / "toolchain"),
+                "virtual_env": None,
+            },
+        },
+    )
+
+    subprocess_calls: list[list[str]] = []
+
+    class _Proc:
+        def __init__(self, argv: list[str]) -> None:
+            self.args = list(argv)
+            self.returncode = 0
+            self.stdout = "ok\n"
+            self.stderr = ""
+
+    def _fake_run(argv: list[str], **kwargs: Any) -> _Proc:
+        del kwargs
+        subprocess_calls.append(list(argv))
+        return _Proc(argv)
+
+    monkeypatch.setattr(runner_mod.subprocess, "run", _fake_run)
+
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": _make_dummy_codex_binary(tmp_path)}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            verification_commands=('python -c "print(\'ok\')"',),
+        ),
+    )
+
+    assert result.exit_code == 0
+
+    preflight = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    assert (
+        preflight.get("python_runtime", {}).get("selected", {}).get("path")
+        == selected_runtime_path
+    )
+    assert (
+        preflight.get("python_context_probe", {}).get("metadata", {}).get("executable")
+        == selected_runtime_path
+    )
+    assert (
+        preflight.get("python_validation", {}).get("validated_python_executable")
+        == selected_runtime_path
+    )
+
+    verification = json.loads(
+        (result.run_dir / "verification" / "attempt1" / "verification.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert verification.get("python_executable") == selected_runtime_path
+    command_entry = verification.get("commands", [])[0]
+    effective_command = str(command_entry.get("effective_command"))
+    assert selected_runtime_path in effective_command
+    assert not effective_command.lstrip().startswith("python ")
