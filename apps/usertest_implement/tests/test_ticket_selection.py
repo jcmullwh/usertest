@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import yaml
 
@@ -461,7 +461,10 @@ def test_run_dry_run_applies_settings_profile_and_reports_effective_handoff_flag
     assert proc.returncode == 0, proc.stderr or proc.stdout
     payload = json.loads(proc.stdout)
     assert payload["settings"]["profile"] == "custom_profile"
-    assert payload["settings"]["config_path"].endswith("configs\\usertest_implement_settings.yaml")
+    assert PurePosixPath(payload["settings"]["config_path"].replace("\\", "/")).parts[-2:] == (
+        "configs",
+        "usertest_implement_settings.yaml",
+    )
     assert payload["run_request"]["exec_docker_profile"] == "maintenance"
     assert payload["run_request"]["persona_id"] == "thoughtful_maintainer"
     assert payload["run_request"]["mission_id"] == "implement_maintenance_backlog_ticket_v1"

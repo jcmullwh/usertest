@@ -136,6 +136,34 @@ def _marker_verification_command() -> str:
     )
 
 
+def _stub_codex_binary_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fake_probe_commands_local(
+        commands: list[str],
+        *,
+        workspace_dir: Path,
+        env_overrides: dict[str, str] | None = None,
+    ) -> tuple[dict[str, bool], dict[str, object]]:
+        command_map = {cmd: True for cmd in commands}
+        return command_map, {
+            "command_probe_details": {
+                cmd: {"present": True, "source": "test_stub"} for cmd in commands
+            }
+        }
+
+    monkeypatch.setattr(runner_mod, "_probe_commands_local", _fake_probe_commands_local)
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_agent_cli_version",
+        lambda **kwargs: {
+            "ok": True,
+            "argv": [str(kwargs.get("binary", "codex")), "--version"],
+            "returncode": 0,
+            "stdout": "codex test stub\n",
+            "stderr": "",
+        },
+    )
+
+
 def _run_broker_wrapper(*, run_dir: Path, workspace_dir: Path) -> subprocess.CompletedProcess[str]:
     client_root = run_dir / "verification_broker" / "client"
     if os.name == "nt":
@@ -270,6 +298,7 @@ def test_run_once_reuses_broker_verification_without_post_agent_rerun(
 ) -> None:
     runner_root = _setup_runner_root(tmp_path)
     target = _setup_target_repo(tmp_path)
+    _stub_codex_binary_preflight(monkeypatch)
 
     def _fake_run_codex_exec(**kwargs: object) -> object:
         raw_events_path = Path(str(kwargs["raw_events_path"]))
@@ -326,6 +355,7 @@ def test_run_once_uses_latest_broker_result_within_single_attempt(
 ) -> None:
     runner_root = _setup_runner_root(tmp_path)
     target = _setup_target_repo(tmp_path)
+    _stub_codex_binary_preflight(monkeypatch)
 
     def _fake_run_codex_exec(**kwargs: object) -> object:
         raw_events_path = Path(str(kwargs["raw_events_path"]))
@@ -389,6 +419,7 @@ def test_run_once_uses_failed_broker_result_directly_before_followup(
 ) -> None:
     runner_root = _setup_runner_root(tmp_path)
     target = _setup_target_repo(tmp_path)
+    _stub_codex_binary_preflight(monkeypatch)
     state = {"attempt": 0}
 
     def _fake_run_codex_exec(**kwargs: object) -> object:
@@ -456,6 +487,7 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_command_not_request
 ) -> None:
     runner_root = _setup_runner_root(tmp_path)
     target = _setup_target_repo(tmp_path)
+    _stub_codex_binary_preflight(monkeypatch)
 
     def _fake_run_codex_exec(**kwargs: object) -> object:
         raw_events_path = Path(str(kwargs["raw_events_path"]))
