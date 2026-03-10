@@ -1,0 +1,711 @@
+Metadata-Version: 2.4
+Name: hishel
+Version: 1.1.9
+Summary:  Elegant HTTP Caching for Python
+Project-URL: Homepage, https://hishel.com
+Project-URL: Source, https://github.com/karpetrosyan/hishel
+Author-email: Kar Petrosyan <kar.petrosyanpy@gmail.com>
+License-Expression: BSD-3-Clause
+License-File: LICENSE
+Classifier: Development Status :: 3 - Alpha
+Classifier: Environment :: Web Environment
+Classifier: Framework :: AsyncIO
+Classifier: Framework :: Trio
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: BSD License
+Classifier: Operating System :: OS Independent
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3 :: Only
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Classifier: Programming Language :: Python :: 3.13
+Classifier: Programming Language :: Python :: 3.14
+Classifier: Topic :: Internet :: WWW/HTTP
+Requires-Python: >=3.10
+Requires-Dist: msgpack>=1.1.2
+Requires-Dist: typing-extensions>=4.14.1
+Provides-Extra: async
+Requires-Dist: anyio>=4.9.0; extra == 'async'
+Requires-Dist: anysqlite>=0.0.5; extra == 'async'
+Provides-Extra: fastapi
+Requires-Dist: fastapi>=0.119.1; extra == 'fastapi'
+Provides-Extra: httpx
+Requires-Dist: anyio>=4.9.0; extra == 'httpx'
+Requires-Dist: anysqlite>=0.0.5; extra == 'httpx'
+Requires-Dist: httpx>=0.28.1; extra == 'httpx'
+Provides-Extra: requests
+Requires-Dist: requests>=2.32.5; extra == 'requests'
+Description-Content-Type: text/markdown
+
+
+<p align="center">
+  <img alt="Hishel Logo" width="350" src="https://raw.githubusercontent.com/karpetrosyan/hishel/master/docs/static/Shelkopryad_350x250_yellow.png#gh-dark-mode-only">
+  <img alt="Hishel Logo" width="350" src="https://raw.githubusercontent.com/karpetrosyan/hishel/master/docs/static/Shelkopryad_350x250_black.png#gh-light-mode-only">
+</p>
+
+<h1 align="center">Hishel</h1>
+
+<p align="center">
+  <strong>Elegant HTTP Caching for Python</strong>
+</p>
+
+<p align="center">
+  <a href="https://pypi.org/project/hishel">
+    <img src="https://img.shields.io/pypi/v/hishel.svg" alt="PyPI version">
+  </a>
+  <a href="https://pypi.org/project/hishel">
+    <img src="https://img.shields.io/pypi/pyversions/hishel.svg" alt="Python versions">
+  </a>
+  <a href="https://github.com/karpetrosyan/hishel/blob/master/LICENSE">
+    <img src="https://img.shields.io/pypi/l/hishel" alt="License">
+  </a>
+  <a href="https://coveralls.io/github/karpetrosyan/hishel">
+    <img src="https://img.shields.io/coverallsCoverage/github/karpetrosyan/hishel" alt="Coverage">
+  </a>
+  <a href="https://static.pepy.tech/badge/hishel/month">
+    <img src="https://static.pepy.tech/badge/hishel/month" alt="Downloads">
+  </a>
+</p>
+
+---
+
+**Hishel** (հիշել, *to remember* in Armenian) is a modern HTTP caching library for Python that implements [RFC 9111](https://www.rfc-editor.org/rfc/rfc9111.html) specifications. It provides seamless caching integration for popular HTTP clients with minimal code changes.
+
+## ✨ Features
+
+- 🎯 **RFC 9111 Compliant** - Fully compliant with the latest HTTP caching specification
+- 🔌 **Easy Integration** - Drop-in support for HTTPX, Requests, ASGI, FastAPI, and BlackSheep
+- 💾 **Flexible Storage** - SQLite backend with more coming soon
+- ⚡ **High Performance** - Efficient caching with minimal overhead
+- 🔄 **Async & Sync** - Full support for both synchronous and asynchronous workflows
+- 🎨 **Type Safe** - Fully typed with comprehensive type hints
+- 🧪 **Well Tested** - Extensive test coverage and battle-tested
+- 🎛️ **Configurable** - Fine-grained control over caching behavior with flexible policies
+- 💨 **Memory Efficient** - Streaming support prevents loading large payloads into memory
+- 🌐 **Universal** - Works with any ASGI application (Starlette, Litestar, BlackSheep, etc.)
+- 🎯 **GraphQL Support** - Cache GraphQL queries with body-sensitive content caching
+
+## 📦 Installation
+
+```bash
+pip install hishel
+```
+
+### Optional Dependencies
+
+Install with specific integration support:
+
+```bash
+pip install hishel[httpx]      # For HTTPX support
+pip install hishel[requests]   # For Requests support
+pip install hishel[fastapi]    # For FastAPI support (includes ASGI)
+```
+
+Or install multiple:
+
+```bash
+pip install hishel[httpx,requests,fastapi]
+```
+
+> [!NOTE]
+> ASGI middleware has no extra dependencies - it's included in the base installation.
+ 
+## 🚀 Quick Start
+
+### With HTTPX
+
+**Synchronous:**
+
+```python
+from hishel.httpx import SyncCacheClient
+
+client = SyncCacheClient()
+
+# First request - fetches from origin
+response = client.get("https://api.example.com/data")
+print(response.extensions["hishel_from_cache"])  # False
+
+# Second request - served from cache
+response = client.get("https://api.example.com/data")
+print(response.extensions["hishel_from_cache"])  # True
+```
+
+**Asynchronous:**
+
+```python
+from hishel.httpx import AsyncCacheClient
+
+async with AsyncCacheClient() as client:
+    # First request - fetches from origin
+    response = await client.get("https://api.example.com/data")
+    print(response.extensions["hishel_from_cache"])  # False
+    
+    # Second request - served from cache
+    response = await client.get("https://api.example.com/data")
+    print(response.extensions["hishel_from_cache"])  # True
+```
+
+### With Requests
+
+```python
+import requests
+from hishel.requests import CacheAdapter
+
+session = requests.Session()
+session.mount("https://", CacheAdapter())
+session.mount("http://", CacheAdapter())
+
+# First request - fetches from origin
+response = session.get("https://api.example.com/data")
+
+# Second request - served from cache
+response = session.get("https://api.example.com/data")
+print(response.headers.get("X-Hishel-From-Cache"))  # "True"
+```
+
+### With ASGI Applications
+
+Add caching middleware to any ASGI application:
+
+```python
+from hishel.asgi import ASGICacheMiddleware
+
+# Wrap your ASGI app
+app = ASGICacheMiddleware(app)
+
+# Or configure with options
+from hishel import AsyncSqliteStorage, CacheOptions, SpecificationPolicy
+
+app = ASGICacheMiddleware(
+    app,
+    storage=AsyncSqliteStorage(),
+    policy=SpecificationPolicy(
+      cache_options=CacheOptions(shared=True)
+    ),
+)
+```
+
+### With FastAPI
+
+Add Cache-Control headers using the `cache()` dependency:
+
+```python
+from fastapi import FastAPI
+from hishel.fastapi import cache
+
+app = FastAPI()
+
+@app.get("/api/data", dependencies=[cache(max_age=300, public=True)])
+async def get_data():
+    # Cache-Control: public, max-age=300
+    return {"data": "cached for 5 minutes"}
+  
+# Optionally wrap with ASGI middleware for local caching according to specified rules
+from hishel.asgi import ASGICacheMiddleware
+from hishel import AsyncSqliteStorage
+
+app = ASGICacheMiddleware(app, storage=AsyncSqliteStorage())
+```
+
+### With BlackSheep
+
+Use BlackSheep's native `cache_control` decorator with Hishel's ASGI middleware:
+
+```python
+from blacksheep import Application, get
+from blacksheep.server.headers.cache import cache_control
+
+app = Application()
+
+@get("/api/data")
+@cache_control(max_age=300, public=True)
+async def get_data():
+    # Cache-Control: public, max-age=300
+    return {"data": "cached for 5 minutes"}
+```
+
+## 🎛️ Advanced Configuration
+
+### Caching Policies
+
+Hishel supports two types of caching policies:
+
+**SpecificationPolicy** - RFC 9111 compliant HTTP caching (default):
+
+```python
+from hishel import CacheOptions, SpecificationPolicy
+from hishel.httpx import SyncCacheClient
+
+client = SyncCacheClient(
+    policy=SpecificationPolicy(
+        cache_options=CacheOptions(
+            shared=False,                              # Use as private cache (browser-like)
+            supported_methods=["GET", "HEAD", "POST"], # Cache GET, HEAD, and POST
+            allow_stale=True                           # Allow serving stale responses
+        )
+    )
+)
+```
+
+**FilterPolicy** - Custom filtering logic for fine-grained control:
+
+```python
+from hishel import FilterPolicy, BaseFilter, Request
+from hishel.httpx import AsyncCacheClient
+
+class CacheOnlyAPIRequests(BaseFilter[Request]):
+    def needs_body(self) -> bool:
+        return False
+    
+    def apply(self, item: Request, body: bytes | None) -> bool:
+        return "/api/" in str(item.url)
+
+client = AsyncCacheClient(
+    policy=FilterPolicy(
+        request_filters=[CacheOnlyAPIRequests()]
+    )
+)
+```
+
+[Learn more about policies →](https://hishel.com/dev/policies/)
+
+### Custom Storage Backend
+
+```python
+from hishel import SyncSqliteStorage
+from hishel.httpx import SyncCacheClient
+
+storage = SyncSqliteStorage(
+    database_path="my_cache.db",
+    default_ttl=7200.0,           # Cache entries expire after 2 hours
+    refresh_ttl_on_access=True    # Reset TTL when accessing cached entries
+)
+
+client = SyncCacheClient(storage=storage)
+```
+
+### GraphQL and Body-Sensitive Caching
+
+Cache GraphQL queries and other POST requests by including the request body in the cache key.
+
+**Using per-request header:**
+
+```python
+from hishel import FilterPolicy
+from hishel.httpx import SyncCacheClient
+
+client = SyncCacheClient(
+    policy=FilterPolicy()
+)
+
+# Cache GraphQL queries - different queries get different cache entries
+graphql_query = """
+    query GetUser($id: ID!) {
+        user(id: $id) {
+            name
+            email
+        }
+    }
+"""
+
+response = client.post(
+    "https://api.example.com/graphql",
+    json={"query": graphql_query, "variables": {"id": "123"}},
+    headers={"X-Hishel-Body-Key": "true"}  # Enable body-based caching
+)
+
+# Different query will be cached separately
+response = client.post(
+    "https://api.example.com/graphql",
+    json={"query": graphql_query, "variables": {"id": "456"}},
+    headers={"X-Hishel-Body-Key": "true"}
+)
+```
+
+**Using global configuration:**
+
+```python
+from hishel.httpx import SyncCacheClient
+from hishel import FilterPolicy
+
+# Enable body-based caching for all requests
+client = SyncCacheClient(policy=FilterPolicy(use_body_key=True))
+
+# All POST requests automatically include body in cache key
+response = client.post(
+    "https://api.example.com/graphql",
+    json={"query": graphql_query, "variables": {"id": "123"}}
+)
+```
+
+## 🏗️ Architecture
+
+Hishel uses a **sans-I/O state machine** architecture that separates HTTP caching logic from I/O operations:
+
+- ✅ **Correct** - Fully RFC 9111 compliant
+- ✅ **Testable** - Easy to test without network dependencies
+- ✅ **Flexible** - Works with any HTTP client or server
+- ✅ **Type Safe** - Clear state transitions with full type hints
+
+## 🔮 Roadmap
+
+We're actively working on:
+
+- 🎯 Performance optimizations
+- 🎯 More integrations
+- 🎯 Partial responses support
+
+## 📚 Documentation
+
+Comprehensive documentation is available at [https://hishel.com/dev](https://hishel.com/dev)
+
+- [Getting Started](https://hishel.com)
+- [HTTPX Integration](https://hishel.com/dev/integrations/httpx)
+- [Requests Integration](https://hishel.com/dev/integrations/requests)
+- [ASGI Integration](https://hishel.com/dev/asgi)
+- [FastAPI Integration](https://hishel.com/dev/fastapi)
+- [BlackSheep Integration](https://hishel.com/dev/integrations/blacksheep)
+- [GraphQL Integration](https://hishel.com/dev/integrations/graphql)
+- [Storage Backends](https://hishel.com/dev/storages)
+- [Request/Response Metadata](https://hishel.com/dev/metadata)
+- [RFC 9111 Specification](https://hishel.com/dev/specification)
+
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request. For major changes, please open an issue first to discuss what you would like to change.
+
+See our [Contributing Guide](https://hishel.com/dev/contributing) for more details.
+
+## 📄 License
+
+This project is licensed under the BSD-3-Clause License - see the [LICENSE](LICENSE) file for details.
+
+## 💖 Support
+
+If you find Hishel useful, please consider:
+
+- ⭐ Starring the repository
+- 🐛 Reporting bugs and issues
+- 💡 Suggesting new features
+- 📖 Improving documentation
+- ☕ [Buying me a coffee](https://buymeacoffee.com/karpetrosyan)
+
+## 🙏 Acknowledgments
+
+Hishel is inspired by and builds upon the excellent work in the Python HTTP ecosystem, particularly:
+
+- [HTTPX](https://github.com/encode/httpx) - A next-generation HTTP client for Python
+- [Requests](https://github.com/psf/requests) - The classic HTTP library for Python
+- [RFC 9111](https://www.rfc-editor.org/rfc/rfc9111.html) - HTTP Caching specification
+
+---
+
+<p align="center">
+  <strong>Made with ❤️ by <a href="https://github.com/karpetrosyan">Kar Petrosyan</a></strong>
+</p>
+
+## What's Changed in 1.1.9
+### ⚙️ Miscellaneous Tasks
+
+* chore: drop python 3.9 support by @CharString in [#418](https://github.com/karpetrosyan/hishel/pull/418)
+### 📦 Dependencies
+
+* chore(deps-dev): bump the python-packages group across 1 directory with 5 updates by @dependabot[bot] in [#440](https://github.com/karpetrosyan/hishel/pull/440)
+
+### Contributors
+* @CharString
+* @dependabot[bot]
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.1.8...1.1.9
+
+## What's Changed in 1.1.8
+### ⚙️ Miscellaneous Tasks
+
+* chore(ci): remove redis action by @karpetrosyan in [#428](https://github.com/karpetrosyan/hishel/pull/428)
+### 🐛 Bug Fixes
+
+* fix: prevent race conditions by @karpetrosyan in [#436](https://github.com/karpetrosyan/hishel/pull/436)
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.1.7...1.1.8
+
+## What's Changed in 1.1.7
+### ♻️ Refactoring
+
+* refactor(storage): create sqlite database path only when creating connections by @jeefberkey in [#426](https://github.com/karpetrosyan/hishel/pull/426)
+### ⚙️ Miscellaneous Tasks
+
+* chore(deps-dev): bump the python-packages group with 5 updates by @dependabot[bot] in [#424](https://github.com/karpetrosyan/hishel/pull/424)
+### 🐛 Bug Fixes
+
+* fix(cache): Lambda parameter name clashes the loop variable being closed over by @dump247 in [#427](https://github.com/karpetrosyan/hishel/pull/427)
+### 📚 Documentation
+
+* add release process guidelines for maintainers by @karpetrosyan
+### 🚀 Features
+
+* Feature/accept pathlib path in SqliteStorage by @daudef in [#419](https://github.com/karpetrosyan/hishel/pull/419)
+
+### Contributors
+* @karpetrosyan
+* @daudef
+* @dependabot[bot]
+* @jeefberkey
+* @dump247
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.1.6...1.1.7
+
+## What's Changed in 1.1.6
+### 📚 Documentation
+
+* remove some stale httpx configs by @karpetrosyan
+### 🚀 Features
+
+* Add support for request no-cache directive by @karpetrosyan in [#416](https://github.com/karpetrosyan/hishel/pull/416)
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.1.5...1.1.6
+
+## What's Changed in 1.1.5
+### 🐛 Bug Fixes
+
+* filter out soft-deleted, expired and incomplete entries in `get_entries` by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.1.4...1.1.5
+
+## What's Changed in 1.1.4
+### 🐛 Bug Fixes
+
+* don't raise an error on consumed streams that were read into memory by @karpetrosyan
+* close sqlite connections properly by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.1.3...1.1.4
+
+## What's Changed in 1.1.3
+### ⚙️ Miscellaneous Tasks
+
+* improve git-cliff docs by @karpetrosyan
+### 🐛 Bug Fixes
+
+* fix: add BaseFilter to __all__ exports by @martinblech in [#408](https://github.com/karpetrosyan/hishel/pull/408)
+* fix: set `after_revalidation=True` for `NeedsToBeUpdated` -> `FromCache` transition by @jlopex in [#402](https://github.com/karpetrosyan/hishel/pull/402)
+
+### Contributors
+* @karpetrosyan
+* @martinblech
+* @jlopex
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.1.2...1.1.3
+
+## What's Changed in 1.1.2
+### 🐛 Bug Fixes
+
+* respect shared option when excluding unstorable headers by @karpetrosyan
+* remove s-maxage consideration for private caches by @karpetrosyan
+* ensure 304 responses don't leak by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+* @jlopex
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.1.1...1.1.2
+
+## What's Changed in 1.1.1
+### ⚙️ Miscellaneous Tasks
+
+* chore(deps-dev): bump the python-packages group with 10 updates by @dependabot[bot] in [#396](https://github.com/karpetrosyan/hishel/pull/396)
+### 📦 Dependencies
+
+* chore(deps): bump astral-sh/setup-uv from 5 to 7 by @dependabot[bot] in [#393](https://github.com/karpetrosyan/hishel/pull/393)
+* chore(deps): bump actions/download-artifact from 4 to 6 by @dependabot[bot] in [#394](https://github.com/karpetrosyan/hishel/pull/394)
+* chore(deps): bump actions/upload-artifact from 4 to 5 by @dependabot[bot] in [#395](https://github.com/karpetrosyan/hishel/pull/395)
+
+### Contributors
+* @karpetrosyan
+* @dependabot[bot]
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.1.0...1.1.1
+
+## What's Changed in 1.1.0
+### ⚙️ Miscellaneous Tasks
+
+* add in memory example by @karpetrosyan
+### 🐛 Bug Fixes
+
+* pass any response with non-expected status code on revalidation to client by @karpetrosyan
+* pass any response with non-expected status code on revalidation to client by @karpetrosyan
+### 🚀 Features
+
+* allow setting storage base with via `database_path` for sqlite storage by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.0.0...1.1.0
+
+## What's Changed in 1.0.0
+### ⚙️ Miscellaneous Tasks
+
+* add examples, improve docs by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.0.0b1...1.0.0
+
+## What's Changed in 1.0.0b1
+### ♻️ Refactoring
+
+* add policies by @karpetrosyan
+### ⚙️ Miscellaneous Tasks
+
+* add graphql docs by @karpetrosyan
+* improve sans-io diagram colors by @karpetrosyan
+### 🐛 Bug Fixes
+
+* filter out `Transfer-Encoding` header for asgi responses by @karpetrosyan
+* body-sensitive responses caching by @karpetrosyan
+### 🚀 Features
+
+* add global `use_body_key` setting by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.0.0.dev3...1.0.0b1
+
+## What's Changed in 1.0.0.dev3
+### ♻️ Refactoring
+
+* automatically generate httpx sync integration from async by @karpetrosyan
+* replace pairs with entries, simplify storage API by @karpetrosyan
+### ⚙️ Miscellaneous Tasks
+
+* more robust compressed response caching by @karpetrosyan
+* add custom integrations docs by @karpetrosyan
+* simplify metadata docs by @karpetrosyan
+### 🐛 Bug Fixes
+
+* add date header for proper age calculation by @karpetrosyan
+* handle httpx iterable usage instead of iterator correctly by @karpetrosyan
+* fix compressed data caching for requests by @karpetrosyan
+* raise on consumed httpx streams, which we can't store as is (it's already decoded) by @karpetrosyan
+* add missing permissions into `publish.yml` by @karpetrosyan
+### 🚀 Features
+
+* add logging for asgi by @karpetrosyan
+* add blacksheep integration examples by @karpetrosyan
+* add integrations with fastapi and asgi by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.0.0.dev2...1.0.0.dev3
+
+## What's Changed in 1.0.0.dev2
+### ⚙️ Miscellaneous Tasks
+
+* fix time travel date, explicitly specify the timezone by @karpetrosyan
+* add import without extras check in ci by @karpetrosyan
+* remove redundant utils and tests by @karpetrosyan
+### 🐛 Bug Fixes
+
+* don't raise an error on 3xx during revalidation by @karpetrosyan
+* fix check for storing auth requests by @karpetrosyan
+### 🚀 Features
+
+* add hishel_created_at response metadata by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.0.0.dev1...1.0.0.dev2
+
+## What's Changed in 1.0.0.dev1
+### ⚙️ Miscellaneous Tasks
+
+* remove some redundant utils methods by @karpetrosyan
+### 📦 Dependencies
+
+* improve git-cliff by @karpetrosyan
+* install async extra with httpx by @karpetrosyan
+* make `anysqlite` optional dependency by @karpetrosyan
+* make httpx and async libs optional dependencies by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/1.0.0.dev0...1.0.0.dev1
+
+## What's Changed in 1.0.0.dev0
+### ⚙️ Miscellaneous Tasks
+
+* improve docs versioning, deploy dev doc on ci by @karpetrosyan
+* use mike powered versioning by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/0.1.5...1.0.0.dev0
+
+## What's Changed in 0.1.5
+### ⚙️ Miscellaneous Tasks
+
+* remove some redundant files from repo by @karpetrosyan
+### 🐛 Bug Fixes
+
+* fix some line breaks by @karpetrosyan
+### 🚀 Features
+
+* increase requests buffer size to 128KB, disable charset detection by @karpetrosyan
+* feat: add close method to storages API by @karpetrosyan in [#384](https://github.com/karpetrosyan/hishel/pull/384)
+* better cache-control parsing by @karpetrosyan
+* set chunk size to 128KB for httpx to reduce SQLite read/writes by @karpetrosyan
+
+### Contributors
+* @karpetrosyan
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/0.1.4...0.1.5
+
+## What's Changed in 0.1.4
+### ⚙️ Miscellaneous Tasks
+
+* move some tests to beta by @karpetrosyan
+* add sqlite tests for new storage by @karpetrosyan
+* temporary remove python3.14 from CI by @karpetrosyan
+* chore(internal): remove src folder by @karpetrosyan in [#373](https://github.com/karpetrosyan/hishel/pull/373)
+* chore: improve CI by @karpetrosyan in [#369](https://github.com/karpetrosyan/hishel/pull/369)
+### 🐛 Bug Fixes
+
+* fix beta imports by @karpetrosyan
+* create an sqlite file in a cache folder by @karpetrosyan
+### 🚀 Features
+
+* better async implemetation for sqlite storage by @karpetrosyan
+* get rid of some locks from sqlite storage by @karpetrosyan
+* add sqlite storage for beta storages by @karpetrosyan
+* feat: allow already consumed streams with `CacheTransport` by @jamesbraza in [#377](https://github.com/karpetrosyan/hishel/pull/377)
+* feat: add support for a sans-IO API by @karpetrosyan in [#366](https://github.com/karpetrosyan/hishel/pull/366)
+
+### Contributors
+* @karpetrosyan
+* @jamesbraza
+* @GugNersesyan
+* @dependabot[bot]
+* @mmdbalkhi
+* @AstraLuma
+* @deathaxe
+
+**Full Changelog**: https://github.com/karpetrosyan/hishel/compare/0.1.3...0.1.4
+
