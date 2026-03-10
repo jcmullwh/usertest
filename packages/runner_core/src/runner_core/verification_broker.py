@@ -20,11 +20,13 @@ from runner_core.workspace_state_hash import WorkspaceStateHash
 
 _SHELL_PROBE_TIMEOUT_SECONDS = 2.0
 _POWERSHELL_PROBE_TIMEOUT_SECONDS = 10.0
-_BROKER_DEFAULT_INTERNAL_DEADLINE_SECONDS = 10_800.0
+_BROKER_DEFAULT_VERIFICATION_TIMEOUT_SECONDS = 300.0
+_BROKER_INTERNAL_DEADLINE_GRACE_SECONDS = 300.0
 _BROKER_CLIENT_WAIT_GRACE_SECONDS = 15.0
 _BROKER_STOP_JOIN_TIMEOUT_SECONDS = 10.0
 _BROKER_PROGRESS_HEARTBEAT_SECONDS = 5.0
-_BROKER_TERMINAL_STATUSES = {"passed", "failed", "timed_out", "cancelled"}
+_BROKER_TERMINAL_STATUSES = {"passed", "failed", "timed_out", "broker_error"}
+_BROKER_SUMMARY_TERMINAL_REASONS = _BROKER_TERMINAL_STATUSES | {"cancelled"}
 _JSON_ATOMIC_REPLACE_RETRIES = 10
 _JSON_ATOMIC_REPLACE_RETRY_SECONDS = 0.05
 
@@ -35,6 +37,7 @@ class VerificationBrokerRequestResult:
     attempt: int
     status: str
     terminal_reason: str | None
+    timeout_seconds: float | None
     started_utc: str | None
     deadline_utc: str | None
     deadline_seconds: float | None
@@ -57,6 +60,7 @@ class VerificationBrokerRequestResult:
             "attempt": self.attempt,
             "status": self.status,
             "terminal_reason": self.terminal_reason,
+            "timeout_seconds": self.timeout_seconds,
             "started_utc": self.started_utc,
             "deadline_utc": self.deadline_utc,
             "deadline_seconds": self.deadline_seconds,
@@ -87,6 +91,14 @@ class VerificationLauncher:
     executable: str
     shell_argv_prefix: tuple[str, ...]
     broker_wrapper_name: str
+
+
+@dataclass(frozen=True)
+class VerificationBrokerLifecycle:
+    timeout_seconds: float
+    deadline_seconds: float
+    client_wait_timeout_seconds: float
+    stop_join_timeout_seconds: float
 
 
 def resolve_verification_launcher(
@@ -278,12 +290,48 @@ def _compute_broker_internal_deadline_seconds(
     verification_timeout_seconds: float | None,
     verification_command_count: int,
 ) -> float:
-    if verification_timeout_seconds is None or verification_timeout_seconds <= 0:
-        return _BROKER_DEFAULT_INTERNAL_DEADLINE_SECONDS
+    timeout_seconds = _resolve_verification_timeout_seconds(
+        verification_timeout_seconds=verification_timeout_seconds
+    )
     command_count = max(1, int(verification_command_count))
     return max(
         300.0,
-        float(verification_timeout_seconds) * float(command_count) + 300.0,
+        float(timeout_seconds) * float(command_count) + _BROKER_INTERNAL_DEADLINE_GRACE_SECONDS,
+    )
+
+
+def _resolve_verification_timeout_seconds(
+    *,
+    verification_timeout_seconds: float | None,
+) -> float:
+    if verification_timeout_seconds is None or verification_timeout_seconds <= 0:
+        return _BROKER_DEFAULT_VERIFICATION_TIMEOUT_SECONDS
+    return max(0.1, float(verification_timeout_seconds))
+
+
+def resolve_verification_broker_lifecycle(
+    *,
+    verification_timeout_seconds: float | None,
+    verification_command_count: int,
+) -> VerificationBrokerLifecycle:
+    timeout_seconds = _resolve_verification_timeout_seconds(
+        verification_timeout_seconds=verification_timeout_seconds
+    )
+    deadline_seconds = _compute_broker_internal_deadline_seconds(
+        verification_timeout_seconds=timeout_seconds,
+        verification_command_count=verification_command_count,
+    )
+    client_wait_timeout_seconds = _compute_client_wait_timeout(
+        internal_deadline_seconds=deadline_seconds
+    )
+    return VerificationBrokerLifecycle(
+        timeout_seconds=timeout_seconds,
+        deadline_seconds=deadline_seconds,
+        client_wait_timeout_seconds=client_wait_timeout_seconds,
+        stop_join_timeout_seconds=min(
+            client_wait_timeout_seconds,
+            _BROKER_STOP_JOIN_TIMEOUT_SECONDS,
+        ),
     )
 
 
@@ -361,12 +409,13 @@ class VerificationBrokerAttempt:
         self._request_counter = 0
         self._results: list[VerificationBrokerRequestResult] = []
         self._results_lock = threading.Lock()
+        self._terminal_request_ids: set[str] = set()
         self._active_request_lock = threading.Lock()
         self._active_cancel_event: threading.Event | None = None
         self._stop = threading.Event()
         self._request_settle_seconds = 2.0
         self._drain_deadline_monotonic: float | None = None
-        self._internal_deadline_seconds = _compute_broker_internal_deadline_seconds(
+        self._lifecycle = resolve_verification_broker_lifecycle(
             verification_timeout_seconds=verification_timeout_seconds,
             verification_command_count=verification_command_count,
         )
@@ -381,14 +430,16 @@ class VerificationBrokerAttempt:
         )
         self._client = self._write_client_files(
             python_command=python_command,
-            wait_timeout_seconds=_compute_client_wait_timeout(
-                internal_deadline_seconds=self._internal_deadline_seconds,
-            ),
+            wait_timeout_seconds=self._lifecycle.client_wait_timeout_seconds,
         )
 
     @property
     def client(self) -> VerificationBrokerClient:
         return self._client
+
+    @property
+    def lifecycle(self) -> VerificationBrokerLifecycle:
+        return self._lifecycle
 
     def start(self) -> None:
         self.requests_dir.mkdir(parents=True, exist_ok=True)
@@ -411,7 +462,7 @@ class VerificationBrokerAttempt:
             if self._active_cancel_event is not None:
                 self._active_cancel_event.set()
         if join_timeout_seconds is None:
-            join_timeout_seconds = _BROKER_STOP_JOIN_TIMEOUT_SECONDS
+            join_timeout_seconds = self._lifecycle.stop_join_timeout_seconds
         self._thread.join(timeout=join_timeout_seconds)
 
     def latest_success_result(self) -> VerificationBrokerRequestResult | None:
@@ -516,16 +567,17 @@ class VerificationBrokerAttempt:
         response_path = self.responses_dir / f"{request_id}.json"
         started_utc = self.utc_now_fn()
         deadline_utc = _compute_deadline_utc(
-            started_utc, deadline_seconds=self._internal_deadline_seconds
+            started_utc, deadline_seconds=self._lifecycle.deadline_seconds
         )
         result = VerificationBrokerRequestResult(
             request_id=request_id,
             attempt=self.attempt_number,
-            status="cancelled",
-            terminal_reason="cancelled",
+            status="broker_error",
+            terminal_reason="broker_error",
+            timeout_seconds=self._lifecycle.timeout_seconds,
             started_utc=started_utc,
             deadline_utc=deadline_utc,
-            deadline_seconds=self._internal_deadline_seconds,
+            deadline_seconds=self._lifecycle.deadline_seconds,
             last_updated_utc=self.utc_now_fn(),
             finished_utc=self.utc_now_fn(),
             workspace_hash_after_verification=None,
@@ -550,31 +602,34 @@ class VerificationBrokerAttempt:
                 "finished_utc": self.utc_now_fn(),
                 "wall_seconds": 0.0,
                 "passed": False,
-                "status": "cancelled",
-                "terminal_reason": "cancelled",
+                "status": "broker_error",
+                "terminal_reason": "broker_error",
+                "timeout_seconds": self._lifecycle.timeout_seconds,
+                "deadline_seconds": self._lifecycle.deadline_seconds,
                 "cancelled": True,
                 "timed_out": False,
                 "failure_reason": reason,
                 "commands": [],
             },
         )
-        self._record_result(result=result, response_path=response_path)
+        self._record_terminal_result(result=result, response_path=response_path)
 
     def _handle_request(self, *, request_id: str, request_path: Path) -> None:
         response_path = self.responses_dir / f"{request_id}.json"
         started_utc = self.utc_now_fn()
         deadline_utc = _compute_deadline_utc(
-            started_utc, deadline_seconds=self._internal_deadline_seconds
+            started_utc, deadline_seconds=self._lifecycle.deadline_seconds
         )
         if self.verifier is None or self.workspace_hash_fn is None:
             result = VerificationBrokerRequestResult(
                 request_id=request_id,
                 attempt=self.attempt_number,
-                status="failed",
-                terminal_reason="failed",
+                status="broker_error",
+                terminal_reason="broker_error",
+                timeout_seconds=self._lifecycle.timeout_seconds,
                 started_utc=started_utc,
                 deadline_utc=deadline_utc,
-                deadline_seconds=self._internal_deadline_seconds,
+                deadline_seconds=self._lifecycle.deadline_seconds,
                 last_updated_utc=self.utc_now_fn(),
                 finished_utc=self.utc_now_fn(),
                 workspace_hash_after_verification=None,
@@ -588,7 +643,7 @@ class VerificationBrokerAttempt:
                 progress=None,
                 verification_summary=None,
             )
-            self._record_result(result=result, response_path=response_path)
+            self._record_terminal_result(result=result, response_path=response_path)
             return
         try:
             payload = json.loads(request_path.read_text(encoding="utf-8"))
@@ -596,11 +651,12 @@ class VerificationBrokerAttempt:
             result = VerificationBrokerRequestResult(
                 request_id=request_id,
                 attempt=self.attempt_number,
-                status="failed",
-                terminal_reason="failed",
+                status="broker_error",
+                terminal_reason="broker_error",
+                timeout_seconds=self._lifecycle.timeout_seconds,
                 started_utc=started_utc,
                 deadline_utc=deadline_utc,
-                deadline_seconds=self._internal_deadline_seconds,
+                deadline_seconds=self._lifecycle.deadline_seconds,
                 last_updated_utc=self.utc_now_fn(),
                 finished_utc=self.utc_now_fn(),
                 workspace_hash_after_verification=None,
@@ -614,7 +670,7 @@ class VerificationBrokerAttempt:
                 progress=None,
                 verification_summary=None,
             )
-            self._record_result(result=result, response_path=response_path)
+            self._record_terminal_result(result=result, response_path=response_path)
             return
 
         token = payload.get("request_token")
@@ -622,11 +678,12 @@ class VerificationBrokerAttempt:
             result = VerificationBrokerRequestResult(
                 request_id=request_id,
                 attempt=self.attempt_number,
-                status="failed",
-                terminal_reason="failed",
+                status="broker_error",
+                terminal_reason="broker_error",
+                timeout_seconds=self._lifecycle.timeout_seconds,
                 started_utc=started_utc,
                 deadline_utc=deadline_utc,
-                deadline_seconds=self._internal_deadline_seconds,
+                deadline_seconds=self._lifecycle.deadline_seconds,
                 last_updated_utc=self.utc_now_fn(),
                 finished_utc=self.utc_now_fn(),
                 workspace_hash_after_verification=None,
@@ -640,7 +697,7 @@ class VerificationBrokerAttempt:
                 progress=None,
                 verification_summary=None,
             )
-            self._record_result(result=result, response_path=response_path)
+            self._record_terminal_result(result=result, response_path=response_path)
             return
 
         if self._stop.is_set():
@@ -653,9 +710,14 @@ class VerificationBrokerAttempt:
 
         progress_sequence = 0
         cancel_event = threading.Event()
-        deadline_monotonic = time.monotonic() + self._internal_deadline_seconds
+        request_started_monotonic = time.monotonic()
+        deadline_monotonic = request_started_monotonic + self._lifecycle.deadline_seconds
+        self._request_counter += 1
+        request_index = self._request_counter
 
         def _progress_snapshot(payload: dict[str, Any] | None = None, *, status: str) -> None:
+            if self._has_terminal_result(request_id):
+                return
             nonlocal progress_sequence
             progress_sequence += 1
             normalized = _normalize_progress_snapshot(payload)
@@ -668,9 +730,10 @@ class VerificationBrokerAttempt:
                 attempt=self.attempt_number,
                 status=status,
                 terminal_reason=None,
+                timeout_seconds=self._lifecycle.timeout_seconds,
                 started_utc=started_utc,
                 deadline_utc=deadline_utc,
-                deadline_seconds=self._internal_deadline_seconds,
+                deadline_seconds=self._lifecycle.deadline_seconds,
                 last_updated_utc=normalized.get("updated_utc"),
                 finished_utc=None,
                 workspace_hash_after_verification=None,
@@ -696,38 +759,171 @@ class VerificationBrokerAttempt:
             status="pending",
         )
 
-        try:
-            self._request_counter += 1
-            _progress_snapshot(
-                {
-                    "phase": "starting",
-                    "message": "verification started",
-                },
-                status="running",
-            )
+        verifier_done = threading.Event()
+        verifier_summary: dict[str, Any] | None = None
+        verifier_error: Exception | None = None
+
+        def _run_verifier() -> None:
+            nonlocal verifier_summary, verifier_error
             try:
-                summary = self.verifier(
-                    self._request_counter,
-                    cancel_event=cancel_event,
-                    deadline_monotonic=deadline_monotonic,
-                    deadline_utc=deadline_utc,
-                    deadline_seconds=self._internal_deadline_seconds,
-                    progress_callback=_progress_snapshot,
+                _progress_snapshot(
+                    {
+                        "phase": "starting",
+                        "message": "verification started",
+                    },
+                    status="running",
                 )
-            except TypeError as exc:
-                exc_text = str(exc)
-                if "unexpected keyword argument" not in exc_text:
-                    raise
-                summary = self.verifier(self._request_counter)
-        except Exception as exc:  # noqa: BLE001
+                try:
+                    verifier_summary = self.verifier(
+                        request_index,
+                        cancel_event=cancel_event,
+                        deadline_monotonic=deadline_monotonic,
+                        deadline_utc=deadline_utc,
+                        deadline_seconds=self._lifecycle.deadline_seconds,
+                        progress_callback=_progress_snapshot,
+                    )
+                except TypeError as exc:
+                    exc_text = str(exc)
+                    if "unexpected keyword argument" not in exc_text:
+                        raise
+                    verifier_summary = self.verifier(request_index)
+            except Exception as exc:  # noqa: BLE001
+                verifier_error = exc
+            finally:
+                verifier_done.set()
+
+        verifier_thread = threading.Thread(
+            target=_run_verifier,
+            name=f"verification-broker-request-{request_id}",
+            daemon=True,
+        )
+        verifier_thread.start()
+
+        shutdown_deadline_monotonic: float | None = None
+        try:
+            while not verifier_done.wait(self._poll_seconds):
+                now = time.monotonic()
+                if self._stop.is_set():
+                    cancel_event.set()
+                    if shutdown_deadline_monotonic is None:
+                        shutdown_deadline_monotonic = (
+                            now + self._lifecycle.stop_join_timeout_seconds
+                        )
+                    elif now >= shutdown_deadline_monotonic:
+                        result = VerificationBrokerRequestResult(
+                            request_id=request_id,
+                            attempt=self.attempt_number,
+                            status="broker_error",
+                            terminal_reason="broker_error",
+                            timeout_seconds=self._lifecycle.timeout_seconds,
+                            started_utc=started_utc,
+                            deadline_utc=deadline_utc,
+                            deadline_seconds=self._lifecycle.deadline_seconds,
+                            last_updated_utc=self.utc_now_fn(),
+                            finished_utc=self.utc_now_fn(),
+                            workspace_hash_after_verification=None,
+                            workspace_hash_mode=None,
+                            artifacts_dir=None,
+                            summary_path=None,
+                            timed_out=False,
+                            cancelled=True,
+                            cancel_requested=True,
+                            failure_reason="runner_shutdown_timeout",
+                            progress={
+                                "sequence": progress_sequence + 1,
+                                "phase": "broker_error",
+                                "message": (
+                                    "verification broker shutdown timed out before the request "
+                                    "completed"
+                                ),
+                                "updated_utc": self.utc_now_fn(),
+                            },
+                            verification_summary={
+                                "schema_version": 1,
+                                "attempt": self.attempt_number,
+                                "artifacts_dir": None,
+                                "started_utc": started_utc,
+                                "finished_utc": self.utc_now_fn(),
+                                "wall_seconds": max(
+                                    0.0, time.monotonic() - request_started_monotonic
+                                ),
+                                "passed": False,
+                                "status": "broker_error",
+                                "terminal_reason": "broker_error",
+                                "timeout_seconds": self._lifecycle.timeout_seconds,
+                                "deadline_seconds": self._lifecycle.deadline_seconds,
+                                "timed_out": False,
+                                "cancelled": True,
+                                "failure_reason": "runner_shutdown_timeout",
+                                "commands": [],
+                            },
+                        )
+                        self._record_terminal_result(result=result, response_path=response_path)
+                        return
+                if now >= deadline_monotonic:
+                    cancel_event.set()
+                    result = VerificationBrokerRequestResult(
+                        request_id=request_id,
+                        attempt=self.attempt_number,
+                        status="timed_out",
+                        terminal_reason="timed_out",
+                        timeout_seconds=self._lifecycle.timeout_seconds,
+                        started_utc=started_utc,
+                        deadline_utc=deadline_utc,
+                        deadline_seconds=self._lifecycle.deadline_seconds,
+                        last_updated_utc=self.utc_now_fn(),
+                        finished_utc=self.utc_now_fn(),
+                        workspace_hash_after_verification=None,
+                        workspace_hash_mode=None,
+                        artifacts_dir=None,
+                        summary_path=None,
+                        timed_out=True,
+                        cancelled=False,
+                        cancel_requested=cancel_event.is_set(),
+                        failure_reason="timed_out",
+                        progress={
+                            "sequence": progress_sequence + 1,
+                            "phase": "timed_out",
+                            "message": "verification broker deadline reached before completion",
+                            "updated_utc": self.utc_now_fn(),
+                        },
+                        verification_summary={
+                            "schema_version": 1,
+                            "attempt": self.attempt_number,
+                            "artifacts_dir": None,
+                            "started_utc": started_utc,
+                            "finished_utc": self.utc_now_fn(),
+                            "wall_seconds": max(
+                                0.0, time.monotonic() - request_started_monotonic
+                            ),
+                            "passed": False,
+                            "status": "timed_out",
+                            "terminal_reason": "timed_out",
+                            "timeout_seconds": self._lifecycle.timeout_seconds,
+                            "deadline_seconds": self._lifecycle.deadline_seconds,
+                            "timed_out": True,
+                            "cancelled": False,
+                            "failure_reason": "timed_out",
+                            "commands": [],
+                        },
+                    )
+                    self._record_terminal_result(result=result, response_path=response_path)
+                    return
+        finally:
+            with self._active_request_lock:
+                self._active_cancel_event = None
+
+        summary = verifier_summary
+        if verifier_error is not None:
             result = VerificationBrokerRequestResult(
                 request_id=request_id,
                 attempt=self.attempt_number,
-                status="failed",
-                terminal_reason="failed",
+                status="broker_error",
+                terminal_reason="broker_error",
+                timeout_seconds=self._lifecycle.timeout_seconds,
                 started_utc=started_utc,
                 deadline_utc=deadline_utc,
-                deadline_seconds=self._internal_deadline_seconds,
+                deadline_seconds=self._lifecycle.deadline_seconds,
                 last_updated_utc=self.utc_now_fn(),
                 finished_utc=self.utc_now_fn(),
                 workspace_hash_after_verification=None,
@@ -737,17 +933,37 @@ class VerificationBrokerAttempt:
                 timed_out=False,
                 cancelled=False,
                 cancel_requested=cancel_event.is_set(),
-                failure_reason=f"broker_exception: {exc}",
+                failure_reason=f"broker_exception: {verifier_error}",
                 progress=None,
                 verification_summary=None,
             )
-            with self._active_request_lock:
-                self._active_cancel_event = None
-            self._record_result(result=result, response_path=response_path)
+            self._record_terminal_result(result=result, response_path=response_path)
             return
-        finally:
-            with self._active_request_lock:
-                self._active_cancel_event = None
+        if not isinstance(summary, dict):
+            result = VerificationBrokerRequestResult(
+                request_id=request_id,
+                attempt=self.attempt_number,
+                status="broker_error",
+                terminal_reason="broker_error",
+                timeout_seconds=self._lifecycle.timeout_seconds,
+                started_utc=started_utc,
+                deadline_utc=deadline_utc,
+                deadline_seconds=self._lifecycle.deadline_seconds,
+                last_updated_utc=self.utc_now_fn(),
+                finished_utc=self.utc_now_fn(),
+                workspace_hash_after_verification=None,
+                workspace_hash_mode=None,
+                artifacts_dir=None,
+                summary_path=None,
+                timed_out=False,
+                cancelled=False,
+                cancel_requested=cancel_event.is_set(),
+                failure_reason="invalid_verification_summary",
+                progress=None,
+                verification_summary=None,
+            )
+            self._record_terminal_result(result=result, response_path=response_path)
+            return
 
         artifacts_dir = summary.get("artifacts_dir")
         artifacts_dir_s = (
@@ -762,6 +978,8 @@ class VerificationBrokerAttempt:
             if isinstance(terminal_reason_raw, str) and terminal_reason_raw.strip()
             else ("passed" if bool(summary.get("passed", False)) else "failed")
         )
+        if terminal_reason not in _BROKER_SUMMARY_TERMINAL_REASONS:
+            terminal_reason = "broker_error"
         timed_out = bool(summary.get("timed_out", False) or terminal_reason == "timed_out")
         cancelled = bool(summary.get("cancelled", False) or terminal_reason == "cancelled")
         passed = terminal_reason == "passed"
@@ -776,11 +994,14 @@ class VerificationBrokerAttempt:
             workspace_hash_mode = state_hash.mode
         else:
             if cancelled:
-                status = "cancelled"
+                status = "broker_error"
                 failure_reason = str(summary.get("failure_reason") or "cancelled")
             elif timed_out:
                 status = "timed_out"
                 failure_reason = str(summary.get("failure_reason") or "timed_out")
+            elif terminal_reason == "broker_error":
+                status = "broker_error"
+                failure_reason = str(summary.get("failure_reason") or "broker_error")
             elif _summary_has_rejected_sentinel(summary):
                 failure_reason = "rejected_sentinel"
             else:
@@ -791,9 +1012,10 @@ class VerificationBrokerAttempt:
             attempt=self.attempt_number,
             status=status,
             terminal_reason=status,
+            timeout_seconds=self._lifecycle.timeout_seconds,
             started_utc=started_utc,
             deadline_utc=deadline_utc,
-            deadline_seconds=self._internal_deadline_seconds,
+            deadline_seconds=self._lifecycle.deadline_seconds,
             last_updated_utc=self.utc_now_fn(),
             finished_utc=self.utc_now_fn(),
             workspace_hash_after_verification=workspace_hash_after_verification,
@@ -807,7 +1029,7 @@ class VerificationBrokerAttempt:
             progress=_normalize_progress_snapshot(summary.get("progress")),
             verification_summary=summary,
         )
-        self._record_result(result=result, response_path=response_path)
+        self._record_terminal_result(result=result, response_path=response_path)
 
     def _write_response_snapshot(
         self,
@@ -824,6 +1046,7 @@ class VerificationBrokerAttempt:
                 "status": result.status,
                 "terminal": _is_terminal_status(result.status),
                 "terminal_reason": result.terminal_reason,
+                "timeout_seconds": result.timeout_seconds,
                 "timed_out": result.timed_out,
                 "cancelled": result.cancelled,
                 "cancel_requested": result.cancel_requested,
@@ -841,13 +1064,22 @@ class VerificationBrokerAttempt:
             },
         )
 
-    def _record_result(
+    def _has_terminal_result(self, request_id: str) -> bool:
+        with self._results_lock:
+            return request_id in self._terminal_request_ids
+
+    def _record_terminal_result(
         self,
         *,
         result: VerificationBrokerRequestResult,
         response_path: Path,
     ) -> None:
+        if not _is_terminal_status(result.status):
+            raise ValueError(f"Expected terminal broker status, got {result.status!r}")
         with self._results_lock:
+            if result.request_id in self._terminal_request_ids:
+                return
+            self._terminal_request_ids.add(result.request_id)
             self._results.append(result)
         self._write_response_snapshot(response_path=response_path, result=result)
 
@@ -968,7 +1200,7 @@ def _load_response(path: Path, request_id: str) -> tuple[dict[str, object] | Non
         "passed",
         "failed",
         "timed_out",
-        "cancelled",
+        "broker_error",
     }:
         return None, f"invalid broker response status for request_id={request_id}: {status!r}"
     return payload, None
@@ -1045,7 +1277,7 @@ def main() -> int:
                 "passed",
                 "failed",
                 "timed_out",
-                "cancelled",
+                "broker_error",
             }
             progress = response_payload.get("progress")
             progress_dict = progress if isinstance(progress, dict) else {}

@@ -90,6 +90,7 @@ from runner_core.verification_broker import (
     probe_local_verification_launcher,
     probe_windows_bash_usable,
     render_verification_broker_command,
+    resolve_verification_broker_lifecycle,
     resolve_verification_launcher,
 )
 from runner_core.workspace_state_hash import WorkspaceStateHash, compute_workspace_state_hash
@@ -2338,6 +2339,14 @@ def _verification_terminal_reason(summary: dict[str, Any]) -> str:
     terminal_reason = summary.get("terminal_reason")
     if isinstance(terminal_reason, str) and terminal_reason.strip():
         return terminal_reason.strip()
+    status = summary.get("status")
+    if isinstance(status, str) and status.strip() in {
+        "passed",
+        "failed",
+        "timed_out",
+        "broker_error",
+    }:
+        return status.strip()
     if bool(summary.get("cancelled")):
         return "cancelled"
     if bool(summary.get("timed_out")):
@@ -2357,6 +2366,8 @@ def _normalize_verification_summary(summary: dict[str, Any]) -> dict[str, Any]:
     payload["cancelled"] = bool(payload.get("cancelled")) or terminal_reason == "cancelled"
     if terminal_reason == "failed" and not payload.get("failure_reason"):
         payload["failure_reason"] = "verification_failed"
+    if terminal_reason == "broker_error" and not payload.get("failure_reason"):
+        payload["failure_reason"] = "broker_error"
     if terminal_reason == "timed_out" and not payload.get("failure_reason"):
         payload["failure_reason"] = "timed_out"
     if terminal_reason == "cancelled" and not payload.get("failure_reason"):
@@ -2395,6 +2406,7 @@ def _coerce_verification_summary_from_broker_result(
         "attempt_number": broker_result.attempt,
         "commands_configured": list(commands_configured),
         "passed": broker_result.status == "passed",
+        "timeout_seconds": broker_result.timeout_seconds,
         "started_utc": broker_result.started_utc,
         "finished_utc": broker_result.finished_utc,
         "wall_seconds": 0.0,
@@ -6560,8 +6572,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "verification_reuse_mode must be one of {'auto', 'off'}; "
                     f"got {request.verification_reuse_mode!r}"
                 )
+            effective_verification_timeout_seconds = verification_timeout_seconds
             verification_broker_command: str | None = None
             if verification_commands and verification_reuse_mode == "auto":
+                effective_verification_timeout_seconds = resolve_verification_broker_lifecycle(
+                    verification_timeout_seconds=verification_timeout_seconds,
+                    verification_command_count=len(verification_commands),
+                ).timeout_seconds
                 broker_launcher, broker_launcher_probe = _probe_verification_broker_launcher(
                     command_prefix=command_prefix,
                     sandbox=sandbox,
@@ -6667,7 +6684,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             else verification_commands
                         ),
                         "final_handoff_command": verification_broker_command,
-                        "timeout_seconds": verification_timeout_seconds,
+                        "timeout_seconds": effective_verification_timeout_seconds,
                     },
                     "preflight": {
                         "commands": preflight_commands_present,
@@ -6720,7 +6737,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 pytest_probe=pytest_probe,
                 command_diagnostics=command_diagnostics,
                 verification_commands=verification_commands,
-                verification_timeout_seconds=verification_timeout_seconds,
+                verification_timeout_seconds=effective_verification_timeout_seconds,
                 verification_reuse_mode=verification_reuse_mode,
                 verification_broker_command=verification_broker_command,
                 agent=request.agent,
@@ -6935,7 +6952,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "reuse_mode": verification_reuse_mode,
                         "final_handoff_command": verification_broker_command,
                         "commands": verification_commands,
-                        "timeout_seconds": verification_timeout_seconds,
+                        "timeout_seconds": effective_verification_timeout_seconds,
                     },
                 )
 
@@ -7027,7 +7044,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             commands=verification_commands,
                             command_prefix=command_prefix,
                             cwd=acquired.workspace_dir,
-                            timeout_seconds=verification_timeout_seconds,
+                            timeout_seconds=effective_verification_timeout_seconds,
                             python_executable=_python_exec_for_verification,
                             python_toolchain_capability=python_toolchain_capability_summary,
                             env_overrides=agent_env_overrides,
@@ -7051,7 +7068,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             exec_backend=request.exec_backend,
                             validated_python_executable=validated_python_executable_for_execution,
                         ),
-                        verification_timeout_seconds=verification_timeout_seconds,
+                        verification_timeout_seconds=effective_verification_timeout_seconds,
                         verification_command_count=len(verification_commands),
                         verifier=_run_broker_verification,
                         workspace_hash_fn=lambda: compute_workspace_state_hash(
@@ -7273,7 +7290,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "commands": verification_commands,
                             "command_prefix": command_prefix,
                             "cwd": acquired.workspace_dir,
-                            "timeout_seconds": verification_timeout_seconds,
+                            "timeout_seconds": effective_verification_timeout_seconds,
                             "python_executable": python_exec_for_verification,
                             "python_toolchain_capability": python_toolchain_capability_summary,
                             "env_overrides": agent_env_overrides,

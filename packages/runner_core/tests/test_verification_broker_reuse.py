@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,7 +15,10 @@ from run_artifacts.path_normalization import normalize_agent_path
 
 import runner_core.runner as runner_mod
 from runner_core import RunnerConfig, RunRequest, run_once
-from runner_core.verification_broker import VerificationBrokerAttempt
+from runner_core.verification_broker import (
+    VerificationBrokerAttempt,
+    resolve_verification_broker_lifecycle,
+)
 from runner_core.workspace_state_hash import WorkspaceStateHash
 
 
@@ -351,6 +355,18 @@ def test_verification_broker_client_surfaces_progress_updates(tmp_path: Path) ->
     assert "phase=running_command" in completed.stdout
 
 
+def test_verification_broker_resolves_bounded_default_timeout_when_unset() -> None:
+    lifecycle = resolve_verification_broker_lifecycle(
+        verification_timeout_seconds=None,
+        verification_command_count=2,
+    )
+
+    assert lifecycle.timeout_seconds == 300.0
+    assert lifecycle.deadline_seconds == 900.0
+    assert lifecycle.client_wait_timeout_seconds == 915.0
+    assert lifecycle.client_wait_timeout_seconds < 10_800.0
+
+
 def test_verification_broker_stop_cancels_inflight_request(tmp_path: Path) -> None:
     run_dir = tmp_path / "run"
 
@@ -405,9 +421,14 @@ def test_verification_broker_stop_cancels_inflight_request(tmp_path: Path) -> No
 
     wrapper_thread = threading.Thread(target=_run_wrapper, daemon=True)
     wrapper_thread.start()
-    request_path = run_dir / "verification_broker" / "attempt1" / "requests"
+    response_dir = run_dir / "verification_broker" / "attempt1" / "responses"
     deadline = time.monotonic() + 5.0
-    while time.monotonic() < deadline and not list(request_path.glob("*.json")):
+    while time.monotonic() < deadline:
+        response_files = sorted(response_dir.glob("*.json"))
+        if response_files:
+            payload = json.loads(response_files[-1].read_text(encoding="utf-8"))
+            if payload.get("status") == "running":
+                break
         time.sleep(0.05)
 
     started = time.monotonic()
@@ -419,15 +440,85 @@ def test_verification_broker_stop_cancels_inflight_request(tmp_path: Path) -> No
     assert "result" in completed_holder
     completed = completed_holder["result"]
     assert completed.returncode != 0
-    assert "status=cancelled" in completed.stderr
+    assert "status=broker_error" in completed.stderr
+    assert "failure_reason=runner_shutdown" in completed.stderr
 
     response_files = sorted(
         (run_dir / "verification_broker" / "attempt1" / "responses").glob("*.json")
     )
     assert response_files
     payload = json.loads(response_files[-1].read_text(encoding="utf-8"))
-    assert payload["status"] == "cancelled"
-    assert payload["terminal_reason"] == "cancelled"
+    assert payload["status"] == "broker_error"
+    assert payload["terminal_reason"] == "broker_error"
+    assert payload["failure_reason"] == "runner_shutdown"
+    assert payload["cancel_requested"] is True
+
+
+def test_verification_broker_stop_forces_terminal_outcome_for_hung_request(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    release = threading.Event()
+
+    def _verifier(_: int, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        release.wait()
+        return {
+            "schema_version": 1,
+            "attempt_number": 1,
+            "commands_configured": [_verification_command()],
+            "passed": True,
+            "status": "passed",
+            "terminal_reason": "passed",
+            "started_utc": "2026-03-07T00:00:00Z",
+            "finished_utc": "2026-03-07T00:00:01Z",
+            "wall_seconds": 0.1,
+            "artifacts_dir": "verification/attempt1/broker_request_01",
+            "commands": [],
+        }
+
+    broker = _make_broker_attempt(run_dir=run_dir, verifier=_verifier)
+    broker._lifecycle = replace(broker.lifecycle, stop_join_timeout_seconds=0.5)  # noqa: SLF001
+    broker.start()
+    completed_holder: dict[str, subprocess.CompletedProcess[str]] = {}
+
+    def _run_wrapper() -> None:
+        completed_holder["result"] = _run_broker_wrapper(run_dir=run_dir, workspace_dir=tmp_path)
+
+    wrapper_thread = threading.Thread(target=_run_wrapper, daemon=True)
+    wrapper_thread.start()
+    response_dir = run_dir / "verification_broker" / "attempt1" / "responses"
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        response_files = sorted(response_dir.glob("*.json"))
+        if response_files:
+            payload = json.loads(response_files[-1].read_text(encoding="utf-8"))
+            if payload.get("status") == "running":
+                break
+        time.sleep(0.05)
+
+    started = time.monotonic()
+    broker.stop(join_timeout_seconds=2.0)
+    stop_seconds = time.monotonic() - started
+    wrapper_thread.join(timeout=5.0)
+    release.set()
+
+    assert stop_seconds < 3.0
+    assert "result" in completed_holder
+    completed = completed_holder["result"]
+    assert completed.returncode != 0
+    assert "status=broker_error" in completed.stderr
+    assert "failure_reason=runner_shutdown_timeout" in completed.stderr
+    assert len(broker.results()) == 1
+
+    response_files = sorted(
+        (run_dir / "verification_broker" / "attempt1" / "responses").glob("*.json")
+    )
+    assert response_files
+    payload = json.loads(response_files[-1].read_text(encoding="utf-8"))
+    assert payload["status"] == "broker_error"
+    assert payload["terminal_reason"] == "broker_error"
+    assert payload["failure_reason"] == "runner_shutdown_timeout"
     assert payload["cancel_requested"] is True
 
 
@@ -506,11 +597,18 @@ def test_run_once_reuses_broker_verification_without_post_agent_rerun(
     assert verification["reused"] is True
     assert verification["passed"] is True
     assert verification["terminal_reason"] == "passed"
+    assert verification["timeout_seconds"] == 300.0
     assert not (result.run_dir / "verification" / "attempt1" / "post_agent_rerun").exists()
 
     reuse = json.loads((result.run_dir / "verification_reuse.json").read_text(encoding="utf-8"))
     assert reuse["selected_source"] == "broker_reuse"
     assert reuse["selected_request_id"]
+    verification_config = json.loads(
+        (result.run_dir / "verification_config.json").read_text(encoding="utf-8")
+    )
+    assert verification_config["timeout_seconds"] == 300.0
+    prompt_text = (result.run_dir / "prompt.txt").read_text(encoding="utf-8")
+    assert "timeout_seconds: 300" in prompt_text
     report = json.loads((result.run_dir / "report.json").read_text(encoding="utf-8"))
     assert report["extensions"]["verification"]["terminal_reason"] == "passed"
 

@@ -50,6 +50,7 @@ If omitted, these fall back to the corresponding CLI flag values (or to catalog 
 - `preflight_required_commands` (list[string]): commands that must be available and permitted (fails fast) in addition to `--require-preflight-command`.
 - `verification_commands` (list[string]): repeatable shell commands that must pass before handing off (in addition to any `--verify-command` flags).
 - `verification_timeout_seconds` (number | null): optional per-command timeout for verification checks (non-positive disables).
+  - When brokered final verification reuse is active, `null` resolves to the runner's bounded default timeout instead of waiting indefinitely.
 
 Retry/backoff tuning (usually only needed when debugging provider capacity issues):
 
