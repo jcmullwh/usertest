@@ -684,64 +684,53 @@ def _wait_for_ci_success(
 
     assert run_id is not None
 
-    remaining = max(1.0, timeout_seconds - (time.monotonic() - started_monotonic))
-    try:
-        watch_proc = subprocess.run(
-            [
-                "gh",
-                "run",
-                "watch",
-                str(run_id),
-                "--compact",
-                "--exit-status",
-                "--interval",
-                "10",
-            ],
-            cwd=str(workspace_dir),
-            check=False,
-            timeout=remaining,
-        )
-    except subprocess.TimeoutExpired:
-        summary["error"] = f"Timed out waiting for GitHub Actions run {run_id} to complete."
-        summary["finished_at_utc"] = _utc_now_z()
-        _write_json(run_dir / "ci_gate.json", summary)
-        return summary
+    poll_interval_seconds = 10.0
+    while True:
+        elapsed = time.monotonic() - started_monotonic
+        if elapsed > timeout_seconds:
+            summary["error"] = f"Timed out waiting for GitHub Actions run {run_id} to complete."
+            summary["finished_at_utc"] = _utc_now_z()
+            _write_json(run_dir / "ci_gate.json", summary)
+            return summary
 
-    try:
-        view_raw = _gh_json(
-            [
-                "gh",
-                "run",
-                "view",
-                str(run_id),
-                "--json",
-                "status,conclusion,url,headSha,event,createdAt,updatedAt",
-            ]
-        )
+        try:
+            view_raw = _gh_json(
+                [
+                    "gh",
+                    "run",
+                    "view",
+                    str(run_id),
+                    "--json",
+                    "status,conclusion,url,headSha,event,createdAt,updatedAt",
+                ]
+            )
+        except Exception as e:  # noqa: BLE001
+            summary["error"] = f"Failed to inspect GitHub Actions run {run_id}: {e}"
+            summary["finished_at_utc"] = _utc_now_z()
+            _write_json(run_dir / "ci_gate.json", summary)
+            return summary
+
         if isinstance(view_raw, dict):
             summary["status"] = view_raw.get("status")
             summary["conclusion"] = view_raw.get("conclusion")
             summary["run_url"] = view_raw.get("url") or summary.get("run_url")
-    except Exception:
-        pass
+            _write_json(run_dir / "ci_gate.json", summary)
 
-    summary["watch_returncode"] = int(watch_proc.returncode)
-    passed = bool(watch_proc.returncode == 0)
-    summary["passed"] = passed
-    if passed:
-        if summary.get("conclusion") is None:
-            summary["conclusion"] = "success"
-        if summary.get("status") is None:
-            summary["status"] = "completed"
-    elif not summary.get("error"):
-        summary["error"] = (
-            f"GitHub Actions CI did not pass (run_id={run_id}, "
-            f"returncode={watch_proc.returncode}, conclusion={summary.get('conclusion')!r})."
-        )
+        status = str(summary.get("status") or "").strip().lower()
+        conclusion = str(summary.get("conclusion") or "").strip().lower()
+        if status == "completed":
+            passed = conclusion == "success"
+            summary["passed"] = passed
+            if not passed:
+                summary["error"] = (
+                    f"GitHub Actions CI did not pass (run_id={run_id}, "
+                    f"conclusion={summary.get('conclusion')!r})."
+                )
+            summary["finished_at_utc"] = _utc_now_z()
+            _write_json(run_dir / "ci_gate.json", summary)
+            return summary
 
-    summary["finished_at_utc"] = _utc_now_z()
-    _write_json(run_dir / "ci_gate.json", summary)
-    return summary
+        time.sleep(poll_interval_seconds)
 
 
 def _looks_like_local_path(value: str) -> bool:
@@ -1488,6 +1477,106 @@ def _review_findings_from_report(report: dict[str, Any]) -> list[dict[str, Any]]
     return findings
 
 
+def _stringify_review_detail(value: Any) -> str | None:
+    if isinstance(value, str):
+        text = value.strip()
+        return text or None
+    if value is None:
+        return None
+    return json.dumps(value, ensure_ascii=False, sort_keys=True)
+
+
+def _build_pr_review_body(*, review_summary: dict[str, Any]) -> str:
+    decision = str(review_summary.get("review_decision") or "").strip().lower()
+    alignment = str(review_summary.get("approach_alignment") or "").strip().lower()
+    scope = str(review_summary.get("scope_assessment") or "").strip().lower()
+    rationale = str(review_summary.get("rationale") or "").strip()
+    merge_ready = bool(review_summary.get("merge_ready") is True)
+    findings_raw = review_summary.get("findings")
+    findings = findings_raw if isinstance(findings_raw, list) else []
+
+    lines = [
+        "## Automated implementation review",
+        "",
+        f"- Decision: `{decision or 'unknown'}`",
+        f"- Approach alignment: `{alignment or 'unknown'}`",
+        f"- Scope assessment: `{scope or 'unknown'}`",
+        f"- Merge ready: `{'yes' if merge_ready else 'no'}`",
+        "",
+        "### Rationale",
+        "",
+        rationale or "No rationale provided.",
+        "",
+        "### Findings",
+        "",
+    ]
+    if not findings:
+        lines.append("No additional findings.")
+    else:
+        for index, finding_raw in enumerate(findings, start=1):
+            if not isinstance(finding_raw, dict):
+                continue
+            severity = str(finding_raw.get("severity") or "info").strip().lower() or "info"
+            title = str(finding_raw.get("title") or "Untitled finding").strip() or "Untitled finding"
+            details = str(finding_raw.get("details") or "").strip() or "No details provided."
+            lines.append(f"{index}. [{severity}] {title}")
+            lines.append("")
+            lines.append(details)
+            evidence = _stringify_review_detail(finding_raw.get("evidence"))
+            if evidence:
+                lines.append("")
+                lines.append(f"Evidence: {evidence}")
+            suggested_fix = _stringify_review_detail(finding_raw.get("suggested_fix"))
+            if suggested_fix:
+                lines.append("")
+                lines.append(f"Suggested fix: {suggested_fix}")
+            lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _submit_pr_review(
+    *,
+    workspace_dir: Path,
+    pr_url: str,
+    review_run_dir: Path,
+    review_summary: dict[str, Any],
+) -> dict[str, Any]:
+    merge_ready = bool(review_summary.get("merge_ready") is True)
+    event = "APPROVE" if merge_ready else "REQUEST_CHANGES"
+    event_flag = "--approve" if merge_ready else "--request-changes"
+    body = _build_pr_review_body(review_summary=review_summary)
+    body_path = review_run_dir / "pr_review.md"
+    body_path.write_text(body, encoding="utf-8")
+    proc = subprocess.run(
+        [
+            "gh",
+            "pr",
+            "review",
+            pr_url,
+            event_flag,
+            "--body-file",
+            str(body_path),
+        ],
+        cwd=str(workspace_dir),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    return {
+        "schema_version": 1,
+        "pr_url": pr_url,
+        "event": event,
+        "submitted": proc.returncode == 0,
+        "body_path": str(body_path),
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+        "returncode": int(proc.returncode),
+        "submitted_at_utc": _utc_now_z() if proc.returncode == 0 else None,
+    }
+
+
 def _build_final_review_summary(
     *,
     selected: SelectedTicket,
@@ -1610,6 +1699,10 @@ def _run_review_for_selected_ticket(
 ) -> tuple[Path | None, dict[str, Any] | None]:
     if not implementation_run_dir.exists():
         raise SystemExit(f"Recorded implementation run dir does not exist: {implementation_run_dir}")
+    if selected.idea_path is None or "4 - for_review" not in selected.idea_path.parts:
+        raise SystemExit(
+            f"Ticket {selected.fingerprint!r} is not in 4 - for_review and cannot be reviewed yet."
+        )
 
     handoff_summary = _read_json(implementation_run_dir / "handoff_summary.json")
     pr_ref = _read_json(implementation_run_dir / "pr_ref.json")
@@ -1625,6 +1718,12 @@ def _run_review_for_selected_ticket(
     pr_meta = pr_context.get("pr")
     if not isinstance(pr_meta, dict):
         raise SystemExit("Unable to read PR metadata for review.")
+    current_merge_ready, current_gate = _current_merge_gate_from_pr_context(pr_context)
+    if not current_merge_ready:
+        raise SystemExit(
+            "Refusing to run review before the PR gate is green: "
+            + json.dumps(current_gate, ensure_ascii=False)
+        )
 
     head_ref_name = pr_meta.get("headRefName")
     review_prompt = _build_review_append_prompt(
@@ -1740,6 +1839,22 @@ def _run_review_for_selected_ticket(
         raise SystemExit(f"Invalid review output in {review_run_dir}: {exc}") from exc
 
     _write_json(review_run_dir / "review_summary.json", review_summary)
+    pr_review_ref = _submit_pr_review(
+        workspace_dir=owner_root,
+        pr_url=pr_url,
+        review_run_dir=review_run_dir,
+        review_summary=review_summary,
+    )
+    _write_json(review_run_dir / "pr_review_ref.json", pr_review_ref)
+    if pr_review_ref.get("submitted") is not True:
+        raise SystemExit(
+            "Failed to publish PR review: "
+            + (
+                str(pr_review_ref.get("stderr") or "").strip()
+                or str(pr_review_ref.get("stdout") or "").strip()
+                or "gh pr review failed"
+            )
+        )
     _write_json(
         review_run_dir / "review_ref.json",
         {
@@ -1809,7 +1924,7 @@ def _build_handoff_summary(
             pr_url = pr_url_raw.strip()
 
     pushed = bool(isinstance(push_ref, dict) and push_ref.get("pushed") is True)
-    review_required = pr_created
+    review_required = False
     review_decision = None
     review_merge_ready = None
     if isinstance(review_summary, dict):
@@ -1821,8 +1936,6 @@ def _build_handoff_summary(
     final_status = "success"
     if pr_created:
         if review_error is not None:
-            final_status = "failure"
-        elif review_required and review_merge_ready is not True:
             final_status = "failure"
 
     return {
@@ -2506,75 +2619,6 @@ def _run_selected_ticket(
     review_run_dir: Path | None = None
     review_summary: dict[str, Any] | None = None
     review_error: str | None = None
-    pr_created = bool(isinstance(pr_ref, dict) and pr_ref.get("created") is True)
-    if pr_created:
-        if selected.owner_root is None:
-            review_error = "Automatic review requires a local owner_root for the selected ticket."
-        else:
-            effective_ledger_path = ledger_path or _resolve_ledger_path(repo_root=repo_root, raw=None)
-            implementation_review_agent = (
-                str(args.implementation_review_agent).strip()
-                if isinstance(getattr(args, "implementation_review_agent", None), str)
-                and str(args.implementation_review_agent).strip()
-                else str(args.agent)
-            )
-            implementation_review_model = (
-                str(args.implementation_review_model).strip()
-                if isinstance(getattr(args, "implementation_review_model", None), str)
-                and str(args.implementation_review_model).strip()
-                else args.model
-            )
-            try:
-                review_run_dir, review_summary = _run_review_for_selected_ticket(
-                    repo_root=repo_root,
-                    cfg=cfg,
-                    owner_root=selected.owner_root,
-                    selected=selected,
-                    implementation_run_dir=run_dir,
-                    ledger_path=effective_ledger_path,
-                    review_agent=implementation_review_agent,
-                    review_model=implementation_review_model,
-                    review_policy=str(args.policy),
-                    review_persona_id=_DEFAULT_REVIEW_PERSONA_ID,
-                    review_mission_id=_DEFAULT_REVIEW_MISSION_ID,
-                    review_seed=int(args.seed),
-                    review_agent_config_override=list(args.agent_config_override or []),
-                    keep_workspace=bool(args.keep_workspace),
-                    exec_backend=str(args.exec_backend),
-                    exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
-                    exec_use_target_sandbox_cli_install=bool(args.exec_use_target_sandbox_cli_install),
-                    exec_docker_profile=getattr(args, "exec_docker_profile", None),
-                    exec_keep_container=bool(args.exec_keep_container),
-                    exec_cache=str(args.exec_cache),
-                    exec_cache_dir=exec_cache_dir,
-                    maintenance_venv_cache=maintenance_venv_cache,
-                    dry_run=False,
-                )
-            except SystemExit as exc:
-                review_error = str(exc).strip() or "Automatic review failed."
-
-        if review_run_dir is not None:
-            _write_json(
-                run_dir / "review_ref.json",
-                {
-                    "schema_version": 1,
-                    "implementation_run_dir": str(run_dir),
-                    "review_run_dir": str(review_run_dir),
-                    "ticket_fingerprint": selected.fingerprint,
-                },
-            )
-        if review_error is not None:
-            print("[implement] ERROR: automatic review failed:", file=sys.stderr)
-            print(f"  {review_error}", file=sys.stderr)
-            exit_code = max(exit_code, 6)
-        elif not (isinstance(review_summary, dict) and review_summary.get("merge_ready") is True):
-            review_decision = None
-            if isinstance(review_summary, dict):
-                review_decision = review_summary.get("review_decision")
-            print("[implement] ERROR: review did not approve the PR for merge.", file=sys.stderr)
-            print(f"  Review run: {review_run_dir}", file=sys.stderr)
-            print(f"  Decision: {review_decision!r}", file=sys.stderr)
-            exit_code = max(exit_code, 6)
 
     handoff_summary = _build_handoff_summary(
         branch=branch,
