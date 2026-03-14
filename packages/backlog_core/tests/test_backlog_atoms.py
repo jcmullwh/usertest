@@ -70,6 +70,19 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
             },
             "report_validation_errors": ["$: failed to parse JSON from agent output"],
             "error": {"type": "AgentExecFailed", "message": "command not found"},
+            "terminal_artifact_reads": {
+                "report.json": {
+                    "path": "report.json",
+                    "exists": True,
+                    "decode_ok": True,
+                    "parse_ok": False,
+                    "error_phase": "parse",
+                    "error_type": "JSONDecodeError",
+                    "error_message": "Expecting value",
+                    "error_line": 1,
+                    "error_column": 1,
+                }
+            },
         }
     ]
 
@@ -96,6 +109,7 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
     ]
     assert failure_atom["error"]["type"] == "AgentExecFailed"
     assert failure_atom["error"]["message"] == "command not found"
+    assert failure_atom["terminal_artifact_reads"]["report.json"]["error_phase"] == "parse"
 
     attachments = failure_atom["attachments"]
     stderr_attachment = next(item for item in attachments if item["path"] == "agent_stderr.txt")

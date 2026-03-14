@@ -20,6 +20,12 @@ _EMBED_DEFINITION_KEYS = {
     "prompt_template_md",
     "report_schema_json",
 }
+_STATUS_OK = "ok"
+_STATUS_ERROR = "error"
+_STATUS_MISSING_REPORT = "missing_report"
+_STATUS_LEGACY_NO_TERMINAL_ARTIFACT = "no_terminal_artifact"
+_STATUS_REPORT_VALIDATION_ERROR = "report_validation_error"
+_STATUS_TERMINAL_ARTIFACT_UNREADABLE = "terminal_artifact_unreadable"
 
 
 @dataclass(frozen=True)
@@ -289,17 +295,18 @@ def _derive_run_status(
         _has_artifact_read_failure(result)
         for result in (report_read, error_read, report_validation_errors_read)
     ):
-        return "terminal_artifact_unreadable", terminal_artifact_reads
+        return _STATUS_TERMINAL_ARTIFACT_UNREADABLE, terminal_artifact_reads
     if isinstance(error_read.value, dict):
-        return "error", terminal_artifact_reads
+        return _STATUS_ERROR, terminal_artifact_reads
     if report_validation_errors_read.value is not None:
-        return "report_validation_error", terminal_artifact_reads
+        return _STATUS_REPORT_VALIDATION_ERROR, terminal_artifact_reads
     if report_read.value is None:
-        # Neither report.json nor error.json exists (error.json absence implied above).
-        # This indicates a legacy run directory that predates the terminal-artifact contract,
-        # or a run that was interrupted before any terminal artifact was emitted.
-        return "no_terminal_artifact", terminal_artifact_reads
-    return "ok", terminal_artifact_reads
+        # report.json is absent and we already ruled out unreadable/error/validation terminal
+        # artifacts above. In practice this means the run never produced the expected report
+        # artifact, whether because it predates the terminal-artifact contract or because it was
+        # interrupted before the terminal artifact was emitted.
+        return _STATUS_MISSING_REPORT, terminal_artifact_reads
+    return _STATUS_OK, terminal_artifact_reads
 
 
 def _history_text_policy(max_embed_bytes: int) -> TextCapturePolicy:
@@ -602,11 +609,12 @@ def write_report_history_jsonl(
 
     total = 0
     counts: dict[str, int] = {
-        "ok": 0,
-        "no_terminal_artifact": 0,
-        "report_validation_error": 0,
-        "terminal_artifact_unreadable": 0,
-        "error": 0,
+        _STATUS_OK: 0,
+        _STATUS_MISSING_REPORT: 0,
+        _STATUS_LEGACY_NO_TERMINAL_ARTIFACT: 0,
+        _STATUS_REPORT_VALIDATION_ERROR: 0,
+        _STATUS_TERMINAL_ARTIFACT_UNREADABLE: 0,
+        _STATUS_ERROR: 0,
     }
     with out_path.open("w", encoding="utf-8", newline="\n") as f:
         for item in iter_report_history(
