@@ -811,6 +811,7 @@ def test_reports_export_tickets_attaches_ux_review_and_promotes_docs(tmp_path: P
 
     idea_path = Path(export["owner_repo"]["idea_path"])
     assert idea_path.exists()
+    assert idea_path.parent.name == "2 - ready"
     idea_text = idea_path.read_text(encoding="utf-8")
     assert "## UX review" in idea_text
     assert "- Export kind: `implementation`" in idea_text
@@ -917,6 +918,7 @@ def test_reports_export_tickets_promotes_high_surface_ready_ticket_with_docs_rec
 
     idea_path = Path(export["owner_repo"]["idea_path"])
     assert idea_path.exists()
+    assert idea_path.parent.name == "2 - ready"
     idea_text = idea_path.read_text(encoding="utf-8")
     assert "- Export kind: `implementation`" in idea_text
 
@@ -1200,6 +1202,8 @@ def test_reports_export_tickets_removes_stale_generated_scope_files_for_same_tar
 
     ideas_dir = owner_repo / ".agents" / "plans" / "1 - ideas"
     ideas_dir.mkdir(parents=True, exist_ok=True)
+    ready_dir = owner_repo / ".agents" / "plans" / "2 - ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
     stale_same_target = ideas_dir / "20260301_deadbeefdeadbeef_old-target-a.md"
     stale_same_target.write_text(
         "\n".join(
@@ -1269,7 +1273,7 @@ def test_reports_export_tickets_removes_stale_generated_scope_files_for_same_tar
     out_json = compiled_dir / "target_a.tickets_export.json"
     export_doc = json.loads(out_json.read_text(encoding="utf-8"))
     assert export_doc["stats"]["swept_scope_stale_generated_removed"] == 1
-    generated_candidates = sorted(ideas_dir.glob(f"*_{fingerprint}_*.md"))
+    generated_candidates = sorted(ready_dir.glob(f"*_{fingerprint}_*.md"))
     assert len(generated_candidates) == 1
     generated_path = generated_candidates[0]
     updated = generated_path.read_text(encoding="utf-8")
@@ -1326,6 +1330,8 @@ def test_reports_export_tickets_refreshes_existing_generated_queue_ticket(tmp_pa
 
     ideas_dir = owner_repo / ".agents" / "plans" / "1 - ideas"
     ideas_dir.mkdir(parents=True, exist_ok=True)
+    ready_dir = owner_repo / ".agents" / "plans" / "2 - ready"
+    ready_dir.mkdir(parents=True, exist_ok=True)
     existing_path = ideas_dir / f"20260301_{fingerprint}_old.md"
     existing_path.write_text(
         "\n".join(
@@ -1372,7 +1378,11 @@ def test_reports_export_tickets_refreshes_existing_generated_queue_ticket(tmp_pa
         )
     assert exc.value.code == 0
 
-    updated = existing_path.read_text(encoding="utf-8")
+    promoted_candidates = sorted(ready_dir.glob(f"*_{fingerprint}_*.md"))
+    assert len(promoted_candidates) == 1
+    promoted_path = promoted_candidates[0]
+    assert not existing_path.exists()
+    updated = promoted_path.read_text(encoding="utf-8")
     assert "## Evidence breadth context" in updated
     assert "- Breadth profile: `internal_maintenance`" in updated
     assert "- Observation breadth: `runs=6, agents=2, personas=0`" in updated
