@@ -418,7 +418,10 @@ def build_snapshot(repo_root: Path, log_dir: Path, runs_root: Path) -> dict[str,
         batch_dir / "ticket_outcomes.jsonl" if batch_dir is not None else None,
         limit=100,
     )
-    if using_continuous_loop:
+    continuous_batch_bridge = using_continuous_loop and isinstance(summary, dict) and (
+        str(summary.get("current_action") or "").strip().lower() == "batch"
+    )
+    if using_continuous_loop and not continuous_batch_bridge:
         batch_state = None
         batch_blockers = None
         batch_summary = None
