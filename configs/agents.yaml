@@ -18,7 +18,9 @@ agents:
     # Default Codex config overrides passed via `codex exec -c key=value`.
     # This is useful for guarding against unsupported values in a user's `~/.codex/config.toml`.
     # If personality/model_personality is configured here, model_messages must also be configured.
-    config_overrides: ["model_reasoning_effort=high"]
+    config_overrides:
+      - "model_reasoning_effort=high"
+      - 'model_messages=[{"role":"system","content":"Follow the provided system, mission, and repo instructions exactly."}]'
     args:
       json_events: ["--json"]
       last_message: ["--output-last-message"]

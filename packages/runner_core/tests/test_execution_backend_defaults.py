@@ -661,3 +661,180 @@ def test_prepare_maintenance_profile_prefers_local_image_and_plans_cache_mounts(
     assert prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ENABLED"] == "1"
     assert prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ROOT"] == "/cache/usertest_maint_venvs"
     assert prep.env_overrides["USERTEST_MAINT_VENV_SEED_ROOT"] == "/opt/usertest_maint_seed"
+
+
+def test_prepare_maintenance_profile_runs_cleanup_and_records_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Maintenance profile preparation should persist cleanup output when enabled."""
+
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    cache_dir = tmp_path / "cache"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    context_dir = run_dir / "sandbox" / "maintenance_image_context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        backend_mod,
+        "_load_maintenance_docker_config",
+        lambda repo_root: backend_mod.MaintenanceDockerConfig(
+            local_image_repo="usertest-maintenance",
+            published_image_repo="ghcr.io/jcmullwh/usertest-maintenance",
+            pull_policy="if_missing",
+            seed_root="/opt/usertest_maint_seed",
+            cache_root_subdir="usertest_maint_venvs",
+            publish_branches=("dev", "main"),
+            cleanup_enabled=True,
+            cleanup_on_prepare=True,
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_prepare_maintenance_image_context",
+        lambda **_kwargs: (
+            context_dir,
+            {"python_major_minor": "3.11", "pdm_version": "2.26.2"},
+        ),
+    )
+    monkeypatch.setattr(backend_mod, "compute_image_hash", lambda **_kwargs: "b" * 64)
+    monkeypatch.setattr(backend_mod, "_docker_image_exists_local", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        backend_mod,
+        "_compute_install_cache_fingerprints",
+        lambda **_kwargs: {"projects": []},
+    )
+    def _fake_cleanup(**kwargs):
+        summary = {
+            "schema_version": 1,
+            "cleanup_enabled": True,
+            "dry_run": False,
+            "repos_scanned": [
+                "usertest-maintenance",
+                "ghcr.io/jcmullwh/usertest-maintenance",
+            ],
+            "protected_tags": ["latest"],
+            "kept_tags": ["usertest-maintenance:latest"],
+            "deleted_tags": ["usertest-maintenance:aaaaaaaaaaaaaaaa"],
+            "deleted_image_ids": ["sha256:a"],
+            "errors": [],
+        }
+        kwargs["artifact_path"].write_text(
+            json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return summary
+
+    monkeypatch.setattr(backend_mod, "cleanup_local_maintenance_images", _fake_cleanup)
+
+    request = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+        verification_commands=("smoke", "install", "lint", "test"),
+    )
+
+    prep = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        maintenance_venv_reuse_enabled=True,
+        timeout_seconds=30.0,
+    )
+
+    cleanup_artifact = run_dir / "sandbox" / "maintenance_image_cleanup.json"
+    assert cleanup_artifact.exists()
+    cleanup_meta = json.loads(cleanup_artifact.read_text(encoding="utf-8"))
+    assert cleanup_meta["deleted_tags"] == ["usertest-maintenance:aaaaaaaaaaaaaaaa"]
+    assert prep.metadata["cleanup"]["deleted_image_ids"] == ["sha256:a"]
+
+
+def test_prepare_maintenance_profile_cleanup_failure_is_best_effort(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup failure should be recorded without aborting maintenance preparation."""
+
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    cache_dir = tmp_path / "cache"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    context_dir = run_dir / "sandbox" / "maintenance_image_context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        backend_mod,
+        "_load_maintenance_docker_config",
+        lambda repo_root: backend_mod.MaintenanceDockerConfig(
+            local_image_repo="usertest-maintenance",
+            published_image_repo="ghcr.io/jcmullwh/usertest-maintenance",
+            pull_policy="if_missing",
+            seed_root="/opt/usertest_maint_seed",
+            cache_root_subdir="usertest_maint_venvs",
+            publish_branches=("dev", "main"),
+            cleanup_enabled=True,
+            cleanup_on_prepare=True,
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_prepare_maintenance_image_context",
+        lambda **_kwargs: (
+            context_dir,
+            {"python_major_minor": "3.11", "pdm_version": "2.26.2"},
+        ),
+    )
+    monkeypatch.setattr(backend_mod, "compute_image_hash", lambda **_kwargs: "c" * 64)
+    monkeypatch.setattr(backend_mod, "_docker_image_exists_local", lambda **_kwargs: True)
+    monkeypatch.setattr(
+        backend_mod,
+        "_compute_install_cache_fingerprints",
+        lambda **_kwargs: {"projects": []},
+    )
+
+    def _raise_cleanup(**_kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(backend_mod, "cleanup_local_maintenance_images", _raise_cleanup)
+
+    request = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+        verification_commands=("smoke", "install", "lint", "test"),
+    )
+
+    prep = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        maintenance_venv_reuse_enabled=True,
+        timeout_seconds=30.0,
+    )
+
+    cleanup_artifact = run_dir / "sandbox" / "maintenance_image_cleanup.json"
+    assert cleanup_artifact.exists()
+    cleanup_meta = json.loads(cleanup_artifact.read_text(encoding="utf-8"))
+    assert cleanup_meta["errors"] == ["Automatic maintenance image cleanup failed: boom"]
+    assert prep.metadata["cleanup"]["errors"] == [
+        "Automatic maintenance image cleanup failed: boom"
+    ]

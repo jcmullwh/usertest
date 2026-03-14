@@ -104,9 +104,3 @@ $RECYCLE.BIN/
 # Scaffolding artifacts (local-only)
 ############################################
 **/lint_report.json
-
-# usertest: allow reading run artifacts under runs/usertest for agent file tools.
-!runs/
-runs/*
-!runs/usertest/
-!runs/usertest/**

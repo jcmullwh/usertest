@@ -29,19 +29,12 @@ from agent_adapters import (
     validate_codex_reasoning_effort_config_overrides,
 )
 from agent_adapters.codex_config import toml_basic_string
-from agent_adapters.docker_exec_env import (
-    inject_docker_exec_env,
-    looks_like_docker_exec_prefix,
-)
+from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
 from normalized_events import iter_events_jsonl, make_event
 from reporter import (
     compute_metrics,
     render_report_markdown,
     validate_report,
-)
-from run_artifacts.path_normalization import (
-    agent_path_for_staged_file,
-    ensure_runs_usertest_exists,
 )
 from sandbox_runner.diagnostics import (
     capture_container_artifacts,
@@ -71,11 +64,10 @@ from runner_core.pip_target import (
     requirements_path as pip_requirements_path,
 )
 from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
+from runner_core.python_interpreter_probe import resolve_usable_python_interpreter
 from runner_core.python_runtime import (
-    PythonToolchainCapabilitySnapshot,
     probe_pip_module,
     probe_pytest_module,
-    resolve_usable_python_interpreter,
     select_python_runtime,
     verification_commands_may_provision_pytest,
     verification_commands_need_pdm,
@@ -88,10 +80,11 @@ from runner_core.verification_broker import (
     VerificationBrokerAttempt,
     VerificationBrokerRequestResult,
     probe_local_verification_launcher,
-    probe_windows_bash_usable,
     render_verification_broker_command,
-    resolve_verification_broker_lifecycle,
     resolve_verification_launcher,
+)
+from runner_core.verification_broker import (
+    probe_windows_bash_usable as _probe_windows_bash_usable_impl,
 )
 from runner_core.workspace_state_hash import WorkspaceStateHash, compute_workspace_state_hash
 
@@ -1180,7 +1173,6 @@ def _probe_commands_local(
             candidate_commands=python_commands,
             timeout_seconds=5.0,
             path=effective_path,
-            environment=effective_env,
         )
         if python_commands
         else None
@@ -1276,7 +1268,7 @@ def _probe_commands_local(
             except subprocess.TimeoutExpired:
                 usable = False
                 reason_code = "unresponsive"
-                reason = "bash probe timed out (2.0s) while attempting to start bash."
+                reason = "bash probe timed out (2.0s) running `bash -lc \"echo ok\"`."
             except OSError as e:
                 usable = False
                 reason_code = "blocked"
@@ -1673,7 +1665,10 @@ def _gemini_include_directories_for_workspace(*, workspace_dir: Path) -> list[st
     # `--include-directories runs/usertest` at process start.
     marker = workspace_dir / "tools" / "scaffold" / "monorepo.toml"
     if marker.exists():
-        ensure_runs_usertest_exists(workspace_dir)
+        try:
+            candidate.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            return []
         return [include_rel]
 
     return []
@@ -2247,6 +2242,22 @@ def _stage_agent_prompt_file(*, run_dir: Path, name: str, src_path: Path) -> Pat
     shutil.copyfile(src_path, dest_path)
     return dest_path
 
+def _agent_path_for_staged_file(
+    staged_path: Path, *, run_dir: Path, run_dir_mount: str | None
+) -> str:
+    if run_dir_mount is None:
+        return str(staged_path.resolve())
+
+    mount = normalize_agent_path(run_dir_mount)
+    if not mount or mount == ".":
+        mount = "/run_dir"
+    if not mount.startswith("/"):
+        mount = f"/{mount}"
+
+    rel = staged_path.resolve().relative_to(run_dir.resolve()).as_posix()
+    return agent_path_join(mount, rel)
+
+
 def _verification_broker_client_command(
     *,
     run_dir: Path,
@@ -2254,7 +2265,7 @@ def _verification_broker_client_command(
     command_prefix: list[str],
 ) -> str:
     client_root = run_dir / "verification_broker" / "client"
-    client_root_for_agent = agent_path_for_staged_file(
+    client_root_for_agent = _agent_path_for_staged_file(
         client_root,
         run_dir=run_dir,
         run_dir_mount=run_dir_mount,
@@ -2339,14 +2350,6 @@ def _verification_terminal_reason(summary: dict[str, Any]) -> str:
     terminal_reason = summary.get("terminal_reason")
     if isinstance(terminal_reason, str) and terminal_reason.strip():
         return terminal_reason.strip()
-    status = summary.get("status")
-    if isinstance(status, str) and status.strip() in {
-        "passed",
-        "failed",
-        "timed_out",
-        "broker_error",
-    }:
-        return status.strip()
     if bool(summary.get("cancelled")):
         return "cancelled"
     if bool(summary.get("timed_out")):
@@ -2366,8 +2369,6 @@ def _normalize_verification_summary(summary: dict[str, Any]) -> dict[str, Any]:
     payload["cancelled"] = bool(payload.get("cancelled")) or terminal_reason == "cancelled"
     if terminal_reason == "failed" and not payload.get("failure_reason"):
         payload["failure_reason"] = "verification_failed"
-    if terminal_reason == "broker_error" and not payload.get("failure_reason"):
-        payload["failure_reason"] = "broker_error"
     if terminal_reason == "timed_out" and not payload.get("failure_reason"):
         payload["failure_reason"] = "timed_out"
     if terminal_reason == "cancelled" and not payload.get("failure_reason"):
@@ -2406,7 +2407,6 @@ def _coerce_verification_summary_from_broker_result(
         "attempt_number": broker_result.attempt,
         "commands_configured": list(commands_configured),
         "passed": broker_result.status == "passed",
-        "timeout_seconds": broker_result.timeout_seconds,
         "started_utc": broker_result.started_utc,
         "finished_utc": broker_result.finished_utc,
         "wall_seconds": 0.0,
@@ -2676,18 +2676,6 @@ def _maybe_rewrite_ripgrep_unexpected_argument(
 
 
 _VERIFICATION_REJECTION_SENTINELS: frozenset[str] = frozenset({"rejected"})
-_VERIFICATION_PATCH_TOOL_RE = re.compile(
-    r"^\s*(?:&\s*)?(?:apply_patch|applypatch|apply-patch)(?:\s|$)",
-    re.IGNORECASE,
-)
-_VERIFICATION_PATCH_PAYLOAD_RE = re.compile(
-    r"^\s*\*{3}\s+(?:Begin|Update|Add|Delete|End)\s+Patch\b",
-    re.IGNORECASE,
-)
-_VERIFICATION_PYTHON_HEREDOC_RE = re.compile(
-    r"^\s*(?:python3?|py)(?=\s|$).*<<",
-    re.IGNORECASE,
-)
 
 
 def _looks_like_verification_rejection_sentinel(command: str) -> bool:
@@ -2774,70 +2762,8 @@ def _looks_like_verification_rejection_sentinel(command: str) -> bool:
     return False
 
 
-def _validate_verification_command_dispatch(
-    *,
-    command: str,
-    is_powershell: bool,
-) -> dict[str, Any] | None:
-    """
-    Block malformed command shapes before they reach the shell/process launcher.
-
-    These checks intentionally focus on repeated high-signal failure patterns observed in runs:
-    shell-dispatched patch payloads/tool names, POSIX chaining forwarded into PowerShell 5.1, and
-    Python heredoc invocations that are incompatible with PowerShell dispatch.
-    """
-
-    raw = (command or "").strip()
-    if not raw:
-        return None
-
-    if _VERIFICATION_PATCH_TOOL_RE.match(raw) or _VERIFICATION_PATCH_PAYLOAD_RE.match(raw):
-        return {
-            "kind": "shell_dispatched_patch_tool",
-            "reason": (
-                "Received an apply_patch command or patch payload on the shell verification path."
-            ),
-            "hint": (
-                "Route patch payloads through the apply_patch tool instead of dispatching them "
-                "through the shell."
-            ),
-        }
-
-    if not is_powershell:
-        return None
-
-    argv = _split_verification_command(raw, prefer_posix=False)
-    if any(token in {"&&", "||"} for token in argv):
-        return {
-            "kind": "powershell_unsupported_chain_operator",
-            "reason": (
-                "The command uses POSIX-style `&&`/`||` chaining, which is incompatible with "
-                "the PowerShell 5.1 shell contract used for Windows local runs."
-            ),
-            "hint": (
-                "Run the commands separately, or use PowerShell-native sequencing and "
-                "`$LASTEXITCODE` checks."
-            ),
-        }
-
-    if _VERIFICATION_PYTHON_HEREDOC_RE.search(raw):
-        return {
-            "kind": "powershell_unsupported_python_heredoc",
-            "reason": (
-                "Python heredoc shell syntax (`python - <<...`) is incompatible with the "
-                "PowerShell verification shell."
-            ),
-            "hint": (
-                "Use `python -c`, write the script to a file, or run the command in a bash "
-                "execution path instead."
-            ),
-        }
-
-    return None
-
-
 def _probe_windows_bash_usable() -> dict[str, Any]:
-    return probe_windows_bash_usable()
+    return _probe_windows_bash_usable_impl()
 
 
 def _maybe_rewrite_windows_bash_smoke_verification_command(
@@ -2980,24 +2906,15 @@ def _reason_type_for_code(reason_code: str | None) -> str | None:
     code = reason_code.strip().lower()
     if code in {"not_found", "windowsapps_alias"}:
         return "discovery"
-    if code in {
-        "launch_failed",
-        "access_denied",
-        "timeout",
-        "blocked",
-        "unresponsive",
-        "context_mismatch",
-    }:
+    if code in {"launch_failed", "access_denied", "timeout"}:
         return "execution"
-    if code in {"pip_missing", "pytest_missing", "pdm_missing"}:
+    if code in {"pip_missing", "pytest_missing"}:
         return "dependency"
     if code in {
         "missing_stdlib",
         "runtime_probe_failed",
         "pip_probe_failed",
         "pytest_probe_failed",
-        "pdm_probe_failed",
-        "probe_failed",
     }:
         return "runtime"
     return "unknown"
@@ -3013,589 +2930,13 @@ def _python_probe_remediation(reason_code: str | None) -> str | None:
         return "Python execution is blocked in this environment. Verify sandbox/policy access."
     if code == "missing_stdlib":
         return "Selected Python runtime is incomplete (missing stdlib). Reinstall Python."
-    if code == "pytest_missing":
-        return "Install pytest into the selected interpreter/environment, then retry."
-    if code == "pdm_missing":
-        return "Install PDM into the selected interpreter/environment, then retry."
     if code == "timeout":
         return "Python interpreter probe timed out. Verify interpreter health and policy limits."
     if code == "not_found":
         return "Python command is unavailable in the effective agent execution context."
-    if code == "context_mismatch":
-        return (
-            "Selected Python runtime does not match the effective execution context. "
-            "Clear leaked host runtime hints or select a backend-local interpreter."
-        )
     return "Inspect probe stderr/stdout and selected interpreter metadata in preflight.json."
 
 
-def _tool_command_probe_remediation(command_name: str, reason_code: str | None) -> str | None:
-    code = reason_code.strip().lower() if isinstance(reason_code, str) else None
-    if command_name == "pytest" and code in {"not_found", "pytest_missing"}:
-        return "Install pytest into the selected interpreter/environment, then retry."
-    if command_name == "pdm" and code in {
-        "not_found",
-        "pdm_missing",
-        "probe_failed",
-        "pdm_probe_failed",
-    }:
-        return (
-            "Install `pdm` into the selected interpreter/environment "
-            "(python -m pip install -U pdm), then retry."
-        )
-    return _python_probe_remediation(reason_code)
-
-
-def _prepare_probe_environment(
-    *,
-    command_prefix: list[str],
-    env_overrides: dict[str, str] | None,
-) -> tuple[list[str], dict[str, str] | None]:
-    merged_env: dict[str, str] | None = None
-    effective_prefix = list(command_prefix)
-    if env_overrides:
-        safe_overrides = {
-            key: value
-            for key, value in env_overrides.items()
-            if isinstance(key, str) and isinstance(value, str)
-        }
-        if safe_overrides:
-            if effective_prefix and looks_like_docker_exec_prefix(effective_prefix):
-                effective_prefix = inject_docker_exec_env(effective_prefix, safe_overrides)
-            elif not effective_prefix:
-                merged_env = dict(os.environ)
-                merged_env.update(safe_overrides)
-    return effective_prefix, merged_env
-
-
-def _resolve_command_in_execution_context(
-    *,
-    command_name: str,
-    command_prefix: list[str],
-    cwd: Path,
-    env_overrides: dict[str, str] | None,
-    timeout_seconds: float = 3.0,
-) -> str | None:
-    effective_prefix, merged_env = _prepare_probe_environment(
-        command_prefix=command_prefix,
-        env_overrides=env_overrides,
-    )
-    if not effective_prefix:
-        effective_path = (
-            env_overrides.get("PATH")
-            if isinstance(env_overrides, dict) and isinstance(env_overrides.get("PATH"), str)
-            else None
-        )
-        return (
-            shutil.which(command_name, path=effective_path)
-            if effective_path is not None
-            else shutil.which(command_name)
-        )
-
-    proc = subprocess.run(
-        _verification_shell_argv(
-            command_prefix=effective_prefix,
-            command=f"command -v {shlex.quote(command_name)}",
-        ),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        cwd=str(cwd),
-        timeout=max(0.1, float(timeout_seconds)),
-        check=False,
-        env=merged_env,
-    )
-    if proc.returncode != 0:
-        return None
-    for line in proc.stdout.splitlines():
-        candidate = line.strip()
-        if candidate:
-            return candidate
-    return None
-
-
-def _probe_same_shell_python_command(
-    *,
-    command_name: str,
-    command_prefix: list[str],
-    cwd: Path,
-    env_overrides: dict[str, str] | None,
-    timeout_seconds: float = 6.0,
-) -> dict[str, Any]:
-    effective_prefix, merged_env = _prepare_probe_environment(
-        command_prefix=command_prefix,
-        env_overrides=env_overrides,
-    )
-    resolved_path: str | None = None
-    stdout_text = ""
-    stderr_text = ""
-    exit_code = 0
-    timed_out = False
-    exception: str | None = None
-    payload: dict[str, Any] | None = None
-
-    try:
-        resolved_path = _resolve_command_in_execution_context(
-            command_name=command_name,
-            command_prefix=command_prefix,
-            cwd=cwd,
-            env_overrides=env_overrides,
-        )
-        if resolved_path is None:
-            return {
-                "command": command_name,
-                "resolved_path": None,
-                "present": False,
-                "usable": False,
-                "status": "missing",
-                "reason_code": "not_found",
-                "reason_type": _reason_type_for_code("not_found"),
-                "reason": f"`{command_name}` was not found in the verification runtime.",
-                "remediation": _tool_command_probe_remediation(command_name, "not_found"),
-            }
-
-        if _is_windows() and "\\windowsapps\\" in resolved_path.replace("/", "\\").lower():
-            return {
-                "command": command_name,
-                "resolved_path": resolved_path,
-                "present": True,
-                "usable": False,
-                "status": "unusable",
-                "reason_code": "windowsapps_alias",
-                "reason_type": _reason_type_for_code("windowsapps_alias"),
-                "reason": (
-                    "Resolved to a WindowsApps launcher alias. "
-                    "Install/select a full Python interpreter and retry."
-                ),
-                "remediation": _python_probe_remediation("windowsapps_alias"),
-            }
-
-        if effective_prefix:
-            health_probe_command = (
-                f"{shlex.quote(command_name)} -c "
-                f"{shlex.quote(_PYTHON_CONTEXT_HEALTH_PROBE)}"
-            )
-            argv = _verification_shell_argv(
-                command_prefix=effective_prefix,
-                command=health_probe_command,
-            )
-        else:
-            argv = [resolved_path, "-c", _PYTHON_CONTEXT_HEALTH_PROBE]
-
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=str(cwd),
-            timeout=max(0.1, float(timeout_seconds)),
-            check=False,
-            env=merged_env,
-        )
-        exit_code = int(proc.returncode or 0)
-        stdout_text = proc.stdout or ""
-        stderr_text = proc.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        exit_code = 124
-        if isinstance(exc.stdout, bytes):
-            stdout_text = exc.stdout.decode("utf-8", "replace")
-        else:
-            stdout_text = exc.stdout or ""
-        if isinstance(exc.stderr, bytes):
-            stderr_text = exc.stderr.decode("utf-8", "replace")
-        else:
-            stderr_text = exc.stderr or ""
-    except OSError as exc:
-        exit_code = 1
-        exception = str(exc)
-
-    if exit_code == 0 and not timed_out and exception is None:
-        for line in reversed(stdout_text.splitlines()):
-            candidate = line.strip()
-            if not candidate:
-                continue
-            try:
-                decoded = json.loads(candidate)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(decoded, dict):
-                payload = decoded
-                break
-
-    merged = "\n".join(value for value in (stderr_text, stdout_text, exception) if value).strip()
-    lowered = merged.lower()
-    reason_code: str | None = None
-    reason: str | None = None
-    if timed_out:
-        reason_code = "timeout"
-        reason = "Python context probe timed out."
-    elif exception is not None:
-        reason_code = "launch_failed"
-        reason = exception
-    elif exit_code != 0:
-        if "encodings" in lowered and (
-            "modulenotfounderror" in lowered or "no module named" in lowered
-        ):
-            reason_code = "missing_stdlib"
-        elif "access is denied" in lowered or "permission denied" in lowered:
-            reason_code = "access_denied"
-        elif "cannot be accessed by the system" in lowered:
-            reason_code = "access_denied"
-        elif "windowsapps" in lowered:
-            reason_code = "windowsapps_alias"
-        elif "not found" in lowered or "not recognized" in lowered:
-            reason_code = "not_found"
-        else:
-            reason_code = "runtime_probe_failed"
-        reason = merged or f"Probe command exited with code {exit_code}."
-    elif payload is None:
-        reason_code = "runtime_probe_failed"
-        reason = "Probe command succeeded but did not emit parseable JSON metadata."
-
-    usable = bool(exit_code == 0 and not timed_out and exception is None and payload is not None)
-    return {
-        "command": command_name,
-        "resolved_path": resolved_path,
-        "present": resolved_path is not None,
-        "usable": usable,
-        "status": "present" if usable else ("missing" if resolved_path is None else "unusable"),
-        "reason_code": reason_code,
-        "reason_type": _reason_type_for_code(reason_code),
-        "reason": reason,
-        "remediation": _tool_command_probe_remediation(command_name, reason_code),
-        "exit_code": exit_code,
-        "timed_out": timed_out,
-        "stdout_tail": _tail_text_for_prompt(stdout_text),
-        "stderr_tail": _tail_text_for_prompt(stderr_text),
-        "exception": exception,
-        "version": payload.get("version") if isinstance(payload, dict) else None,
-        "executable": payload.get("executable") if isinstance(payload, dict) else None,
-    }
-
-
-def _probe_same_shell_wrapper_command(
-    *,
-    command_name: str,
-    argv_suffix: list[str],
-    command_prefix: list[str],
-    cwd: Path,
-    env_overrides: dict[str, str] | None,
-    timeout_seconds: float = 6.0,
-) -> dict[str, Any]:
-    effective_prefix, merged_env = _prepare_probe_environment(
-        command_prefix=command_prefix,
-        env_overrides=env_overrides,
-    )
-    resolved_path: str | None = None
-    stdout_text = ""
-    stderr_text = ""
-    exit_code = 0
-    timed_out = False
-    exception: str | None = None
-
-    try:
-        resolved_path = _resolve_command_in_execution_context(
-            command_name=command_name,
-            command_prefix=command_prefix,
-            cwd=cwd,
-            env_overrides=env_overrides,
-        )
-        if resolved_path is None:
-            return {
-                "command": command_name,
-                "resolved_path": None,
-                "present": False,
-                "usable": False,
-                "status": "missing",
-                "reason_code": "not_found",
-                "reason_type": _reason_type_for_code("not_found"),
-                "reason": f"`{command_name}` was not found in the verification runtime.",
-                "remediation": _python_probe_remediation("not_found"),
-            }
-
-        if effective_prefix:
-            quoted_suffix = " ".join(shlex.quote(part) for part in argv_suffix)
-            argv = _verification_shell_argv(
-                command_prefix=effective_prefix,
-                command=f"{shlex.quote(command_name)} {quoted_suffix}".strip(),
-            )
-        else:
-            argv = [resolved_path, *argv_suffix]
-
-        proc = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            cwd=str(cwd),
-            timeout=max(0.1, float(timeout_seconds)),
-            check=False,
-            env=merged_env,
-        )
-        exit_code = int(proc.returncode or 0)
-        stdout_text = proc.stdout or ""
-        stderr_text = proc.stderr or ""
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        exit_code = 124
-        if isinstance(exc.stdout, bytes):
-            stdout_text = exc.stdout.decode("utf-8", "replace")
-        else:
-            stdout_text = exc.stdout or ""
-        if isinstance(exc.stderr, bytes):
-            stderr_text = exc.stderr.decode("utf-8", "replace")
-        else:
-            stderr_text = exc.stderr or ""
-    except OSError as exc:
-        exit_code = 1
-        exception = str(exc)
-
-    merged = "\n".join(value for value in (stderr_text, stdout_text, exception) if value).strip()
-    lowered = merged.lower()
-    reason_code: str | None = None
-    if timed_out:
-        reason_code = "timeout"
-    elif exception is not None:
-        reason_code = "launch_failed"
-    elif exit_code != 0:
-        if command_name == "pytest" and (
-            "no module named pytest" in lowered
-            or ("modulenotfounderror" in lowered and "pytest" in lowered)
-        ):
-            reason_code = "pytest_missing"
-        elif command_name == "pdm" and (
-            "no module named pdm" in lowered
-            or ("modulenotfounderror" in lowered and "pdm" in lowered)
-        ):
-            reason_code = "pdm_missing"
-        elif (
-            "access is denied" in lowered
-            or "permission denied" in lowered
-            or "cannot be accessed by the system" in lowered
-        ):
-            reason_code = "access_denied"
-        else:
-            reason_code = f"{command_name}_probe_failed"
-
-    usable = bool(exit_code == 0 and not timed_out and exception is None)
-    return {
-        "command": command_name,
-        "resolved_path": resolved_path,
-        "present": resolved_path is not None,
-        "usable": usable,
-        "status": "present" if usable else ("missing" if resolved_path is None else "unusable"),
-        "reason_code": reason_code,
-        "reason_type": _reason_type_for_code(reason_code),
-        "reason": merged or exception,
-        "remediation": _python_probe_remediation(reason_code),
-        "argv": [command_name, *argv_suffix],
-        "exit_code": exit_code,
-        "timed_out": timed_out,
-        "stdout_tail": _tail_text_for_prompt(stdout_text),
-        "stderr_tail": _tail_text_for_prompt(stderr_text),
-        "exception": exception,
-    }
-
-
-def _python_interpreter_summary_from_toolchain_commands(
-    command_probes: dict[str, dict[str, Any]],
-) -> dict[str, Any] | None:
-    candidates: list[dict[str, Any]] = []
-    selected: dict[str, Any] | None = None
-    for command in ("python", "python3", "py"):
-        probe = command_probes.get(command)
-        if not isinstance(probe, dict):
-            continue
-        candidate = {
-            "command": command,
-            "resolved_path": probe.get("resolved_path"),
-            "present": probe.get("present"),
-            "usable": probe.get("usable"),
-            "reason_code": probe.get("reason_code"),
-            "reason": probe.get("reason"),
-            "version": probe.get("version"),
-            "executable": probe.get("executable"),
-        }
-        candidates.append(candidate)
-        if selected is None and bool(probe.get("usable")):
-            selected = {
-                "command": command,
-                "resolved_path": probe.get("resolved_path"),
-                "version": probe.get("version"),
-                "executable": probe.get("executable"),
-            }
-    if not candidates:
-        return None
-    return {
-        "selected": selected,
-        "candidates": candidates,
-        "rejected": [candidate for candidate in candidates if not bool(candidate.get("usable"))],
-    }
-_REMOTE_RUNTIME_HINT_ENV_KEYS: tuple[str, ...] = (
-    "VIRTUAL_ENV",
-    "USERTEST_PYTHON",
-    "PDM_PYTHON",
-    "UV_PYTHON",
-    "PYTHONHOME",
-    "__PYVENV_LAUNCHER__",
-    "CONDA_PREFIX",
-)
-
-
-def _normalize_runtime_path_key(path_text: str | None) -> str | None:
-    if not isinstance(path_text, str):
-        return None
-    raw = path_text.strip()
-    if not raw:
-        return None
-    normalized = raw.replace("\\", "/")
-    return normalized.lower() if _is_windows() else normalized
-
-
-def _context_verified_runtime_candidate(
-    python_context_probe: dict[str, Any] | None,
-) -> dict[str, Any] | None:
-    probe_passed = bool(
-        isinstance(python_context_probe, dict)
-        and python_context_probe.get("passed", False)
-    )
-    if not probe_passed:
-        return None
-    metadata = (
-        python_context_probe.get("metadata")
-        if isinstance(python_context_probe.get("metadata"), dict)
-        else None
-    )
-    if metadata is None:
-        return None
-    executable = metadata.get("executable")
-    executable_s = executable.strip() if isinstance(executable, str) else ""
-    if not executable_s:
-        return None
-
-    candidate: dict[str, Any] = {
-        "source": "context_verified",
-        "path": executable_s,
-        "present": True,
-        "usable": True,
-        "reason_code": None,
-        "reason_type": None,
-        "reason": None,
-    }
-    for key in (
-        "version",
-        "executable",
-        "prefix",
-        "base_prefix",
-        "real_prefix",
-        "exec_prefix",
-        "base_exec_prefix",
-        "virtual_env",
-    ):
-        value = metadata.get(key)
-        candidate[key] = value if isinstance(value, str) else None
-    return candidate
-
-
-def _rebuild_runtime_summary(runtime_summary: dict[str, Any]) -> dict[str, Any]:
-    candidates = runtime_summary.get("candidates")
-    candidate_list = (
-        [item for item in candidates if isinstance(item, dict)]
-        if isinstance(candidates, list)
-        else []
-    )
-    selected = runtime_summary.get("selected")
-    selected_dict = dict(selected) if isinstance(selected, dict) else None
-    return {
-        "selected": selected_dict,
-        "candidates": candidate_list,
-        "rejected": [item for item in candidate_list if not bool(item.get("usable", False))],
-    }
-
-
-def _reconcile_python_runtime_summary_with_context(
-    *,
-    python_runtime_summary: dict[str, Any],
-    python_context_probe: dict[str, Any] | None,
-    prefer_context_selection: bool,
-) -> dict[str, Any]:
-    summary = _rebuild_runtime_summary(python_runtime_summary)
-    selected = summary.get("selected")
-    selected_dict = dict(selected) if isinstance(selected, dict) else None
-    verified_candidate = _context_verified_runtime_candidate(python_context_probe)
-    selected_path_key = _normalize_runtime_path_key(
-        selected_dict.get("path") if isinstance(selected_dict, dict) else None
-    )
-
-    if verified_candidate is not None and prefer_context_selection:
-        verified_path_key = _normalize_runtime_path_key(verified_candidate.get("path"))
-        candidates: list[dict[str, Any]] = [verified_candidate]
-        if selected_dict is not None and selected_path_key != verified_path_key:
-            demoted = dict(selected_dict)
-            demoted["usable"] = False
-            demoted["reason_code"] = "context_mismatch"
-            demoted["reason_type"] = _reason_type_for_code("context_mismatch")
-            demoted["reason"] = (
-                "Host-selected interpreter does not match the execution backend verified runtime."
-            )
-            candidates.append(demoted)
-        for candidate in summary.get("candidates", []):
-            if not isinstance(candidate, dict):
-                continue
-            candidate_path_key = _normalize_runtime_path_key(candidate.get("path"))
-            if candidate_path_key == verified_path_key:
-                continue
-            if selected_path_key is not None and candidate_path_key == selected_path_key:
-                continue
-            candidates.append(dict(candidate))
-        return _rebuild_runtime_summary({"selected": verified_candidate, "candidates": candidates})
-
-    probe_failed = isinstance(python_context_probe, dict) and not bool(
-        python_context_probe.get("passed", False)
-    )
-    if probe_failed:
-        if selected_dict is None:
-            return summary
-        reason_code = python_context_probe.get("reason_code")
-        reason_code_s = reason_code if isinstance(reason_code, str) else "runtime_probe_failed"
-        reason = python_context_probe.get("reason")
-        demoted = dict(selected_dict)
-        demoted["usable"] = False
-        demoted["reason_code"] = reason_code_s
-        demoted["reason_type"] = _reason_type_for_code(reason_code_s)
-        demoted["reason"] = (
-            reason
-            if isinstance(reason, str) and reason.strip()
-            else "Execution-context verification failed."
-        )
-        candidates = [demoted]
-        for candidate in summary.get("candidates", []):
-            if not isinstance(candidate, dict):
-                continue
-            candidate_path_key = _normalize_runtime_path_key(candidate.get("path"))
-            if selected_path_key is not None and candidate_path_key == selected_path_key:
-                continue
-            candidates.append(dict(candidate))
-        return _rebuild_runtime_summary({"selected": None, "candidates": candidates})
-
-    return summary
-
-
-def _sanitize_runtime_env_overrides(
-    *,
-    env_overrides: dict[str, str] | None,
-    command_prefix: list[str],
-) -> dict[str, str]:
-    sanitized = dict(env_overrides or {})
-    if command_prefix:
-        for key in _REMOTE_RUNTIME_HINT_ENV_KEYS:
-            sanitized.setdefault(key, "")
-        sanitized.setdefault("PATH", "")
-    return sanitized
 def _primary_runtime_rejection(python_runtime_summary: dict[str, Any]) -> dict[str, Any]:
     rejected = python_runtime_summary.get("rejected")
     if isinstance(rejected, list):
@@ -3625,8 +2966,6 @@ def _align_python_command_diagnostics(
     python_runtime_summary: dict[str, Any],
     python_context_probe: dict[str, Any] | None,
     python_validation_required: bool,
-    prefer_context_selection: bool = False,
-    validated_python_executable: str | None = None,
 ) -> None:
     selected = python_runtime_summary.get("selected")
     selected_ok = isinstance(selected, dict)
@@ -3634,7 +2973,7 @@ def _align_python_command_diagnostics(
     failure: dict[str, Any] | None = None
     if not selected_ok:
         failure = _primary_runtime_rejection(python_runtime_summary)
-    elif isinstance(python_context_probe, dict):
+    elif python_validation_required and isinstance(python_context_probe, dict):
         if not bool(python_context_probe.get("passed", False)):
             reason_code = python_context_probe.get("reason_code")
             reason = python_context_probe.get("reason")
@@ -3656,37 +2995,16 @@ def _align_python_command_diagnostics(
             }
 
     if failure is None:
-        if prefer_context_selection:
-            python_diag = command_diagnostics.get("python")
-            if not isinstance(python_diag, dict):
-                python_diag = {}
-                command_diagnostics["python"] = python_diag
-            if isinstance(validated_python_executable, str) and validated_python_executable.strip():
-                python_diag["present"] = True
-                python_diag["usable"] = True
-                python_diag["status"] = "present"
-                python_diag["resolved_path"] = validated_python_executable.strip()
-                python_diag["reason_code"] = None
-                python_diag["reason_type"] = None
-                python_diag["reason"] = None
-                python_diag["remediation"] = None
-            for command in ("python3", "py"):
-                diag = command_diagnostics.get(command)
-                if isinstance(diag, dict):
-                    diag["resolved_path"] = None
         return
 
     for command in ("python", "python3", "py", "pdm"):
         diag = command_diagnostics.get(command)
         if not isinstance(diag, dict):
             continue
-        if diag.get("status") == "missing" and not prefer_context_selection:
+        if diag.get("status") == "missing":
             continue
         diag["usable"] = False
         diag["status"] = "unusable"
-        if prefer_context_selection:
-            diag["present"] = False
-            diag["resolved_path"] = None
         diag["reason_code"] = failure.get("reason_code")
         diag["reason_type"] = failure.get("reason_type")
         if isinstance(failure.get("reason"), str):
@@ -3742,182 +3060,6 @@ def _build_python_toolchain_capability_summary(
     }
 
 
-def _build_python_toolchain_snapshot(
-    *,
-    workspace_dir: Path,
-    verification_commands: tuple[str, ...],
-    command_prefix: list[str],
-    cwd: Path,
-    env_overrides: dict[str, str] | None,
-    probe_details_dict: dict[str, Any],
-    effective_probe_commands: list[str],
-) -> PythonToolchainCapabilitySnapshot:
-    python_capability = _validate_python_capability(
-        workspace_dir=workspace_dir,
-        verification_commands=verification_commands,
-        command_prefix=command_prefix,
-        cwd=cwd,
-        env_overrides=env_overrides,
-    )
-    runtime_selection = python_capability["runtime_selection"]
-    runtime_summary = python_capability["runtime_summary"]
-    context_probe = python_capability["context_probe"]
-    validation = python_capability["validation"]
-
-    relevant_command_names = [
-        name
-        for name in ("python", "python3", "py", "pdm")
-        if name in effective_probe_commands or name in probe_details_dict
-    ]
-    if (
-        verification_commands_need_pytest(verification_commands)
-        or "pytest" in effective_probe_commands
-    ):
-        relevant_command_names.append("pytest")
-
-    command_probes: dict[str, dict[str, Any]] = {}
-    for name in relevant_command_names:
-        existing = probe_details_dict.get(name)
-        if isinstance(existing, dict) and (
-            "resolved_path" in existing or command_prefix == []
-        ):
-            status = "unknown"
-            present = existing.get("present")
-            usable = existing.get("usable")
-            if present is False:
-                status = "missing"
-            elif usable is True:
-                status = "present"
-            elif present is True and usable is False:
-                status = "unusable"
-            command_probes[name] = {
-                "command": name,
-                "resolved_path": existing.get("resolved_path"),
-                "present": present,
-                "usable": usable,
-                "status": status,
-                "reason_code": existing.get("reason_code"),
-                "reason_type": _reason_type_for_code(
-                    existing.get("reason_code")
-                    if isinstance(existing.get("reason_code"), str)
-                    else None
-                ),
-                "reason": existing.get("reason"),
-                "remediation": _tool_command_probe_remediation(
-                    name,
-                    existing.get("reason_code")
-                    if isinstance(existing.get("reason_code"), str)
-                    else None
-                ),
-                "version": existing.get("version"),
-                "executable": existing.get("executable"),
-            }
-            continue
-
-        if name in {"python", "python3", "py"}:
-            command_probes[name] = _probe_same_shell_python_command(
-                command_name=name,
-                command_prefix=command_prefix,
-                cwd=cwd,
-                env_overrides=env_overrides,
-            )
-        elif name in {"pdm", "pytest"}:
-            command_probes[name] = _probe_same_shell_wrapper_command(
-                command_name=name,
-                argv_suffix=["--version"],
-                command_prefix=command_prefix,
-                cwd=cwd,
-                env_overrides=env_overrides,
-            )
-
-    python_failure: dict[str, Any] | None = None
-    if runtime_selection.selected is None:
-        python_failure = _primary_runtime_rejection(runtime_summary)
-    elif bool(validation.get("required")) and isinstance(context_probe, dict):
-        if not bool(context_probe.get("passed", False)):
-            reason_code = context_probe.get("reason_code")
-            effective_reason_code = (
-                reason_code if isinstance(reason_code, str) else "runtime_probe_failed"
-            )
-            python_failure = {
-                "reason_code": effective_reason_code,
-                "reason_type": _reason_type_for_code(
-                    reason_code if isinstance(reason_code, str) else None
-                ),
-                "reason": (
-                    context_probe.get("reason")
-                    if isinstance(context_probe.get("reason"), str)
-                    else None
-                ),
-                "remediation": (
-                    context_probe.get("remediation")
-                    if isinstance(context_probe.get("remediation"), str)
-                    else _python_probe_remediation(
-                        reason_code if isinstance(reason_code, str) else None
-                    )
-                ),
-            }
-
-    if python_failure is not None:
-        for name in ("python", "python3", "py"):
-            probe = command_probes.get(name)
-            if not isinstance(probe, dict) or probe.get("status") == "missing":
-                continue
-            probe["usable"] = False
-            probe["status"] = "unusable"
-            probe["reason_code"] = python_failure.get("reason_code")
-            probe["reason_type"] = python_failure.get("reason_type")
-            if isinstance(python_failure.get("reason"), str):
-                probe["reason"] = python_failure.get("reason")
-            if isinstance(python_failure.get("remediation"), str):
-                probe["remediation"] = python_failure.get("remediation")
-
-    pip_probe: dict[str, Any] | None = None
-    if (
-        bool(validation.get("required"))
-        and bool(validation.get("enabled"))
-        and not command_prefix
-        and runtime_selection.selected is not None
-    ):
-        pip_probe = probe_pip_module(
-            python_executable=runtime_selection.selected.path,
-            cwd=workspace_dir,
-        )
-        if isinstance(pip_probe, dict):
-            reason_code = pip_probe.get("reason_code")
-            pip_probe["reason_type"] = _reason_type_for_code(
-                reason_code if isinstance(reason_code, str) else None
-            )
-
-    pytest_module_probe: dict[str, Any] | None = None
-    if (
-        verification_commands_need_pytest(verification_commands)
-        and bool(validation.get("enabled"))
-        and not command_prefix
-        and runtime_selection.selected is not None
-    ):
-        pytest_module_probe = probe_pytest_module(
-            python_executable=runtime_selection.selected.path,
-            cwd=workspace_dir,
-        )
-        if isinstance(pytest_module_probe, dict):
-            reason_code = pytest_module_probe.get("reason_code")
-            pytest_module_probe["reason_type"] = _reason_type_for_code(
-                reason_code if isinstance(reason_code, str) else None
-            )
-
-    return PythonToolchainCapabilitySnapshot(
-        command_probes=command_probes,
-        runtime_selection=runtime_selection,
-        validation=dict(validation),
-        context_probe=context_probe if isinstance(context_probe, dict) else None,
-        module_probes={
-            "pip": pip_probe,
-            "pytest": pytest_module_probe,
-        },
-    )
-
-
 def _validate_python_capability(
     *,
     workspace_dir: Path,
@@ -3933,60 +3075,36 @@ def _validate_python_capability(
     needs Python, validates effective execution-path usability with a context probe.
     """
 
-    prefer_context_selection = bool(command_prefix)
-    runtime_env_overrides = _sanitize_runtime_env_overrides(
-        env_overrides=env_overrides,
-        command_prefix=command_prefix,
-    )
+    runtime_env_overrides = dict(env_overrides or {})
+    if command_prefix:
+        # For remote backends (for example docker exec), host-only runtime hints can leak across
+        # boundary (for example external-drive VIRTUAL_ENV). Clear by default unless explicitly
+        # provided by the backend bootstrap.
+        runtime_env_overrides.setdefault("VIRTUAL_ENV", "")
+        runtime_env_overrides.setdefault("USERTEST_PYTHON", "")
 
     python_runtime = select_python_runtime(
         workspace_dir=workspace_dir,
-        include_where_fallbacks=not prefer_context_selection,
-        include_sys_executable=not prefer_context_selection,
         environment=runtime_env_overrides or None,
     )
     python_runtime_summary = python_runtime.to_dict()
     python_validation_required = verification_commands_need_python(verification_commands)
 
     python_context_probe: dict[str, Any] | None = None
-    python_admissibility_probe_required = (
-        prefer_context_selection or python_runtime.selected is not None
-    )
-    if python_admissibility_probe_required:
+    if python_validation_required and python_runtime.selected is not None:
         python_context_probe = _probe_python_context_capability(
             command_prefix=command_prefix,
             cwd=cwd,
-            env_overrides=runtime_env_overrides or None,
-            python_executable=(
-                python_runtime.selected.path
-                if (python_runtime.selected is not None and not prefer_context_selection)
-                else None
-            ),
+            env_overrides=env_overrides,
+            python_executable=python_runtime.selected.path if not command_prefix else None,
         )
-    python_runtime_summary = _reconcile_python_runtime_summary_with_context(
-        python_runtime_summary=python_runtime_summary,
-        python_context_probe=python_context_probe,
-        prefer_context_selection=prefer_context_selection,
-    )
-    verified_context_candidate = _context_verified_runtime_candidate(python_context_probe)
 
-    python_validation_enabled = True
+    python_validation_enabled = not python_validation_required
     python_validation_reason_code: str | None = None
     python_validation_reason_type: str | None = None
     python_validation_reason: str | None = None
-    if isinstance(python_context_probe, dict):
-        python_validation_enabled = verified_context_candidate is not None
-        if not python_validation_enabled:
-            probe_reason_code = python_context_probe.get("reason_code")
-            python_validation_reason_code = (
-                probe_reason_code if isinstance(probe_reason_code, str) else "runtime_probe_failed"
-            )
-            python_validation_reason_type = _reason_type_for_code(python_validation_reason_code)
-            probe_reason = python_context_probe.get("reason")
-            python_validation_reason = probe_reason if isinstance(probe_reason, str) else None
-    elif python_validation_required:
-        python_validation_enabled = False
-        if python_runtime_summary.get("selected") is None:
+    if python_validation_required:
+        if python_runtime.selected is None:
             primary_rejection = _primary_runtime_rejection(python_runtime_summary)
             python_validation_reason_code = (
                 primary_rejection.get("reason_code")
@@ -4003,20 +3121,35 @@ def _validate_python_capability(
                 if isinstance(primary_rejection.get("reason"), str)
                 else None
             )
+        elif isinstance(python_context_probe, dict):
+            python_validation_enabled = bool(python_context_probe.get("passed", False))
+            if not python_validation_enabled:
+                probe_reason_code = python_context_probe.get("reason_code")
+                python_validation_reason_code = (
+                    probe_reason_code
+                    if isinstance(probe_reason_code, str)
+                    else "runtime_probe_failed"
+                )
+                python_validation_reason_type = _reason_type_for_code(python_validation_reason_code)
+                probe_reason = python_context_probe.get("reason")
+                python_validation_reason = probe_reason if isinstance(probe_reason, str) else None
         else:
+            python_validation_enabled = False
             python_validation_reason_code = "runtime_probe_failed"
             python_validation_reason_type = _reason_type_for_code(python_validation_reason_code)
             python_validation_reason = (
                 "Python validation was required, but context probe metadata was missing."
             )
 
-    validated_python_executable = (
-        verified_context_candidate.get("path")
-        if isinstance(verified_context_candidate, dict)
-        and isinstance(verified_context_candidate.get("path"), str)
-        and verified_context_candidate.get("path")
-        else None
-    )
+    validated_python_executable: str | None = None
+    if (
+        python_runtime.selected is not None
+        and not command_prefix
+        and (not python_validation_required or python_validation_enabled)
+    ):
+        selected_path = python_runtime.selected.path
+        if isinstance(selected_path, str) and selected_path.strip():
+            validated_python_executable = selected_path.strip()
 
     return {
         "runtime_selection": python_runtime,
@@ -4355,10 +3488,6 @@ def _run_verification_commands(
     attempt_dir = run_dir / attempt_dir_rel
     attempt_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure runs/usertest exists in the workspace to satisfy clean-environment
-    # assumptions for verification commands that expect a standard layout.
-    ensure_runs_usertest_exists(cwd)
-
     started_utc = _utc_now_z()
     started_monotonic = time.monotonic()
     results: list[dict[str, Any]] = []
@@ -4512,14 +3641,6 @@ def _run_verification_commands(
         )
         rewritten = bool(python_rewritten or bash_rewritten)
         rejected_sentinel = _looks_like_verification_rejection_sentinel(effective_cmd)
-        dispatch_validation = (
-            None
-            if rejected_sentinel
-            else _validate_verification_command_dispatch(
-                command=effective_cmd,
-                is_powershell=is_powershell,
-            )
-        )
         cmd_started_utc = _utc_now_z()
         cmd_started_monotonic = time.monotonic()
         timed_out = False
@@ -4551,27 +3672,6 @@ def _run_verification_commands(
                 "[runner] Fix: propagate the rejection as a structured error instead of "
                 "executing it.\n"
             )
-            try:
-                stdout_path.write_text("", encoding="utf-8", newline="\n")
-            except OSError:
-                pass
-            try:
-                stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
-            except OSError:
-                pass
-        elif dispatch_validation is not None:
-            exit_code = 126
-            kind = str(dispatch_validation.get("kind") or "invalid_dispatch").strip()
-            reason = str(dispatch_validation.get("reason") or "").strip()
-            hint = str(dispatch_validation.get("hint") or "").strip()
-            stderr_text = (
-                "[runner] Verification command dispatch blocked: "
-                f"kind={kind} command={effective_cmd!r}.\n"
-            )
-            if reason:
-                stderr_text += f"[runner] Reason: {reason}\n"
-            if hint:
-                stderr_text += f"[runner] Fix: {hint}\n"
             try:
                 stdout_path.write_text("", encoding="utf-8", newline="\n")
             except OSError:
@@ -4688,8 +3788,6 @@ def _run_verification_commands(
             "timed_out": timed_out,
             "cancelled": cancelled,
             "rejected_sentinel": rejected_sentinel,
-            "dispatch_blocked": dispatch_validation is not None,
-            "dispatch_validation": dispatch_validation,
             "command_started_utc": cmd_started_utc,
             "wall_seconds": wall_seconds,
             "stdout_path": stdout_path.name,
@@ -5625,7 +4723,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 # into stdin on the host. Therefore use the host path, not a container mount path.
                 system_prompt_path_for_agent = str(staged_system_prompt)
             else:
-                system_prompt_path_for_agent = agent_path_for_staged_file(
+                system_prompt_path_for_agent = _agent_path_for_staged_file(
                     staged_system_prompt,
                     run_dir=run_dir,
                     run_dir_mount=backend.run_dir_mount,
@@ -5693,7 +4791,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         text=append_text,
                     )
 
-                append_system_prompt_path_for_agent = agent_path_for_staged_file(
+                append_system_prompt_path_for_agent = _agent_path_for_staged_file(
                     staged_append_system_prompt,
                     run_dir=run_dir,
                     run_dir_mount=backend.run_dir_mount,
@@ -5803,11 +4901,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             ]
 
             probe_commands = _build_preflight_command_list(request)
-            if (
-                verification_commands_need_pytest(effective_verification_commands)
-                and "pytest" not in probe_commands
-            ):
-                probe_commands.append("pytest")
             if required_agent_binary is not None and required_agent_binary not in probe_commands:
                 probe_commands.append(required_agent_binary)
             preflight_commands_present: dict[str, bool] = {}
@@ -5881,24 +4974,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
             probe_details = preflight_meta.get("command_probe_details")
             probe_details_dict = probe_details if isinstance(probe_details, dict) else {}
-            python_toolchain = _build_python_toolchain_snapshot(
+            python_interpreter_meta = preflight_meta.get("python_interpreter")
+            python_interpreter_summary = (
+                python_interpreter_meta if isinstance(python_interpreter_meta, dict) else None
+            )
+            python_capability = _validate_python_capability(
                 workspace_dir=acquired.workspace_dir,
                 verification_commands=effective_verification_commands,
                 command_prefix=command_prefix,
                 cwd=acquired.workspace_dir,
                 env_overrides=agent_env_overrides,
-                probe_details_dict=probe_details_dict,
-                effective_probe_commands=effective_probe_commands,
             )
-            python_toolchain_summary = python_toolchain.to_dict()
-            python_interpreter_summary = _python_interpreter_summary_from_toolchain_commands(
-                python_toolchain_summary.get("commands", {})
-                if isinstance(python_toolchain_summary.get("commands"), dict)
-                else {}
-            )
-            python_runtime_summary = python_toolchain_summary["runtime"]
-            python_context_probe = python_toolchain_summary.get("context_probe")
-            python_validation = python_toolchain_summary["validation"]
+            python_runtime = python_capability["runtime_selection"]
+            python_runtime_summary = python_capability["runtime_summary"]
+            python_context_probe = python_capability["context_probe"]
+            python_validation = python_capability["validation"]
             python_validation_required = bool(python_validation.get("required", False))
             python_validation_enabled = bool(python_validation.get("enabled", False))
             python_validation_reason_code = (
@@ -5927,36 +5017,43 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             pytest_validation_required = verification_commands_need_pytest(
                 effective_verification_commands
             )
-            module_probes = (
-                python_toolchain_summary.get("modules")
-                if isinstance(python_toolchain_summary.get("modules"), dict)
-                else {}
-            )
-            pip_probe = (
-                module_probes.get("pip")
-                if isinstance(module_probes.get("pip"), dict)
-                else None
-            )
-            pytest_probe = (
-                module_probes.get("pytest")
-                if isinstance(module_probes.get("pytest"), dict)
-                else None
-            )
-            toolchain_command_probes = (
-                python_toolchain_summary.get("commands")
-                if isinstance(python_toolchain_summary.get("commands"), dict)
-                else {}
-            )
+            pip_probe: dict[str, Any] | None = None
+            if (
+                python_validation_required
+                and python_validation_enabled
+                and not command_prefix
+                and python_runtime.selected is not None
+            ):
+                pip_probe = probe_pip_module(
+                    python_executable=python_runtime.selected.path,
+                    cwd=acquired.workspace_dir,
+                )
+                if isinstance(pip_probe, dict):
+                    reason_code = pip_probe.get("reason_code")
+                    pip_probe["reason_type"] = _reason_type_for_code(
+                        reason_code if isinstance(reason_code, str) else None
+                    )
+            pytest_probe: dict[str, Any] | None = None
+            if (
+                pytest_validation_required
+                and python_validation_enabled
+                and not command_prefix
+                and python_runtime.selected is not None
+            ):
+                pytest_probe = probe_pytest_module(
+                    python_executable=python_runtime.selected.path,
+                    cwd=acquired.workspace_dir,
+                )
+                if isinstance(pytest_probe, dict):
+                    reason_code = pytest_probe.get("reason_code")
+                    pytest_probe["reason_type"] = _reason_type_for_code(
+                        reason_code if isinstance(reason_code, str) else None
+                    )
 
             command_diagnostics: dict[str, Any] = {}
             for cmd in effective_probe_commands:
-                toolchain_detail = toolchain_command_probes.get(cmd)
-                if isinstance(toolchain_detail, dict):
-                    detail_dict = dict(toolchain_detail)
-                else:
-                    detail = probe_details_dict.get(cmd)
-                    detail_dict = detail if isinstance(detail, dict) else {}
-
+                detail = probe_details_dict.get(cmd)
+                detail_dict = detail if isinstance(detail, dict) else {}
                 detail_present = detail_dict.get("present")
                 detail_usable = detail_dict.get("usable")
 
@@ -5989,13 +5086,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
                 if shell_status == "blocked" and status == "present":
                     status = "blocked_by_policy"
-                detail_remediation = detail_dict.get("remediation")
-                remediation: str | None = (
-                    detail_remediation
-                    if isinstance(detail_remediation, str) and detail_remediation.strip()
-                    else None
-                )
-                if remediation is None and status in {"missing", "unusable"}:
+                remediation: str | None = None
+                if status in {"missing", "unusable"}:
                     if cmd in {"python", "python3", "py"} and reason_code_s in {
                         "access_denied",
                         "launch_failed",
@@ -6027,7 +5119,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             f"Install `{cmd}` in the selected execution backend, "
                             "or switch --exec-backend."
                         )
-                elif remediation is None and status == "blocked_by_policy":
+                elif status == "blocked_by_policy":
                     remediation = (
                         "Enable shell commands in policy (recommended: --policy inspect), "
                         "or switch agent/policy."
@@ -6048,8 +5140,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 python_runtime_summary=python_runtime_summary,
                 python_context_probe=python_context_probe,
                 python_validation_required=python_validation_required,
-                prefer_context_selection=bool(command_prefix),
-                validated_python_executable=validated_python_executable_for_execution,
             )
 
             required_agent_binary_present = (
@@ -6080,7 +5170,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "required_agent_binary": required_agent_binary,
                     "required_agent_binary_present": required_agent_binary_present,
                     "python_interpreter": python_interpreter_summary,
-                    "python_toolchain": python_toolchain_summary,
                     "python_runtime": python_runtime_summary,
                     "python_context_probe": python_context_probe,
                     "python_validation": {
@@ -6141,7 +5230,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         ),
                         "hint": hint,
                         "preflight": {
-                            "python_toolchain": python_toolchain_summary,
                             "python_runtime": python_runtime_summary,
                             "python_interpreter": python_interpreter_summary,
                             "python_context_probe": python_context_probe,
@@ -6189,7 +5277,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "workspace `.venv` exists and contains pytest."
                         ),
                         "preflight": {
-                            "python_toolchain": python_toolchain_summary,
                             "python_runtime": python_runtime_summary,
                             "python_context_probe": python_context_probe,
                             "python_validation": {
@@ -6677,13 +5764,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "verification_reuse_mode must be one of {'auto', 'off'}; "
                     f"got {request.verification_reuse_mode!r}"
                 )
-            effective_verification_timeout_seconds = verification_timeout_seconds
             verification_broker_command: str | None = None
             if verification_commands and verification_reuse_mode == "auto":
-                effective_verification_timeout_seconds = resolve_verification_broker_lifecycle(
-                    verification_timeout_seconds=verification_timeout_seconds,
-                    verification_command_count=len(verification_commands),
-                ).timeout_seconds
                 broker_launcher, broker_launcher_probe = _probe_verification_broker_launcher(
                     command_prefix=command_prefix,
                     sandbox=sandbox,
@@ -6789,13 +5871,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             else verification_commands
                         ),
                         "final_handoff_command": verification_broker_command,
-                        "timeout_seconds": effective_verification_timeout_seconds,
+                        "timeout_seconds": verification_timeout_seconds,
                     },
                     "preflight": {
                         "commands": preflight_commands_present,
                         "command_diagnostics": command_diagnostics,
                         "python_interpreter": python_interpreter_summary,
-                        "python_toolchain": python_toolchain_summary,
                         "python_runtime": python_runtime_summary,
                         "python_context_probe": python_context_probe,
                         "python_validation": {
@@ -6842,7 +5923,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 pytest_probe=pytest_probe,
                 command_diagnostics=command_diagnostics,
                 verification_commands=verification_commands,
-                verification_timeout_seconds=effective_verification_timeout_seconds,
+                verification_timeout_seconds=verification_timeout_seconds,
                 verification_reuse_mode=verification_reuse_mode,
                 verification_broker_command=verification_broker_command,
                 agent=request.agent,
@@ -6872,17 +5953,44 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
 
             codex_overrides = list(combined_overrides)
-            if system_prompt_path_for_agent is not None:
-                codex_overrides.append(
-                    "model_instructions_file=" + toml_basic_string(system_prompt_path_for_agent)
-                )
+            codex_instructions_path_for_agent: str | None = system_prompt_path_for_agent
             if staged_append_system_prompt is not None:
-                try:
-                    dev_text = staged_append_system_prompt.read_text(encoding="utf-8")
-                except OSError:
-                    dev_text = ""
-                if dev_text.strip():
-                    codex_overrides.append("developer_instructions=" + toml_basic_string(dev_text))
+                if staged_system_prompt is not None:
+                    try:
+                        base_payload = staged_system_prompt.read_text(encoding="utf-8")
+                    except OSError:
+                        base_payload = ""
+                    try:
+                        append_payload = staged_append_system_prompt.read_text(encoding="utf-8")
+                    except OSError:
+                        append_payload = ""
+                    merged_parts: list[str] = []
+                    if base_payload.strip():
+                        merged_parts.append(base_payload.rstrip())
+                    if append_payload.strip():
+                        merged_parts.append(append_payload.strip())
+                    if merged_parts:
+                        staged_codex_instructions = _stage_agent_prompt_text(
+                            run_dir=run_dir,
+                            name="codex_model_instructions.md",
+                            text="\n\n".join(merged_parts).rstrip() + "\n",
+                        )
+                        codex_instructions_path_for_agent = _agent_path_for_staged_file(
+                            staged_codex_instructions,
+                            run_dir=run_dir,
+                            run_dir_mount=backend.run_dir_mount,
+                        )
+                else:
+                    codex_instructions_path_for_agent = _agent_path_for_staged_file(
+                        staged_append_system_prompt,
+                        run_dir=run_dir,
+                        run_dir_mount=backend.run_dir_mount,
+                    )
+            if codex_instructions_path_for_agent is not None:
+                codex_overrides.append(
+                    "model_instructions_file="
+                    + toml_basic_string(codex_instructions_path_for_agent)
+                )
 
             claude_cfg = config.agents.get("claude", {}) if isinstance(config.agents, dict) else {}
             claude_binary = (
@@ -6973,7 +6081,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             ) -> tuple[int, list[str]]:
                 if request.agent == "codex":
                     codex_last_message_for_attempt = (
-                        agent_path_for_staged_file(
+                        _agent_path_for_staged_file(
                             last_message_attempt_path,
                             run_dir=run_dir,
                             run_dir_mount=backend.run_dir_mount,
@@ -7057,7 +6165,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "reuse_mode": verification_reuse_mode,
                         "final_handoff_command": verification_broker_command,
                         "commands": verification_commands,
-                        "timeout_seconds": effective_verification_timeout_seconds,
+                        "timeout_seconds": verification_timeout_seconds,
                     },
                 )
 
@@ -7114,12 +6222,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     attempt_broker_root = (
                         run_dir / "verification_broker" / f"attempt{attempt_number}"
                     )
-                    client_root_for_agent = agent_path_for_staged_file(
+                    client_root_for_agent = _agent_path_for_staged_file(
                         client_root,
                         run_dir=run_dir,
                         run_dir_mount=backend.run_dir_mount,
                     )
-                    attempt_root_for_agent = agent_path_for_staged_file(
+                    attempt_root_for_agent = _agent_path_for_staged_file(
                         attempt_broker_root,
                         run_dir=run_dir,
                         run_dir_mount=backend.run_dir_mount,
@@ -7149,7 +6257,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             commands=verification_commands,
                             command_prefix=command_prefix,
                             cwd=acquired.workspace_dir,
-                            timeout_seconds=effective_verification_timeout_seconds,
+                            timeout_seconds=verification_timeout_seconds,
                             python_executable=_python_exec_for_verification,
                             python_toolchain_capability=python_toolchain_capability_summary,
                             env_overrides=agent_env_overrides,
@@ -7173,7 +6281,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             exec_backend=request.exec_backend,
                             validated_python_executable=validated_python_executable_for_execution,
                         ),
-                        verification_timeout_seconds=effective_verification_timeout_seconds,
+                        verification_timeout_seconds=verification_timeout_seconds,
                         verification_command_count=len(verification_commands),
                         verifier=_run_broker_verification,
                         workspace_hash_fn=lambda: compute_workspace_state_hash(
@@ -7395,7 +6503,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "commands": verification_commands,
                             "command_prefix": command_prefix,
                             "cwd": acquired.workspace_dir,
-                            "timeout_seconds": effective_verification_timeout_seconds,
+                            "timeout_seconds": verification_timeout_seconds,
                             "python_executable": python_exec_for_verification,
                             "python_toolchain_capability": python_toolchain_capability_summary,
                             "env_overrides": agent_env_overrides,

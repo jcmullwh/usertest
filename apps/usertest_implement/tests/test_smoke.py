@@ -65,3 +65,22 @@ def test_help_smoke() -> None:
     )
     assert proc.returncode == 0
     assert "usertest-implement" in proc.stdout
+
+
+def test_parser_maintenance_images_cleanup_defaults_to_config_dry_run_choice() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["maintenance-images", "cleanup"])
+    assert args.dry_run is None
+    assert args.timeout_seconds == 120.0
+
+
+def test_parser_maintenance_images_cleanup_dry_run_override() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["maintenance-images", "cleanup", "--dry-run"])
+    assert args.dry_run is True
+
+
+def test_parser_maintenance_images_list() -> None:
+    parser = build_parser()
+    args = parser.parse_args(["maintenance-images", "list", "--timeout-seconds", "9"])
+    assert args.timeout_seconds == 9.0
