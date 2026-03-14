@@ -4279,6 +4279,25 @@ def _render_export_issue_body(
     str
         Normalized string result.
     """
+    def _append_section_text(lines: list[str], heading: str, value: Any) -> None:
+        text = _coerce_string(value)
+        if not text:
+            return
+        lines.append(heading)
+        lines.append("")
+        lines.append(text)
+        lines.append("")
+
+    def _append_section_list(lines: list[str], heading: str, values: Any) -> None:
+        items = _coerce_string_list(values)
+        if not items:
+            return
+        lines.append(heading)
+        lines.append("")
+        for item in items:
+            lines.append(f"- {item}")
+        lines.append("")
+
     title = _coerce_string(ticket.get("title")) or ""
     problem = _coerce_string(ticket.get("problem")) or ""
     user_impact = _coerce_string(ticket.get("user_impact")) or ""
@@ -4327,6 +4346,17 @@ def _render_export_issue_body(
         lines.append("## User impact")
         lines.append("")
         lines.append(user_impact)
+        lines.append("")
+
+    problem_record_raw = ticket.get("problem_record")
+    problem_record = problem_record_raw if isinstance(problem_record_raw, dict) else {}
+    evidence_summary = _coerce_string(problem_record.get("evidence_summary")) or _coerce_string(
+        ticket.get("evidence_summary")
+    )
+    if evidence_summary:
+        lines.append("## Evidence summary")
+        lines.append("")
+        lines.append(evidence_summary)
         lines.append("")
 
     if proposed_fix:
@@ -4395,6 +4425,122 @@ def _render_export_issue_body(
             lines.append(f"- {step}")
         lines.append("")
 
+    research_raw = ticket.get("research")
+    research = research_raw if isinstance(research_raw, dict) else {}
+    if research:
+        lines.append("## Research context")
+        lines.append("")
+        repro = _coerce_string(research.get("reproduction_status"))
+        diff_cls = _coerce_string(research.get("diff_classification"))
+        broader = _coerce_string(research.get("broader_class_assessment"))
+        writes_used = research.get("writes_used")
+        writes_used_s = (
+            "true" if writes_used is True else "false" if writes_used is False else None
+        )
+        if repro:
+            lines.append(f"- Reproduction status: `{repro}`")
+        if diff_cls:
+            lines.append(f"- Diff classification: `{diff_cls}`")
+        if broader:
+            lines.append(f"- Broader class assessment: `{broader}`")
+        if writes_used_s is not None:
+            lines.append(f"- Writes used during research: `{writes_used_s}`")
+        writes_purpose = _coerce_string_list(research.get("writes_purpose"))
+        if writes_purpose:
+            lines.append("- Writes purpose:")
+            for item in writes_purpose:
+                lines.append(f"  - {item}")
+        lines.append("")
+        _append_section_list(lines, "### Root cause hypotheses", research.get("root_cause_hypotheses"))
+        _append_section_list(lines, "### Unknowns / next evidence needed", research.get("unknowns"))
+        _append_section_list(lines, "### Diff notes", research.get("diff_suspicious_reasons"))
+
+    selected_solution_raw = ticket.get("selected_solution")
+    selected_solution = selected_solution_raw if isinstance(selected_solution_raw, dict) else {}
+    selected_option_raw = selected_solution.get("selected_option")
+    selected_option = selected_option_raw if isinstance(selected_option_raw, dict) else {}
+    selected_family_id = _coerce_string(selected_solution.get("selected_family_id")) or _coerce_string(
+        ticket.get("selected_family_id")
+    )
+    selected_option_id = _coerce_string(selected_solution.get("selected_option_id")) or _coerce_string(
+        ticket.get("selected_option_id")
+    )
+    selected_option_summary = _coerce_string(selected_option.get("summary"))
+    selection_rationale = _coerce_string(selected_solution.get("selection_rationale"))
+    repo_intent_alignment = _coerce_string(selected_solution.get("repo_intent_alignment"))
+    why_not_others = _coerce_string(selected_solution.get("why_other_options_were_not_selected"))
+    if (
+        selected_solution
+        or selected_family_id
+        or selected_option_id
+        or selected_option_summary
+        or selection_rationale
+    ):
+        lines.append("## Selected solution context")
+        lines.append("")
+        if selected_family_id:
+            lines.append(f"- Selected family: `{selected_family_id}`")
+        if selected_option_id:
+            lines.append(f"- Selected option: `{selected_option_id}`")
+        component = _coerce_string(selected_solution.get("component")) or _coerce_string(
+            ticket.get("component")
+        )
+        if component:
+            lines.append(f"- Component: `{component}`")
+        intent_risk = _coerce_string(selected_solution.get("intent_risk")) or _coerce_string(
+            ticket.get("intent_risk")
+        )
+        if intent_risk:
+            lines.append(f"- Intent risk: `{intent_risk}`")
+        lines.append("")
+        _append_section_text(lines, "### Selected option summary", selected_option_summary)
+        _append_section_text(lines, "### Selection rationale", selection_rationale)
+        _append_section_text(lines, "### Repo intent alignment", repo_intent_alignment)
+        _append_section_text(lines, "### Why other options were not selected", why_not_others)
+        _append_section_text(lines, "### Change surface hypothesis", selected_option.get("change_surface_hypothesis"))
+        _append_section_text(lines, "### Tradeoffs", selected_option.get("tradeoffs"))
+        _append_section_text(lines, "### Recurrence prevention", selected_option.get("recurrence_prevention"))
+        _append_section_text(lines, "### Test implications", selected_option.get("test_implications"))
+        _append_section_text(lines, "### Option rationale", selected_option.get("rationale"))
+
+    solution_options_raw = ticket.get("solution_options")
+    solution_options = (
+        [item for item in solution_options_raw if isinstance(item, dict)]
+        if isinstance(solution_options_raw, list)
+        else []
+    )
+    if solution_options:
+        lines.append("## Solution options considered")
+        lines.append("")
+        for opt in solution_options:
+            option_id = _coerce_string(opt.get("option_id")) or "(no option_id)"
+            family_id = _coerce_string(opt.get("family_id")) or "unknown"
+            label = f"### `{option_id}`"
+            if selected_option_id and option_id == selected_option_id:
+                label += " (selected)"
+            lines.append(label)
+            lines.append("")
+            lines.append(f"- Family: `{family_id}`")
+            summary = _coerce_string(opt.get("summary"))
+            if summary:
+                lines.append(f"- Summary: {summary}")
+            change_surface_hypothesis = _coerce_string(opt.get("change_surface_hypothesis"))
+            if change_surface_hypothesis:
+                lines.append(f"- Change surface hypothesis: `{change_surface_hypothesis}`")
+            tradeoffs = _coerce_string(opt.get("tradeoffs"))
+            if tradeoffs:
+                lines.append(f"- Tradeoffs: {tradeoffs}")
+            recurrence = _coerce_string(opt.get("recurrence_prevention"))
+            if recurrence:
+                lines.append(f"- Recurrence prevention: {recurrence}")
+            tests = _coerce_string(opt.get("test_implications"))
+            if tests:
+                lines.append(f"- Test implications: {tests}")
+            rationale = _coerce_string(opt.get("rationale"))
+            if rationale:
+                lines.append(f"- Rationale: {rationale}")
+            lines.append("")
+
     success = _coerce_string_list(ticket.get("success_criteria"))
     if success:
         lines.append("## Success criteria")
@@ -4402,6 +4548,48 @@ def _render_export_issue_body(
         for criterion in success:
             lines.append(f"- {criterion}")
         lines.append("")
+
+    change_plan_raw = ticket.get("change_plan")
+    change_plan = change_plan_raw if isinstance(change_plan_raw, dict) else {}
+    if change_plan:
+        lines.append("## Implementation plan")
+        lines.append("")
+        change_plan_id = _coerce_string(change_plan.get("change_plan_id")) or _coerce_string(
+            ticket.get("change_plan_id")
+        )
+        if change_plan_id:
+            lines.append(f"- Change plan ID: `{change_plan_id}`")
+        plan_status = _coerce_string(change_plan.get("change_plan_status"))
+        if plan_status:
+            lines.append(f"- Plan status: `{plan_status}`")
+        suggested_owner = _coerce_string(change_plan.get("suggested_owner")) or _coerce_string(
+            ticket.get("suggested_owner")
+        )
+        if suggested_owner:
+            lines.append(f"- Suggested owner: `{suggested_owner}`")
+        related_change_plans = _coerce_string_list(change_plan.get("related_change_plan_ids"))
+        if related_change_plans:
+            lines.append("- Related change plans:")
+            for rel in related_change_plans:
+                lines.append(f"  - `{rel}`")
+        lines.append("")
+        _append_section_list(
+            lines,
+            "### Implementation steps",
+            _coerce_string_list(ticket.get("implementation_steps"))
+            or _coerce_string_list(change_plan.get("implementation_steps")),
+        )
+        _append_section_list(
+            lines,
+            "### Verification steps",
+            _coerce_string_list(ticket.get("verification_steps"))
+            or _coerce_string_list(change_plan.get("verification_steps")),
+        )
+        _append_section_text(
+            lines,
+            "### Rollback notes",
+            _coerce_string(ticket.get("rollback_notes")) or _coerce_string(change_plan.get("rollback_notes")),
+        )
 
     if breadth:
         lines.append("## Problem-local evidence breadth (counts)")
