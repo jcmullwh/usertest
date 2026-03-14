@@ -1,0 +1,116 @@
+{
+  "blocked": [
+    {
+      "name": "powershell_posix_chain_operator",
+      "host_os": "Windows",
+      "command_prefix": [],
+      "command": "python -m pytest && pytest -q",
+      "expected_kind": "powershell_unsupported_chain_operator",
+      "expected_stderr_fragment": "POSIX-style `&&`/`||` chaining"
+    },
+    {
+      "name": "powershell_python_heredoc",
+      "host_os": "Windows",
+      "command_prefix": [],
+      "command": "python - <<'PY'",
+      "expected_kind": "powershell_unsupported_python_heredoc",
+      "expected_stderr_fragment": "Python heredoc shell syntax"
+    },
+    {
+      "name": "shell_dispatched_apply_patch_tool",
+      "host_os": "Linux",
+      "command_prefix": [],
+      "command": "apply_patch *** Begin Patch",
+      "expected_kind": "shell_dispatched_patch_tool",
+      "expected_stderr_fragment": "apply_patch tool"
+    },
+    {
+      "name": "shell_dispatched_patch_payload",
+      "host_os": "Linux",
+      "command_prefix": [],
+      "command": "*** Begin Patch",
+      "expected_kind": "shell_dispatched_patch_tool",
+      "expected_stderr_fragment": "apply_patch tool"
+    }
+  ],
+  "allowed": [
+    {
+      "name": "bash_chain_allowed_in_docker",
+      "host_os": "Windows",
+      "command_prefix": [
+        "docker",
+        "exec",
+        "-i",
+        "sandbox"
+      ],
+      "command": "cd /workspace && rg TODO README.md",
+      "expected_argv_prefix": [
+        "docker",
+        "exec",
+        "-i",
+        "sandbox",
+        "sh",
+        "-lc"
+      ]
+    },
+    {
+      "name": "powershell_separator_allowed",
+      "host_os": "Windows",
+      "command_prefix": [],
+      "command": "Get-ChildItem; Get-Location",
+      "expected_argv_prefix": [
+        "powershell",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command"
+      ]
+    },
+    {
+      "name": "collapsed_relative_path_passthrough",
+      "host_os": "Linux",
+      "command_prefix": [],
+      "command": "python .appsusertestsrcusertestcli.py",
+      "expected_argv_prefix": [
+        "sh",
+        "-lc"
+      ]
+    }
+  ],
+  "metadata": [
+    {
+      "name": "local_windows",
+      "host_os": "Windows",
+      "exec_backend": "local",
+      "command_prefix": [],
+      "expected_shell": "powershell",
+      "expected_summary_fragment": "PowerShell (Windows; no `&&` / `||`)",
+      "expected_wrapper": "verify_client.ps1",
+      "expected_broker_prefix": "powershell -NoProfile -ExecutionPolicy Bypass -File"
+    },
+    {
+      "name": "docker_windows",
+      "host_os": "Windows",
+      "exec_backend": "docker",
+      "command_prefix": [
+        "docker",
+        "exec",
+        "-i",
+        "sandbox"
+      ],
+      "expected_shell": "bash",
+      "expected_summary_fragment": "- Shell: bash",
+      "expected_wrapper": "verify_client.sh",
+      "expected_broker_prefix": "sh "
+    },
+    {
+      "name": "local_linux",
+      "host_os": "Linux",
+      "exec_backend": "local",
+      "command_prefix": [],
+      "expected_shell": "bash",
+      "expected_summary_fragment": "- Shell: bash",
+      "expected_wrapper": "verify_client.sh",
+      "expected_broker_prefix": "sh "
+    }
+  ]
+}

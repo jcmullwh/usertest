@@ -2676,6 +2676,18 @@ def _maybe_rewrite_ripgrep_unexpected_argument(
 
 
 _VERIFICATION_REJECTION_SENTINELS: frozenset[str] = frozenset({"rejected"})
+_VERIFICATION_PATCH_TOOL_RE = re.compile(
+    r"^\s*(?:&\s*)?(?:apply_patch|applypatch|apply-patch)(?:\s|$)",
+    re.IGNORECASE,
+)
+_VERIFICATION_PATCH_PAYLOAD_RE = re.compile(
+    r"^\s*\*{3}\s+(?:Begin|Update|Add|Delete|End)\s+Patch\b",
+    re.IGNORECASE,
+)
+_VERIFICATION_PYTHON_HEREDOC_RE = re.compile(
+    r"^\s*(?:python3?|py)(?=\s|$).*<<",
+    re.IGNORECASE,
+)
 
 
 def _looks_like_verification_rejection_sentinel(command: str) -> bool:
@@ -2760,6 +2772,68 @@ def _looks_like_verification_rejection_sentinel(command: str) -> bool:
             return True
         current = inner
     return False
+
+
+def _validate_verification_command_dispatch(
+    *,
+    command: str,
+    is_powershell: bool,
+) -> dict[str, Any] | None:
+    """
+    Block malformed command shapes before they reach the shell/process launcher.
+
+    These checks intentionally focus on repeated high-signal failure patterns observed in runs:
+    shell-dispatched patch payloads/tool names, POSIX chaining forwarded into PowerShell 5.1, and
+    Python heredoc invocations that are incompatible with PowerShell dispatch.
+    """
+
+    raw = (command or "").strip()
+    if not raw:
+        return None
+
+    if _VERIFICATION_PATCH_TOOL_RE.match(raw) or _VERIFICATION_PATCH_PAYLOAD_RE.match(raw):
+        return {
+            "kind": "shell_dispatched_patch_tool",
+            "reason": (
+                "Received an apply_patch command or patch payload on the shell verification path."
+            ),
+            "hint": (
+                "Route patch payloads through the apply_patch tool instead of dispatching them "
+                "through the shell."
+            ),
+        }
+
+    if not is_powershell:
+        return None
+
+    argv = _split_verification_command(raw, prefer_posix=False)
+    if any(token in {"&&", "||"} for token in argv):
+        return {
+            "kind": "powershell_unsupported_chain_operator",
+            "reason": (
+                "The command uses POSIX-style `&&`/`||` chaining, which is incompatible with "
+                "the PowerShell 5.1 shell contract used for Windows local runs."
+            ),
+            "hint": (
+                "Run the commands separately, or use PowerShell-native sequencing and "
+                "`$LASTEXITCODE` checks."
+            ),
+        }
+
+    if _VERIFICATION_PYTHON_HEREDOC_RE.search(raw):
+        return {
+            "kind": "powershell_unsupported_python_heredoc",
+            "reason": (
+                "Python heredoc shell syntax (`python - <<...`) is incompatible with the "
+                "PowerShell verification shell."
+            ),
+            "hint": (
+                "Use `python -c`, write the script to a file, or run the command in a bash "
+                "execution path instead."
+            ),
+        }
+
+    return None
 
 
 def _probe_windows_bash_usable() -> dict[str, Any]:
@@ -4438,6 +4512,14 @@ def _run_verification_commands(
         )
         rewritten = bool(python_rewritten or bash_rewritten)
         rejected_sentinel = _looks_like_verification_rejection_sentinel(effective_cmd)
+        dispatch_validation = (
+            None
+            if rejected_sentinel
+            else _validate_verification_command_dispatch(
+                command=effective_cmd,
+                is_powershell=is_powershell,
+            )
+        )
         cmd_started_utc = _utc_now_z()
         cmd_started_monotonic = time.monotonic()
         timed_out = False
@@ -4469,6 +4551,27 @@ def _run_verification_commands(
                 "[runner] Fix: propagate the rejection as a structured error instead of "
                 "executing it.\n"
             )
+            try:
+                stdout_path.write_text("", encoding="utf-8", newline="\n")
+            except OSError:
+                pass
+            try:
+                stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
+            except OSError:
+                pass
+        elif dispatch_validation is not None:
+            exit_code = 126
+            kind = str(dispatch_validation.get("kind") or "invalid_dispatch").strip()
+            reason = str(dispatch_validation.get("reason") or "").strip()
+            hint = str(dispatch_validation.get("hint") or "").strip()
+            stderr_text = (
+                "[runner] Verification command dispatch blocked: "
+                f"kind={kind} command={effective_cmd!r}.\n"
+            )
+            if reason:
+                stderr_text += f"[runner] Reason: {reason}\n"
+            if hint:
+                stderr_text += f"[runner] Fix: {hint}\n"
             try:
                 stdout_path.write_text("", encoding="utf-8", newline="\n")
             except OSError:
@@ -4585,6 +4688,8 @@ def _run_verification_commands(
             "timed_out": timed_out,
             "cancelled": cancelled,
             "rejected_sentinel": rejected_sentinel,
+            "dispatch_blocked": dispatch_validation is not None,
+            "dispatch_validation": dispatch_validation,
             "command_started_utc": cmd_started_utc,
             "wall_seconds": wall_seconds,
             "stdout_path": stdout_path.name,
