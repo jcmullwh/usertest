@@ -5,6 +5,18 @@ maintenance_docker:
   pull_policy: "if_missing"
   seed_root: "/opt/usertest_maint_seed"
   cache_root_subdir: "usertest_maint_venvs"
+  cleanup_enabled: true
+  keep_local_count: 5
+  keep_local_days: 7
+  keep_branch_alias_tags: true
+  protect_tags:
+    - "latest"
+    - "main-latest"
+    - "dev-latest"
+    - "bench-dfc31ac"
+    - "ci-local"
+  cleanup_on_prepare: true
+  cleanup_dry_run_default: false
   publish_branches:
     - "dev"
     - "main"

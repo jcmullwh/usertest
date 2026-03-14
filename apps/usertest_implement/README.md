@@ -53,7 +53,13 @@ Maintenance install cache (Docker + warm cache):
 - Disable this behavior with `--no-maintenance-venv-cache` (forces full reinstall behavior).
 - Cache root inside the container: `/cache/usertest_maint_venvs`.
 - Default host cache root: `<repo_root>/runs/_cache/usertest_implement`.
-- Manual cleanup: delete the host cache directory (or only `usertest_maint_venvs`) when needed.
+- Inspect retained maintenance images with:
+  - `usertest-implement maintenance-images list`
+- Prune old maintenance-image tags with:
+  - `usertest-implement maintenance-images cleanup --dry-run`
+  - `usertest-implement maintenance-images cleanup`
+- Automatic best-effort local image cleanup also runs after maintenance-image resolution using
+  `configs/maintenance_docker.yaml`.
 
 Docker execution profile:
 
@@ -71,6 +77,14 @@ CI gate (before PR creation):
 - Override with `--skip-ci-wait` (debugging only; expect PR checks to fail) and `--ci-timeout-seconds`.
 - If you still want a PR even when CI fails, use `--draft-pr-on-ci-failure` to create a draft PR.
 - CI gate metadata is written to `ci_gate.json` in the run directory (including when skipped).
+
+Implementation review gate (before merge):
+
+- `usertest-implement run --commit --push --pr` stops at `4 - for_review` once the PR is created.
+- It does not mark the ticket complete and it does not merge the PR.
+- Use `usertest-implement review run` to review the PR against the ticket's selected approach.
+- Use `usertest-implement review merge` only after review approval and green CI.
+- `5 - complete` is reserved for merged tickets.
 
 Quick checks:
 
@@ -169,3 +183,29 @@ It runs the backlog refresh steps via `usertest-backlog` (backlog → intent-sna
 exports only `ready_for_ticket` items, then selects the next local plan ticket that is both
 `Export kind: implementation` and `Stage: ready_for_ticket`. Use `--no-refresh-backlog` for a fast path
 that only selects from existing `.agents/plans/*` tickets that match the same stage-6 implementation gate.
+
+### Review stage
+
+PR-backed implementation tickets do not go straight from implementation to complete.
+
+- `usertest-implement run --commit --push --pr` stops at `4 - for_review`
+- `usertest-implement review run` checks the PR against the selected ticket approach
+- `usertest-implement review merge` merges only when the review says the PR is merge-ready
+- `5 - complete` is reserved for merged tickets
+
+Example review flow:
+
+```bash
+usertest-implement review run --ticket-path ".agents/plans/4 - for_review/<ticket>.md"
+usertest-implement review status --ticket-path ".agents/plans/4 - for_review/<ticket>.md"
+usertest-implement review merge --ticket-path ".agents/plans/4 - for_review/<ticket>.md"
+```
+
+The review stage is intentionally narrow. It checks:
+
+- alignment to the ticket's selected approach
+- unnecessary added scope
+- implementation defects and regressions
+- CI truth and PR mergeability
+
+It does not re-decide the backlog ticket's solution.

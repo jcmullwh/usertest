@@ -65,6 +65,11 @@ def _is_missing_module(exc: ModuleNotFoundError, module: str) -> bool:
 
 try:
     from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
+    from runner_core.execution_backend import (
+        _load_maintenance_docker_config,
+        cleanup_local_maintenance_images,
+        list_local_maintenance_images,
+    )
 except ModuleNotFoundError as exc:
     if _is_missing_module(exc, "runner_core"):
         raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
@@ -72,7 +77,7 @@ except ModuleNotFoundError as exc:
 
 try:
     from usertest_implement.finalize import finalize_commit, finalize_push
-    from usertest_implement.ledger import update_ledger_file
+    from usertest_implement.ledger import load_ledger, update_ledger_file
     from usertest_implement.model_detect import infer_observed_model
     from usertest_implement.summarize import iter_implementation_rows, write_jsonl
     from usertest_implement.tickets import (
@@ -112,6 +117,10 @@ class _SettingsValueSpec:
 _SETTINGS_FILENAME = "usertest_implement_settings.yaml"
 _DEFAULT_PERSONA_ID = "thoughtful_maintainer"
 _DEFAULT_MISSION_ID = "implement_maintenance_backlog_ticket_v1"
+_DEFAULT_REVIEW_PERSONA_ID = "compliance_sentinel"
+_DEFAULT_REVIEW_MISSION_ID = "review_backlog_implementation_pr_v1"
+_DEFAULT_LEDGER_PATH = Path(".agents/state/backlog_implement_actions.yaml")
+_MAX_REVIEW_DIFF_CHARS = 120_000
 _SETTINGS_SECTION_RUN_COMMON = "run_common"
 _SETTINGS_SECTION_RUN = "run"
 _SETTINGS_SECTION_TICKETS_RUN_NEXT = "tickets_run_next"
@@ -152,6 +161,12 @@ _SETTINGS_COMMON_SPECS: dict[str, _SettingsValueSpec] = {
     "verification_timeout_seconds": _SettingsValueSpec("float", allow_none=True),
     "skip_verify": _SettingsValueSpec("bool"),
     "verify_reuse": _SettingsValueSpec("choice", choices=("auto", "off")),
+    "implementation_review_agent": _SettingsValueSpec(
+        "choice",
+        choices=("claude", "codex", "gemini"),
+        allow_none=True,
+    ),
+    "implementation_review_model": _SettingsValueSpec("str", allow_none=True),
     "ci_timeout_seconds": _SettingsValueSpec("float"),
     "skip_ci_wait": _SettingsValueSpec("bool"),
     "draft_pr_on_ci_failure": _SettingsValueSpec("bool"),
@@ -524,6 +539,13 @@ def _read_json(path: Path) -> Any | None:
 
 def _write_json(path: Path, obj: object) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _resolve_ledger_path(*, repo_root: Path, raw: Path | None) -> Path:
+    ledger_path = raw if raw is not None else _DEFAULT_LEDGER_PATH
+    if ledger_path.is_absolute():
+        return ledger_path.resolve()
+    return (repo_root / ledger_path).resolve()
 
 
 def _git_head_sha(workspace_dir: Path) -> str | None:
@@ -1015,6 +1037,32 @@ def _select_ticket_from_path(ticket_path: Path) -> SelectedTicket:
     )
 
 
+def _select_ticket_from_owner_root(
+    *,
+    owner_root: Path,
+    fingerprint: str,
+) -> SelectedTicket:
+    index = build_ticket_index(owner_root=owner_root)
+    entry = index.get(fingerprint)
+    if entry is None or not entry.paths:
+        raise ValueError(f"Unknown fingerprint under {owner_root}: {fingerprint}")
+    path = sorted(entry.paths, key=lambda item: str(item))[0]
+    return _select_ticket_from_path(path)
+
+
+def _select_review_ticket(
+    *,
+    owner_root: Path,
+    ticket_path: Path | None,
+    fingerprint: str | None,
+) -> SelectedTicket:
+    if ticket_path is not None:
+        return _select_ticket_from_path(ticket_path)
+    if isinstance(fingerprint, str) and fingerprint.strip():
+        return _select_ticket_from_owner_root(owner_root=owner_root, fingerprint=fingerprint.strip())
+    raise SystemExit("Provide either --ticket-path or --fingerprint.")
+
+
 def _compose_ticket_blob(selected: SelectedTicket) -> str:
     lines: list[str] = []
     lines.append("# Ticket context")
@@ -1197,6 +1245,604 @@ def _write_pr_manifest(
 
     (run_dir / "pr_manifest.md").write_text(manifest, encoding="utf-8")
     return title, body
+
+
+def _run_gh_json(*, cwd: Path, argv: list[str]) -> Any:
+    proc = subprocess.run(
+        argv,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        raise RuntimeError(stderr or stdout or "gh failed")
+    try:
+        return json.loads(proc.stdout or "null")
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"gh returned invalid JSON: {exc}") from exc
+
+
+def _run_gh_text(*, cwd: Path, argv: list[str]) -> str:
+    proc = subprocess.run(
+        argv,
+        cwd=str(cwd),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        check=False,
+    )
+    if proc.returncode != 0:
+        stderr = (proc.stderr or "").strip()
+        stdout = (proc.stdout or "").strip()
+        raise RuntimeError(stderr or stdout or "gh failed")
+    return proc.stdout or ""
+
+
+def _load_ledger_entry(*, ledger_path: Path, fingerprint: str) -> dict[str, Any]:
+    doc = load_ledger(ledger_path)
+    actions = doc.get("actions")
+    if not isinstance(actions, dict):
+        return {}
+    entry = actions.get(fingerprint)
+    return entry if isinstance(entry, dict) else {}
+
+
+def _coerce_pr_url(*, handoff_summary: dict[str, Any] | None, pr_ref: dict[str, Any] | None) -> str | None:
+    if isinstance(handoff_summary, dict):
+        pr_url = handoff_summary.get("pr_url")
+        if isinstance(pr_url, str) and pr_url.strip():
+            return pr_url.strip()
+    if isinstance(pr_ref, dict):
+        pr_url = pr_ref.get("url")
+        if isinstance(pr_url, str) and pr_url.strip():
+            return pr_url.strip()
+    return None
+
+
+def _classify_pr_checks(checks: list[dict[str, Any]]) -> tuple[str, str | None]:
+    if not checks:
+        return "pending", None
+
+    success_states = {"SUCCESS", "SKIPPING", "NEUTRAL"}
+    failure_states = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
+    pending_states = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
+
+    saw_pending = False
+    for check in checks:
+        state_raw = check.get("state")
+        state = str(state_raw).strip().upper() if isinstance(state_raw, str) else ""
+        if state in failure_states:
+            return "completed", "failure"
+        if state in pending_states or not state:
+            saw_pending = True
+        elif state not in success_states:
+            saw_pending = True
+
+    if saw_pending:
+        return "pending", None
+    return "completed", "success"
+
+
+def _collect_pr_review_context(*, workspace_dir: Path, pr_url: str) -> dict[str, Any]:
+    view_raw = _run_gh_json(
+        cwd=workspace_dir,
+        argv=[
+            "gh",
+            "pr",
+            "view",
+            pr_url,
+            "--json",
+            "number,url,title,state,isDraft,headRefName,baseRefName,mergeable,statusCheckRollup",
+        ],
+    )
+    if not isinstance(view_raw, dict):
+        raise RuntimeError("gh pr view returned non-object JSON")
+
+    checks_raw = _run_gh_json(
+        cwd=workspace_dir,
+        argv=[
+            "gh",
+            "pr",
+            "checks",
+            pr_url,
+            "--json",
+            "name,state,startedAt,completedAt,link,bucket,event",
+        ],
+    )
+    checks = [item for item in checks_raw if isinstance(item, dict)] if isinstance(checks_raw, list) else []
+    ci_status, ci_conclusion = _classify_pr_checks(checks)
+
+    changed_files_text = _run_gh_text(
+        cwd=workspace_dir,
+        argv=["gh", "pr", "diff", pr_url, "--name-only"],
+    )
+    changed_files = [line.strip() for line in changed_files_text.splitlines() if line.strip()]
+
+    diff_full = _run_gh_text(
+        cwd=workspace_dir,
+        argv=["gh", "pr", "diff", pr_url],
+    )
+    diff_excerpt = diff_full
+    diff_truncated = False
+    if len(diff_excerpt) > _MAX_REVIEW_DIFF_CHARS:
+        diff_excerpt = diff_excerpt[:_MAX_REVIEW_DIFF_CHARS].rstrip() + "\n\n[diff truncated]\n"
+        diff_truncated = True
+
+    return {
+        "pr": view_raw,
+        "checks": checks,
+        "ci_status": ci_status,
+        "ci_conclusion": ci_conclusion,
+        "changed_files": changed_files,
+        "diff_excerpt": diff_excerpt,
+        "diff_truncated": diff_truncated,
+    }
+
+
+def _build_review_append_prompt(
+    *,
+    selected: SelectedTicket,
+    handoff_summary: dict[str, Any] | None,
+    pr_ref: dict[str, Any] | None,
+    ci_gate: dict[str, Any] | None,
+    pr_context: dict[str, Any],
+) -> str:
+    pr_json = json.dumps(pr_context.get("pr", {}), indent=2, ensure_ascii=False)
+    checks_json = json.dumps(pr_context.get("checks", []), indent=2, ensure_ascii=False)
+    handoff_json = json.dumps(handoff_summary or {}, indent=2, ensure_ascii=False)
+    pr_ref_json = json.dumps(pr_ref or {}, indent=2, ensure_ascii=False)
+    ci_gate_json = json.dumps(ci_gate or {}, indent=2, ensure_ascii=False)
+    changed_files = pr_context.get("changed_files", [])
+    changed_file_lines = "\n".join(f"- {path}" for path in changed_files) if changed_files else "- <none>"
+    diff_excerpt = str(pr_context.get("diff_excerpt") or "").rstrip()
+
+    return (
+        "# Review task\n\n"
+        "You are reviewing a PR-backed implementation of an already-selected backlog ticket.\n"
+        "Do not redesign the ticket. Review only whether the PR stays aligned with the chosen approach,\n"
+        "whether it adds unnecessary scope, whether there are implementation defects/regressions, and whether CI is green.\n\n"
+        "Your report must use `task_run_v1` and must set `report.extensions.review_summary` to an object with:\n"
+        "- `review_decision`: `approved` | `changes_requested` | `blocked`\n"
+        "- `approach_alignment`: `aligned` | `diverged` | `unclear`\n"
+        "- `scope_assessment`: `appropriate` | `excessive` | `unclear`\n"
+        "- `rationale`: short string\n\n"
+        "Use `issues[]` for findings. Do not modify repository source files. Do not merge the PR.\n\n"
+        "# Ticket markdown\n\n"
+        f"{selected.ticket_markdown.rstrip()}\n\n"
+        "# Handoff summary\n\n"
+        f"```json\n{handoff_json}\n```\n\n"
+        "# PR reference\n\n"
+        f"```json\n{pr_ref_json}\n```\n\n"
+        "# CI gate artifact from implementation\n\n"
+        f"```json\n{ci_gate_json}\n```\n\n"
+        "# Current PR metadata\n\n"
+        f"```json\n{pr_json}\n```\n\n"
+        "# Current PR checks\n\n"
+        f"```json\n{checks_json}\n```\n\n"
+        "# Changed files\n\n"
+        f"{changed_file_lines}\n\n"
+        "# PR diff excerpt\n\n"
+        "```diff\n"
+        f"{diff_excerpt}\n"
+        "```\n"
+    )
+
+
+def _extract_agent_review_summary(report: dict[str, Any]) -> dict[str, Any]:
+    extensions = report.get("extensions")
+    if not isinstance(extensions, dict):
+        raise ValueError("report.json missing extensions object")
+    review_summary = extensions.get("review_summary")
+    if not isinstance(review_summary, dict):
+        raise ValueError("report.json missing extensions.review_summary object")
+
+    out: dict[str, Any] = {}
+    for key, allowed in (
+        ("review_decision", {"approved", "changes_requested", "blocked"}),
+        ("approach_alignment", {"aligned", "diverged", "unclear"}),
+        ("scope_assessment", {"appropriate", "excessive", "unclear"}),
+    ):
+        raw = review_summary.get(key)
+        value = raw.strip().lower() if isinstance(raw, str) and raw.strip() else None
+        if value not in allowed:
+            raise ValueError(f"extensions.review_summary.{key} must be one of {sorted(allowed)!r}")
+        out[key] = value
+
+    rationale_raw = review_summary.get("rationale")
+    if not isinstance(rationale_raw, str) or not rationale_raw.strip():
+        raise ValueError("extensions.review_summary.rationale must be a non-empty string")
+    out["rationale"] = rationale_raw.strip()
+    return out
+
+
+def _review_findings_from_report(report: dict[str, Any]) -> list[dict[str, Any]]:
+    issues_raw = report.get("issues")
+    issues = issues_raw if isinstance(issues_raw, list) else []
+    findings: list[dict[str, Any]] = []
+    for issue in issues:
+        if not isinstance(issue, dict):
+            continue
+        severity_raw = issue.get("severity")
+        severity = severity_raw if isinstance(severity_raw, str) and severity_raw.strip() else "info"
+        title_raw = issue.get("title")
+        details_raw = issue.get("details")
+        if not isinstance(title_raw, str) or not title_raw.strip():
+            continue
+        if not isinstance(details_raw, str) or not details_raw.strip():
+            continue
+        findings.append(
+            {
+                "severity": severity.strip().lower(),
+                "title": title_raw.strip(),
+                "details": details_raw.strip(),
+                "evidence": issue.get("evidence"),
+                "suggested_fix": issue.get("suggested_fix"),
+            }
+        )
+    return findings
+
+
+def _build_final_review_summary(
+    *,
+    selected: SelectedTicket,
+    review_run_dir: Path,
+    pr_url: str,
+    pr_context: dict[str, Any],
+    agent_summary: dict[str, Any],
+    report: dict[str, Any],
+) -> dict[str, Any]:
+    pr_meta = pr_context.get("pr")
+    if not isinstance(pr_meta, dict):
+        raise ValueError("PR context missing metadata")
+    pr_number_raw = pr_meta.get("number")
+    pr_number = (
+        int(pr_number_raw)
+        if isinstance(pr_number_raw, int)
+        else int(str(pr_number_raw).strip())
+        if isinstance(pr_number_raw, str) and str(pr_number_raw).strip().isdigit()
+        else None
+    )
+    mergeable_raw = pr_meta.get("mergeable")
+    mergeable = str(mergeable_raw).strip().upper() == "MERGEABLE"
+    is_draft = bool(pr_meta.get("isDraft") is True)
+    pr_state = str(pr_meta.get("state") or "").strip().upper()
+    ci_status = str(pr_context.get("ci_status") or "pending")
+    ci_conclusion_raw = pr_context.get("ci_conclusion")
+    ci_conclusion = (
+        str(ci_conclusion_raw).strip().lower()
+        if isinstance(ci_conclusion_raw, str) and str(ci_conclusion_raw).strip()
+        else None
+    )
+    merge_ready = (
+        agent_summary["review_decision"] == "approved"
+        and agent_summary["approach_alignment"] == "aligned"
+        and agent_summary["scope_assessment"] == "appropriate"
+        and ci_conclusion == "success"
+        and mergeable
+        and not is_draft
+        and pr_state == "OPEN"
+    )
+    return {
+        "schema_version": 1,
+        "ticket_fingerprint": selected.fingerprint,
+        "ticket_path": str(selected.idea_path) if selected.idea_path is not None else None,
+        "run_dir": str(review_run_dir),
+        "pr_url": pr_url,
+        "pr_number": pr_number,
+        "pr_state": pr_state.lower() if pr_state else None,
+        "pr_title": pr_meta.get("title"),
+        "head_ref_name": pr_meta.get("headRefName"),
+        "base_ref_name": pr_meta.get("baseRefName"),
+        "is_draft": is_draft,
+        "mergeable": mergeable,
+        "mergeable_state": mergeable_raw,
+        "ci_status": ci_status,
+        "ci_conclusion": ci_conclusion,
+        "review_decision": agent_summary["review_decision"],
+        "approach_alignment": agent_summary["approach_alignment"],
+        "scope_assessment": agent_summary["scope_assessment"],
+        "rationale": agent_summary["rationale"],
+        "findings": _review_findings_from_report(report),
+        "merge_ready": merge_ready,
+        "review_source": "automated",
+        "reviewed_at_utc": _utc_now_z(),
+    }
+
+
+def _current_merge_gate_from_pr_context(pr_context: dict[str, Any]) -> tuple[bool, dict[str, Any]]:
+    pr_meta = pr_context.get("pr")
+    if not isinstance(pr_meta, dict):
+        raise ValueError("PR context missing metadata")
+    mergeable_state = pr_meta.get("mergeable")
+    mergeable = str(mergeable_state).strip().upper() == "MERGEABLE"
+    is_draft = bool(pr_meta.get("isDraft") is True)
+    pr_state = str(pr_meta.get("state") or "").strip().upper()
+    ci_status = str(pr_context.get("ci_status") or "pending")
+    ci_conclusion_raw = pr_context.get("ci_conclusion")
+    ci_conclusion = (
+        str(ci_conclusion_raw).strip().lower()
+        if isinstance(ci_conclusion_raw, str) and str(ci_conclusion_raw).strip()
+        else None
+    )
+    gate = {
+        "pr_state": pr_state.lower() if pr_state else None,
+        "is_draft": is_draft,
+        "mergeable": mergeable,
+        "mergeable_state": mergeable_state,
+        "ci_status": ci_status,
+        "ci_conclusion": ci_conclusion,
+    }
+    okay = pr_state == "OPEN" and not is_draft and mergeable and ci_conclusion == "success"
+    return okay, gate
+
+
+def _run_review_for_selected_ticket(
+    *,
+    repo_root: Path,
+    cfg: RunnerConfig,
+    owner_root: Path,
+    selected: SelectedTicket,
+    implementation_run_dir: Path,
+    ledger_path: Path,
+    review_agent: str,
+    review_model: str | None,
+    review_policy: str,
+    review_persona_id: str,
+    review_mission_id: str,
+    review_seed: int,
+    review_agent_config_override: list[str],
+    keep_workspace: bool,
+    exec_backend: str,
+    exec_use_host_agent_login: bool,
+    exec_use_target_sandbox_cli_install: bool,
+    exec_docker_profile: str | None,
+    exec_keep_container: bool,
+    exec_cache: str,
+    exec_cache_dir: Path | None,
+    maintenance_venv_cache: bool,
+    dry_run: bool,
+) -> tuple[Path | None, dict[str, Any] | None]:
+    if not implementation_run_dir.exists():
+        raise SystemExit(f"Recorded implementation run dir does not exist: {implementation_run_dir}")
+
+    handoff_summary = _read_json(implementation_run_dir / "handoff_summary.json")
+    pr_ref = _read_json(implementation_run_dir / "pr_ref.json")
+    ci_gate = _read_json(implementation_run_dir / "ci_gate.json")
+    pr_url = _coerce_pr_url(handoff_summary=handoff_summary, pr_ref=pr_ref)
+    if pr_url is None:
+        raise SystemExit(
+            f"Ticket {selected.fingerprint!r} does not have a PR to review "
+            f"(run_dir={implementation_run_dir})."
+        )
+
+    pr_context = _collect_pr_review_context(workspace_dir=owner_root, pr_url=pr_url)
+    pr_meta = pr_context.get("pr")
+    if not isinstance(pr_meta, dict):
+        raise SystemExit("Unable to read PR metadata for review.")
+
+    head_ref_name = pr_meta.get("headRefName")
+    review_prompt = _build_review_append_prompt(
+        selected=selected,
+        handoff_summary=handoff_summary if isinstance(handoff_summary, dict) else None,
+        pr_ref=pr_ref if isinstance(pr_ref, dict) else None,
+        ci_gate=ci_gate if isinstance(ci_gate, dict) else None,
+        pr_context=pr_context,
+    )
+
+    if dry_run:
+        print(
+            json.dumps(
+                {
+                    "ticket_fingerprint": selected.fingerprint,
+                    "ticket_path": str(selected.idea_path) if selected.idea_path is not None else None,
+                    "implementation_run_dir": str(implementation_run_dir),
+                    "pr_url": pr_url,
+                    "head_ref_name": head_ref_name,
+                    "review_agent": review_agent,
+                    "review_model": review_model,
+                    "review_persona_id": review_persona_id,
+                    "review_mission_id": review_mission_id,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return None, None
+
+    effective_repo_input = str(owner_root)
+    if _looks_like_local_path(effective_repo_input):
+        git_root = _infer_git_root(owner_root)
+        if git_root is not None:
+            remote_url = _git_remote_url(repo_dir=git_root, remote_name="origin")
+            if isinstance(remote_url, str) and remote_url.strip():
+                effective_repo_input = remote_url.strip()
+
+    effective_exec_backend = str(exec_backend).strip().lower()
+    maintenance_profile_eligible = _maintenance_profile_is_eligible(
+        repo_root=repo_root,
+        repo_input=effective_repo_input,
+    )
+    effective_exec_docker_profile = _resolve_exec_docker_profile(
+        exec_backend=effective_exec_backend,
+        requested_profile=exec_docker_profile,
+        maintenance_eligible=maintenance_profile_eligible,
+    )
+    if effective_exec_backend == "docker":
+        _require_docker_available()
+
+    staged_review_prompt_dir = repo_root / "runs" / "_tmp_review_prompt_staging"
+    staged_review_prompt_dir.mkdir(parents=True, exist_ok=True)
+    staged_review_prompt_path = (
+        staged_review_prompt_dir
+        / f"{selected.fingerprint}_{int(time.time() * 1000)}_review_prompt.md"
+    )
+    staged_review_prompt_path.write_text(review_prompt, encoding="utf-8")
+
+    request = RunRequest(
+        repo=effective_repo_input,
+        ref=str(head_ref_name).strip() if isinstance(head_ref_name, str) and head_ref_name.strip() else None,
+        agent=review_agent,
+        model=review_model,
+        policy=review_policy,
+        persona_id=review_persona_id,
+        mission_id=review_mission_id,
+        seed=review_seed,
+        agent_config_overrides=tuple(str(v) for v in review_agent_config_override or []),
+        agent_append_system_prompt_file=staged_review_prompt_path,
+        keep_workspace=bool(keep_workspace),
+        verification_commands=(),
+        verification_reuse_mode="off",
+        exec_backend=effective_exec_backend,
+        exec_docker_profile=effective_exec_docker_profile,
+        exec_use_host_agent_login=bool(exec_use_host_agent_login),
+        exec_use_target_sandbox_cli_install=bool(exec_use_target_sandbox_cli_install),
+        exec_cache=str(exec_cache),
+        exec_cache_dir=exec_cache_dir,
+        exec_maintenance_venv_cache=bool(maintenance_venv_cache),
+        exec_keep_container=bool(exec_keep_container),
+    )
+
+    try:
+        result = run_once(cfg, request)
+    finally:
+        try:
+            staged_review_prompt_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+    review_run_dir = result.run_dir
+    if int(result.exit_code or 0) != 0:
+        raise SystemExit(f"Review run failed (exit_code={result.exit_code}) in {review_run_dir}")
+    if result.report_validation_errors:
+        raise SystemExit(
+            "Review run produced an invalid report: "
+            + "; ".join(str(err) for err in result.report_validation_errors)
+        )
+    report = _read_json(review_run_dir / "report.json")
+    if not isinstance(report, dict):
+        raise SystemExit(f"Missing or invalid report.json in review run dir: {review_run_dir}")
+    try:
+        agent_summary = _extract_agent_review_summary(report)
+        review_summary = _build_final_review_summary(
+            selected=selected,
+            review_run_dir=review_run_dir,
+            pr_url=pr_url,
+            pr_context=pr_context,
+            agent_summary=agent_summary,
+            report=report,
+        )
+    except ValueError as exc:
+        raise SystemExit(f"Invalid review output in {review_run_dir}: {exc}") from exc
+
+    _write_json(review_run_dir / "review_summary.json", review_summary)
+    _write_json(
+        review_run_dir / "review_ref.json",
+        {
+            "schema_version": 1,
+            "ticket_fingerprint": selected.fingerprint,
+            "ticket_path": str(selected.idea_path) if selected.idea_path is not None else None,
+            "implementation_run_dir": str(implementation_run_dir),
+            "pr_url": pr_url,
+        },
+    )
+    update_ledger_file(
+        ledger_path,
+        fingerprint=selected.fingerprint,
+        updates={
+            "last_review_run_dir": str(review_run_dir),
+            "last_review_pr_url": pr_url,
+            "last_review_decision": review_summary["review_decision"],
+            "last_review_merge_ready": bool(review_summary["merge_ready"]),
+            "last_review_ci_conclusion": review_summary.get("ci_conclusion"),
+        },
+    )
+    return review_run_dir, review_summary
+
+
+def _build_handoff_summary(
+    *,
+    branch: str,
+    commit_performed: bool,
+    push_ref: dict[str, Any] | None,
+    pr_ref: dict[str, Any] | None,
+    ci_gate: dict[str, Any] | None,
+    review_run_dir: Path | None,
+    review_summary: dict[str, Any] | None,
+    review_error: str | None,
+) -> dict[str, Any]:
+    ci_status = None
+    ci_conclusion = None
+    ci_run_url = None
+    if isinstance(ci_gate, dict):
+        ci_status_raw = ci_gate.get("status")
+        ci_conclusion_raw = ci_gate.get("conclusion")
+        ci_status = str(ci_status_raw).strip() if isinstance(ci_status_raw, str) and ci_status_raw.strip() else None
+        ci_conclusion = (
+            str(ci_conclusion_raw).strip().lower()
+            if isinstance(ci_conclusion_raw, str) and ci_conclusion_raw.strip()
+            else None
+        )
+        ci_run_url_raw = ci_gate.get("run_url")
+        if isinstance(ci_run_url_raw, str) and ci_run_url_raw.strip():
+            ci_run_url = ci_run_url_raw.strip()
+        if ci_status is None and ci_gate.get("skipped") is True:
+            ci_status = "skipped"
+        if ci_conclusion is None:
+            if ci_gate.get("passed") is True:
+                ci_conclusion = "success"
+                ci_status = ci_status or "completed"
+            elif ci_gate.get("passed") is False:
+                ci_conclusion = "failure"
+                ci_status = ci_status or "completed"
+
+    pr_url = None
+    pr_created = False
+    if isinstance(pr_ref, dict):
+        pr_created = bool(pr_ref.get("created") is True)
+        pr_url_raw = pr_ref.get("url")
+        if isinstance(pr_url_raw, str) and pr_url_raw.strip():
+            pr_url = pr_url_raw.strip()
+
+    pushed = bool(isinstance(push_ref, dict) and push_ref.get("pushed") is True)
+    review_required = pr_created
+    review_decision = None
+    review_merge_ready = None
+    if isinstance(review_summary, dict):
+        review_decision_raw = review_summary.get("review_decision")
+        if isinstance(review_decision_raw, str) and review_decision_raw.strip():
+            review_decision = review_decision_raw.strip()
+        review_merge_ready = bool(review_summary.get("merge_ready") is True)
+
+    final_status = "success"
+    if pr_created:
+        if review_error is not None:
+            final_status = "failure"
+        elif review_required and review_merge_ready is not True:
+            final_status = "failure"
+
+    return {
+        "schema_version": 1,
+        "branch": branch,
+        "commit_performed": bool(commit_performed),
+        "pushed": pushed,
+        "pr_created": pr_created,
+        "pr_url": pr_url,
+        "ci_required": pr_created,
+        "ci_status": ci_status,
+        "ci_run_url": ci_run_url,
+        "ci_conclusion": ci_conclusion,
+        "review_required": review_required,
+        "review_run_dir": str(review_run_dir) if review_run_dir is not None else None,
+        "review_decision": review_decision,
+        "review_merge_ready": review_merge_ready,
+        "review_error": review_error,
+        "final_status": final_status,
+    }
 
 
 def _require_docker_available() -> None:
@@ -1830,10 +2476,9 @@ def _run_selected_ticket(
         except Exception as e:
             print(f"WARNING: failed to move ticket to for_review: {e}", file=sys.stderr)
 
+    ledger_path: Path | None = None
     if args.ledger is not None:
-        ledger_path = args.ledger
-        if not ledger_path.is_absolute():
-            ledger_path = repo_root / ledger_path
+        ledger_path = _resolve_ledger_path(repo_root=repo_root, raw=args.ledger)
         updates: dict[str, Any] = {
             "title": selected.title,
             "owner_root": str(selected.owner_root) if selected.owner_root is not None else None,
@@ -1857,6 +2502,91 @@ def _run_selected_ticket(
             update_ledger_file(ledger_path, fingerprint=selected.fingerprint, updates=updates)
         except Exception as e:
             print(f"WARNING: failed to update ledger: {e}", file=sys.stderr)
+
+    review_run_dir: Path | None = None
+    review_summary: dict[str, Any] | None = None
+    review_error: str | None = None
+    pr_created = bool(isinstance(pr_ref, dict) and pr_ref.get("created") is True)
+    if pr_created:
+        if selected.owner_root is None:
+            review_error = "Automatic review requires a local owner_root for the selected ticket."
+        else:
+            effective_ledger_path = ledger_path or _resolve_ledger_path(repo_root=repo_root, raw=None)
+            implementation_review_agent = (
+                str(args.implementation_review_agent).strip()
+                if isinstance(getattr(args, "implementation_review_agent", None), str)
+                and str(args.implementation_review_agent).strip()
+                else str(args.agent)
+            )
+            implementation_review_model = (
+                str(args.implementation_review_model).strip()
+                if isinstance(getattr(args, "implementation_review_model", None), str)
+                and str(args.implementation_review_model).strip()
+                else args.model
+            )
+            try:
+                review_run_dir, review_summary = _run_review_for_selected_ticket(
+                    repo_root=repo_root,
+                    cfg=cfg,
+                    owner_root=selected.owner_root,
+                    selected=selected,
+                    implementation_run_dir=run_dir,
+                    ledger_path=effective_ledger_path,
+                    review_agent=implementation_review_agent,
+                    review_model=implementation_review_model,
+                    review_policy=str(args.policy),
+                    review_persona_id=_DEFAULT_REVIEW_PERSONA_ID,
+                    review_mission_id=_DEFAULT_REVIEW_MISSION_ID,
+                    review_seed=int(args.seed),
+                    review_agent_config_override=list(args.agent_config_override or []),
+                    keep_workspace=bool(args.keep_workspace),
+                    exec_backend=str(args.exec_backend),
+                    exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
+                    exec_use_target_sandbox_cli_install=bool(args.exec_use_target_sandbox_cli_install),
+                    exec_docker_profile=getattr(args, "exec_docker_profile", None),
+                    exec_keep_container=bool(args.exec_keep_container),
+                    exec_cache=str(args.exec_cache),
+                    exec_cache_dir=exec_cache_dir,
+                    maintenance_venv_cache=maintenance_venv_cache,
+                    dry_run=False,
+                )
+            except SystemExit as exc:
+                review_error = str(exc).strip() or "Automatic review failed."
+
+        if review_run_dir is not None:
+            _write_json(
+                run_dir / "review_ref.json",
+                {
+                    "schema_version": 1,
+                    "implementation_run_dir": str(run_dir),
+                    "review_run_dir": str(review_run_dir),
+                    "ticket_fingerprint": selected.fingerprint,
+                },
+            )
+        if review_error is not None:
+            print("[implement] ERROR: automatic review failed:", file=sys.stderr)
+            print(f"  {review_error}", file=sys.stderr)
+            exit_code = max(exit_code, 6)
+        elif not (isinstance(review_summary, dict) and review_summary.get("merge_ready") is True):
+            review_decision = None
+            if isinstance(review_summary, dict):
+                review_decision = review_summary.get("review_decision")
+            print("[implement] ERROR: review did not approve the PR for merge.", file=sys.stderr)
+            print(f"  Review run: {review_run_dir}", file=sys.stderr)
+            print(f"  Decision: {review_decision!r}", file=sys.stderr)
+            exit_code = max(exit_code, 6)
+
+    handoff_summary = _build_handoff_summary(
+        branch=branch,
+        commit_performed=commit_performed,
+        push_ref=push_ref,
+        pr_ref=pr_ref,
+        ci_gate=_read_json(run_dir / "ci_gate.json"),
+        review_run_dir=review_run_dir,
+        review_summary=review_summary,
+        review_error=review_error,
+    )
+    _write_json(run_dir / "handoff_summary.json", handoff_summary)
 
     if result.report_validation_errors:
         print("[implement] WARNING: report validation failed:", file=sys.stderr)
@@ -1921,6 +2651,181 @@ def _cmd_run(args: argparse.Namespace) -> int:
         )
 
     return _run_selected_ticket(args=args, repo_root=repo_root, cfg=cfg, selected=selected)
+
+
+def _read_review_summary(*, review_run_dir: Path) -> dict[str, Any]:
+    summary = _read_json(review_run_dir / "review_summary.json")
+    if not isinstance(summary, dict):
+        raise SystemExit(f"Missing review_summary.json in {review_run_dir}")
+    return summary
+
+
+def _cmd_review_run(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    cfg = _load_runner_config(repo_root)
+    owner_root = args.owner_root.resolve()
+    selected = _select_review_ticket(
+        owner_root=owner_root,
+        ticket_path=args.ticket_path,
+        fingerprint=args.fingerprint,
+    )
+
+    ledger_path = _resolve_ledger_path(repo_root=repo_root, raw=args.ledger)
+    ledger_entry = _load_ledger_entry(ledger_path=ledger_path, fingerprint=selected.fingerprint)
+    run_dir_raw = ledger_entry.get("last_run_dir")
+    if not isinstance(run_dir_raw, str) or not run_dir_raw.strip():
+        raise SystemExit(
+            f"No last_run_dir recorded in ledger for ticket {selected.fingerprint!r}. "
+            f"Expected ledger entry in {ledger_path}."
+        )
+    implementation_run_dir = Path(run_dir_raw)
+    review_run_dir, _review_summary = _run_review_for_selected_ticket(
+        repo_root=repo_root,
+        cfg=cfg,
+        owner_root=owner_root,
+        selected=selected,
+        implementation_run_dir=implementation_run_dir,
+        ledger_path=ledger_path,
+        review_agent=str(args.agent),
+        review_model=args.model,
+        review_policy=str(args.policy),
+        review_persona_id=str(args.persona_id),
+        review_mission_id=str(args.mission_id),
+        review_seed=int(args.seed),
+        review_agent_config_override=list(getattr(args, "agent_config_override", []) or []),
+        keep_workspace=bool(args.keep_workspace),
+        exec_backend=str(args.exec_backend),
+        exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
+        exec_use_target_sandbox_cli_install=bool(args.exec_use_target_sandbox_cli_install),
+        exec_docker_profile=getattr(args, "exec_docker_profile", None),
+        exec_keep_container=bool(args.exec_keep_container),
+        exec_cache=str(args.exec_cache),
+        exec_cache_dir=args.exec_cache_dir,
+        maintenance_venv_cache=bool(args.maintenance_venv_cache),
+        dry_run=bool(args.dry_run),
+    )
+    if review_run_dir is None:
+        return 0
+    print(str(review_run_dir))
+    return 0
+
+
+def _cmd_review_status(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    owner_root = args.owner_root.resolve()
+    selected = _select_review_ticket(
+        owner_root=owner_root,
+        ticket_path=args.ticket_path,
+        fingerprint=args.fingerprint,
+    )
+    ledger_path = _resolve_ledger_path(repo_root=repo_root, raw=args.ledger)
+    ledger_entry = _load_ledger_entry(ledger_path=ledger_path, fingerprint=selected.fingerprint)
+    review_run_dir_raw = ledger_entry.get("last_review_run_dir")
+    if not isinstance(review_run_dir_raw, str) or not review_run_dir_raw.strip():
+        raise SystemExit(f"No review run recorded in ledger for ticket {selected.fingerprint!r}.")
+    review_summary = _read_review_summary(review_run_dir=Path(review_run_dir_raw))
+    print(json.dumps(review_summary, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _cmd_review_merge(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    owner_root = args.owner_root.resolve()
+    selected = _select_review_ticket(
+        owner_root=owner_root,
+        ticket_path=args.ticket_path,
+        fingerprint=args.fingerprint,
+    )
+    ledger_path = _resolve_ledger_path(repo_root=repo_root, raw=args.ledger)
+    ledger_entry = _load_ledger_entry(ledger_path=ledger_path, fingerprint=selected.fingerprint)
+    review_run_dir_raw = ledger_entry.get("last_review_run_dir")
+    if not isinstance(review_run_dir_raw, str) or not review_run_dir_raw.strip():
+        raise SystemExit(f"No review run recorded in ledger for ticket {selected.fingerprint!r}.")
+    review_run_dir = Path(review_run_dir_raw)
+    review_summary = _read_review_summary(review_run_dir=review_run_dir)
+    pr_url = review_summary.get("pr_url")
+    if not isinstance(pr_url, str) or not pr_url.strip():
+        raise SystemExit(f"Review summary for {selected.fingerprint!r} is missing pr_url.")
+    if review_summary.get("merge_ready") is not True:
+        raise SystemExit(
+            f"Review summary for {selected.fingerprint!r} is not merge-ready "
+            f"(decision={review_summary.get('review_decision')!r}, "
+            f"ci_conclusion={review_summary.get('ci_conclusion')!r})."
+        )
+
+    pr_context = _collect_pr_review_context(workspace_dir=owner_root, pr_url=pr_url)
+    current_merge_ready, current_gate = _current_merge_gate_from_pr_context(pr_context)
+    if not current_merge_ready:
+        raise SystemExit(
+            "Refusing to merge because the current PR gate is not green: "
+            f"{json.dumps(current_gate, ensure_ascii=False)}"
+        )
+
+    proc = subprocess.run(
+        ["gh", "pr", "merge", pr_url, "--merge", "--delete-branch"],
+        cwd=str(owner_root),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    merge_ref = {
+        "schema_version": 1,
+        "pr_url": pr_url,
+        "merged": proc.returncode == 0,
+        "stdout": proc.stdout,
+        "stderr": proc.stderr,
+        "returncode": int(proc.returncode),
+        "merged_at_utc": _utc_now_z() if proc.returncode == 0 else None,
+    }
+    _write_json(review_run_dir / "merge_ref.json", merge_ref)
+    if proc.returncode != 0:
+        raise SystemExit(proc.stderr.strip() or proc.stdout.strip() or "gh pr merge failed")
+
+    if selected.owner_root is not None:
+        move_ticket_file(
+            owner_root=selected.owner_root,
+            fingerprint=selected.fingerprint,
+            to_bucket="5 - complete",
+            dry_run=False,
+        )
+    update_ledger_file(
+        ledger_path,
+        fingerprint=selected.fingerprint,
+        updates={
+            "last_merge_pr_url": pr_url,
+            "last_merged_at": merge_ref["merged_at_utc"],
+        },
+    )
+    print(pr_url)
+    return 0
+
+
+def _cmd_maintenance_images_list(args: argparse.Namespace) -> int:
+    """Print the local maintenance-image inventory as JSON."""
+
+    repo_root = _resolve_repo_root(getattr(args, "repo_root", None))
+    payload = list_local_maintenance_images(
+        repo_root=repo_root,
+        timeout_seconds=float(args.timeout_seconds),
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0
+
+
+def _cmd_maintenance_images_cleanup(args: argparse.Namespace) -> int:
+    """Prune old local maintenance-image tags using the configured retention policy."""
+
+    repo_root = _resolve_repo_root(getattr(args, "repo_root", None))
+    dry_run = args.dry_run
+    if dry_run is None:
+        dry_run = _load_maintenance_docker_config(repo_root=repo_root).cleanup_dry_run_default
+    payload = cleanup_local_maintenance_images(
+        repo_root=repo_root,
+        timeout_seconds=float(args.timeout_seconds),
+        dry_run=bool(dry_run),
+    )
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0
 
 
 def _cmd_reports_summarize(args: argparse.Namespace) -> int:
@@ -2053,6 +2958,20 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--policy", default="write")
     parser.add_argument("--persona-id", dest="persona_id", default=_DEFAULT_PERSONA_ID)
     parser.add_argument("--mission-id", dest="mission_id", default=_DEFAULT_MISSION_ID)
+    parser.add_argument(
+        "--implementation-review-agent",
+        dest="implementation_review_agent",
+        choices=["claude", "codex", "gemini"],
+        help=(
+            "Agent CLI used for the automatic post-implementation review after PR creation "
+            "(default: settings value, otherwise the implementation agent)."
+        ),
+    )
+    parser.add_argument(
+        "--implementation-review-model",
+        dest="implementation_review_model",
+        help="Optional model override for the automatic post-implementation review.",
+    )
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument(
         "--agent-config-override",
@@ -2240,11 +3159,98 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ledger",
         nargs="?",
-        const=Path("configs/backlog_implement_actions.yaml"),
+        const=_DEFAULT_LEDGER_PATH,
         type=Path,
         help=(
             "Optional attempt ledger YAML. If provided without a value, defaults to "
-            "<repo_root>/configs/backlog_implement_actions.yaml."
+            "<repo_root>/.agents/state/backlog_implement_actions.yaml."
+        ),
+    )
+
+
+def _add_review_execution_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--agent", choices=["claude", "codex", "gemini"], default="codex")
+    parser.add_argument("--model", help="Optional model override.")
+    parser.add_argument("--policy", default="write")
+    parser.add_argument("--persona-id", dest="persona_id", default=_DEFAULT_REVIEW_PERSONA_ID)
+    parser.add_argument("--mission-id", dest="mission_id", default=_DEFAULT_REVIEW_MISSION_ID)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--agent-config-override",
+        action="append",
+        default=[],
+        help="Repeatable agent config override strings.",
+    )
+    parser.add_argument("--keep-workspace", action="store_true", help="Keep workspace directory after run.")
+
+    exec_backend_group = parser.add_mutually_exclusive_group()
+    exec_backend_group.add_argument(
+        "--exec-backend",
+        choices=["docker", "local"],
+        default="docker",
+        help="Execution backend (default: docker).",
+    )
+    exec_backend_group.add_argument(
+        "--no-docker",
+        dest="exec_backend",
+        action="store_const",
+        const="local",
+        help="Opt out of Docker sandboxing (exec_backend=local).",
+    )
+    run_auth_group = parser.add_mutually_exclusive_group()
+    run_auth_group.add_argument(
+        "--exec-use-host-agent-login",
+        dest="exec_use_host_agent_login",
+        action="store_true",
+        default=True,
+    )
+    run_auth_group.add_argument(
+        "--exec-use-api-key-auth",
+        dest="exec_use_host_agent_login",
+        action="store_false",
+    )
+    parser.add_argument("--exec-use-target-sandbox-cli-install", action="store_true", default=False)
+    parser.add_argument(
+        "--exec-docker-profile",
+        choices=["standard", "maintenance"],
+        help=(
+            "Docker execution profile. Defaults to maintenance for same-repo maintenance targets "
+            "and standard otherwise."
+        ),
+    )
+    parser.add_argument(
+        "--exec-keep-container",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep Docker container after the run (default: enabled).",
+    )
+    parser.add_argument(
+        "--exec-cache",
+        choices=["cold", "warm"],
+        default="warm",
+        help="Docker sandbox cache mode (default: warm).",
+    )
+    parser.add_argument(
+        "--exec-cache-dir",
+        type=Path,
+        help="Host directory mounted at /cache when --exec-cache warm.",
+    )
+    parser.add_argument(
+        "--maintenance-venv-cache",
+        dest="maintenance_venv_cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Docker maintenance venv cache reuse (default: enabled).",
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--ledger",
+        nargs="?",
+        const=_DEFAULT_LEDGER_PATH,
+        type=Path,
+        help=(
+            "Optional attempt ledger YAML. If provided without a value, defaults to "
+            "<repo_root>/.agents/state/backlog_implement_actions.yaml."
         ),
     )
 
@@ -2273,6 +3279,97 @@ def build_parser() -> argparse.ArgumentParser:
     _add_run_execution_args(run_p)
 
     run_p.set_defaults(func=_cmd_run)
+
+    review_p = sub.add_parser("review", help="Review and merge PR-backed implementation tickets.")
+    review_sub = review_p.add_subparsers(dest="review_cmd", required=True)
+
+    review_run_p = review_sub.add_parser("run", help="Run an implementation review for a PR-backed ticket.")
+    review_run_p.add_argument("--owner-root", type=Path, default=Path.cwd())
+    review_run_group = review_run_p.add_mutually_exclusive_group(required=True)
+    review_run_group.add_argument("--ticket-path", dest="ticket_path", type=Path)
+    review_run_group.add_argument("--fingerprint")
+    _add_review_execution_args(review_run_p)
+    review_run_p.set_defaults(func=_cmd_review_run)
+
+    review_status_p = review_sub.add_parser("status", help="Show the latest review summary for a ticket.")
+    review_status_p.add_argument("--owner-root", type=Path, default=Path.cwd())
+    review_status_group = review_status_p.add_mutually_exclusive_group(required=True)
+    review_status_group.add_argument("--ticket-path", dest="ticket_path", type=Path)
+    review_status_group.add_argument("--fingerprint")
+    review_status_p.add_argument(
+        "--ledger",
+        nargs="?",
+        const=_DEFAULT_LEDGER_PATH,
+        type=Path,
+        help=(
+            "Optional attempt ledger YAML. If provided without a value, defaults to "
+            "<repo_root>/.agents/state/backlog_implement_actions.yaml."
+        ),
+    )
+    review_status_p.set_defaults(func=_cmd_review_status)
+
+    review_merge_p = review_sub.add_parser("merge", help="Merge a reviewed PR when review + CI are green.")
+    review_merge_p.add_argument("--owner-root", type=Path, default=Path.cwd())
+    review_merge_group = review_merge_p.add_mutually_exclusive_group(required=True)
+    review_merge_group.add_argument("--ticket-path", dest="ticket_path", type=Path)
+    review_merge_group.add_argument("--fingerprint")
+    review_merge_p.add_argument(
+        "--ledger",
+        nargs="?",
+        const=_DEFAULT_LEDGER_PATH,
+        type=Path,
+        help=(
+            "Optional attempt ledger YAML. If provided without a value, defaults to "
+            "<repo_root>/.agents/state/backlog_implement_actions.yaml."
+        ),
+    )
+    review_merge_p.set_defaults(func=_cmd_review_merge)
+
+    maintenance_images_p = sub.add_parser(
+        "maintenance-images",
+        help="Inspect and prune local maintenance-image tags.",
+    )
+    maintenance_images_sub = maintenance_images_p.add_subparsers(
+        dest="maintenance_images_cmd",
+        required=True,
+    )
+
+    maintenance_images_list_p = maintenance_images_sub.add_parser(
+        "list",
+        help="List local maintenance-image tags retained on the Docker host.",
+    )
+    maintenance_images_list_p.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Timeout for Docker inventory commands.",
+    )
+    maintenance_images_list_p.set_defaults(func=_cmd_maintenance_images_list)
+
+    maintenance_images_cleanup_p = maintenance_images_sub.add_parser(
+        "cleanup",
+        help="Prune old local maintenance-image tags using the configured retention policy.",
+    )
+    maintenance_images_cleanup_p.add_argument(
+        "--dry-run",
+        dest="dry_run",
+        action="store_true",
+        default=None,
+        help="Show what would be deleted without deleting it.",
+    )
+    maintenance_images_cleanup_p.add_argument(
+        "--apply",
+        dest="dry_run",
+        action="store_false",
+        help="Delete tags selected by the retention policy.",
+    )
+    maintenance_images_cleanup_p.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=120.0,
+        help="Timeout for Docker cleanup commands.",
+    )
+    maintenance_images_cleanup_p.set_defaults(func=_cmd_maintenance_images_cleanup)
 
     reports_p = sub.add_parser("reports", help="Reporting utilities.")
     reports_sub = reports_p.add_subparsers(dest="reports_cmd", required=True)
@@ -2378,6 +3475,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise SystemExit(2)
             if not args.fingerprint:
                 raise SystemExit("Provide --fingerprint with --tickets-export.")
+        raise SystemExit(args.func(args))
+
+    if args.cmd == "review":
         raise SystemExit(args.func(args))
 
     raise SystemExit(args.func(args))

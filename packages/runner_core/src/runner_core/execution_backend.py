@@ -9,6 +9,7 @@ import sys
 import time
 import tomllib
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -66,6 +67,13 @@ class MaintenanceDockerConfig:
     seed_root: str
     cache_root_subdir: str
     publish_branches: tuple[str, ...]
+    cleanup_enabled: bool = True
+    keep_local_count: int = 5
+    keep_local_days: int = 7
+    keep_branch_alias_tags: bool = True
+    protect_tags: tuple[str, ...] = ()
+    cleanup_on_prepare: bool = True
+    cleanup_dry_run_default: bool = False
 
 
 @dataclass(frozen=True)
@@ -175,6 +183,18 @@ def _load_maintenance_docker_config(*, repo_root: Path) -> MaintenanceDockerConf
             raise ValueError(f"maintenance_docker.{key} must be a non-empty string in {path}")
         return value.strip()
 
+    def _get_bool(key: str, default: bool) -> bool:
+        value = cfg.get(key, default)
+        if not isinstance(value, bool):
+            raise ValueError(f"maintenance_docker.{key} must be a boolean in {path}")
+        return value
+
+    def _get_nonnegative_int(key: str, default: int) -> int:
+        value = cfg.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError(f"maintenance_docker.{key} must be a non-negative integer in {path}")
+        return value
+
     pull_policy = _require_nonempty_str("pull_policy").lower()
     if pull_policy not in {"if_missing", "always", "never"}:
         raise ValueError(
@@ -187,6 +207,13 @@ def _load_maintenance_docker_config(*, repo_root: Path) -> MaintenanceDockerConf
         raise ValueError(
             f"maintenance_docker.publish_branches must be a list of non-empty strings in {path}"
         )
+    protect_tags_raw = cfg.get("protect_tags", [])
+    if not isinstance(protect_tags_raw, list) or not all(
+        isinstance(item, str) and item.strip() for item in protect_tags_raw
+    ):
+        raise ValueError(
+            f"maintenance_docker.protect_tags must be a list of non-empty strings in {path}"
+        )
 
     return MaintenanceDockerConfig(
         local_image_repo=_require_nonempty_str("local_image_repo"),
@@ -195,7 +222,43 @@ def _load_maintenance_docker_config(*, repo_root: Path) -> MaintenanceDockerConf
         seed_root=_require_nonempty_str("seed_root"),
         cache_root_subdir=_require_nonempty_str("cache_root_subdir"),
         publish_branches=tuple(item.strip() for item in publish_branches_raw),
+        cleanup_enabled=_get_bool("cleanup_enabled", True),
+        keep_local_count=_get_nonnegative_int("keep_local_count", 5),
+        keep_local_days=_get_nonnegative_int("keep_local_days", 7),
+        keep_branch_alias_tags=_get_bool("keep_branch_alias_tags", True),
+        protect_tags=tuple(item.strip() for item in protect_tags_raw),
+        cleanup_on_prepare=_get_bool("cleanup_on_prepare", True),
+        cleanup_dry_run_default=_get_bool("cleanup_dry_run_default", False),
     )
+
+
+def _maintenance_repo_names(*, cfg: MaintenanceDockerConfig) -> tuple[str, ...]:
+    """Return the Docker repositories managed by the maintenance image workflow."""
+
+    return (cfg.local_image_repo, cfg.published_image_repo)
+
+
+def _maintenance_protected_tags(*, cfg: MaintenanceDockerConfig) -> tuple[str, ...]:
+    """Return tag names that local cleanup must preserve."""
+
+    tags: list[str] = list(cfg.protect_tags)
+    if cfg.keep_branch_alias_tags:
+        tags.extend(["latest", "main-latest", "dev-latest"])
+    ordered: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        normalized = str(tag).strip()
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        ordered.append(normalized)
+    return tuple(ordered)
+
+
+def _maintenance_hash_tag(tag: str) -> bool:
+    """Return True when the tag matches the current immutable maintenance-image hash suffix."""
+
+    return bool(re.fullmatch(r"[0-9a-f]{16}", tag or ""))
 
 
 def _run_subprocess(
@@ -267,6 +330,277 @@ def _docker_tag_image(*, source_ref: str, target_ref: str, timeout_seconds: floa
             f"stdout:\n{proc.stdout}\n"
             f"stderr:\n{proc.stderr}\n"
         )
+
+
+def _docker_image_ls_rows(*, timeout_seconds: float | None) -> list[dict[str, Any]]:
+    """List local Docker images as parsed JSON rows."""
+
+    proc = _run_subprocess(
+        ["docker", "image", "ls", "--format", "{{json .}}"],
+        timeout_seconds=timeout_seconds,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to list Docker images.\n"
+            f"stdout:\n{proc.stdout}\n"
+            f"stderr:\n{proc.stderr}\n"
+        )
+    rows: list[dict[str, Any]] = []
+    for line in (proc.stdout or "").splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        parsed = json.loads(stripped)
+        if isinstance(parsed, dict):
+            rows.append({str(key): value for key, value in parsed.items()})
+    return rows
+
+
+def _docker_image_inspect_rows(
+    refs_or_ids: list[str],
+    *,
+    timeout_seconds: float | None,
+) -> list[dict[str, Any]]:
+    """Inspect Docker image refs/IDs and return parsed JSON objects."""
+
+    if not refs_or_ids:
+        return []
+    proc = _run_subprocess(
+        ["docker", "image", "inspect", *refs_or_ids],
+        timeout_seconds=timeout_seconds,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Failed to inspect Docker images.\n"
+            f"refs_or_ids={refs_or_ids!r}\n"
+            f"stdout:\n{proc.stdout}\n"
+            f"stderr:\n{proc.stderr}\n"
+        )
+    parsed = json.loads(proc.stdout or "[]")
+    if not isinstance(parsed, list):
+        raise RuntimeError("docker image inspect returned invalid JSON.")
+    return [cast(dict[str, Any], item) for item in parsed if isinstance(item, dict)]
+
+
+def _coerce_iso8601_utc(value: object) -> str | None:
+    """Normalize a Docker timestamp into an ISO-8601 UTC string."""
+
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    match = re.match(r"^(.*?\.\d{6})\d+(Z|[+-]\d{2}:\d{2})$", raw)
+    if match:
+        raw = f"{match.group(1)}{match.group(2)}"
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat()
+
+
+def _parse_created_at_for_sort(value: object) -> datetime:
+    """Convert a serialized created_at value into a sortable UTC datetime."""
+
+    normalized = _coerce_iso8601_utc(value)
+    if normalized is None:
+        return datetime.fromtimestamp(0, tz=timezone.utc)
+    return datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+
+
+def _normalize_maintenance_inventory_entry(entry: dict[str, Any]) -> dict[str, Any]:
+    """Fill derived maintenance-inventory fields expected by cleanup logic."""
+
+    repository = str(entry.get("repository", "") or "").strip()
+    tag = str(entry.get("tag", "") or "").strip()
+    ref = str(entry.get("ref", "") or "").strip()
+    if not ref and repository and tag:
+        ref = f"{repository}:{tag}"
+    return {
+        **entry,
+        "repository": repository,
+        "tag": tag,
+        "ref": ref,
+        "image_id": str(entry.get("image_id", "") or "").strip(),
+        "created_at": _coerce_iso8601_utc(entry.get("created_at")) or entry.get("created_at"),
+        "hash_tag": bool(entry.get("hash_tag")) or _maintenance_hash_tag(tag),
+    }
+
+
+def list_local_maintenance_images(
+    *,
+    repo_root: Path,
+    timeout_seconds: float | None = 120.0,
+) -> dict[str, Any]:
+    """Return a structured inventory of local maintenance images and tags."""
+
+    cfg = _load_maintenance_docker_config(repo_root=repo_root)
+    repos_scanned = list(_maintenance_repo_names(cfg=cfg))
+    protected_tags = list(_maintenance_protected_tags(cfg=cfg))
+    ls_rows = _docker_image_ls_rows(timeout_seconds=timeout_seconds)
+    refs: list[str] = []
+    base_entries: list[dict[str, Any]] = []
+    for row in ls_rows:
+        repository = str(row.get("repository", row.get("Repository", "")) or "").strip()
+        tag = str(row.get("tag", row.get("Tag", "")) or "").strip()
+        image_id = str(row.get("image_id", row.get("ID", row.get("Id", ""))) or "").strip()
+        if repository not in repos_scanned or not tag or tag == "<none>":
+            continue
+        ref = f"{repository}:{tag}"
+        refs.append(ref)
+        base_entries.append(
+            {
+                "repository": repository,
+                "tag": tag,
+                "ref": ref,
+                "image_id": image_id,
+            }
+        )
+
+    inspect_rows = _docker_image_inspect_rows(refs, timeout_seconds=timeout_seconds)
+    inspect_by_ref: dict[str, dict[str, Any]] = {}
+    inspect_by_id: dict[str, dict[str, Any]] = {}
+    for row in inspect_rows:
+        image_id = str(row.get("Id", "") or "").strip()
+        if image_id:
+            inspect_by_id[image_id] = row
+        repo_tags = row.get("RepoTags") or []
+        if isinstance(repo_tags, list):
+            for tag in repo_tags:
+                if isinstance(tag, str) and tag.strip():
+                    inspect_by_ref[tag.strip()] = row
+
+    entries: list[dict[str, Any]] = []
+    for entry in base_entries:
+        inspect = inspect_by_ref.get(entry["ref"]) or inspect_by_id.get(entry["image_id"]) or {}
+        created_at = _coerce_iso8601_utc(inspect.get("Created"))
+        entries.append(
+            {
+                **entry,
+                "created_at": created_at,
+                "protected": entry["tag"] in protected_tags,
+                "hash_tag": _maintenance_hash_tag(entry["tag"]),
+            }
+        )
+
+    entries.sort(
+        key=lambda item: _parse_created_at_for_sort(item.get("created_at")),
+        reverse=True,
+    )
+    return {
+        "schema_version": 1,
+        "repos_scanned": repos_scanned,
+        "protected_tags": protected_tags,
+        "entries": entries,
+    }
+
+
+def cleanup_local_maintenance_images(
+    *,
+    repo_root: Path,
+    dry_run: bool = False,
+    timeout_seconds: float | None = 120.0,
+    artifact_path: Path | None = None,
+) -> dict[str, Any]:
+    """Prune old local maintenance-image tags conservatively according to retention settings."""
+
+    cfg = _load_maintenance_docker_config(repo_root=repo_root)
+    inventory = list_local_maintenance_images(
+        repo_root=repo_root,
+        timeout_seconds=timeout_seconds,
+    )
+    protected_tags = set(cast(list[str], inventory.get("protected_tags", [])))
+    entries = [
+        _normalize_maintenance_inventory_entry(cast(dict[str, Any], item))
+        for item in inventory.get("entries", [])
+        if isinstance(item, dict)
+    ]
+    hash_entries = [entry for entry in entries if bool(entry.get("hash_tag"))]
+    hash_entries.sort(
+        key=lambda item: _parse_created_at_for_sort(item.get("created_at")),
+        reverse=True,
+    )
+    keep_cutoff = datetime.now(timezone.utc) - timedelta(days=cfg.keep_local_days)
+    kept_hash_refs: set[str] = set()
+    for index, entry in enumerate(hash_entries):
+        ref = str(entry.get("ref") or "")
+        created_at = _parse_created_at_for_sort(entry.get("created_at"))
+        if index < cfg.keep_local_count or created_at >= keep_cutoff:
+            kept_hash_refs.add(ref)
+
+    kept_tags: list[str] = []
+    deleted_tags: list[str] = []
+    deleted_image_ids: list[str] = []
+    errors: list[str] = []
+    deleted_candidate_ids: set[str] = set()
+
+    for entry in entries:
+        ref = str(entry.get("ref") or "")
+        tag = str(entry.get("tag") or "")
+        image_id = str(entry.get("image_id") or "")
+        is_hash = bool(entry.get("hash_tag"))
+        if tag in protected_tags or not is_hash or ref in kept_hash_refs:
+            if ref:
+                kept_tags.append(ref)
+            continue
+        deleted_tags.append(ref)
+        if image_id:
+            deleted_candidate_ids.add(image_id)
+        if dry_run:
+            continue
+        proc = _run_subprocess(
+            ["docker", "image", "rm", ref],
+            timeout_seconds=timeout_seconds,
+        )
+        if proc.returncode != 0:
+            errors.append(
+                f"Failed to delete maintenance image tag {ref}: "
+                f"{proc.stderr.strip() or proc.stdout.strip() or 'docker image rm failed'}"
+            )
+
+    if not dry_run:
+        for image_id in sorted(deleted_candidate_ids):
+            try:
+                inspect_rows = _docker_image_inspect_rows(
+                    [image_id],
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001
+                errors.append(f"Failed to inspect maintenance image id {image_id}: {exc}")
+                continue
+            if not inspect_rows:
+                continue
+            repo_tags = inspect_rows[0].get("RepoTags") or []
+            if repo_tags:
+                continue
+            proc = _run_subprocess(
+                ["docker", "image", "rm", image_id],
+                timeout_seconds=timeout_seconds,
+            )
+            if proc.returncode != 0:
+                errors.append(
+                    f"Failed to delete unreferenced maintenance image id {image_id}: "
+                    f"{proc.stderr.strip() or proc.stdout.strip() or 'docker image rm failed'}"
+                )
+                continue
+            deleted_image_ids.append(image_id)
+
+    summary = {
+        "schema_version": 1,
+        "cleanup_enabled": bool(cfg.cleanup_enabled),
+        "dry_run": bool(dry_run),
+        "repos_scanned": inventory.get("repos_scanned", []),
+        "protected_tags": sorted(protected_tags),
+        "kept_tags": sorted(set(kept_tags)),
+        "deleted_tags": sorted(set(deleted_tags)),
+        "deleted_image_ids": deleted_image_ids,
+        "errors": errors,
+    }
+    if artifact_path is not None:
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(artifact_path, summary)
+    return summary
 
 
 def _git_remote_url(*, repo_dir: Path, remote_name: str = "origin") -> str | None:
@@ -610,6 +944,29 @@ def _prepare_maintenance_profile(
             "install_projects_run": None,
         },
     }
+    if cfg.cleanup_enabled and cfg.cleanup_on_prepare:
+        cleanup_artifact_path = run_dir / "sandbox" / "maintenance_image_cleanup.json"
+        try:
+            cleanup_summary = cleanup_local_maintenance_images(
+                repo_root=repo_root,
+                dry_run=cfg.cleanup_dry_run_default,
+                timeout_seconds=timeout_seconds,
+                artifact_path=cleanup_artifact_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            cleanup_summary = {
+                "schema_version": 1,
+                "cleanup_enabled": True,
+                "dry_run": bool(cfg.cleanup_dry_run_default),
+                "repos_scanned": list(_maintenance_repo_names(cfg=cfg)),
+                "protected_tags": list(_maintenance_protected_tags(cfg=cfg)),
+                "kept_tags": [],
+                "deleted_tags": [],
+                "deleted_image_ids": [],
+                "errors": [f"Automatic maintenance image cleanup failed: {exc}"],
+            }
+            _write_json(cleanup_artifact_path, cleanup_summary)
+        metadata["cleanup"] = cleanup_summary
 
     return MaintenanceProfilePreparation(
         image_ref=local_ref,

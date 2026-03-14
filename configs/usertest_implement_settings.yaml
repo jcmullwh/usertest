@@ -27,6 +27,8 @@ profiles:
       verification_timeout_seconds: null
       skip_verify: false
       verify_reuse: auto
+      implementation_review_agent: claude
+      implementation_review_model: null
       ci_timeout_seconds: 3600
       skip_ci_wait: false
       draft_pr_on_ci_failure: true
@@ -43,7 +45,7 @@ profiles:
       pr: true
       move_on_start: true
       move_on_commit: true
-      ledger: configs/backlog_implement_actions.yaml
+      ledger: .agents/state/backlog_implement_actions.yaml
     run: {}
     tickets_run_next:
       bucket_priority: []
