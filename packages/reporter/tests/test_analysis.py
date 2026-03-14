@@ -170,12 +170,24 @@ def test_analyze_report_history_captures_large_non_keyword_artifacts(tmp_path: P
             "report": None,
             "report_validation_errors": None,
             "error": None,
+            "terminal_artifact_reads": {
+                "report.json": {
+                    "path": "report.json",
+                    "exists": False,
+                    "decode_ok": None,
+                    "parse_ok": None,
+                    "error_phase": None,
+                    "error_type": None,
+                    "error_message": None,
+                }
+            },
         }
     ]
 
     summary = analyze_report_history(records, repo_root=tmp_path)
     signals = [signal for theme in summary["themes"] for signal in theme["signals"]]
     failure_signal = next(signal for signal in signals if signal["source"] == "run_failure_event")
+    assert failure_signal["terminal_artifact_reads"]["report.json"]["exists"] is False
     attachments = failure_signal["attachments"]
     stderr_attachment = next(item for item in attachments if item["path"] == "agent_stderr.txt")
     assert stderr_attachment["truncated"] is True

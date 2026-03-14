@@ -20,6 +20,8 @@ _TURN_METADATA_TIMEOUT_HINT = (
 _CODEX_MODEL_REFRESH_TIMEOUT_HINT = (
     "hint=Codex model refresh timed out; model list may be stale."
 )
+_LEGACY_MISSING_REPORT_STATUS = "no_terminal_artifact"
+_MISSING_REPORT_STATUS = "missing_report"
 
 
 def _truncate_text(text: str, *, max_chars: int, marker: str) -> str:
@@ -91,10 +93,11 @@ def classify_failure_kind(
         return True, "error"
     if validation_errors:
         return True, "report_validation_error"
+    if status_lower in {_MISSING_REPORT_STATUS, _LEGACY_MISSING_REPORT_STATUS}:
+        return True, _MISSING_REPORT_STATUS
     if status_lower in {
         "error",
         "report_validation_error",
-        "no_terminal_artifact",
         "terminal_artifact_unreadable",
     }:
         return True, status_lower
