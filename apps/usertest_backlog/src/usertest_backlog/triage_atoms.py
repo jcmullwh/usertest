@@ -248,8 +248,7 @@ def build_implementation_index(
                 pr_error=pr_error,
                 head_commit=head_commit,
                 branch=branch,
-                diff_numstat=diff_numstat,
-            )
+                diff_numstat=diff_numstat,            )
         )
 
     # Sort newest-first when timing is present (else stable by path).

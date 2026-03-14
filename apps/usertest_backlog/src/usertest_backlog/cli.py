@@ -1899,7 +1899,7 @@ def _write_ticket_idea_file(
     ux_review_section: str | None = None,
 ) -> Path:
     """
-    Write a single exported ticket as an idea markdown file in owner repo plans.
+    Write a single exported ticket as a generated queue markdown file in owner repo plans.
     """
     stage = (_coerce_string(ticket.get("stage")) or "triage").strip().lower()
     queue_dir = _ticket_queue_dir_for_stage(owner_repo_root=owner_repo_root, stage=stage)
@@ -1997,6 +1997,8 @@ def _ticket_queue_dir_for_stage(*, owner_repo_root: Path, stage: str) -> Path:
     normalized = stage.strip().lower()
     if normalized == "triage":
         return owner_repo_root / ".agents" / "plans" / "0.5 - to_triage"
+    if normalized == "ready_for_ticket":
+        return owner_repo_root / ".agents" / "plans" / "2 - ready"
     return owner_repo_root / ".agents" / "plans" / "1 - ideas"
 
 
@@ -2014,6 +2016,7 @@ def _ticket_queue_dirs(owner_repo_root: Path) -> list[Path]:
         Normalized list result.
     """
     return [
+        owner_repo_root / ".agents" / "plans" / "2 - ready",
         owner_repo_root / ".agents" / "plans" / "1 - ideas",
         owner_repo_root / ".agents" / "plans" / "0.5 - to_triage",
         # Legacy triage queue path retained for stale-file cleanup compatibility.
@@ -4880,6 +4883,8 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                         ux_review_section=ux_section,
                     ):
                         generated_queue_files_refreshed += 1
+                        if ux_section is not None:
+                            ux_plan_tickets_updated += 1
                 if ux_section is not None and queue_paths:
                     for path_s in queue_paths:
                         if _apply_ux_review_to_plan_ticket(
@@ -4907,6 +4912,18 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                                     "notes": "Deferred by UX review recommendation.",
                                 }
                                 actions_mutated = True
+                elif (
+                    desired_status != "actioned"
+                    and stage_effective == "ready_for_ticket"
+                    and queue_paths
+                ):
+                    moved = _move_plan_ticket_to_bucket(
+                        path=Path(queue_paths[0]),
+                        owner_repo_root=owner_repo_root,
+                        bucket="2 - ready",
+                    )
+                    if moved is not None:
+                        queue_paths[0] = str(moved)
                 for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
                     ref: dict[str, str] = {
                         "atom_id": atom_id,
@@ -4920,7 +4937,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 continue
 
         idea_path = _write_ticket_idea_file(
-            ticket=ticket,
+            ticket=ticket_for_body,
             issue_title=issue_title,
             fingerprint=fingerprint,
             body_markdown=base_body,
