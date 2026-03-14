@@ -189,7 +189,7 @@ that only selects from existing `.agents/plans/*` tickets that match the same st
 PR-backed implementation tickets do not go straight from implementation to complete.
 
 - `usertest-implement run --commit --push --pr` stops at `4 - for_review`
-- `usertest-implement review run` checks the PR against the selected ticket approach
+- `usertest-implement review run` checks the PR against the selected ticket approach and publishes the review comments directly onto the PR
 - `usertest-implement review merge` merges only when the review says the PR is merge-ready
 - `5 - complete` is reserved for merged tickets
 
