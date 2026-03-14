@@ -45,6 +45,7 @@ class LoopContext:
     log_path: Path
     state_path: Path
     pid_path: Path
+    batch_config_path: Path
     implement_python: Path
     backlog_python: Path
     gh_bin: str = "gh"
@@ -563,6 +564,29 @@ def _run_ticket(ctx: LoopContext, ticket_path: Path) -> bool:
     return proc.returncode == 0
 
 
+def _run_batch_pass(ctx: LoopContext) -> bool:
+    """Run one full maintenance batch pass through the batch engine."""
+
+    _write_state(ctx, status="running", current_action="batch")
+    proc = _run_logged(
+        ctx,
+        [
+            str(ctx.implement_python),
+            "-m",
+            "usertest_implement.cli",
+            "--repo-root",
+            str(ctx.repo_root),
+            "batch",
+            "run",
+            "--config",
+            str(ctx.batch_config_path),
+        ],
+        cwd=ctx.repo_root,
+        label="batch run",
+    )
+    return proc.returncode == 0
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser for the continuous implementation loop."""
 
@@ -611,6 +635,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=Path("runs/_continuous_loop/loop.pid"),
     )
+    parser.add_argument(
+        "--batch-config",
+        type=Path,
+        default=Path("configs/backlog_implement_batch.yaml"),
+    )
     return parser
 
 
@@ -624,6 +653,9 @@ def main(argv: list[str] | None = None) -> int:
     owner_root = args.owner_root.resolve()
     runs_dir = args.runs_dir if args.runs_dir.is_absolute() else (repo_root / args.runs_dir).resolve()
     settings_path = args.settings if args.settings.is_absolute() else (repo_root / args.settings).resolve()
+    batch_config_path = (
+        args.batch_config if args.batch_config.is_absolute() else (repo_root / args.batch_config).resolve()
+    )
     ctx = LoopContext(
         repo_root=repo_root,
         owner_root=owner_root,
@@ -648,6 +680,7 @@ def main(argv: list[str] | None = None) -> int:
         log_path=args.log_path if args.log_path.is_absolute() else (repo_root / args.log_path).resolve(),
         state_path=args.state_path if args.state_path.is_absolute() else (repo_root / args.state_path).resolve(),
         pid_path=args.pid_path if args.pid_path.is_absolute() else (repo_root / args.pid_path).resolve(),
+        batch_config_path=batch_config_path,
         implement_python=(repo_root / "apps" / "usertest_implement" / ".venv" / "Scripts" / "python.exe").resolve(),
         backlog_python=(repo_root / "apps" / "usertest_backlog" / ".venv" / "Scripts" / "python.exe").resolve(),
     )
@@ -663,37 +696,19 @@ def main(argv: list[str] | None = None) -> int:
                 _run_maintenance_cleanup(ctx)
 
             _reconcile_review_queue(ctx)
-
-            ready_candidates = _list_ready_candidates(ctx)
-            if not ready_candidates:
-                _refresh_backlog(ctx)
-                _reconcile_review_queue(ctx)
-                ready_candidates = _list_ready_candidates(ctx)
-            export_candidates = _list_export_candidates(ctx)
-            all_candidates: list[Path] = []
-            seen_candidates: set[str] = set()
-            for candidate in [*ready_candidates, *export_candidates]:
-                key = str(candidate.resolve()).lower()
-                if key in seen_candidates:
-                    continue
-                seen_candidates.add(key)
-                all_candidates.append(candidate)
-
-            if all_candidates:
-                next_ticket = all_candidates[0]
-                _append_log(ctx, f"selected ready ticket: {next_ticket}")
-                _run_ticket(ctx, next_ticket)
-                _reconcile_review_queue(ctx)
-                continue
+            batch_ok = _run_batch_pass(ctx)
+            _reconcile_review_queue(ctx)
+            if not batch_ok:
+                _append_log(ctx, f"batch pass returned non-zero; sleeping {ctx.sleep_seconds:.0f}s")
+            else:
+                _append_log(ctx, f"batch pass complete; sleeping {ctx.sleep_seconds:.0f}s")
 
             _write_state(
                 ctx,
                 status="idle",
                 current_action="sleep",
                 sleep_seconds=ctx.sleep_seconds,
-                ready_candidates=0,
             )
-            _append_log(ctx, f"no blocker/high ready tickets; sleeping {ctx.sleep_seconds:.0f}s")
             time.sleep(ctx.sleep_seconds)
         except KeyboardInterrupt:
             _append_log(ctx, "continuous implementation loop interrupted")

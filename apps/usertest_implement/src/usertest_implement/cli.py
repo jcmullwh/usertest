@@ -76,6 +76,7 @@ except ModuleNotFoundError as exc:
     raise
 
 try:
+    from usertest_implement.batch_runner import add_batch_subcommands
     from usertest_implement.finalize import finalize_commit, finalize_push
     from usertest_implement.ledger import load_ledger, update_ledger_file
     from usertest_implement.model_detect import infer_observed_model
@@ -3458,6 +3459,8 @@ def build_parser() -> argparse.ArgumentParser:
     tickets_move_p.add_argument("--to-bucket", required=True)
     tickets_move_p.add_argument("--dry-run", action="store_true")
     tickets_move_p.set_defaults(func=_cmd_tickets_move)
+
+    add_batch_subcommands(sub)
 
     return parser
 
