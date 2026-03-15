@@ -55,11 +55,8 @@ try {
         }
     }
 
-    try {
-        $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
-    }
-    catch {
-        Write-Err $_.Exception.Message
+    $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
+    if (-not $pythonInfo) {
         exit 1
     }
     $pythonCmd = $pythonInfo.CommandPath

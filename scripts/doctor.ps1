@@ -12,11 +12,8 @@ $repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $exitCode = 0
 Push-Location $repoRoot
 try {
-    try {
-        $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
-    }
-    catch {
-        Write-Host $_.Exception.Message
+    $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
+    if (-not $pythonInfo) {
         exit 1
     }
     $pythonCmd = $pythonInfo.CommandPath

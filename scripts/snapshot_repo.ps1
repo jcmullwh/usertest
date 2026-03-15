@@ -68,6 +68,9 @@ $exitCode = 0
 Push-Location $repoRoot
 try {
     $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
+    if (-not $pythonInfo) {
+        exit 1
+    }
     $pythonCmd = $pythonInfo.CommandPath
     $env:USERTEST_PYTHON = $pythonCmd
     Write-Host "==> Using Python: $($pythonInfo.Name) -> $pythonCmd"
