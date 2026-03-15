@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import importlib.util
-from pathlib import Path
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 
@@ -44,8 +44,12 @@ def test_run_batch_pass_invokes_usertest_implement_batch_run(tmp_path: Path) -> 
         state_path=repo_root / "runs" / "_continuous_loop" / "loop_state.json",
         pid_path=repo_root / "runs" / "_continuous_loop" / "loop.pid",
         batch_config_path=repo_root / "configs" / "backlog_implement_batch.yaml",
-        implement_python=repo_root / "apps" / "usertest_implement" / ".venv" / "Scripts" / "python.exe",
-        backlog_python=repo_root / "apps" / "usertest_backlog" / ".venv" / "Scripts" / "python.exe",
+        implement_python=(
+            repo_root / "apps" / "usertest_implement" / ".venv" / "Scripts" / "python.exe"
+        ),
+        backlog_python=(
+            repo_root / "apps" / "usertest_backlog" / ".venv" / "Scripts" / "python.exe"
+        ),
     )
     captured: dict[str, object] = {}
 

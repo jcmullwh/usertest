@@ -10,8 +10,8 @@ from runner_core.runner import RunResult
 import usertest_implement.cli as implement_cli
 from usertest_implement.cli import (
     SelectedTicket,
-    _build_pr_review_body,
     _build_final_review_summary,
+    _build_pr_review_body,
     _cmd_review_merge,
     _cmd_review_run,
     _collect_pr_review_context,

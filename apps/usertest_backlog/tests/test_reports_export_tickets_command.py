@@ -314,19 +314,39 @@ def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_pa
     ticket = {
         "ticket_id": "BLG-CTX-001",
         "title": "Harden batch resume flow after preflight failures",
-        "problem": "Batch runs can stall because the operator lacks enough context to recover the failed ticket correctly.",
-        "user_impact": "Operators spend time rediscovering prior research and may reopen the wrong recovery path.",
+        "problem": (
+            "Batch runs can stall because the operator lacks enough context to recover "
+            "the failed ticket correctly."
+        ),
+        "user_impact": (
+            "Operators spend time rediscovering prior research and may reopen the "
+            "wrong recovery path."
+        ),
         "severity": "high",
         "confidence": 0.82,
         "stage": "ready_for_ticket",
         "evidence_summary": "Multiple runs show the same preflight-failure recovery confusion.",
         "evidence_atom_ids": ["target_a/20260104T000000Z/codex/0:confusion_point:1"],
-        "change_surface": {"user_visible": False, "kinds": ["behavior_change"], "notes": "Maintenance flow."},
-        "breadth": {"missions": 2, "targets": 1, "repo_inputs": 1, "agents": 2, "personas": 1, "runs": 5},
+        "change_surface": {
+            "user_visible": False,
+            "kinds": ["behavior_change"],
+            "notes": "Maintenance flow.",
+        },
+        "breadth": {
+            "missions": 2,
+            "targets": 1,
+            "repo_inputs": 1,
+            "agents": 2,
+            "personas": 1,
+            "runs": 5,
+        },
         "suggested_owner": "usertest_implement",
         "problem_record": {
             "problem_id": "problem:batch_resume",
-            "evidence_summary": "Operators repeatedly ask what to do after a preflight failure in batch mode.",
+            "evidence_summary": (
+                "Operators repeatedly ask what to do after a preflight failure in "
+                "batch mode."
+            ),
         },
         "research": {
             "problem_id": "problem:batch_resume",
@@ -335,14 +355,18 @@ def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_pa
             "writes_purpose": [],
             "implementation_performed": False,
             "root_cause_hypotheses": [
-                "The exported ticket strips away the stage-3/4/5 context needed for confident implementation.",
+                "The exported ticket strips away the stage-3/4/5 context needed "
+                "for confident implementation.",
             ],
             "broader_class_assessment": "repeated_variant",
             "unknowns": [
-                "Whether the current resume path should branch differently for preflight vs runtime failures."
+                "Whether the current resume path should branch differently for "
+                "preflight vs runtime failures."
             ],
             "diff_classification": "no_changes",
-            "diff_suspicious_reasons": ["No code changes were needed to reproduce the confusion."],
+            "diff_suspicious_reasons": [
+                "No code changes were needed to reproduce the confusion."
+            ],
         },
         "solution_options": [
             {
@@ -360,11 +384,20 @@ def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_pa
                 "option_id": "opt:full_context",
                 "problem_id": "problem:batch_resume",
                 "family_id": "existing_surface_hardening",
-                "summary": "Render the full research, solutioning, and plan context directly into the exported ticket.",
-                "tradeoffs": "Longer ticket body, but implementers no longer need to reconstruct the decision trail.",
+                "summary": (
+                    "Render the full research, solutioning, and plan context "
+                    "directly into the exported ticket."
+                ),
+                "tradeoffs": (
+                    "Longer ticket body, but implementers no longer need to "
+                    "reconstruct the decision trail."
+                ),
                 "recurrence_prevention": "Makes future implementations self-contained.",
                 "change_surface_hypothesis": "behavior_change",
-                "test_implications": "Assert exported tickets include research/selection/plan sections.",
+                "test_implications": (
+                    "Assert exported tickets include research/selection/plan "
+                    "sections."
+                ),
                 "rationale": "Best matches the maintenance goal of reducing rediscovery.",
             },
         ],
@@ -372,18 +405,30 @@ def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_pa
             "problem_id": "problem:batch_resume",
             "selected_option_id": "opt:full_context",
             "selected_family_id": "existing_surface_hardening",
-            "selection_rationale": "Implementers should not need to reopen multiple stage artifacts to understand the intended change.",
-            "repo_intent_alignment": "Improves operator throughput without expanding external surface area.",
-            "why_other_options_were_not_selected": "The compact option still hid key research and tradeoff context.",
+            "selection_rationale": (
+                "Implementers should not need to reopen multiple stage artifacts "
+                "to understand the intended change."
+            ),
+            "repo_intent_alignment": (
+                "Improves operator throughput without expanding external surface area."
+            ),
+            "why_other_options_were_not_selected": (
+                "The compact option still hid key research and tradeoff context."
+            ),
             "needs_ux_review": False,
             "component": "usertest_implement",
             "intent_risk": "low",
             "selected_option": {
-                "summary": "Render the full research, solutioning, and plan context directly into the exported ticket.",
+                "summary": (
+                    "Render the full research, solutioning, and plan context "
+                    "directly into the exported ticket."
+                ),
                 "tradeoffs": "Longer markdown, but less rediscovery.",
                 "recurrence_prevention": "The ticket becomes a complete handoff artifact.",
                 "change_surface_hypothesis": "behavior_change",
-                "test_implications": "Update export ticket tests to verify the new sections.",
+                "test_implications": (
+                    "Update export ticket tests to verify the new sections."
+                ),
                 "rationale": "Preserves the value of earlier pipeline stages.",
             },
         },
@@ -394,7 +439,10 @@ def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_pa
             "title": "Expand exported implementation tickets with full planning context",
             "problem": "The exported implementation ticket omits prior reasoning.",
             "user_impact": "Implementers waste time rediscovering context.",
-            "proposed_fix": "Include research, selected-solution rationale, and option tradeoffs in the exported ticket body.",
+            "proposed_fix": (
+                "Include research, selected-solution rationale, and option "
+                "tradeoffs in the exported ticket body."
+            ),
             "implementation_steps": [
                 "Add stage-context sections to the export renderer.",
                 "Cover the new sections with export ticket tests.",
@@ -404,9 +452,12 @@ def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_pa
                 "Spot-check a generated ready ticket for readability.",
             ],
             "success_criteria": [
-                "Ready tickets contain the research context, chosen approach rationale, and implementation plan.",
+                "Ready tickets contain the research context, chosen approach "
+                "rationale, and implementation plan.",
             ],
-            "rollback_notes": "Revert the renderer changes if the exported ticket becomes too noisy.",
+            "rollback_notes": (
+                "Revert the renderer changes if the exported ticket becomes too noisy."
+            ),
             "suggested_owner": "usertest_implement",
             "related_change_plan_ids": ["plan:batch_resume:2"],
             "change_plan_status": "planned",
@@ -420,9 +471,12 @@ def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_pa
             "Spot-check a generated ready ticket for readability.",
         ],
         "success_criteria": [
-            "Ready tickets contain the research context, chosen approach rationale, and implementation plan.",
+            "Ready tickets contain the research context, chosen approach "
+            "rationale, and implementation plan.",
         ],
-        "rollback_notes": "Revert the renderer changes if the exported ticket becomes too noisy.",
+        "rollback_notes": (
+            "Revert the renderer changes if the exported ticket becomes too noisy."
+        ),
     }
 
     backlog_path = compiled_dir / "target_a.backlog.json"
@@ -460,7 +514,9 @@ def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_pa
         )
     assert exc.value.code == 0
 
-    export_doc = json.loads((compiled_dir / "target_a.tickets_export.json").read_text(encoding="utf-8"))
+    export_doc = json.loads(
+        (compiled_dir / "target_a.tickets_export.json").read_text(encoding="utf-8")
+    )
     body = export_doc["exports"][0]["body_markdown"]
     assert "## Research context" in body
     assert "### Root cause hypotheses" in body
