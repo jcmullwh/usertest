@@ -79,6 +79,10 @@ from runner_core.python_runtime import (
     verification_commands_need_python,
 )
 from runner_core.run_spec import resolve_effective_run_inputs
+from runner_core.shell_command_normalization import (
+    normalize_command_for_shell,
+    render_shell_command_guidance_md,
+)
 from runner_core.target_acquire import acquire_target
 from runner_core.verification_broker import (
     VerificationBrokerAttempt,
@@ -2580,6 +2584,30 @@ def _verification_shell_argv(*, command_prefix: list[str], command: str) -> list
     return [*command_prefix, *launcher.shell_argv_prefix, command]
 
 
+def _merge_command_rewrite_meta(
+    existing: dict[str, Any] | None, new_meta: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if new_meta is None:
+        return existing
+    if existing is None:
+        return new_meta
+
+    rewrites: list[dict[str, Any]] = []
+    if existing.get("kind") == "multi" and isinstance(existing.get("rewrites"), list):
+        rewrites.extend(
+            item for item in existing["rewrites"] if isinstance(item, dict)
+        )
+    else:
+        rewrites.append(existing)
+
+    if new_meta.get("kind") == "multi" and isinstance(new_meta.get("rewrites"), list):
+        rewrites.extend(item for item in new_meta["rewrites"] if isinstance(item, dict))
+    else:
+        rewrites.append(new_meta)
+
+    return {"kind": "multi", "rewrites": rewrites}
+
+
 _VERIFICATION_SHELL_CONTROL_TOKENS: frozenset[str] = frozenset(
     {
         "|",
@@ -4194,6 +4222,7 @@ def _run_verification_commands(
             and c.strip()
             and c.strip().replace("\\", "/").lower().startswith("bash ")
             and not _looks_like_verification_rejection_sentinel(c)
+            and normalize_command_for_shell(c, shell_family="powershell").action == "passthrough"
             for c in commands
         ):
             windows_bash_probe = _probe_windows_bash_usable()
@@ -4259,8 +4288,44 @@ def _run_verification_commands(
                         cmd_after_bash_rewrite = new_cmd.strip()
                         bash_rewritten = True
 
-        if toolchain_status == "blocked" and verification_commands_need_python(
-            (cmd_after_bash_rewrite,)
+        shell_family = "powershell" if is_powershell else "bash"
+        host_normalization = normalize_command_for_shell(
+            cmd_after_bash_rewrite,
+            shell_family=shell_family,
+        )
+        cmd_after_host_normalization = cmd_after_bash_rewrite
+        host_dispatch_validation: dict[str, Any] | None = None
+        host_rewritten = False
+        if host_normalization.action == "rewrite":
+            normalized_command = host_normalization.command.strip()
+            if normalized_command and normalized_command != cmd_after_bash_rewrite:
+                cmd_after_host_normalization = normalized_command
+                host_rewritten = True
+                host_rewrite_meta = {
+                    "kind": host_normalization.kind or "host_shell_normalization",
+                    "original_command": cmd_after_bash_rewrite,
+                    "rewritten_command": normalized_command,
+                }
+                if host_normalization.reason:
+                    host_rewrite_meta["reason"] = host_normalization.reason
+                if host_normalization.hint:
+                    host_rewrite_meta["hint"] = host_normalization.hint
+                rewrite_meta = _merge_command_rewrite_meta(rewrite_meta, host_rewrite_meta)
+        elif host_normalization.action == "blocked":
+            host_dispatch_validation = {
+                "kind": host_normalization.kind or "host_shell_portability_blocked",
+                "reason": (
+                    host_normalization.reason
+                    or "Command is not portable to the active shell."
+                ),
+                "hint": host_normalization.hint
+                or "Rewrite the command for the active shell, or report the portability issue.",
+            }
+
+        if (
+            host_dispatch_validation is None
+            and toolchain_status == "blocked"
+            and verification_commands_need_python((cmd_after_host_normalization,))
         ):
             stdout_text = ""
             reason_s = f": {toolchain_reason}" if toolchain_reason else ""
@@ -4298,14 +4363,16 @@ def _run_verification_commands(
             continue
 
         effective_cmd, python_rewritten = _rewrite_verification_command_for_python(
-            cmd_after_bash_rewrite,
+            cmd_after_host_normalization,
             python_executable=python_executable,
             is_powershell=is_powershell,
         )
-        rewritten = bool(python_rewritten or bash_rewritten)
+        rewritten = bool(python_rewritten or bash_rewritten or host_rewritten)
         rejected_sentinel = _looks_like_verification_rejection_sentinel(effective_cmd)
         dispatch_validation = (
-            None
+            host_dispatch_validation
+            if host_dispatch_validation is not None
+            else None
             if rejected_sentinel
             else _validate_verification_command_dispatch(
                 command=effective_cmd,
@@ -4433,13 +4500,7 @@ def _run_verification_commands(
                         except OSError:
                             stderr_text = ""
                         ripgrep_rewritten = True
-                        if rewrite_meta is None:
-                            rewrite_meta = rg_meta
-                        else:
-                            rewrite_meta = {
-                                "kind": "multi",
-                                "rewrites": [rewrite_meta, rg_meta],
-                            }
+                        rewrite_meta = _merge_command_rewrite_meta(rewrite_meta, rg_meta)
             else:
                 argv = _verification_shell_argv(
                     command_prefix=effective_prefix,
@@ -6648,6 +6709,16 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
 
             try:
+                execution_notes_md = CANONICAL_EXECUTION_NOTES_MD
+                shell_command_guidance_md = render_shell_command_guidance_md(
+                    shell_family=execution_shell
+                )
+                if shell_command_guidance_md.strip():
+                    execution_notes_md = (
+                        execution_notes_md.rstrip()
+                        + "\n"
+                        + shell_command_guidance_md.strip()
+                    )
                 prompt = build_prompt_from_template(
                     template_text=effective_spec.prompt_template_text,
                     variables={
@@ -6658,9 +6729,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "users_md": users_md_text,
                         "policy_json": policy_json,
                         "preflight_summary_md": preflight_summary_md,
+                        "execution_notes_md": execution_notes_md,
                         "environment_json": environment_json,
                         "report_schema_json": report_schema_json,
-                        "execution_notes_md": CANONICAL_EXECUTION_NOTES_MD,
                     },
                 )
             except TemplateSubstitutionError as e:
@@ -7225,9 +7296,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "broker_response_incomplete"
                             if attempt_broker_response_contract_error is not None
                             else (
-                            "broker_response_missing"
-                            if attempt_broker_requested
-                            else "broker_not_requested"
+                                "broker_response_missing"
+                                if attempt_broker_requested
+                                else "broker_not_requested"
                             )
                         )
 
