@@ -63,7 +63,11 @@ from runner_core.pip_target import (
 from runner_core.pip_target import (
     requirements_path as pip_requirements_path,
 )
-from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
+from runner_core.prompt import (
+    CANONICAL_EXECUTION_NOTES_MD,
+    TemplateSubstitutionError,
+    build_prompt_from_template,
+)
 from runner_core.python_interpreter_probe import resolve_usable_python_interpreter
 from runner_core.python_runtime import (
     probe_pip_module,
@@ -6655,6 +6659,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "preflight_summary_md": preflight_summary_md,
                         "environment_json": environment_json,
                         "report_schema_json": report_schema_json,
+                        "execution_notes_md": CANONICAL_EXECUTION_NOTES_MD,
                     },
                 )
             except TemplateSubstitutionError as e:
