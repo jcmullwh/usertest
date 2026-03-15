@@ -63,7 +63,11 @@ from runner_core.pip_target import (
 from runner_core.pip_target import (
     requirements_path as pip_requirements_path,
 )
-from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
+from runner_core.prompt import (
+    CANONICAL_EXECUTION_NOTES_MD,
+    TemplateSubstitutionError,
+    build_prompt_from_template,
+)
 from runner_core.python_interpreter_probe import resolve_usable_python_interpreter
 from runner_core.python_runtime import (
     probe_pip_module,
@@ -86,6 +90,7 @@ from runner_core.verification_broker import (
     probe_local_verification_launcher,
     render_verification_broker_command,
     resolve_verification_launcher,
+    validate_verification_broker_response_payload,
 )
 from runner_core.verification_broker import (
     probe_windows_bash_usable as _probe_windows_bash_usable_impl,
@@ -6704,9 +6709,16 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
 
             try:
+                execution_notes_md = CANONICAL_EXECUTION_NOTES_MD
                 shell_command_guidance_md = render_shell_command_guidance_md(
                     shell_family=execution_shell
                 )
+                if shell_command_guidance_md.strip():
+                    execution_notes_md = (
+                        execution_notes_md.rstrip()
+                        + "\n"
+                        + shell_command_guidance_md.strip()
+                    )
                 prompt = build_prompt_from_template(
                     template_text=effective_spec.prompt_template_text,
                     variables={
@@ -6717,7 +6729,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "users_md": users_md_text,
                         "policy_json": policy_json,
                         "preflight_summary_md": preflight_summary_md,
-                        "shell_command_guidance_md": shell_command_guidance_md,
+                        "execution_notes_md": execution_notes_md,
                         "environment_json": environment_json,
                         "report_schema_json": report_schema_json,
                     },
@@ -7171,6 +7183,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 attempt_broker_request_id = None
                 attempt_broker_response_status: str | None = None
                 attempt_broker_response_failure_reason: str | None = None
+                attempt_broker_response_contract_error: str | None = None
                 attempt_broker_reuse_candidate = False
                 if broker_latest_result is not None:
                     latest_request_id = getattr(broker_latest_result, "request_id", None)
@@ -7189,6 +7202,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         attempt_broker_response_failure_reason = (
                             latest_failure_reason.strip()
                         )
+                    _broker_payload, broker_payload_error = (
+                        validate_verification_broker_response_payload(
+                            broker_latest_result.to_response_dict(),
+                            request_id=broker_latest_result.request_id,
+                        )
+                    )
+                    if broker_payload_error is not None:
+                        attempt_broker_response_contract_error = broker_payload_error
+                        attempt_broker_response_failure_reason = "incomplete_broker_response"
                 elif broker_request_ids:
                     attempt_broker_request_id = broker_request_ids[-1]
                 if (
@@ -7197,7 +7219,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     and verification_commands
                 ):
                     broker_reuse_fallback_reason: str | None = None
-                    if verification_reuse_mode == "auto" and broker_latest_result is not None:
+                    if (
+                        verification_reuse_mode == "auto"
+                        and broker_latest_result is not None
+                        and attempt_broker_response_contract_error is None
+                    ):
                         attempt_broker_request_id = broker_latest_result.request_id
                         broker_summary = _coerce_verification_summary_from_broker_result(
                             broker_latest_result,
@@ -7267,9 +7293,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             )
                     elif verification_reuse_mode == "auto":
                         broker_reuse_fallback_reason = (
-                            "broker_response_missing"
-                            if attempt_broker_requested
-                            else "broker_not_requested"
+                            "broker_response_incomplete"
+                            if attempt_broker_response_contract_error is not None
+                            else (
+                                "broker_response_missing"
+                                if attempt_broker_requested
+                                else "broker_not_requested"
+                            )
                         )
 
                     if attempt_verification_summary is None:
@@ -7505,6 +7535,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "broker_response_failure_reason": (
                             attempt_broker_response_failure_reason
                         ),
+                        "broker_response_contract_error": (
+                            attempt_broker_response_contract_error
+                        ),
                         "reuse_candidate": (
                             attempt_broker_reuse_candidate if verification_commands else False
                         ),
@@ -7706,10 +7739,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 },
             )
 
+            materialization_errors: list[str] = []
+
             def _materialize_attempt_artifact(
                 src: Path,
                 dst: Path,
                 *,
+                label: str,
                 fallback_text: str | None = None,
             ) -> None:
                 if src == dst:
@@ -7717,23 +7753,77 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 if src.exists():
                     shutil.copyfile(src, dst)
                     return
-                try:
-                    dst.write_text(fallback_text or "", encoding="utf-8")
-                except OSError:
+                if fallback_text is None:
+                    materialization_errors.append(
+                        f"missing_selected_attempt_artifact={label}:{src}"
+                    )
+                    try:
+                        dst.write_text("", encoding="utf-8")
+                    except OSError as exc:
+                        materialization_errors.append(
+                            "failed_selected_attempt_artifact_placeholder="
+                            f"{label}:{dst}:{exc}"
+                        )
                     return
+                try:
+                    dst.write_text(fallback_text, encoding="utf-8")
+                except OSError as exc:
+                    materialization_errors.append(
+                        f"failed_selected_attempt_artifact_materialization={label}:{dst}:{exc}"
+                    )
 
-            _materialize_attempt_artifact(selected_raw_events_path, raw_events_path)
-            _materialize_attempt_artifact(selected_raw_events_ts_path, raw_events_ts_path)
+            _materialize_attempt_artifact(
+                selected_raw_events_path,
+                raw_events_path,
+                label="raw_events",
+            )
+            _materialize_attempt_artifact(
+                selected_raw_events_ts_path,
+                raw_events_ts_path,
+                label="raw_events_ts",
+                fallback_text="",
+            )
             _materialize_attempt_artifact(
                 selected_last_message_path,
                 last_message_path,
+                label="last_message",
                 fallback_text=selected_last_message_text,
             )
             _materialize_attempt_artifact(
                 selected_stderr_path,
                 stderr_path,
+                label="stderr",
                 fallback_text=selected_stderr_text,
             )
+            if materialization_errors:
+                forced_exit_code = 1
+                message = (
+                    "Selected attempt artifacts were incomplete during final materialization; "
+                    "the runner refused to silently synthesize missing files."
+                )
+                if not (run_dir / "error.json").exists():
+                    _write_json(
+                        run_dir / "error.json",
+                        {
+                            "type": "SelectedAttemptArtifactsIncomplete",
+                            "subtype": "selected_attempt_artifacts_incomplete",
+                            "code": "selected_attempt_artifacts_incomplete",
+                            "message": message,
+                            "details": {
+                                "errors": materialization_errors,
+                                "selected_verification_source": (
+                                    str(selected_verification_summary.get("source") or "").strip()
+                                    if isinstance(selected_verification_summary, dict)
+                                    else None
+                                ),
+                                "selected_attempt": selected_attempt_index + 1
+                                if selected_attempt_index is not None
+                                else None,
+                            },
+                        },
+                    )
+                if not report_validation_errors:
+                    report_validation_errors = [message, *materialization_errors]
 
             verification_output_payload: dict[str, Any]
             if selected_verification_summary is not None:

@@ -16,7 +16,6 @@ def test_render_shell_command_guidance_mentions_shared_windows_rewrites() -> Non
 
     assert "bash -lc" in guidance
     assert "Get-Content -LiteralPath" in guidance
-    assert 'rg -n -- "--skip-install" README.md' in guidance
     assert "portability issue" in guidance
 
 
@@ -25,7 +24,7 @@ def test_render_shell_command_guidance_mentions_bash_passthrough() -> None:
 
     assert "bash/sh" in guidance
     assert "avoid redundant `bash -lc` wrappers" in guidance
-    assert "Ripgrep" in guidance
+    assert "portability issue" in guidance
 
 
 def test_normalize_command_for_shell_unwraps_shell_neutral_bash_wrapper_for_powershell() -> None:

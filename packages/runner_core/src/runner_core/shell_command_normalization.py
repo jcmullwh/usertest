@@ -219,12 +219,6 @@ def render_shell_command_guidance_md(*, shell_family: str) -> str:
         bullets.extend(
             [
                 (
-                    "- PowerShell (Windows): assume PowerShell 5.1 compatibility unless "
-                    "the environment explicitly says otherwise (no `&&` / `||`). Run "
-                    "commands separately, or check `$LASTEXITCODE` after each native "
-                    "command and `exit $LASTEXITCODE` on failure."
-                ),
-                (
                     "- PowerShell (Windows): do not wrap commands in `bash -lc` / "
                     "`sh -lc`. If the inner command is shell-neutral (for example "
                     "`python -m pytest -q`), run it directly. If it relies on "
@@ -245,19 +239,9 @@ def render_shell_command_guidance_md(*, shell_family: str) -> str:
             "`bash -lc` wrappers unless the environment explicitly requires them."
         )
 
-    bullets.extend(
-        [
-            (
-                '- Ripgrep: when searching for a literal pattern that begins with `-`, '
-                'pass `--` to end option parsing (example: `rg -n -- "--skip-install" '
-                "README.md`)."
-            ),
-            "- Ripgrep: exit code `1` means \"no matches found\" (not necessarily a tool failure).",
-            (
-                "- If no safe translation exists for the active shell, stop and report "
-                "the portability issue instead of guessing."
-            ),
-        ]
+    bullets.append(
+        "- If no safe translation exists for the active shell, stop and report "
+        "the portability issue instead of guessing."
     )
 
     return "\n".join(bullets)
