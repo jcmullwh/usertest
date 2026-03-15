@@ -51,6 +51,8 @@ def _infer_registry_or_auth_failure(run_dir: Path) -> dict[str, Any] | None:
     if not log_text:
         return None
     lowered = log_text.lower()
+    if "exit_code=0" in lowered:
+        return None
     if "gitlab" not in lowered:
         return None
     if "missing gitlab_pypi_username/gitlab_pypi_password" in lowered:
@@ -138,9 +140,11 @@ def classify_run_outcome(
     missing_terminal_artifacts: bool = False,
 ) -> dict[str, Any]:
     if isinstance(handoff_summary, dict):
-        if handoff_summary.get("final_status") == "success" and handoff_summary.get(
-            "ci_status"
-        ) == "success":
+        ci_status = str(handoff_summary.get("ci_status") or "").strip().lower()
+        ci_conclusion = str(handoff_summary.get("ci_conclusion") or "").strip().lower()
+        if handoff_summary.get("final_status") == "success" and (
+            ci_status == "success" or ci_conclusion == "success"
+        ):
             return {
                 "failure_class": "success",
                 "retryable": False,
@@ -150,7 +154,7 @@ def classify_run_outcome(
             }
         if (
             handoff_summary.get("pr_created") is True
-            and handoff_summary.get("ci_status") == "failure"
+            and (ci_status == "failure" or ci_conclusion == "failure")
         ):
             return {
                 "failure_class": "ticket_regression",

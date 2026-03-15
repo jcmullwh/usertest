@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -555,6 +556,146 @@ def _load_candidates(
     return candidates
 
 
+def _load_ready_queue_candidates(
+    *,
+    repo_root: Path,
+    source_name: str,
+    export_path: Path,
+    severities: set[str],
+    processed: set[str],
+) -> list[BatchCandidate]:
+    ready_dir = repo_root / ".agents" / "plans" / "2 - ready"
+    if not ready_dir.exists():
+        return []
+
+    candidates: list[BatchCandidate] = []
+    for ticket_path in sorted(ready_dir.glob("*.md"), key=lambda path: path.name.lower()):
+        try:
+            markdown = ticket_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        fingerprint_match = re.search(
+            r"^-\s*Fingerprint:\s*`([^`]+)`\s*$",
+            markdown,
+            flags=re.MULTILINE,
+        )
+        export_kind_match = re.search(
+            r"^-\s*Export kind:\s*`([^`]+)`\s*$",
+            markdown,
+            flags=re.MULTILINE,
+        )
+        stage_match = re.search(
+            r"^-\s*Stage:\s*`([^`]+)`\s*$",
+            markdown,
+            flags=re.MULTILINE,
+        )
+        severity_match = re.search(
+            r"^-\s*Severity:\s*`([^`]+)`\s*$",
+            markdown,
+            flags=re.MULTILINE,
+        )
+        execution_domain_match = re.search(
+            r"^-\s*Execution domain:\s*`([^`]+)`\s*$",
+            markdown,
+            flags=re.MULTILINE,
+        )
+        conflict_line_match = re.search(
+            r"^-\s*Execution conflict keys:\s*(.+)$",
+            markdown,
+            flags=re.MULTILINE,
+        )
+        title_match = re.search(r"^#\s+(.+)$", markdown, flags=re.MULTILINE)
+        if fingerprint_match is None:
+            continue
+        fingerprint = fingerprint_match.group(1).strip()
+        if not fingerprint:
+            continue
+        if (
+            export_kind_match is None
+            or export_kind_match.group(1).strip().lower() != "implementation"
+        ):
+            continue
+        if stage_match is None or stage_match.group(1).strip().lower() != "ready_for_ticket":
+            continue
+        severity = (
+            severity_match.group(1).strip().lower()
+            if severity_match is not None and severity_match.group(1).strip()
+            else "medium"
+        )
+        if severity not in severities:
+            continue
+        owner_root = repo_root.resolve()
+        key = _ticket_key(owner_root, fingerprint)
+        if key in processed:
+            continue
+        title = title_match.group(1).strip() if title_match is not None else ticket_path.stem
+        execution_domain = (
+            execution_domain_match.group(1).strip()
+            if execution_domain_match is not None and execution_domain_match.group(1).strip()
+            else "unknown"
+        )
+        explicit_conflict_keys = (
+            tuple(
+                value.strip()
+                for value in re.findall(r"`([^`]+)`", conflict_line_match.group(1))
+                if value.strip()
+            )
+            if conflict_line_match is not None
+            else ()
+        )
+        if explicit_conflict_keys:
+            conflict_keys = explicit_conflict_keys
+        else:
+            conflict_keys = (f"ticket:{fingerprint}",)
+            _print(
+                f"WARNING ready ticket {ticket_path.name} missing conflict metadata; "
+                f"using fallback conflict key {conflict_keys[0]!r}"
+            )
+        candidates.append(
+            BatchCandidate(
+                source_name=source_name,
+                export_path=export_path,
+                fingerprint=fingerprint,
+                severity=severity,
+                title=title,
+                owner_root=owner_root,
+                ticket_path=ticket_path.resolve(),
+                execution_domain=execution_domain,
+                execution_conflict_keys=conflict_keys,
+            )
+        )
+    return candidates
+
+
+def _ready_queue_has_work(repo_root: Path) -> bool:
+    ready_dir = repo_root / ".agents" / "plans" / "2 - ready"
+    if not ready_dir.exists():
+        return False
+    for ticket_path in ready_dir.glob("*.md"):
+        try:
+            markdown = ticket_path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        export_kind_match = re.search(
+            r"^-\s*Export kind:\s*`([^`]+)`\s*$",
+            markdown,
+            flags=re.MULTILINE,
+        )
+        stage_match = re.search(
+            r"^-\s*Stage:\s*`([^`]+)`\s*$",
+            markdown,
+            flags=re.MULTILINE,
+        )
+        if (
+            export_kind_match is not None
+            and export_kind_match.group(1).strip().lower() == "implementation"
+            and stage_match is not None
+            and stage_match.group(1).strip().lower() == "ready_for_ticket"
+        ):
+            return True
+    return False
+
+
 def _collect_wave_candidates(
     *,
     repo_root: Path,
@@ -569,6 +710,31 @@ def _collect_wave_candidates(
     refresh_state: dict[str, SourceRefreshState],
 ) -> list[BatchCandidate]:
     by_key: dict[str, BatchCandidate] = {}
+    for source in sources:
+        export_path = _export_path(source)
+        for candidate in _load_ready_queue_candidates(
+            repo_root=repo_root,
+            source_name=source.name,
+            export_path=export_path,
+            severities=severities,
+            processed=processed,
+        ):
+            by_key.setdefault(candidate.ticket_key, candidate)
+    if by_key:
+        _print(f"QUEUE_READY candidates={len(by_key)} refresh_skipped=true")
+        return sorted(
+            by_key.values(),
+            key=lambda item: (
+                SEVERITY_RANK.get(item.severity, 99),
+                item.execution_domain,
+                item.title.lower(),
+                item.ticket_key,
+            ),
+        )
+    if _ready_queue_has_work(repo_root):
+        _print("QUEUE_READY candidates=0 refresh_skipped=true")
+        return []
+
     shared_inputs_fingerprint = _shared_backlog_inputs_fingerprint(repo_root)
     for source in sources:
         source_fingerprint = _source_inputs_fingerprint(

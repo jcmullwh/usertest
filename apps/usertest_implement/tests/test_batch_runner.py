@@ -7,8 +7,10 @@ from typing import Any
 
 from usertest_implement.batch_failure import classify_run_outcome
 from usertest_implement.batch_runner import (
+    BacklogSource,
     BatchCandidate,
     _batch_subprocess_env,
+    _collect_wave_candidates,
     _pick_launchable_candidate_index,
     _write_stream,
 )
@@ -106,6 +108,42 @@ def test_classify_run_outcome_marks_red_pr_as_ticket_regression(tmp_path: Path) 
     assert failure["global_blocker"] is True
 
 
+def test_classify_run_outcome_marks_completed_failure_ci_as_ticket_regression(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "bootstrap_pip.log").write_text(
+        "\n".join(
+            [
+                "$ docker exec ...",
+                (
+                    '    echo "Missing '
+                    'GITLAB_PYPI_USERNAME/GITLAB_PYPI_PASSWORD '
+                    'in container env." 1>&2'
+                ),
+                "exit_code=0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    failure = classify_run_outcome(
+        run_dir=run_dir,
+        handoff_summary={
+            "pr_created": True,
+            "pr_url": "https://example.invalid/pr/2",
+            "ci_status": "completed",
+            "ci_conclusion": "failure",
+            "ci_run_url": "https://example.invalid/run/2",
+            "final_status": "success",
+        },
+    )
+
+    assert failure["failure_class"] == "ticket_regression"
+    assert failure["global_blocker"] is True
+
+
 def test_batch_subprocess_env_includes_repo_src_paths(
     tmp_path: Path,
     monkeypatch,
@@ -139,3 +177,160 @@ def test_write_stream_ignores_oserror_from_closed_pipe() -> None:
             raise AssertionError("flush should not be called after a write failure")
 
     _write_stream(BrokenStream(), "hello")
+
+
+def test_collect_wave_candidates_prefers_ready_queue_over_refresh(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ready_dir = tmp_path / ".agents" / "plans" / "2 - ready"
+    ready_dir.mkdir(parents=True)
+    ticket_path = ready_dir / "20260314_deadbeefdeadbeef_ticket.md"
+    ticket_path.write_text(
+        "\n".join(
+            [
+                "# Queue-first ticket",
+                "",
+                "- Fingerprint: `deadbeefdeadbeef`",
+                "- Execution domain: `runner_core`",
+                (
+                    "- Execution conflict keys: "
+                    "`execution_domain:runner_core`, "
+                    "`subsystem:python_runtime`"
+                ),
+                "- Export kind: `implementation`",
+                "- Stage: `ready_for_ticket`",
+                "- Severity: `blocker`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    source = BacklogSource(
+        name="usertest",
+        runs_dir=tmp_path / "runs" / "usertest",
+        target="usertest",
+    )
+
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._refresh_backlog",
+        lambda **_: (_ for _ in ()).throw(AssertionError("refresh should be skipped")),
+    )
+
+    candidates = _collect_wave_candidates(
+        repo_root=tmp_path,
+        repo_input=str(tmp_path),
+        backlog_python=tmp_path / "python.exe",
+        refresh_agent="codex",
+        refresh_model="gpt-5.4",
+        batch_dir_path=tmp_path / "batch",
+        sources=[source],
+        severities={"blocker", "high"},
+        processed=set(),
+        refresh_state={},
+    )
+
+    assert [candidate.fingerprint for candidate in candidates] == ["deadbeefdeadbeef"]
+    assert candidates[0].ticket_path == ticket_path.resolve()
+    assert candidates[0].execution_domain == "runner_core"
+    assert candidates[0].execution_conflict_keys == (
+        "execution_domain:runner_core",
+        "subsystem:python_runtime",
+    )
+
+
+def test_collect_wave_candidates_skips_refresh_while_other_ready_work_exists(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ready_dir = tmp_path / ".agents" / "plans" / "2 - ready"
+    ready_dir.mkdir(parents=True)
+    (ready_dir / "20260314_feedfacefeedface_ticket.md").write_text(
+        "\n".join(
+            [
+                "# Medium ticket",
+                "",
+                "- Fingerprint: `feedfacefeedface`",
+                "- Export kind: `implementation`",
+                "- Stage: `ready_for_ticket`",
+                "- Severity: `medium`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    source = BacklogSource(
+        name="usertest",
+        runs_dir=tmp_path / "runs" / "usertest",
+        target="usertest",
+    )
+
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._refresh_backlog",
+        lambda **_: (_ for _ in ()).throw(AssertionError("refresh should be skipped")),
+    )
+
+    candidates = _collect_wave_candidates(
+        repo_root=tmp_path,
+        repo_input=str(tmp_path),
+        backlog_python=tmp_path / "python.exe",
+        refresh_agent="codex",
+        refresh_model="gpt-5.4",
+        batch_dir_path=tmp_path / "batch",
+        sources=[source],
+        severities={"blocker", "high"},
+        processed=set(),
+        refresh_state={},
+    )
+
+    assert candidates == []
+
+
+def test_collect_wave_candidates_uses_per_ticket_fallback_when_conflict_metadata_missing(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    ready_dir = tmp_path / ".agents" / "plans" / "2 - ready"
+    ready_dir.mkdir(parents=True)
+    ticket_path = ready_dir / "20260314_facefeedfacefeed_ticket.md"
+    ticket_path.write_text(
+        "\n".join(
+            [
+                "# Missing conflict metadata",
+                "",
+                "- Fingerprint: `facefeedfacefeed`",
+                "- Export kind: `implementation`",
+                "- Stage: `ready_for_ticket`",
+                "- Severity: `high`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    source = BacklogSource(
+        name="usertest",
+        runs_dir=tmp_path / "runs" / "usertest",
+        target="usertest",
+    )
+
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._refresh_backlog",
+        lambda **_: (_ for _ in ()).throw(AssertionError("refresh should be skipped")),
+    )
+
+    candidates = _collect_wave_candidates(
+        repo_root=tmp_path,
+        repo_input=str(tmp_path),
+        backlog_python=tmp_path / "python.exe",
+        refresh_agent="codex",
+        refresh_model="gpt-5.4",
+        batch_dir_path=tmp_path / "batch",
+        sources=[source],
+        severities={"blocker", "high"},
+        processed=set(),
+        refresh_state={},
+    )
+
+    assert [candidate.fingerprint for candidate in candidates] == ["facefeedfacefeed"]
+    assert candidates[0].execution_domain == "unknown"
+    assert candidates[0].execution_conflict_keys == ("ticket:facefeedfacefeed",)

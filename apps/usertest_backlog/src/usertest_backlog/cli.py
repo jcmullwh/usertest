@@ -1916,6 +1916,8 @@ def _write_ticket_idea_file(
             body_markdown=body_markdown,
             scope_target=scope_target,
             scope_repo_input=scope_repo_input,
+            execution_domain=_coerce_string(ticket.get("execution_domain")),
+            execution_conflict_keys=_coerce_string_list(ticket.get("execution_conflict_keys")),
             ux_review_section=ux_review_section,
         ),
         encoding="utf-8",
@@ -1930,6 +1932,8 @@ def _render_ticket_idea_markdown(
     body_markdown: str,
     scope_target: str | None,
     scope_repo_input: str | None,
+    execution_domain: str | None,
+    execution_conflict_keys: list[str],
     ux_review_section: str | None,
 ) -> str:
     lines: list[str] = []
@@ -1947,6 +1951,12 @@ def _render_ticket_idea_markdown(
         lines.append(f"- Export scope target: `{scope_target.strip()}`")
     if isinstance(scope_repo_input, str) and scope_repo_input.strip():
         lines.append(f"- Export scope repo_input: `{scope_repo_input.strip()}`")
+    if isinstance(execution_domain, str) and execution_domain.strip():
+        lines.append(f"- Execution domain: `{execution_domain.strip()}`")
+    cleaned_conflict_keys = [value.strip() for value in execution_conflict_keys if value.strip()]
+    if cleaned_conflict_keys:
+        rendered_keys = ", ".join(f"`{value}`" for value in cleaned_conflict_keys)
+        lines.append(f"- Execution conflict keys: {rendered_keys}")
     lines.append("")
     lines.append(body_markdown.rstrip())
     lines.append("")
@@ -1961,6 +1971,8 @@ def _refresh_generated_ticket_idea_file(
     body_markdown: str,
     scope_target: str | None,
     scope_repo_input: str | None,
+    execution_domain: str | None,
+    execution_conflict_keys: list[str],
     ux_review_section: str | None,
 ) -> bool:
     if _extract_generated_ticket_scope_metadata(path) is None:
@@ -1972,6 +1984,8 @@ def _refresh_generated_ticket_idea_file(
             body_markdown=body_markdown,
             scope_target=scope_target,
             scope_repo_input=scope_repo_input,
+            execution_domain=execution_domain,
+            execution_conflict_keys=execution_conflict_keys,
             ux_review_section=ux_review_section,
         ),
         encoding="utf-8",
@@ -5068,6 +5082,8 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                         body_markdown=base_body,
                         scope_target=target_slug,
                         scope_repo_input=backlog_scope_repo_input or repo_input,
+                        execution_domain=_coerce_string(ticket.get("execution_domain")),
+                        execution_conflict_keys=_coerce_string_list(ticket.get("execution_conflict_keys")),
                         ux_review_section=ux_section,
                     ):
                         generated_queue_files_refreshed += 1
