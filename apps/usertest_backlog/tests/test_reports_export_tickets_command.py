@@ -1531,6 +1531,11 @@ def test_reports_export_tickets_refreshes_existing_generated_queue_ticket(tmp_pa
             "observation_breadth": {"runs": 6, "agents": 2, "personas": 0},
             "structurally_constant_dimensions": ["missions", "targets", "repo_inputs"],
         },
+        "execution_domain": "runner_core",
+        "execution_conflict_keys": [
+            "execution_domain:runner_core",
+            "subsystem:python_runtime",
+        ],
         "review_domain": "behavior_compat",
         "suggested_owner": "docs",
     }
@@ -1611,6 +1616,11 @@ def test_reports_export_tickets_refreshes_existing_generated_queue_ticket(tmp_pa
     assert "- Breadth profile: `internal_maintenance`" in updated
     assert "- Observation breadth: `runs=6, agents=2, personas=0`" in updated
     assert "- Export scope target: `target_a`" in updated
+    assert "- Execution domain: `runner_core`" in updated
+    assert (
+        "- Execution conflict keys: `execution_domain:runner_core`, "
+        "`subsystem:python_runtime`"
+    ) in updated
 
     out_json = compiled_dir / "target_a.tickets_export.json"
     export_doc = json.loads(out_json.read_text(encoding="utf-8"))
