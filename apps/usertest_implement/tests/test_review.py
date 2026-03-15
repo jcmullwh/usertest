@@ -315,7 +315,7 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
         assert errors == "replace"
         assert check is False
         assert argv[:4] == ["gh", "pr", "review", "https://example.invalid/pr/2"]
-        assert "--approve" in argv
+        assert "--comment" in argv
         body_path = Path(argv[argv.index("--body-file") + 1])
         body_text = body_path.read_text(encoding="utf-8")
         assert "Automated implementation review" in body_text
@@ -340,7 +340,7 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
     pr_review_ref = _read_json(review_run_dir / "pr_review_ref.json")
     assert isinstance(pr_review_ref, dict)
     assert pr_review_ref["submitted"] is True
-    assert pr_review_ref["event"] == "APPROVE"
+    assert pr_review_ref["event"] == "COMMENT"
 
     ledger_text = ledger_path.read_text(encoding="utf-8")
     assert "last_review_run_dir" in ledger_text
