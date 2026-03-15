@@ -1,6 +1,6 @@
 [project]
 name = "triage_engine"
-version = "0.1.0"
+version = "0.2.0"
 description = "A Python library (PDM)"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -59,4 +59,3 @@ select = [
   "UP",
 ]
 ignore = ["UP017"]
-

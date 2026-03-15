@@ -9,3 +9,4 @@ default; see `.gitignore`).
 Start here:
 
 - `docs/ops/security.md` (run artifacts sensitivity + safe sharing + CI archiving guidance)
+- `docs/ops/release-notes-v0.2.0.md` (high-level changelog for the `v0.2.0` push to `main`)

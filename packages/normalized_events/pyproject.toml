@@ -1,6 +1,6 @@
 [project]
 name = "normalized_events"
-version = "0.1.0"
+version = "0.2.0"
 description = "Shared normalized-events contract + JSONL helpers"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -51,4 +51,3 @@ select = [
   "UP",
 ]
 ignore = ["UP017"]
-
