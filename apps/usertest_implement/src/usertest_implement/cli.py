@@ -1542,9 +1542,6 @@ def _submit_pr_review(
     review_run_dir: Path,
     review_summary: dict[str, Any],
 ) -> dict[str, Any]:
-    merge_ready = bool(review_summary.get("merge_ready") is True)
-    event = "APPROVE" if merge_ready else "REQUEST_CHANGES"
-    event_flag = "--approve" if merge_ready else "--request-changes"
     body = _build_pr_review_body(review_summary=review_summary)
     body_path = review_run_dir / "pr_review.md"
     body_path.write_text(body, encoding="utf-8")
@@ -1554,7 +1551,7 @@ def _submit_pr_review(
             "pr",
             "review",
             pr_url,
-            event_flag,
+            "--comment",
             "--body-file",
             str(body_path),
         ],
@@ -1568,7 +1565,7 @@ def _submit_pr_review(
     return {
         "schema_version": 1,
         "pr_url": pr_url,
-        "event": event,
+        "event": "COMMENT",
         "submitted": proc.returncode == 0,
         "body_path": str(body_path),
         "stdout": proc.stdout,
