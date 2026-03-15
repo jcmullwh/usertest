@@ -30,6 +30,25 @@ source "${SCRIPT_DIR}/python_preflight.sh"
 usertest_resolve_python "${REPO_ROOT}"
 PYTHON_BIN="${USERTEST_PYTHON_BIN}"
 
+TOOLCHAIN_ARGS=(
+  resolve
+  --repo-root "${REPO_ROOT}"
+  --python-exe "${PYTHON_BIN}"
+  --workflow doctor
+  --emit shell
+)
+
+if [[ "${SKIP_TOOL_CHECKS}" -eq 0 ]]; then
+  TOOLCHAIN_ARGS+=(--require-pdm)
+fi
+
+if [[ "${REQUIRE_PIP}" -eq 1 ]]; then
+  TOOLCHAIN_ARGS+=(--require-pip --bootstrap-pip)
+fi
+
+eval "$("${PYTHON_BIN}" tools/python_toolchain.py "${TOOLCHAIN_ARGS[@]}")"
+PYTHON_BIN="${USERTEST_TOOLCHAIN_PYTHON_EXE}"
+
 echo "==> Using Python: ${USERTEST_PYTHON_SOURCE} -> ${PYTHON_BIN}"
 if [[ -n "${USERTEST_PYTHON_EXECUTABLE:-}" ]]; then
   echo "==> Python executable: ${USERTEST_PYTHON_EXECUTABLE}"

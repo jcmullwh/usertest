@@ -14,6 +14,7 @@ They are convenience helpers; the “official” monorepo workflow is driven by 
 - `doctor.ps1`
 - `python_preflight.sh` (shared bash Python resolver)
 - `python_preflight.ps1` (shared Windows Python resolver)
+- `../tools/python_toolchain.py` (shared python/pip/pdm/venv contract used by the wrappers after interpreter selection)
 
 These run a deterministic checklist used in onboarding and CI verification:
 
@@ -36,6 +37,14 @@ In strict mode, missing `pdm` is treated as a failure instead of a skip.
 
 All of these scripts honor `USERTEST_PYTHON` first. When set, the scripts reuse that explicit
 interpreter decision instead of re-resolving `python` / `python3` from PATH.
+
+After selecting an interpreter, the wrappers call `tools/python_toolchain.py resolve` so setup,
+doctor, smoke, and offline-first-success flows all share one diagnostic contract for:
+
+- interpreter health
+- `python -m pip` availability / `ensurepip` bootstrap
+- usable `pdm`
+- `.venv` creation (including temp fallback for offline-first-success)
 
 ### PowerShell parse preflight
 
