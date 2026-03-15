@@ -42,6 +42,25 @@ source "${SCRIPT_DIR}/python_preflight.sh"
 usertest_resolve_python "${REPO_ROOT}"
 PYTHON_BIN="${USERTEST_PYTHON_BIN}"
 
+TOOLCHAIN_ARGS=(
+  resolve
+  --repo-root "${REPO_ROOT}"
+  --python-exe "${PYTHON_BIN}"
+  --workflow smoke
+  --emit shell
+)
+
+if [[ "${SKIP_INSTALL}" -eq 0 ]]; then
+  TOOLCHAIN_ARGS+=(--require-pip --bootstrap-pip)
+fi
+
+if [[ "${REQUIRE_DOCTOR}" -eq 1 ]]; then
+  TOOLCHAIN_ARGS+=(--require-pdm)
+fi
+
+eval "$("${PYTHON_BIN}" tools/python_toolchain.py "${TOOLCHAIN_ARGS[@]}")"
+PYTHON_BIN="${USERTEST_TOOLCHAIN_PYTHON_EXE}"
+
 echo "==> Using Python: ${USERTEST_PYTHON_SOURCE} -> ${PYTHON_BIN}"
 if [[ -n "${USERTEST_PYTHON_EXECUTABLE:-}" ]]; then
   echo "==> Python executable: ${USERTEST_PYTHON_EXECUTABLE}"
@@ -106,12 +125,6 @@ run_skip_install_preflight() {
 }
 
 if [[ "${REQUIRE_DOCTOR}" -eq 1 ]]; then
-  if ! command -v pdm >/dev/null 2>&1; then
-    echo "Scaffold doctor required but pdm was not found on PATH." >&2
-    echo "Install pdm (recommended): ${PYTHON_BIN} -m pip install -U pdm" >&2
-    echo "Or rerun without --require-doctor." >&2
-    exit 1
-  fi
   echo "==> Scaffold doctor"
   "${PYTHON_BIN}" tools/scaffold/scaffold.py doctor
 else

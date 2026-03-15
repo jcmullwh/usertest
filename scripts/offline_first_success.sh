@@ -23,6 +23,17 @@ source "${SCRIPT_DIR}/python_preflight.sh"
 usertest_resolve_python "${REPO_ROOT}"
 PYTHON_BIN="${USERTEST_PYTHON_BIN}"
 
+eval "$("${PYTHON_BIN}" tools/python_toolchain.py resolve \
+  --repo-root "${REPO_ROOT}" \
+  --python-exe "${PYTHON_BIN}" \
+  --workflow offline_first_success \
+  --emit shell \
+  --require-pip \
+  --bootstrap-pip \
+  --ensure-venv "${REPO_ROOT}/.venv" \
+  --allow-temp-venv-fallback)"
+PYTHON_BIN="${USERTEST_TOOLCHAIN_PYTHON_EXE}"
+
 echo "==> Using Python: ${USERTEST_PYTHON_SOURCE} -> ${PYTHON_BIN}"
 if [[ -n "${USERTEST_PYTHON_EXECUTABLE:-}" ]]; then
   echo "==> Python executable: ${USERTEST_PYTHON_EXECUTABLE}"
@@ -31,24 +42,10 @@ if [[ -n "${USERTEST_PYTHON_VERSION:-}" ]]; then
   echo "==> Python version: ${USERTEST_PYTHON_VERSION}"
 fi
 
-VENV_DIR="${REPO_ROOT}/.venv"
-VENV_PY="${VENV_DIR}/bin/python"
-if [[ ! -x "${VENV_PY}" ]]; then
-  echo "==> Create venv (.venv)"
-  venv_out=""
-  if ! venv_out="$("${PYTHON_BIN}" -m venv "${VENV_DIR}" 2>&1)"; then
-    echo "${venv_out}" >&2
-    echo "==> WARNING: could not create ${VENV_DIR} (symlinks may be blocked on this filesystem)." >&2
-    echo "==> Falling back to a temp venv under /tmp (this does not modify your global Python)." >&2
-    rm -rf "${VENV_DIR}"
-    VENV_DIR="$(mktemp -d -t usertest_venv_XXXXXX)"
-    "${PYTHON_BIN}" -m venv "${VENV_DIR}"
-    VENV_PY="${VENV_DIR}/bin/python"
-  fi
-fi
-if [[ ! -x "${VENV_PY}" ]]; then
-  echo "Failed to create venv at ${VENV_DIR}" >&2
-  exit 1
+VENV_DIR="${USERTEST_TOOLCHAIN_VENV_DIR}"
+VENV_PY="${USERTEST_TOOLCHAIN_VENV_PY}"
+if [[ "${USERTEST_TOOLCHAIN_VENV_FALLBACK_USED:-0}" == "1" ]]; then
+  echo "==> WARNING: local .venv was unavailable; using temp venv at ${VENV_DIR}"
 fi
 
 PIP_FLAGS=(--disable-pip-version-check --retries 10 --timeout 30)

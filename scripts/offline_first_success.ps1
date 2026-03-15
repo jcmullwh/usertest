@@ -41,22 +41,22 @@ function Invoke-Step {
     }
 }
 
+function Write-Err {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Message
+    )
+    [Console]::Error.WriteLine($Message)
+}
+
 Push-Location $repoRoot
 try {
-    $venvDir = Join-Path $repoRoot '.venv'
-    # Windows-specific: venv uses Scripts\python.exe
-    $venvPython = Join-Path $venvDir 'Scripts\python.exe'
-
-    if (Test-Path -LiteralPath $venvPython) {
-        $venvProbe = Test-PythonInterpreter -CommandPath $venvPython -TimeoutSeconds 2.0
-        if (-not $venvProbe.Usable) {
-            Write-Host "==> Existing .venv looks unhealthy ($($venvProbe.ReasonCode)); recreating it." -ForegroundColor Yellow
-            try { Remove-Item -Recurse -Force -LiteralPath $venvDir } catch { }
-        }
+    try {
+        $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
     }
-
-    $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
-    if (-not $pythonInfo) {
+    catch {
+        Write-Err $_.Exception.Message
         exit 1
     }
     $pythonCmd = $pythonInfo.CommandPath
@@ -66,15 +66,25 @@ try {
     if ($pythonInfo.Version) {
         Write-Host "==> Python version: $($pythonInfo.Version)"
     }
-    $pipFlags = @('--disable-pip-version-check', '--retries', '10', '--timeout', '30')
-
-    if (-not (Test-Path $venvPython)) {
-        Invoke-Step -Name 'Create venv (.venv)' -Command {
-            & $pythonCmd -m venv $venvDir
-        }
+    $toolchainEnv = & $pythonCmd tools/python_toolchain.py resolve `
+        --repo-root $repoRoot `
+        --python-exe $pythonCmd `
+        --workflow offline_first_success `
+        --emit powershell `
+        --require-pip `
+        --bootstrap-pip `
+        --ensure-venv (Join-Path $repoRoot '.venv') `
+        --allow-temp-venv-fallback
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
     }
-    if (-not (Test-Path $venvPython)) {
-        throw "Failed to create venv at $venvDir"
+    Invoke-Expression ($toolchainEnv -join [Environment]::NewLine)
+    $pythonCmd = $env:USERTEST_TOOLCHAIN_PYTHON_EXE
+    $pipFlags = @('--disable-pip-version-check', '--retries', '10', '--timeout', '30')
+    $venvDir = $env:USERTEST_TOOLCHAIN_VENV_DIR
+    $venvPython = $env:USERTEST_TOOLCHAIN_VENV_PY
+    if ($env:USERTEST_TOOLCHAIN_VENV_FALLBACK_USED -eq '1') {
+        Write-Host "==> WARNING: local .venv was unavailable; using temp venv at $venvDir" -ForegroundColor Yellow
     }
 
     Invoke-Step -Name 'Install minimal deps (requirements-dev.txt)' -Command {

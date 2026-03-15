@@ -126,8 +126,11 @@ if errors:
 
 Push-Location $repoRoot
 try {
-    $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
-    if (-not $pythonInfo) {
+    try {
+        $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
+    }
+    catch {
+        Write-Err $_.Exception.Message
         exit 1
     }
     $pythonCmd = $pythonInfo.CommandPath
@@ -137,13 +140,28 @@ try {
     if ($pythonInfo.Version) {
         Write-Host "==> Python version: $($pythonInfo.Version)"
     }
+    $toolchainArgs = @(
+        'resolve',
+        '--repo-root', $repoRoot,
+        '--python-exe', $pythonCmd,
+        '--workflow', 'smoke',
+        '--emit', 'powershell'
+    )
+    if (-not $SkipInstall) {
+        $toolchainArgs += @('--require-pip', '--bootstrap-pip')
+    }
+    if ($RequireDoctor) {
+        $toolchainArgs += '--require-pdm'
+    }
+    $toolchainEnv = & $pythonCmd tools/python_toolchain.py @toolchainArgs
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    Invoke-Expression ($toolchainEnv -join [Environment]::NewLine)
+    $pythonCmd = $env:USERTEST_TOOLCHAIN_PYTHON_EXE
     $pipFlags = @('--disable-pip-version-check', '--retries', '10', '--timeout', '30')
 
     if ($RequireDoctor) {
-        if (-not (Get-Command pdm -ErrorAction SilentlyContinue)) {
-            Write-Error "Scaffold doctor required but pdm was not found on PATH.`nInstall pdm (recommended): $pythonCmd -m pip install -U pdm`nOr rerun without -RequireDoctor."
-            exit 1
-        }
         Invoke-Step -Name 'Scaffold doctor' -Command {
             & $pythonCmd tools/scaffold/scaffold.py doctor
         }
@@ -160,35 +178,6 @@ try {
     Write-SetupHint -PythonCmd $pythonCmd
 
     if (-not $SkipInstall) {
-        $pipProbeOk = $false
-        & $pythonCmd -m pip --version
-        if ($LASTEXITCODE -eq 0) {
-            $pipProbeOk = $true
-        }
-
-        if (-not $pipProbeOk) {
-            $venvPython = Join-Path (Join-Path $repoRoot '.venv') 'Scripts\python.exe'
-            if (-not (Test-Path -LiteralPath $venvPython)) {
-                Invoke-Step -Name 'Create .venv (pip bootstrap)' -Command {
-                    & $pythonCmd -m venv .venv
-                }
-            }
-            if (Test-Path -LiteralPath $venvPython) {
-                $pythonCmd = $venvPython
-                Write-Host "==> Using Python: venv -> $pythonCmd"
-            }
-
-            Invoke-Step -Name 'Bootstrap pip (ensurepip)' -Command {
-                & $pythonCmd -m ensurepip --upgrade
-            }
-
-            & $pythonCmd -m pip --version
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "pip is required for smoke installs, but is not available after ensurepip.`nTry installing a full CPython (with ensurepip), then re-run smoke."
-                exit $LASTEXITCODE
-            }
-        }
-
         Invoke-Step -Name 'Install base Python deps' -Command {
             & $pythonCmd -m pip install @pipFlags -r requirements-dev.txt
         }
