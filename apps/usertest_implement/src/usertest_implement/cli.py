@@ -2422,8 +2422,6 @@ def _run_selected_ticket(
         if args.pr:
             if not commit_performed:
                 pr_ref["error"] = "Skipping PR creation: no commit was performed."
-            elif shutil.which("gh") is None:
-                pr_ref["error"] = "gh not found on PATH"
             else:
                 if workspace_dir is None:
                     pr_ref["error"] = "Missing workspace_ref.json; cannot locate workspace"
@@ -2536,33 +2534,37 @@ def _run_selected_ticket(
                         pass
                     else:
                         pr_ref["body"] = pr_body
-                        proc = subprocess.run(
-                            [
-                                "gh",
-                                "pr",
-                                "create",
-                                "--base",
-                                str(args.base_branch),
-                                "--title",
-                                title,
-                                "--body",
-                                pr_body,
-                                *(["--draft"] if create_draft else []),
-                            ],
-                            cwd=str(workspace_dir),
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                        )
-                        if proc.returncode == 0:
-                            pr_ref["created"] = True
-                            pr_ref["url"] = proc.stdout.strip() or None
-                        else:
-                            pr_ref["error"] = (
-                                proc.stderr.strip()
-                                or proc.stdout.strip()
-                                or f"gh failed ({proc.returncode})"
+                        try:
+                            proc = subprocess.run(
+                                [
+                                    "gh",
+                                    "pr",
+                                    "create",
+                                    "--base",
+                                    str(args.base_branch),
+                                    "--title",
+                                    title,
+                                    "--body",
+                                    pr_body,
+                                    *(["--draft"] if create_draft else []),
+                                ],
+                                cwd=str(workspace_dir),
+                                capture_output=True,
+                                text=True,
+                                check=False,
                             )
+                        except OSError:
+                            pr_ref["error"] = "gh not found on PATH"
+                        else:
+                            if proc.returncode == 0:
+                                pr_ref["created"] = True
+                                pr_ref["url"] = proc.stdout.strip() or None
+                            else:
+                                pr_ref["error"] = (
+                                    proc.stderr.strip()
+                                    or proc.stdout.strip()
+                                    or f"gh failed ({proc.returncode})"
+                                )
         _write_json(run_dir / "pr_ref.json", pr_ref)
 
     if (
