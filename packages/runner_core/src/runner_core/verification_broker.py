@@ -19,11 +19,27 @@ from runner_core.workspace_state_hash import WorkspaceStateHash
 
 _SHELL_PROBE_TIMEOUT_SECONDS = 2.0
 _POWERSHELL_PROBE_TIMEOUT_SECONDS = 10.0
-_BROKER_DEFAULT_INTERNAL_DEADLINE_SECONDS = 10_800.0
+_PYTHON_PROBE_TIMEOUT_SECONDS = 4.0
+_BROKER_DEFAULT_COMMAND_TIMEOUT_SECONDS = 600.0
+_BROKER_MIN_INTERNAL_DEADLINE_SECONDS = 60.0
+_BROKER_INTERNAL_DEADLINE_GRACE_SECONDS = 30.0
 _BROKER_CLIENT_WAIT_GRACE_SECONDS = 15.0
 _BROKER_STOP_JOIN_TIMEOUT_SECONDS = 10.0
 _BROKER_PROGRESS_HEARTBEAT_SECONDS = 5.0
 _BROKER_TERMINAL_STATUSES = {"passed", "failed", "timed_out", "cancelled"}
+_BROKER_REQUIRED_RESPONSE_ARTIFACT_FIELDS = ("artifacts_dir", "summary_path")
+_BROKER_REQUIRED_RESULT_ARTIFACT_FIELDS = (
+    "artifacts_dir",
+    "summary_path",
+    "verification_summary",
+)
+_BROKER_NO_ARTIFACT_FAILURE_REASONS = frozenset(
+    {"async_verifier_disabled", "invalid_request_token", "runner_shutdown"}
+)
+_BROKER_NO_ARTIFACT_FAILURE_REASON_PREFIXES = (
+    "invalid_request_json:",
+    "broker_exception:",
+)
 
 
 @dataclass(frozen=True)
@@ -48,7 +64,11 @@ class VerificationBrokerRequestResult:
     progress: dict[str, Any] | None
     verification_summary: dict[str, Any] | None
 
+    def missing_required_artifacts(self) -> tuple[str, ...]:
+        return verification_broker_missing_result_artifacts(self)
+
     def to_artifact_dict(self) -> dict[str, Any]:
+        missing_artifacts = list(self.missing_required_artifacts())
         return {
             "request_id": self.request_id,
             "attempt": self.attempt,
@@ -68,6 +88,8 @@ class VerificationBrokerRequestResult:
             "cancel_requested": self.cancel_requested,
             "failure_reason": self.failure_reason,
             "progress": dict(self.progress) if isinstance(self.progress, dict) else None,
+            "required_artifacts_complete": not missing_artifacts,
+            "missing_required_artifacts": missing_artifacts,
         }
 
 
@@ -84,6 +106,18 @@ class VerificationLauncher:
     executable: str
     shell_argv_prefix: tuple[str, ...]
     broker_wrapper_name: str
+
+
+@dataclass(frozen=True)
+class VerificationBrokerContract:
+    launcher: VerificationLauncher
+    python_command: str
+    python_probe_command: str | None
+    effective_timeout_seconds: float
+    default_timeout_applied: bool
+    internal_deadline_seconds: float
+    client_wait_timeout_seconds: float
+    required_terminal_artifacts: tuple[str, ...]
 
 
 def resolve_verification_launcher(
@@ -123,6 +157,100 @@ def render_verification_broker_command(
             + _quote_powershell_path(script_path)
         )
     return f"sh {shlex.quote(script_path)}"
+
+
+def resolve_verification_broker_python_command(
+    *,
+    exec_backend: str,
+    validated_python_executable: str | None,
+) -> str:
+    if exec_backend == "local" and isinstance(validated_python_executable, str):
+        executable = validated_python_executable.strip()
+        if executable:
+            return executable
+    return "python"
+
+
+def resolve_verification_broker_timeout_seconds(
+    *,
+    verification_timeout_seconds: float | None,
+) -> tuple[float, bool]:
+    if verification_timeout_seconds is None or float(verification_timeout_seconds) <= 0.0:
+        return _BROKER_DEFAULT_COMMAND_TIMEOUT_SECONDS, True
+    return float(verification_timeout_seconds), False
+
+
+def _compute_broker_internal_deadline_seconds(
+    *,
+    effective_timeout_seconds: float,
+    verification_command_count: int,
+) -> float:
+    command_count = max(1, int(verification_command_count))
+    return max(
+        _BROKER_MIN_INTERNAL_DEADLINE_SECONDS,
+        float(effective_timeout_seconds) * float(command_count)
+        + _BROKER_INTERNAL_DEADLINE_GRACE_SECONDS,
+    )
+
+
+def _compute_client_wait_timeout(
+    *,
+    internal_deadline_seconds: float,
+) -> float:
+    return max(60.0, float(internal_deadline_seconds) + _BROKER_CLIENT_WAIT_GRACE_SECONDS)
+
+
+def resolve_verification_broker_contract(
+    *,
+    command_prefix: Sequence[str],
+    exec_backend: str,
+    validated_python_executable: str | None,
+    verification_timeout_seconds: float | None,
+    verification_command_count: int,
+    is_windows: bool | None = None,
+) -> VerificationBrokerContract:
+    launcher = resolve_verification_launcher(
+        command_prefix=command_prefix,
+        is_windows=is_windows,
+    )
+    python_command = resolve_verification_broker_python_command(
+        exec_backend=exec_backend,
+        validated_python_executable=validated_python_executable,
+    )
+    effective_timeout_seconds, default_timeout_applied = (
+        resolve_verification_broker_timeout_seconds(
+            verification_timeout_seconds=verification_timeout_seconds
+        )
+    )
+    internal_deadline_seconds = _compute_broker_internal_deadline_seconds(
+        effective_timeout_seconds=effective_timeout_seconds,
+        verification_command_count=verification_command_count,
+    )
+    return VerificationBrokerContract(
+        launcher=launcher,
+        python_command=python_command,
+        python_probe_command=python_command.strip() or None,
+        effective_timeout_seconds=effective_timeout_seconds,
+        default_timeout_applied=default_timeout_applied,
+        internal_deadline_seconds=internal_deadline_seconds,
+        client_wait_timeout_seconds=_compute_client_wait_timeout(
+            internal_deadline_seconds=internal_deadline_seconds,
+        ),
+        required_terminal_artifacts=_BROKER_REQUIRED_RESPONSE_ARTIFACT_FIELDS,
+    )
+
+
+def verification_broker_runtime_prerequisites(
+    contract: VerificationBrokerContract,
+) -> tuple[str, ...]:
+    ordered: list[str] = []
+    for candidate in (contract.launcher.executable, contract.python_probe_command):
+        if not isinstance(candidate, str):
+            continue
+        normalized = candidate.strip()
+        if normalized and normalized not in ordered:
+            ordered.append(normalized)
+    return tuple(ordered)
 
 
 def probe_windows_bash_usable() -> dict[str, Any]:
@@ -266,22 +394,153 @@ def probe_local_verification_launcher(*, launcher: VerificationLauncher) -> dict
     }
 
 
+def probe_local_verification_python(*, python_command: str) -> dict[str, Any]:
+    executable = python_command.strip()
+    if not executable:
+        return {
+            "present": False,
+            "usable": False,
+            "resolved_path": None,
+            "reason_code": "not_configured",
+            "reason": "python command is not configured for the verification broker wrapper.",
+        }
+
+    resolved: str | None = None
+    if os.path.isabs(executable) or any(sep in executable for sep in ("/", "\\")):
+        resolved = executable if Path(executable).exists() else None
+    else:
+        resolved = shutil.which(executable)
+    if resolved is None:
+        return {
+            "present": False,
+            "usable": False,
+            "resolved_path": None,
+            "reason_code": "not_found",
+            "reason": f"`{executable}` was not found for the verification broker wrapper.",
+        }
+
+    try:
+        proc = subprocess.run(
+            [resolved, "-c", "print('ok')"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_PYTHON_PROBE_TIMEOUT_SECONDS,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "present": True,
+            "usable": False,
+            "resolved_path": resolved,
+            "reason_code": "unresponsive",
+            "reason": (
+                "python probe timed out "
+                f"({_PYTHON_PROBE_TIMEOUT_SECONDS:.1f}s) running `{resolved} -c ...`."
+            ),
+        }
+    except OSError as e:
+        return {
+            "present": True,
+            "usable": False,
+            "resolved_path": resolved,
+            "reason_code": "blocked",
+            "reason": f"python probe failed: {e}",
+        }
+
+    exit_code = int(proc.returncode or 0)
+    if exit_code == 0:
+        return {
+            "present": True,
+            "usable": True,
+            "resolved_path": resolved,
+            "reason_code": None,
+            "reason": None,
+        }
+    stderr = (proc.stderr or "").strip()
+    return {
+        "present": True,
+        "usable": False,
+        "resolved_path": resolved,
+        "reason_code": "probe_failed",
+        "reason": (
+            "python probe exited non-zero"
+            + (f": {stderr}" if stderr else f" (exit_code={exit_code})")
+        ),
+    }
+
+
 def _is_terminal_status(status: str | None) -> bool:
     return isinstance(status, str) and status.strip() in _BROKER_TERMINAL_STATUSES
 
 
-def _compute_broker_internal_deadline_seconds(
+def _failure_reason_allows_missing_artifacts(failure_reason: str | None) -> bool:
+    normalized = failure_reason.strip() if isinstance(failure_reason, str) else ""
+    if not normalized:
+        return False
+    if normalized in _BROKER_NO_ARTIFACT_FAILURE_REASONS:
+        return True
+    return normalized.startswith(_BROKER_NO_ARTIFACT_FAILURE_REASON_PREFIXES)
+
+
+def verification_broker_terminal_response_requires_artifacts(
     *,
-    verification_timeout_seconds: float | None,
-    verification_command_count: int,
-) -> float:
-    if verification_timeout_seconds is None or verification_timeout_seconds <= 0:
-        return _BROKER_DEFAULT_INTERNAL_DEADLINE_SECONDS
-    command_count = max(1, int(verification_command_count))
-    return max(
-        300.0,
-        float(verification_timeout_seconds) * float(command_count) + 300.0,
-    )
+    status: str | None,
+    failure_reason: str | None,
+) -> bool:
+    status_s = status.strip() if isinstance(status, str) else ""
+    if status_s == "passed":
+        return True
+    if status_s in {"timed_out", "cancelled"}:
+        return not _failure_reason_allows_missing_artifacts(failure_reason)
+    if status_s == "failed":
+        return not _failure_reason_allows_missing_artifacts(failure_reason)
+    return False
+
+
+def verification_broker_missing_response_artifacts(
+    payload: dict[str, Any],
+    *,
+    required_fields: Sequence[str] = _BROKER_REQUIRED_RESPONSE_ARTIFACT_FIELDS,
+) -> tuple[str, ...]:
+    if not verification_broker_terminal_response_requires_artifacts(
+        status=payload.get("status") if isinstance(payload.get("status"), str) else None,
+        failure_reason=(
+            payload.get("failure_reason")
+            if isinstance(payload.get("failure_reason"), str)
+            else None
+        ),
+    ):
+        return ()
+    missing: list[str] = []
+    for field in required_fields:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(field)
+    return tuple(missing)
+
+
+def verification_broker_missing_result_artifacts(
+    result: VerificationBrokerRequestResult,
+    *,
+    required_fields: Sequence[str] = _BROKER_REQUIRED_RESULT_ARTIFACT_FIELDS,
+) -> tuple[str, ...]:
+    if not verification_broker_terminal_response_requires_artifacts(
+        status=result.status,
+        failure_reason=result.failure_reason,
+    ):
+        return ()
+    missing: list[str] = []
+    for field in required_fields:
+        value = getattr(result, field, None)
+        if field == "verification_summary":
+            if not isinstance(value, dict):
+                missing.append(field)
+            continue
+        if not isinstance(value, str) or not value.strip():
+            missing.append(field)
+    return tuple(missing)
 
 
 def _compute_deadline_utc(started_utc: str | None, *, deadline_seconds: float) -> str | None:
@@ -327,10 +586,7 @@ class VerificationBrokerAttempt:
         client_root: Path,
         client_root_for_agent: str,
         attempt_root_for_agent: str,
-        execution_shell: str,
-        python_command: str,
-        verification_timeout_seconds: float | None,
-        verification_command_count: int,
+        contract: VerificationBrokerContract,
         verifier: Callable[..., dict[str, Any]] | None,
         workspace_hash_fn: Callable[[], WorkspaceStateHash] | None,
         utc_now_fn: Callable[[], str],
@@ -338,7 +594,7 @@ class VerificationBrokerAttempt:
     ) -> None:
         self.run_dir = run_dir
         self.attempt_number = attempt_number
-        self.execution_shell = execution_shell.strip().lower() or "bash"
+        self.contract = contract
         self.verifier = verifier
         self.workspace_hash_fn = workspace_hash_fn
         self.utc_now_fn = utc_now_fn
@@ -363,10 +619,7 @@ class VerificationBrokerAttempt:
         self._stop = threading.Event()
         self._request_settle_seconds = 2.0
         self._drain_deadline_monotonic: float | None = None
-        self._internal_deadline_seconds = _compute_broker_internal_deadline_seconds(
-            verification_timeout_seconds=verification_timeout_seconds,
-            verification_command_count=verification_command_count,
-        )
+        self._internal_deadline_seconds = contract.internal_deadline_seconds
         self._thread = (
             threading.Thread(
                 target=self._worker_loop,
@@ -377,10 +630,10 @@ class VerificationBrokerAttempt:
             else None
         )
         self._client = self._write_client_files(
-            python_command=python_command,
-            wait_timeout_seconds=_compute_client_wait_timeout(
-                internal_deadline_seconds=self._internal_deadline_seconds,
-            ),
+            launcher=contract.launcher,
+            python_command=contract.python_command,
+            wait_timeout_seconds=contract.client_wait_timeout_seconds,
+            required_terminal_artifacts=contract.required_terminal_artifacts,
         )
 
     @property
@@ -851,8 +1104,10 @@ class VerificationBrokerAttempt:
     def _write_client_files(
         self,
         *,
+        launcher: VerificationLauncher,
         python_command: str,
         wait_timeout_seconds: float,
+        required_terminal_artifacts: Sequence[str],
     ) -> VerificationBrokerClient:
         self.client_root.mkdir(parents=True, exist_ok=True)
         request_dir_for_agent = agent_path_join(self.attempt_root_for_agent, "requests")
@@ -862,6 +1117,7 @@ class VerificationBrokerAttempt:
             request_dir=request_dir_for_agent,
             response_dir=response_dir_for_agent,
             wait_timeout_seconds=wait_timeout_seconds,
+            required_terminal_artifacts=required_terminal_artifacts,
         )
         self.python_script.write_text(python_payload, encoding="utf-8", newline="\n")
         self.shell_script.write_text(
@@ -875,10 +1131,6 @@ class VerificationBrokerAttempt:
             newline="\n",
         )
 
-        launcher = resolve_verification_launcher(
-            command_prefix=(),
-            is_windows=self.execution_shell == "powershell",
-        )
         if launcher.executable == "powershell":
             command = render_verification_broker_command(
                 client_root_for_agent=self.client_root_for_agent,
@@ -908,6 +1160,7 @@ def _render_client_python(
     request_dir: str,
     response_dir: str,
     wait_timeout_seconds: float,
+    required_terminal_artifacts: Sequence[str],
 ) -> str:
     payload = """from __future__ import annotations
 
@@ -921,6 +1174,9 @@ REQUEST_TOKEN = __REQUEST_TOKEN__
 REQUEST_DIR = Path(__REQUEST_DIR__)
 RESPONSE_DIR = Path(__RESPONSE_DIR__)
 WAIT_TIMEOUT_SECONDS = __WAIT_TIMEOUT_SECONDS__
+REQUIRED_TERMINAL_ARTIFACT_FIELDS = __REQUIRED_TERMINAL_ARTIFACT_FIELDS__
+NO_ARTIFACT_FAILURE_REASONS = __NO_ARTIFACT_FAILURE_REASONS__
+NO_ARTIFACT_FAILURE_REASON_PREFIXES = __NO_ARTIFACT_FAILURE_REASON_PREFIXES__
 POLL_INTERVAL_SECONDS = 0.2
 
 
@@ -961,7 +1217,45 @@ def _load_response(path: Path, request_id: str) -> tuple[dict[str, object] | Non
         "cancelled",
     }:
         return None, f"invalid broker response status for request_id={request_id}: {status!r}"
+    missing_artifacts = _missing_required_terminal_artifacts(payload)
+    if missing_artifacts:
+        missing_list = ", ".join(missing_artifacts)
+        return (
+            None,
+            "incomplete broker response for request_id="
+            f"{request_id}: missing required artifact fields: {missing_list}",
+        )
     return payload, None
+
+
+def _failure_reason_allows_missing_artifacts(failure_reason: str) -> bool:
+    normalized = failure_reason.strip()
+    if not normalized:
+        return False
+    if normalized in NO_ARTIFACT_FAILURE_REASONS:
+        return True
+    return normalized.startswith(tuple(NO_ARTIFACT_FAILURE_REASON_PREFIXES))
+
+
+def _terminal_response_requires_artifacts(payload: dict[str, object]) -> bool:
+    status = str(payload.get("status") or "").strip()
+    failure_reason = str(payload.get("failure_reason") or "").strip()
+    if status == "passed":
+        return True
+    if status in {"timed_out", "cancelled", "failed"}:
+        return not _failure_reason_allows_missing_artifacts(failure_reason)
+    return False
+
+
+def _missing_required_terminal_artifacts(payload: dict[str, object]) -> list[str]:
+    if not _terminal_response_requires_artifacts(payload):
+        return []
+    missing: list[str] = []
+    for field in REQUIRED_TERMINAL_ARTIFACT_FIELDS:
+        value = payload.get(field)
+        if not isinstance(value, str) or not value.strip():
+            missing.append(field)
+    return missing
 
 
 def _render_failure_message(request_id: str, payload: dict[str, object]) -> str:
@@ -1080,6 +1374,18 @@ if __name__ == "__main__":
         .replace("__REQUEST_DIR__", json.dumps(request_dir))
         .replace("__RESPONSE_DIR__", json.dumps(response_dir))
         .replace("__WAIT_TIMEOUT_SECONDS__", repr(float(wait_timeout_seconds)))
+        .replace(
+            "__REQUIRED_TERMINAL_ARTIFACT_FIELDS__",
+            repr(tuple(str(field) for field in required_terminal_artifacts)),
+        )
+        .replace(
+            "__NO_ARTIFACT_FAILURE_REASONS__",
+            repr(tuple(sorted(_BROKER_NO_ARTIFACT_FAILURE_REASONS))),
+        )
+        .replace(
+            "__NO_ARTIFACT_FAILURE_REASON_PREFIXES__",
+            repr(tuple(_BROKER_NO_ARTIFACT_FAILURE_REASON_PREFIXES)),
+        )
         .replace("__HEARTBEAT_SECONDS__", repr(float(_BROKER_PROGRESS_HEARTBEAT_SECONDS)))
     )
 
@@ -1111,13 +1417,6 @@ def _summary_has_rejected_sentinel(summary: dict[str, Any]) -> bool:
         isinstance(command, dict) and bool(command.get("rejected_sentinel"))
         for command in commands
     )
-
-
-def _compute_client_wait_timeout(
-    *,
-    internal_deadline_seconds: float,
-) -> float:
-    return max(60.0, float(internal_deadline_seconds) + _BROKER_CLIENT_WAIT_GRACE_SECONDS)
 
 
 def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:

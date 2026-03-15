@@ -78,10 +78,15 @@ from runner_core.run_spec import resolve_effective_run_inputs
 from runner_core.target_acquire import acquire_target
 from runner_core.verification_broker import (
     VerificationBrokerAttempt,
+    VerificationBrokerContract,
     VerificationBrokerRequestResult,
     probe_local_verification_launcher,
+    probe_local_verification_python,
     render_verification_broker_command,
+    resolve_verification_broker_contract,
     resolve_verification_launcher,
+    verification_broker_missing_result_artifacts,
+    verification_broker_runtime_prerequisites,
 )
 from runner_core.verification_broker import (
     probe_windows_bash_usable as _probe_windows_bash_usable_impl,
@@ -2262,7 +2267,7 @@ def _verification_broker_client_command(
     *,
     run_dir: Path,
     run_dir_mount: str | None,
-    command_prefix: list[str],
+    contract: VerificationBrokerContract,
 ) -> str:
     client_root = run_dir / "verification_broker" / "client"
     client_root_for_agent = _agent_path_for_staged_file(
@@ -2270,42 +2275,25 @@ def _verification_broker_client_command(
         run_dir=run_dir,
         run_dir_mount=run_dir_mount,
     )
-    launcher = resolve_verification_launcher(
-        command_prefix=command_prefix,
-        is_windows=_is_windows(),
-    )
     return render_verification_broker_command(
         client_root_for_agent=client_root_for_agent,
-        launcher=launcher,
+        launcher=contract.launcher,
     )
-
-
-def _verification_broker_client_python(
-    *,
-    exec_backend: str,
-    validated_python_executable: str | None,
-) -> str:
-    if exec_backend == "local" and isinstance(validated_python_executable, str):
-        executable = validated_python_executable.strip()
-        if executable:
-            return executable
-    return "python"
 
 
 def _probe_verification_broker_launcher(
     *,
     command_prefix: list[str],
     sandbox: Any,
+    contract: VerificationBrokerContract,
 ) -> tuple[Any, dict[str, Any]]:
-    launcher = resolve_verification_launcher(
-        command_prefix=command_prefix,
-        is_windows=_is_windows(),
-    )
+    launcher = contract.launcher
+    required_runtime_commands = verification_broker_runtime_prerequisites(contract)
     if command_prefix and sandbox is not None:
         try:
             present_map, meta = probe_commands_in_container(
                 command_prefix=command_prefix,
-                commands=[launcher.executable],
+                commands=list(required_runtime_commands),
             )
         except Exception as exc:  # noqa: BLE001
             return launcher, {
@@ -2314,36 +2302,111 @@ def _probe_verification_broker_launcher(
                 "resolved_path": None,
                 "reason_code": "probe_failed",
                 "reason": f"launcher preflight probe failed: {exc}",
+                "runtime_dependencies": {},
             }
 
-        detail = meta.get(launcher.executable) if isinstance(meta, dict) else None
-        detail_dict = detail if isinstance(detail, dict) else {}
-        present = bool(detail_dict.get("present", present_map.get(launcher.executable)))
-        usable = bool(detail_dict.get("usable", present))
-        return launcher, {
-            "present": present,
-            "usable": usable,
-            "resolved_path": (
-                detail_dict.get("resolved_path")
-                if isinstance(detail_dict.get("resolved_path"), str)
-                else None
-            ),
-            "reason_code": (
-                detail_dict.get("reason_code")
-                if isinstance(detail_dict.get("reason_code"), str)
-                else ("not_found" if not present else None)
-            ),
-            "reason": (
-                detail_dict.get("reason")
-                if isinstance(detail_dict.get("reason"), str)
-                else (
-                    f"`{launcher.executable}` was not found in the verification runtime."
-                    if not present
+        dependency_details: dict[str, dict[str, Any]] = {}
+        failing_dependency: str | None = None
+        failing_detail: dict[str, Any] | None = None
+        for dependency in required_runtime_commands:
+            detail = meta.get(dependency) if isinstance(meta, dict) else None
+            detail_dict = detail if isinstance(detail, dict) else {}
+            present = bool(detail_dict.get("present", present_map.get(dependency)))
+            usable = bool(detail_dict.get("usable", present))
+            normalized_detail = {
+                "present": present,
+                "usable": usable,
+                "resolved_path": (
+                    detail_dict.get("resolved_path")
+                    if isinstance(detail_dict.get("resolved_path"), str)
                     else None
-                )
+                ),
+                "reason_code": (
+                    detail_dict.get("reason_code")
+                    if isinstance(detail_dict.get("reason_code"), str)
+                    else ("not_found" if not present else None)
+                ),
+                "reason": (
+                    detail_dict.get("reason")
+                    if isinstance(detail_dict.get("reason"), str)
+                    else (
+                        f"`{dependency}` was not found in the verification runtime."
+                        if not present
+                        else None
+                    )
+                ),
+            }
+            dependency_details[dependency] = normalized_detail
+            if failing_dependency is None and not usable:
+                failing_dependency = dependency
+                failing_detail = normalized_detail
+        launcher_detail = dependency_details.get(launcher.executable, {})
+        if failing_dependency is None:
+            return launcher, {
+                "present": True,
+                "usable": True,
+                "resolved_path": launcher_detail.get("resolved_path"),
+                "reason_code": None,
+                "reason": None,
+                "runtime_dependencies": dependency_details,
+            }
+        assert failing_detail is not None
+        reason = failing_detail.get("reason")
+        dependency_label = (
+            "launcher"
+            if failing_dependency == launcher.executable
+            else f"required dependency `{failing_dependency}`"
+        )
+        return launcher, {
+            "present": False,
+            "usable": False,
+            "resolved_path": failing_detail.get("resolved_path"),
+            "reason_code": failing_detail.get("reason_code"),
+            "reason": (
+                f"{dependency_label} unavailable in the verification runtime: {reason}"
+                if isinstance(reason, str) and reason.strip()
+                else f"{dependency_label} unavailable in the verification runtime."
             ),
+            "failed_dependency": failing_dependency,
+            "runtime_dependencies": dependency_details,
         }
-    return launcher, probe_local_verification_launcher(launcher=launcher)
+    launcher_probe = probe_local_verification_launcher(launcher=launcher)
+    dependency_details = {launcher.executable: dict(launcher_probe)}
+    python_dependency = contract.python_probe_command
+    if isinstance(python_dependency, str) and python_dependency.strip():
+        python_probe = probe_local_verification_python(python_command=python_dependency)
+        dependency_details[python_dependency] = dict(python_probe)
+        if not bool(python_probe.get("usable", False)):
+            reason = python_probe.get("reason")
+            return launcher, {
+                "present": False,
+                "usable": False,
+                "resolved_path": python_probe.get("resolved_path"),
+                "reason_code": python_probe.get("reason_code"),
+                "reason": (
+                    "required dependency `"
+                    + python_dependency.strip()
+                    + "` unavailable in the verification runtime: "
+                    + str(reason).strip()
+                    if isinstance(reason, str) and reason.strip()
+                    else (
+                        f"required dependency `{python_dependency.strip()}` "
+                        "unavailable in the verification runtime."
+                    )
+                ),
+                "failed_dependency": python_dependency.strip(),
+                "runtime_dependencies": dependency_details,
+            }
+    if bool(launcher_probe.get("usable", False)):
+        return launcher, {
+            **launcher_probe,
+            "runtime_dependencies": dependency_details,
+        }
+    return launcher, {
+        **launcher_probe,
+        "failed_dependency": launcher.executable,
+        "runtime_dependencies": dependency_details,
+    }
 
 
 def _verification_terminal_reason(summary: dict[str, Any]) -> str:
@@ -6477,10 +6540,24 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     f"got {request.verification_reuse_mode!r}"
                 )
             verification_broker_command: str | None = None
+            verification_broker_contract: VerificationBrokerContract | None = None
+            effective_verification_timeout_seconds = verification_timeout_seconds
             if verification_commands and verification_reuse_mode == "auto":
+                verification_broker_contract = resolve_verification_broker_contract(
+                    command_prefix=command_prefix,
+                    exec_backend=request.exec_backend,
+                    validated_python_executable=validated_python_executable_for_execution,
+                    verification_timeout_seconds=verification_timeout_seconds,
+                    verification_command_count=len(verification_commands),
+                    is_windows=_is_windows(),
+                )
+                effective_verification_timeout_seconds = (
+                    verification_broker_contract.effective_timeout_seconds
+                )
                 broker_launcher, broker_launcher_probe = _probe_verification_broker_launcher(
                     command_prefix=command_prefix,
                     sandbox=sandbox,
+                    contract=verification_broker_contract,
                 )
                 if not bool(broker_launcher_probe.get("usable", False)):
                     launcher_name = broker_launcher.executable
@@ -6502,6 +6579,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         if isinstance(reason_code, str) and reason_code.strip()
                         else None
                     )
+                    failed_dependency = broker_launcher_probe.get("failed_dependency")
+                    failed_dependency_s = (
+                        failed_dependency.strip()
+                        if isinstance(failed_dependency, str) and failed_dependency.strip()
+                        else None
+                    )
                     message = (
                         "Final verification broker launcher is unavailable in the current "
                         f"runtime: launcher=`{launcher_name}`; {reason_s}"
@@ -6515,9 +6598,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "subtype": "verification_broker_launcher_unavailable",
                             "message": message,
                             "launcher": launcher_name,
+                            "failed_dependency": failed_dependency_s,
                             "resolved_path": resolved_path_s,
                             "reason_code": reason_code_s,
                             "reason": reason_s,
+                            "runtime_dependencies": broker_launcher_probe.get(
+                                "runtime_dependencies"
+                            ),
                             "exec_backend": request.exec_backend,
                             "verification_reuse_mode": verification_reuse_mode,
                         },
@@ -6530,7 +6617,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 verification_broker_command = _verification_broker_client_command(
                     run_dir=run_dir,
                     run_dir_mount=backend.run_dir_mount,
-                    command_prefix=command_prefix,
+                    contract=verification_broker_contract,
                 )
 
             policy_json = json.dumps(
@@ -6583,7 +6670,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             else verification_commands
                         ),
                         "final_handoff_command": verification_broker_command,
-                        "timeout_seconds": verification_timeout_seconds,
+                        "timeout_seconds": effective_verification_timeout_seconds,
                     },
                     "preflight": {
                         "commands": preflight_commands_present,
@@ -6635,7 +6722,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 pytest_probe=pytest_probe,
                 command_diagnostics=command_diagnostics,
                 verification_commands=verification_commands,
-                verification_timeout_seconds=verification_timeout_seconds,
+                verification_timeout_seconds=effective_verification_timeout_seconds,
                 verification_reuse_mode=verification_reuse_mode,
                 verification_broker_command=verification_broker_command,
                 agent=request.agent,
@@ -6877,7 +6964,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "reuse_mode": verification_reuse_mode,
                         "final_handoff_command": verification_broker_command,
                         "commands": verification_commands,
-                        "timeout_seconds": verification_timeout_seconds,
+                        "timeout_seconds": effective_verification_timeout_seconds,
                     },
                 )
 
@@ -6930,6 +7017,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 broker_attempt_rows: list[dict[str, Any]] = []
                 broker_request_ids: list[str] = []
                 if verification_commands and verification_reuse_mode == "auto":
+                    assert verification_broker_contract is not None
                     client_root = run_dir / "verification_broker" / "client"
                     attempt_broker_root = (
                         run_dir / "verification_broker" / f"attempt{attempt_number}"
@@ -6969,7 +7057,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             commands=verification_commands,
                             command_prefix=command_prefix,
                             cwd=acquired.workspace_dir,
-                            timeout_seconds=verification_timeout_seconds,
+                            timeout_seconds=effective_verification_timeout_seconds,
                             python_executable=_python_exec_for_verification,
                             python_toolchain_capability=python_toolchain_capability_summary,
                             env_overrides=agent_env_overrides,
@@ -6988,13 +7076,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         client_root=client_root,
                         client_root_for_agent=client_root_for_agent,
                         attempt_root_for_agent=attempt_root_for_agent,
-                        execution_shell=execution_shell,
-                        python_command=_verification_broker_client_python(
-                            exec_backend=request.exec_backend,
-                            validated_python_executable=validated_python_executable_for_execution,
-                        ),
-                        verification_timeout_seconds=verification_timeout_seconds,
-                        verification_command_count=len(verification_commands),
+                        contract=verification_broker_contract,
                         verifier=_run_broker_verification,
                         workspace_hash_fn=lambda: compute_workspace_state_hash(
                             acquired.workspace_dir
@@ -7106,6 +7188,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 attempt_broker_request_id = None
                 attempt_broker_response_status: str | None = None
                 attempt_broker_response_failure_reason: str | None = None
+                attempt_broker_missing_required_artifacts: list[str] = []
                 attempt_broker_reuse_candidate = False
                 if broker_latest_result is not None:
                     latest_request_id = getattr(broker_latest_result, "request_id", None)
@@ -7124,6 +7207,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         attempt_broker_response_failure_reason = (
                             latest_failure_reason.strip()
                         )
+                    attempt_broker_missing_required_artifacts = list(
+                        verification_broker_missing_result_artifacts(broker_latest_result)
+                    )
                 elif broker_request_ids:
                     attempt_broker_request_id = broker_request_ids[-1]
                 if (
@@ -7134,38 +7220,65 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     broker_reuse_fallback_reason: str | None = None
                     if verification_reuse_mode == "auto" and broker_latest_result is not None:
                         attempt_broker_request_id = broker_latest_result.request_id
-                        broker_summary = _coerce_verification_summary_from_broker_result(
-                            broker_latest_result,
-                            commands_configured=verification_commands,
-                        )
-                        if broker_latest_result.status == "passed":
-                            attempt_verification_workspace_hash = (
-                                compute_workspace_state_hash(acquired.workspace_dir)
+                        if attempt_broker_missing_required_artifacts:
+                            broker_reuse_fallback_reason = "broker_response_incomplete"
+                        else:
+                            broker_summary = _coerce_verification_summary_from_broker_result(
+                                broker_latest_result,
+                                commands_configured=verification_commands,
                             )
-                            expected_hash = (
-                                broker_latest_result.workspace_hash_after_verification
-                            )
-                            expected_hash_s = (
-                                expected_hash.strip()
-                                if isinstance(expected_hash, str) and expected_hash.strip()
-                                else None
-                            )
-                            if (
-                                expected_hash_s is not None
-                                and expected_hash_s
-                                == attempt_verification_workspace_hash.sha256
-                            ):
-                                attempt_broker_reuse_candidate = True
-                                attempt_verification_source = "broker_reuse"
-                                attempt_verification_summary = (
-                                    _decorate_verification_summary(
-                                        broker_summary,
-                                        source="broker_reuse",
-                                        reused=True,
-                                        workspace_hash=attempt_verification_workspace_hash,
-                                        broker_request_id=broker_latest_result.request_id,
-                                        broker_artifacts_dir=broker_latest_result.artifacts_dir,
+                            if broker_latest_result.status == "passed":
+                                attempt_verification_workspace_hash = (
+                                    compute_workspace_state_hash(acquired.workspace_dir)
+                                )
+                                expected_hash = (
+                                    broker_latest_result.workspace_hash_after_verification
+                                )
+                                expected_hash_s = (
+                                    expected_hash.strip()
+                                    if isinstance(expected_hash, str) and expected_hash.strip()
+                                    else None
+                                )
+                                if (
+                                    expected_hash_s is not None
+                                    and expected_hash_s
+                                    == attempt_verification_workspace_hash.sha256
+                                ):
+                                    attempt_broker_reuse_candidate = True
+                                    attempt_verification_source = "broker_reuse"
+                                    attempt_verification_summary = (
+                                        _decorate_verification_summary(
+                                            broker_summary,
+                                            source="broker_reuse",
+                                            reused=True,
+                                            workspace_hash=attempt_verification_workspace_hash,
+                                            broker_request_id=broker_latest_result.request_id,
+                                            broker_artifacts_dir=broker_latest_result.artifacts_dir,
+                                        )
                                     )
+                                    verification_reuse_selected_source = "broker_reuse"
+                                    verification_reuse_fallback_reason = None
+                                    verification_reuse_selected_request_id = (
+                                        broker_latest_result.request_id
+                                    )
+                                    verification_reuse_selected_attempt = attempt_number
+                                    verification_reuse_selected_artifacts_dir = (
+                                        broker_latest_result.artifacts_dir
+                                    )
+                                    verification_reuse_workspace_hash_final = (
+                                        attempt_verification_workspace_hash.to_dict()
+                                    )
+                                else:
+                                    broker_reuse_fallback_reason = "workspace_hash_mismatch"
+                            else:
+                                attempt_verification_source = "broker_reuse"
+                                attempt_verification_summary = _decorate_verification_summary(
+                                    broker_summary,
+                                    source="broker_reuse",
+                                    reused=True,
+                                    workspace_hash=None,
+                                    broker_request_id=broker_latest_result.request_id,
+                                    broker_artifacts_dir=broker_latest_result.artifacts_dir,
                                 )
                                 verification_reuse_selected_source = "broker_reuse"
                                 verification_reuse_fallback_reason = None
@@ -7176,30 +7289,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 verification_reuse_selected_artifacts_dir = (
                                     broker_latest_result.artifacts_dir
                                 )
-                                verification_reuse_workspace_hash_final = (
-                                    attempt_verification_workspace_hash.to_dict()
-                                )
-                            else:
-                                broker_reuse_fallback_reason = "workspace_hash_mismatch"
-                        else:
-                            attempt_verification_source = "broker_reuse"
-                            attempt_verification_summary = _decorate_verification_summary(
-                                broker_summary,
-                                source="broker_reuse",
-                                reused=True,
-                                workspace_hash=None,
-                                broker_request_id=broker_latest_result.request_id,
-                                broker_artifacts_dir=broker_latest_result.artifacts_dir,
-                            )
-                            verification_reuse_selected_source = "broker_reuse"
-                            verification_reuse_fallback_reason = None
-                            verification_reuse_selected_request_id = (
-                                broker_latest_result.request_id
-                            )
-                            verification_reuse_selected_attempt = attempt_number
-                            verification_reuse_selected_artifacts_dir = (
-                                broker_latest_result.artifacts_dir
-                            )
                     elif verification_reuse_mode == "auto":
                         broker_reuse_fallback_reason = (
                             "broker_response_missing"
@@ -7215,7 +7304,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "commands": verification_commands,
                             "command_prefix": command_prefix,
                             "cwd": acquired.workspace_dir,
-                            "timeout_seconds": verification_timeout_seconds,
+                            "timeout_seconds": effective_verification_timeout_seconds,
                             "python_executable": python_exec_for_verification,
                             "python_toolchain_capability": python_toolchain_capability_summary,
                             "env_overrides": agent_env_overrides,
@@ -7439,6 +7528,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "broker_response_status": attempt_broker_response_status,
                         "broker_response_failure_reason": (
                             attempt_broker_response_failure_reason
+                        ),
+                        "broker_missing_required_artifacts": (
+                            attempt_broker_missing_required_artifacts
                         ),
                         "reuse_candidate": (
                             attempt_broker_reuse_candidate if verification_commands else False

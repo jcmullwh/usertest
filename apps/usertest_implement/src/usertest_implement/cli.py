@@ -597,19 +597,7 @@ def _wait_for_ci_success(
     }
 
     def _gh_json(argv: list[str]) -> Any:
-        proc = subprocess.run(
-            argv,
-            cwd=str(workspace_dir),
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        if proc.returncode != 0:
-            raise RuntimeError(proc.stderr.strip() or proc.stdout.strip() or "gh failed")
-        try:
-            return json.loads(proc.stdout or "null")
-        except json.JSONDecodeError as e:
-            raise RuntimeError(f"gh returned invalid JSON: {e}") from e
+        return _run_gh_json(cwd=workspace_dir, argv=argv)
 
     def _pick_run(runs: list[dict[str, Any]]) -> dict[str, Any] | None:
         matches = [
@@ -1237,16 +1225,23 @@ def _write_pr_manifest(
     return title, body
 
 
+def _run_gh(*, cwd: Path, argv: list[str]) -> subprocess.CompletedProcess[str]:
+    try:
+        return subprocess.run(
+            argv,
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+        )
+    except OSError as exc:
+        raise RuntimeError("gh not found on PATH") from exc
+
+
 def _run_gh_json(*, cwd: Path, argv: list[str]) -> Any:
-    proc = subprocess.run(
-        argv,
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    proc = _run_gh(cwd=cwd, argv=argv)
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         stdout = (proc.stdout or "").strip()
@@ -1258,15 +1253,7 @@ def _run_gh_json(*, cwd: Path, argv: list[str]) -> Any:
 
 
 def _run_gh_text(*, cwd: Path, argv: list[str]) -> str:
-    proc = subprocess.run(
-        argv,
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        check=False,
-    )
+    proc = _run_gh(cwd=cwd, argv=argv)
     if proc.returncode != 0:
         stderr = (proc.stderr or "").strip()
         stdout = (proc.stdout or "").strip()
@@ -2422,8 +2409,6 @@ def _run_selected_ticket(
         if args.pr:
             if not commit_performed:
                 pr_ref["error"] = "Skipping PR creation: no commit was performed."
-            elif shutil.which("gh") is None:
-                pr_ref["error"] = "gh not found on PATH"
             else:
                 if workspace_dir is None:
                     pr_ref["error"] = "Missing workspace_ref.json; cannot locate workspace"
@@ -2536,33 +2521,26 @@ def _run_selected_ticket(
                         pass
                     else:
                         pr_ref["body"] = pr_body
-                        proc = subprocess.run(
-                            [
-                                "gh",
-                                "pr",
-                                "create",
-                                "--base",
-                                str(args.base_branch),
-                                "--title",
-                                title,
-                                "--body",
-                                pr_body,
-                                *(["--draft"] if create_draft else []),
-                            ],
-                            cwd=str(workspace_dir),
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                        )
-                        if proc.returncode == 0:
+                        try:
+                            pr_url = _run_gh_text(
+                                cwd=workspace_dir,
+                                argv=[
+                                    "gh",
+                                    "pr",
+                                    "create",
+                                    "--base",
+                                    str(args.base_branch),
+                                    "--title",
+                                    title,
+                                    "--body",
+                                    pr_body,
+                                    *(["--draft"] if create_draft else []),
+                                ],
+                            ).strip()
                             pr_ref["created"] = True
-                            pr_ref["url"] = proc.stdout.strip() or None
-                        else:
-                            pr_ref["error"] = (
-                                proc.stderr.strip()
-                                or proc.stdout.strip()
-                                or f"gh failed ({proc.returncode})"
-                            )
+                            pr_ref["url"] = pr_url or None
+                        except RuntimeError as exc:
+                            pr_ref["error"] = str(exc)
         _write_json(run_dir / "pr_ref.json", pr_ref)
 
     if (
@@ -3112,7 +3090,11 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         "--verify-timeout-seconds",
         type=float,
         default=None,
-        help="Optional per-command timeout for --verify-command (non-positive disables).",
+        help=(
+            "Optional per-command timeout for --verify-command. "
+            "When brokered final verification reuse is active, omitted or non-positive "
+            "values fall back to the runner's bounded default timeout."
+        ),
     )
     parser.add_argument(
         "--skip-verify",

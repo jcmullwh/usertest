@@ -202,6 +202,7 @@ def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_
     expected_wrapper = "verify_client.ps1" if os.name == "nt" else "verify_client.sh"
     assert "Final handoff verification" in prompt_text
     assert expected_wrapper in prompt_text
+    assert "timeout_seconds: 600" in prompt_text
     assert verify_cmd not in prompt_text
     assert "it blocks until verification finishes" in prompt_text
     assert "it must pass before you finish" in prompt_text
@@ -291,6 +292,13 @@ def test_codex_uses_model_instructions_file_for_large_append_prompt(
 
 def test_verification_broker_handoff_uses_shared_launcher_resolution() -> None:
     launcher = runner_mod.resolve_verification_launcher(command_prefix=[])
+    contract = runner_mod.resolve_verification_broker_contract(
+        command_prefix=[],
+        exec_backend="local",
+        validated_python_executable=sys.executable,
+        verification_timeout_seconds=None,
+        verification_command_count=1,
+    )
     argv = runner_mod._verification_shell_argv(command_prefix=[], command="echo ok")
 
     assert argv[: len(launcher.shell_argv_prefix)] == list(launcher.shell_argv_prefix)
@@ -298,7 +306,7 @@ def test_verification_broker_handoff_uses_shared_launcher_resolution() -> None:
     command = runner_mod._verification_broker_client_command(
         run_dir=Path("/tmp/run"),
         run_dir_mount="/run_dir",
-        command_prefix=[],
+        contract=contract,
     )
     assert launcher.broker_wrapper_name in command
 
@@ -353,3 +361,70 @@ def test_run_once_fails_fast_when_final_broker_launcher_is_unavailable(
     assert error_obj.get("launcher") == "sh"
     assert "launcher=`sh`" in str(error_obj.get("message", ""))
     assert "Access is denied" in str(error_obj.get("message", ""))
+
+
+def test_run_once_fails_fast_when_final_broker_python_is_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_binary(tmp_path)
+
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_verification_broker_launcher",
+        lambda **_: (
+            SimpleNamespace(executable="sh"),
+            {
+                "present": False,
+                "usable": False,
+                "resolved_path": None,
+                "reason_code": "not_found",
+                "reason": (
+                    "required dependency `python` unavailable in the verification runtime: "
+                    "`python` was not found in the verification runtime."
+                ),
+                "failed_dependency": "python",
+                "runtime_dependencies": {
+                    "sh": {"present": True, "usable": True, "resolved_path": "/bin/sh"},
+                    "python": {
+                        "present": False,
+                        "usable": False,
+                        "resolved_path": None,
+                        "reason_code": "not_found",
+                        "reason": "`python` was not found in the verification runtime.",
+                    },
+                },
+            },
+        ),
+    )
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+            verification_commands=("python -c 'import sys; sys.exit(0)'",),
+            verification_reuse_mode="auto",
+        ),
+    )
+
+    assert result.exit_code == 1
+    error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error_obj.get("type") == "VerificationBrokerLauncherUnavailable"
+    assert error_obj.get("failed_dependency") == "python"
+    assert "required dependency `python`" in str(error_obj.get("message", ""))
+    runtime_dependencies = error_obj.get("runtime_dependencies")
+    assert isinstance(runtime_dependencies, dict)
+    assert runtime_dependencies["python"]["usable"] is False
