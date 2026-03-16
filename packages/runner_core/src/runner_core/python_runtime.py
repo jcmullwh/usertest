@@ -1147,7 +1147,9 @@ def verification_commands_need_python(commands: tuple[str | VerificationCommandS
     return False
 
 
-def verification_commands_may_provision_pytest(commands: tuple[str | VerificationCommandSpec, ...]) -> bool:
+def verification_commands_may_provision_pytest(
+    commands: tuple[str | VerificationCommandSpec, ...],
+) -> bool:
     """
     Heuristic: treat dependency-install verification steps as provisioning, so `pytest` may
     become available later in the verification sequence.
