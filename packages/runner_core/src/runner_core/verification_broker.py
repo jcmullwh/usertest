@@ -14,6 +14,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from runner_core.agent_visible_paths import mirror_path_into_workspace
 from runner_core.pathing import agent_path_join, normalize_agent_path
 from runner_core.workspace_state_hash import WorkspaceStateHash
 
@@ -325,6 +326,9 @@ class VerificationBrokerAttempt:
         run_dir: Path,
         attempt_number: int,
         client_root: Path,
+        attempt_root: Path,
+        artifact_client_root: Path | None = None,
+        artifact_attempt_root: Path | None = None,
         client_root_for_agent: str,
         attempt_root_for_agent: str,
         execution_shell: str,
@@ -344,10 +348,14 @@ class VerificationBrokerAttempt:
         self.utc_now_fn = utc_now_fn
         self.run_async_verifier = bool(run_async_verifier)
         self.request_token = uuid.uuid4().hex
-        self.attempt_root = run_dir / "verification_broker" / f"attempt{attempt_number}"
+        self.attempt_root = attempt_root
         self.requests_dir = self.attempt_root / "requests"
         self.responses_dir = self.attempt_root / "responses"
         self.client_root = client_root
+        self.artifact_client_root = artifact_client_root or client_root
+        self.artifact_attempt_root = artifact_attempt_root or attempt_root
+        self.artifact_requests_dir = self.artifact_attempt_root / "requests"
+        self.artifact_responses_dir = self.artifact_attempt_root / "responses"
         self.client_root_for_agent = normalize_agent_path(client_root_for_agent)
         self.attempt_root_for_agent = normalize_agent_path(attempt_root_for_agent)
         self.python_script = client_root / "verify_client.py"
@@ -390,6 +398,8 @@ class VerificationBrokerAttempt:
     def start(self) -> None:
         self.requests_dir.mkdir(parents=True, exist_ok=True)
         self.responses_dir.mkdir(parents=True, exist_ok=True)
+        self.artifact_requests_dir.mkdir(parents=True, exist_ok=True)
+        self.artifact_responses_dir.mkdir(parents=True, exist_ok=True)
         if self._thread is not None:
             self._thread.start()
 
@@ -479,6 +489,7 @@ class VerificationBrokerAttempt:
             if not request_id or request_id in self._processed_ids:
                 continue
             self._processed_ids.add(request_id)
+            self._mirror_request_artifact(request_path)
             processed_any = True
             if cancel_pending:
                 self._cancel_request(
@@ -812,31 +823,35 @@ class VerificationBrokerAttempt:
         response_path: Path,
         result: VerificationBrokerRequestResult,
     ) -> None:
+        payload = {
+            "schema_version": 2,
+            "request_id": result.request_id,
+            "attempt": result.attempt,
+            "status": result.status,
+            "terminal": _is_terminal_status(result.status),
+            "terminal_reason": result.terminal_reason,
+            "timed_out": result.timed_out,
+            "cancelled": result.cancelled,
+            "cancel_requested": result.cancel_requested,
+            "failure_reason": result.failure_reason,
+            "artifacts_dir": result.artifacts_dir,
+            "summary_path": result.summary_path,
+            "workspace_hash_after_verification": result.workspace_hash_after_verification,
+            "workspace_hash_mode": result.workspace_hash_mode,
+            "started_utc": result.started_utc,
+            "deadline_utc": result.deadline_utc,
+            "deadline_seconds": result.deadline_seconds,
+            "last_updated_utc": result.last_updated_utc,
+            "finished_utc": result.finished_utc,
+            "progress": result.progress,
+        }
         _write_json_atomic(
             response_path,
-            {
-                "schema_version": 2,
-                "request_id": result.request_id,
-                "attempt": result.attempt,
-                "status": result.status,
-                "terminal": _is_terminal_status(result.status),
-                "terminal_reason": result.terminal_reason,
-                "timed_out": result.timed_out,
-                "cancelled": result.cancelled,
-                "cancel_requested": result.cancel_requested,
-                "failure_reason": result.failure_reason,
-                "artifacts_dir": result.artifacts_dir,
-                "summary_path": result.summary_path,
-                "workspace_hash_after_verification": result.workspace_hash_after_verification,
-                "workspace_hash_mode": result.workspace_hash_mode,
-                "started_utc": result.started_utc,
-                "deadline_utc": result.deadline_utc,
-                "deadline_seconds": result.deadline_seconds,
-                "last_updated_utc": result.last_updated_utc,
-                "finished_utc": result.finished_utc,
-                "progress": result.progress,
-            },
+            payload,
         )
+        artifact_response_path = self.artifact_responses_dir / response_path.name
+        if artifact_response_path != response_path:
+            _write_json_atomic(artifact_response_path, payload)
 
     def _record_result(
         self,
@@ -874,6 +889,7 @@ class VerificationBrokerAttempt:
             encoding="utf-8",
             newline="\n",
         )
+        self._mirror_client_artifacts()
 
         launcher = resolve_verification_launcher(
             command_prefix=(),
@@ -899,6 +915,24 @@ class VerificationBrokerAttempt:
             python_script=self.python_script,
             shell_script=shell_script,
             powershell_script=powershell_script,
+        )
+
+    def _mirror_client_artifacts(self) -> None:
+        if self.artifact_client_root == self.client_root:
+            return
+        mirror_path_into_workspace(
+            source_path=self.client_root,
+            dest_path=self.artifact_client_root,
+            workspace_dir=self.artifact_client_root.parent.parent,
+        )
+
+    def _mirror_request_artifact(self, request_path: Path) -> None:
+        if self.artifact_requests_dir == self.requests_dir:
+            return
+        mirror_path_into_workspace(
+            source_path=request_path,
+            dest_path=self.artifact_requests_dir / request_path.name,
+            workspace_dir=self.artifact_attempt_root.parent.parent,
         )
 
 

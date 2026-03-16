@@ -138,6 +138,10 @@ Files that are conditionally present:
   `append_system_prompt.md` (when append content is configured) and `system_prompt.md`
   (when an effective system prompt file is configured or composed). These are convenience copies
   for in-workspace agent reads and are not stored under the run directory tree.
+- Workspace root verification mirrors: when verification paths need to stay agent-readable from the
+  workspace root (for example on local backends without a dedicated `run_dir` mount), the acquired
+  workspace may also include `verification/` and `verification_broker/` mirrors. These mirror the
+  agent-visible verification paths; the canonical run artifacts remain under the run directory.
 - `sandbox/*`: present when using docker execution backend.
 
 ## Semantics and stability notes

@@ -44,6 +44,14 @@ from sandbox_runner.diagnostics import (
 
 from runner_core.agent_docs import obfuscate_target_agent_docs
 from runner_core.agent_prompt_files import _materialize_agent_prompt_into_workspace
+from runner_core.agent_visible_paths import (
+    AgentVisiblePath,
+    ensure_workspace_dir,
+    mirror_path_into_workspace,
+)
+from runner_core.agent_visible_paths import (
+    agent_visible_run_subpath as _resolve_agent_visible_run_subpath,
+)
 from runner_core.catalog import load_catalog_config
 from runner_core.execution_backend import prepare_execution_backend
 from runner_core.pathing import (
@@ -2258,18 +2266,34 @@ def _agent_path_for_staged_file(
     return agent_path_join(mount, rel)
 
 
+def _agent_visible_run_subpath(
+    *,
+    run_dir: Path,
+    subpath: Path,
+    run_dir_mount: str | None,
+    workspace_dir: Path | None = None,
+) -> AgentVisiblePath:
+    return _resolve_agent_visible_run_subpath(
+        run_dir=run_dir,
+        subpath=subpath,
+        run_dir_mount=run_dir_mount,
+        workspace_dir=workspace_dir,
+    )
+
+
 def _verification_broker_client_command(
     *,
     run_dir: Path,
     run_dir_mount: str | None,
+    workspace_dir: Path | None,
     command_prefix: list[str],
 ) -> str:
-    client_root = run_dir / "verification_broker" / "client"
-    client_root_for_agent = _agent_path_for_staged_file(
-        client_root,
+    client_root_for_agent = _agent_visible_run_subpath(
         run_dir=run_dir,
+        subpath=Path("verification_broker") / "client",
         run_dir_mount=run_dir_mount,
-    )
+        workspace_dir=workspace_dir,
+    ).agent_path
     launcher = resolve_verification_launcher(
         command_prefix=command_prefix,
         is_windows=_is_windows(),
@@ -2362,6 +2386,9 @@ def _verification_terminal_reason(summary: dict[str, Any]) -> str:
 def _normalize_verification_summary(summary: dict[str, Any]) -> dict[str, Any]:
     payload = dict(summary)
     terminal_reason = _verification_terminal_reason(payload)
+    artifacts_dir = payload.get("artifacts_dir")
+    if isinstance(artifacts_dir, str) and artifacts_dir.strip():
+        payload["artifacts_dir"] = normalize_agent_path(artifacts_dir.strip())
     payload["terminal_reason"] = terminal_reason
     payload["status"] = str(payload.get("status") or terminal_reason).strip() or terminal_reason
     payload["passed"] = terminal_reason == "passed"
@@ -2543,8 +2570,7 @@ def _build_verification_followup_prompt(
     if isinstance(artifacts_dir, str) and artifacts_dir.strip():
         artifacts_hint = (
             "\n\nVerification artifacts:\n"
-            f"- Host: {artifacts_dir.strip()}\n"
-            f"- Docker: /run_dir/{artifacts_dir.strip()}\n"
+            f"- Agent-visible: {artifacts_dir.strip()}\n"
         )
 
     return (
@@ -4133,6 +4159,9 @@ def _run_verification_commands(
     python_toolchain_capability: dict[str, Any] | None = None,
     env_overrides: dict[str, str] | None = None,
     artifacts_dir_rel: Path | None = None,
+    agent_visible_artifacts_dir: str | None = None,
+    agent_visible_artifacts_host_dir: Path | None = None,
+    agent_visible_workspace_dir: Path | None = None,
     cancel_event: threading.Event | None = None,
     deadline_monotonic: float | None = None,
     deadline_seconds: float | None = None,
@@ -4539,11 +4568,16 @@ def _run_verification_commands(
         )
     )
 
+    surfaced_artifacts_dir = (
+        normalize_agent_path(agent_visible_artifacts_dir)
+        if isinstance(agent_visible_artifacts_dir, str) and agent_visible_artifacts_dir.strip()
+        else normalize_agent_path(attempt_dir_rel)
+    )
     summary = _normalize_verification_summary(
         {
             "schema_version": 1,
             "attempt": attempt_number,
-            "artifacts_dir": normalize_agent_path(attempt_dir_rel),
+            "artifacts_dir": surfaced_artifacts_dir,
             "started_utc": started_utc,
             "finished_utc": finished_utc,
             "wall_seconds": wall_seconds_total,
@@ -4565,6 +4599,15 @@ def _run_verification_commands(
         }
     )
     _write_json(attempt_dir / "verification.json", summary)
+    if (
+        agent_visible_artifacts_host_dir is not None
+        and agent_visible_workspace_dir is not None
+    ):
+        mirror_path_into_workspace(
+            source_path=attempt_dir,
+            dest_path=agent_visible_artifacts_host_dir,
+            workspace_dir=agent_visible_workspace_dir,
+        )
     return summary
 
 
@@ -6530,6 +6573,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 verification_broker_command = _verification_broker_client_command(
                     run_dir=run_dir,
                     run_dir_mount=backend.run_dir_mount,
+                    workspace_dir=acquired.workspace_dir,
                     command_prefix=command_prefix,
                 )
 
@@ -6930,20 +6974,33 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 broker_attempt_rows: list[dict[str, Any]] = []
                 broker_request_ids: list[str] = []
                 if verification_commands and verification_reuse_mode == "auto":
-                    client_root = run_dir / "verification_broker" / "client"
-                    attempt_broker_root = (
-                        run_dir / "verification_broker" / f"attempt{attempt_number}"
-                    )
-                    client_root_for_agent = _agent_path_for_staged_file(
-                        client_root,
+                    client_root_layout = _agent_visible_run_subpath(
                         run_dir=run_dir,
+                        subpath=Path("verification_broker") / "client",
                         run_dir_mount=backend.run_dir_mount,
+                        workspace_dir=acquired.workspace_dir,
                     )
-                    attempt_root_for_agent = _agent_path_for_staged_file(
-                        attempt_broker_root,
+                    attempt_broker_root_layout = _agent_visible_run_subpath(
                         run_dir=run_dir,
+                        subpath=Path("verification_broker") / f"attempt{attempt_number}",
                         run_dir_mount=backend.run_dir_mount,
+                        workspace_dir=acquired.workspace_dir,
                     )
+                    client_root = client_root_layout.host_path
+                    attempt_broker_root = attempt_broker_root_layout.host_path
+                    if backend.run_dir_mount is None:
+                        ensure_workspace_dir(
+                            path=client_root,
+                            workspace_dir=acquired.workspace_dir,
+                        )
+                        ensure_workspace_dir(
+                            path=attempt_broker_root / "requests",
+                            workspace_dir=acquired.workspace_dir,
+                        )
+                        ensure_workspace_dir(
+                            path=attempt_broker_root / "responses",
+                            workspace_dir=acquired.workspace_dir,
+                        )
 
                     def _run_broker_verification(
                         request_index: int,
@@ -6963,6 +7020,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             if progress_callback is not None
                             else None
                         )
+                        request_artifacts_layout = _agent_visible_run_subpath(
+                            run_dir=run_dir,
+                            subpath=Path("verification")
+                            / f"attempt{_attempt_number}"
+                            / f"broker_request_{request_index:02d}",
+                            run_dir_mount=backend.run_dir_mount,
+                            workspace_dir=acquired.workspace_dir,
+                        )
                         return _run_verification_commands(
                             run_dir=run_dir,
                             attempt_number=_attempt_number,
@@ -6980,14 +7045,30 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             artifacts_dir_rel=Path("verification")
                             / f"attempt{_attempt_number}"
                             / f"broker_request_{request_index:02d}",
+                            agent_visible_artifacts_dir=request_artifacts_layout.agent_path,
+                            agent_visible_artifacts_host_dir=(
+                                request_artifacts_layout.host_path
+                                if backend.run_dir_mount is None
+                                else None
+                            ),
+                            agent_visible_workspace_dir=(
+                                acquired.workspace_dir
+                                if backend.run_dir_mount is None
+                                else None
+                            ),
                         )
 
                     broker_session = VerificationBrokerAttempt(
                         run_dir=run_dir,
                         attempt_number=attempt_number,
                         client_root=client_root,
-                        client_root_for_agent=client_root_for_agent,
-                        attempt_root_for_agent=attempt_root_for_agent,
+                        attempt_root=attempt_broker_root,
+                        artifact_client_root=run_dir / "verification_broker" / "client",
+                        artifact_attempt_root=(
+                            run_dir / "verification_broker" / f"attempt{attempt_number}"
+                        ),
+                        client_root_for_agent=client_root_layout.agent_path,
+                        attempt_root_for_agent=attempt_broker_root_layout.agent_path,
                         execution_shell=execution_shell,
                         python_command=_verification_broker_client_python(
                             exec_backend=request.exec_backend,
@@ -7209,6 +7290,19 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
                     if attempt_verification_summary is None:
                         attempt_verification_source = "post_agent_rerun"
+                        post_agent_artifacts_rel = (
+                            Path("verification")
+                            / f"attempt{attempt_number}"
+                            / "post_agent_rerun"
+                            if verification_reuse_mode == "auto"
+                            else Path("verification") / f"attempt{attempt_number}"
+                        )
+                        post_agent_artifacts_layout = _agent_visible_run_subpath(
+                            run_dir=run_dir,
+                            subpath=post_agent_artifacts_rel,
+                            run_dir_mount=backend.run_dir_mount,
+                            workspace_dir=acquired.workspace_dir,
+                        )
                         verification_kwargs: dict[str, Any] = {
                             "run_dir": run_dir,
                             "attempt_number": attempt_number,
@@ -7219,13 +7313,20 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "python_executable": python_exec_for_verification,
                             "python_toolchain_capability": python_toolchain_capability_summary,
                             "env_overrides": agent_env_overrides,
+                            "agent_visible_artifacts_dir": post_agent_artifacts_layout.agent_path,
+                            "agent_visible_artifacts_host_dir": (
+                                post_agent_artifacts_layout.host_path
+                                if backend.run_dir_mount is None
+                                else None
+                            ),
+                            "agent_visible_workspace_dir": (
+                                acquired.workspace_dir
+                                if backend.run_dir_mount is None
+                                else None
+                            ),
                         }
                         if verification_reuse_mode == "auto":
-                            verification_kwargs["artifacts_dir_rel"] = (
-                                Path("verification")
-                                / f"attempt{attempt_number}"
-                                / "post_agent_rerun"
-                            )
+                            verification_kwargs["artifacts_dir_rel"] = post_agent_artifacts_rel
                         attempt_verification_summary = _run_verification_commands(
                             **verification_kwargs,
                         )
@@ -7319,7 +7420,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "attempt": attempt_number,
                                 "verification": {
                                     "summary_path": (
-                                        str(Path(artifacts_dir.strip()) / "verification.json")
+                                        agent_path_join(
+                                            normalize_agent_path(artifacts_dir.strip()),
+                                            "verification.json",
+                                        )
                                         if isinstance(artifacts_dir, str)
                                         and artifacts_dir.strip()
                                         else None
@@ -7373,10 +7477,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 attempt_wall_seconds = time.monotonic() - attempt_start_monotonic
                 verification_summary_path: str | None = None
                 if attempt_verification_summary is not None:
-                    artifacts_dir = Path(
-                        str(attempt_verification_summary.get("artifacts_dir", "")).strip()
-                    )
-                    verification_summary_path = str(artifacts_dir / "verification.json")
+                    artifacts_dir = str(
+                        attempt_verification_summary.get("artifacts_dir", "")
+                    ).strip()
+                    if artifacts_dir:
+                        verification_summary_path = agent_path_join(
+                            normalize_agent_path(artifacts_dir),
+                            "verification.json",
+                        )
                 attempt_meta: dict[str, Any] = {
                     "attempt": attempt_number,
                     "attempt_started_utc": attempt_started_utc,

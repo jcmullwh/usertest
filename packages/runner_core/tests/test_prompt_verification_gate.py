@@ -298,9 +298,22 @@ def test_verification_broker_handoff_uses_shared_launcher_resolution() -> None:
     command = runner_mod._verification_broker_client_command(
         run_dir=Path("/tmp/run"),
         run_dir_mount="/run_dir",
+        workspace_dir=Path("/tmp/workspace"),
         command_prefix=[],
     )
     assert launcher.broker_wrapper_name in command
+
+
+def test_verification_broker_handoff_uses_workspace_relative_path_without_run_dir_mount() -> None:
+    command = runner_mod._verification_broker_client_command(
+        run_dir=Path("/tmp/run"),
+        run_dir_mount=None,
+        workspace_dir=Path("/tmp/workspace"),
+        command_prefix=[],
+    )
+
+    assert "verification_broker/client" in command
+    assert "/tmp/run" not in command
 
 
 def test_run_once_fails_fast_when_final_broker_launcher_is_unavailable(

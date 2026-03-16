@@ -326,6 +326,7 @@ def _run_fixture_backed_toolchain_case(
         python_toolchain_capability: dict[str, Any] | None = None,
         env_overrides: dict[str, str] | None = None,
         execution_shell: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         del (
             command_prefix,
@@ -334,6 +335,7 @@ def _run_fixture_backed_toolchain_case(
             python_toolchain_capability,
             env_overrides,
             execution_shell,
+            kwargs,
         )
         verification_calls["count"] += 1
         verification_python_executables.append(python_executable)

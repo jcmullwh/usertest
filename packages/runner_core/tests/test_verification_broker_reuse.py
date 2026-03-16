@@ -172,8 +172,11 @@ def _stub_codex_binary_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-def _run_broker_wrapper(*, run_dir: Path, workspace_dir: Path) -> subprocess.CompletedProcess[str]:
-    client_root = run_dir / "verification_broker" / "client"
+def _run_broker_wrapper(
+    *,
+    client_root: Path,
+    workspace_dir: Path,
+) -> subprocess.CompletedProcess[str]:
     if os.name == "nt":
         wrapper = client_root / "verify_client.ps1"
         return subprocess.run(
@@ -203,17 +206,30 @@ def _run_broker_wrapper(*, run_dir: Path, workspace_dir: Path) -> subprocess.Com
 def _make_broker_attempt(
     *,
     run_dir: Path,
+    workspace_root: Path | None = None,
     verifier: object,
     wait_timeout_seconds: float | None = 30.0,
 ) -> VerificationBrokerAttempt:
-    client_root = run_dir / "verification_broker" / "client"
-    attempt_root = run_dir / "verification_broker" / "attempt1"
+    broker_root = workspace_root if workspace_root is not None else run_dir
+    client_root = broker_root / "verification_broker" / "client"
+    attempt_root = broker_root / "verification_broker" / "attempt1"
     return VerificationBrokerAttempt(
         run_dir=run_dir,
         attempt_number=1,
         client_root=client_root,
-        client_root_for_agent=str(client_root),
-        attempt_root_for_agent=str(attempt_root),
+        attempt_root=attempt_root,
+        artifact_client_root=run_dir / "verification_broker" / "client",
+        artifact_attempt_root=run_dir / "verification_broker" / "attempt1",
+        client_root_for_agent=(
+            "verification_broker/client"
+            if workspace_root is not None
+            else str(client_root)
+        ),
+        attempt_root_for_agent=(
+            "verification_broker/attempt1"
+            if workspace_root is not None
+            else str(attempt_root)
+        ),
         execution_shell="powershell" if os.name == "nt" else "bash",
         python_command=sys.executable,
         verification_timeout_seconds=wait_timeout_seconds,
@@ -253,7 +269,7 @@ def test_verification_broker_client_waits_for_async_pass(tmp_path: Path) -> None
     broker.start()
     try:
         completed = _run_broker_wrapper(
-            run_dir=run_dir,
+            client_root=broker.client_root,
             workspace_dir=tmp_path,
         )
     finally:
@@ -262,6 +278,49 @@ def test_verification_broker_client_waits_for_async_pass(tmp_path: Path) -> None
     assert completed.returncode == 0, completed.stderr
     assert "verification requested" in completed.stdout
     assert "verification passed" in completed.stdout
+
+
+def test_verification_broker_workspace_mirror_still_publishes_run_dir_artifacts(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    summary = {
+        "schema_version": 1,
+        "attempt_number": 1,
+        "commands_configured": [_verification_command()],
+        "passed": True,
+        "started_utc": "2026-03-07T00:00:00Z",
+        "finished_utc": "2026-03-07T00:00:01Z",
+        "wall_seconds": 0.01,
+        "artifacts_dir": "verification/attempt1/broker_request_01",
+        "commands": [
+            {
+                "command": _verification_command(),
+                "exit_code": 0,
+                "timed_out": False,
+            }
+        ],
+    }
+    broker = _make_broker_attempt(
+        run_dir=run_dir,
+        workspace_root=workspace_dir,
+        verifier=lambda _: summary,
+    )
+    broker.start()
+    try:
+        completed = _run_broker_wrapper(
+            client_root=workspace_dir / "verification_broker" / "client",
+            workspace_dir=workspace_dir,
+        )
+    finally:
+        broker.stop()
+
+    assert completed.returncode == 0, completed.stderr
+    assert list((workspace_dir / "verification_broker" / "attempt1" / "requests").glob("*.json"))
+    assert list((run_dir / "verification_broker" / "attempt1" / "requests").glob("*.json"))
+    assert list((run_dir / "verification_broker" / "attempt1" / "responses").glob("*.json"))
 
 
 def test_verification_broker_client_waits_for_async_failure(tmp_path: Path) -> None:
@@ -287,7 +346,7 @@ def test_verification_broker_client_waits_for_async_failure(tmp_path: Path) -> N
     broker.start()
     try:
         completed = _run_broker_wrapper(
-            run_dir=run_dir,
+            client_root=broker.client_root,
             workspace_dir=tmp_path,
         )
     finally:
@@ -342,7 +401,7 @@ def test_verification_broker_client_surfaces_progress_updates(tmp_path: Path) ->
     broker = _make_broker_attempt(run_dir=run_dir, verifier=_verifier)
     broker.start()
     try:
-        completed = _run_broker_wrapper(run_dir=run_dir, workspace_dir=tmp_path)
+        completed = _run_broker_wrapper(client_root=broker.client_root, workspace_dir=tmp_path)
     finally:
         broker.stop()
 
@@ -424,7 +483,10 @@ def test_verification_broker_stop_cancels_inflight_request(tmp_path: Path) -> No
     completed_holder: dict[str, subprocess.CompletedProcess[str]] = {}
 
     def _run_wrapper() -> None:
-        completed_holder["result"] = _run_broker_wrapper(run_dir=run_dir, workspace_dir=tmp_path)
+        completed_holder["result"] = _run_broker_wrapper(
+            client_root=broker.client_root,
+            workspace_dir=tmp_path,
+        )
 
     wrapper_thread = threading.Thread(target=_run_wrapper, daemon=True)
     wrapper_thread.start()
@@ -485,17 +547,19 @@ def test_run_once_reuses_broker_verification_without_post_agent_rerun(
     runner_root = _setup_runner_root(tmp_path)
     target = _setup_target_repo(tmp_path)
     _stub_codex_binary_preflight(monkeypatch)
+    workspace_holder: dict[str, Path] = {}
 
     def _fake_run_codex_exec(**kwargs: object) -> object:
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
-        run_dir = last_message_path.parent
+        workspace_dir = Path(str(kwargs["workspace_dir"]))
+        workspace_holder["path"] = workspace_dir
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
         broker = _run_broker_wrapper(
-            run_dir=run_dir,
-            workspace_dir=Path(str(kwargs["workspace_dir"])),
+            client_root=workspace_dir / "verification_broker" / "client",
+            workspace_dir=workspace_dir,
         )
         assert broker.returncode == 0, broker.stderr or broker.stdout
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
@@ -520,6 +584,7 @@ def test_run_once_reuses_broker_verification_without_post_agent_rerun(
             mission_id="m",
             verification_commands=(_verification_command(),),
             verification_reuse_mode="auto",
+            keep_workspace=True,
         ),
     )
 
@@ -529,11 +594,17 @@ def test_run_once_reuses_broker_verification_without_post_agent_rerun(
     assert verification["reused"] is True
     assert verification["passed"] is True
     assert verification["terminal_reason"] == "passed"
+    assert verification["artifacts_dir"] == "verification/attempt1/broker_request_01"
     assert not (result.run_dir / "verification" / "attempt1" / "post_agent_rerun").exists()
+    workspace_dir = workspace_holder["path"]
+    assert (
+        workspace_dir / "verification" / "attempt1" / "broker_request_01" / "verification.json"
+    ).exists()
 
     reuse = json.loads((result.run_dir / "verification_reuse.json").read_text(encoding="utf-8"))
     assert reuse["selected_source"] == "broker_reuse"
     assert reuse["selected_request_id"]
+    assert reuse["selected_artifacts_dir"] == "verification/attempt1/broker_request_01"
     report = json.loads((result.run_dir / "report.json").read_text(encoding="utf-8"))
     assert report["extensions"]["verification"]["terminal_reason"] == "passed"
 
@@ -550,15 +621,20 @@ def test_run_once_uses_latest_broker_result_within_single_attempt(
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
-        run_dir = last_message_path.parent
         workspace_dir = Path(str(kwargs["workspace_dir"]))
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
 
-        first = _run_broker_wrapper(run_dir=run_dir, workspace_dir=workspace_dir)
+        first = _run_broker_wrapper(
+            client_root=workspace_dir / "verification_broker" / "client",
+            workspace_dir=workspace_dir,
+        )
         assert first.returncode != 0
         (workspace_dir / "marker.txt").write_text("ok\n", encoding="utf-8")
-        second = _run_broker_wrapper(run_dir=run_dir, workspace_dir=workspace_dir)
+        second = _run_broker_wrapper(
+            client_root=workspace_dir / "verification_broker" / "client",
+            workspace_dir=workspace_dir,
+        )
         assert second.returncode == 0, second.stderr or second.stdout
 
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
@@ -616,7 +692,6 @@ def test_run_once_uses_failed_broker_result_directly_before_followup(
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
-        run_dir = last_message_path.parent
         workspace_dir = Path(str(kwargs["workspace_dir"]))
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
@@ -624,7 +699,10 @@ def test_run_once_uses_failed_broker_result_directly_before_followup(
         if state["attempt"] >= 2:
             (workspace_dir / "marker.txt").write_text("ok\n", encoding="utf-8")
 
-        broker = _run_broker_wrapper(run_dir=run_dir, workspace_dir=workspace_dir)
+        broker = _run_broker_wrapper(
+            client_root=workspace_dir / "verification_broker" / "client",
+            workspace_dir=workspace_dir,
+        )
         if state["attempt"] == 1:
             assert broker.returncode != 0
         else:
@@ -677,11 +755,13 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_command_not_request
     runner_root = _setup_runner_root(tmp_path)
     target = _setup_target_repo(tmp_path)
     _stub_codex_binary_preflight(monkeypatch)
+    workspace_holder: dict[str, Path] = {}
 
     def _fake_run_codex_exec(**kwargs: object) -> object:
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
+        workspace_holder["path"] = Path(str(kwargs["workspace_dir"]))
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
@@ -706,6 +786,7 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_command_not_request
             mission_id="m",
             verification_commands=(_verification_command(),),
             verification_reuse_mode="auto",
+            keep_workspace=True,
         ),
     )
 
@@ -714,7 +795,12 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_command_not_request
     assert verification["source"] == "post_agent_rerun"
     assert verification["reused"] is False
     assert verification["passed"] is True
+    assert verification["artifacts_dir"] == "verification/attempt1/post_agent_rerun"
     assert (result.run_dir / "verification" / "attempt1" / "post_agent_rerun").exists()
+    workspace_dir = workspace_holder["path"]
+    assert (
+        workspace_dir / "verification" / "attempt1" / "post_agent_rerun" / "verification.json"
+    ).exists()
 
     reuse = json.loads((result.run_dir / "verification_reuse.json").read_text(encoding="utf-8"))
     assert reuse["selected_source"] == "post_agent_rerun"
