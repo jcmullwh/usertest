@@ -39,6 +39,26 @@ def test_resolve_agent_visible_run_dir_entry_materializes_workspace_copy_for_loc
     assert expected_path.read_text(encoding="utf-8") == "system prompt\n"
 
 
+def test_resolve_agent_visible_run_dir_entry_uses_host_path_without_workspace_mirror(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    staged_path = run_dir / "agent_prompts" / "system_prompt.md"
+    staged_path.parent.mkdir(parents=True, exist_ok=True)
+    staged_path.write_text("system prompt\n", encoding="utf-8")
+
+    entry = runner_mod._resolve_agent_visible_run_dir_entry(
+        staged_path,
+        run_dir=run_dir,
+        workspace_dir=None,
+        run_dir_mount=None,
+    )
+
+    assert entry.mirrored_into_workspace is False
+    assert entry.host_path == staged_path
+    assert entry.agent_path == runner_mod.normalize_agent_path(staged_path.resolve())
+
+
 def test_run_verification_commands_surfaces_workspace_artifacts_dir_for_local_backend(
     tmp_path: Path,
 ) -> None:

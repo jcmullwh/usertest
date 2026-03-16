@@ -17,19 +17,27 @@ If you're looking to *run* usertests, use `usertest` instead.
 
 ## Install
 
-This repo uses `pdm` (do not use `pip` / `python -m ...` directly).
+From a monorepo checkout, prefer the repo bootstrap/smoke flow first so the wrapper resolves a
+usable Python before installs:
 
-From the monorepo root:
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1`
+- **macOS / Linux:** `bash ./scripts/smoke.sh`
+
+That path installs the shared requirements plus the local editable apps/packages used by this repo.
+
+Advanced/manual fallback if you already have a known-good interpreter and intentionally want only
+this app installed:
 
 ```bash
-cd apps/usertest_backlog
-pdm install -d
+python -m pip install -r requirements-dev.txt
+python -m pip install -e apps/usertest_backlog
 ```
 
 Confirm:
 
 ```bash
-pdm run usertest-backlog --help
+python -m usertest_backlog.cli --help
+# If PATH already exposes the console script: usertest-backlog --help
 ```
 
 ---
@@ -109,7 +117,6 @@ Embedding/runtime notes:
 - Set `TRIAGE_ENGINE_EMBED_CACHE_PATH` to reuse embeddings via an on-disk SQLite cache across
   repeated runs.
 - XLSX output requires `openpyxl` to be installed in the environment.
-```
 
 ---
 
@@ -130,6 +137,9 @@ Operational notes (security, CI guidance) live under `docs/ops/`.
 From the repo root:
 
 ```bash
+# Run the repo bootstrap once first if this is a fresh checkout:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1
+#   # or: bash ./scripts/smoke.sh
 python tools/scaffold/scaffold.py run install --project usertest_backlog
 python tools/scaffold/scaffold.py run test --project usertest_backlog
 python tools/scaffold/scaffold.py run lint --project usertest_backlog
@@ -138,6 +148,5 @@ python tools/scaffold/scaffold.py run lint --project usertest_backlog
 Smoke tests:
 
 ```bash
-cd apps/usertest_backlog
-pdm run pytest -q tests/test_smoke.py
+python -m pytest -q apps/usertest_backlog/tests/test_smoke.py
 ```
