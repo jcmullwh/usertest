@@ -93,3 +93,170 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
 
     captured = capsys.readouterr()
     assert captured.out.strip().splitlines()[-1] == str(run_dir)
+
+
+def test_repo_health_failure_does_not_block_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "verification.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "passed": False,
+                "change_validation_passed": True,
+                "commands": [{"index": 1, "command": "echo health-fail", "exit_code": 1, "category": "repo_health"}],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_once(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(run_dir=run_dir, exit_code=0, report_validation_errors=[])
+
+    commit_called = {"yes": False}
+    def mock_finalize_commit(*_args: object, **_kwargs: object) -> dict[str, Any]:
+        commit_called["yes"] = True
+        return {"commit_performed": True}
+
+    monkeypatch.setattr(implement_cli, "run_once", fake_run_once)
+    monkeypatch.setattr(implement_cli, "finalize_commit", mock_finalize_commit)
+
+    target_repo = tmp_path / "target_repo"
+    target_repo.mkdir(parents=True, exist_ok=True)
+    (target_repo / ".git").mkdir()
+    ticket_path = tmp_path / "ticket.md"
+    ticket_path.write_text("# ticket\n", encoding="utf-8")
+
+    parser = implement_cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            "--ticket-path",
+            str(ticket_path),
+            "--repo",
+            str(target_repo),
+            "--no-docker",
+            "--commit",
+            "--verify-command",
+            "echo ok",
+            "--no-move-on-start",
+            "--no-move-on-commit",
+        ]
+    )
+
+    cfg = RunnerConfig(
+        repo_root=tmp_path,
+        runs_dir=tmp_path / "runs",
+        agents={},
+        policies={},
+    )
+    selected = implement_cli.SelectedTicket(
+        fingerprint="fp",
+        title="Test ticket",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=target_repo,
+        idea_path=None,
+        ticket_markdown="# ticket\n",
+        tickets_export_path=None,
+        export_index=None,
+    )
+
+    exit_code = implement_cli._run_selected_ticket(
+        args=args,
+        repo_root=tmp_path,
+        cfg=cfg,
+        selected=selected,
+    )
+
+    assert exit_code == 0
+    assert commit_called["yes"] is True
+
+    captured = capsys.readouterr()
+    assert "WARNING: Repo health checks failed, but change validation passed" in captured.err
+
+
+def test_prerequisite_failure_blocks_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "verification.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "passed": False,
+                "change_validation_passed": False,
+                "commands": [
+                    {"index": 1, "command": "echo smoke", "exit_code": 0, "category": "repo_health"},
+                    {"index": 2, "command": "echo install-fail", "exit_code": 1, "category": "prerequisite"},
+                ],
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def fake_run_once(*_args: object, **_kwargs: object) -> object:
+        return SimpleNamespace(run_dir=run_dir, exit_code=0, report_validation_errors=[])
+
+    def fail_if_called(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("finalize_commit must not be called when prerequisite fails")
+
+    monkeypatch.setattr(implement_cli, "run_once", fake_run_once)
+    monkeypatch.setattr(implement_cli, "finalize_commit", fail_if_called)
+
+    target_repo = tmp_path / "target_repo"
+    target_repo.mkdir(parents=True, exist_ok=True)
+    ticket_path = tmp_path / "ticket.md"
+    ticket_path.write_text("# ticket\n", encoding="utf-8")
+
+    parser = implement_cli.build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            "--ticket-path",
+            str(ticket_path),
+            "--repo",
+            str(target_repo),
+            "--no-docker",
+            "--commit",
+            "--verify-command",
+            "echo ok",
+            "--no-move-on-start",
+            "--no-move-on-commit",
+        ]
+    )
+
+    exit_code = implement_cli._run_selected_ticket(
+        args=args,
+        repo_root=tmp_path,
+        cfg=RunnerConfig(repo_root=tmp_path, runs_dir=tmp_path / "runs", agents={}, policies={}),
+        selected=implement_cli.SelectedTicket(
+            fingerprint="fp",
+            title="T",
+            export_kind="implementation",
+            stage="ready_for_ticket",
+            owner_root=None,
+            idea_path=None,
+            ticket_markdown="# ticket\n",
+            tickets_export_path=None,
+            export_index=None,
+        ),
+    )
+
+    assert exit_code == 2
+    captured = capsys.readouterr()
+    assert "ERROR: Verification gate failed; refusing to commit/push/PR" in captured.err
+    assert "Failing command: echo install-fail" in captured.err

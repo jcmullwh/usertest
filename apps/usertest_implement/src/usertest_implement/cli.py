@@ -1906,12 +1906,16 @@ def _build_handoff_summary(
         if ci_status is None and ci_gate.get("skipped") is True:
             ci_status = "skipped"
         if ci_conclusion is None:
-            if ci_gate.get("passed") is True:
+            if ci_gate.get("change_validation_passed") is True:
                 ci_conclusion = "success"
                 ci_status = ci_status or "completed"
-            elif ci_gate.get("passed") is False:
+            elif ci_gate.get("change_validation_passed") is False:
                 ci_conclusion = "failure"
                 ci_status = ci_status or "completed"
+
+    repo_health_passed = None
+    if isinstance(ci_gate, dict):
+        repo_health_passed = bool(ci_gate.get("passed") is True)
 
     pr_url = None
     pr_created = False
@@ -1947,6 +1951,7 @@ def _build_handoff_summary(
         "ci_status": ci_status,
         "ci_run_url": ci_run_url,
         "ci_conclusion": ci_conclusion,
+        "repo_health_passed": repo_health_passed,
         "review_required": review_required,
         "review_run_dir": str(review_run_dir) if review_run_dir is not None else None,
         "review_decision": review_decision,
@@ -2180,6 +2185,7 @@ def _run_selected_ticket(
         agent_append_system_prompt=ticket_blob,
         keep_workspace=keep_workspace,
         verification_commands=tuple(verification_commands),
+        verification_categories=tuple(getattr(args, "verification_categories", []) or []),
         verification_timeout_seconds=verification_timeout_seconds,
         verification_reuse_mode=verification_reuse_mode,
         exec_backend=exec_backend,
@@ -2299,35 +2305,51 @@ def _run_selected_ticket(
     verification_configured = bool(request.verification_commands)
     if verification_configured and not bool(getattr(args, "skip_verify", False)):
         verification = _read_json(run_dir / "verification.json")
-        if isinstance(verification, dict) and verification.get("passed") is False:
-            verification_failed = True
-            exit_code = max(exit_code, 2)
-            commands = verification.get("commands")
-            if isinstance(commands, list):
-                for cmd in commands:
-                    if not isinstance(cmd, dict):
-                        continue
-                    cmd_exit = cmd.get("exit_code")
-                    if isinstance(cmd_exit, int) and cmd_exit != 0:
-                        raw_cmd = cmd.get("command")
-                        if isinstance(raw_cmd, str) and raw_cmd.strip():
-                            failing_verification_command = raw_cmd.strip()
-                        break
+        if isinstance(verification, dict):
+            # Fallback to 'passed' if 'change_validation_passed' is missing (backward compatibility)
+            change_validation_passed = verification.get("change_validation_passed")
+            if change_validation_passed is None:
+                change_validation_passed = verification.get("passed")
 
-            if wants_handoff:
+            if change_validation_passed is False:
+                verification_failed = True
+                exit_code = max(exit_code, 2)
+                commands = verification.get("commands")
+                if isinstance(commands, list):
+                    for cmd in commands:
+                        if not isinstance(cmd, dict):
+                            continue
+                        cmd_exit = cmd.get("exit_code")
+                        if isinstance(cmd_exit, int) and cmd_exit != 0:
+                            raw_cmd = cmd.get("command")
+                            if isinstance(raw_cmd, str) and raw_cmd.strip():
+                                failing_verification_command = raw_cmd.strip()
+                            break
+
+                if wants_handoff:
+                    print(
+                        "[implement] ERROR: Verification gate failed; refusing to commit/push/PR.",
+                        file=sys.stderr,
+                    )
+                else:
+                    print("[implement] ERROR: Verification gate failed.", file=sys.stderr)
+                print(f"  Run dir: {run_dir}", file=sys.stderr)
+                if failing_verification_command is not None:
+                    print(f"  Failing command: {failing_verification_command}", file=sys.stderr)
                 print(
-                    "[implement] ERROR: Verification gate failed; refusing to commit/push/PR.",
+                    "  Override (debugging only): rerun with --skip-verify",
                     file=sys.stderr,
                 )
-            else:
-                print("[implement] ERROR: Verification gate failed.", file=sys.stderr)
-            print(f"  Run dir: {run_dir}", file=sys.stderr)
-            if failing_verification_command is not None:
-                print(f"  Failing command: {failing_verification_command}", file=sys.stderr)
-            print(
-                "  Override (debugging only): rerun with --skip-verify",
-                file=sys.stderr,
-            )
+            elif verification.get("passed") is False:
+                print(
+                    "[implement] WARNING: Repo health checks failed, but change validation passed.",
+                    file=sys.stderr,
+                )
+                print(
+                    "           Handoff will proceed because the change itself appears valid.",
+                    file=sys.stderr,
+                )
+                print(f"           Run dir: {run_dir}", file=sys.stderr)
 
     handoff_blocked = bool(wants_handoff and verification_failed and not args.skip_verify)
 

@@ -120,6 +120,7 @@ class RunRequest:
     preflight_commands: tuple[str, ...] = ()
     preflight_required_commands: tuple[str, ...] = ()
     verification_commands: tuple[str, ...] = ()
+    verification_categories: tuple[str, ...] = ()
     verification_timeout_seconds: float | None = None
     verification_reuse_mode: str = "off"
 
@@ -2359,6 +2360,24 @@ def _verification_terminal_reason(summary: dict[str, Any]) -> str:
     return "failed"
 
 
+def _resolve_effective_verification_categories(
+    commands: Sequence[str], categories: Sequence[str]
+) -> list[str]:
+    effective = list(categories)
+    if not effective and len(commands) >= 4:
+        # Apply 4-command heuristic if no explicit categories provided
+        effective = [
+            "repo_health",  # smoke
+            "prerequisite",  # install
+            "repo_health",  # lint
+            "change_validation",  # test
+        ]
+    # Pad or truncate categories to match command count
+    while len(effective) < len(commands):
+        effective.append("change_validation")
+    return effective[: len(commands)]
+
+
 def _normalize_verification_summary(summary: dict[str, Any]) -> dict[str, Any]:
     payload = dict(summary)
     terminal_reason = _verification_terminal_reason(payload)
@@ -2367,6 +2386,11 @@ def _normalize_verification_summary(summary: dict[str, Any]) -> dict[str, Any]:
     payload["passed"] = terminal_reason == "passed"
     payload["timed_out"] = bool(payload.get("timed_out")) or terminal_reason == "timed_out"
     payload["cancelled"] = bool(payload.get("cancelled")) or terminal_reason == "cancelled"
+
+    if "change_validation_passed" not in payload:
+        # Fallback for old summaries: change_validation_passed follows passed.
+        payload["change_validation_passed"] = payload["passed"]
+
     if terminal_reason == "failed" and not payload.get("failure_reason"):
         payload["failure_reason"] = "verification_failed"
     if terminal_reason == "timed_out" and not payload.get("failure_reason"):
@@ -4137,6 +4161,7 @@ def _run_verification_commands(
     deadline_monotonic: float | None = None,
     deadline_seconds: float | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    categories: list[str] | None = None,
 ) -> dict[str, Any]:
     attempt_dir_rel = (
         artifacts_dir_rel
@@ -4465,10 +4490,16 @@ def _run_verification_commands(
             rewritten = True
 
         wall_seconds = max(0.0, time.monotonic() - cmd_started_monotonic)
+        category = (
+            categories[idx - 1]
+            if categories is not None and 0 <= (idx - 1) < len(categories)
+            else None
+        )
         result = {
             "index": idx,
             "command": cmd_original,
             "effective_command": effective_cmd,
+            "category": category,
             "rewritten": rewritten,
             "argv": argv,
             "exit_code": exit_code,
@@ -4512,18 +4543,36 @@ def _run_verification_commands(
             progress_callback(finished_progress)
 
         if exit_code != 0:
-            break
+            is_blocking = category is None or category in {"change_validation", "prerequisite"}
+            if is_blocking:
+                break
 
     finished_utc = _utc_now_z()
     wall_seconds_total = max(0.0, time.monotonic() - started_monotonic)
     cancelled_any = any(bool(r.get("cancelled")) for r in results)
     timed_out_any = any(bool(r.get("timed_out")) for r in results)
-    passed = (
+
+    def _is_blocking_failure(r: dict[str, Any]) -> bool:
+        cat = r.get("category")
+        blocking = cat is None or cat in {"change_validation", "prerequisite"}
+        if not blocking:
+            return False
+        exit_code = int(r.get("exit_code") or 0)
+        timed_out = bool(r.get("timed_out"))
+        cancelled = bool(r.get("cancelled"))
+        return exit_code != 0 or timed_out or cancelled
+
+    change_validation_passed = (
+        bool(results)
+        and not any(_is_blocking_failure(r) for r in results)
+    )
+    all_passed = (
         bool(results)
         and not cancelled_any
         and not timed_out_any
         and all(int(r.get("exit_code") or 0) == 0 for r in results)
     )
+    passed = change_validation_passed
     terminal_reason = (
         "cancelled"
         if cancelled_any
@@ -4551,6 +4600,8 @@ def _run_verification_commands(
             "deadline_seconds": deadline_seconds,
             "python_executable": python_executable,
             "passed": passed,
+            "all_passed": all_passed,
+            "change_validation_passed": change_validation_passed,
             "status": terminal_reason,
             "terminal_reason": terminal_reason,
             "timed_out": timed_out_any,
@@ -5517,6 +5568,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             effective_verification_commands = _normalize_verification_commands_for_execution(
                 request.verification_commands
             )
+            effective_verification_categories = _resolve_effective_verification_categories(
+                commands=effective_verification_commands,
+                categories=request.verification_categories,
+            )
+
             bootstrap: PipBootstrapResult | None = None
             if is_pip_repo_input(request.repo):
                 pip_spec = parse_pip_repo_input(request.repo)
@@ -6967,8 +7023,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             run_dir=run_dir,
                             attempt_number=_attempt_number,
                             commands=verification_commands,
+                            categories=effective_verification_categories,
                             command_prefix=command_prefix,
                             cwd=acquired.workspace_dir,
+
                             timeout_seconds=verification_timeout_seconds,
                             python_executable=_python_exec_for_verification,
                             python_toolchain_capability=python_toolchain_capability_summary,
@@ -7213,6 +7271,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "run_dir": run_dir,
                             "attempt_number": attempt_number,
                             "commands": verification_commands,
+                            "categories": effective_verification_categories,
                             "command_prefix": command_prefix,
                             "cwd": acquired.workspace_dir,
                             "timeout_seconds": verification_timeout_seconds,
