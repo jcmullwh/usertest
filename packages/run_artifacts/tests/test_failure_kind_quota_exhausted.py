@@ -59,6 +59,16 @@ def test_classify_failure_kind_normalizes_legacy_no_terminal_artifact_status() -
     assert kind == "missing_report"
 
 
+def test_classify_failure_kind_treats_incomplete_as_failure() -> None:
+    is_failure, kind = classify_failure_kind(
+        status="incomplete",
+        error=None,
+        validation_errors=[],
+    )
+    assert is_failure is True
+    assert kind == "incomplete"
+
+
 def test_render_failure_text_includes_terminal_artifact_read_diagnostics() -> None:
     text = render_failure_text(
         failure_kind="terminal_artifact_unreadable",

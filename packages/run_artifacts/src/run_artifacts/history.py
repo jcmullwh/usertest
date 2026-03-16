@@ -24,6 +24,7 @@ _EMBED_DEFINITION_KEYS = {
 _STATUS_OK = "ok"
 _STATUS_ERROR = "error"
 _STATUS_MISSING_REPORT = "missing_report"
+_STATUS_INCOMPLETE = "incomplete"
 _STATUS_LEGACY_NO_TERMINAL_ARTIFACT = "no_terminal_artifact"
 _STATUS_REPORT_VALIDATION_ERROR = "report_validation_error"
 _STATUS_TERMINAL_ARTIFACT_UNREADABLE = "terminal_artifact_unreadable"
@@ -280,11 +281,19 @@ def _has_artifact_read_failure(result: JsonArtifactReadResult) -> bool:
     return result.exists and (result.decode_ok is False or result.parse_ok is False)
 
 
+def _is_run_finalized(run_meta_value: Any) -> bool:
+    """Return True if run_meta contains an explicit run_finished_utc completion sentinel."""
+    return isinstance(run_meta_value, dict) and isinstance(
+        run_meta_value.get("run_finished_utc"), str
+    )
+
+
 def _derive_run_status(
     *,
     report_read: JsonArtifactReadResult,
     error_read: JsonArtifactReadResult,
     report_validation_errors_read: JsonArtifactReadResult,
+    run_meta_read: JsonArtifactReadResult,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
     terminal_artifact_reads = _terminal_artifact_reads(
         report=report_read,
@@ -292,6 +301,28 @@ def _derive_run_status(
         report_validation_errors=report_validation_errors_read,
     )
 
+    # Use explicit completion metadata as the primary signal for whether a run was finalized.
+    # run_meta.json is always written in the runner's finally block and always includes
+    # run_finished_utc, so its presence is a reliable completion sentinel.
+    finalized = _is_run_finalized(run_meta_read.value)
+
+    if not finalized:
+        # No completion metadata. Check for terminal artifacts to distinguish between
+        # interrupted runs and legacy runs that predate the completion sentinel.
+        has_any_terminal = (
+            report_read.exists or error_read.exists or report_validation_errors_read.exists
+        )
+        if not has_any_terminal:
+            # No completion metadata and no terminal artifacts: the run was interrupted before
+            # it could write any outcome artifact. Classify explicitly as incomplete rather than
+            # conflating with finalized failures that are simply missing their report.
+            return _STATUS_INCOMPLETE, terminal_artifact_reads
+        # Legacy compatibility path: terminal artifacts are present but run_meta.json is absent
+        # or lacks run_finished_utc. Fall through to artifact-based inference so older run
+        # directories remain readable without requiring migration.
+
+    # Finalized run (explicit completion metadata) or legacy run with terminal artifacts present.
+    # Derive status from terminal artifact content.
     if any(
         _has_artifact_read_failure(result)
         for result in (report_read, error_read, report_validation_errors_read)
@@ -302,10 +333,8 @@ def _derive_run_status(
     if report_validation_errors_read.value is not None:
         return _STATUS_REPORT_VALIDATION_ERROR, terminal_artifact_reads
     if report_read.value is None:
-        # report.json is absent and we already ruled out unreadable/error/validation terminal
-        # artifacts above. In practice this means the run never produced the expected report
-        # artifact, whether because it predates the terminal-artifact contract or because it was
-        # interrupted before the terminal artifact was emitted.
+        # Finalized run (or legacy with terminal artifacts) that is missing its canonical
+        # report artifact. This is a contract violation for finalized runs.
         return _STATUS_MISSING_REPORT, terminal_artifact_reads
     return _STATUS_OK, terminal_artifact_reads
 
@@ -498,7 +527,8 @@ def iter_report_history(
             run_dir / "report_validation_errors.json"
         )
         report_validation_errors = report_validation_errors_read.value
-        run_meta = _read_json(run_dir / "run_meta.json")
+        run_meta_read = _read_json_artifact(run_dir / "run_meta.json")
+        run_meta = run_meta_read.value
         agent_attempts = _read_json(run_dir / "agent_attempts.json")
         ticket_ref = _read_json(run_dir / "ticket_ref.json")
         timing = _read_json(run_dir / "timing.json")
@@ -512,6 +542,7 @@ def iter_report_history(
             report_read=report_read,
             error_read=error_read,
             report_validation_errors_read=report_validation_errors_read,
+            run_meta_read=run_meta_read,
         )
 
         embedded: dict[str, Any] = {}
@@ -612,6 +643,7 @@ def write_report_history_jsonl(
     counts: dict[str, int] = {
         _STATUS_OK: 0,
         _STATUS_MISSING_REPORT: 0,
+        _STATUS_INCOMPLETE: 0,
         _STATUS_LEGACY_NO_TERMINAL_ARTIFACT: 0,
         _STATUS_REPORT_VALIDATION_ERROR: 0,
         _STATUS_TERMINAL_ARTIFACT_UNREADABLE: 0,
@@ -670,7 +702,8 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
     error = error_read.value
     report_validation_errors_read = _read_json_artifact(run_dir / "report_validation_errors.json")
     report_validation_errors = report_validation_errors_read.value
-    run_meta = _read_json(run_dir / "run_meta.json")
+    run_meta_read = _read_json_artifact(run_dir / "run_meta.json")
+    run_meta = run_meta_read.value
     agent_attempts = _read_json(run_dir / "agent_attempts.json")
 
     agent_exit_code: int | None = None
@@ -682,6 +715,7 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
         report_read=report_read,
         error_read=error_read,
         report_validation_errors_read=report_validation_errors_read,
+        run_meta_read=run_meta_read,
     )
 
     ts_utc = _parse_timestamp_dirname(ts_dir) if isinstance(ts_dir, str) else None
