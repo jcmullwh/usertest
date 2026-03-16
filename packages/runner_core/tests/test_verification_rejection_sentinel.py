@@ -36,6 +36,7 @@ def test_run_verification_commands_does_not_execute_rejection_sentinel(
 
     summary = runner._run_verification_commands(
         run_dir=tmp_path,
+        workspace_dir=tmp_path,
         attempt_number=1,
         commands=[command],
         command_prefix=[],

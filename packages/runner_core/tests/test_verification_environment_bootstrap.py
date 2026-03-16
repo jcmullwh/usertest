@@ -69,6 +69,7 @@ def test_run_verification_commands_applies_local_env_overrides(
 
     summary = runner_mod._run_verification_commands(
         run_dir=tmp_path / "run",
+        workspace_dir=tmp_path,
         attempt_number=1,
         commands=["echo ok"],
         command_prefix=[],
@@ -116,6 +117,7 @@ def test_run_verification_commands_injects_env_overrides_for_docker_prefix(
 
     summary = runner_mod._run_verification_commands(
         run_dir=tmp_path / "run",
+        workspace_dir=tmp_path,
         attempt_number=1,
         commands=["echo ok"],
         command_prefix=command_prefix,

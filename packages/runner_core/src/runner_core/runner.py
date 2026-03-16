@@ -43,7 +43,10 @@ from sandbox_runner.diagnostics import (
 )
 
 from runner_core.agent_docs import obfuscate_target_agent_docs
-from runner_core.agent_prompt_files import _materialize_agent_prompt_into_workspace
+from runner_core.agent_prompt_files import (
+    _materialize_agent_prompt_into_workspace,
+    _try_ignore_workspace_file_in_git,
+)
 from runner_core.catalog import load_catalog_config
 from runner_core.execution_backend import prepare_execution_backend
 from runner_core.pathing import (
@@ -149,6 +152,14 @@ class RunResult:
     run_dir: Path
     exit_code: int
     report_validation_errors: list[str]
+
+
+@dataclass(frozen=True)
+class _AgentVisibleRunDirEntry:
+    source_path: Path
+    host_path: Path
+    agent_path: str
+    mirrored_into_workspace: bool
 
 
 _BASE_PREFLIGHT_COMMANDS = [
@@ -2242,25 +2253,143 @@ def _stage_agent_prompt_file(*, run_dir: Path, name: str, src_path: Path) -> Pat
     shutil.copyfile(src_path, dest_path)
     return dest_path
 
+
+def _agent_visible_workspace_root(*, workspace_dir: Path) -> Path:
+    root = workspace_dir.resolve() / ".usertest_hidden" / "run_dir"
+    root.mkdir(parents=True, exist_ok=True)
+    _try_ignore_workspace_file_in_git(workspace_dir.resolve(), root)
+    return root
+
+
+def _relative_run_dir_entry_path(*, staged_path: Path, run_dir: Path) -> Path:
+    try:
+        return staged_path.resolve().relative_to(run_dir.resolve())
+    except ValueError as exc:
+        raise RuntimeError(
+            "Refusing to surface a staged path outside the run directory.\n"
+            f"staged_path={staged_path}\n"
+            f"run_dir={run_dir}"
+        ) from exc
+
+
+def _materialize_agent_visible_run_dir_entry(
+    *,
+    staged_path: Path,
+    run_dir: Path,
+    workspace_dir: Path,
+    copy_directory_contents: bool = False,
+    allow_missing: bool = False,
+) -> Path:
+    rel = _relative_run_dir_entry_path(staged_path=staged_path, run_dir=run_dir)
+    dest_path = _agent_visible_workspace_root(workspace_dir=workspace_dir) / rel
+
+    if not staged_path.exists():
+        if not allow_missing:
+            raise RuntimeError(
+                "Cannot surface a missing staged path to the agent.\n"
+                f"staged_path={staged_path}\n"
+                f"workspace_dir={workspace_dir}"
+            )
+        dest_path.mkdir(parents=True, exist_ok=True)
+        return dest_path
+
+    if staged_path.is_dir():
+        dest_path.mkdir(parents=True, exist_ok=True)
+        if copy_directory_contents:
+            shutil.copytree(staged_path, dest_path, dirs_exist_ok=True)
+        return dest_path
+
+    dest_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(staged_path, dest_path)
+    return dest_path
+
+
+def _resolve_agent_visible_run_dir_entry(
+    staged_path: Path,
+    *,
+    run_dir: Path,
+    workspace_dir: Path | None,
+    run_dir_mount: str | None,
+    copy_directory_contents: bool = False,
+    allow_missing: bool = False,
+) -> _AgentVisibleRunDirEntry:
+    rel = _relative_run_dir_entry_path(staged_path=staged_path, run_dir=run_dir)
+    if run_dir_mount is not None:
+        mount = normalize_agent_path(run_dir_mount)
+        if not mount or mount == ".":
+            mount = "/run_dir"
+        if not mount.startswith("/"):
+            mount = f"/{mount}"
+        return _AgentVisibleRunDirEntry(
+            source_path=staged_path,
+            host_path=staged_path,
+            agent_path=agent_path_join(mount, rel.as_posix()),
+            mirrored_into_workspace=False,
+        )
+
+    if workspace_dir is None:
+        raise RuntimeError(
+            "Cannot surface a run_dir path to a local agent without a workspace mirror.\n"
+            f"staged_path={staged_path}\n"
+            f"run_dir={run_dir}"
+        )
+
+    host_path = _materialize_agent_visible_run_dir_entry(
+        staged_path=staged_path,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        copy_directory_contents=copy_directory_contents,
+        allow_missing=allow_missing,
+    )
+    return _AgentVisibleRunDirEntry(
+        source_path=staged_path,
+        host_path=host_path,
+        agent_path=normalize_agent_path(host_path.resolve()),
+        mirrored_into_workspace=True,
+    )
+
+
 def _agent_path_for_staged_file(
-    staged_path: Path, *, run_dir: Path, run_dir_mount: str | None
+    staged_path: Path,
+    *,
+    run_dir: Path,
+    workspace_dir: Path | None,
+    run_dir_mount: str | None,
+    copy_directory_contents: bool = False,
+    allow_missing: bool = False,
 ) -> str:
+    return _resolve_agent_visible_run_dir_entry(
+        staged_path,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        run_dir_mount=run_dir_mount,
+        copy_directory_contents=copy_directory_contents,
+        allow_missing=allow_missing,
+    ).agent_path
+
+
+def _agent_execution_path_for_run_dir_entry(
+    staged_path: Path,
+    *,
+    run_dir: Path,
+    run_dir_mount: str | None,
+) -> str:
+    rel = _relative_run_dir_entry_path(staged_path=staged_path, run_dir=run_dir).as_posix()
     if run_dir_mount is None:
-        return str(staged_path.resolve())
+        return normalize_agent_path(staged_path.resolve())
 
     mount = normalize_agent_path(run_dir_mount)
     if not mount or mount == ".":
         mount = "/run_dir"
     if not mount.startswith("/"):
         mount = f"/{mount}"
-
-    rel = staged_path.resolve().relative_to(run_dir.resolve()).as_posix()
     return agent_path_join(mount, rel)
 
 
 def _verification_broker_client_command(
     *,
     run_dir: Path,
+    workspace_dir: Path | None,
     run_dir_mount: str | None,
     command_prefix: list[str],
 ) -> str:
@@ -2268,7 +2397,9 @@ def _verification_broker_client_command(
     client_root_for_agent = _agent_path_for_staged_file(
         client_root,
         run_dir=run_dir,
+        workspace_dir=workspace_dir,
         run_dir_mount=run_dir_mount,
+        allow_missing=True,
     )
     launcher = resolve_verification_launcher(
         command_prefix=command_prefix,
@@ -4124,6 +4255,8 @@ def _run_verification_subprocess(
 def _run_verification_commands(
     *,
     run_dir: Path,
+    workspace_dir: Path | None = None,
+    run_dir_mount: str | None = None,
     attempt_number: int,
     commands: list[str],
     command_prefix: list[str],
@@ -4538,12 +4671,20 @@ def _run_verification_commands(
             else ("timed_out" if terminal_reason == "timed_out" else "verification_failed")
         )
     )
+    agent_visible_attempt_dir = _resolve_agent_visible_run_dir_entry(
+        attempt_dir,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        run_dir_mount=run_dir_mount,
+        copy_directory_contents=False,
+        allow_missing=True,
+    )
 
     summary = _normalize_verification_summary(
         {
             "schema_version": 1,
             "attempt": attempt_number,
-            "artifacts_dir": normalize_agent_path(attempt_dir_rel),
+            "artifacts_dir": agent_visible_attempt_dir.agent_path,
             "started_utc": started_utc,
             "finished_utc": finished_utc,
             "wall_seconds": wall_seconds_total,
@@ -4565,6 +4706,14 @@ def _run_verification_commands(
         }
     )
     _write_json(attempt_dir / "verification.json", summary)
+    _resolve_agent_visible_run_dir_entry(
+        attempt_dir,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        run_dir_mount=run_dir_mount,
+        copy_directory_contents=True,
+        allow_missing=False,
+    )
     return summary
 
 
@@ -5415,6 +5564,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 system_prompt_path_for_agent = _agent_path_for_staged_file(
                     staged_system_prompt,
                     run_dir=run_dir,
+                    workspace_dir=acquired.workspace_dir,
                     run_dir_mount=backend.run_dir_mount,
                 )
 
@@ -5483,6 +5633,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 append_system_prompt_path_for_agent = _agent_path_for_staged_file(
                     staged_append_system_prompt,
                     run_dir=run_dir,
+                    workspace_dir=acquired.workspace_dir,
                     run_dir_mount=backend.run_dir_mount,
                 )
 
@@ -6529,6 +6680,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     )
                 verification_broker_command = _verification_broker_client_command(
                     run_dir=run_dir,
+                    workspace_dir=acquired.workspace_dir,
                     run_dir_mount=backend.run_dir_mount,
                     command_prefix=command_prefix,
                 )
@@ -6690,12 +6842,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         codex_instructions_path_for_agent = _agent_path_for_staged_file(
                             staged_codex_instructions,
                             run_dir=run_dir,
+                            workspace_dir=acquired.workspace_dir,
                             run_dir_mount=backend.run_dir_mount,
                         )
                 else:
                     codex_instructions_path_for_agent = _agent_path_for_staged_file(
                         staged_append_system_prompt,
                         run_dir=run_dir,
+                        workspace_dir=acquired.workspace_dir,
                         run_dir_mount=backend.run_dir_mount,
                     )
             if codex_instructions_path_for_agent is not None:
@@ -6796,6 +6950,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         _agent_path_for_staged_file(
                             last_message_attempt_path,
                             run_dir=run_dir,
+                            workspace_dir=acquired.workspace_dir,
                             run_dir_mount=backend.run_dir_mount,
                         )
                         if backend.run_dir_mount
@@ -6934,12 +7089,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     attempt_broker_root = (
                         run_dir / "verification_broker" / f"attempt{attempt_number}"
                     )
-                    client_root_for_agent = _agent_path_for_staged_file(
+                    client_root_visible = _resolve_agent_visible_run_dir_entry(
                         client_root,
                         run_dir=run_dir,
+                        workspace_dir=acquired.workspace_dir,
                         run_dir_mount=backend.run_dir_mount,
+                        allow_missing=True,
                     )
-                    attempt_root_for_agent = _agent_path_for_staged_file(
+                    client_root_for_agent = client_root_visible.agent_path
+                    attempt_root_for_agent = _agent_execution_path_for_run_dir_entry(
                         attempt_broker_root,
                         run_dir=run_dir,
                         run_dir_mount=backend.run_dir_mount,
@@ -6965,6 +7123,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         )
                         return _run_verification_commands(
                             run_dir=run_dir,
+                            workspace_dir=acquired.workspace_dir,
+                            run_dir_mount=backend.run_dir_mount,
                             attempt_number=_attempt_number,
                             commands=verification_commands,
                             command_prefix=command_prefix,
@@ -6986,6 +7146,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         run_dir=run_dir,
                         attempt_number=attempt_number,
                         client_root=client_root,
+                        client_root_host_for_agent=(
+                            client_root_visible.host_path
+                            if client_root_visible.mirrored_into_workspace
+                            else None
+                        ),
                         client_root_for_agent=client_root_for_agent,
                         attempt_root_for_agent=attempt_root_for_agent,
                         execution_shell=execution_shell,
@@ -7211,6 +7376,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         attempt_verification_source = "post_agent_rerun"
                         verification_kwargs: dict[str, Any] = {
                             "run_dir": run_dir,
+                            "workspace_dir": acquired.workspace_dir,
+                            "run_dir_mount": backend.run_dir_mount,
                             "attempt_number": attempt_number,
                             "commands": verification_commands,
                             "command_prefix": command_prefix,

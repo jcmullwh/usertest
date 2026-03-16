@@ -41,6 +41,7 @@ def test_verification_rewrites_bash_smoke_to_powershell_when_bash_blocked_on_win
 
     summary = runner_mod._run_verification_commands(
         run_dir=tmp_path / "run",
+        workspace_dir=tmp_path,
         attempt_number=1,
         commands=["bash ./scripts/smoke.sh --skip-install --use-pythonpath --require-doctor"],
         command_prefix=[],
@@ -95,6 +96,7 @@ def test_verification_skips_bash_syntax_check_when_bash_blocked_on_windows(
 
     summary = runner_mod._run_verification_commands(
         run_dir=tmp_path / "run",
+        workspace_dir=tmp_path,
         attempt_number=1,
         commands=["bash -n scripts/smoke.sh"],
         command_prefix=[],

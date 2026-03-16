@@ -459,6 +459,7 @@ def test_run_verification_commands_times_out_on_broker_deadline(tmp_path: Path) 
     started = time.monotonic()
     summary = runner_mod._run_verification_commands(
         run_dir=tmp_path,
+        workspace_dir=tmp_path,
         attempt_number=1,
         commands=[command],
         command_prefix=[],

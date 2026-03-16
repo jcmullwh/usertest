@@ -493,6 +493,10 @@ def test_run_defers_review_until_for_review_and_green_ci(
         "usertest_implement.cli.finalize_push",
         lambda **_: {"pushed": True, "remote_name": "origin", "remote_url": "https://example.invalid/repo.git"},
     )
+    monkeypatch.setattr(
+        "usertest_implement.cli.shutil.which",
+        lambda cmd: "/usr/bin/gh" if cmd == "gh" else None,
+    )
 
     def _fake_subprocess_run(argv, cwd=None, capture_output=None, text=None, check=None):
         if argv[:3] == ["gh", "pr", "create"]:

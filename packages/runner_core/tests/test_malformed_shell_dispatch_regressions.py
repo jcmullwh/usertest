@@ -55,6 +55,7 @@ def test_run_verification_commands_blocks_malformed_dispatch_variants(
 
     summary = runner_mod._run_verification_commands(
         run_dir=tmp_path,
+        workspace_dir=tmp_path,
         attempt_number=1,
         commands=[command],
         command_prefix=command_prefix,
@@ -115,6 +116,7 @@ def test_run_verification_commands_allows_shell_native_variants(
 
     summary = runner_mod._run_verification_commands(
         run_dir=tmp_path,
+        workspace_dir=tmp_path,
         attempt_number=1,
         commands=[command],
         command_prefix=command_prefix,

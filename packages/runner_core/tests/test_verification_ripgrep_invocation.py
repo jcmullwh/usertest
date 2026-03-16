@@ -47,6 +47,7 @@ def test_verification_ripgrep_inserts_e_for_unexpected_leading_dash_pattern_on_w
 
     summary = runner_mod._run_verification_commands(
         run_dir=tmp_path / "run",
+        workspace_dir=tmp_path,
         attempt_number=1,
         commands=[f"rg {pattern} README.md"],
         command_prefix=[],
@@ -97,6 +98,7 @@ def test_verification_ripgrep_inserts_e_inside_docker_command_prefix(
 
     summary = runner_mod._run_verification_commands(
         run_dir=tmp_path / "run",
+        workspace_dir=tmp_path,
         attempt_number=1,
         commands=[f"rg {pattern} README.md"],
         command_prefix=command_prefix,

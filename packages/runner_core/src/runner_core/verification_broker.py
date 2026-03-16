@@ -325,6 +325,7 @@ class VerificationBrokerAttempt:
         run_dir: Path,
         attempt_number: int,
         client_root: Path,
+        client_root_host_for_agent: Path | None = None,
         client_root_for_agent: str,
         attempt_root_for_agent: str,
         execution_shell: str,
@@ -348,6 +349,7 @@ class VerificationBrokerAttempt:
         self.requests_dir = self.attempt_root / "requests"
         self.responses_dir = self.attempt_root / "responses"
         self.client_root = client_root
+        self.client_root_host_for_agent = client_root_host_for_agent
         self.client_root_for_agent = normalize_agent_path(client_root_for_agent)
         self.attempt_root_for_agent = normalize_agent_path(attempt_root_for_agent)
         self.python_script = client_root / "verify_client.py"
@@ -855,6 +857,14 @@ class VerificationBrokerAttempt:
         wait_timeout_seconds: float,
     ) -> VerificationBrokerClient:
         self.client_root.mkdir(parents=True, exist_ok=True)
+        mirror_python_script: Path | None = None
+        mirror_shell_script: Path | None = None
+        mirror_powershell_script: Path | None = None
+        if self.client_root_host_for_agent is not None:
+            self.client_root_host_for_agent.mkdir(parents=True, exist_ok=True)
+            mirror_python_script = self.client_root_host_for_agent / "verify_client.py"
+            mirror_shell_script = self.client_root_host_for_agent / "verify_client.sh"
+            mirror_powershell_script = self.client_root_host_for_agent / "verify_client.ps1"
         request_dir_for_agent = agent_path_join(self.attempt_root_for_agent, "requests")
         response_dir_for_agent = agent_path_join(self.attempt_root_for_agent, "responses")
         python_payload = _render_client_python(
@@ -864,16 +874,28 @@ class VerificationBrokerAttempt:
             wait_timeout_seconds=wait_timeout_seconds,
         )
         self.python_script.write_text(python_payload, encoding="utf-8", newline="\n")
+        if mirror_python_script is not None:
+            mirror_python_script.write_text(python_payload, encoding="utf-8", newline="\n")
+        shell_payload = _render_client_shell_wrapper(python_command=python_command)
         self.shell_script.write_text(
-            _render_client_shell_wrapper(python_command=python_command),
+            shell_payload,
             encoding="utf-8",
             newline="\n",
         )
+        if mirror_shell_script is not None:
+            mirror_shell_script.write_text(shell_payload, encoding="utf-8", newline="\n")
+        powershell_payload = _render_client_powershell_wrapper(python_command=python_command)
         self.powershell_script.write_text(
-            _render_client_powershell_wrapper(python_command=python_command),
+            powershell_payload,
             encoding="utf-8",
             newline="\n",
         )
+        if mirror_powershell_script is not None:
+            mirror_powershell_script.write_text(
+                powershell_payload,
+                encoding="utf-8",
+                newline="\n",
+            )
 
         launcher = resolve_verification_launcher(
             command_prefix=(),

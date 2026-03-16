@@ -317,6 +317,8 @@ def _run_fixture_backed_toolchain_case(
     def _fake_run_verification_commands(
         *,
         run_dir: Path,
+        workspace_dir: Path | None = None,
+        run_dir_mount: str | None = None,
         attempt_number: int,
         command_prefix: list[str],
         commands: list[str],
@@ -326,6 +328,7 @@ def _run_fixture_backed_toolchain_case(
         python_toolchain_capability: dict[str, Any] | None = None,
         env_overrides: dict[str, str] | None = None,
         execution_shell: str | None = None,
+        **kwargs: Any,
     ) -> dict[str, Any]:
         del (
             command_prefix,
@@ -334,17 +337,25 @@ def _run_fixture_backed_toolchain_case(
             python_toolchain_capability,
             env_overrides,
             execution_shell,
+            kwargs,
         )
         verification_calls["count"] += 1
         verification_python_executables.append(python_executable)
         artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
         artifacts_dir = run_dir / artifacts_dir_rel
         artifacts_dir.mkdir(parents=True, exist_ok=True)
+        agent_visible_artifacts_dir = runner_mod._resolve_agent_visible_run_dir_entry(
+            artifacts_dir,
+            run_dir=run_dir,
+            workspace_dir=workspace_dir,
+            run_dir_mount=run_dir_mount,
+            allow_missing=True,
+        )
         summary = {
             "schema_version": 1,
             "passed": True,
             "wall_seconds": 0.01,
-            "artifacts_dir": str(artifacts_dir_rel),
+            "artifacts_dir": agent_visible_artifacts_dir.agent_path,
             "commands": [
                 {
                     "command": cmd,
@@ -359,6 +370,13 @@ def _run_fixture_backed_toolchain_case(
         (artifacts_dir / "verification.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
+        )
+        runner_mod._resolve_agent_visible_run_dir_entry(
+            artifacts_dir,
+            run_dir=run_dir,
+            workspace_dir=workspace_dir,
+            run_dir_mount=run_dir_mount,
+            copy_directory_contents=True,
         )
         return summary
 
@@ -1000,6 +1018,8 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
     def _fake_run_verification_commands(
         *,
         run_dir: Path,
+        workspace_dir: Path | None = None,
+        run_dir_mount: str | None = None,
         attempt_number: int,
         command_prefix: list[str],
         commands: list[str],
@@ -1016,11 +1036,18 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
         artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
         artifacts_dir = run_dir / artifacts_dir_rel
         artifacts_dir.mkdir(parents=True, exist_ok=True)
+        agent_visible_artifacts_dir = runner_mod._resolve_agent_visible_run_dir_entry(
+            artifacts_dir,
+            run_dir=run_dir,
+            workspace_dir=workspace_dir,
+            run_dir_mount=run_dir_mount,
+            allow_missing=True,
+        )
         summary = {
             "schema_version": 1,
             "passed": True,
             "wall_seconds": 0.01,
-            "artifacts_dir": str(artifacts_dir_rel),
+            "artifacts_dir": agent_visible_artifacts_dir.agent_path,
             "python_executable": python_executable,
             "commands": [
                 {
@@ -1036,6 +1063,13 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
         (artifacts_dir / "verification.json").write_text(
             json.dumps(summary, indent=2, ensure_ascii=False) + "\n",
             encoding="utf-8",
+        )
+        runner_mod._resolve_agent_visible_run_dir_entry(
+            artifacts_dir,
+            run_dir=run_dir,
+            workspace_dir=workspace_dir,
+            run_dir_mount=run_dir_mount,
+            copy_directory_contents=True,
         )
         return summary
 
