@@ -40,6 +40,10 @@ _BROKER_NO_ARTIFACT_FAILURE_REASON_PREFIXES = (
     "invalid_request_json:",
     "broker_exception:",
 )
+_BROKER_NONTERMINAL_STATUSES = {"pending", "running", "cancelling"}
+_BROKER_ALL_STATUSES = _BROKER_NONTERMINAL_STATUSES | _BROKER_TERMINAL_STATUSES
+_BROKER_ARTIFACT_REQUIRED_STATUSES = {"passed", "failed", "timed_out"}
+_BROKER_WORKSPACE_HASH_REQUIRED_STATUSES = {"passed"}
 
 
 @dataclass(frozen=True)
@@ -90,6 +94,30 @@ class VerificationBrokerRequestResult:
             "progress": dict(self.progress) if isinstance(self.progress, dict) else None,
             "required_artifacts_complete": not missing_artifacts,
             "missing_required_artifacts": missing_artifacts,
+        }
+
+    def to_response_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": 2,
+            "request_id": self.request_id,
+            "attempt": self.attempt,
+            "status": self.status,
+            "terminal": _is_terminal_status(self.status),
+            "terminal_reason": self.terminal_reason,
+            "timed_out": self.timed_out,
+            "cancelled": self.cancelled,
+            "cancel_requested": self.cancel_requested,
+            "failure_reason": self.failure_reason,
+            "artifacts_dir": self.artifacts_dir,
+            "summary_path": self.summary_path,
+            "workspace_hash_after_verification": self.workspace_hash_after_verification,
+            "workspace_hash_mode": self.workspace_hash_mode,
+            "started_utc": self.started_utc,
+            "deadline_utc": self.deadline_utc,
+            "deadline_seconds": self.deadline_seconds,
+            "last_updated_utc": self.last_updated_utc,
+            "finished_utc": self.finished_utc,
+            "progress": dict(self.progress) if isinstance(self.progress, dict) else None,
         }
 
 
@@ -182,13 +210,19 @@ def resolve_verification_broker_timeout_seconds(
 
 def _compute_broker_internal_deadline_seconds(
     *,
-    effective_timeout_seconds: float,
+    effective_timeout_seconds: float | None = None,
+    verification_timeout_seconds: float | None = None,
     verification_command_count: int,
 ) -> float:
+    resolved_timeout = effective_timeout_seconds
+    if resolved_timeout is None:
+        resolved_timeout, _ = resolve_verification_broker_timeout_seconds(
+            verification_timeout_seconds=verification_timeout_seconds
+        )
     command_count = max(1, int(verification_command_count))
     return max(
         _BROKER_MIN_INTERNAL_DEADLINE_SECONDS,
-        float(effective_timeout_seconds) * float(command_count)
+        float(resolved_timeout) * float(command_count)
         + _BROKER_INTERNAL_DEADLINE_GRACE_SECONDS,
     )
 
@@ -482,6 +516,87 @@ def _failure_reason_allows_missing_artifacts(failure_reason: str | None) -> bool
     if normalized in _BROKER_NO_ARTIFACT_FAILURE_REASONS:
         return True
     return normalized.startswith(_BROKER_NO_ARTIFACT_FAILURE_REASON_PREFIXES)
+
+
+def _verification_broker_response_contract() -> dict[str, tuple[str, ...] | bool]:
+    return {
+        "allowed_statuses": tuple(sorted(_BROKER_ALL_STATUSES)),
+        "artifact_required_statuses": tuple(sorted(_BROKER_ARTIFACT_REQUIRED_STATUSES)),
+        "workspace_hash_required_statuses": tuple(
+            sorted(_BROKER_WORKSPACE_HASH_REQUIRED_STATUSES)
+        ),
+        "require_deadline_utc": True,
+        "require_deadline_seconds": True,
+    }
+
+
+def validate_verification_broker_response_payload(
+    payload: Any,
+    *,
+    request_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    if not isinstance(payload, dict):
+        return None, f"invalid broker response payload for request_id={request_id}"
+
+    response_request_id = payload.get("request_id")
+    if isinstance(response_request_id, str) and response_request_id.strip():
+        if response_request_id.strip() != request_id:
+            return (
+                None,
+                "invalid broker response request_id mismatch: "
+                f"expected {request_id}, got {response_request_id.strip()}",
+            )
+
+    contract = _verification_broker_response_contract()
+    status = payload.get("status")
+    if not isinstance(status, str) or not status.strip():
+        return None, f"invalid broker response status for request_id={request_id}"
+    status_s = status.strip()
+    allowed_statuses = set(contract["allowed_statuses"])
+    if status_s not in allowed_statuses:
+        return (
+            None,
+            f"invalid broker response status for request_id={request_id}: {status!r}",
+        )
+
+    if contract["require_deadline_utc"]:
+        deadline_utc = payload.get("deadline_utc")
+        if not isinstance(deadline_utc, str) or not deadline_utc.strip():
+            return (
+                None,
+                f"incomplete broker response deadline_utc for request_id={request_id}",
+            )
+
+    if contract["require_deadline_seconds"]:
+        deadline_seconds = payload.get("deadline_seconds")
+        if not isinstance(deadline_seconds, (int, float)) or float(deadline_seconds) <= 0.0:
+            return (
+                None,
+                f"incomplete broker response deadline_seconds for request_id={request_id}",
+            )
+
+    missing_artifacts = verification_broker_missing_response_artifacts(payload)
+    if missing_artifacts:
+        missing_list = ", ".join(missing_artifacts)
+        return (
+            None,
+            "incomplete broker response for request_id="
+            f"{request_id}: missing required artifact fields: {missing_list}",
+        )
+
+    if status_s in set(contract["workspace_hash_required_statuses"]):
+        workspace_hash_after_verification = payload.get("workspace_hash_after_verification")
+        if (
+            not isinstance(workspace_hash_after_verification, str)
+            or not workspace_hash_after_verification.strip()
+        ):
+            return (
+                None,
+                "incomplete broker response workspace_hash_after_verification "
+                f"for request_id={request_id}",
+            )
+
+    return payload, None
 
 
 def verification_broker_terminal_response_requires_artifacts(
@@ -1065,31 +1180,7 @@ class VerificationBrokerAttempt:
         response_path: Path,
         result: VerificationBrokerRequestResult,
     ) -> None:
-        _write_json_atomic(
-            response_path,
-            {
-                "schema_version": 2,
-                "request_id": result.request_id,
-                "attempt": result.attempt,
-                "status": result.status,
-                "terminal": _is_terminal_status(result.status),
-                "terminal_reason": result.terminal_reason,
-                "timed_out": result.timed_out,
-                "cancelled": result.cancelled,
-                "cancel_requested": result.cancel_requested,
-                "failure_reason": result.failure_reason,
-                "artifacts_dir": result.artifacts_dir,
-                "summary_path": result.summary_path,
-                "workspace_hash_after_verification": result.workspace_hash_after_verification,
-                "workspace_hash_mode": result.workspace_hash_mode,
-                "started_utc": result.started_utc,
-                "deadline_utc": result.deadline_utc,
-                "deadline_seconds": result.deadline_seconds,
-                "last_updated_utc": result.last_updated_utc,
-                "finished_utc": result.finished_utc,
-                "progress": result.progress,
-            },
-        )
+        _write_json_atomic(response_path, result.to_response_dict())
 
     def _record_result(
         self,
@@ -1162,6 +1253,7 @@ def _render_client_python(
     wait_timeout_seconds: float,
     required_terminal_artifacts: Sequence[str],
 ) -> str:
+    contract = _verification_broker_response_contract()
     payload = """from __future__ import annotations
 
 import json
@@ -1178,6 +1270,11 @@ REQUIRED_TERMINAL_ARTIFACT_FIELDS = __REQUIRED_TERMINAL_ARTIFACT_FIELDS__
 NO_ARTIFACT_FAILURE_REASONS = __NO_ARTIFACT_FAILURE_REASONS__
 NO_ARTIFACT_FAILURE_REASON_PREFIXES = __NO_ARTIFACT_FAILURE_REASON_PREFIXES__
 POLL_INTERVAL_SECONDS = 0.2
+ALLOWED_STATUSES = set(__ALLOWED_STATUSES__)
+ARTIFACT_REQUIRED_STATUSES = set(__ARTIFACT_REQUIRED_STATUSES__)
+WORKSPACE_HASH_REQUIRED_STATUSES = set(__WORKSPACE_HASH_REQUIRED_STATUSES__)
+REQUIRE_DEADLINE_UTC = __REQUIRE_DEADLINE_UTC__
+REQUIRE_DEADLINE_SECONDS = __REQUIRE_DEADLINE_SECONDS__
 
 
 def _write_json_atomic(path: Path, payload: dict[str, object]) -> None:
@@ -1207,16 +1304,20 @@ def _load_response(path: Path, request_id: str) -> tuple[dict[str, object] | Non
     status = payload.get("status")
     if not isinstance(status, str) or not status.strip():
         return None, f"invalid broker response status for request_id={request_id}"
-    if status.strip() not in {
-        "pending",
-        "running",
-        "cancelling",
-        "passed",
-        "failed",
-        "timed_out",
-        "cancelled",
-    }:
+    status = status.strip()
+    if status not in ALLOWED_STATUSES:
         return None, f"invalid broker response status for request_id={request_id}: {status!r}"
+    if REQUIRE_DEADLINE_UTC:
+        deadline_utc = payload.get("deadline_utc")
+        if not isinstance(deadline_utc, str) or not deadline_utc.strip():
+            return None, f"incomplete broker response deadline_utc for request_id={request_id}"
+    if REQUIRE_DEADLINE_SECONDS:
+        deadline_seconds = payload.get("deadline_seconds")
+        if not isinstance(deadline_seconds, (int, float)) or float(deadline_seconds) <= 0.0:
+            return (
+                None,
+                f"incomplete broker response deadline_seconds for request_id={request_id}",
+            )
     missing_artifacts = _missing_required_terminal_artifacts(payload)
     if missing_artifacts:
         missing_list = ", ".join(missing_artifacts)
@@ -1225,6 +1326,17 @@ def _load_response(path: Path, request_id: str) -> tuple[dict[str, object] | Non
             "incomplete broker response for request_id="
             f"{request_id}: missing required artifact fields: {missing_list}",
         )
+    if status in WORKSPACE_HASH_REQUIRED_STATUSES:
+        workspace_hash_after_verification = payload.get("workspace_hash_after_verification")
+        if (
+            not isinstance(workspace_hash_after_verification, str)
+            or not workspace_hash_after_verification.strip()
+        ):
+            return (
+                None,
+                "incomplete broker response workspace_hash_after_verification "
+                f"for request_id={request_id}",
+            )
     return payload, None
 
 
@@ -1387,6 +1499,23 @@ if __name__ == "__main__":
             repr(tuple(_BROKER_NO_ARTIFACT_FAILURE_REASON_PREFIXES)),
         )
         .replace("__HEARTBEAT_SECONDS__", repr(float(_BROKER_PROGRESS_HEARTBEAT_SECONDS)))
+        .replace("__ALLOWED_STATUSES__", json.dumps(list(contract["allowed_statuses"])))
+        .replace(
+            "__ARTIFACT_REQUIRED_STATUSES__",
+            json.dumps(list(contract["artifact_required_statuses"])),
+        )
+        .replace(
+            "__WORKSPACE_HASH_REQUIRED_STATUSES__",
+            json.dumps(list(contract["workspace_hash_required_statuses"])),
+        )
+        .replace(
+            "__REQUIRE_DEADLINE_UTC__",
+            "True" if contract["require_deadline_utc"] else "False",
+        )
+        .replace(
+            "__REQUIRE_DEADLINE_SECONDS__",
+            "True" if contract["require_deadline_seconds"] else "False",
+        )
     )
 
 

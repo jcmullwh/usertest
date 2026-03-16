@@ -397,6 +397,117 @@ def test_verification_broker_client_surfaces_progress_updates(tmp_path: Path) ->
     assert "phase=running_command" in completed.stdout
 
 
+def test_verification_broker_client_rejects_incomplete_pass_response(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    summary = {
+        "schema_version": 1,
+        "attempt_number": 1,
+        "commands_configured": [_verification_command()],
+        "passed": True,
+        "started_utc": "2026-03-07T00:00:00Z",
+        "finished_utc": "2026-03-07T00:00:01Z",
+        "wall_seconds": 0.01,
+        "commands": [
+            {
+                "command": _verification_command(),
+                "exit_code": 0,
+                "timed_out": False,
+            }
+        ],
+    }
+    broker = _make_broker_attempt(run_dir=run_dir, verifier=lambda _: summary)
+    broker.start()
+    try:
+        completed = _run_broker_wrapper(run_dir=run_dir, workspace_dir=tmp_path)
+    finally:
+        broker.stop()
+
+    assert completed.returncode != 0
+    assert "incomplete broker response" in completed.stderr
+    assert "artifacts_dir" in completed.stderr
+
+
+def test_verification_broker_uses_bounded_default_deadline_budget(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    captured: dict[str, float] = {}
+    expected_deadline = broker_mod._compute_broker_internal_deadline_seconds(
+        verification_timeout_seconds=None,
+        verification_command_count=2,
+    )
+    expected_wait_timeout = broker_mod._compute_client_wait_timeout(
+        internal_deadline_seconds=expected_deadline,
+    )
+
+    def _verifier(_: int, **kwargs: object) -> dict[str, object]:
+        captured["deadline_seconds"] = float(kwargs["deadline_seconds"])
+        return {
+            "schema_version": 1,
+            "attempt_number": 1,
+            "commands_configured": [_verification_command(), _verification_command()],
+            "passed": True,
+            "status": "passed",
+            "terminal_reason": "passed",
+            "started_utc": "2026-03-07T00:00:00Z",
+            "finished_utc": "2026-03-07T00:00:01Z",
+            "wall_seconds": 0.1,
+            "artifacts_dir": "verification/attempt1/broker_request_01",
+            "commands": [
+                {
+                    "command": _verification_command(),
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "cancelled": False,
+                }
+            ],
+        }
+
+    contract = broker_mod.resolve_verification_broker_contract(
+        command_prefix=(),
+        exec_backend="local",
+        validated_python_executable=sys.executable,
+        verification_timeout_seconds=None,
+        verification_command_count=2,
+        is_windows=(os.name == "nt"),
+    )
+
+    broker = VerificationBrokerAttempt(
+        run_dir=run_dir,
+        attempt_number=1,
+        client_root=run_dir / "verification_broker" / "client",
+        client_root_for_agent=str(run_dir / "verification_broker" / "client"),
+        attempt_root_for_agent=str(run_dir / "verification_broker" / "attempt1"),
+        contract=contract,
+        verifier=_verifier,
+        workspace_hash_fn=lambda: WorkspaceStateHash(
+            sha256="abc123",
+            mode="filesystem",
+            file_count=1,
+            deleted_count=0,
+        ),
+        utc_now_fn=lambda: "2026-03-07T00:00:00Z",
+        run_async_verifier=True,
+    )
+    broker.start()
+    try:
+        completed = _run_broker_wrapper(run_dir=run_dir, workspace_dir=tmp_path)
+    finally:
+        broker.stop()
+
+    assert completed.returncode == 0, completed.stderr
+    assert captured["deadline_seconds"] == expected_deadline
+    response_dir = run_dir / "verification_broker" / "attempt1" / "responses"
+    response_files = sorted(response_dir.glob("*.json"))
+    assert response_files
+    payload = json.loads(response_files[-1].read_text(encoding="utf-8"))
+    assert payload["deadline_seconds"] == expected_deadline
+    client_python = (run_dir / "verification_broker" / "client" / "verify_client.py").read_text(
+        encoding="utf-8"
+    )
+    assert f"WAIT_TIMEOUT_SECONDS = {expected_wait_timeout!r}" in client_python
+
+
 def test_write_json_atomic_retries_transient_permission_error(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -775,69 +886,50 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_response_is_incompl
     target = _setup_target_repo(tmp_path)
     _stub_codex_binary_preflight(monkeypatch)
 
-    incomplete_result = broker_mod.VerificationBrokerRequestResult(
-        request_id="req_incomplete",
-        attempt=1,
-        status="passed",
-        terminal_reason="passed",
-        started_utc="2026-03-07T00:00:00Z",
-        deadline_utc="2026-03-07T00:10:30Z",
-        deadline_seconds=630.0,
-        last_updated_utc="2026-03-07T00:00:01Z",
-        finished_utc="2026-03-07T00:00:01Z",
-        workspace_hash_after_verification="abc123",
-        workspace_hash_mode="filesystem",
-        artifacts_dir=None,
-        summary_path=None,
-        timed_out=False,
-        cancelled=False,
-        cancel_requested=False,
-        failure_reason=None,
-        progress=None,
-        verification_summary={
-            "schema_version": 1,
-            "attempt": 1,
-            "passed": True,
-            "status": "passed",
-            "terminal_reason": "passed",
-            "commands": [{"command": _verification_command(), "exit_code": 0}],
-        },
-    )
-
-    class _FakeBrokerAttempt:
-        def __init__(self, **_: object) -> None:
-            self._result = incomplete_result
-
-        def start(self) -> None:
-            return None
-
-        def stop(self) -> None:
-            return None
-
-        def request_ids(self) -> list[str]:
-            return [self._result.request_id]
-
-        def results(self) -> list[broker_mod.VerificationBrokerRequestResult]:
-            return [self._result]
-
-        def artifact_rows(self) -> list[dict[str, object]]:
-            return [self._result.to_artifact_dict()]
-
-        def latest_result(self) -> broker_mod.VerificationBrokerRequestResult:
-            return self._result
-
     def _fake_run_codex_exec(**kwargs: object) -> object:
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
+        run_dir = last_message_path.parent
+        workspace_dir = Path(str(kwargs["workspace_dir"]))
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
+        broker = _run_broker_wrapper(run_dir=run_dir, workspace_dir=workspace_dir)
+        assert broker.returncode != 0
+        assert "incomplete broker response" in broker.stderr
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
         return SimpleNamespace(exit_code=0, argv=["codex", "exec"])
 
-    monkeypatch.setattr(runner_mod, "VerificationBrokerAttempt", _FakeBrokerAttempt)
     monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
 
+    original_run_verification_commands = runner_mod._run_verification_commands
+
+    def _incomplete_broker_verification(*args: object, **kwargs: object) -> dict[str, object]:
+        artifacts_dir_rel = kwargs.get("artifacts_dir_rel")
+        artifacts_dir_rel_s = str(artifacts_dir_rel) if artifacts_dir_rel is not None else ""
+        if "broker_request_" in artifacts_dir_rel_s:
+            return {
+                "schema_version": 1,
+                "attempt_number": int(kwargs["attempt_number"]),
+                "commands_configured": [_verification_command()],
+                "passed": True,
+                "status": "passed",
+                "terminal_reason": "passed",
+                "started_utc": "2026-03-07T00:00:00Z",
+                "finished_utc": "2026-03-07T00:00:01Z",
+                "wall_seconds": 0.01,
+                "commands": [
+                    {
+                        "command": _verification_command(),
+                        "exit_code": 0,
+                        "timed_out": False,
+                        "cancelled": False,
+                    }
+                ],
+            }
+        return original_run_verification_commands(*args, **kwargs)
+
+    monkeypatch.setattr(runner_mod, "_run_verification_commands", _incomplete_broker_verification)
     cfg = RunnerConfig(
         repo_root=runner_root,
         runs_dir=tmp_path / "runs",
@@ -868,10 +960,68 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_response_is_incompl
     assert reuse["requests"][0]["required_artifacts_complete"] is False
     assert "artifacts_dir" in reuse["requests"][0]["missing_required_artifacts"]
     attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
-    assert attempts["attempts"][0]["verification"]["broker_missing_required_artifacts"] == [
+    attempt_verification = attempts["attempts"][0]["verification"]
+    assert attempt_verification["broker_missing_required_artifacts"] == [
         "artifacts_dir",
         "summary_path",
     ]
+    assert attempt_verification["broker_response_contract_error"]
+    assert attempt_verification["broker_response_failure_reason"] == "incomplete_broker_response"
+
+
+def test_run_once_fails_closed_when_selected_attempt_artifact_is_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    _stub_codex_binary_preflight(monkeypatch)
+
+    def _fake_run_codex_exec(**kwargs: object) -> object:
+        raw_events_path = Path(str(kwargs["raw_events_path"]))
+        last_message_path = Path(str(kwargs["last_message_path"]))
+        stderr_path = Path(str(kwargs["stderr_path"]))
+        run_dir = last_message_path.parent
+        workspace_dir = Path(str(kwargs["workspace_dir"]))
+        stderr_path.write_text("", encoding="utf-8")
+        broker = _run_broker_wrapper(run_dir=run_dir, workspace_dir=workspace_dir)
+        assert broker.returncode == 0, broker.stderr or broker.stdout
+        if raw_events_path.exists():
+            raw_events_path.unlink()
+        last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
+        return SimpleNamespace(exit_code=0, argv=["codex", "exec"])
+
+    monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": "codex"}},
+        policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+            verification_commands=(_verification_command(),),
+            verification_reuse_mode="auto",
+        ),
+    )
+
+    assert result.exit_code == 1
+    error_payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error_payload["subtype"] == "selected_attempt_artifacts_incomplete"
+    details = error_payload["details"]
+    assert any(
+        "missing_selected_attempt_artifact=raw_events:" in item
+        for item in details["errors"]
+    )
+    assert details["selected_verification_source"] == "broker_reuse"
 
 
 def test_run_once_serializes_failed_terminal_reason_into_report(
