@@ -493,6 +493,27 @@ def test_run_defers_review_until_for_review_and_green_ci(
         "usertest_implement.cli.finalize_push",
         lambda **_: {"pushed": True, "remote_name": "origin", "remote_url": "https://example.invalid/repo.git"},
     )
+    review_run_dir = repo_root / "runs" / "review" / "0"
+
+    def _fake_run_review_for_selected_ticket(**kwargs):
+        assert kwargs["repo_root"] == repo_root
+        assert kwargs["owner_root"] == target_repo
+        assert kwargs["implementation_run_dir"] == impl_run_dir
+        assert kwargs["review_agent"] == "claude"
+        assert kwargs["review_model"] == "review-model"
+        return (
+            review_run_dir,
+            {
+                "review_decision": "approved",
+                "merge_ready": True,
+                "ci_conclusion": "success",
+            },
+        )
+
+    monkeypatch.setattr(
+        "usertest_implement.cli._run_review_for_selected_ticket",
+        _fake_run_review_for_selected_ticket,
+    )
 
     def _fake_subprocess_run(argv, cwd=None, capture_output=None, text=None, check=None):
         if argv[:3] == ["gh", "pr", "create"]:
@@ -584,11 +605,10 @@ def test_run_defers_review_until_for_review_and_green_ci(
     handoff_summary = _read_json(impl_run_dir / "handoff_summary.json")
     assert isinstance(handoff_summary, dict)
     assert handoff_summary["pr_created"] is True
-    assert handoff_summary["review_required"] is False
-    assert handoff_summary["review_run_dir"] is None
-    assert handoff_summary["review_merge_ready"] is None
+    assert handoff_summary["review_required"] is True
+    assert handoff_summary["review_run_dir"] == str(review_run_dir)
+    assert handoff_summary["review_merge_ready"] is True
     assert handoff_summary["final_status"] == "success"
-    assert not (impl_run_dir / "review_ref.json").exists()
 
 
 def test_run_records_missing_gh_when_pr_create_exec_fails(
