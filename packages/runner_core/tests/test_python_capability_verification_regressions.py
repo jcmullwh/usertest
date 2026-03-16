@@ -18,6 +18,15 @@ from runner_core.execution_backend import ExecutionBackendContext
 _FIXTURE_PATH = Path(__file__).resolve().parent / "fixtures" / "python_capability_regressions.json"
 
 
+def _verification_command_text(command: Any) -> str:
+    if isinstance(command, str):
+        return command
+    command_text = getattr(command, "command", None)
+    if isinstance(command_text, str):
+        return command_text
+    raise AssertionError(f"Unsupported verification command payload: {command!r}")
+
+
 def _load_scenario(name: str) -> dict[str, Any]:
     payload = json.loads(_FIXTURE_PATH.read_text(encoding="utf-8"))
     scenario = payload.get(name)
@@ -319,7 +328,7 @@ def _run_fixture_backed_toolchain_case(
         run_dir: Path,
         attempt_number: int,
         command_prefix: list[str],
-        commands: list[str],
+        commands: list[Any],
         cwd: Path,
         timeout_seconds: float | None,
         python_executable: str | None,
@@ -340,6 +349,7 @@ def _run_fixture_backed_toolchain_case(
         artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
         artifacts_dir = run_dir / artifacts_dir_rel
         artifacts_dir.mkdir(parents=True, exist_ok=True)
+        command_texts = [_verification_command_text(cmd) for cmd in commands]
         summary = {
             "schema_version": 1,
             "passed": True,
@@ -353,7 +363,7 @@ def _run_fixture_backed_toolchain_case(
                     "timed_out": False,
                     "rejected_sentinel": False,
                 }
-                for cmd in commands
+                for cmd in command_texts
             ],
         }
         (artifacts_dir / "verification.json").write_text(
@@ -1002,7 +1012,7 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
         run_dir: Path,
         attempt_number: int,
         command_prefix: list[str],
-        commands: list[str],
+        commands: list[Any],
         cwd: Path,
         timeout_seconds: float | None,
         python_executable: str | None,
@@ -1016,6 +1026,7 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
         artifacts_dir_rel = Path("verification") / f"attempt{attempt_number}"
         artifacts_dir = run_dir / artifacts_dir_rel
         artifacts_dir.mkdir(parents=True, exist_ok=True)
+        command_texts = [_verification_command_text(cmd) for cmd in commands]
         summary = {
             "schema_version": 1,
             "passed": True,
@@ -1030,7 +1041,7 @@ def test_two_stage_python_preflight_pass_path_records_metadata(
                     "timed_out": False,
                     "rejected_sentinel": False,
                 }
-                for cmd in commands
+                for cmd in command_texts
             ],
         }
         (artifacts_dir / "verification.json").write_text(
