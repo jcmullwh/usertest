@@ -70,6 +70,12 @@ try {
     $pythonInfo = Resolve-UsablePython -RepoRoot $repoRoot
     $pythonCmd = $pythonInfo.CommandPath
     $env:USERTEST_PYTHON = $pythonCmd
+    $toolchainEnv = & $pythonCmd tools/python_toolchain.py resolve --repo-root $repoRoot --python-exe $pythonCmd --workflow snapshot_repo --emit powershell
+    if ($LASTEXITCODE -ne 0) {
+        exit $LASTEXITCODE
+    }
+    Invoke-Expression ($toolchainEnv -join [Environment]::NewLine)
+    $pythonCmd = $env:USERTEST_TOOLCHAIN_PYTHON_EXE
     Write-Host "==> Using Python: $($pythonInfo.Name) -> $pythonCmd"
 
     Write-Host '==> snapshot_repo'

@@ -76,54 +76,52 @@ uv, Node, Terraform, …).
 
 ## Setup paths
 
+For a fresh repo checkout, the canonical entrypoint is the repo script layer:
+
+- `scripts/doctor.*` to resolve a usable Python and check the environment
+- `scripts/smoke.*` for contributor bootstrap + smoke
+- `scripts/offline_first_success.*` for an offline-safe “first success”
+
+Do **not** make `py`, direct `pdm`, explicit interpreter paths, or ad hoc `.venv` creation your
+normal first step. Keep those as advanced/manual escape hatches after the script-backed path works.
+
 You can work with this repo in a few ways. Pick the one that matches your goals.
 
-### Option A: "Monorepo-native" (recommended for maintainers)
+### Option A: Repo scripts + scaffold (recommended for maintainers)
 
-This matches what CI does and is the best way to run lint/test across multiple projects.
-
-> **PDM prerequisite** — Before using any `pdm` command, ensure PDM is installed and accessible:
->
-> ```bash
-> # Install PDM (recommended via pipx for isolation, or pip into your active environment):
-> python -m pip install -U pdm
-> # Verify:
-> pdm --version
-> ```
->
-> PDM also uses the `virtualenv` package to create project venvs. Install it alongside PDM to avoid
-> `VirtualenvCreateError` when running `pdm install -G dev` in container or restricted environments:
->
-> ```bash
-> python -m pip install -U virtualenv
-> ```
->
-> If `pdm: command not found`, see the PDM installation guide or run the doctor with tool checks skipped first:
-> `python tools/scaffold/scaffold.py doctor --skip-tool-checks`
->
-> For first-use validation, `python tools/scaffold/scaffold.py run lint|test ...` can bootstrap missing host
-> prereqs from `requirements-dev.txt` and inject repo `src/` paths into `PYTHONPATH` automatically.
+This matches what CI does conceptually and is the best way to run lint/test across multiple
+projects, but the first-use entrypoint should be the repo wrappers because they resolve a usable
+Python before any install/test command runs.
 
 1) Ensure you have:
 
 - Python 3.11+
-- `pdm` installed (CI pins a specific version; you can use any recent version locally)
-- `virtualenv` installed (used by PDM to create project venvs; avoids `VirtualenvCreateError` in containers)
+- `git`
+- optional: `pdm` if you later choose to run project-local PDM commands directly
 
 2) Run the doctor:
 
 - Windows PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`
 - macOS / Linux: `bash ./scripts/doctor.sh`
-- Direct (any OS): `python tools/scaffold/scaffold.py doctor`
+- Advanced/direct (bypasses the wrapper's Python resolver): `python tools/scaffold/scaffold.py doctor`
 
-3) Install and test a project (example: the `usertest` CLI project id is `cli`):
+3) Run the canonical contributor bootstrap:
+
+- Windows: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1`
+- macOS/Linux: `bash ./scripts/smoke.sh`
+
+This path resolves Python first, fails fast when the interpreter selection is broken, installs the
+repo requirements, bootstraps the local editables by default, and runs the smoke suite.
+
+4) After the bootstrap succeeds, use scaffold for project-level tasks (example: the `usertest` CLI
+project id is `cli`):
 
 ```bash
 python tools/scaffold/scaffold.py run install --project cli
 python tools/scaffold/scaffold.py run test --project cli
 ```
 
-4) Run tasks across all projects (skip those without the task):
+5) Run tasks across all projects (skip those without the task):
 
 ```bash
 python tools/scaffold/scaffold.py run lint --all --skip-missing
@@ -134,9 +132,23 @@ python tools/scaffold/scaffold.py run test --all --skip-missing
 >
 > `tools/scaffold/monorepo.toml` is the source of truth.
 
-### Option B: “I just want to run the CLI” (quickest after the canonical newcomer-first path)
+If `scaffold run lint|test ...` later discovers missing host prerequisites, scaffold can bootstrap
+them from `requirements-dev.txt` and inject repo `src/` paths into `PYTHONPATH` automatically.
 
-If you only need `usertest` locally, you can do a normal editable install:
+### If the resolver rejects your environment
+
+If `doctor`, `smoke`, or `offline_first_success` prints `No usable Python interpreter found` or
+rejects candidates with reason codes like `windowsapps_alias`, `missing_stdlib`, `access_denied`,
+`context_mismatch`, or `not_found`, stop there and fix the interpreter/backend first.
+
+That early stop is intentional: it tells you the environment/toolchain is broken before `pip`,
+`pdm`, scaffold, or pytest get involved. If you already know the correct interpreter, point the
+wrappers at it with `USERTEST_PYTHON` and rerun the same wrapper.
+
+### Option B: Manual app-only install (advanced)
+
+If you only need `usertest` locally and intentionally want a manual install path, you can do a
+normal editable install:
 
 ```bash
 python -m pip install -r requirements-dev.txt
@@ -145,9 +157,10 @@ python -m usertest.cli --help
 # If you installed the console script: usertest --help
 ```
 
-This path is simple, but you lose the “run tasks across the whole monorepo” ergonomics.
+This is simple, but it is not the recommended first-use path for a fresh checkout because it
+bypasses the script-backed interpreter resolver.
 
-### Option C: Source-run via PYTHONPATH (fallback)
+### Option C: Source-run via PYTHONPATH (advanced fallback)
 
 If you intentionally don’t want editable installs, you can run from source using the helper scripts:
 
@@ -165,7 +178,8 @@ For the most copy/paste-friendly sanity check, use the OS-specific smoke script:
 - Windows: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1`
 - macOS/Linux: `bash ./scripts/smoke.sh`
 
-These run a small, deterministic checklist (doctor → install → CLI help → smoke tests).
+These run a small, deterministic checklist (doctor → install → CLI help → smoke tests) and resolve
+Python through `scripts/python_preflight.*` before they touch installs.
 
 ---
 

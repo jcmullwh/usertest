@@ -66,7 +66,11 @@ def _append_log(ctx: LoopContext, message: str) -> None:
     ctx.log_path.parent.mkdir(parents=True, exist_ok=True)
     with ctx.log_path.open("a", encoding="utf-8", newline="\n") as handle:
         handle.write(line + "\n")
-    print(line, file=sys.stderr, flush=True)
+    try:
+        print(line, file=sys.stderr, flush=True)
+    except OSError:
+        # Detached/background launches can expose an invalid stderr handle on Windows.
+        return
 
 
 def _write_state(ctx: LoopContext, **payload: Any) -> None:

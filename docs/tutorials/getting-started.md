@@ -135,14 +135,19 @@ See “Quickstart (one command)” above.
 
 ## Running from source (manual)
 
-If you prefer to manage your environment manually, you must install dependencies and configure `PYTHONPATH` for this monorepo.
+If you prefer to manage your environment manually:
 
 1. **Install minimal dependencies:**
    ```bash
    python -m pip install -r requirements-dev.txt
    ```
 
-2. **Set PYTHONPATH:**
+2. **Install the package (editable):**
+   ```bash
+   python -m pip install -e apps/usertest
+   ```
+
+   *Alternative (source-run without editable installs):* set `PYTHONPATH` instead:
    - **Windows PowerShell:** `. .\scripts\set_pythonpath.ps1`
    - **macOS / Linux:** `source scripts/set_pythonpath.sh`
 
@@ -151,8 +156,9 @@ If you prefer to manage your environment manually, you must install dependencies
    python -m usertest.cli --help
    ```
 
-If you see a `Missing import ...` message with a hint to run `scripts/set_pythonpath.*`, you’re running from a
-monorepo checkout without the required `PYTHONPATH` configuration.
+If you see a `Missing import ...` message, either the editable install did not complete or `PYTHONPATH`
+is not configured. Run `bash ./scripts/smoke.sh` (macOS/Linux) or the PowerShell equivalent to
+resolve setup in one step.
 
 ---
 

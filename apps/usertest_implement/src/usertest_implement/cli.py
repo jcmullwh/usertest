@@ -1887,6 +1887,7 @@ def _build_handoff_summary(
     push_ref: dict[str, Any] | None,
     pr_ref: dict[str, Any] | None,
     ci_gate: dict[str, Any] | None,
+    review_required: bool,
     review_run_dir: Path | None,
     review_summary: dict[str, Any] | None,
     review_error: str | None,
@@ -1925,7 +1926,6 @@ def _build_handoff_summary(
             pr_url = pr_url_raw.strip()
 
     pushed = bool(isinstance(push_ref, dict) and push_ref.get("pushed") is True)
-    review_required = False
     review_decision = None
     review_merge_ready = None
     if isinstance(review_summary, dict):
@@ -1950,7 +1950,7 @@ def _build_handoff_summary(
         "ci_status": ci_status,
         "ci_run_url": ci_run_url,
         "ci_conclusion": ci_conclusion,
-        "review_required": review_required,
+        "review_required": bool(review_required),
         "review_run_dir": str(review_run_dir) if review_run_dir is not None else None,
         "review_decision": review_decision,
         "review_merge_ready": review_merge_ready,
@@ -2425,8 +2425,6 @@ def _run_selected_ticket(
         if args.pr:
             if not commit_performed:
                 pr_ref["error"] = "Skipping PR creation: no commit was performed."
-            elif shutil.which("gh") is None:
-                pr_ref["error"] = "gh not found on PATH"
             else:
                 if workspace_dir is None:
                     pr_ref["error"] = "Missing workspace_ref.json; cannot locate workspace"
@@ -2539,33 +2537,37 @@ def _run_selected_ticket(
                         pass
                     else:
                         pr_ref["body"] = pr_body
-                        proc = subprocess.run(
-                            [
-                                "gh",
-                                "pr",
-                                "create",
-                                "--base",
-                                str(args.base_branch),
-                                "--title",
-                                title,
-                                "--body",
-                                pr_body,
-                                *(["--draft"] if create_draft else []),
-                            ],
-                            cwd=str(workspace_dir),
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                        )
-                        if proc.returncode == 0:
-                            pr_ref["created"] = True
-                            pr_ref["url"] = proc.stdout.strip() or None
-                        else:
-                            pr_ref["error"] = (
-                                proc.stderr.strip()
-                                or proc.stdout.strip()
-                                or f"gh failed ({proc.returncode})"
+                        try:
+                            proc = subprocess.run(
+                                [
+                                    "gh",
+                                    "pr",
+                                    "create",
+                                    "--base",
+                                    str(args.base_branch),
+                                    "--title",
+                                    title,
+                                    "--body",
+                                    pr_body,
+                                    *(["--draft"] if create_draft else []),
+                                ],
+                                cwd=str(workspace_dir),
+                                capture_output=True,
+                                text=True,
+                                check=False,
                             )
+                        except OSError:
+                            pr_ref["error"] = "gh not found on PATH"
+                        else:
+                            if proc.returncode == 0:
+                                pr_ref["created"] = True
+                                pr_ref["url"] = proc.stdout.strip() or None
+                            else:
+                                pr_ref["error"] = (
+                                    proc.stderr.strip()
+                                    or proc.stdout.strip()
+                                    or f"gh failed ({proc.returncode})"
+                                )
         _write_json(run_dir / "pr_ref.json", pr_ref)
 
     if (
@@ -2617,9 +2619,51 @@ def _run_selected_ticket(
         except Exception as e:
             print(f"WARNING: failed to update ledger: {e}", file=sys.stderr)
 
+    review_required = bool(
+        args.pr
+        and isinstance(pr_ref, dict)
+        and pr_ref.get("created") is True
+        and isinstance(args.implementation_review_agent, str)
+        and args.implementation_review_agent.strip()
+    )
     review_run_dir: Path | None = None
     review_summary: dict[str, Any] | None = None
     review_error: str | None = None
+    if review_required:
+        owner_root = selected.owner_root if selected.owner_root is not None else repo_root
+        resolved_ledger_path = (
+            _resolve_ledger_path(repo_root=repo_root, raw=args.ledger)
+            if args.ledger is not None
+            else _DEFAULT_LEDGER_PATH
+        )
+        try:
+            review_run_dir, review_summary = _run_review_for_selected_ticket(
+                repo_root=repo_root,
+                cfg=cfg,
+                owner_root=owner_root,
+                selected=selected,
+                implementation_run_dir=run_dir,
+                ledger_path=resolved_ledger_path,
+                review_agent=str(args.implementation_review_agent),
+                review_model=args.implementation_review_model,
+                review_policy=str(args.policy),
+                review_persona_id=_DEFAULT_REVIEW_PERSONA_ID,
+                review_mission_id=_DEFAULT_REVIEW_MISSION_ID,
+                review_seed=int(args.seed),
+                review_agent_config_override=list(getattr(args, "agent_config_override", []) or []),
+                keep_workspace=bool(args.keep_workspace),
+                exec_backend=str(args.exec_backend),
+                exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
+                exec_use_target_sandbox_cli_install=bool(args.exec_use_target_sandbox_cli_install),
+                exec_docker_profile=getattr(args, "exec_docker_profile", None),
+                exec_keep_container=bool(args.exec_keep_container),
+                exec_cache=str(args.exec_cache),
+                exec_cache_dir=args.exec_cache_dir,
+                maintenance_venv_cache=bool(args.maintenance_venv_cache),
+                dry_run=bool(args.dry_run),
+            )
+        except SystemExit as exc:
+            review_error = str(exc)
 
     handoff_summary = _build_handoff_summary(
         branch=branch,
@@ -2627,6 +2671,7 @@ def _run_selected_ticket(
         push_ref=push_ref,
         pr_ref=pr_ref,
         ci_gate=_read_json(run_dir / "ci_gate.json"),
+        review_required=review_required,
         review_run_dir=review_run_dir,
         review_summary=review_summary,
         review_error=review_error,

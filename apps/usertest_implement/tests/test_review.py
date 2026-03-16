@@ -502,6 +502,27 @@ def test_run_defers_review_until_for_review_and_green_ci(
         "usertest_implement.cli.finalize_push",
         lambda **_: {"pushed": True, "remote_name": "origin", "remote_url": "https://example.invalid/repo.git"},
     )
+    review_run_dir = repo_root / "runs" / "review" / "0"
+
+    def _fake_run_review_for_selected_ticket(**kwargs):
+        assert kwargs["repo_root"] == repo_root
+        assert kwargs["owner_root"] == target_repo
+        assert kwargs["implementation_run_dir"] == impl_run_dir
+        assert kwargs["review_agent"] == "claude"
+        assert kwargs["review_model"] == "review-model"
+        return (
+            review_run_dir,
+            {
+                "review_decision": "approved",
+                "merge_ready": True,
+                "ci_conclusion": "success",
+            },
+        )
+
+    monkeypatch.setattr(
+        "usertest_implement.cli._run_review_for_selected_ticket",
+        _fake_run_review_for_selected_ticket,
+    )
 
     def _fake_subprocess_run(argv, cwd=None, capture_output=None, text=None, check=None):
         if argv[:3] == ["gh", "pr", "create"]:
@@ -513,6 +534,10 @@ def test_run_defers_review_until_for_review_and_green_ci(
         raise AssertionError(f"unexpected subprocess call: {argv}")
 
     monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr(
+        "usertest_implement.cli.shutil.which", 
+        lambda cmd: "/usr/bin/gh" if cmd == "gh" else None
+    )
 
     args = argparse.Namespace(
         repo_root=repo_root,
@@ -589,11 +614,133 @@ def test_run_defers_review_until_for_review_and_green_ci(
     handoff_summary = _read_json(impl_run_dir / "handoff_summary.json")
     assert isinstance(handoff_summary, dict)
     assert handoff_summary["pr_created"] is True
-    assert handoff_summary["review_required"] is False
-    assert handoff_summary["review_run_dir"] is None
-    assert handoff_summary["review_merge_ready"] is None
+    assert handoff_summary["review_required"] is True
+    assert handoff_summary["review_run_dir"] == str(review_run_dir)
+    assert handoff_summary["review_merge_ready"] is True
     assert handoff_summary["final_status"] == "success"
-    assert not (impl_run_dir / "review_ref.json").exists()
+
+
+def test_run_records_missing_gh_when_pr_create_exec_fails(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo_root"
+    repo_root.mkdir(parents=True)
+    target_repo = tmp_path / "target_repo"
+    target_repo.mkdir(parents=True)
+    ticket_path = _make_ticket(target_repo, bucket="2 - ready", fingerprint="ghghghghghghghgh")
+    impl_run_dir = repo_root / "runs" / "impl" / "0"
+    impl_run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    def _fake_run_once(_cfg, _request):
+        _write_json(
+            impl_run_dir / "workspace_ref.json",
+            {"workspace_dir": str(workspace_dir)},
+        )
+        return SimpleNamespace(run_dir=impl_run_dir, exit_code=0, report_validation_errors=[])
+
+    monkeypatch.setattr("usertest_implement.cli.run_once", _fake_run_once)
+    monkeypatch.setattr(
+        "usertest_implement.cli._maintenance_profile_is_eligible",
+        lambda **_: False,
+    )
+    monkeypatch.setattr("usertest_implement.cli._git_head_sha", lambda _workspace_dir: "abc123")
+    monkeypatch.setattr(
+        "usertest_implement.cli.finalize_commit",
+        lambda **_: {"commit_performed": True, "branch": "backlog/test", "head_commit": "abc123"},
+    )
+    monkeypatch.setattr(
+        "usertest_implement.cli.finalize_push",
+        lambda **_: {"pushed": True, "remote_name": "origin", "remote_url": "https://example.invalid/repo.git"},
+    )
+
+    def _fake_subprocess_run(argv, cwd=None, capture_output=None, text=None, check=None):
+        if argv[:3] == ["gh", "pr", "create"]:
+            raise OSError("CreateProcess failed")
+        raise AssertionError(f"unexpected subprocess call: {argv}")
+
+    monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
+
+    args = argparse.Namespace(
+        repo_root=repo_root,
+        settings=None,
+        settings_profile=None,
+        repo=str(target_repo),
+        ref=None,
+        agent="codex",
+        model=None,
+        policy="write",
+        persona_id="thoughtful_maintainer",
+        mission_id="implement_maintenance_backlog_ticket_v1",
+        implementation_review_agent="claude",
+        implementation_review_model="review-model",
+        seed=0,
+        agent_config_override=[],
+        keep_workspace=False,
+        exec_backend="local",
+        exec_use_host_agent_login=True,
+        exec_use_target_sandbox_cli_install=False,
+        exec_docker_profile=None,
+        exec_keep_container=True,
+        exec_cache="warm",
+        exec_cache_dir=None,
+        maintenance_venv_cache=True,
+        dry_run=False,
+        verification_commands=[],
+        verification_timeout_seconds=None,
+        skip_verify=False,
+        verify_reuse="auto",
+        ci_timeout_seconds=60.0,
+        skip_ci_wait=True,
+        draft_pr_on_ci_failure=True,
+        commit=True,
+        branch=None,
+        commit_message=None,
+        git_user_name=None,
+        git_user_email=None,
+        push=True,
+        remote_name="origin",
+        remote_url=None,
+        force_push=False,
+        base_branch="dev",
+        pr=True,
+        move_on_start=False,
+        move_on_commit=True,
+        ledger=Path(".agents/state/backlog_implement_actions.yaml"),
+        ticket_path=ticket_path,
+        tickets_export=None,
+        fingerprint=None,
+        _settings_info=None,
+    )
+
+    cfg = object()
+    selected = SelectedTicket(
+        fingerprint="ghghghghghghghgh",
+        title="Ticket",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=target_repo,
+        idea_path=ticket_path,
+        ticket_markdown=ticket_path.read_text(encoding="utf-8"),
+        tickets_export_path=None,
+        export_index=None,
+    )
+
+    exit_code = implement_cli._run_selected_ticket(
+        args=args,
+        repo_root=repo_root,
+        cfg=cfg,
+        selected=selected,
+    )
+
+    assert exit_code == 5
+    pr_ref = _read_json(impl_run_dir / "pr_ref.json")
+    assert isinstance(pr_ref, dict)
+    assert pr_ref["created"] is False
+    assert pr_ref["error"] == "gh not found on PATH"
+
 
 def test_review_run_refuses_when_ticket_not_in_for_review(monkeypatch, tmp_path: Path) -> None:
     repo_root = tmp_path / "repo_root"
