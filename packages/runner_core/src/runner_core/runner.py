@@ -93,9 +93,9 @@ from runner_core.verification_broker import (
     render_verification_broker_command,
     resolve_verification_broker_contract,
     resolve_verification_launcher,
+    validate_verification_broker_response_payload,
     verification_broker_missing_result_artifacts,
     verification_broker_runtime_prerequisites,
-    validate_verification_broker_response_payload,
 )
 from runner_core.verification_broker import (
     probe_windows_bash_usable as _probe_windows_bash_usable_impl,
