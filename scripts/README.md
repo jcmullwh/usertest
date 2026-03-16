@@ -6,7 +6,25 @@ They are convenience helpers; the “official” monorepo workflow is driven by 
 
 ---
 
-## Smoke scripts
+## Offline-safe first success (canonical newcomer-first path)
+
+Use these one-command wrappers first when you want an offline-safe newcomer success signal:
+
+- Windows PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1`
+- macOS/Linux: `bash ./scripts/offline_first_success.sh`
+
+Success signal: prints a “Scratch run dir” path containing a freshly re-rendered `report.md`.
+
+Compatibility aliases:
+
+- `offline_fixture_rerender.sh`
+- `offline_fixture_rerender.ps1`
+
+These aliases stay available for backwards compatibility, but `offline_first_success.*` is the primary newcomer-first path.
+
+---
+
+## Smoke scripts (secondary developer sanity check)
 
 - `smoke.sh`
 - `smoke.ps1`
@@ -15,7 +33,7 @@ They are convenience helpers; the “official” monorepo workflow is driven by 
 - `python_preflight.sh` (shared bash Python resolver)
 - `python_preflight.ps1` (shared Windows Python resolver)
 
-These run a deterministic checklist used in onboarding and CI verification:
+These run a deterministic checklist used for the secondary developer sanity check and CI verification:
 
 - doctor
 - install
@@ -68,8 +86,10 @@ With no args, they default to writing `repo_snapshot.zip`. To preview without wr
 
 These configure `PYTHONPATH` so you can run CLIs from source without editable installs.
 
-### One-command fixture rerender (offline-safe)
+### Offline-safe rerender internals
 
+- `offline_first_success.sh`
+- `offline_first_success.ps1`
 - `offline_fixture_rerender.sh`
 - `offline_fixture_rerender.ps1`
 

@@ -1,10 +1,11 @@
 # How to run a usertest
 
-This guide uses the module invocation form (`python -m usertest.cli ...`), which works even if you
-haven’t installed the `usertest` console script yet.
+The canonical newcomer-first path lives in `docs/tutorials/getting-started.md`: run the offline-safe
+first-success script first, then use the installed-console-script command for the first real run.
 
-If you did install the console script, you can replace `python -m usertest.cli` with `usertest` in
-all examples.
+This guide uses the module invocation form (`python -m usertest.cli ...`) as the documented fallback
+for source-run and explicit examples. If you did install the console script, you can replace
+`python -m usertest.cli` with `usertest` in all examples.
 
 If you don’t yet have a working environment, start with `docs/tutorials/getting-started.md`.
 
@@ -35,11 +36,21 @@ python -m usertest.cli personas list --repo-root .
 python -m usertest.cli missions list --repo-root .
 ```
 
-Run with explicit IDs:
+Run with the canonical first-real-run IDs:
 
 ```text
-python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id burst_user --mission-id produce_default_output
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke
 ```
+
+The built-in `first_output_smoke` mission requires shell commands and edits, so the canonical first real run uses `--policy write`.
+
+Read-only alternative:
+
+```text
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id privacy_locked_run
+```
+
+Use `privacy_locked_run` with `--policy inspect` when you want a read-only first probe instead.
 
 ---
 

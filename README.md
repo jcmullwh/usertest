@@ -35,7 +35,7 @@ Once we have all of those target issues, we need to implement them.
   project environments and zero-copy `.venv` cache mounts so repeated maintenance does not spend
   most of its time reinstalling the monorepo.
 
-## Quickstart (one command)
+## Quickstart (canonical newcomer-first path)
 
 Run the offline-safe “first success” script (creates a local `.venv`, installs minimal deps, sets `PYTHONPATH`, and re-renders a golden fixture report — **no agents**, **no network calls**):
 
@@ -50,7 +50,7 @@ Run the offline-safe “first success” script (creates a local `.venv`, instal
 
 Success signal: prints a “Scratch run dir” path containing a freshly re-rendered `report.md`.
 
-## Developer smoke (one command, optional)
+## Developer smoke (secondary developer sanity check)
 
 For a deterministic end-to-end sanity check (doctor -> deps -> CLI help -> pytest smoke suite):
 
@@ -62,7 +62,7 @@ For a deterministic end-to-end sanity check (doctor -> deps -> CLI help -> pytes
 - **Docs hub:** `docs/README.md`
 - **Tutorial:** `docs/tutorials/getting-started.md`
 - **Monorepo setup + scaffold workflow:** `docs/tutorials/monorepo-setup.md`
-- **One-command smoke (per OS):** `scripts/smoke.ps1` (Windows) / `scripts/smoke.sh` (macOS/Linux)
+- **Developer smoke (secondary):** `scripts/smoke.ps1` (Windows) / `scripts/smoke.sh` (macOS/Linux)
 - **Shareable repo snapshot ZIP:** `scripts/snapshot_repo.ps1` (Windows) / `scripts/snapshot_repo.sh` (macOS/Linux)
 
 ## Fastest output (no setup)
@@ -74,7 +74,7 @@ Open the checked-in golden fixture artifacts directly (no Python deps required):
 
 ### One-command "from source" verification
 
-See “Quickstart (one command)” above.
+See “Quickstart (canonical newcomer-first path)” above.
 
 ### Running from source (manual)
 
@@ -108,7 +108,7 @@ There are three main “kinds” in this specific project:
 
 The monorepo is managed by `tools/scaffold/scaffold.py` (manifest-driven task runner and project generator). CI uses the scaffold manifest to generate its job matrix.
 
-## Quickstart
+## Full setup and first real run
 
 ### Requirements
 
@@ -134,10 +134,10 @@ Convenience wrappers:
 - Windows PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`
 - macOS/Linux: `bash ./scripts/doctor.sh`
 
-### One copy-paste smoke command per OS
+### Developer smoke details (secondary developer sanity check)
 
-These commands are self-contained (no implicit prior shell state) and enforce non-zero exit on
-failure.
+These optional commands are self-contained (no implicit prior shell state) and enforce non-zero exit on
+failure after you have already validated the canonical newcomer-first path.
 
 Windows PowerShell:
 
@@ -233,9 +233,19 @@ macOS/Linux:
 
 ## Run a single target
 
-After install (editable or PYTHONPATH), run:
+After install, the canonical first real run uses the installed console script:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+
+The built-in `first_output_smoke` mission requires shell commands and edits, so the canonical first real run uses `--policy write`.
+
+From-source fallback (same run via module form):
+
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+
+Read-only alternative when you want a safer first probe instead:
+
+`usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id privacy_locked_run`
 
 Local directory example (initializes `.usertest/` scaffold):
 
@@ -243,7 +253,7 @@ Local directory example (initializes `.usertest/` scaffold):
 
 Then run against that directory (requires an agent CLI + credentials):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`usertest run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 List built-in personas/missions:
 

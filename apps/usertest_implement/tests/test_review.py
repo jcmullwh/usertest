@@ -504,6 +504,10 @@ def test_run_defers_review_until_for_review_and_green_ci(
         raise AssertionError(f"unexpected subprocess call: {argv}")
 
     monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr(
+        "usertest_implement.cli.shutil.which",
+        lambda cmd: "/usr/bin/gh" if cmd == "gh" else None,
+    )
 
     args = argparse.Namespace(
         repo_root=repo_root,

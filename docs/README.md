@@ -80,3 +80,11 @@ If you are new, start with **Tutorials**.
 - **I’m integrating a new agent adapter (developer/agent)** → `docs/agents/`
 - **I’m reviewing the system contract** → `docs/design/run-artifacts.md`
 - **I’m operating the repo (CI/publish/security)** → `docs/ops/`
+
+---
+
+## Maintainers: onboarding contract
+
+The newcomer-first onboarding copy is anchored by `tools/onboarding_contract.py`. When the canonical
+path or shell-specific fallback ladder changes, update that contract first and then run
+`python tools/check_onboarding_contract.py`.

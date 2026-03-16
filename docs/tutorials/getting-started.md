@@ -30,7 +30,7 @@ Run the doctor first to get a one-screen **PASS/FAIL** and copy/paste next actio
 
 ---
 
-## Step 1: offline-safe first success (one command)
+## Step 1: offline-safe first success (canonical newcomer-first path)
 
 Run the offline-safe “first success” script (creates a local `.venv`, installs minimal deps, sets `PYTHONPATH`, and re-renders a golden fixture report — **no agents**, **no network calls**):
 
@@ -45,7 +45,7 @@ Run the offline-safe “first success” script (creates a local `.venv`, instal
 
 Success signal: prints a “Scratch run dir” path containing a freshly re-rendered `report.md`.
 
-## Developer smoke (one command, optional)
+## Developer smoke (secondary developer sanity check)
 
 For a deterministic end-to-end sanity check (doctor -> deps -> CLI help -> pytest smoke suite):
 
@@ -119,7 +119,7 @@ To understand what a run produces without installing anything, open the checked-
 
 ### One-command "from source" verification
 
-See “Quickstart (one command)” above.
+See “Step 1: offline-safe first success (canonical newcomer-first path)” above.
 
 ---
 
@@ -162,9 +162,9 @@ Useful helpers:
 
 ---
 
-## One-command smoke (recommended for developers)
+## One-command smoke (secondary developer sanity check)
 
-See “Developer smoke (one command, optional)” above.
+See “Developer smoke (secondary developer sanity check)” above.
 
 ---
 
@@ -247,11 +247,21 @@ and what “success” means. If present, it is snapshotted into the run directo
 
 ### 4) Run
 
-For a first attempt, use `inspect` (read-only + allows shell commands):
+Recommended installed-CLI first run (primary):
 
 ```text
-usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke
 ```
+
+The built-in `first_output_smoke` mission requires shell commands and edits, so the canonical first real run uses `--policy write`.
+
+Read-only alternative when you want a safer first probe instead:
+
+```text
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id privacy_locked_run
+```
+
+Use `privacy_locked_run` with `--policy inspect` when you want a read-only first probe instead.
 
 Strictest mode (no shell, no writes):
 

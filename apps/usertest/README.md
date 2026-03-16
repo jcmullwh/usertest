@@ -43,12 +43,18 @@ usertest --help
 
 Run a single target and write a run directory under `runs/usertest/…`.
 
+Canonical first real run:
+
 ```bash
-usertest run \
-  --repo-root . \
-  --repo "PATH_OR_GIT_URL" \
-  --agent codex \
-  --policy inspect
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke
+```
+
+The built-in `first_output_smoke` mission requires shell commands and edits, so the canonical first real run uses `--policy write`.
+
+Read-only alternative:
+
+```bash
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id privacy_locked_run
 ```
 
 ### `usertest batch`

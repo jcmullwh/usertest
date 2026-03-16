@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-from usertest.cli import _from_source_import_remediation, _one_command_first_success_remediation
+from usertest_backlog.cli import _one_command_first_success_remediation
 
 
 def _load_contract() -> ModuleType:
@@ -19,17 +19,7 @@ def _load_contract() -> ModuleType:
     return module
 
 
-def test_from_source_import_remediation_mentions_supported_fixes() -> None:
-    contract = _load_contract()
-    msg = _from_source_import_remediation(missing_module="agent_adapters")
-    assert "requirements-dev.txt" in msg
-    assert contract.OFFLINE_FIRST_SUCCESS.windows in msg
-    assert contract.OFFLINE_FIRST_SUCCESS.posix in msg
-    assert contract.SET_PYTHONPATH.windows in msg
-    assert contract.SET_PYTHONPATH.posix in msg
-
-
-def test_usertest_cli_uses_canonical_quick_fix_text() -> None:
+def test_backlog_cli_uses_canonical_quick_fix_text() -> None:
     contract = _load_contract()
     assert _one_command_first_success_remediation() == (
         contract.one_command_first_success_remediation()
