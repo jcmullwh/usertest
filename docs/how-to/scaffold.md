@@ -18,14 +18,16 @@ For the full reference (generators, trust model, vendoring), see `tools/scaffold
 
 - **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`
 - **macOS / Linux:** `bash ./scripts/doctor.sh`
-- **Direct (any OS):** `python tools/scaffold/scaffold.py doctor`
+- **Direct (any OS, advanced):** `python tools/scaffold/scaffold.py doctor`
 
-This checks Python + temp directory health, reports whether `python -m pip` works, and checks required tools for recorded projects.
+Prefer the wrappers for first-use validation because they resolve a usable Python before invoking
+scaffold. This checks Python + temp directory health, reports whether `python -m pip` works, and
+checks required tools for recorded projects.
 If you want doctor to fail when `pip` is missing, you can run:
 
 - **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1 -RequirePip`
 - **macOS / Linux:** `bash ./scripts/doctor.sh --require-pip`
-- **Direct (any OS):** `python tools/scaffold/scaffold.py doctor --require-pip`
+- **Direct (any OS, advanced):** `python tools/scaffold/scaffold.py doctor --require-pip`
 
 ---
 

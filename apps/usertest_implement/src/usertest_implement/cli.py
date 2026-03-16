@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import re
 import shutil
 import subprocess
@@ -70,6 +69,7 @@ try:
         cleanup_local_maintenance_images,
         list_local_maintenance_images,
     )
+    from runner_core.runner import _normalize_verification_commands_for_execution
 except ModuleNotFoundError as exc:
     if _is_missing_module(exc, "runner_core"):
         raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
@@ -101,12 +101,12 @@ class SelectedTicket:
     title: str | None
     export_kind: str | None
     stage: str | None
-    scope: str | None
     owner_root: Path | None
     idea_path: Path | None
     ticket_markdown: str
     tickets_export_path: Path | None
     export_index: int | None
+    scope: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1888,6 +1888,7 @@ def _build_handoff_summary(
     push_ref: dict[str, Any] | None,
     pr_ref: dict[str, Any] | None,
     ci_gate: dict[str, Any] | None,
+    review_required: bool,
     review_run_dir: Path | None,
     review_summary: dict[str, Any] | None,
     review_error: str | None,
@@ -1926,7 +1927,6 @@ def _build_handoff_summary(
             pr_url = pr_url_raw.strip()
 
     pushed = bool(isinstance(push_ref, dict) and push_ref.get("pushed") is True)
-    review_required = False
     review_decision = None
     review_merge_ready = None
     if isinstance(review_summary, dict):
@@ -1951,7 +1951,7 @@ def _build_handoff_summary(
         "ci_status": ci_status,
         "ci_run_url": ci_run_url,
         "ci_conclusion": ci_conclusion,
-        "review_required": review_required,
+        "review_required": bool(review_required),
         "review_run_dir": str(review_run_dir) if review_run_dir is not None else None,
         "review_decision": review_decision,
         "review_merge_ready": review_merge_ready,
@@ -2119,6 +2119,20 @@ def _run_selected_ticket(
         maintenance_eligible=maintenance_profile_eligible,
     )
 
+    exec_cache = str(getattr(args, "exec_cache", "cold") or "cold")
+    exec_cache_dir = getattr(args, "exec_cache_dir", None)
+    if exec_cache_dir is not None:
+        exec_cache_dir = exec_cache_dir.resolve()
+    if exec_cache == "warm" and exec_cache_dir is None:
+        exec_cache_dir = repo_root / "runs" / "_cache" / "usertest_implement"
+    maintenance_venv_cache = bool(
+        exec_backend == "docker"
+        and exec_cache == "warm"
+        and bool(getattr(args, "maintenance_venv_cache", True))
+    )
+
+    ticket_blob = _compose_ticket_blob(selected)
+
     request = RunRequest(
         repo=str(effective_repo_input),
         ref=effective_ref,
@@ -2147,6 +2161,16 @@ def _run_selected_ticket(
     )
 
     if args.dry_run:
+        effective_verification_commands = [
+            spec.command
+            for spec in _normalize_verification_commands_for_execution(
+                request.verification_commands,
+                verification_profile=request.verification_profile,
+                verification_scope=request.verification_scope,
+                exec_backend=request.exec_backend,
+                exec_docker_profile=request.exec_docker_profile,
+            )
+        ]
         selected_dict = asdict(selected)
         selected_dict["owner_root"] = (
             str(selected.owner_root) if selected.owner_root is not None else None
@@ -2175,7 +2199,7 @@ def _run_selected_ticket(
                 "exec_cache": request.exec_cache,
                 "exec_maintenance_venv_cache": request.exec_maintenance_venv_cache,
                 "verification_profile": verification_profile,
-                "verification_commands": list(request.verification_commands),
+                "verification_commands": effective_verification_commands,
                 "verification_timeout_seconds": request.verification_timeout_seconds,
                 "verification_reuse_mode": request.verification_reuse_mode,
                 "commit": bool(args.commit),
@@ -2376,8 +2400,6 @@ def _run_selected_ticket(
         if args.pr:
             if not commit_performed:
                 pr_ref["error"] = "Skipping PR creation: no commit was performed."
-            elif shutil.which("gh") is None:
-                pr_ref["error"] = "gh not found on PATH"
             else:
                 if workspace_dir is None:
                     pr_ref["error"] = "Missing workspace_ref.json; cannot locate workspace"
@@ -2490,33 +2512,37 @@ def _run_selected_ticket(
                         pass
                     else:
                         pr_ref["body"] = pr_body
-                        proc = subprocess.run(
-                            [
-                                "gh",
-                                "pr",
-                                "create",
-                                "--base",
-                                str(args.base_branch),
-                                "--title",
-                                title,
-                                "--body",
-                                pr_body,
-                                *(["--draft"] if create_draft else []),
-                            ],
-                            cwd=str(workspace_dir),
-                            capture_output=True,
-                            text=True,
-                            check=False,
-                        )
-                        if proc.returncode == 0:
-                            pr_ref["created"] = True
-                            pr_ref["url"] = proc.stdout.strip() or None
-                        else:
-                            pr_ref["error"] = (
-                                proc.stderr.strip()
-                                or proc.stdout.strip()
-                                or f"gh failed ({proc.returncode})"
+                        try:
+                            proc = subprocess.run(
+                                [
+                                    "gh",
+                                    "pr",
+                                    "create",
+                                    "--base",
+                                    str(args.base_branch),
+                                    "--title",
+                                    title,
+                                    "--body",
+                                    pr_body,
+                                    *(["--draft"] if create_draft else []),
+                                ],
+                                cwd=str(workspace_dir),
+                                capture_output=True,
+                                text=True,
+                                check=False,
                             )
+                        except OSError:
+                            pr_ref["error"] = "gh not found on PATH"
+                        else:
+                            if proc.returncode == 0:
+                                pr_ref["created"] = True
+                                pr_ref["url"] = proc.stdout.strip() or None
+                            else:
+                                pr_ref["error"] = (
+                                    proc.stderr.strip()
+                                    or proc.stdout.strip()
+                                    or f"gh failed ({proc.returncode})"
+                                )
         _write_json(run_dir / "pr_ref.json", pr_ref)
 
     if (
@@ -2568,9 +2594,51 @@ def _run_selected_ticket(
         except Exception as e:
             print(f"WARNING: failed to update ledger: {e}", file=sys.stderr)
 
+    review_required = bool(
+        args.pr
+        and isinstance(pr_ref, dict)
+        and pr_ref.get("created") is True
+        and isinstance(args.implementation_review_agent, str)
+        and args.implementation_review_agent.strip()
+    )
     review_run_dir: Path | None = None
     review_summary: dict[str, Any] | None = None
     review_error: str | None = None
+    if review_required:
+        owner_root = selected.owner_root if selected.owner_root is not None else repo_root
+        resolved_ledger_path = (
+            _resolve_ledger_path(repo_root=repo_root, raw=args.ledger)
+            if args.ledger is not None
+            else _DEFAULT_LEDGER_PATH
+        )
+        try:
+            review_run_dir, review_summary = _run_review_for_selected_ticket(
+                repo_root=repo_root,
+                cfg=cfg,
+                owner_root=owner_root,
+                selected=selected,
+                implementation_run_dir=run_dir,
+                ledger_path=resolved_ledger_path,
+                review_agent=str(args.implementation_review_agent),
+                review_model=args.implementation_review_model,
+                review_policy=str(args.policy),
+                review_persona_id=_DEFAULT_REVIEW_PERSONA_ID,
+                review_mission_id=_DEFAULT_REVIEW_MISSION_ID,
+                review_seed=int(args.seed),
+                review_agent_config_override=list(getattr(args, "agent_config_override", []) or []),
+                keep_workspace=bool(args.keep_workspace),
+                exec_backend=str(args.exec_backend),
+                exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
+                exec_use_target_sandbox_cli_install=bool(args.exec_use_target_sandbox_cli_install),
+                exec_docker_profile=getattr(args, "exec_docker_profile", None),
+                exec_keep_container=bool(args.exec_keep_container),
+                exec_cache=str(args.exec_cache),
+                exec_cache_dir=args.exec_cache_dir,
+                maintenance_venv_cache=bool(args.maintenance_venv_cache),
+                dry_run=bool(args.dry_run),
+            )
+        except SystemExit as exc:
+            review_error = str(exc)
 
     handoff_summary = _build_handoff_summary(
         branch=branch,
@@ -2578,6 +2646,7 @@ def _run_selected_ticket(
         push_ref=push_ref,
         pr_ref=pr_ref,
         ci_gate=_read_json(run_dir / "ci_gate.json"),
+        review_required=review_required,
         review_run_dir=review_run_dir,
         review_summary=review_summary,
         review_error=review_error,

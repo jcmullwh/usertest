@@ -17,7 +17,10 @@ def test_normalize_verification_commands_prepends_scaffold_install() -> None:
 
     effective = runner_mod._normalize_verification_commands_for_execution(commands)
 
-    assert effective[0].command == "python tools/scaffold/scaffold.py run --all --skip-missing install"
+    assert (
+        effective[0].command
+        == "python tools/scaffold/scaffold.py run --all --skip-missing install"
+    )
     assert effective[0].track == runner_mod.VerificationTrack.BOOTSTRAP
     assert [e.command for e in effective[1:]] == list(commands)
 

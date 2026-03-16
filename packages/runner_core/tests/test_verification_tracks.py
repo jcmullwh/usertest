@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 
@@ -21,9 +20,12 @@ def test_run_verification_commands_repo_health_failure_does_not_block(
             self.stdout = "ok\n" if returncode == 0 else "fail\n"
             self.stderr = ""
             self.args = list(argv)
-        
-        def poll(self): return self.returncode
-        def wait(self): return self.returncode
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self) -> int:
+            return self.returncode
 
     def _fake_run(argv: list[str], **kwargs: Any) -> _Proc:
         calls.append(list(argv))
@@ -38,9 +40,18 @@ def test_run_verification_commands_repo_health_failure_does_not_block(
         run_dir=tmp_path / "run",
         attempt_number=1,
         commands=[
-            VerificationCommandSpec(command="echo scoped-pass", track=VerificationTrack.CHANGE_VALIDATION),
-            VerificationCommandSpec(command="echo fail-me-repo-health", track=VerificationTrack.REPO_HEALTH),
-            VerificationCommandSpec(command="echo repo-health-2", track=VerificationTrack.REPO_HEALTH),
+            VerificationCommandSpec(
+                command="echo scoped-pass",
+                track=VerificationTrack.CHANGE_VALIDATION,
+            ),
+            VerificationCommandSpec(
+                command="echo fail-me-repo-health",
+                track=VerificationTrack.REPO_HEALTH,
+            ),
+            VerificationCommandSpec(
+                command="echo repo-health-2",
+                track=VerificationTrack.REPO_HEALTH,
+            ),
         ],
         command_prefix=[],
         cwd=tmp_path,
@@ -63,10 +74,11 @@ def test_run_verification_commands_change_validation_failure_blocks(
 ) -> None:
     def _fake_run(argv: list[str], **kwargs: Any):
         class _Proc:
-            def __init__(self, returncode: int):
+            def __init__(self, returncode: int) -> None:
                 self.returncode = returncode
                 self.stdout = ""
                 self.stderr = ""
+
         if "fail-me" in " ".join(argv):
             return _Proc(1)
         return _Proc(0)
@@ -77,8 +89,14 @@ def test_run_verification_commands_change_validation_failure_blocks(
         run_dir=tmp_path / "run",
         attempt_number=1,
         commands=[
-            VerificationCommandSpec(command="echo fail-me-scoped", track=VerificationTrack.CHANGE_VALIDATION),
-            VerificationCommandSpec(command="echo repo-health", track=VerificationTrack.REPO_HEALTH),
+            VerificationCommandSpec(
+                command="echo fail-me-scoped",
+                track=VerificationTrack.CHANGE_VALIDATION,
+            ),
+            VerificationCommandSpec(
+                command="echo repo-health",
+                track=VerificationTrack.REPO_HEALTH,
+            ),
         ],
         command_prefix=[],
         cwd=tmp_path,
@@ -98,10 +116,11 @@ def test_run_verification_commands_bootstrap_failure_blocks(
 ) -> None:
     def _fake_run(argv: list[str], **kwargs: Any):
         class _Proc:
-            def __init__(self, returncode: int):
+            def __init__(self, returncode: int) -> None:
                 self.returncode = returncode
                 self.stdout = ""
                 self.stderr = ""
+
         if "fail-me" in " ".join(argv):
             return _Proc(1)
         return _Proc(0)
@@ -112,8 +131,14 @@ def test_run_verification_commands_bootstrap_failure_blocks(
         run_dir=tmp_path / "run",
         attempt_number=1,
         commands=[
-            VerificationCommandSpec(command="echo fail-me-bootstrap", track=VerificationTrack.BOOTSTRAP),
-            VerificationCommandSpec(command="echo scoped", track=VerificationTrack.CHANGE_VALIDATION),
+            VerificationCommandSpec(
+                command="echo fail-me-bootstrap",
+                track=VerificationTrack.BOOTSTRAP,
+            ),
+            VerificationCommandSpec(
+                command="echo scoped",
+                track=VerificationTrack.CHANGE_VALIDATION,
+            ),
         ],
         command_prefix=[],
         cwd=tmp_path,
