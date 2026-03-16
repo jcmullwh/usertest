@@ -21,6 +21,7 @@ $paths = @(
     (Join-Path $RepoRoot "packages/runner_core/src"),
     (Join-Path $RepoRoot "packages/agent_adapters/src"),
     (Join-Path $RepoRoot "packages/normalized_events/src"),
+    (Join-Path $RepoRoot "packages/onboarding_contract/src"),
     (Join-Path $RepoRoot "packages/reporter/src"),
     (Join-Path $RepoRoot "packages/sandbox_runner/src"),
     (Join-Path $RepoRoot "packages/triage_engine/src"),

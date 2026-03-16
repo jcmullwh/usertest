@@ -716,6 +716,44 @@ def _validate_project_venv(*, project_dir: Path) -> bool:
     return version == expected
 
 
+def _project_venv_requires_external_fallback(*, project_dir: Path) -> bool:
+    """
+    Detect an unreadable `.venv` entry.
+
+    On some host-mounted filesystems, a restored cached virtualenv can surface as a
+    directory-junction/mount entry. If that backing cache entry is later removed, the
+    `.venv` name still appears in the directory listing but `lstat()` and normal
+    filesystem operations fail. In that state, `pdm install` cannot recreate the venv in
+    place, so PDM commands must be redirected to an out-of-project venv location.
+    """
+
+    venv_dir = project_dir / ".venv"
+    try:
+        children = os.listdir(project_dir)
+    except OSError:
+        return False
+    if ".venv" not in children:
+        return False
+    try:
+        os.lstat(venv_dir)
+    except OSError:
+        return True
+    return False
+
+
+def _external_pdm_venv_root(*, repo_root: Path) -> Path:
+    return repo_root / ".scaffold" / "pdm_venvs"
+
+
+def _external_pdm_venv_marker_path(*, repo_root: Path, project_id: str) -> Path:
+    return _external_pdm_venv_root(repo_root=repo_root) / ".project_markers" / f"{project_id}.json"
+
+
+def _write_external_pdm_venv_marker(*, repo_root: Path, project_id: str) -> None:
+    marker_path = _external_pdm_venv_marker_path(repo_root=repo_root, project_id=project_id)
+    _write_json_file(marker_path, {"schema_version": 1, "project_id": project_id})
+
+
 def _install_cache_restore(*, state: _InstallCacheState, project_dir: Path, project_id: str) -> bool:
     if not state.enabled or state.venv_cache_dir is None:
         return False
@@ -730,7 +768,7 @@ def _install_cache_restore(*, state: _InstallCacheState, project_dir: Path, proj
         ) as tmp:
             tmp_path = Path(tmp)
             staged = tmp_path / "venv"
-            shutil.copytree(state.venv_cache_dir, staged, symlinks=True)
+            shutil.copytree(state.venv_cache_dir, staged, symlinks=False)
             target = project_dir / ".venv"
             if target.exists():
                 shutil.rmtree(target, ignore_errors=True)
@@ -766,7 +804,7 @@ def _install_cache_restore_from_seed(
         ) as tmp:
             tmp_path = Path(tmp)
             staged = tmp_path / "venv"
-            shutil.copytree(state.seed_venv_dir, staged, symlinks=True)
+            shutil.copytree(state.seed_venv_dir, staged, symlinks=False)
             target = project_dir / ".venv"
             if target.exists():
                 shutil.rmtree(target, ignore_errors=True)
@@ -830,7 +868,7 @@ def _install_cache_save(*, state: _InstallCacheState, project_dir: Path, project
         if temp_entry.exists():
             shutil.rmtree(temp_entry, ignore_errors=True)
         (temp_entry / "venv").parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(venv_dir, temp_entry / "venv", symlinks=True)
+        shutil.copytree(venv_dir, temp_entry / "venv", symlinks=False)
         _write_json_file(
             temp_entry / "meta.json",
             {
@@ -913,6 +951,21 @@ def _run_manifest_task(
     # fails due to Windows file locking.
     env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
 
+    repo_root = _repo_root()
+    external_venv_root = _external_pdm_venv_root(repo_root=repo_root)
+    external_venv_marker = _external_pdm_venv_marker_path(repo_root=repo_root, project_id=project_id)
+    use_external_pdm_venv = _project_venv_requires_external_fallback(project_dir=cwd)
+    if external_venv_marker.exists():
+        use_external_pdm_venv = True
+    if use_external_pdm_venv:
+        external_venv_root.mkdir(parents=True, exist_ok=True)
+        env.setdefault("PDM_VENV_IN_PROJECT", "0")
+        env.setdefault("PDM_VENV_PATH", str(external_venv_root))
+        _eprint(
+            "WARNING: project .venv requires external fallback for "
+            f"'{project_id}'; using external PDM venv root at {external_venv_root}."
+        )
+
     if task_name != "install" or not _is_pdm_install_command(cmd):
         return _run(cmd, cwd=cwd, env=env)
 
@@ -934,12 +987,34 @@ def _run_manifest_task(
         )
 
     cache_state = _build_install_cache_state(
-        repo_root=_repo_root(),
+        repo_root=repo_root,
         project_dir=cwd,
         project_id=project_id,
         install_cmd=cmd,
         cache_enabled=_install_cache_enabled(),
     )
+    if (
+        not use_external_pdm_venv
+        and os.path.ismount(cwd / ".venv")
+        and not _local_install_metadata_matches(state=cache_state)
+    ):
+        use_external_pdm_venv = True
+        external_venv_root.mkdir(parents=True, exist_ok=True)
+        env.setdefault("PDM_VENV_IN_PROJECT", "0")
+        env.setdefault("PDM_VENV_PATH", str(external_venv_root))
+        _eprint(
+            "WARNING: cached project .venv mount requires dependency updates for "
+            f"'{project_id}'; using external PDM venv root at {external_venv_root}."
+        )
+    if use_external_pdm_venv:
+        cp = _run(cmd, cwd=cwd, capture=True, env=env)
+        _emit_captured_process_output(cp)
+        if cp.returncode == 0:
+            try:
+                _write_external_pdm_venv_marker(repo_root=repo_root, project_id=project_id)
+            except OSError as exc:
+                _eprint(f"INFO: {project_id}: external-pdm-venv marker write skipped ({exc}).")
+        return cp
     if cache_state.enabled and _local_install_metadata_matches(state=cache_state):
         _eprint(f"INFO: {project_id}: maint-venv-cache hit-local ({cache_state.fingerprint[:12]}).")
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")

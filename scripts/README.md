@@ -4,9 +4,15 @@ This folder contains small repo scripts.
 
 They are convenience helpers; the “official” monorepo workflow is driven by `tools/scaffold/`.
 
+Onboarding precedence:
+
+1. **Canonical newcomer-first path:** `offline_first_success.ps1` / `offline_first_success.sh`
+2. **Diagnostic alternate:** `doctor.ps1` / `doctor.sh`
+3. **Secondary developer sanity check:** `smoke.ps1` / `smoke.sh`
+
 ---
 
-## Smoke scripts
+## Doctor + smoke scripts
 
 - `smoke.sh`
 - `smoke.ps1`
@@ -15,7 +21,8 @@ They are convenience helpers; the “official” monorepo workflow is driven by 
 - `python_preflight.sh` (shared bash Python resolver)
 - `python_preflight.ps1` (shared Windows Python resolver)
 
-These run a deterministic checklist used in onboarding and CI verification:
+These are the diagnostic / developer-sanity-check entrypoints that come after, or alongside, the
+canonical newcomer-first path:
 
 - doctor
 - install
@@ -68,16 +75,26 @@ With no args, they default to writing `repo_snapshot.zip`. To preview without wr
 
 These configure `PYTHONPATH` so you can run CLIs from source without editable installs.
 
-### One-command fixture rerender (offline-safe)
+### Canonical newcomer-first path (offline-safe)
 
-- `offline_fixture_rerender.sh`
-- `offline_fixture_rerender.ps1`
+- `offline_first_success.sh`
+- `offline_first_success.ps1`
 
 These scripts create/use a local `.venv`, install `requirements-dev.txt`, set `PYTHONPATH`, and
 re-render a golden fixture report in a scratch directory.
 
-They are a quick way to verify that the repo can render reports *from source* without calling any
-agents. They do **not** validate agent quality or end-to-end runtime behavior.
+They are the canonical newcomer-first onboarding path for this repo: a quick way to verify that the
+repo can render reports *from source* without calling any agents or network services.
+
+- Windows PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1`
+- macOS / Linux: `bash ./scripts/offline_first_success.sh`
+
+### Backwards-compatible fixture rerender aliases
+
+- `offline_fixture_rerender.sh`
+- `offline_fixture_rerender.ps1`
+
+These wrappers continue to point at `offline_first_success.*` for compatibility.
 
 ### From-source pytest example
 

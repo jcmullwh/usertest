@@ -15,9 +15,19 @@ The runner can drive multiple agent CLIs (Codex, Claude Code, Gemini) in headles
 
 ---
 
+## Onboarding contract
+
+- **Canonical newcomer-first path:** Step 1 offline-safe first success.
+- **Diagnostic alternate:** Step 0 doctor when you want PASS/FAIL setup guidance first.
+- **Secondary developer sanity check:** Developer smoke after the canonical path.
+- **Canonical first real run:** `usertest run ... --policy write --mission-id first_output_smoke`.
+- **Source-friendly alternate invocation:** `python -m usertest.cli run ...` with the same flags.
+
+---
+
 ## Step 0: doctor (recommended)
 
-Run the doctor first to get a one-screen **PASS/FAIL** and copy/paste next actions:
+Run the doctor when you want a one-screen **PASS/FAIL** and copy/paste next actions before or after the canonical newcomer-first path:
 
 - **Windows PowerShell:**
   ```powershell
@@ -247,16 +257,23 @@ and what “success” means. If present, it is snapshotted into the run directo
 
 ### 4) Run
 
-For a first attempt, use `inspect` (read-only + allows shell commands):
+For the canonical first real run, use the built-in `first_output_smoke` mission with `write`
+because that mission requires edits:
 
 ```text
-usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke
 ```
 
-Strictest mode (no shell, no writes):
+If you have not installed the console script yet, use the same command via module invocation:
+
+```text
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke
+```
+
+Read-only probe instead (shell allowed, no edits):
 
 ```bash
-usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy safe
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --mission-id privacy_locked_run
 ```
 
 ### 5) Inspect the output
@@ -290,11 +307,13 @@ Full guide: `docs/how-to/personas-and-missions.md`.
 
 ## If you run into issues
 
-- If the agent is blocked by policy, switch to `--policy inspect` (read-only + shell).
+- If the agent is blocked by policy, switch to the policy required by the selected mission.
+  `first_output_smoke` requires `--policy write`; read-only probes should use a non-edit mission such
+  as `privacy_locked_run` with `--policy inspect`.
 - If you need isolation or want fewer OS-specific shell issues, use the Docker backend:
 
 ```bash
-usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker
 ```
 
 More workflows: `docs/how-to/run-usertest.md`.

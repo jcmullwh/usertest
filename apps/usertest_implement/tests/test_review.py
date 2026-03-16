@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from runner_core.runner import RunResult
 
 import usertest_implement.cli as implement_cli
@@ -19,6 +20,14 @@ from usertest_implement.cli import (
     _run_gh_json,
     _run_gh_text,
 )
+
+
+@pytest.fixture(autouse=True)
+def _stub_gh_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        "usertest_implement.cli.shutil.which",
+        lambda cmd: "/usr/bin/gh" if cmd == "gh" else None,
+    )
 
 
 def _write_json(path: Path, obj: object) -> None:

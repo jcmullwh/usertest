@@ -5,7 +5,7 @@
 groups = ["default", "dev"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:98708eb5ebe950ef6bbc5c86430619d848a9f6442ff89f6f0b47f73ad6778cb3"
+content_hash = "sha256:8cb7e8ac14a2edffd9231ece824a6658f44d2f918533a26d48b198a1d21b2e37"
 
 [[metadata.targets]]
 requires_python = ">=3.11"
@@ -254,6 +254,14 @@ version = "0.1.0"
 requires_python = ">=3.11"
 path = "../../packages/normalized_events"
 summary = "Shared normalized-events contract + JSONL helpers"
+groups = ["default"]
+
+[[package]]
+name = "onboarding-contract"
+version = "0.2.0"
+requires_python = ">=3.11"
+path = "../../packages/onboarding_contract"
+summary = "Shared newcomer-first onboarding contract for the usertest monorepo"
 groups = ["default"]
 
 [[package]]

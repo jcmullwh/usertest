@@ -7,6 +7,7 @@ requires-python = ">=3.11"
 dependencies = [
   "agent-adapters @ file:///${PROJECT_ROOT}/../../packages/agent_adapters",
   "normalized_events @ file:///${PROJECT_ROOT}/../../packages/normalized_events",
+  "onboarding_contract @ file:///${PROJECT_ROOT}/../../packages/onboarding_contract",
   "pyyaml>=6.0.3",
   "reporter @ file:///${PROJECT_ROOT}/../../packages/reporter",
   "run_artifacts @ file:///${PROJECT_ROOT}/../../packages/run_artifacts",

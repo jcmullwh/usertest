@@ -1,9 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import os
 import sys
 from pathlib import Path
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_ONBOARDING_CONTRACT_SRC = _REPO_ROOT / "packages" / "onboarding_contract" / "src"
+if _ONBOARDING_CONTRACT_SRC.is_dir():
+    sys.path.insert(0, str(_ONBOARDING_CONTRACT_SRC))
+
+command_path = importlib.import_module("onboarding_contract").command_path
 
 
 def _is_under(path: Path, root: Path) -> bool:
@@ -87,16 +95,19 @@ def main(argv: list[str] | None = None) -> int:
     print(f"    expected under: {repo_root}", file=sys.stderr)
     print(f"    resolved at:    {resolved_str}", file=sys.stderr)
     print("", file=sys.stderr)
+    doctor = command_path("doctor")
+    smoke = command_path("smoke")
+
     print("    Run the prerequisite check first:", file=sys.stderr)
     print("      python tools/scaffold/scaffold.py doctor", file=sys.stderr)
-    print("        (Windows wrapper: powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\doctor.ps1)", file=sys.stderr)
-    print("        (macOS/Linux wrapper: bash ./scripts/doctor.sh)", file=sys.stderr)
+    print(f"        (Windows wrapper: {doctor.command_for('windows_powershell')})", file=sys.stderr)
+    print(f"        (macOS/Linux wrapper: {doctor.command_for('posix_bash')})", file=sys.stderr)
     print("", file=sys.stderr)
     print("    Fix options:", file=sys.stderr)
     print("      - Use PYTHONPATH mode (recommended for smoke scripts):", file=sys.stderr)
-    print("          bash ./scripts/smoke.sh --use-pythonpath", file=sys.stderr)
+    print(f"          {smoke.command_for('posix_bash')} --use-pythonpath", file=sys.stderr)
     print(
-        "          powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1 -UsePythonPath",
+        f"          {smoke.command_for('windows_powershell')} -UsePythonPath",
         file=sys.stderr,
     )
     print("      - Or use an isolated venv and reinstall editables from this repo.", file=sys.stderr)
@@ -113,4 +124,3 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

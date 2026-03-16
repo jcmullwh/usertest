@@ -1,10 +1,17 @@
 # How to run a usertest
 
-This guide uses the module invocation form (`python -m usertest.cli ...`), which works even if you
-haven’t installed the `usertest` console script yet.
+This guide uses the module invocation form (`python -m usertest.cli ...`), which is the
+source-friendly alternate entrypoint when you have not installed the `usertest` console script yet.
 
 If you did install the console script, you can replace `python -m usertest.cli` with `usertest` in
-all examples.
+all examples. The newcomer-first tutorial (`docs/tutorials/getting-started.md`) uses the console
+script for the canonical first real run after setup succeeds.
+
+For reference, the source-friendly alternate form of that canonical first real run is:
+
+```text
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke
+```
 
 If you don’t yet have a working environment, start with `docs/tutorials/getting-started.md`.
 
@@ -46,7 +53,7 @@ python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex 
 ## Policies: safe vs inspect vs write
 
 - Use `--policy safe` when you want the strictest mode.
-- Use `--policy inspect` for most onboarding probes (read-only + shell).
+- Use `--policy inspect` for read-only probes (read-only + shell).
 - Use `--policy write` when you intentionally want edits.
 
 Policies apply to **agent tool permissions during the run**.

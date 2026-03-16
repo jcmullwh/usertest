@@ -52,6 +52,21 @@ tasks.test = ["pdm", "run", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
+id = "onboarding_contract"
+kind = "lib"
+path = "packages/onboarding_contract"
+generator = "python_pdm_lib"
+toolchain = "python"
+package_manager = "pdm"
+ci = { lint = true, test = true, build = false }
+tasks.format = ["pdm", "run", "ruff", "format", "."]
+tasks.install = ["pdm", "install"]
+tasks.lint = ["pdm", "run", "ruff", "check", "."]
+tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
+tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.typecheck = ["pdm", "run", "mypy", "."]
+
+[[projects]]
 id = "reporter"
 kind = "lib"
 path = "packages/reporter"

@@ -10,6 +10,10 @@ The goal is to allow fast iteration, experimentation, and evolution of a project
 
 This tutorial explains the mental model and shows the supported setup paths.
 
+If you are brand new to the repo, start with the canonical newcomer-first path in the repo root
+`README.md` or `docs/tutorials/getting-started.md` first. This tutorial covers the maintainer /
+developer setup paths that come after that first success.
+
 ---
 
 ## Monorepo mental model
@@ -130,7 +134,7 @@ python tools/scaffold/scaffold.py run test --all --skip-missing
 >
 > `tools/scaffold/monorepo.toml` is the source of truth.
 
-### Option B: “I just want to run the CLI” (quickest)
+### Option B: “I just want to run the CLI” (quickest after the canonical newcomer-first path)
 
 If you only need `usertest` locally, you can do a normal editable install:
 
@@ -154,7 +158,7 @@ If you forget this step, the CLIs will fail fast with a short `Missing import ..
 
 ---
 
-## The smoke scripts
+## The smoke scripts (secondary developer sanity check)
 
 For the most copy/paste-friendly sanity check, use the OS-specific smoke script:
 

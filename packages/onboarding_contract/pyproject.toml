@@ -1,0 +1,45 @@
+[project]
+name = "onboarding_contract"
+version = "0.2.0"
+description = "Shared newcomer-first onboarding contract for the usertest monorepo"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["pdm-backend>=2.0.0"]
+build-backend = "pdm.backend"
+
+[tool.pdm]
+distribution = true
+
+[tool.pytest.ini_options]
+addopts = "-q"
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unused_configs = true
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = [
+  "B",
+  "E",
+  "F",
+  "I",
+  "UP",
+]
+ignore = ["UP017"]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.8.0",
+  "pytest>=8.0.0",
+  "ruff>=0.14.0",
+]

@@ -18,10 +18,17 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
-_WINDOWS_OFFLINE_FIRST_SUCCESS_CMD = (
-    r"powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1"
-)
-_POSIX_OFFLINE_FIRST_SUCCESS_CMD = "bash ./scripts/offline_first_success.sh"
+try:
+    from onboarding_contract import render_first_success_remediation
+except ModuleNotFoundError:
+    _ONBOARDING_CONTRACT_SRC = (
+        Path(__file__).resolve().parents[4] / "packages" / "onboarding_contract" / "src"
+    )
+    if _ONBOARDING_CONTRACT_SRC.is_dir():
+        sys.path.insert(0, str(_ONBOARDING_CONTRACT_SRC))
+        from onboarding_contract import render_first_success_remediation
+    else:
+        raise
 _BREADTH_PROFILE_EXTERNAL = "external_generalization"
 _BREADTH_PROFILE_INTERNAL = "internal_maintenance"
 _BREADTH_PROFILE_CHOICES = (
@@ -36,11 +43,7 @@ _REVIEW_DOMAIN_BEHAVIOR_COMPAT = "behavior_compat"
 
 
 def _one_command_first_success_remediation() -> str:
-    return (
-        "Quick fix (recommended): from repo root, run ONE of:\n"
-        f"  - Windows PowerShell: `{_WINDOWS_OFFLINE_FIRST_SUCCESS_CMD}`\n"
-        f"  - macOS/Linux: `{_POSIX_OFFLINE_FIRST_SUCCESS_CMD}`"
-    )
+    return render_first_success_remediation()
 
 
 def _missing_dependency_remediation(*, dependency: str, import_name: str) -> str:

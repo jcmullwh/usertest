@@ -35,7 +35,9 @@ Once we have all of those target issues, we need to implement them.
   project environments and zero-copy `.venv` cache mounts so repeated maintenance does not spend
   most of its time reinstalling the monorepo.
 
-## Quickstart (one command)
+## Quickstart (canonical newcomer-first path)
+
+This is the canonical newcomer-first path from repo root. Use doctor only when you want setup diagnostics first, and use smoke only after this path when you want a broader developer sanity check.
 
 Run the offline-safe “first success” script (creates a local `.venv`, installs minimal deps, sets `PYTHONPATH`, and re-renders a golden fixture report — **no agents**, **no network calls**):
 
@@ -50,7 +52,7 @@ Run the offline-safe “first success” script (creates a local `.venv`, instal
 
 Success signal: prints a “Scratch run dir” path containing a freshly re-rendered `report.md`.
 
-## Developer smoke (one command, optional)
+## Developer smoke (secondary one-command sanity check)
 
 For a deterministic end-to-end sanity check (doctor -> deps -> CLI help -> pytest smoke suite):
 
@@ -123,9 +125,9 @@ The monorepo is managed by `tools/scaffold/scaffold.py` (manifest-driven task ru
 - Optional: `pdm` (for the scaffold-based install flow)
 - Optional: `docker` (for the Docker execution backend)
 
-### Step 0: doctor
+### Step 0: doctor (diagnostic)
 
-Run this first in any setup path:
+Run this when you want a PASS/FAIL environment check and copy/paste remediation before or after the canonical newcomer-first path:
 
 `python tools/scaffold/scaffold.py doctor`
 
@@ -134,7 +136,7 @@ Convenience wrappers:
 - Windows PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\doctor.ps1`
 - macOS/Linux: `bash ./scripts/doctor.sh`
 
-### One copy-paste smoke command per OS
+### One copy-paste smoke command per OS (secondary developer path)
 
 These commands are self-contained (no implicit prior shell state) and enforce non-zero exit on
 failure.
@@ -233,9 +235,13 @@ macOS/Linux:
 
 ## Run a single target
 
-After install (editable or PYTHONPATH), run:
+Canonical first real run after install (editable or PYTHONPATH):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+
+Alternate source-friendly invocation if you have not installed the console script:
+
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 Local directory example (initializes `.usertest/` scaffold):
 
@@ -243,7 +249,7 @@ Local directory example (initializes `.usertest/` scaffold):
 
 Then run against that directory (requires an agent CLI + credentials):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`usertest run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
 
 List built-in personas/missions:
 
@@ -294,8 +300,8 @@ Execution-policy notes:
 - Execution policies apply to agent tool permissions during `run`/`batch`; host-side CLI commands
   such as `python -m usertest.cli --help` are unaffected.
 - `--policy safe` is strictest (no writes; and for Claude/Gemini, no shell commands).
-- `--policy inspect` is read-only but allows shell commands (recommended for first-success probing
-  workflows on Claude/Gemini).
+- `--policy inspect` is read-only but allows shell commands (recommended for read-only probing
+  workflows or missions that do not require edits).
 - Built-in `first_output_smoke` / `produce_default_output` missions require edits; use `--policy write` for those runs.
 - Which policy should I use?
   - Read-only + shell (no edits): `--policy inspect`
