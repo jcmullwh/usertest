@@ -8,6 +8,16 @@
 
 $ErrorActionPreference = 'Stop'
 
+function Write-PreflightErr {
+    param(
+        [Parameter(Mandatory = $true)]
+        [AllowEmptyString()]
+        [string]$Message
+    )
+
+    [Console]::Error.WriteLine($Message)
+}
+
 function _Quote-ProcessArg {
     param([Parameter(Mandatory = $true)][string]$Value)
     if ($Value -notmatch '[\s"]') {
@@ -400,12 +410,20 @@ function Resolve-UsablePython {
     $lines += "No usable Python interpreter found (within ~$TimeoutSeconds seconds)."
     $lines += ""
     $lines += "Tried:"
-    foreach ($line in $rejections) { $lines += "  - $line" }
+    if ($rejections.Count -eq 0) {
+        $lines += "  - No candidates were discovered."
+    }
+    else {
+        foreach ($line in $rejections) { $lines += "  - $line" }
+    }
     $lines += ""
     $lines += "Fix options:"
     $lines += "  1) Install CPython (python.org) or via winget: winget install -e --id Python.Python.3.13"
     $lines += "  2) Disable App Execution Alias shims: Settings -> Apps -> Advanced app settings -> App execution aliases -> turn off python.exe/python3.exe"
     $lines += "  3) Use a portable/vendored Python and put its folder first on PATH"
 
-    throw ($lines -join "`n")
+    foreach ($line in $lines) {
+        Write-PreflightErr $line
+    }
+    return $null
 }

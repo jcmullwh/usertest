@@ -71,7 +71,11 @@ from runner_core.pip_target import (
 from runner_core.pip_target import (
     requirements_path as pip_requirements_path,
 )
-from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
+from runner_core.prompt import (
+    CANONICAL_EXECUTION_NOTES_MD,
+    TemplateSubstitutionError,
+    build_prompt_from_template,
+)
 from runner_core.python_interpreter_probe import resolve_usable_python_interpreter
 from runner_core.python_runtime import (
     probe_pip_module,
@@ -83,6 +87,10 @@ from runner_core.python_runtime import (
     verification_commands_need_python,
 )
 from runner_core.run_spec import resolve_effective_run_inputs
+from runner_core.shell_command_normalization import (
+    normalize_command_for_shell,
+    render_shell_command_guidance_md,
+)
 from runner_core.target_acquire import acquire_target
 from runner_core.verification_broker import (
     VerificationBrokerAttempt,
@@ -90,6 +98,7 @@ from runner_core.verification_broker import (
     probe_local_verification_launcher,
     render_verification_broker_command,
     resolve_verification_launcher,
+    validate_verification_broker_response_payload,
 )
 from runner_core.verification_broker import (
     probe_windows_bash_usable as _probe_windows_bash_usable_impl,
@@ -2601,6 +2610,30 @@ def _verification_shell_argv(*, command_prefix: list[str], command: str) -> list
     return [*command_prefix, *launcher.shell_argv_prefix, command]
 
 
+def _merge_command_rewrite_meta(
+    existing: dict[str, Any] | None, new_meta: dict[str, Any] | None
+) -> dict[str, Any] | None:
+    if new_meta is None:
+        return existing
+    if existing is None:
+        return new_meta
+
+    rewrites: list[dict[str, Any]] = []
+    if existing.get("kind") == "multi" and isinstance(existing.get("rewrites"), list):
+        rewrites.extend(
+            item for item in existing["rewrites"] if isinstance(item, dict)
+        )
+    else:
+        rewrites.append(existing)
+
+    if new_meta.get("kind") == "multi" and isinstance(new_meta.get("rewrites"), list):
+        rewrites.extend(item for item in new_meta["rewrites"] if isinstance(item, dict))
+    else:
+        rewrites.append(new_meta)
+
+    return {"kind": "multi", "rewrites": rewrites}
+
+
 _VERIFICATION_SHELL_CONTROL_TOKENS: frozenset[str] = frozenset(
     {
         "|",
@@ -4218,6 +4251,7 @@ def _run_verification_commands(
             and c.strip()
             and c.strip().replace("\\", "/").lower().startswith("bash ")
             and not _looks_like_verification_rejection_sentinel(c)
+            and normalize_command_for_shell(c, shell_family="powershell").action == "passthrough"
             for c in commands
         ):
             windows_bash_probe = _probe_windows_bash_usable()
@@ -4283,8 +4317,44 @@ def _run_verification_commands(
                         cmd_after_bash_rewrite = new_cmd.strip()
                         bash_rewritten = True
 
-        if toolchain_status == "blocked" and verification_commands_need_python(
-            (cmd_after_bash_rewrite,)
+        shell_family = "powershell" if is_powershell else "bash"
+        host_normalization = normalize_command_for_shell(
+            cmd_after_bash_rewrite,
+            shell_family=shell_family,
+        )
+        cmd_after_host_normalization = cmd_after_bash_rewrite
+        host_dispatch_validation: dict[str, Any] | None = None
+        host_rewritten = False
+        if host_normalization.action == "rewrite":
+            normalized_command = host_normalization.command.strip()
+            if normalized_command and normalized_command != cmd_after_bash_rewrite:
+                cmd_after_host_normalization = normalized_command
+                host_rewritten = True
+                host_rewrite_meta = {
+                    "kind": host_normalization.kind or "host_shell_normalization",
+                    "original_command": cmd_after_bash_rewrite,
+                    "rewritten_command": normalized_command,
+                }
+                if host_normalization.reason:
+                    host_rewrite_meta["reason"] = host_normalization.reason
+                if host_normalization.hint:
+                    host_rewrite_meta["hint"] = host_normalization.hint
+                rewrite_meta = _merge_command_rewrite_meta(rewrite_meta, host_rewrite_meta)
+        elif host_normalization.action == "blocked":
+            host_dispatch_validation = {
+                "kind": host_normalization.kind or "host_shell_portability_blocked",
+                "reason": (
+                    host_normalization.reason
+                    or "Command is not portable to the active shell."
+                ),
+                "hint": host_normalization.hint
+                or "Rewrite the command for the active shell, or report the portability issue.",
+            }
+
+        if (
+            host_dispatch_validation is None
+            and toolchain_status == "blocked"
+            and verification_commands_need_python((cmd_after_host_normalization,))
         ):
             stdout_text = ""
             reason_s = f": {toolchain_reason}" if toolchain_reason else ""
@@ -4322,14 +4392,16 @@ def _run_verification_commands(
             continue
 
         effective_cmd, python_rewritten = _rewrite_verification_command_for_python(
-            cmd_after_bash_rewrite,
+            cmd_after_host_normalization,
             python_executable=python_executable,
             is_powershell=is_powershell,
         )
-        rewritten = bool(python_rewritten or bash_rewritten)
+        rewritten = bool(python_rewritten or bash_rewritten or host_rewritten)
         rejected_sentinel = _looks_like_verification_rejection_sentinel(effective_cmd)
         dispatch_validation = (
-            None
+            host_dispatch_validation
+            if host_dispatch_validation is not None
+            else None
             if rejected_sentinel
             else _validate_verification_command_dispatch(
                 command=effective_cmd,
@@ -4457,13 +4529,7 @@ def _run_verification_commands(
                         except OSError:
                             stderr_text = ""
                         ripgrep_rewritten = True
-                        if rewrite_meta is None:
-                            rewrite_meta = rg_meta
-                        else:
-                            rewrite_meta = {
-                                "kind": "multi",
-                                "rewrites": [rewrite_meta, rg_meta],
-                            }
+                        rewrite_meta = _merge_command_rewrite_meta(rewrite_meta, rg_meta)
             else:
                 argv = _verification_shell_argv(
                     command_prefix=effective_prefix,
@@ -6687,6 +6753,16 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             )
 
             try:
+                execution_notes_md = CANONICAL_EXECUTION_NOTES_MD
+                shell_command_guidance_md = render_shell_command_guidance_md(
+                    shell_family=execution_shell
+                )
+                if shell_command_guidance_md.strip():
+                    execution_notes_md = (
+                        execution_notes_md.rstrip()
+                        + "\n"
+                        + shell_command_guidance_md.strip()
+                    )
                 prompt = build_prompt_from_template(
                     template_text=effective_spec.prompt_template_text,
                     variables={
@@ -6697,6 +6773,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "users_md": users_md_text,
                         "policy_json": policy_json,
                         "preflight_summary_md": preflight_summary_md,
+                        "execution_notes_md": execution_notes_md,
                         "environment_json": environment_json,
                         "report_schema_json": report_schema_json,
                     },
@@ -7187,6 +7264,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 attempt_broker_request_id = None
                 attempt_broker_response_status: str | None = None
                 attempt_broker_response_failure_reason: str | None = None
+                attempt_broker_response_contract_error: str | None = None
                 attempt_broker_reuse_candidate = False
                 if broker_latest_result is not None:
                     latest_request_id = getattr(broker_latest_result, "request_id", None)
@@ -7205,6 +7283,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         attempt_broker_response_failure_reason = (
                             latest_failure_reason.strip()
                         )
+                    _broker_payload, broker_payload_error = (
+                        validate_verification_broker_response_payload(
+                            broker_latest_result.to_response_dict(),
+                            request_id=broker_latest_result.request_id,
+                        )
+                    )
+                    if broker_payload_error is not None:
+                        attempt_broker_response_contract_error = broker_payload_error
+                        attempt_broker_response_failure_reason = "incomplete_broker_response"
                 elif broker_request_ids:
                     attempt_broker_request_id = broker_request_ids[-1]
                 if (
@@ -7213,7 +7300,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     and verification_commands
                 ):
                     broker_reuse_fallback_reason: str | None = None
-                    if verification_reuse_mode == "auto" and broker_latest_result is not None:
+                    if (
+                        verification_reuse_mode == "auto"
+                        and broker_latest_result is not None
+                        and attempt_broker_response_contract_error is None
+                    ):
                         attempt_broker_request_id = broker_latest_result.request_id
                         broker_summary = _coerce_verification_summary_from_broker_result(
                             broker_latest_result,
@@ -7283,9 +7374,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             )
                     elif verification_reuse_mode == "auto":
                         broker_reuse_fallback_reason = (
-                            "broker_response_missing"
-                            if attempt_broker_requested
-                            else "broker_not_requested"
+                            "broker_response_incomplete"
+                            if attempt_broker_response_contract_error is not None
+                            else (
+                                "broker_response_missing"
+                                if attempt_broker_requested
+                                else "broker_not_requested"
+                            )
                         )
 
                     if attempt_verification_summary is None:
@@ -7548,6 +7643,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "broker_response_failure_reason": (
                             attempt_broker_response_failure_reason
                         ),
+                        "broker_response_contract_error": (
+                            attempt_broker_response_contract_error
+                        ),
                         "reuse_candidate": (
                             attempt_broker_reuse_candidate if verification_commands else False
                         ),
@@ -7749,10 +7847,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 },
             )
 
+            materialization_errors: list[str] = []
+
             def _materialize_attempt_artifact(
                 src: Path,
                 dst: Path,
                 *,
+                label: str,
                 fallback_text: str | None = None,
             ) -> None:
                 if src == dst:
@@ -7760,23 +7861,77 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 if src.exists():
                     shutil.copyfile(src, dst)
                     return
-                try:
-                    dst.write_text(fallback_text or "", encoding="utf-8")
-                except OSError:
+                if fallback_text is None:
+                    materialization_errors.append(
+                        f"missing_selected_attempt_artifact={label}:{src}"
+                    )
+                    try:
+                        dst.write_text("", encoding="utf-8")
+                    except OSError as exc:
+                        materialization_errors.append(
+                            "failed_selected_attempt_artifact_placeholder="
+                            f"{label}:{dst}:{exc}"
+                        )
                     return
+                try:
+                    dst.write_text(fallback_text, encoding="utf-8")
+                except OSError as exc:
+                    materialization_errors.append(
+                        f"failed_selected_attempt_artifact_materialization={label}:{dst}:{exc}"
+                    )
 
-            _materialize_attempt_artifact(selected_raw_events_path, raw_events_path)
-            _materialize_attempt_artifact(selected_raw_events_ts_path, raw_events_ts_path)
+            _materialize_attempt_artifact(
+                selected_raw_events_path,
+                raw_events_path,
+                label="raw_events",
+            )
+            _materialize_attempt_artifact(
+                selected_raw_events_ts_path,
+                raw_events_ts_path,
+                label="raw_events_ts",
+                fallback_text="",
+            )
             _materialize_attempt_artifact(
                 selected_last_message_path,
                 last_message_path,
+                label="last_message",
                 fallback_text=selected_last_message_text,
             )
             _materialize_attempt_artifact(
                 selected_stderr_path,
                 stderr_path,
+                label="stderr",
                 fallback_text=selected_stderr_text,
             )
+            if materialization_errors:
+                forced_exit_code = 1
+                message = (
+                    "Selected attempt artifacts were incomplete during final materialization; "
+                    "the runner refused to silently synthesize missing files."
+                )
+                if not (run_dir / "error.json").exists():
+                    _write_json(
+                        run_dir / "error.json",
+                        {
+                            "type": "SelectedAttemptArtifactsIncomplete",
+                            "subtype": "selected_attempt_artifacts_incomplete",
+                            "code": "selected_attempt_artifacts_incomplete",
+                            "message": message,
+                            "details": {
+                                "errors": materialization_errors,
+                                "selected_verification_source": (
+                                    str(selected_verification_summary.get("source") or "").strip()
+                                    if isinstance(selected_verification_summary, dict)
+                                    else None
+                                ),
+                                "selected_attempt": selected_attempt_index + 1
+                                if selected_attempt_index is not None
+                                else None,
+                            },
+                        },
+                    )
+                if not report_validation_errors:
+                    report_validation_errors = [message, *materialization_errors]
 
             verification_output_payload: dict[str, Any]
             if selected_verification_summary is not None:

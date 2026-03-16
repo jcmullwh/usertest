@@ -77,3 +77,50 @@ def test_run_batch_pass_invokes_usertest_implement_batch_run(tmp_path: Path) -> 
         "--config",
         str(ctx.batch_config_path),
     ]
+
+
+def test_append_log_ignores_oserror_from_stderr(tmp_path: Path, monkeypatch) -> None:
+    mod = _load_module()
+    repo_root = tmp_path / "repo"
+    repo_root.mkdir()
+    ctx = mod.LoopContext(
+        repo_root=repo_root,
+        owner_root=repo_root,
+        runs_dir=repo_root / "runs" / "usertest_implement",
+        target="usertest",
+        repo_input=str(repo_root),
+        settings_path=repo_root / "configs" / "usertest_implement_settings.yaml",
+        settings_profile="default",
+        backlog_agent="codex",
+        backlog_model="gpt-5.4",
+        implementation_agent="codex",
+        implementation_model=None,
+        review_agent="claude",
+        review_model=None,
+        allowed_severities={"blocker", "high"},
+        sleep_seconds=60.0,
+        cleanup_interval_seconds=21600.0,
+        log_path=repo_root / "runs" / "_continuous_loop" / "continuous_loop.log",
+        state_path=repo_root / "runs" / "_continuous_loop" / "loop_state.json",
+        pid_path=repo_root / "runs" / "_continuous_loop" / "loop.pid",
+        batch_config_path=repo_root / "configs" / "backlog_implement_batch.yaml",
+        implement_python=(
+            repo_root / "apps" / "usertest_implement" / ".venv" / "Scripts" / "python.exe"
+        ),
+        backlog_python=(
+            repo_root / "apps" / "usertest_backlog" / ".venv" / "Scripts" / "python.exe"
+        ),
+    )
+
+    class BrokenStderr:
+        def write(self, text: str) -> int:
+            raise OSError(22, "Invalid argument")
+
+        def flush(self) -> None:
+            raise AssertionError("flush should not be called after write failure")
+
+    monkeypatch.setattr(mod.sys, "stderr", BrokenStderr())
+
+    mod._append_log(ctx, "background-safe log write")
+
+    assert "background-safe log write" in ctx.log_path.read_text(encoding="utf-8")

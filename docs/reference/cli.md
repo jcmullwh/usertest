@@ -15,7 +15,7 @@ If you’re unsure where to start, read `docs/tutorials/getting-started.md`.
 Entry points:
 
 - `usertest …` (installed script)
-- `pdm run usertest …` (from `apps/usertest/` for local dev)
+- `python -m usertest.cli …` (same environment, useful when PATH is stale)
 
 ### Core commands
 
@@ -58,7 +58,7 @@ Most backlog/ticket workflows have moved to `usertest-backlog`.
 Entry points:
 
 - `usertest-backlog …` (installed script)
-- `pdm run usertest-backlog …` (from `apps/usertest_backlog/` for local dev)
+- `python -m usertest_backlog.cli …` (same environment, useful when PATH is stale)
 
 ### Reports workflows
 
@@ -106,7 +106,7 @@ preserving full evidence text. The canonical atom stream is still written as JSO
 Entry points:
 
 - `usertest-implement …` (installed script)
-- `pdm run usertest-implement …` (from `apps/usertest_implement/` for local dev)
+- `python -m usertest_implement.cli …` (same environment, useful when PATH is stale)
 
 ### Core command
 
@@ -168,15 +168,12 @@ These CLIs evolve quickly.
 Use:
 
 ```bash
-cd apps/usertest
-pdm run usertest --help
-pdm run usertest run --help
-cd ../usertest_backlog
-pdm run usertest-backlog --help
-cd ../usertest_implement
-pdm run usertest-implement --help
+python -m usertest.cli --help
+python -m usertest.cli run --help
+python -m usertest_backlog.cli --help
+python -m usertest_implement.cli --help
 
-# If you installed the console scripts:
+# If PATH already exposes the console scripts:
 usertest --help
 usertest-backlog --help
 usertest-implement --help
