@@ -105,7 +105,16 @@ If `gh` is installed but not found, ensure its install directory is on `PATH` (W
 
 ## Install
 
-From the monorepo root (editable install):
+From a monorepo checkout, prefer the repo bootstrap/smoke flow first so the wrapper resolves a
+usable Python before installs:
+
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1`
+- **macOS / Linux:** `bash ./scripts/smoke.sh`
+
+That path installs the shared requirements plus the local editable apps/packages used by this repo.
+
+Advanced/manual fallback if you already have a known-good interpreter and intentionally want only
+this app installed:
 
 ```bash
 python -m pip install -r requirements-dev.txt
@@ -115,7 +124,8 @@ python -m pip install -e apps/usertest_implement
 Confirm:
 
 ```bash
-usertest-implement --help
+python -m usertest_implement.cli --help
+# If PATH already exposes the console script: usertest-implement --help
 ```
 
 ---

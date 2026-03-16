@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from runner_core import RunnerConfig
@@ -108,7 +109,14 @@ def test_repo_health_failure_does_not_block_commit(
                 "schema_version": 1,
                 "passed": False,
                 "change_validation_passed": True,
-                "commands": [{"index": 1, "command": "echo health-fail", "exit_code": 1, "category": "repo_health"}],
+                "commands": [
+                    {
+                        "index": 1,
+                        "command": "echo health-fail",
+                        "exit_code": 1,
+                        "category": "repo_health",
+                    }
+                ],
             },
             indent=2,
             ensure_ascii=False,
@@ -121,6 +129,7 @@ def test_repo_health_failure_does_not_block_commit(
         return SimpleNamespace(run_dir=run_dir, exit_code=0, report_validation_errors=[])
 
     commit_called = {"yes": False}
+
     def mock_finalize_commit(*_args: object, **_kwargs: object) -> dict[str, Any]:
         commit_called["yes"] = True
         return {"commit_performed": True}
@@ -197,8 +206,18 @@ def test_prerequisite_failure_blocks_commit(
                 "passed": False,
                 "change_validation_passed": False,
                 "commands": [
-                    {"index": 1, "command": "echo smoke", "exit_code": 0, "category": "repo_health"},
-                    {"index": 2, "command": "echo install-fail", "exit_code": 1, "category": "prerequisite"},
+                    {
+                        "index": 1,
+                        "command": "echo smoke",
+                        "exit_code": 0,
+                        "category": "repo_health",
+                    },
+                    {
+                        "index": 2,
+                        "command": "echo install-fail",
+                        "exit_code": 1,
+                        "category": "prerequisite",
+                    },
                 ],
             },
             indent=2,
