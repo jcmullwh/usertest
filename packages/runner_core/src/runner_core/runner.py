@@ -86,6 +86,7 @@ from runner_core.verification_broker import (
 from runner_core.verification_broker import (
     probe_windows_bash_usable as _probe_windows_bash_usable_impl,
 )
+from runner_core.verification_plan import VerificationCommandSpec, VerificationTrack
 from runner_core.workspace_state_hash import WorkspaceStateHash, compute_workspace_state_hash
 
 
@@ -119,7 +120,9 @@ class RunRequest:
     keep_workspace: bool = False
     preflight_commands: tuple[str, ...] = ()
     preflight_required_commands: tuple[str, ...] = ()
-    verification_commands: tuple[str, ...] = ()
+    verification_commands: tuple[str | VerificationCommandSpec, ...] = ()
+    verification_profile: str = "none"
+    verification_scope: str | None = None
     verification_timeout_seconds: float | None = None
     verification_reuse_mode: str = "off"
 
@@ -988,45 +991,120 @@ def _build_preflight_command_list(request: RunRequest) -> list[str]:
     return merged
 
 
-def _requires_scaffold_install_bootstrap(commands: Sequence[str]) -> bool:
-    has_scaffold_install = False
-    has_scaffold_lint_or_test = False
-    for raw in commands:
-        if not isinstance(raw, str):
-            continue
-        command = raw.strip()
-        if not command:
-            continue
-        if _SCAFFOLD_SCRIPT_PATTERN.search(command) is None:
-            continue
-        if _SCAFFOLD_RUN_PATTERN.search(command) is None:
-            continue
-        if _SCAFFOLD_INSTALL_PATTERN.search(command) is not None:
-            has_scaffold_install = True
-        if _SCAFFOLD_LINT_OR_TEST_PATTERN.search(command) is not None:
-            has_scaffold_lint_or_test = True
-    return has_scaffold_lint_or_test and not has_scaffold_install
+def _normalize_verification_commands_for_execution(
+    commands: Sequence[str | VerificationCommandSpec],
+    *,
+    verification_profile: str = "none",
+    verification_scope: str | None = None,
+    exec_backend: str = "local",
+    exec_docker_profile: str = "standard",
+) -> tuple[VerificationCommandSpec, ...]:
+    plan: list[VerificationCommandSpec] = []
+
+    # 1. Handle profile-based defaults if no explicit commands were provided
+    if not commands and verification_profile == "default_handoff":
+        is_windows = _is_windows()
+        is_docker = exec_backend == "docker"
+        is_maintenance = exec_docker_profile == "maintenance"
+
+        # Smoke check
+        smoke_cmd = "bash ./scripts/smoke.sh"
+        if is_windows and not is_docker:
+            smoke_cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1"
+        elif is_docker and is_maintenance:
+            smoke_cmd = "bash ./scripts/smoke.sh --skip-install --use-pythonpath"
+
+        plan.append(VerificationCommandSpec(command=smoke_cmd, track=VerificationTrack.REPO_HEALTH))
+
+        # Scaffold checks
+        scaffold_base = "python tools/scaffold/scaffold.py"
+        if is_docker:
+            scaffold_base = (
+                'PYTHON_BIN=python; command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python3; '
+                '"$PYTHON_BIN" tools/scaffold/scaffold.py'
+            )
+
+        # CHANGE_VALIDATION: scoped checks if scope is provided
+        if verification_scope:
+            plan.append(
+                VerificationCommandSpec(
+                    command=f"{scaffold_base} run {verification_scope} --skip-missing install",
+                    track=VerificationTrack.CHANGE_VALIDATION,
+                )
+            )
+            plan.append(
+                VerificationCommandSpec(
+                    command=f"{scaffold_base} run {verification_scope} --skip-missing lint",
+                    track=VerificationTrack.CHANGE_VALIDATION,
+                )
+            )
+            plan.append(
+                VerificationCommandSpec(
+                    command=f"{scaffold_base} run {verification_scope} --skip-missing test",
+                    track=VerificationTrack.CHANGE_VALIDATION,
+                )
+            )
+
+        # REPO_HEALTH: repo-wide checks (always present in default_handoff)
+        plan.append(
+            VerificationCommandSpec(
+                command=f"{scaffold_base} run --all --skip-missing install",
+                track=VerificationTrack.REPO_HEALTH,
+            )
+        )
+        plan.append(
+            VerificationCommandSpec(
+                command=f"{scaffold_base} run --all --skip-missing lint",
+                track=VerificationTrack.REPO_HEALTH,
+            )
+        )
+        plan.append(
+            VerificationCommandSpec(
+                command=f"{scaffold_base} run --all --skip-missing test",
+                track=VerificationTrack.REPO_HEALTH,
+            )
+        )
+    else:
+        # Convert explicit commands to specs
+        for item in commands:
+            if isinstance(item, VerificationCommandSpec):
+                plan.append(item)
+            elif isinstance(item, str):
+                stripped = item.strip()
+                if stripped:
+                    # Heuristic for track if not provided
+                    track = VerificationTrack.CHANGE_VALIDATION
+                    if "--all" in stripped or "smoke.sh" in stripped or "smoke.ps1" in stripped:
+                        track = VerificationTrack.REPO_HEALTH
+                    plan.append(VerificationCommandSpec(command=stripped, track=track))
+
+    # 2. Inject bootstrap if needed
+    has_scaffold_install = any(
+        "scaffold.py" in s.command and "run" in s.command and "install" in s.command
+        for s in plan
+    )
+    has_scaffold_health = any(
+        "scaffold.py" in s.command and "run" in s.command and ("lint" in s.command or "test" in s.command)
+        for s in plan
+    )
+
+    if has_scaffold_health and not has_scaffold_install:
+        bootstrap_cmd = "python tools/scaffold/scaffold.py run --all --skip-missing install"
+        if exec_backend == "docker":
+            bootstrap_cmd = (
+                'PYTHON_BIN=python; command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python3; '
+                '"$PYTHON_BIN" tools/scaffold/scaffold.py run --all --skip-missing install'
+            )
+        plan.insert(0, VerificationCommandSpec(command=bootstrap_cmd, track=VerificationTrack.BOOTSTRAP))
+
+    return tuple(plan)
 
 
-def _normalize_verification_commands_for_execution(commands: Sequence[str]) -> tuple[str, ...]:
-    normalized: list[str] = []
-    for raw in commands:
-        if not isinstance(raw, str):
-            continue
-        stripped = raw.strip()
-        if stripped:
-            normalized.append(stripped)
-
-    if _requires_scaffold_install_bootstrap(normalized):
-        normalized = [
-            "python tools/scaffold/scaffold.py run install --all --skip-missing",
-            *normalized,
-        ]
-    return tuple(normalized)
-
-
-def _verification_commands_need_source_bootstrap(commands: Sequence[str]) -> bool:
-    for raw in commands:
+def _verification_commands_need_source_bootstrap(
+    commands: Sequence[str | VerificationCommandSpec],
+) -> bool:
+    for item in commands:
+        raw = item.command if isinstance(item, VerificationCommandSpec) else item
         if not isinstance(raw, str):
             continue
         command = raw.strip()
@@ -1540,7 +1618,8 @@ def _format_preflight_summary_md(
             lines.append("- Verification gate:")
             lines.append(f"  - timeout_seconds: {timeout_label}")
             lines.append("  - commands:")
-            for cmd in verification_commands:
+            for item in verification_commands:
+                cmd = item.command if isinstance(item, VerificationCommandSpec) else item
                 lines.append(f"    - `{cmd}`")
 
     if (
@@ -2397,7 +2476,7 @@ def _decorate_verification_summary(
 def _coerce_verification_summary_from_broker_result(
     broker_result: VerificationBrokerRequestResult,
     *,
-    commands_configured: list[str],
+    commands_configured: Sequence[str | VerificationCommandSpec],
 ) -> dict[str, Any]:
     summary = broker_result.verification_summary
     if isinstance(summary, dict):
@@ -2405,7 +2484,10 @@ def _coerce_verification_summary_from_broker_result(
     return {
         "schema_version": 1,
         "attempt_number": broker_result.attempt,
-        "commands_configured": list(commands_configured),
+        "commands_configured": [
+            c.to_dict() if isinstance(c, VerificationCommandSpec) else c
+            for c in commands_configured
+        ],
         "passed": broker_result.status == "passed",
         "started_utc": broker_result.started_utc,
         "finished_utc": broker_result.finished_utc,
@@ -3712,7 +3794,7 @@ def _build_python_toolchain_capability_summary(
 def _validate_python_capability(
     *,
     workspace_dir: Path,
-    verification_commands: tuple[str, ...],
+    verification_commands: tuple[str | VerificationCommandSpec, ...],
     command_prefix: list[str],
     cwd: Path,
     env_overrides: dict[str, str] | None,
@@ -4125,7 +4207,7 @@ def _run_verification_commands(
     *,
     run_dir: Path,
     attempt_number: int,
-    commands: list[str],
+    commands: Sequence[str | VerificationCommandSpec],
     command_prefix: list[str],
     cwd: Path,
     timeout_seconds: float | None,
@@ -4185,16 +4267,36 @@ def _run_verification_commands(
     windows_bash_probe: dict[str, Any] | None = None
     if _is_windows() and not command_prefix:
         if any(
-            isinstance(c, str)
-            and c.strip()
-            and c.strip().replace("\\", "/").lower().startswith("bash ")
-            and not _looks_like_verification_rejection_sentinel(c)
-            for c in commands
+            (
+                (isinstance(s, VerificationCommandSpec) and s.command.strip())
+                or (isinstance(s, str) and s.strip())
+            )
+            and (
+                (isinstance(s, VerificationCommandSpec) and s.command.strip())
+                or (isinstance(s, str) and s.strip())
+            ).replace("\\", "/").lower().startswith("bash ")
+            and not _looks_like_verification_rejection_sentinel(
+                s.command if isinstance(s, VerificationCommandSpec) else s
+            )
+            for s in commands
         ):
             windows_bash_probe = _probe_windows_bash_usable()
 
-    for idx, raw in enumerate(commands, start=1):
-        cmd_original = raw.strip()
+    for idx, item in enumerate(commands, start=1):
+        if isinstance(item, VerificationCommandSpec):
+            spec = item
+        else:
+            # Heuristic for track if not provided
+            track = VerificationTrack.CHANGE_VALIDATION
+            if (
+                isinstance(item, str)
+                and ("--all" in item or "smoke.sh" in item or "smoke.ps1" in item)
+            ):
+                track = VerificationTrack.REPO_HEALTH
+            spec = VerificationCommandSpec(command=str(item), track=track)
+
+        cmd_original = spec.command.strip()
+        track = spec.track
         if not cmd_original:
             continue
 
@@ -4230,6 +4332,9 @@ def _run_verification_commands(
                     result = {
                         "index": idx,
                         "command": cmd_original,
+                        "track": track,
+                        "scope_relevant": track == VerificationTrack.CHANGE_VALIDATION,
+                        "is_bootstrap": track == VerificationTrack.BOOTSTRAP,
                         "effective_command": None,
                         "rewritten": False,
                         "argv": None,
@@ -4255,7 +4360,7 @@ def _run_verification_commands(
                         bash_rewritten = True
 
         if toolchain_status == "blocked" and verification_commands_need_python(
-            (cmd_after_bash_rewrite,)
+            (VerificationCommandSpec(command=cmd_after_bash_rewrite),)
         ):
             stdout_text = ""
             reason_s = f": {toolchain_reason}" if toolchain_reason else ""
@@ -4274,6 +4379,9 @@ def _run_verification_commands(
             result = {
                 "index": idx,
                 "command": cmd_original,
+                "track": track,
+                "scope_relevant": track == VerificationTrack.CHANGE_VALIDATION,
+                "is_bootstrap": track == VerificationTrack.BOOTSTRAP,
                 "effective_command": None,
                 "rewritten": False,
                 "argv": None,
@@ -4320,6 +4428,7 @@ def _run_verification_commands(
             "command_index": idx,
             "command_count": len(commands),
             "command": cmd_original,
+            "track": track,
             "updated_utc": cmd_started_utc,
         }
 
@@ -4465,9 +4574,24 @@ def _run_verification_commands(
             rewritten = True
 
         wall_seconds = max(0.0, time.monotonic() - cmd_started_monotonic)
+        
+        # DEBUG
+        try:
+            with open("/tmp/runner_debug.txt", "a") as f:
+                f.write(f"Command {idx}: {cmd_original}\n")
+                f.write(f"  Track: {track} (type: {type(track)})\n")
+                f.write(f"  Exit code: {exit_code}\n")
+                f.write(f"  Repo health enum: {VerificationTrack.REPO_HEALTH}\n")
+                f.write(f"  Will break: {exit_code != 0 and track != VerificationTrack.REPO_HEALTH}\n")
+        except:
+            pass
+
         result = {
             "index": idx,
             "command": cmd_original,
+            "track": track,
+            "scope_relevant": track == VerificationTrack.CHANGE_VALIDATION,
+            "is_bootstrap": track == VerificationTrack.BOOTSTRAP,
             "effective_command": effective_cmd,
             "rewritten": rewritten,
             "argv": argv,
@@ -4511,18 +4635,25 @@ def _run_verification_commands(
                 )
             progress_callback(finished_progress)
 
-        if exit_code != 0:
+        if exit_code != 0 and track != VerificationTrack.REPO_HEALTH:
             break
 
     finished_utc = _utc_now_z()
     wall_seconds_total = max(0.0, time.monotonic() - started_monotonic)
     cancelled_any = any(bool(r.get("cancelled")) for r in results)
     timed_out_any = any(bool(r.get("timed_out")) for r in results)
+
+    blocking_failed = any(
+        int(r.get("exit_code") or 0) != 0
+        and r.get("track") in {VerificationTrack.CHANGE_VALIDATION, VerificationTrack.BOOTSTRAP}
+        for r in results
+    )
+
     passed = (
         bool(results)
         and not cancelled_any
         and not timed_out_any
-        and all(int(r.get("exit_code") or 0) == 0 for r in results)
+        and not blocking_failed
     )
     terminal_reason = (
         "cancelled"
@@ -5515,7 +5646,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
         try:
             effective_verification_commands = _normalize_verification_commands_for_execution(
-                request.verification_commands
+                request.verification_commands,
+                verification_profile=request.verification_profile,
+                verification_scope=request.verification_scope,
+                exec_backend=request.exec_backend,
+                exec_docker_profile=request.exec_docker_profile,
             )
             bootstrap: PipBootstrapResult | None = None
             if is_pip_repo_input(request.repo):
@@ -6580,7 +6715,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "commands": (
                             []
                             if verification_reuse_mode == "auto"
-                            else verification_commands
+                            else [
+                                c.to_dict() if isinstance(c, VerificationCommandSpec) else c
+                                for c in verification_commands
+                            ]
                         ),
                         "final_handoff_command": verification_broker_command,
                         "timeout_seconds": verification_timeout_seconds,
@@ -6876,7 +7014,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "schema_version": 1,
                         "reuse_mode": verification_reuse_mode,
                         "final_handoff_command": verification_broker_command,
-                        "commands": verification_commands,
+                        "commands": [
+                            c.to_dict() if isinstance(c, VerificationCommandSpec) else c
+                            for c in verification_commands
+                        ],
                         "timeout_seconds": verification_timeout_seconds,
                     },
                 )
@@ -7699,7 +7840,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "skipped": True,
                     "skip_reason": skip_reason,
                     "attempt_number": len(attempts_meta),
-                    "commands_configured": verification_commands,
+                    "commands_configured": [
+                        c.to_dict() if isinstance(c, VerificationCommandSpec) else c
+                        for c in verification_commands
+                    ],
                     "source": "disabled" if status_s == "disabled" else "post_agent_rerun",
                     "reused": False,
                     "workspace_hash": None,

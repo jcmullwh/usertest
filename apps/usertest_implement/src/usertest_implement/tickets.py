@@ -245,6 +245,7 @@ def parse_ticket_markdown_metadata(markdown: str) -> dict[str, str]:
         ("fingerprint", "Fingerprint"),
         ("export_kind", "Export kind"),
         ("stage", "Stage"),
+        ("scope", "Export scope target"),
     ):
         match = re.search(
             rf"^-\s*{re.escape(label)}:\s*`([^`]+)`\s*$",

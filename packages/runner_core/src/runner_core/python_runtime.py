@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from runner_core.verification_plan import VerificationCommandSpec
+
 _LOG = logging.getLogger(__name__)
 
 _PYTHON_HEALTH_PROBE = (
@@ -1091,8 +1093,9 @@ _VERIFICATION_INSTALL_PATTERN = re.compile(
 )
 
 
-def verification_commands_need_pytest(commands: tuple[str, ...]) -> bool:
-    for raw in commands:
+def verification_commands_need_pytest(commands: tuple[str | VerificationCommandSpec, ...]) -> bool:
+    for item in commands:
+        raw = item.command if isinstance(item, VerificationCommandSpec) else item
         if not isinstance(raw, str) or not raw.strip():
             continue
         stripped = raw.strip()
@@ -1103,7 +1106,7 @@ def verification_commands_need_pytest(commands: tuple[str, ...]) -> bool:
     return False
 
 
-def verification_commands_need_pdm(commands: tuple[str, ...]) -> bool:
+def verification_commands_need_pdm(commands: tuple[str | VerificationCommandSpec, ...]) -> bool:
     """Return True if any verification command appears to invoke ``pdm`` directly.
 
     ``pdm`` is a Python-dependent tool: its run/install/test subcommands all
@@ -1111,7 +1114,8 @@ def verification_commands_need_pdm(commands: tuple[str, ...]) -> bool:
     Python-dependent tool is invoked should prefer
     :func:`verification_commands_need_python`, which includes this check.
     """
-    for raw in commands:
+    for item in commands:
+        raw = item.command if isinstance(item, VerificationCommandSpec) else item
         if not isinstance(raw, str) or not raw.strip():
             continue
         if _VERIFICATION_PDM_CMD_PATTERN.search(raw.strip()):
@@ -1119,7 +1123,7 @@ def verification_commands_need_pdm(commands: tuple[str, ...]) -> bool:
     return False
 
 
-def verification_commands_need_python(commands: tuple[str, ...]) -> bool:
+def verification_commands_need_python(commands: tuple[str | VerificationCommandSpec, ...]) -> bool:
     """Return True if any verification command requires a usable Python runtime.
 
     This includes direct invocations of ``python`` / ``python3`` / ``py`` /
@@ -1127,7 +1131,8 @@ def verification_commands_need_python(commands: tuple[str, ...]) -> bool:
     whose subcommands (``run``, ``install``, ``test``, etc.) all depend on a
     functional interpreter.
     """
-    for raw in commands:
+    for item in commands:
+        raw = item.command if isinstance(item, VerificationCommandSpec) else item
         if not isinstance(raw, str) or not raw.strip():
             continue
         stripped = raw.strip()
@@ -1142,13 +1147,14 @@ def verification_commands_need_python(commands: tuple[str, ...]) -> bool:
     return False
 
 
-def verification_commands_may_provision_pytest(commands: tuple[str, ...]) -> bool:
+def verification_commands_may_provision_pytest(commands: tuple[str | VerificationCommandSpec, ...]) -> bool:
     """
     Heuristic: treat dependency-install verification steps as provisioning, so `pytest` may
     become available later in the verification sequence.
     """
 
-    for raw in commands:
+    for item in commands:
+        raw = item.command if isinstance(item, VerificationCommandSpec) else item
         if not isinstance(raw, str) or not raw.strip():
             continue
         if _VERIFICATION_INSTALL_PATTERN.search(raw):

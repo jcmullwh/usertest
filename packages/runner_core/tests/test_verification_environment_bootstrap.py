@@ -17,8 +17,9 @@ def test_normalize_verification_commands_prepends_scaffold_install() -> None:
 
     effective = runner_mod._normalize_verification_commands_for_execution(commands)
 
-    assert effective[0] == "python tools/scaffold/scaffold.py run install --all --skip-missing"
-    assert effective[1:] == commands
+    assert effective[0].command == "python tools/scaffold/scaffold.py run --all --skip-missing install"
+    assert effective[0].track == runner_mod.VerificationTrack.BOOTSTRAP
+    assert [e.command for e in effective[1:]] == list(commands)
 
 
 def test_normalize_verification_commands_keeps_existing_scaffold_install() -> None:
@@ -29,7 +30,8 @@ def test_normalize_verification_commands_keeps_existing_scaffold_install() -> No
 
     effective = runner_mod._normalize_verification_commands_for_execution(commands)
 
-    assert effective == commands
+    assert [e.command for e in effective] == list(commands)
+    assert all(e.track == runner_mod.VerificationTrack.REPO_HEALTH for e in effective)
 
 
 def test_augment_env_with_workspace_pythonpath_discovers_src_dirs(tmp_path: Path) -> None:

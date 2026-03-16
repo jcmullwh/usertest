@@ -101,6 +101,7 @@ class SelectedTicket:
     title: str | None
     export_kind: str | None
     stage: str | None
+    scope: str | None
     owner_root: Path | None
     idea_path: Path | None
     ticket_markdown: str
@@ -981,12 +982,14 @@ def _select_ticket_from_export(
     if not isinstance(body, str) or not body.strip():
         raise ValueError("Export missing body_markdown")
     body = strip_legacy_source_ticket_lines(body)
+    meta = parse_ticket_markdown_metadata(body)
 
     return SelectedTicket(
         fingerprint=export_fp.strip(),
         title=title_s,
         export_kind=export_kind_s,
         stage=stage_s,
+        scope=meta.get("scope"),
         owner_root=owner_root,
         idea_path=idea_path,
         ticket_markdown=body,
@@ -1019,6 +1022,7 @@ def _select_ticket_from_path(ticket_path: Path) -> SelectedTicket:
         title=title,
         export_kind=export_kind,
         stage=stage,
+        scope=meta.get("scope"),
         owner_root=owner_root,
         idea_path=ticket_path,
         ticket_markdown=text,
@@ -2115,58 +2119,6 @@ def _run_selected_ticket(
         maintenance_eligible=maintenance_profile_eligible,
     )
 
-    if (
-        wants_handoff
-        and verification_profile == "default_handoff"
-        and not verification_commands
-        and not bool(getattr(args, "skip_verify", False))
-    ):
-        install_gate = "python tools/scaffold/scaffold.py run --all --skip-missing install"
-        lint_gate = "python tools/scaffold/scaffold.py run --all --skip-missing lint"
-        test_gate = "python tools/scaffold/scaffold.py run --all --skip-missing test"
-
-        if exec_backend == "docker":
-            scaffold_prefix = (
-                'PYTHON_BIN=python; command -v "$PYTHON_BIN" >/dev/null 2>&1 || PYTHON_BIN=python3; '
-                '"$PYTHON_BIN" tools/scaffold/scaffold.py run --all --skip-missing '
-            )
-            smoke_cmd = "bash ./scripts/smoke.sh"
-            if exec_docker_profile == "maintenance":
-                smoke_cmd = "bash ./scripts/smoke.sh --skip-install --use-pythonpath"
-            verification_commands = [
-                smoke_cmd,
-                f"{scaffold_prefix}install",
-                f"{scaffold_prefix}lint",
-                f"{scaffold_prefix}test",
-            ]
-        elif os.name == "nt":
-            verification_commands = [
-                "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1",
-                install_gate,
-                lint_gate,
-                test_gate,
-            ]
-        else:
-            verification_commands = [
-                "bash ./scripts/smoke.sh",
-                install_gate,
-                lint_gate,
-                test_gate,
-            ]
-
-    exec_cache = str(getattr(args, "exec_cache", "cold") or "cold")
-    exec_cache_dir = getattr(args, "exec_cache_dir", None)
-    if exec_cache_dir is not None:
-        exec_cache_dir = exec_cache_dir.resolve()
-    if exec_cache == "warm" and exec_cache_dir is None:
-        exec_cache_dir = repo_root / "runs" / "_cache" / "usertest_implement"
-    maintenance_venv_cache = bool(
-        exec_backend == "docker"
-        and exec_cache == "warm"
-        and bool(getattr(args, "maintenance_venv_cache", True))
-    )
-
-    ticket_blob = _compose_ticket_blob(selected)
     request = RunRequest(
         repo=str(effective_repo_input),
         ref=effective_ref,
@@ -2180,6 +2132,8 @@ def _run_selected_ticket(
         agent_append_system_prompt=ticket_blob,
         keep_workspace=keep_workspace,
         verification_commands=tuple(verification_commands),
+        verification_profile=verification_profile,
+        verification_scope=selected.scope,
         verification_timeout_seconds=verification_timeout_seconds,
         verification_reuse_mode=verification_reuse_mode,
         exec_backend=exec_backend,
@@ -2296,7 +2250,7 @@ def _run_selected_ticket(
     verification_failed = False
     failing_verification_command: str | None = None
 
-    verification_configured = bool(request.verification_commands)
+    verification_configured = bool(request.verification_commands) or verification_profile != "none"
     if verification_configured and not bool(getattr(args, "skip_verify", False)):
         verification = _read_json(run_dir / "verification.json")
         if isinstance(verification, dict) and verification.get("passed") is False:
