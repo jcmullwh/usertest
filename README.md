@@ -78,11 +78,14 @@ See “Quickstart (canonical newcomer-first path)” above.
 
 ### Running from source (manual)
 
-If you prefer to manage your environment manually, you must install dependencies and configure `PYTHONPATH` for this monorepo.
+If you prefer to manage your environment manually:
 
 1. **Install minimal dependencies:**
    `python -m pip install -r requirements-dev.txt`
-2. **Set PYTHONPATH:**
+2. **Install the package (editable):**
+   `python -m pip install -e apps/usertest`
+
+   *Alternative (source-run without editable installs):* set `PYTHONPATH` instead:
    - **Windows PowerShell:** `. .\scripts\set_pythonpath.ps1`
    - **macOS / Linux:** `source scripts/set_pythonpath.sh`
 3. **Verify:**
@@ -90,8 +93,9 @@ If you prefer to manage your environment manually, you must install dependencies
 
 Success signal: the command prints help output.
 
-If you see a `Missing import ...` message with a hint to run `scripts/set_pythonpath.*`, you’re running from a
-monorepo checkout without the required `PYTHONPATH` configuration.
+If you see a `Missing import ...` message, either the editable install did not complete or `PYTHONPATH` is not
+configured. Run `bash ./scripts/smoke.sh` (macOS/Linux) or
+`powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1` (Windows) to resolve setup in one step.
 
 ## Repo structure
 
@@ -165,25 +169,20 @@ and continue with the pip-based flow. For CI or strict preflight runs, require d
 - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -RequireDoctor`
 - macOS/Linux: `bash ./scripts/smoke.sh --require-doctor`
 
-Fallback mode if you want PYTHONPATH-based execution instead of editable installs:
+Advanced: restricted-environment flags (not needed for a typical first-run):
 
-- PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -UsePythonPath`
-- macOS/Linux: `bash ./scripts/smoke.sh --use-pythonpath`
+These flags exist for environments that cannot use editable installs (pre-provisioned containers, CI
+pipelines that manage deps separately, etc.). For a normal developer first-run, use the plain
+`smoke.ps1` / `smoke.sh` command above with no extra flags.
 
-Restricted environments (no editable installs / pre-provisioned deps):
-
-- No editable installs (still installs `requirements-dev.txt`): use the PYTHONPATH modes above.
-- No installs at runtime (deps already provisioned, e.g., offline wheelhouse): run smoke with both flags:
+- PYTHONPATH mode (installs deps, skips editable installs):
+  - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -UsePythonPath`
+  - macOS/Linux: `bash ./scripts/smoke.sh --use-pythonpath`
+- No-install mode (deps already provisioned, e.g., offline wheelhouse):
   - PowerShell: `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1 -SkipInstall -UsePythonPath`
   - macOS/Linux: `bash ./scripts/smoke.sh --skip-install --use-pythonpath`
-- If you pass only `--skip-install` (without `--use-pythonpath`), smoke assumes your environment already has the
-  monorepo packages installed and importable. Note: `--skip-install` skips *all* installs (including
-  `requirements-dev.txt`); smoke will run an import preflight and fail fast with actionable setup guidance if imports
-  are not available.
-
-- Manual repro (preflight UX): in a fresh environment without installs, run `bash ./scripts/smoke.sh --skip-install`
-  (or PowerShell `.\scripts\smoke.ps1 -SkipInstall`) and confirm the first failure signal is the preflight guidance
-  (not a Python stack trace from later CLI/pytest imports).
+  - Note: `--skip-install` skips *all* installs (including `requirements-dev.txt`); smoke runs an
+    import preflight and fails fast with actionable guidance if imports are not available.
 
 ### Share this repo as a ZIP (snapshot)
 
@@ -410,6 +409,16 @@ Golden fixture verification command:
 
 ## Troubleshooting
 
+- If the smoke script reports `No usable Python interpreter found`, the wrapper tried several
+  candidates (workspace `.venv`, `VIRTUAL_ENV`, `py -0p` on Windows, `python`/`python3` on PATH)
+  and rejected all. The script requires Python 3.11+.
+  - Windows / PowerShell fix options:
+    1. Install CPython 3.11+ from python.org or your package manager and ensure it appears on `PATH`.
+    2. Disable the "App Execution Aliases" for Python in Windows Settings.
+    3. Use a portable or vendored Python and put its folder first on `PATH`.
+  - macOS / Linux fix options:
+    1. Install CPython 3.11+ from python.org or your package manager and ensure it appears on `PATH`.
+    2. Export `USERTEST_PYTHON=/path/to/python` before rerunning smoke if you need to pin a known-good interpreter.
 - If `usertest` is "command not found" / not on PATH, either:
   - run via module invocation (after installing deps): `python -m usertest.cli --help`, or
   - install the console script: `python -m pip install -e apps/usertest`

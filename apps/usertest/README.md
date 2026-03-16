@@ -16,7 +16,16 @@ If you’re looking for the fastest on-ramp, start at `docs/tutorials/getting-st
 
 ## Install
 
-From the monorepo root (editable install):
+From a monorepo checkout, prefer the repo bootstrap/smoke flow first so the wrapper resolves a
+usable Python before installs:
+
+- **Windows PowerShell:** `powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1`
+- **macOS / Linux:** `bash ./scripts/smoke.sh`
+
+That path installs the shared requirements plus the local editable apps/packages used by this repo.
+
+Advanced/manual fallback if you already have a known-good interpreter and intentionally want only
+this app installed:
 
 ```bash
 python -m pip install -r requirements-dev.txt
@@ -129,6 +138,9 @@ Contract: `docs/design/run-artifacts.md`.
 From the repo root:
 
 ```bash
+# Run the repo bootstrap once first if this is a fresh checkout:
+#   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\smoke.ps1
+#   # or: bash ./scripts/smoke.sh
 python tools/scaffold/scaffold.py run install --project cli
 python tools/scaffold/scaffold.py run test --project cli
 python tools/scaffold/scaffold.py run lint --project cli
