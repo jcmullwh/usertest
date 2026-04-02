@@ -2,11 +2,18 @@
 
 [![CI](https://github.com/jcmullwh/usertest/actions/workflows/ci.yml/badge.svg)](https://github.com/jcmullwh/usertest/actions/workflows/ci.yml)
 
-This repo contains **usertest**, a runner for repeatable “agentic usertests” and **usertest-backlog**, a backlog miner. We aim to solve two core problems:
+This repo contains: 
 
-1. The only way to actually test software is to have users use it. Developers (agent and human) have great ideas about how
+**usertest**, a runner for repeatable “agentic usertests" of a repo
+**usertest-backlog**, which mines the usertest results and creates a prioritized backlog.
+**usertest-implement**, which generates, reviews and merges PR's based on the backlog
+
+We aim to solve three core problems:
+
+1. The only way to really test software is to have users use it. Developers (agent and human) have great ideas about how
 well their software works, but those ideas are just guesses until they are put into contact with users.
 2. User feedback/suggestions/input is often noisy, overlapping, and sometimes contradictory, making it difficult to aggregate and act upon.
+3. Agents are narrowly focused and will generate ever-more slop unless controlled.
 
 **usertest**
 
@@ -29,11 +36,10 @@ The backlog CLI provides tools to mine and analyze data produced by usertest, ge
 
 Once we have all of those target issues, we need to implement them.
 
-- Use the same mechanisms as usertest and usertest-backlog to generate a PR.
+- Use the same mechanisms as usertest and usertest-backlog to generate a PR for a ticket.
+- Review the PR
+- Merge the PR
 - Track metrics on the implementers to identify rising complexity and tech debt.
-- Same-repo Docker maintenance runs now have a dedicated maintenance image profile with seeded
-  project environments and zero-copy `.venv` cache mounts so repeated maintenance does not spend
-  most of its time reinstalling the monorepo.
 
 ## Quickstart (one command)
 
