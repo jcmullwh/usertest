@@ -150,14 +150,17 @@ def _discover_loop_processes() -> list[dict[str, Any]]:
         "| Select-Object ProcessId, CommandLine, CreationDate; "
         "$rows | ConvertTo-Json -Depth 3"
     )
-    proc = subprocess.run(
-        ["powershell", "-NoProfile", "-Command", cmd],
-        capture_output=True,
-        text=True,
-        check=False,
-        encoding="utf-8",
-        errors="replace",
-    )
+    try:
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", cmd],
+            capture_output=True,
+            text=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except OSError:
+        return []
     if proc.returncode != 0 or not proc.stdout.strip():
         return []
     try:
