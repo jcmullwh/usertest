@@ -11,12 +11,12 @@ generator = "python_pdm_lib"
 toolchain = "python"
 package_manager = "pdm"
 ci = { lint = true, test = true, build = false }
-tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.depcheck = ["pdm", "run", "deptry", "."]
 tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -27,12 +27,12 @@ generator = "python_pdm_lib"
 toolchain = "python"
 package_manager = "pdm"
 ci = { lint = true, test = true, build = false }
-tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.depcheck = ["pdm", "run", "deptry", "."]
 tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -43,12 +43,12 @@ generator = "python_pdm_lib"
 toolchain = "python"
 package_manager = "pdm"
 ci = { lint = true, test = true, build = false }
-tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.depcheck = ["pdm", "run", "deptry", "."]
 tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -59,12 +59,12 @@ generator = "python_pdm_lib"
 toolchain = "python"
 package_manager = "pdm"
 ci = { lint = true, test = true, build = false }
-tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.depcheck = ["pdm", "run", "deptry", "."]
 tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -75,12 +75,12 @@ generator = "python_pdm_app"
 toolchain = "python"
 package_manager = "pdm"
 ci = { lint = true, test = true, build = false }
-tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.depcheck = ["pdm", "run", "deptry", "."]
 tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -91,12 +91,12 @@ generator = "python_pdm_lib"
 toolchain = "python"
 package_manager = "pdm"
 ci = { lint = true, test = true, build = false }
-tasks.depcheck = ["pdm", "run", "deptry", "src"]
+tasks.depcheck = ["pdm", "run", "deptry", "."]
 tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -112,7 +112,7 @@ tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -128,7 +128,7 @@ tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -144,7 +144,7 @@ tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -160,7 +160,7 @@ tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -176,7 +176,7 @@ tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -192,7 +192,7 @@ tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]
 
 [[projects]]
@@ -208,5 +208,5 @@ tasks.format = ["pdm", "run", "ruff", "format", "."]
 tasks.install = ["pdm", "install"]
 tasks.lint = ["pdm", "run", "ruff", "check", "."]
 tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
-tasks.test = ["pdm", "run", "pytest", "-q"]
+tasks.test = ["pdm", "run", "python", "-m", "pytest", "-q"]
 tasks.typecheck = ["pdm", "run", "mypy", "."]

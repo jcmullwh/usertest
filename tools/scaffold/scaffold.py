@@ -878,15 +878,27 @@ def _looks_like_transient_pdm_local_path_failure(*, stdout: str, stderr: str) ->
     return any(marker in text for marker in _KNOWN_TRANSIENT_PDM_LOCAL_PATH_MARKERS)
 
 
+def _write_stream_backslashescaped(stream: Any, text: str) -> None:
+    try:
+        stream.write(text)
+        return
+    except UnicodeEncodeError:
+        encoding = getattr(stream, "encoding", None) or "utf-8"
+        escaped = text.encode(encoding, errors="backslashreplace").decode(
+            encoding, errors="ignore"
+        )
+        stream.write(escaped)
+
+
 def _emit_captured_process_output(cp: subprocess.CompletedProcess[str]) -> None:
     if cp.stdout:
-        sys.stdout.write(cp.stdout)
+        _write_stream_backslashescaped(sys.stdout, cp.stdout)
         if not cp.stdout.endswith("\n"):
-            sys.stdout.write("\n")
+            _write_stream_backslashescaped(sys.stdout, "\n")
     if cp.stderr:
-        sys.stderr.write(cp.stderr)
+        _write_stream_backslashescaped(sys.stderr, cp.stderr)
         if not cp.stderr.endswith("\n"):
-            sys.stderr.write("\n")
+            _write_stream_backslashescaped(sys.stderr, "\n")
 
 
 def _run_manifest_task(
@@ -1207,13 +1219,23 @@ def _looks_like_pdm_run_ruff_check(cmd: list[str]) -> bool:
     )
 
 
+def _pdm_run_pytest_probe_argv(cmd: list[str]) -> list[str] | None:
+    if len(cmd) < 3 or not _is_pdm_command(cmd) or cmd[1] != "run":
+        return None
+    if Path(cmd[2]).name.lower() in _PYTEST_COMMAND_NAMES:
+        return [cmd[0], "run", cmd[2], "--version"]
+    if (
+        len(cmd) >= 5
+        and Path(cmd[2]).name.lower() in _PYTHON_COMMAND_NAMES
+        and cmd[3] == "-m"
+        and cmd[4] == "pytest"
+    ):
+        return [cmd[0], "run", cmd[2], "-m", "pytest", "--version"]
+    return None
+
+
 def _looks_like_pdm_run_pytest(cmd: list[str]) -> bool:
-    return (
-        len(cmd) >= 3
-        and _is_pdm_command(cmd)
-        and cmd[1] == "run"
-        and Path(cmd[2]).name.lower() in _PYTEST_COMMAND_NAMES
-    )
+    return _pdm_run_pytest_probe_argv(cmd) is not None
 
 
 def _looks_like_host_pytest_command(cmd: list[str]) -> bool:
@@ -1441,7 +1463,8 @@ def _ensure_pytest_available_for_test(
     install_cmd: list[str] | None,
     extra_env: dict[str, str] | None,
 ) -> None:
-    if not _looks_like_pdm_run_pytest(cmd):
+    probe_argv = _pdm_run_pytest_probe_argv(cmd)
+    if probe_argv is None:
         return
 
     env = dict(os.environ)
@@ -1449,7 +1472,6 @@ def _ensure_pytest_available_for_test(
         env.update(extra_env)
     env.setdefault("PDM_IGNORE_ACTIVE_VENV", "1")
 
-    probe_argv = [cmd[0], "run", cmd[2], "--version"]
     cp = _probe(probe_argv, cwd=cwd, env=env)
     if cp.returncode == 0:
         return
