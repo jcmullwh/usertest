@@ -86,6 +86,7 @@ $RECYCLE.BIN/
 *.swo
 *.zip
 *.tar.gz
+run_dashboard.html
 backup_artifacts/
 
 ############################################
