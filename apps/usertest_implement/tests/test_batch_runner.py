@@ -9,6 +9,7 @@ from usertest_implement.batch_failure import classify_run_outcome
 from usertest_implement.batch_runner import (
     BacklogSource,
     BatchCandidate,
+    _add_batch_resource_conflicts,
     _batch_subprocess_env,
     _collect_wave_candidates,
     _pick_launchable_candidate_index,
@@ -53,6 +54,50 @@ def test_pick_launchable_candidate_index_respects_conflict_keys(tmp_path: Path) 
     )
 
     assert index == 1
+
+
+def test_docker_batch_resource_conflict_serializes_ticket_runs(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    ticket_path = owner_root / ".agents" / "plans" / "2 - ready" / "ticket.md"
+    queue = [
+        _add_batch_resource_conflicts(
+            BatchCandidate(
+                source_name="src",
+                export_path=tmp_path / "export.json",
+                fingerprint="aaaaaaaaaaaaaaaa",
+                severity="high",
+                title="First",
+                owner_root=owner_root,
+                ticket_path=ticket_path,
+                execution_domain="runner_core",
+                execution_conflict_keys=("ticket:aaaaaaaaaaaaaaaa",),
+            ),
+            exec_backend="docker",
+        ),
+        _add_batch_resource_conflicts(
+            BatchCandidate(
+                source_name="src",
+                export_path=tmp_path / "export.json",
+                fingerprint="bbbbbbbbbbbbbbbb",
+                severity="high",
+                title="Second",
+                owner_root=owner_root,
+                ticket_path=ticket_path,
+                execution_domain="docs",
+                execution_conflict_keys=("ticket:bbbbbbbbbbbbbbbb",),
+            ),
+            exec_backend="docker",
+        ),
+    ]
+
+    assert queue[0].execution_conflict_keys == (
+        "ticket:aaaaaaaaaaaaaaaa",
+        "batch_resource:docker",
+    )
+    assert _pick_launchable_candidate_index(
+        queue,
+        active_conflict_keys={"batch_resource:docker"},
+    ) is None
 
 
 def test_classify_run_outcome_detects_registry_json_failure(tmp_path: Path) -> None:

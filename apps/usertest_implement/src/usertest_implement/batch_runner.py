@@ -855,6 +855,34 @@ def _pick_launchable_candidate_index(
     return None
 
 
+def _add_batch_resource_conflicts(
+    candidate: BatchCandidate,
+    *,
+    exec_backend: str,
+) -> BatchCandidate:
+    extra_keys: tuple[str, ...] = ()
+    if exec_backend.strip().lower() == "docker":
+        extra_keys = ("batch_resource:docker",)
+    if not extra_keys:
+        return candidate
+
+    merged_keys = tuple(dict.fromkeys((*candidate.execution_conflict_keys, *extra_keys)))
+    if merged_keys == candidate.execution_conflict_keys:
+        return candidate
+    return BatchCandidate(
+        source_name=candidate.source_name,
+        export_path=candidate.export_path,
+        fingerprint=candidate.fingerprint,
+        severity=candidate.severity,
+        title=candidate.title,
+        owner_root=candidate.owner_root,
+        ticket_path=candidate.ticket_path,
+        execution_domain=candidate.execution_domain,
+        execution_conflict_keys=merged_keys,
+        retry_count=candidate.retry_count,
+    )
+
+
 def _run_ticket_process(
     *,
     repo_root: Path,
@@ -1106,6 +1134,7 @@ def _drain_phase(
     settings_profile: str,
     repo_input: str,
     refresh_state: dict[str, SourceRefreshState],
+    exec_backend: str,
 ) -> None:
     defaults = config.get("defaults", {})
     refresh_agent = str(defaults.get("refresh_agent") or workers[0].agent)
@@ -1158,6 +1187,10 @@ def _drain_phase(
             processed=processed,
             refresh_state=refresh_state,
         )
+        candidates = [
+            _add_batch_resource_conflicts(candidate, exec_backend=exec_backend)
+            for candidate in candidates
+        ]
         if not candidates:
             _print(f"DONE phase={phase.name} cycles={cycle - 1}")
             return
@@ -1443,6 +1476,7 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
                 settings_profile=run_settings_profile,
                 repo_input=repo_input,
                 refresh_state=refresh_state,
+                exec_backend=exec_backend,
             )
             if state.get("status") == "blocked":
                 break
