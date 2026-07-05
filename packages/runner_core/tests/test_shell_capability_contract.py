@@ -124,7 +124,7 @@ def test_shell_capability_resolver_classifies_codex_windows_probe_failures() -> 
     assert powershell["reason_code"] == "codex_windows_powershell_prepayload_failed"
 
 
-def test_codex_nonlocal_backend_requires_probe_evidence() -> None:
+def test_codex_nonlocal_backend_requires_explicit_shell_evidence() -> None:
     unprobed = _resolve_shell_capability(
         agent="codex",
         operating_system="Linux",
@@ -136,6 +136,18 @@ def test_codex_nonlocal_backend_requires_probe_evidence() -> None:
     ).to_dict()
     assert unprobed["state"] == "unprobed"
     assert unprobed["probe_status"] == "not_run"
+
+    policy_available = _resolve_shell_capability(
+        agent="codex",
+        operating_system="Linux",
+        backend="docker",
+        sandbox_mode="danger-full-access",
+        policy_status="allowed",
+        policy_reason="Codex sandbox policy is explicitly configured as danger-full-access.",
+        allowed_tools=None,
+    ).to_dict()
+    assert policy_available["state"] == "available"
+    assert policy_available["probe_status"] == "not_run"
 
     available = _resolve_shell_capability(
         agent="codex",
@@ -152,7 +164,30 @@ def test_codex_nonlocal_backend_requires_probe_evidence() -> None:
 
 
 def test_shell_probe_result_uses_existing_backend_probe_meta() -> None:
-    passed = _shell_probe_result_from_preflight_meta({"exit_code": 0, "stderr": ""})
+    generic_probe = _shell_probe_result_from_preflight_meta(
+        {
+            "exit_code": 0,
+            "stderr": "",
+            "command_probe_details": {"codex": {"present": True}},
+        }
+    )
+    assert generic_probe is None
+
+    generic_capability = _resolve_shell_capability(
+        agent="codex",
+        operating_system="Linux",
+        backend="docker",
+        sandbox_mode="danger-full-access",
+        policy_status="unknown",
+        policy_reason="Codex CLI command execution depends on sandbox policy.",
+        allowed_tools=None,
+        probe_result=generic_probe,
+    ).to_dict()
+    assert generic_capability["state"] == "unprobed"
+
+    passed = _shell_probe_result_from_preflight_meta(
+        {"shell_probe": {"exit_code": 0, "stderr": ""}}
+    )
     assert passed == {
         "ok": True,
         "exit_code": 0,

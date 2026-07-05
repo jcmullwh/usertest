@@ -335,7 +335,7 @@ def test_run_once_writes_preflight_probe_commands(
     assert "resolved_path" in python_diag
     caps = payload.get("capabilities", {})
     assert isinstance(caps, dict)
-    assert caps.get("shell_commands", {}).get("status") == "unknown"
+    assert caps.get("shell_commands", {}).get("status") == "allowed"
 
 
 def test_run_once_fails_fast_when_required_agent_binary_missing(tmp_path: Path) -> None:

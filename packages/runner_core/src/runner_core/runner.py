@@ -2181,6 +2181,7 @@ def _build_auth_missing_hints(
 def _infer_shell_policy_status(
     *,
     agent: str,
+    codex_policy: dict[str, Any] | None = None,
     claude_policy: dict[str, Any],
     gemini_policy: dict[str, Any],
     has_outer_sandbox: bool,
@@ -2240,6 +2241,19 @@ def _infer_shell_policy_status(
         )
 
     if agent == "codex":
+        codex_policy = codex_policy if isinstance(codex_policy, dict) else {}
+        sandbox_raw = codex_policy.get("sandbox")
+        sandbox = (
+            str(sandbox_raw).strip()
+            if isinstance(sandbox_raw, str) and str(sandbox_raw).strip()
+            else ""
+        )
+        if sandbox in {"read-only", "workspace-write", "danger-full-access"}:
+            return (
+                "allowed",
+                f"Codex sandbox policy is explicitly configured as {sandbox}.",
+                None,
+            )
         return (
             "unknown",
             (
@@ -2438,7 +2452,13 @@ def _resolve_shell_capability(
             allowed_tools=allowed_tools,
         )
 
-    if policy_status_norm == "allowed":
+    codex_local_windows_unprobed = (
+        agent_norm == "codex"
+        and backend_norm == "local"
+        and operating_system.strip().lower().startswith("windows")
+        and probe_status != "passed"
+    )
+    if policy_status_norm == "allowed" and not codex_local_windows_unprobed:
         return ShellCapability(
             state="available",
             agent=agent,
@@ -2491,11 +2511,12 @@ def _shell_probe_result_from_preflight_meta(
             "reason": error.strip(),
         }
 
-    if "exit_code" in preflight_meta:
-        exit_code_raw = preflight_meta.get("exit_code")
+    shell_probe = preflight_meta.get("shell_probe")
+    if isinstance(shell_probe, dict):
+        exit_code_raw = shell_probe.get("exit_code")
         exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 1
-        stderr = preflight_meta.get("stderr")
-        stdout = preflight_meta.get("stdout")
+        stderr = shell_probe.get("stderr")
+        stdout = shell_probe.get("stdout")
         return {
             "ok": exit_code == 0,
             "exit_code": exit_code,
@@ -2526,6 +2547,7 @@ def _policy_allows_shell(
 
     status, _reason, _allowed_tools = _infer_shell_policy_status(
         agent=agent,
+        codex_policy=policy_cfg.get("codex", {}),
         claude_policy=claude_policy,
         gemini_policy=gemini_policy,
         has_outer_sandbox=(str(exec_backend) == "docker"),
@@ -5637,6 +5659,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         # Fail fast: permission requirements are validated before any expensive backend setup.
         shell_status, shell_reason, allowed_tools = _infer_shell_policy_status(
             agent=request.agent,
+            codex_policy=codex_policy,
             claude_policy=claude_policy,
             gemini_policy=gemini_policy,
             has_outer_sandbox=(request.exec_backend == "docker"),
@@ -5669,6 +5692,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 request = replace(request, exec_backend="docker")
                 shell_status, shell_reason, allowed_tools = _infer_shell_policy_status(
                     agent=request.agent,
+                    codex_policy=codex_policy,
                     claude_policy=claude_policy,
                     gemini_policy=gemini_policy,
                     has_outer_sandbox=True,
@@ -6353,9 +6377,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         else "run_shell_command not enabled"
                     )
             else:
-                shell_reason = (
-                    "Codex CLI command execution depends on Codex sandbox policy/approvals. "
-                    "This runner can't reliably precompute allowlist outcome."
+                shell_status, shell_reason, allowed_tools = _infer_shell_policy_status(
+                    agent=request.agent,
+                    codex_policy=codex_policy,
+                    claude_policy=claude_policy,
+                    gemini_policy=gemini_policy,
+                    has_outer_sandbox=(sandbox is not None),
                 )
 
             host_os = _runner_host_os()
