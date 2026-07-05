@@ -819,7 +819,8 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional per-command timeout for --verify-command checks. "
-            "Non-positive values disable the timeout."
+            "When brokered final verification reuse is active, omitted or non-positive "
+            "values fall back to the runner's bounded default timeout."
         ),
     )
     run_p.add_argument(
@@ -1022,7 +1023,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--verify-timeout-seconds",
         type=float,
         default=None,
-        help="Optional per-command timeout for --verify-command checks (applied to all targets).",
+        help=(
+            "Optional per-command timeout for --verify-command checks "
+            "(applied to all targets). When brokered final verification reuse is active, "
+            "omitted or non-positive values fall back to the runner's bounded default timeout."
+        ),
     )
     batch_p.add_argument(
         "--agent-system-prompt-file",

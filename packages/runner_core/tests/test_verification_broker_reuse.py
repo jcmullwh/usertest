@@ -208,16 +208,21 @@ def _make_broker_attempt(
 ) -> VerificationBrokerAttempt:
     client_root = run_dir / "verification_broker" / "client"
     attempt_root = run_dir / "verification_broker" / "attempt1"
+    contract = broker_mod.resolve_verification_broker_contract(
+        command_prefix=[],
+        exec_backend="local",
+        validated_python_executable=sys.executable,
+        verification_timeout_seconds=wait_timeout_seconds,
+        verification_command_count=1,
+        is_windows=os.name == "nt",
+    )
     return VerificationBrokerAttempt(
         run_dir=run_dir,
         attempt_number=1,
         client_root=client_root,
         client_root_for_agent=str(client_root),
         attempt_root_for_agent=str(attempt_root),
-        execution_shell="powershell" if os.name == "nt" else "bash",
-        python_command=sys.executable,
-        verification_timeout_seconds=wait_timeout_seconds,
-        verification_command_count=1,
+        contract=contract,
         verifier=verifier,
         workspace_hash_fn=lambda: WorkspaceStateHash(
             sha256="abc123",
@@ -298,6 +303,47 @@ def test_verification_broker_client_waits_for_async_failure(tmp_path: Path) -> N
     assert "summary_path=" in completed.stderr
     assert "broker_request_01" in completed.stderr
     assert "verification.json" in completed.stderr
+
+
+def test_verification_broker_client_rejects_passed_response_missing_required_artifacts(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    summary = {
+        "schema_version": 1,
+        "attempt_number": 1,
+        "commands_configured": [_verification_command()],
+        "passed": True,
+        "status": "passed",
+        "terminal_reason": "passed",
+        "started_utc": "2026-03-07T00:00:00Z",
+        "finished_utc": "2026-03-07T00:00:01Z",
+        "wall_seconds": 0.01,
+        "artifacts_dir": None,
+        "commands": [
+            {
+                "command": _verification_command(),
+                "exit_code": 0,
+                "timed_out": False,
+            }
+        ],
+    }
+    broker = _make_broker_attempt(run_dir=run_dir, verifier=lambda _: summary)
+    broker.start()
+    try:
+        completed = _run_broker_wrapper(run_dir=run_dir, workspace_dir=tmp_path)
+    finally:
+        broker.stop()
+
+    assert completed.returncode != 0
+    assert "missing required artifact fields" in completed.stderr
+    assert "artifacts_dir" in completed.stderr
+    response_files = sorted(
+        (run_dir / "verification_broker" / "attempt1" / "responses").glob("*.json")
+    )
+    payload = json.loads(response_files[-1].read_text(encoding="utf-8"))
+    assert payload["status"] == "passed"
+    assert payload["summary_path"] is None
 
 
 def test_verification_broker_client_surfaces_progress_updates(tmp_path: Path) -> None:
@@ -417,16 +463,22 @@ def test_verification_broker_uses_bounded_default_deadline_budget(
             ],
         }
 
+    contract = broker_mod.resolve_verification_broker_contract(
+        command_prefix=(),
+        exec_backend="local",
+        validated_python_executable=sys.executable,
+        verification_timeout_seconds=None,
+        verification_command_count=2,
+        is_windows=(os.name == "nt"),
+    )
+
     broker = VerificationBrokerAttempt(
         run_dir=run_dir,
         attempt_number=1,
         client_root=run_dir / "verification_broker" / "client",
         client_root_for_agent=str(run_dir / "verification_broker" / "client"),
         attempt_root_for_agent=str(run_dir / "verification_broker" / "attempt1"),
-        execution_shell="powershell" if os.name == "nt" else "bash",
-        python_command=sys.executable,
-        verification_timeout_seconds=None,
-        verification_command_count=2,
+        contract=contract,
         verifier=_verifier,
         workspace_hash_fn=lambda: WorkspaceStateHash(
             sha256="abc123",
@@ -878,7 +930,6 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_response_is_incompl
         return original_run_verification_commands(*args, **kwargs)
 
     monkeypatch.setattr(runner_mod, "_run_verification_commands", _incomplete_broker_verification)
-
     cfg = RunnerConfig(
         repo_root=runner_root,
         runs_dir=tmp_path / "runs",
@@ -906,8 +957,14 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_response_is_incompl
     reuse = json.loads((result.run_dir / "verification_reuse.json").read_text(encoding="utf-8"))
     assert reuse["selected_source"] == "post_agent_rerun"
     assert reuse["fallback_reason"] == "broker_response_incomplete"
+    assert reuse["requests"][0]["required_artifacts_complete"] is False
+    assert "artifacts_dir" in reuse["requests"][0]["missing_required_artifacts"]
     attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
     attempt_verification = attempts["attempts"][0]["verification"]
+    assert attempt_verification["broker_missing_required_artifacts"] == [
+        "artifacts_dir",
+        "summary_path",
+    ]
     assert attempt_verification["broker_response_contract_error"]
     assert attempt_verification["broker_response_failure_reason"] == "incomplete_broker_response"
 

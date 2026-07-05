@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from runner_core.runner import RunResult
 
 import usertest_implement.cli as implement_cli
@@ -515,8 +516,19 @@ def test_run_defers_review_until_for_review_and_green_ci(
         _fake_run_review_for_selected_ticket,
     )
 
-    def _fake_subprocess_run(argv, cwd=None, capture_output=None, text=None, check=None):
+    def _fake_subprocess_run(
+        argv,
+        cwd=None,
+        capture_output=None,
+        text=None,
+        encoding=None,
+        errors=None,
+        check=None,
+    ):
         if argv[:3] == ["gh", "pr", "create"]:
+            assert text is True
+            assert encoding == "utf-8"
+            assert errors == "replace"
             return SimpleNamespace(
                 returncode=0,
                 stdout="https://example.invalid/pr/55\n",
@@ -647,7 +659,15 @@ def test_run_records_missing_gh_when_pr_create_exec_fails(
         lambda **_: {"pushed": True, "remote_name": "origin", "remote_url": "https://example.invalid/repo.git"},
     )
 
-    def _fake_subprocess_run(argv, cwd=None, capture_output=None, text=None, check=None):
+    def _fake_subprocess_run(
+        argv,
+        cwd=None,
+        capture_output=None,
+        text=None,
+        check=None,
+        encoding=None,
+        errors=None,
+    ):
         if argv[:3] == ["gh", "pr", "create"]:
             raise OSError("CreateProcess failed")
         raise AssertionError(f"unexpected subprocess call: {argv}")
@@ -859,8 +879,19 @@ def test_wait_for_ci_success_polls_view_until_completed_success(
     monotonic_values = iter([0.0, 0.0, 1.0, 2.0, 3.0, 4.0])
     view_calls = {"count": 0}
 
-    def _fake_run(argv, cwd=None, capture_output=None, text=None, check=None):
+    def _fake_run(
+        argv,
+        cwd=None,
+        capture_output=None,
+        text=None,
+        encoding=None,
+        errors=None,
+        check=None,
+    ):
         assert cwd == str(workspace_dir)
+        assert text is True
+        assert encoding == "utf-8"
+        assert errors == "replace"
         if argv[:3] == ["gh", "run", "list"]:
             return SimpleNamespace(
                 returncode=0,
@@ -940,6 +971,16 @@ def test_run_gh_text_returns_empty_string_when_stdout_missing(monkeypatch, tmp_p
     monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
 
     assert _run_gh_text(cwd=tmp_path, argv=["gh", "pr", "diff", "123"]) == ""
+
+
+def test_run_gh_text_reports_missing_gh(monkeypatch, tmp_path: Path) -> None:
+    def _fake_subprocess_run(*_args, **_kwargs):
+        raise FileNotFoundError("gh")
+
+    monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
+
+    with pytest.raises(RuntimeError, match="gh not found on PATH"):
+        _run_gh_text(cwd=tmp_path, argv=["gh", "pr", "diff", "123"])
 
 
 def test_run_gh_json_accepts_missing_stdout_as_null(monkeypatch, tmp_path: Path) -> None:
