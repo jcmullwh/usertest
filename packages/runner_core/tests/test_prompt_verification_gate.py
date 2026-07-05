@@ -202,7 +202,7 @@ def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_
     expected_wrapper = "verify_client.ps1" if os.name == "nt" else "verify_client.sh"
     assert "Final handoff verification" in prompt_text
     assert expected_wrapper in prompt_text
-    assert "timeout_seconds: 600" in prompt_text
+    assert "timeout_seconds: 10800" in prompt_text
     assert verify_cmd not in prompt_text
     assert "it blocks until verification finishes" in prompt_text
     assert "it must pass before you finish" in prompt_text

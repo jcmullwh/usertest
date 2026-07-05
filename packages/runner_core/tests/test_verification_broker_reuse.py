@@ -436,6 +436,7 @@ def test_verification_broker_uses_bounded_default_deadline_budget(
         verification_timeout_seconds=None,
         verification_command_count=2,
     )
+    assert expected_deadline == 21_630.0
     expected_wait_timeout = broker_mod._compute_client_wait_timeout(
         internal_deadline_seconds=expected_deadline,
     )
