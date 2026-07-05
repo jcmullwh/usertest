@@ -69,7 +69,7 @@ def test_batch_preflight_skips_github_auth_for_local_exercise_profile(
     )
 
 
-def test_batch_preflight_keeps_github_auth_for_default_remote_handoff(
+def test_batch_preflight_accepts_env_token_when_auth_status_reports_stale_default(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
@@ -101,4 +101,45 @@ def test_batch_preflight_keeps_github_auth_for_default_remote_handoff(
     )
 
     assert ["gh", "auth", "status"] in called
+    assert ["gh", "api", "user", "--jq", ".login"] in called
+    assert ["gh", "repo", "view", "--json", "nameWithOwner"] in called
+    assert result["blockers"] == []
+
+
+def test_batch_preflight_blocks_when_github_capability_probe_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    called: list[list[str]] = []
+
+    def fake_run(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        called.append(argv)
+        if argv in (
+            ["gh", "auth", "status"],
+            ["gh", "api", "user", "--jq", ".login"],
+        ):
+            return _completed(argv, returncode=1)
+        return _completed(argv)
+
+    monkeypatch.setattr(batch_preflight, "_run", fake_run)
+    monkeypatch.setattr(batch_preflight, "_git_branch", lambda _: "dev")
+    monkeypatch.setattr(batch_preflight, "_git_head", lambda _: "abc123")
+    monkeypatch.setattr(batch_preflight, "_gitlab_registry_probe", lambda: None)
+
+    result = batch_preflight.run_batch_preflight(
+        repo_root=tmp_path,
+        batch_dir=tmp_path / "batch",
+        batch_config={
+            "defaults": {
+                "require_clean_git": False,
+                "require_local_green": False,
+                "require_ci_green_for_base": False,
+            }
+        },
+        worker_roster=[],
+        exec_backend="host",
+    )
+
+    assert ["gh", "auth", "status"] in called
+    assert ["gh", "api", "user", "--jq", ".login"] in called
     assert [item["blocker_id"] for item in result["blockers"]] == ["batch_control_plane"]
