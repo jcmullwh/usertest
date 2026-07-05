@@ -20,7 +20,11 @@ from runner_core.workspace_state_hash import WorkspaceStateHash
 _SHELL_PROBE_TIMEOUT_SECONDS = 2.0
 _POWERSHELL_PROBE_TIMEOUT_SECONDS = 10.0
 _PYTHON_PROBE_TIMEOUT_SECONDS = 4.0
-_BROKER_DEFAULT_COMMAND_TIMEOUT_SECONDS = 600.0
+# Default verification command timeout is intentionally a high hang guard, not an
+# expected-duration budget. Monorepo install/test verification has historical
+# successful commands above 600s, so this preserves the older 3h broker bound as
+# the per-command default when no explicit timeout is configured.
+_BROKER_DEFAULT_COMMAND_TIMEOUT_SECONDS = 10_800.0
 _BROKER_MIN_INTERNAL_DEADLINE_SECONDS = 60.0
 _BROKER_INTERNAL_DEADLINE_GRACE_SECONDS = 30.0
 _BROKER_CLIENT_WAIT_GRACE_SECONDS = 15.0
