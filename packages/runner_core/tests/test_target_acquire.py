@@ -56,6 +56,43 @@ def test_git_clone_supports_no_local_flag(monkeypatch) -> None:
     assert recorded == [["git", "clone", "--no-local", "C:/src/repo", str(Path("C:/tmp/dest"))]]
 
 
+def test_acquire_target_plain_directory_with_isolated_home(
+    tmp_path: Path, monkeypatch
+) -> None:
+    src = tmp_path / "target_repo"
+    src.mkdir(parents=True)
+    (src / "README.md").write_text("# repo\n", encoding="utf-8")
+
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+
+    acquired = target_acquire.acquire_target(
+        repo=str(src),
+        dest_dir=tmp_path / "workspace",
+        ref=None,
+    )
+
+    assert acquired.mode == "copy"
+    safe_dir = str(acquired.workspace_dir.resolve()).replace("\\", "/")
+    proc = subprocess.run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={safe_dir}",
+            "-C",
+            str(acquired.workspace_dir),
+            "status",
+            "--porcelain",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+
+
 def test_acquire_target_local_git_repo_uses_safe_clone_and_connectivity_check(
     tmp_path: Path, monkeypatch
 ) -> None:
