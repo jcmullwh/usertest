@@ -2476,7 +2476,9 @@ def _resolve_shell_capability(
     )
 
 
-def _shell_probe_result_from_preflight_meta(preflight_meta: dict[str, Any]) -> dict[str, Any] | None:
+def _shell_probe_result_from_preflight_meta(
+    preflight_meta: dict[str, Any],
+) -> dict[str, Any] | None:
     if not isinstance(preflight_meta, dict):
         return None
 
