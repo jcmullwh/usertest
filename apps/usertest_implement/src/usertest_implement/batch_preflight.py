@@ -86,6 +86,19 @@ def _batch_remote_handoff_requested(*, repo_root: Path, batch_config: dict[str, 
     return push or pr
 
 
+def _github_cli_ready(*, repo_root: Path, preflight_dir: Path) -> bool:
+    auth_proc = _run(["gh", "auth", "status"], cwd=repo_root)
+    _write_log(preflight_dir / "gh_auth.log", auth_proc)
+    if auth_proc.returncode == 0:
+        return True
+
+    user_proc = _run(["gh", "api", "user", "--jq", ".login"], cwd=repo_root)
+    _write_log(preflight_dir / "gh_auth_user_probe.log", user_proc)
+    repo_proc = _run(["gh", "repo", "view", "--json", "nameWithOwner"], cwd=repo_root)
+    _write_log(preflight_dir / "gh_auth_repo_probe.log", repo_proc)
+    return user_proc.returncode == 0 and repo_proc.returncode == 0
+
+
 def _git_branch(repo_root: Path) -> str:
     proc = _run(["git", "branch", "--show-current"], cwd=repo_root)
     branch = proc.stdout.strip()
@@ -279,15 +292,17 @@ def run_batch_preflight(
     )
 
     if require_github:
-        gh_auth_proc = _run(["gh", "auth", "status"], cwd=repo_root)
-        _write_log(preflight_dir / "gh_auth.log", gh_auth_proc)
-        if gh_auth_proc.returncode != 0:
+        if not _github_cli_ready(repo_root=repo_root, preflight_dir=preflight_dir):
             blockers.append(
                 _blocker(
                     blocker_id="batch_control_plane",
                     failure_class="batch_control_plane",
-                    summary="GitHub CLI auth is not ready for batch push/PR operations.",
-                    evidence={"path": str(preflight_dir / "gh_auth.log")},
+                    summary="GitHub CLI cannot perform required batch push/PR operations.",
+                    evidence={
+                        "auth_path": str(preflight_dir / "gh_auth.log"),
+                        "user_probe_path": str(preflight_dir / "gh_auth_user_probe.log"),
+                        "repo_probe_path": str(preflight_dir / "gh_auth_repo_probe.log"),
+                    },
                 )
             )
     else:
