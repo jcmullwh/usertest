@@ -29,7 +29,7 @@ profiles:
       verify_reuse: auto
       implementation_review_agent: claude
       implementation_review_model: null
-      ci_timeout_seconds: 3600
+      ci_timeout_seconds: null
       skip_ci_wait: false
       draft_pr_on_ci_failure: true
       commit: true

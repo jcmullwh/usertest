@@ -8,15 +8,13 @@ defaults:
   require_local_green: true
   require_ci_green_for_base: true
   halt_on_red_pr: true
-  ticket_timeout_seconds: 5400
-  ci_timeout_seconds: 3600
   infra_retry_limit: 1
   registry_retry_limit: 1
   max_phase_cycles: 20
   conflict_strategy: execution_domain
   worker_roster:
     - agent: codex
-      model: gpt-5.4
+      model: gpt-5.5
     - agent: claude
     - agent: gemini
 phases:

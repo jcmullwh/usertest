@@ -334,6 +334,22 @@ def write_atom_actions_yaml(path: Path, atoms: dict[str, dict[str, Any]]) -> Non
             else:
                 item[list_key] = sorted_unique_strings([str(values)])
 
+        for list_key in (
+            "dequeued_paths",
+            "dequeued_owner_roots",
+            "discarded_paths",
+            "discarded_owner_roots",
+            "discarded_fingerprints",
+            "reconciled_missing_queue_paths",
+        ):
+            values = item.get(list_key)
+            if isinstance(values, list):
+                item[list_key] = sorted_unique_strings(
+                    [value for value in values if isinstance(value, str)]
+                )
+            elif values is not None:
+                item[list_key] = sorted_unique_strings([str(values)])
+
         payload_atoms.append(item)
 
     doc = {"version": 1, "atoms": payload_atoms}

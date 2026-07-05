@@ -155,6 +155,9 @@ The target under test. Can be:
 
 Which adapter to use (`codex`, `claude`, `gemini`). Configured in `configs/agents.yaml`.
 
+When `--model` is omitted, the adapter uses its `configs/agents.yaml` `default_model` if one is
+configured.
+
 ### `--policy`
 
 Execution policy for the agent (`safe`, `inspect`, `write`). Configured in `configs/policies.yaml`.

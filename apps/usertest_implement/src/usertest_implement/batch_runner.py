@@ -14,6 +14,11 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from backlog_repo import (
+    load_atom_actions_yaml,
+    reconcile_atom_actions_from_plan_folders,
+    write_atom_actions_yaml,
+)
 
 from usertest_implement.batch_failure import classify_run_outcome, write_batch_failure
 from usertest_implement.batch_preflight import run_batch_preflight
@@ -38,6 +43,7 @@ SEVERITY_RANK = {
     "low": 3,
 }
 VALID_AGENTS = {"claude", "codex", "gemini"}
+LATEST_CODEX_MODEL = "gpt-5.5"
 RUN_HISTORY_ARTIFACT_NAMES = {
     "agent_attempts.json",
     "effective_run_spec.json",
@@ -63,6 +69,17 @@ BACKLOG_INPUT_PATHS = (
     Path("configs/backlog_stage_guidance_internal_maintenance"),
     Path("configs/repo_intent.md"),
 )
+
+
+def _sync_ticket_atom_actions(*, repo_root: Path, owner_root: Path) -> None:
+    atom_actions_path = repo_root / "configs" / "backlog_atom_actions.yaml"
+    atom_actions = load_atom_actions_yaml(atom_actions_path)
+    reconcile_atom_actions_from_plan_folders(
+        atom_actions=atom_actions,
+        owner_roots=[owner_root.resolve()],
+        generated_at=utc_now_z(),
+    )
+    write_atom_actions_yaml(atom_actions_path, atom_actions)
 
 
 @dataclass(frozen=True)
@@ -426,6 +443,8 @@ def _refresh_backlog(
             "reports",
             "intent-snapshot",
             *common,
+            "--repo-input",
+            repo_input,
         ],
         cwd=repo_root,
         log_path=log_dir / "intent_snapshot.log",
@@ -792,31 +811,37 @@ def _collect_wave_candidates(
     )
 
 
-def _claim_ticket(candidate: BatchCandidate) -> Path:
-    return move_ticket_file(
+def _claim_ticket(*, candidate: BatchCandidate, repo_root: Path) -> Path:
+    path = move_ticket_file(
         owner_root=candidate.owner_root,
         fingerprint=candidate.fingerprint,
         to_bucket="3 - in_progress",
         dry_run=False,
     ).resolve()
+    _sync_ticket_atom_actions(repo_root=repo_root, owner_root=candidate.owner_root)
+    return path
 
 
-def _requeue_ticket(candidate: BatchCandidate) -> Path:
-    return move_ticket_file(
+def _requeue_ticket(*, candidate: BatchCandidate, repo_root: Path) -> Path:
+    path = move_ticket_file(
         owner_root=candidate.owner_root,
         fingerprint=candidate.fingerprint,
         to_bucket="2 - ready",
         dry_run=False,
     ).resolve()
+    _sync_ticket_atom_actions(repo_root=repo_root, owner_root=candidate.owner_root)
+    return path
 
 
-def _move_ticket_for_review(candidate: BatchCandidate) -> Path:
-    return move_ticket_file(
+def _move_ticket_for_review(*, candidate: BatchCandidate, repo_root: Path) -> Path:
+    path = move_ticket_file(
         owner_root=candidate.owner_root,
         fingerprint=candidate.fingerprint,
         to_bucket="4 - for_review",
         dry_run=False,
     ).resolve()
+    _sync_ticket_atom_actions(repo_root=repo_root, owner_root=candidate.owner_root)
+    return path
 
 
 def _pick_launchable_candidate_index(
@@ -840,7 +865,7 @@ def _run_ticket_process(
     worker: WorkerTemplate,
     settings_path: Path,
     settings_profile: str,
-    ticket_timeout_seconds: float,
+    ticket_timeout_seconds: float | None,
 ) -> TicketRunResult:
     command = [
         str(implement_python),
@@ -883,14 +908,15 @@ def _run_ticket_process(
             stdout = out or ""
             stderr = err or ""
             break
-        if time.monotonic() - started > ticket_timeout_seconds:
+        if (
+            ticket_timeout_seconds is not None
+            and time.monotonic() - started > ticket_timeout_seconds
+        ):
             timed_out = True
             proc.terminate()
-            try:
-                out, err = proc.communicate(timeout=60)
-            except subprocess.TimeoutExpired:
+            if proc.poll() is None:
                 proc.kill()
-                out, err = proc.communicate()
+            out, err = proc.communicate()
             stdout = out or ""
             stderr = err or ""
             break
@@ -1083,8 +1109,13 @@ def _drain_phase(
 ) -> None:
     defaults = config.get("defaults", {})
     refresh_agent = str(defaults.get("refresh_agent") or workers[0].agent)
-    refresh_model = str(defaults.get("refresh_model") or workers[0].model or "gpt-5.4")
-    ticket_timeout_seconds = float(defaults.get("ticket_timeout_seconds") or 5400)
+    refresh_model = str(defaults.get("refresh_model") or workers[0].model or LATEST_CODEX_MODEL)
+    ticket_timeout_seconds: float | None = None
+    ticket_timeout_raw = defaults.get("ticket_timeout_seconds")
+    if ticket_timeout_raw not in (None, ""):
+        parsed_timeout = float(ticket_timeout_raw)
+        if parsed_timeout > 0:
+            ticket_timeout_seconds = parsed_timeout
     infra_retry_limit = int(defaults.get("infra_retry_limit") or 1)
     max_phase_cycles = int(defaults.get("max_phase_cycles") or 20)
 
@@ -1148,7 +1179,7 @@ def _drain_phase(
                     candidate = queue.pop(launch_index)
                     worker = workers[next_worker_index % len(workers)]
                     next_worker_index += 1
-                    claimed_path = _claim_ticket(candidate)
+                    claimed_path = _claim_ticket(candidate=candidate, repo_root=repo_root)
                     active_conflict_keys.update(candidate.execution_conflict_keys)
                     state.setdefault("in_flight", []).append(
                         {
@@ -1228,7 +1259,7 @@ def _drain_phase(
 
                     if failure["failure_class"] == "success":
                         try:
-                            _move_ticket_for_review(candidate)
+                            _move_ticket_for_review(candidate=candidate, repo_root=repo_root)
                         except Exception:
                             pass
                         state.setdefault("completed", []).append(
@@ -1256,7 +1287,7 @@ def _drain_phase(
                             and failure_class == "infra_transient"
                             and candidate.retry_count < infra_retry_limit
                         ):
-                            _requeue_ticket(candidate)
+                            _requeue_ticket(candidate=candidate, repo_root=repo_root)
                             queue.append(
                                 BatchCandidate(
                                     source_name=candidate.source_name,
@@ -1281,9 +1312,12 @@ def _drain_phase(
                                     isinstance(handoff_summary, dict)
                                     and handoff_summary.get("pr_created") is True
                                 ):
-                                    _move_ticket_for_review(candidate)
+                                    _move_ticket_for_review(
+                                        candidate=candidate,
+                                        repo_root=repo_root,
+                                    )
                                 else:
-                                    _requeue_ticket(candidate)
+                                    _requeue_ticket(candidate=candidate, repo_root=repo_root)
                             except Exception:
                                 pass
                             state.setdefault("failed", []).append(
@@ -1488,6 +1522,7 @@ def batch_recover(*, repo_root: Path, batch_id: str | None = None) -> int:
             to_bucket=destination_bucket,
             dry_run=False,
         )
+        _sync_ticket_atom_actions(repo_root=repo_root, owner_root=owner_root)
         recovered.append(
             {"fingerprint": fingerprint, "to_bucket": destination_bucket, "path": str(new_path)}
         )
@@ -1508,6 +1543,7 @@ def batch_recover(*, repo_root: Path, batch_id: str | None = None) -> int:
             to_bucket="2 - ready",
             dry_run=False,
         )
+        _sync_ticket_atom_actions(repo_root=repo_root, owner_root=owner_root)
         recovered.append(
             {"fingerprint": fingerprint, "to_bucket": "2 - ready", "path": str(new_path)}
         )

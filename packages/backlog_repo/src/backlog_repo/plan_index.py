@@ -21,6 +21,12 @@ PLAN_BUCKET_TO_ATOM_STATUS: dict[str, str] = {
     "6 - archived": "actioned",
     "0.1 - deferred": "actioned",
 }
+DISCARDED_PLAN_BUCKET = "0.2 - discarded"
+DISCARDED_PLAN_BUCKETS: tuple[str, ...] = (DISCARDED_PLAN_BUCKET,)
+PLAN_BUCKET_TO_TICKET_STATUS: dict[str, str] = {
+    **PLAN_BUCKET_TO_ATOM_STATUS,
+    DISCARDED_PLAN_BUCKET: "discarded",
+}
 
 ACTIONED_PLAN_BUCKET_PRIORITY: list[str] = [
     "6 - archived",
@@ -33,12 +39,27 @@ _ACTIONED_BUCKET_RANK: dict[str, int] = {
     bucket: rank for rank, bucket in enumerate(reversed(ACTIONED_PLAN_BUCKET_PRIORITY), start=1)
 }
 PLAN_TICKET_FILENAME_RE = re.compile(
-    r"^(?P<date>[0-9]{8})_(?:(?P<legacy_ticket_id>BLG-[0-9]{3})_)?(?P<fingerprint>[0-9a-f]{16})_(?P<slug>.+\.md)$"
+    r"^(?P<date>[0-9]{8})_"
+    r"(?:(?P<legacy_ticket_id>BLG-[0-9]{3}|TKT-[0-9a-f]{12})_)?"
+    r"(?P<fingerprint>[0-9a-f]{16})_(?P<slug>.+\.md)$"
 )
 ATOM_ID_RE = re.compile(
     r"^[A-Za-z0-9_.-]+/[0-9]{8}T[0-9]{6}Z/[A-Za-z0-9_.-]+/[0-9]+:[A-Za-z0-9_.-]+:[0-9]+$"
 )
-DEQUEUED_PLAN_DIRNAMES: tuple[str, ...] = ("_dequeued", "_archive")
+DEQUEUED_PLAN_DIRNAMES: tuple[str, ...] = ("_dequeued",)
+REMOVED_PLAN_DIRNAMES: tuple[str, ...] = (*DISCARDED_PLAN_BUCKETS, *DEQUEUED_PLAN_DIRNAMES)
+
+
+def _merge_ticket_status(current: str | None, desired: str) -> str:
+    """Merge plan-index statuses while treating discarded as non-actioned."""
+
+    if current == "actioned" or desired == "actioned":
+        return "actioned"
+    if current == "queued" or desired == "queued":
+        return "queued"
+    if current == "discarded" or desired == "discarded":
+        return "discarded"
+    return desired
 
 
 def _strip_legacy_source_ticket_lines(markdown: str) -> str:
@@ -109,18 +130,48 @@ def _extract_atom_ids_from_ticket_markdown(markdown: str) -> list[str]:
     return sorted(atom_ids)
 
 
+def _fingerprint_from_plan_path(path: Path) -> str | None:
+    match = PLAN_TICKET_FILENAME_RE.match(path.name)
+    if match is None:
+        return None
+    return match.group("fingerprint")
+
+
+def _atom_ids_for_plan(
+    *,
+    atom_actions: dict[str, dict[str, Any]],
+    markdown: str,
+    fingerprint: str | None,
+) -> list[str]:
+    atom_ids = set(_extract_atom_ids_from_ticket_markdown(markdown))
+    if fingerprint is not None:
+        for atom_id, entry in atom_actions.items():
+            fingerprints = entry.get("fingerprints", [])
+            if not isinstance(fingerprints, list):
+                continue
+            if fingerprint in {item for item in fingerprints if isinstance(item, str)}:
+                atom_ids.add(atom_id)
+    return sorted(atom_ids)
+
+
+def _canonicalize_atom_id_for_update(atom_id: str) -> tuple[str, str | None]:
+    canonical_atom_id = canonicalize_failure_atom_id(atom_id)
+    if canonical_atom_id is not None and canonical_atom_id != atom_id:
+        return canonical_atom_id, atom_id
+    return atom_id, None
+
+
 def sync_atom_actions_from_dequeued_plan_folders(
     *,
     atom_actions: dict[str, dict[str, Any]],
     owner_roots: list[Path],
     generated_at: str,
 ) -> dict[str, Any]:
-    """Demote queued/ticketed atom ledger entries based on `_dequeued` plan files.
+    """Demote atom ledger entries based on discarded/dequeued plan files.
 
-    Plans moved under `.agents/plans/_dequeued/**` (or `.agents/plans/_archive/**`) are
-    treated as explicitly removed from the active queue. Any referenced atoms are
-    demoted back to `new` so they become eligible for re-mining, while `actioned`
-    atoms are never demoted.
+    Plans moved under `.agents/plans/0.2 - discarded` or `_dequeued/**`
+    are treated as explicitly removed from the active queue. Any referenced atoms are
+    demoted back to `new` so they become eligible for re-mining.
 
     This is intended to run *before* `sync_atom_actions_from_plan_folders()` so that
     any atoms still referenced by active queued/actioned plan buckets are promoted
@@ -133,8 +184,9 @@ def sync_atom_actions_from_dequeued_plan_folders(
     tickets_without_evidence = 0
     atom_ids_seen = 0
     atoms_missing = 0
-    atoms_skipped_actioned = 0
+    atoms_created = 0
     atoms_demoted = 0
+    discarded_ticket_files_scanned = 0
 
     for owner_root in owner_roots:
         plans_dir = owner_root / ".agents" / "plans"
@@ -143,7 +195,7 @@ def sync_atom_actions_from_dequeued_plan_folders(
         roots_scanned += 1
 
         dequeued_dirs: list[Path] = []
-        for dirname in DEQUEUED_PLAN_DIRNAMES:
+        for dirname in REMOVED_PLAN_DIRNAMES:
             candidate = plans_dir / dirname
             if candidate.exists() and candidate.is_dir():
                 dequeued_dirs.append(candidate)
@@ -154,41 +206,49 @@ def sync_atom_actions_from_dequeued_plan_folders(
         for dequeued_dir in dequeued_dirs:
             for md_path in sorted(dequeued_dir.rglob("*.md"), key=lambda p: str(p)):
                 ticket_files_scanned += 1
+                if dequeued_dir.name in DISCARDED_PLAN_BUCKETS:
+                    discarded_ticket_files_scanned += 1
 
                 try:
                     markdown = md_path.read_text(encoding="utf-8", errors="replace")
                 except OSError:
                     continue
 
-                atom_ids = _extract_atom_ids_from_ticket_markdown(markdown)
+                fingerprint = _fingerprint_from_plan_path(md_path)
+                atom_ids = _atom_ids_for_plan(
+                    atom_actions=atom_actions,
+                    markdown=markdown,
+                    fingerprint=fingerprint,
+                )
                 if not atom_ids:
                     tickets_without_evidence += 1
                     continue
                 atom_ids_seen += len(atom_ids)
 
                 for atom_id in atom_ids:
-                    canonical_atom_id = canonicalize_failure_atom_id(atom_id)
-                    derived_from_atom_id: str | None = None
-                    if canonical_atom_id is not None and canonical_atom_id != atom_id:
-                        derived_from_atom_id = atom_id
-                        atom_id = canonical_atom_id
+                    atom_id, derived_from_atom_id = _canonicalize_atom_id_for_update(atom_id)
 
                     existing = atom_actions.get(atom_id)
                     if existing is None:
-                        atoms_missing += 1
-                        continue
+                        existing = {
+                            "atom_id": atom_id,
+                            "status": "new",
+                            "first_seen_at": generated_at,
+                        }
+                        atom_actions[atom_id] = existing
+                        atoms_created += 1
 
                     old_status_raw = existing.get("status")
                     old_status = str(old_status_raw) if isinstance(old_status_raw, str) else None
                     old_status_n = old_status.strip().lower() if old_status else "new"
-                    if old_status_n == "actioned":
-                        atoms_skipped_actioned += 1
-                        continue
 
                     if old_status_n != "new":
                         atoms_demoted += 1
                     existing["status"] = "new"
                     existing["last_dequeued_at"] = generated_at
+                    existing["last_removed_plan_bucket"] = dequeued_dir.name
+                    if dequeued_dir.name in DISCARDED_PLAN_BUCKETS:
+                        existing["last_discarded_at"] = generated_at
 
                     dequeued_paths = [
                         item for item in existing.get("dequeued_paths", []) if isinstance(item, str)
@@ -203,6 +263,34 @@ def sync_atom_actions_from_dequeued_plan_folders(
                     ]
                     dequeued_roots.append(str(owner_root))
                     existing["dequeued_owner_roots"] = sorted_unique_strings(dequeued_roots)
+
+                    if dequeued_dir.name in DISCARDED_PLAN_BUCKETS:
+                        discarded_paths = [
+                            item
+                            for item in existing.get("discarded_paths", [])
+                            if isinstance(item, str)
+                        ]
+                        discarded_paths.append(str(md_path))
+                        existing["discarded_paths"] = sorted_unique_strings(discarded_paths)
+
+                        discarded_roots = [
+                            item
+                            for item in existing.get("discarded_owner_roots", [])
+                            if isinstance(item, str)
+                        ]
+                        discarded_roots.append(str(owner_root))
+                        existing["discarded_owner_roots"] = sorted_unique_strings(discarded_roots)
+
+                        if fingerprint is not None:
+                            discarded_fingerprints = [
+                                item
+                                for item in existing.get("discarded_fingerprints", [])
+                                if isinstance(item, str)
+                            ]
+                            discarded_fingerprints.append(fingerprint)
+                            existing["discarded_fingerprints"] = sorted_unique_strings(
+                                discarded_fingerprints
+                            )
 
                     if derived_from_atom_id is not None:
                         derived = [
@@ -222,8 +310,9 @@ def sync_atom_actions_from_dequeued_plan_folders(
         "tickets_without_evidence": tickets_without_evidence,
         "atom_ids_seen": atom_ids_seen,
         "atoms_missing": atoms_missing,
-        "atoms_skipped_actioned": atoms_skipped_actioned,
+        "atoms_created": atoms_created,
         "atoms_demoted": atoms_demoted,
+        "discarded_ticket_files_scanned": discarded_ticket_files_scanned,
     }
 
 
@@ -247,7 +336,7 @@ def scan_plan_ticket_index(*, owner_root: Path) -> dict[str, dict[str, Any]]:
 
     index: dict[str, dict[str, Any]] = {}
     for bucket_dir in sorted([p for p in plans_dir.iterdir() if p.is_dir()], key=lambda p: p.name):
-        desired_status = PLAN_BUCKET_TO_ATOM_STATUS.get(bucket_dir.name)
+        desired_status = PLAN_BUCKET_TO_TICKET_STATUS.get(bucket_dir.name)
         if desired_status is None:
             continue
 
@@ -265,7 +354,7 @@ def scan_plan_ticket_index(*, owner_root: Path) -> dict[str, dict[str, Any]]:
 
             status_value = meta.get("status")
             status_current = str(status_value) if isinstance(status_value, str) else None
-            meta["status"] = promote_atom_status(status_current, desired_status)
+            meta["status"] = _merge_ticket_status(status_current, desired_status)
 
             paths = [item for item in meta.get("paths", []) if isinstance(item, str)]
             paths.append(str(md_path))
@@ -439,18 +528,18 @@ def sync_atom_actions_from_plan_folders(
                 except OSError:
                     continue
 
-                atom_ids = _extract_atom_ids_from_ticket_markdown(markdown)
+                atom_ids = _atom_ids_for_plan(
+                    atom_actions=atom_actions,
+                    markdown=markdown,
+                    fingerprint=fingerprint,
+                )
                 if not atom_ids:
                     tickets_without_evidence += 1
                     continue
                 atom_ids_seen += len(atom_ids)
 
                 for atom_id in atom_ids:
-                    derived_from_atom_id: str | None = None
-                    canonical_atom_id = canonicalize_failure_atom_id(atom_id)
-                    if canonical_atom_id is not None and canonical_atom_id != atom_id:
-                        derived_from_atom_id = atom_id
-                        atom_id = canonical_atom_id
+                    atom_id, derived_from_atom_id = _canonicalize_atom_id_for_update(atom_id)
 
                     existing = atom_actions.get(atom_id)
                     if existing is None:
@@ -512,4 +601,122 @@ def sync_atom_actions_from_plan_folders(
         "atom_ids_seen": atom_ids_seen,
         "atoms_created": atoms_created,
         "atoms_promoted": atoms_promoted,
+    }
+
+
+def _live_plan_fingerprints(*, owner_roots: list[Path]) -> set[str]:
+    live: set[str] = set()
+    for owner_root in owner_roots:
+        plans_dir = owner_root / ".agents" / "plans"
+        if not plans_dir.exists() or not plans_dir.is_dir():
+            continue
+        bucket_dirs = sorted(
+            [path for path in plans_dir.iterdir() if path.is_dir()],
+            key=lambda path: path.name,
+        )
+        for bucket_dir in bucket_dirs:
+            if PLAN_BUCKET_TO_TICKET_STATUS.get(bucket_dir.name) is None:
+                continue
+            for md_path in sorted(bucket_dir.glob("*.md"), key=lambda p: p.name):
+                fingerprint = _fingerprint_from_plan_path(md_path)
+                if fingerprint is not None:
+                    live.add(fingerprint)
+    return live
+
+
+def reconcile_missing_plan_atoms(
+    *,
+    atom_actions: dict[str, dict[str, Any]],
+    owner_roots: list[Path],
+    generated_at: str,
+) -> dict[str, Any]:
+    """Demote stale queued/ticketed atoms whose recorded plans no longer exist."""
+
+    live_fingerprints = _live_plan_fingerprints(owner_roots=owner_roots)
+    atoms_demoted = 0
+    atoms_checked = 0
+    atoms_with_live_fingerprint = 0
+    atoms_with_existing_queue_path = 0
+
+    for atom_id, existing in list(atom_actions.items()):
+        old_status_raw = existing.get("status")
+        old_status = (
+            str(old_status_raw).strip().lower() if isinstance(old_status_raw, str) else "new"
+        )
+        if old_status not in ("queued", "ticketed"):
+            continue
+        atoms_checked += 1
+
+        fingerprints = [
+            item for item in existing.get("fingerprints", []) if isinstance(item, str) and item
+        ]
+        if any(fingerprint in live_fingerprints for fingerprint in fingerprints):
+            atoms_with_live_fingerprint += 1
+            continue
+
+        queue_paths = [
+            item for item in existing.get("queue_paths", []) if isinstance(item, str) and item
+        ]
+        existing_queue_paths = [item for item in queue_paths if Path(item).exists()]
+        if existing_queue_paths:
+            atoms_with_existing_queue_path += 1
+            continue
+
+        existing["status"] = "new"
+        existing["last_reconciled_missing_plan_at"] = generated_at
+        existing["last_reconciled_missing_plan_reason"] = "no_live_fingerprint_or_queue_path"
+        if queue_paths:
+            missing_paths = [
+                item
+                for item in existing.get("reconciled_missing_queue_paths", [])
+                if isinstance(item, str)
+            ]
+            missing_paths.extend(queue_paths)
+            existing["reconciled_missing_queue_paths"] = sorted_unique_strings(missing_paths)
+        atom_actions[atom_id] = existing
+        atoms_demoted += 1
+
+    return {
+        "atoms_checked": atoms_checked,
+        "atoms_demoted": atoms_demoted,
+        "atoms_with_live_fingerprint": atoms_with_live_fingerprint,
+        "atoms_with_existing_queue_path": atoms_with_existing_queue_path,
+        "live_fingerprints": len(live_fingerprints),
+    }
+
+
+def reconcile_atom_actions_from_plan_folders(
+    *,
+    atom_actions: dict[str, dict[str, Any]],
+    owner_roots: list[Path],
+    generated_at: str,
+) -> dict[str, Any]:
+    """Synchronize atom lifecycle state from all plan-folder evidence."""
+
+    removal_sync = sync_atom_actions_from_dequeued_plan_folders(
+        atom_actions=atom_actions,
+        owner_roots=owner_roots,
+        generated_at=generated_at,
+    )
+    plan_sync = sync_atom_actions_from_plan_folders(
+        atom_actions=atom_actions,
+        owner_roots=owner_roots,
+        generated_at=generated_at,
+    )
+    missing_plan_sync = reconcile_missing_plan_atoms(
+        atom_actions=atom_actions,
+        owner_roots=owner_roots,
+        generated_at=generated_at,
+    )
+    status_counts: dict[str, int] = {}
+    for entry in atom_actions.values():
+        status = entry.get("status")
+        if isinstance(status, str) and status:
+            status_counts[status] = status_counts.get(status, 0) + 1
+    return {
+        "removal_sync": removal_sync,
+        "plan_sync": plan_sync,
+        "missing_plan_sync": missing_plan_sync,
+        "status_counts": status_counts,
+        "ledger_atoms_total": len(atom_actions),
     }

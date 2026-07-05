@@ -825,8 +825,8 @@ def build_parser() -> argparse.ArgumentParser:
     run_p.add_argument(
         "--exec-backend",
         choices=["local", "docker"],
-        default="local",
-        help="Execution backend.",
+        default="docker",
+        help="Execution backend (default: docker).",
     )
     run_p.add_argument(
         "--exec-docker-context",
@@ -1038,7 +1038,7 @@ def build_parser() -> argparse.ArgumentParser:
         type=Path,
         help="Default agent system prompt append file for all targets (see `run --help`).",
     )
-    batch_p.add_argument("--exec-backend", choices=["local", "docker"], default="local")
+    batch_p.add_argument("--exec-backend", choices=["local", "docker"], default="docker")
     batch_p.add_argument("--exec-docker-context", type=Path)
     batch_p.add_argument("--exec-dockerfile", type=Path)
     batch_p.add_argument("--exec-docker-python", default="auto")
@@ -1149,8 +1149,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument(
             "--exec-backend",
             choices=["local", "docker"],
-            default="local",
-            help="Execution backend (affects tool availability, especially for gemini shell access).",
+            default="docker",
+            help="Execution backend (default: docker; affects tool availability, especially for gemini shell access).",
         )
         p.add_argument("--exec-docker-context", type=Path)
         p.add_argument("--exec-dockerfile", type=Path)
@@ -1436,6 +1436,27 @@ def _resolve_optional_path(repo_root: Path, arg: Path | None) -> Path | None:
     return path.resolve()
 
 
+def _default_builtin_sandbox_cli_context(repo_root: Path) -> Path:
+    """Resolve the built-in sandbox_cli Docker context from source or package layout."""
+    candidates = (
+        repo_root / "packages" / "sandbox_runner" / "builtins" / "docker" / "contexts" / "sandbox_cli",
+        repo_root
+        / "packages"
+        / "sandbox_runner"
+        / "src"
+        / "sandbox_runner"
+        / "builtins"
+        / "docker"
+        / "contexts"
+        / "sandbox_cli",
+    )
+    for candidate in candidates:
+        resolved = candidate.resolve()
+        if resolved.exists() and resolved.is_dir():
+            return resolved
+    return candidates[0].resolve()
+
+
 def _coerce_string(value: Any) -> str | None:
     """Return a stripped non-empty string value when possible."""
     if not isinstance(value, str):
@@ -1549,15 +1570,7 @@ def _cmd_run(args: argparse.Namespace) -> int:
         exec_docker_timeout_seconds = None
 
     if args.exec_backend == "docker" and exec_docker_context is None:
-        exec_docker_context = (
-            repo_root
-            / "packages"
-            / "sandbox_runner"
-            / "builtins"
-            / "docker"
-            / "contexts"
-            / "sandbox_cli"
-        ).resolve()
+        exec_docker_context = _default_builtin_sandbox_cli_context(repo_root)
         print(
             f"No --exec-docker-context provided; using built-in context: {exec_docker_context}",
             file=sys.stderr,
@@ -1668,15 +1681,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
     if exec_docker_timeout_seconds is not None and exec_docker_timeout_seconds <= 0:
         exec_docker_timeout_seconds = None
     if args.exec_backend == "docker" and exec_docker_context is None:
-        exec_docker_context = (
-            repo_root
-            / "packages"
-            / "sandbox_runner"
-            / "builtins"
-            / "docker"
-            / "contexts"
-            / "sandbox_cli"
-        ).resolve()
+        exec_docker_context = _default_builtin_sandbox_cli_context(repo_root)
         print(
             f"No --exec-docker-context provided; using built-in context: {exec_docker_context}",
             file=sys.stderr,
@@ -2403,7 +2408,7 @@ def _matrix__parse_agent_entries(raw: Any, *, spec_path: Path) -> list[dict[str,
 
     Agents can be specified as:
       - "codex"
-      - {agent: "codex", models: ["GPT-5.3-Codex"], policy: "inspect", agent_config: ["k=v"]}
+      - {agent: "codex", models: ["gpt-5.5"], policy: "inspect", agent_config: ["k=v"]}
 
     Returns a list of normalized dicts with keys: agent, models, policy, agent_config.
     """
@@ -3776,8 +3781,8 @@ def _cmd_report(args: argparse.Namespace) -> int:
 
 def _render_target_catalog_yaml(*, persona_id: str | None, mission_id: str | None) -> str:
     """Render target-level catalog override YAML content."""
-    resolved_persona = persona_id or "quickstart_sprinter"
-    resolved_mission = mission_id or "first_output_smoke"
+    resolved_persona = persona_id or "representative_workflow_evaluator"
+    resolved_mission = mission_id or "verify_install_to_result"
     return "\n".join(
         [
             "version: 1",

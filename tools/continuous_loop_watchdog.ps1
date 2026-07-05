@@ -32,7 +32,7 @@ function Start-ContinuousLoop {
         "--target", "usertest",
         "--repo-input", $RepoRoot,
         "--backlog-agent", "codex",
-        "--backlog-model", "gpt-5.4",
+        "--backlog-model", "gpt-5.5",
         "--implementation-agent", "codex",
         "--review-agent", "claude",
         "--sleep-seconds", "60"

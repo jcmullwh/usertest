@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from reporter import compute_metrics, load_schema, validate_report
+from reporter import compute_metrics, load_schema, render_report_markdown, validate_report
 
 
 def test_compute_metrics_basic_counts() -> None:
@@ -121,3 +121,97 @@ def test_task_run_schema_allows_nullable_output_path() -> None:
 
     errors = validate_report(report, schema)
     assert errors == []
+
+def test_task_run_evidence_schema_requires_verification_on_success() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    schema_path = repo_root / "configs" / "report_schemas" / "task_run_evidence_v1.schema.json"
+    schema = load_schema(schema_path)
+
+    report = {
+        "schema_version": 1,
+        "kind": "task_run_v1",
+        "status": "success",
+        "goal": "Validate the representative workflow.",
+        "summary": "Ran the main flow.",
+        "representative_workflow": {
+            "entry_point": "README.md",
+            "workflow": "Run the documented default command.",
+            "why_representative": "It is the primary path described for new users.",
+            "user_visible_result": "A generated report.",
+        },
+        "steps": [
+            {
+                "name": "Run",
+                "attempts": [
+                    {
+                        "action": "python -m tool run",
+                        "result": "command succeeded",
+                        "evidence": "stdout showed the output path",
+                    }
+                ],
+                "outcome": "success",
+            }
+        ],
+        "outputs": [
+            {
+                "label": "report",
+                "path": "runs/example/report.md",
+                "description": "Generated report.",
+            }
+        ],
+        "verification": [],
+        "next_actions": ["Try a second target."],
+    }
+
+    errors = validate_report(report, schema)
+    assert errors
+
+
+def test_render_task_run_report_includes_representative_workflow_and_verification() -> None:
+    report = {
+        "schema_version": 1,
+        "kind": "task_run_v1",
+        "status": "success",
+        "goal": "Validate the representative workflow.",
+        "summary": "Ran the main flow.",
+        "representative_workflow": {
+            "entry_point": "README.md",
+            "workflow": "Run the documented default command.",
+            "why_representative": "It matches the primary user journey.",
+            "user_visible_result": "A generated report.",
+        },
+        "steps": [
+            {
+                "name": "Run",
+                "attempts": [
+                    {
+                        "action": "python -m tool run",
+                        "result": "command succeeded",
+                        "evidence": "stdout showed the output path",
+                    }
+                ],
+                "outcome": "success",
+            }
+        ],
+        "outputs": [
+            {
+                "label": "report",
+                "path": "runs/example/report.md",
+                "description": "Generated report.",
+            }
+        ],
+        "verification": [
+            {
+                "check": "Open the report path",
+                "result": "report.md exists",
+                "evidence": "runs/example/report.md",
+            }
+        ],
+        "next_actions": ["Try a second target."],
+    }
+
+    md = render_report_markdown(report=report)
+    assert "## Representative workflow" in md
+    assert "## Verification" in md
+    assert "It matches the primary user journey." in md
+    assert "report.md exists" in md

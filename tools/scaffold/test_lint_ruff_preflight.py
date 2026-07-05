@@ -55,8 +55,16 @@ def test_run_lint_fails_fast_with_single_install_remediation_when_ruff_missing(
 
     monkeypatch.setattr(scaffold, "_probe", fake_probe)
 
-    def fail_run_manifest_task(*, cmd: list[str], cwd: Path, task_name: str, project_id: str):
-        del cmd, cwd, task_name, project_id
+    def fail_run_manifest_task(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        task_name: str,
+        project_id: str,
+        extra_env: dict[str, str] | None = None,
+        force_install: bool = False,
+    ):
+        del cmd, cwd, task_name, project_id, extra_env, force_install
         raise AssertionError("Expected lint to fail during preflight (before running the task).")
 
     monkeypatch.setattr(scaffold, "_run_manifest_task", fail_run_manifest_task)

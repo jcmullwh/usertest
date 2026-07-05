@@ -431,7 +431,7 @@ def _normalize_maintenance_inventory_entry(entry: dict[str, Any]) -> dict[str, A
 def list_local_maintenance_images(
     *,
     repo_root: Path,
-    timeout_seconds: float | None = 120.0,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Return a structured inventory of local maintenance images and tags."""
 
@@ -500,7 +500,7 @@ def cleanup_local_maintenance_images(
     *,
     repo_root: Path,
     dry_run: bool = False,
-    timeout_seconds: float | None = 120.0,
+    timeout_seconds: float | None = None,
     artifact_path: Path | None = None,
 ) -> dict[str, Any]:
     """Prune old local maintenance-image tags conservatively according to retention settings."""
@@ -606,7 +606,6 @@ def cleanup_local_maintenance_images(
 def _git_remote_url(*, repo_dir: Path, remote_name: str = "origin") -> str | None:
     proc = _run_subprocess(
         ["git", "-C", str(repo_dir), "remote", "get-url", remote_name.strip() or "origin"],
-        timeout_seconds=10.0,
     )
     if proc.returncode != 0:
         return None

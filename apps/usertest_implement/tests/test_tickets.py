@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+import yaml
+
+from usertest_implement.cli import main
 from usertest_implement.tickets import build_ticket_index, move_ticket_file, select_next_ticket_path
 
 
@@ -155,3 +159,75 @@ def test_move_ticket_file_dedupes_actioned_buckets_and_prevents_downgrade(tmp_pa
     assert dest == complete_path
     assert complete_path.exists()
     assert not in_progress_path.exists()
+
+
+def test_tickets_discard_moves_ticket_and_demotes_atom(tmp_path: Path) -> None:
+    repo_root = tmp_path / "repo"
+    ready_dir = repo_root / ".agents" / "plans" / "2 - ready"
+    ready_dir.mkdir(parents=True)
+
+    fingerprint = "deadbeefdeadbeef"
+    atom_id = "usertest/20260220T194226Z/codex/0:suggested_change:2"
+    ticket_path = ready_dir / f"20260220_{fingerprint}_bad-solution.md"
+    ticket_path.write_text(
+        "# Bad solution\n\n"
+        f"- Fingerprint: `{fingerprint}`\n\n"
+        "## Evidence atom ids\n\n"
+        f"- `{atom_id}`\n",
+        encoding="utf-8",
+    )
+    atom_actions_path = repo_root / "configs" / "backlog_atom_actions.yaml"
+    atom_actions_path.parent.mkdir(parents=True, exist_ok=True)
+    atom_actions_path.write_text(
+        yaml.safe_dump(
+            {
+                "version": 1,
+                "atoms": [
+                    {
+                        "atom_id": atom_id,
+                        "status": "queued",
+                        "fingerprints": [fingerprint],
+                        "queue_paths": [str(ticket_path)],
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "--repo-root",
+                str(repo_root),
+                "tickets",
+                "discard",
+                "--owner-root",
+                str(repo_root),
+                "--fingerprint",
+                fingerprint,
+                "--reason",
+                "bad_solution",
+                "--note",
+                "Generated fix was not acceptable.",
+            ]
+        )
+
+    assert exc.value.code == 0
+    discarded_path = repo_root / ".agents" / "plans" / "0.2 - discarded" / ticket_path.name
+    assert discarded_path.exists()
+    assert not ticket_path.exists()
+
+    actions_doc = yaml.safe_load((repo_root / "configs" / "backlog_actions.yaml").read_text())
+    action = actions_doc["actions"][0]
+    assert action["fingerprint"] == fingerprint
+    assert action["status"] == "discarded"
+    assert action["discard_reason"] == "bad_solution"
+
+    atom_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
+    atom = atom_doc["atoms"][0]
+    assert atom["status"] == "new"
+    assert atom["discarded_fingerprints"] == [fingerprint]
+    assert atom["last_discard_reason"] == "bad_solution"
+    assert atom["last_discard_note"] == "Generated fix was not acceptable."

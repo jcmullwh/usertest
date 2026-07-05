@@ -110,9 +110,9 @@ This is the preferred way to encode: “How should we evaluate *this* repo?”
 
 ---
 
-## Fastest output (no setup)
+## Preview a run artifact (no setup)
 
-To understand what a run produces without installing anything, open the checked-in golden fixture:
+To understand what a run produces without installing anything, open the checked-in golden fixture. This is a fixture preview, not a usertest or installation check:
 
 - `examples/golden_runs/minimal_codex_run/report.md`
 - `examples/golden_runs/minimal_codex_run/metrics.json`
@@ -253,11 +253,26 @@ and what “success” means. If present, it is snapshotted into the run directo
 
 ### 4) Run
 
-For a first attempt, use `inspect` (read-only + allows shell commands):
+Representative validation (default built-in path):
+
+```text
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write
+```
+
+Defaults come from `configs/catalog.yaml`:
+
+- persona: `representative_workflow_evaluator`
+- mission: `verify_install_to_result`
+
+Use this path when you want evidence that a real user can reach a representative result.
+
+Preflight probe (faster, weaker evidence):
 
 ```text
 usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke
 ```
+
+Use this only to establish sign-of-life or isolate the first blocker.
 
 Strictest mode (no shell, no writes):
 
@@ -266,6 +281,7 @@ usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy safe
 ```
 
 ### 5) Inspect the output
+
 
 The command prints the run directory path. The most useful files:
 
@@ -296,11 +312,12 @@ Full guide: `docs/how-to/personas-and-missions.md`.
 
 ## If you run into issues
 
-- If the agent is blocked by policy, switch to `--policy inspect` (read-only + shell).
+- If the agent is blocked by policy during a representative workflow, switch to `--policy write`.
+- If you only need a preflight probe, switch to `--policy inspect` (read-only + shell).
 - If you need isolation or want fewer OS-specific shell issues, use the Docker backend:
 
 ```bash
-usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker
+usertest run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker
 ```
 
 More workflows: `docs/how-to/run-usertest.md`.

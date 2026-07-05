@@ -52,12 +52,14 @@ usertest --help
 
 Run a single target and write a run directory under `runs/usertest/…`.
 
+Defaults come from `configs/catalog.yaml`: `representative_workflow_evaluator` + `verify_install_to_result`.
+
 ```bash
 usertest run \
   --repo-root . \
   --repo "PATH_OR_GIT_URL" \
   --agent codex \
-  --policy inspect
+  --policy write
 ```
 
 ### `usertest batch`

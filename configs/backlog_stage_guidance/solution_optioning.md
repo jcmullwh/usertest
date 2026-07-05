@@ -5,6 +5,15 @@
 Produce one solution option per configured family for each researched problem. Options
 are grounded in the research dossier and must stay within the configured taxonomy.
 
+## Duration guardrail
+
+Stage artifacts and tool calls must not invent sleeps, polling delays, retry delays, or
+timeout values. If waiting behavior is part of the path being analyzed, use an existing
+repo-configured value or document the limitation instead of making up a duration. This
+also applies to tool calls: do not pass `timeout`, `timeout_ms`, or similar duration
+parameters to shell/tool invocations unless the assigned evidence includes that exact
+configured value.
+
 ## Option families (from configs/backlog_taxonomy.json)
 
 The current three families are:

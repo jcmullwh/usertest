@@ -11,7 +11,7 @@ import yaml
 from backlog_repo.export import ticket_export_fingerprint
 from runner_core import find_repo_root
 
-from usertest_backlog.cli import main
+from usertest_backlog.cli import _write_chunked_problem_mining_atoms_workspace, main
 
 
 def _write_json(path: Path, obj: object) -> None:
@@ -30,6 +30,47 @@ def _ticket_labeler_fingerprint(ticket: dict[str, Any]) -> str:
     evidence = sorted(item for item in ticket.get("evidence_atom_ids", []) if isinstance(item, str))
     anchor = json.dumps({"title": title, "evidence": evidence}, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(anchor).hexdigest()[:16]
+
+
+def test_problem_mining_workspace_writes_agent_readable_atom_index(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=workspace,
+        prompt_atoms=[
+            {
+                "atom_id": "run-a:confusion_point:1",
+                "run_rel": "target/20260101T000000Z/codex/0",
+                "source": "confusion_point",
+                "severity_hint": "high",
+                "text": "The CLI quickstart has no obvious first command.",
+                "linked_atom_ids": [],
+            },
+            {
+                "atom_id": "run-b:run_failure_event:1",
+                "run_rel": "target/20260102T000000Z/claude/0",
+                "source": "run_failure_event",
+                "severity_hint": "medium",
+                "text": "Run failed before producing a report.",
+                "linked_atom_ids": ["run-a:confusion_point:1"],
+            },
+        ],
+        max_records_per_miner=3,
+    )
+
+    assert manifest["index_file"] == "atoms_index.md"
+    assert manifest["atom_file_count"] == 2
+    assert manifest["chunks"][0]["text_file"] == "atoms_text/atoms_001.md"
+
+    index = (workspace / "atoms_index.md").read_text(encoding="utf-8")
+    text_chunk = (workspace / "atoms_text" / "atoms_001.md").read_text(encoding="utf-8")
+    atom_file = (workspace / "atoms_by_id" / "atom_0001.md").read_text(encoding="utf-8")
+
+    assert "run-a:confusion_point:1" in index
+    assert "atom_file: `atoms_by_id/atom_0001.md`" in index
+    assert "chunk_file: `atoms_text/atoms_001.md`" in index
+    assert "The CLI quickstart has no obvious first command." in text_chunk
+    assert "The CLI quickstart has no obvious first command." in atom_file
+    assert "linked_atom_ids: run-a:confusion_point:1" in text_chunk
 
 
 def _seed_labeler_cache(artifacts_dir: Path, ticket: dict[str, Any], *, labelers: int = 3) -> None:
@@ -534,6 +575,63 @@ def test_reports_backlog_syncs_atom_actions_from_plan_folders(tmp_path: Path) ->
     atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
     atom_entry = next(item for item in atom_actions_doc["atoms"] if item["atom_id"] == atom_id)
     assert atom_entry["status"] == "actioned"
+
+
+def test_reports_sync_atom_actions_dry_run_reports_without_writing(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root = tmp_path / "runner"
+    repo_root.mkdir(parents=True)
+    owner_repo = tmp_path / "owner_repo"
+    complete_dir = owner_repo / ".agents" / "plans" / "5 - complete"
+    complete_dir.mkdir(parents=True, exist_ok=True)
+
+    fingerprint = "deadbeefdeadbeef"
+    atom_id = "target_a/20260101T000000Z/codex/0:confusion_point:1"
+    (complete_dir / f"20260214_{fingerprint}_plan-sync-test.md").write_text(
+        "# Plan sync test\n",
+        encoding="utf-8",
+    )
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(
+        atom_actions_path,
+        {
+            "version": 1,
+            "atoms": [
+                {
+                    "atom_id": atom_id,
+                    "status": "queued",
+                    "fingerprints": [fingerprint],
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "sync-atom-actions",
+                "--repo-root",
+                str(repo_root),
+                "--owner-root",
+                str(owner_repo),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--dry-run",
+            ]
+        )
+
+    assert exc.value.code == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["dry_run"] is True
+    assert payload["before_status_counts"]["queued"] == 1
+    assert payload["after_status_counts"]["actioned"] == 1
+    assert payload["sync"]["plan_sync"]["atoms_promoted"] == 1
+
+    atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
+    assert atom_actions_doc["atoms"][0]["status"] == "queued"
 
 
 def test_reports_backlog_excludes_queued_atoms_by_default(tmp_path: Path) -> None:

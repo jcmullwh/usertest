@@ -13,6 +13,13 @@ This stage runs in an isolated writable workspace. Writes are allowed for:
 - Minimal fixture or setup changes required to trigger the issue
 - Repro harness scripts
 
+Research artifacts must not invent sleeps, polling delays, retry delays, or timeout
+values. If waiting behavior is part of the path being reproduced, use an existing
+repo-configured value or document the limitation instead of making up a duration.
+This also applies to tool calls: do not pass `timeout`, `timeout_ms`, or similar
+duration parameters to shell/tool invocations unless the assigned evidence includes
+that exact configured value.
+
 Writes are NOT allowed for:
 - Fixing the bug or implementing the solution
 - Changing production behavior to make the symptom disappear

@@ -144,6 +144,27 @@ def test_classify_run_outcome_marks_completed_failure_ci_as_ticket_regression(
     assert failure["global_blocker"] is True
 
 
+def test_classify_run_outcome_accepts_local_exercise_success(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "verification.json").write_text(
+        json.dumps({"passed": True}),
+        encoding="utf-8",
+    )
+
+    failure = classify_run_outcome(
+        run_dir=run_dir,
+        handoff_summary={
+            "pr_created": False,
+            "ci_required": False,
+            "final_status": "success",
+        },
+    )
+
+    assert failure["failure_class"] == "success"
+    assert failure["global_blocker"] is False
+
+
 def test_batch_subprocess_env_includes_repo_src_paths(
     tmp_path: Path,
     monkeypatch,
@@ -222,7 +243,7 @@ def test_collect_wave_candidates_prefers_ready_queue_over_refresh(
         repo_input=str(tmp_path),
         backlog_python=tmp_path / "python.exe",
         refresh_agent="codex",
-        refresh_model="gpt-5.4",
+        refresh_model="gpt-5.5",
         batch_dir_path=tmp_path / "batch",
         sources=[source],
         severities={"blocker", "high"},
@@ -275,7 +296,7 @@ def test_collect_wave_candidates_skips_refresh_while_other_ready_work_exists(
         repo_input=str(tmp_path),
         backlog_python=tmp_path / "python.exe",
         refresh_agent="codex",
-        refresh_model="gpt-5.4",
+        refresh_model="gpt-5.5",
         batch_dir_path=tmp_path / "batch",
         sources=[source],
         severities={"blocker", "high"},
@@ -323,7 +344,7 @@ def test_collect_wave_candidates_uses_per_ticket_fallback_when_conflict_metadata
         repo_input=str(tmp_path),
         backlog_python=tmp_path / "python.exe",
         refresh_agent="codex",
-        refresh_model="gpt-5.4",
+        refresh_model="gpt-5.5",
         batch_dir_path=tmp_path / "batch",
         sources=[source],
         severities={"blocker", "high"},

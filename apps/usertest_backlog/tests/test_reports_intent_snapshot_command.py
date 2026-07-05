@@ -52,3 +52,37 @@ def test_reports_intent_snapshot_writes_outputs(tmp_path: Path) -> None:
 
     markdown = out_md.read_text(encoding="utf-8")
     assert "# Repo Intent Snapshot" in markdown
+
+
+def test_reports_intent_snapshot_uses_repo_input_slug_for_default_outputs(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "intent-snapshot",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--repo-input",
+                r"I:\code\repo_alpha",
+            ]
+        )
+    assert exc.value.code == 0
+
+    compiled = runs_dir / "target_a" / "_compiled"
+    out_json = compiled / "repo_alpha.intent_snapshot.json"
+
+    assert out_json.exists()
+    assert not (compiled / "target_a.intent_snapshot.json").exists()
+
+    snapshot = json.loads(out_json.read_text(encoding="utf-8"))
+    assert snapshot["scope"]["target"] == "target_a"
+    assert snapshot["scope"]["repo_input"] == r"I:\code\repo_alpha"

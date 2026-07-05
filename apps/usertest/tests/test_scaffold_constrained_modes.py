@@ -340,7 +340,7 @@ def test_scaffold_lint_bootstraps_install_when_ruff_probe_fails(
     scaffold = _load_scaffold_module()
 
     probe_calls = {"count": 0}
-    install_calls: list[tuple[str, list[str]]] = []
+    install_calls: list[tuple[str, list[str], bool]] = []
 
     def _fake_probe(
         cmd: list[str], *, cwd: Path, env: dict[str, str] | None = None
@@ -357,9 +357,10 @@ def test_scaffold_lint_bootstraps_install_when_ruff_probe_fails(
         task_name: str,
         project_id: str,
         extra_env: dict[str, str] | None = None,
+        force_install: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         del cwd, project_id, extra_env
-        install_calls.append((task_name, cmd))
+        install_calls.append((task_name, cmd, force_install))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(scaffold, "_probe", _fake_probe)
@@ -375,7 +376,7 @@ def test_scaffold_lint_bootstraps_install_when_ruff_probe_fails(
     )
 
     assert probe_calls["count"] == 2
-    assert install_calls == [("install", ["pdm", "install"])]
+    assert install_calls == [("install", ["pdm", "install"], True)]
 
 
 def test_scaffold_test_bootstraps_install_when_pdm_venv_missing(
@@ -416,8 +417,9 @@ def test_scaffold_test_bootstraps_install_when_pdm_venv_missing(
         task_name: str,
         project_id: str,
         extra_env: dict[str, str] | None = None,
+        force_install: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        del cwd, project_id, extra_env
+        del cwd, project_id, extra_env, force_install
         calls.append((task_name, cmd))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 

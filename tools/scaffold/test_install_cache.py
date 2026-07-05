@@ -78,6 +78,49 @@ def test_install_cache_local_hit_skips_running_install(
     assert calls == []
 
 
+def test_install_cache_force_install_bypasses_local_hit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo"
+    project_dir = repo_root / "packages" / "demo"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    _write(project_dir / "pyproject.toml", "[project]\nname='demo'\nversion='0.1.0'\n")
+    _write(project_dir / "pdm.lock", "lock-version = \"4.5.0\"\n")
+    monkeypatch.setattr(scaffold, "_repo_root", lambda: repo_root)
+    monkeypatch.setenv("USERTEST_MAINT_VENV_CACHE_ENABLED", "1")
+    monkeypatch.setenv("USERTEST_MAINT_VENV_CACHE_ROOT", str(tmp_path / "cache"))
+
+    state = _cache_state(repo_root=repo_root, project_dir=project_dir)
+    (project_dir / ".venv").mkdir(parents=True, exist_ok=True)
+    scaffold._write_local_install_metadata(state=state)
+
+    calls: list[list[str]] = []
+
+    def fake_run(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+        capture: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        del env, capture
+        calls.append(argv)
+        (cwd / ".venv").mkdir(parents=True, exist_ok=True)
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scaffold, "_run", fake_run)
+    cp = scaffold._run_manifest_task(
+        cmd=["pdm", "install"],
+        cwd=project_dir,
+        task_name="install",
+        project_id="demo",
+        force_install=True,
+    )
+    assert cp.returncode == 0
+    assert calls == [["pdm", "install"]]
+
+
 def test_install_cache_disabled_runs_install(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

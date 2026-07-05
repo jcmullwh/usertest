@@ -142,7 +142,15 @@ def test_run_once_fails_when_codex_reports_personality_warning(tmp_path: Path) -
     cfg = RunnerConfig(
         repo_root=repo_root,
         runs_dir=tmp_path / "runs",
-        agents={"codex": {"binary": dummy_binary}},
+        agents={
+            "codex": {
+                "binary": dummy_binary,
+                "config_overrides": [
+                    "personality=pragmatic",
+                    'model_messages=[{role="system", content="Be concise."}]',
+                ],
+            }
+        },
         policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
     )
 
@@ -167,3 +175,34 @@ def test_run_once_fails_when_codex_reports_personality_warning(tmp_path: Path) -
     stderr_text = (result.run_dir / "agent_stderr.txt").read_text(encoding="utf-8")
     assert "Model personality requested but model_messages is missing" not in stderr_text
     assert "code=codex_model_messages_missing" in stderr_text
+
+
+def test_run_once_allows_runtime_only_codex_personality_warning(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    dummy_binary = _make_dummy_codex_with_personality_warning(tmp_path)
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert not (result.run_dir / "error.json").exists()
+    stderr_text = (result.run_dir / "agent_stderr.txt").read_text(encoding="utf-8")
+    assert "Model personality requested but model_messages is missing" not in stderr_text
+    assert "classification=runtime_notice" in stderr_text

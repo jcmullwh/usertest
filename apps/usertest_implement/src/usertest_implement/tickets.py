@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from backlog_repo.plan_index import (
+    DISCARDED_PLAN_BUCKET,
     dedupe_actioned_plan_ticket_files,
     dedupe_queued_plan_ticket_files_when_actioned_exists,
     scan_plan_ticket_index,
@@ -170,6 +171,11 @@ def move_ticket_file(
     # If it's already in the destination bucket, treat as a no-op.
     already_paths = sorted(bucket_to_paths.get(to_bucket, []), key=lambda p: str(p))
     if already_paths:
+        if not dry_run and to_bucket == DISCARDED_PLAN_BUCKET:
+            for path in sorted(entry.paths, key=lambda p: str(p)):
+                if path in already_paths:
+                    continue
+                path.unlink(missing_ok=True)
         return already_paths[0]
 
     # Choose a sensible source bucket based on intended promotion direction.

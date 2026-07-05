@@ -6,6 +6,15 @@ Choose among the existing option set. Do not create new options. The selection m
 reference one of the configured family IDs and explain why the other options were not
 chosen.
 
+## Duration guardrail
+
+Stage artifacts and tool calls must not invent sleeps, polling delays, retry delays, or
+timeout values. If waiting behavior is part of the path being analyzed, use an existing
+repo-configured value or document the limitation instead of making up a duration. This
+also applies to tool calls: do not pass `timeout`, `timeout_ms`, or similar duration
+parameters to shell/tool invocations unless the assigned evidence includes that exact
+configured value.
+
 ## What to favor for this repo
 
 - Incremental changes over new top-level commands unless evidence breadth is compelling.

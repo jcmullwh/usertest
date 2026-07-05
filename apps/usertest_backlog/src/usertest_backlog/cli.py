@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import math
 import os
@@ -33,6 +34,38 @@ _BREADTH_CONTEXT_DIMENSIONS = ("missions", "targets", "repo_inputs")
 _BREADTH_OBSERVATION_DIMENSIONS = ("runs", "agents", "personas")
 _REVIEW_DOMAIN_COMMAND_SURFACE = "command_surface"
 _REVIEW_DOMAIN_BEHAVIOR_COMPAT = "behavior_compat"
+_SOURCE_RELATIVE_PATHS = (
+    "apps/usertest/src",
+    "apps/usertest_backlog/src",
+    "apps/usertest_implement/src",
+    "packages/runner_core/src",
+    "packages/agent_adapters/src",
+    "packages/normalized_events/src",
+    "packages/reporter/src",
+    "packages/sandbox_runner/src",
+    "packages/triage_engine/src",
+    "packages/backlog_core/src",
+    "packages/backlog_miner/src",
+    "packages/backlog_repo/src",
+    "packages/run_artifacts/src",
+)
+
+
+def _prefer_checkout_sources() -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    if not (repo_root / "tools" / "scaffold" / "monorepo.toml").exists():
+        return
+    for rel_path in reversed(_SOURCE_RELATIVE_PATHS):
+        source_path = (repo_root / rel_path).resolve()
+        if not source_path.exists():
+            continue
+        source_path_s = str(source_path)
+        if source_path_s in sys.path:
+            sys.path.remove(source_path_s)
+        sys.path.insert(0, source_path_s)
+
+
+_prefer_checkout_sources()
 
 
 def _one_command_first_success_remediation() -> str:
@@ -69,6 +102,7 @@ try:
     import jsonschema  # noqa: F401
 except ModuleNotFoundError as exc:
     raise SystemExit(_missing_dependency_remediation_simple(dependency="jsonschema")) from exc
+
 
 def _from_source_import_remediation(*, missing_module: str) -> str:
     return (
@@ -153,16 +187,13 @@ try:
         promote_atom_status as _promote_atom_status,
     )
     from backlog_repo import (
+        reconcile_atom_actions_from_plan_folders as _reconcile_atom_actions_from_plan_folders,
+    )
+    from backlog_repo import (
         scan_plan_ticket_index as _scan_plan_ticket_index,
     )
     from backlog_repo import (
         sorted_unique_strings as _sorted_unique_strings,
-    )
-    from backlog_repo import (
-        sync_atom_actions_from_dequeued_plan_folders as _sync_atom_actions_from_dequeued_plan_folders,
-    )
-    from backlog_repo import (
-        sync_atom_actions_from_plan_folders as _sync_atom_actions_from_plan_folders,
     )
     from backlog_repo import (
         write_atom_actions_yaml as _write_atom_actions_yaml,
@@ -851,8 +882,8 @@ def build_parser() -> argparse.ArgumentParser:
         help=(
             "Skip syncing atom statuses from `.agents/plans/*` folder locations before filtering. "
             "Default behavior infers `queued`/`actioned` from ticket file locations (including "
-            "demoting atoms referenced by `.agents/plans/_dequeued/**` or `.agents/plans/_archive/**` "
-            "back to `new`)."
+            "demoting atoms referenced by `.agents/plans/0.2 - discarded/**` or "
+            "`.agents/plans/_dequeued/**` back to `new`)."
         ),
     )
 
@@ -1081,6 +1112,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to monorepo root (auto-detected by default).",
     )
 
+    reports_sync_atom_actions_p = reports_sub.add_parser(
+        "sync-atom-actions",
+        help="Reconcile configs/backlog_atom_actions.yaml from .agents/plans state.",
+    )
+    reports_sync_atom_actions_p.add_argument(
+        "--owner-root",
+        type=Path,
+        action="append",
+        default=[],
+        help="Repository root containing .agents/plans (repeatable; default: current directory).",
+    )
+    reports_sync_atom_actions_p.add_argument(
+        "--atom-actions-yaml",
+        type=Path,
+        help="Atom lifecycle ledger YAML path (defaults to configs/backlog_atom_actions.yaml).",
+    )
+    reports_sync_atom_actions_p.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Report reconciliation results without writing the atom ledger.",
+    )
+    reports_sync_atom_actions_p.add_argument(
+        "--repo-root",
+        type=Path,
+        help="Path to monorepo root (auto-detected by default).",
+    )
+
     reports_export_tickets_p = reports_sub.add_parser(
         "export-tickets",
         help=(
@@ -1146,6 +1204,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--include-actioned",
         action="store_true",
         help="Include tickets already present in the action ledger (default: skip).",
+    )
+    reports_export_tickets_p.add_argument(
+        "--include-discarded",
+        action="store_true",
+        help="Include tickets previously discarded from the action ledger (default: skip).",
     )
     reports_export_tickets_p.add_argument(
         "--skip-plan-folder-dedupe",
@@ -4665,6 +4728,9 @@ def _render_ticket_export_markdown(doc: dict[str, Any]) -> str:
     include_actioned = filters.get("include_actioned")
     if isinstance(include_actioned, bool):
         lines.append(f"- Include actioned: `{str(include_actioned).lower()}`")
+    include_discarded = filters.get("include_discarded")
+    if isinstance(include_discarded, bool):
+        lines.append(f"- Include discarded: `{str(include_discarded).lower()}`")
     lines.append("")
 
     exports_raw = doc.get("exports")
@@ -4721,6 +4787,62 @@ def _render_ticket_export_markdown(doc: dict[str, Any]) -> str:
     _render_section("Research / Design", research)
     _render_section("Implementation", impl)
     return "\n".join(lines).rstrip() + "\n"
+
+
+def _atom_status_counts(atom_actions: dict[str, dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for entry in atom_actions.values():
+        status = _normalize_atom_status(_coerce_string(entry.get("status")))
+        counts[status] = counts.get(status, 0) + 1
+    return counts
+
+
+def _cmd_reports_sync_atom_actions(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    atom_actions_arg: Path | None = args.atom_actions_yaml
+    if atom_actions_arg is not None:
+        atom_actions_path = (
+            _resolve_optional_path(repo_root, atom_actions_arg) or atom_actions_arg.resolve()
+        )
+    else:
+        atom_actions_path = repo_root / "configs" / "backlog_atom_actions.yaml"
+
+    try:
+        atom_actions = _load_atom_actions_yaml(atom_actions_path)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    owner_roots_raw = list(args.owner_root or [Path.cwd()])
+    owner_roots: list[Path] = []
+    for owner_root_raw in owner_roots_raw:
+        resolved = _resolve_optional_path(repo_root, owner_root_raw) or owner_root_raw.resolve()
+        owner_roots.append(resolved)
+    owner_roots = sorted({path.resolve() for path in owner_roots}, key=lambda p: str(p))
+
+    working = copy.deepcopy(atom_actions)
+    before_counts = _atom_status_counts(working)
+    sync_meta = _reconcile_atom_actions_from_plan_folders(
+        atom_actions=working,
+        owner_roots=owner_roots,
+        generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    after_counts = _atom_status_counts(working)
+
+    if not bool(args.dry_run):
+        _write_atom_actions_yaml(atom_actions_path, working)
+
+    payload = {
+        "schema_version": 1,
+        "dry_run": bool(args.dry_run),
+        "atom_actions_yaml": str(atom_actions_path),
+        "owner_roots": [str(path) for path in owner_roots],
+        "before_status_counts": before_counts,
+        "after_status_counts": after_counts,
+        "sync": sync_meta,
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+    return 0
 
 
 def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
@@ -4878,18 +5000,21 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     stages = stage_filters if stage_filters else ["triage", "ready_for_ticket", "research_required"]
     min_severity = str(args.min_severity)
     include_actioned = bool(args.include_actioned)
+    include_discarded = bool(getattr(args, "include_discarded", False))
 
     print(
         "Export filters:",
         f"stages={stages}",
         f"min_severity={min_severity}",
         f"include_actioned={include_actioned}",
+        f"include_discarded={include_discarded}",
         sep=" ",
     )
 
     exports: list[dict[str, Any]] = []
     queued_refs: list[dict[str, str]] = []
     skipped_actioned = 0
+    skipped_discarded = 0
     skipped_existing_plan = 0
     skipped_stage = 0
     skipped_severity = 0
@@ -4905,6 +5030,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     generated_queue_files_refreshed = 0
     actions_mutated = False
     keep_fingerprints_by_owner_root: dict[Path, set[str]] = {}
+    pre_export_atom_sync_meta: dict[str, Any] | None = None
 
     for ticket in tickets:
         fingerprint = ticket_export_fingerprint(ticket)
@@ -4917,6 +5043,18 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         keep_fingerprints_by_owner_root.setdefault(owner_repo_root.resolve(), set()).add(
             fingerprint
         )
+
+    try:
+        atom_actions = _load_atom_actions_yaml(atom_actions_path)
+    except ValueError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    pre_export_atom_sync_meta = _reconcile_atom_actions_from_plan_folders(
+        atom_actions=atom_actions,
+        owner_roots=sorted(keep_fingerprints_by_owner_root.keys(), key=lambda p: str(p)),
+        generated_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    )
+    _write_atom_actions_yaml(atom_actions_path, atom_actions)
 
     for ticket in tickets:
         stage = (_coerce_string(ticket.get("stage")) or "triage").strip()
@@ -4981,9 +5119,15 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             skipped_severity += 1
             continue
 
-        if (fingerprint in actions) and not include_actioned:
-            skipped_actioned += 1
-            continue
+        action_entry = actions.get(fingerprint)
+        if action_entry is not None:
+            action_status = _coerce_string(action_entry.get("status"))
+            if action_status == "discarded" and not include_discarded:
+                skipped_discarded += 1
+                continue
+            if action_status != "discarded" and not include_actioned:
+                skipped_actioned += 1
+                continue
 
         export_kind = "implementation"
         if stage_effective == "research_required":
@@ -5258,6 +5402,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             "stages": stages,
             "min_severity": min_severity,
             "include_actioned": include_actioned,
+            "include_discarded": include_discarded,
         },
         "policy": {
             "surface_area_high": sorted(surface_area_high),
@@ -5266,6 +5411,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             "tickets_total": len(tickets),
             "exports_total": len(exports),
             "skipped_actioned": skipped_actioned,
+            "skipped_discarded": skipped_discarded,
             "skipped_existing_plan": skipped_existing_plan,
             "skipped_stage": skipped_stage,
             "skipped_severity": skipped_severity,
@@ -5279,6 +5425,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
             "ux_plan_tickets_updated": ux_plan_tickets_updated,
             "ux_idea_files_updated": ux_idea_files_updated,
             "ux_tickets_deferred": ux_tickets_deferred,
+            "pre_export_atom_sync": pre_export_atom_sync_meta,
             "atom_status_updates": atom_status_meta,
         },
         "idea_files": idea_files_written,
@@ -5556,7 +5703,10 @@ def _write_chunked_problem_mining_atoms_workspace(
     Written files
     ------------
     - ``atoms.json`` (manifest; small JSON object)
+    - ``atoms_index.md`` (compact, line-oriented index of every atom)
+    - ``atoms_by_id/atom_####.md`` (one markdown file per atom)
     - ``atoms_chunks/atoms_###.json`` (chunk files; each is a JSON array of atom dicts)
+    - ``atoms_text/atoms_###.md`` (markdown view of each chunk for file-read tools)
 
     The manifest includes a stable list of chunk files; a prompt can instruct the model to:
     1) Read ``atoms.json``.
@@ -5591,6 +5741,10 @@ def _write_chunked_problem_mining_atoms_workspace(
     workspace_dir.mkdir(parents=True, exist_ok=True)
     chunks_dir = workspace_dir / "atoms_chunks"
     chunks_dir.mkdir(parents=True, exist_ok=True)
+    text_dir = workspace_dir / "atoms_text"
+    text_dir.mkdir(parents=True, exist_ok=True)
+    atoms_by_id_dir = workspace_dir / "atoms_by_id"
+    atoms_by_id_dir.mkdir(parents=True, exist_ok=True)
 
     header = "[\n"
     footer = "]\n"
@@ -5628,12 +5782,57 @@ def _write_chunked_problem_mining_atoms_workspace(
     if current:
         chunks.append(current)
 
+    def _preview_text(value: Any, *, max_chars: int = 500) -> str:
+        text = _coerce_string(value) or ""
+        text = " ".join(text.replace("\r", "\n").split())
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars].rstrip() + "..."
+
+    def _format_atom_markdown(atom: dict[str, Any]) -> str:
+        atom_id = _coerce_string(atom.get("atom_id")) or "(missing atom_id)"
+        run_rel = _coerce_string(atom.get("run_rel")) or ""
+        source = _coerce_string(atom.get("source")) or ""
+        severity = _coerce_string(atom.get("severity_hint")) or ""
+        linked_raw = atom.get("linked_atom_ids")
+        linked = (
+            [x for x in linked_raw if isinstance(x, str) and x.strip()]
+            if isinstance(linked_raw, list)
+            else []
+        )
+        text = _coerce_string(atom.get("text")) or ""
+        lines = [
+            f"## {atom_id}",
+            "",
+            f"- run_rel: {run_rel}",
+            f"- source: {source}",
+            f"- severity_hint: {severity}",
+            f"- linked_atom_ids: {', '.join(linked) if linked else '(none)'}",
+            "",
+            "Text:",
+            text.rstrip(),
+            "",
+        ]
+        return "\n".join(lines).rstrip() + "\n"
+
     chunk_entries: list[dict[str, Any]] = []
+    index_lines: list[str] = [
+        "# Problem Mining Atom Index",
+        "",
+        "This is a compact index of every evidence atom. Use the listed markdown chunk",
+        "for full text details when the preview is not enough.",
+        "",
+    ]
     total_chunk_bytes = 0
+    total_text_chunk_bytes = 0
+    total_atom_file_bytes = 0
+    atom_file_count = 0
 
     for idx, atoms_chunk in enumerate(chunks, start=1):
         rel_path = Path("atoms_chunks") / f"atoms_{idx:03d}.json"
         chunk_path = workspace_dir / rel_path
+        rel_text_path = Path("atoms_text") / f"atoms_{idx:03d}.md"
+        text_path = workspace_dir / rel_text_path
 
         lines: list[str] = ["["]
         for atom_idx, atom in enumerate(atoms_chunk):
@@ -5646,14 +5845,47 @@ def _write_chunked_problem_mining_atoms_workspace(
         chunk_path.write_text(content, encoding="utf-8")
         chunk_bytes = chunk_path.stat().st_size
         total_chunk_bytes += chunk_bytes
+
+        text_parts = [f"# Atom Chunk {idx:03d}", ""]
+        for atom in atoms_chunk:
+            atom_file_count += 1
+            atom_id = _coerce_string(atom.get("atom_id")) or "(missing atom_id)"
+            source = _coerce_string(atom.get("source")) or ""
+            severity = _coerce_string(atom.get("severity_hint")) or ""
+            run_rel = _coerce_string(atom.get("run_rel")) or ""
+            preview = _preview_text(atom.get("text"))
+            rel_atom_path = Path("atoms_by_id") / f"atom_{atom_file_count:04d}.md"
+            atom_file_content = _format_atom_markdown(atom)
+            atom_file_path = workspace_dir / rel_atom_path
+            atom_file_path.write_text(atom_file_content, encoding="utf-8")
+            total_atom_file_bytes += atom_file_path.stat().st_size
+            index_lines.append(
+                f"- `{atom_id}` | atom_file: `{rel_atom_path.as_posix()}` "
+                f"| chunk_file: `{rel_text_path.as_posix()}` "
+                f"| source: `{source}` | severity: `{severity}` | run: `{run_rel}` "
+                f"| preview: {preview}"
+            )
+            text_parts.append(atom_file_content)
+        text_content = "\n".join(text_parts).rstrip() + "\n"
+        text_path.write_text(text_content, encoding="utf-8")
+        text_bytes = text_path.stat().st_size
+        total_text_chunk_bytes += text_bytes
+
         chunk_entries.append(
             {
                 "file": rel_path.as_posix(),
+                "text_file": rel_text_path.as_posix(),
                 "atom_count": len(atoms_chunk),
                 "bytes": chunk_bytes,
+                "text_bytes": text_bytes,
                 "sha256": sha256(content.encode("utf-8")).hexdigest(),
+                "text_sha256": sha256(text_content.encode("utf-8")).hexdigest(),
             }
         )
+
+    index_content = "\n".join(index_lines).rstrip() + "\n"
+    index_path = workspace_dir / "atoms_index.md"
+    index_path.write_text(index_content, encoding="utf-8")
 
     manifest = {
         "schema_version": 1,
@@ -5663,6 +5895,14 @@ def _write_chunked_problem_mining_atoms_workspace(
         "chunk_count": len(chunk_entries),
         "chunk_max_bytes": int(chunk_max_bytes),
         "total_chunk_bytes": int(total_chunk_bytes),
+        "total_text_chunk_bytes": int(total_text_chunk_bytes),
+        "atom_file_count": int(atom_file_count),
+        "total_atom_file_bytes": int(total_atom_file_bytes),
+        "index_file": "atoms_index.md",
+        "index_bytes": index_path.stat().st_size,
+        "index_preview_chars": 500,
+        "atom_file_view": "atoms_by_id/atom_####.md",
+        "text_view": "atoms_text/atoms_###.md",
         "chunks": chunk_entries,
     }
 
@@ -7674,17 +7914,11 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         owner_roots = sorted({p.resolve() for p in candidate_roots}, key=lambda p: str(p))
         sync_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         plan_sync_at = sync_at
-        dequeue_sync_meta = _sync_atom_actions_from_dequeued_plan_folders(
+        plan_sync_meta = _reconcile_atom_actions_from_plan_folders(
             atom_actions=atom_actions,
             owner_roots=owner_roots,
             generated_at=sync_at,
         )
-        plan_sync_meta = _sync_atom_actions_from_plan_folders(
-            atom_actions=atom_actions,
-            owner_roots=owner_roots,
-            generated_at=sync_at,
-        )
-        plan_sync_meta["dequeue_sync"] = dequeue_sync_meta
 
     backfill_at = plan_sync_at or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     backfill_meta = _backfill_failure_event_atoms_from_legacy_entries(
@@ -8668,6 +8902,8 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_cmd_reports_intent_snapshot(args))
         if args.reports_cmd == "review-ux":
             raise SystemExit(_cmd_reports_review_ux(args))
+        if args.reports_cmd == "sync-atom-actions":
+            raise SystemExit(_cmd_reports_sync_atom_actions(args))
         if args.reports_cmd == "export-tickets":
             raise SystemExit(_cmd_reports_export_tickets(args))
         if args.reports_cmd == "backlog":

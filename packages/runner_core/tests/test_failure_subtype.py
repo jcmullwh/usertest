@@ -53,6 +53,14 @@ def test_classify_failure_subtype_transient_network() -> None:
     assert _classify_failure_subtype(text) == "transient_network"
 
 
+def test_classify_failure_subtype_tool_use_id_collision() -> None:
+    text = (
+        "API Error: 400 {\"type\":\"error\",\"error\":{\"type\":\"invalid_request_error\","
+        "\"message\":\"messages.1.content.1: `tool_use` ids must be unique\"}}"
+    )
+    assert _classify_failure_subtype(text) == "tool_use_id_collision"
+
+
 def test_classify_failure_subtype_provider_capacity_precedes_transient_network() -> None:
     text = "Attempt failed with status 429 RESOURCE_EXHAUSTED; also saw getaddrinfo EAI_AGAIN"
     assert _classify_failure_subtype(text) == "provider_capacity"

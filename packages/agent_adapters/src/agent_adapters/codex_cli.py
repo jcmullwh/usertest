@@ -110,9 +110,9 @@ def validate_codex_personality_config_overrides(
                 "This runner will fail fast to avoid silently falling back to base instructions."
             ),
             hint=(
-                "Add model_messages in configs/agents.yaml agents.codex.config_overrides "
-                "or pass --agent-config model_messages=... alongside personality/model_personality "
-                "to make the personality take effect."
+                "Remove the personality override for headless runs, or pass a known-good "
+                "Codex configuration where personality/model_personality and model_messages "
+                "are paired."
             ),
             details=details,
         )
@@ -299,6 +299,23 @@ def _prepare_codex_argv_and_env(
     return argv, env
 
 
+def _kill_process_tree(proc: subprocess.Popen[str]) -> None:
+    if proc.poll() is not None:
+        return
+    if os.name == "nt":
+        try:
+            subprocess.run(
+                ["taskkill", "/PID", str(proc.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                check=False,
+            )
+            return
+        except Exception:
+            pass
+    proc.kill()
+
+
 def run_codex_exec(
     *,
     workspace_dir: Path | str,
@@ -313,6 +330,7 @@ def run_codex_exec(
     model: str | None = None,
     timeout_seconds: float | None = None,
     config_overrides: Iterable[str] = (),
+    ignore_rules: bool = False,
     skip_git_repo_check: bool = False,
     command_prefix: Iterable[str] = (),
     env_overrides: dict[str, str] | None = None,
@@ -350,6 +368,7 @@ def run_codex_exec(
     argv.extend(
         [
             subcommand,
+            "--ignore-user-config",
             "--json",
             "--cd",
             str(workspace_dir),
@@ -357,6 +376,8 @@ def run_codex_exec(
             sandbox,
         ]
     )
+    if ignore_rules:
+        argv.append("--ignore-rules")
     if skip_git_repo_check:
         argv.append("--skip-git-repo-check")
     if model is not None:
@@ -477,7 +498,7 @@ def run_codex_exec(
                             "Codex returned a non-retriable auth error. Terminating early.\n"
                         )
                         stderr_f.flush()
-                        proc.kill()
+                        _kill_process_tree(proc)
                         break
                 except Exception:
                     pass
@@ -496,7 +517,7 @@ def run_codex_exec(
                     "- Run Codex interactively.\n"
                 )
                 stderr_f.flush()
-                proc.kill()
+                _kill_process_tree(proc)
                 break
 
             if (
@@ -510,7 +531,7 @@ def run_codex_exec(
                     "AGENT_ADAPTERS_CODEX_TIMEOUT_SECONDS.\n"
                 )
                 stderr_f.flush()
-                proc.kill()
+                _kill_process_tree(proc)
                 break
 
             if proc.poll() is not None:
@@ -525,7 +546,7 @@ def run_codex_exec(
                 proc.terminate()
                 proc.wait(timeout=2)
             except subprocess.TimeoutExpired:
-                proc.kill()
+                _kill_process_tree(proc)
                 try:
                     proc.wait(timeout=5)
                 except subprocess.TimeoutExpired:
