@@ -730,11 +730,13 @@ def _install_cache_restore(*, state: _InstallCacheState, project_dir: Path, proj
         ) as tmp:
             tmp_path = Path(tmp)
             staged = tmp_path / "venv"
-            shutil.copytree(state.venv_cache_dir, staged, symlinks=True)
+            try:
+                _install_cache_link_farm(state.venv_cache_dir, staged)
+            except OSError:
+                shutil.rmtree(staged, ignore_errors=True)
+                shutil.copytree(state.venv_cache_dir, staged, symlinks=True)
             target = project_dir / ".venv"
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
-            shutil.move(str(staged), str(target))
+            _install_cache_replace_project_venv(staged=staged, target=target)
     except OSError as exc:
         _eprint(f"INFO: {project_id}: maint-venv-cache restore-failed ({exc}).")
         return False
@@ -749,6 +751,49 @@ def _install_cache_restore(*, state: _InstallCacheState, project_dir: Path, proj
         return False
     _eprint(f"INFO: {project_id}: maint-venv-cache hit ({state.fingerprint[:12]}).")
     return True
+
+
+def _install_cache_link_farm(source: Path, target: Path) -> None:
+    """Create a lightweight venv restore using links to cached directories.
+
+    Maintenance verification runs on bind-mounted workspaces where recursively
+    copying a warm virtualenv from the cache can take several minutes per
+    project.  A project venv only needs the standard top-level entries to be
+    visible for `pdm run`/Python execution, so link cached directories and copy
+    the small top-level files.  If links are unavailable (for example on a
+    locked-down Windows checkout), callers fall back to the previous recursive
+    copy behavior.
+    """
+
+    target.mkdir(parents=True, exist_ok=False)
+    for entry in source.iterdir():
+        destination = target / entry.name
+        if entry.is_dir():
+            os.symlink(entry, destination, target_is_directory=True)
+        elif entry.is_symlink():
+            os.symlink(os.readlink(entry), destination)
+        else:
+            shutil.copy2(entry, destination)
+
+
+def _install_cache_replace_project_venv(*, staged: Path, target: Path) -> None:
+    if target.exists():
+        shutil.rmtree(target, ignore_errors=True)
+    if not target.exists():
+        shutil.move(str(staged), str(target))
+        return
+
+    # Some bind-mounted maintenance workspaces can leave an empty `.venv`
+    # mount point busy even after best-effort removal. Populate that existing
+    # directory rather than failing or moving the staged venv under `.venv/venv`.
+    for child in list(target.iterdir()):
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child, ignore_errors=True)
+        else:
+            child.unlink(missing_ok=True)
+    for child in staged.iterdir():
+        shutil.move(str(child), str(target / child.name))
+    staged.rmdir()
 
 
 def _install_cache_restore_from_seed(
@@ -766,11 +811,13 @@ def _install_cache_restore_from_seed(
         ) as tmp:
             tmp_path = Path(tmp)
             staged = tmp_path / "venv"
-            shutil.copytree(state.seed_venv_dir, staged, symlinks=True)
+            try:
+                _install_cache_link_farm(state.seed_venv_dir, staged)
+            except OSError:
+                shutil.rmtree(staged, ignore_errors=True)
+                shutil.copytree(state.seed_venv_dir, staged, symlinks=True)
             target = project_dir / ".venv"
-            if target.exists():
-                shutil.rmtree(target, ignore_errors=True)
-            shutil.move(str(staged), str(target))
+            _install_cache_replace_project_venv(staged=staged, target=target)
     except OSError as exc:
         _eprint(f"INFO: {project_id}: maint-venv-seed restore-failed ({exc}).")
         return False
@@ -1421,6 +1468,24 @@ def _format_run_install_remediation_cmd(
     return " ".join(parts)
 
 
+def _install_cache_local_hit_for_project(
+    *,
+    cwd: Path,
+    project_id: str,
+    install_cmd: list[str] | None,
+) -> bool:
+    if install_cmd is None or not _is_pdm_install_command(install_cmd):
+        return False
+    cache_state = _build_install_cache_state(
+        repo_root=_repo_root(),
+        project_dir=cwd,
+        project_id=project_id,
+        install_cmd=install_cmd,
+        cache_enabled=_install_cache_enabled(),
+    )
+    return cache_state.enabled and _local_install_metadata_matches(state=cache_state)
+
+
 def _ensure_ruff_available_for_lint(
     *,
     cmd: list[str],
@@ -1441,6 +1506,9 @@ def _ensure_ruff_available_for_lint(
     probe_argv = [cmd[0], "run", cmd[2], "--version"]
     cp = _probe(probe_argv, cwd=cwd, env=env)
     if cp.returncode == 0:
+        return
+
+    if _install_cache_local_hit_for_project(cwd=cwd, project_id=project_id, install_cmd=install_cmd):
         return
 
     if install_cmd is not None:
@@ -1486,6 +1554,9 @@ def _ensure_pytest_available_for_test(
 
     cp = _probe(probe_argv, cwd=cwd, env=env)
     if cp.returncode == 0:
+        return
+
+    if _install_cache_local_hit_for_project(cwd=cwd, project_id=project_id, install_cmd=install_cmd):
         return
 
     if install_cmd is not None:
