@@ -54,6 +54,33 @@ def _override_value_is_present(value: str) -> bool:
     return compact.lower() not in _EMPTY_OVERRIDE_VALUES
 
 
+def _classify_override_state(value: str) -> str:
+    """
+    Classify a Codex config override value into one of three states.
+
+    Returns:
+        "absent": No meaningful value provided (backwards compat with _override_value_is_present)
+        "explicit_empty": An explicit empty marker was provided (e.g., "", '""', "[]")
+        "present_non_empty": A non-empty value was provided
+
+    This distinction matters for validation: explicit empty values should be rejected
+    before Codex config.toml loading, while truly absent values are acceptable.
+    """
+    stripped = value.strip()
+
+    # If the raw stripped value is completely empty, treat as absent for backwards compatibility
+    if not stripped:
+        return "absent"
+
+    # Check if it's an explicit empty marker
+    compact = stripped.replace(" ", "").lower()
+    if compact in _EMPTY_OVERRIDE_VALUES:
+        return "explicit_empty"
+
+    # Otherwise it's a present non-empty value
+    return "present_non_empty"
+
+
 def _normalize_override_value(value: str) -> str:
     normalized = value.strip()
     if len(normalized) >= 2 and normalized[0] == normalized[-1] and normalized[0] in {'"', "'"}:
@@ -70,10 +97,14 @@ def validate_codex_personality_config_overrides(
     Codex warns and silently falls back to base instructions when personality is requested but
     model_messages is absent. The runner treats this as an invalid configuration to keep behavior
     deterministic.
+
+    This validator now distinguishes between absent, explicit empty, and present non-empty
+    override values to prevent invalid configurations from reaching Codex config.toml loading.
     """
 
     overrides = [item for item in config_overrides if isinstance(item, str)]
     personality_keys: list[str] = []
+    personality_explicit_empty_keys: list[str] = []
     model_messages_keys: list[str] = []
     malformed_overrides: list[str] = []
 
@@ -89,15 +120,40 @@ def validate_codex_personality_config_overrides(
             _override_key_matches_suffix(key=key, suffix="personality")
             or _override_key_matches_suffix(key=key, suffix="model_personality")
         ):
-            if _override_value_is_present(value):
+            state = _classify_override_state(value)
+            if state == "present_non_empty":
                 personality_keys.append(key)
+            elif state == "explicit_empty":
+                personality_explicit_empty_keys.append(key)
             continue
         if _override_key_matches_suffix(key=key, suffix="model_messages"):
-            if _override_value_is_present(value):
+            state = _classify_override_state(value)
+            if state == "present_non_empty":
                 model_messages_keys.append(key)
 
-    if personality_keys and not model_messages_keys:
+    # Reject explicit empty personality/model_personality values
+    if personality_explicit_empty_keys:
         details: dict[str, object] = {
+            "explicit_empty_personality_keys": sorted(set(personality_explicit_empty_keys)),
+            "overrides_checked": overrides,
+        }
+        if malformed_overrides:
+            details["malformed_overrides"] = malformed_overrides
+        return CodexPersonalityConfigIssue(
+            message=(
+                "Codex personality override was provided with an explicit empty value. "
+                "This runner rejects explicit empty values to avoid later Codex startup failures."
+            ),
+            hint=(
+                "Remove the personality override entirely, or provide a valid non-empty value. "
+                "Do not use explicit empty markers like personality=\"\" or personality='\"\"'."
+            ),
+            details=details,
+        )
+
+    # Reject non-empty personality without model_messages
+    if personality_keys and not model_messages_keys:
+        details = {
             "personality_keys": sorted(set(personality_keys)),
             "model_messages_keys": [],
             "overrides_checked": overrides,
@@ -127,11 +183,14 @@ def validate_codex_reasoning_effort_config_overrides(
     Validate Codex `model_reasoning_effort` overrides and surface actionable guidance.
 
     Codex rejects unknown enum values (for example `xhigh`) during startup.
+    This validator uses the same override state classification as personality validation
+    to ensure consistent handling of explicit empty values.
     """
 
     overrides = [item for item in config_overrides if isinstance(item, str)]
     invalid_entries: list[dict[str, str]] = []
     matched_keys: list[str] = []
+    explicit_empty_keys: list[str] = []
 
     for raw in overrides:
         key_raw, sep, value_raw = raw.partition("=")
@@ -142,13 +201,38 @@ def validate_codex_reasoning_effort_config_overrides(
             continue
 
         matched_keys.append(key)
-        normalized_value = _normalize_override_value(value_raw)
-        if not normalized_value:
+        state = _classify_override_state(value_raw)
+
+        if state == "absent":
             continue
+        elif state == "explicit_empty":
+            explicit_empty_keys.append(key)
+            continue
+
+        # For present_non_empty values, validate against allowed values
+        normalized_value = _normalize_override_value(value_raw)
         if normalized_value.lower() in _CODEX_REASONING_EFFORT_ALLOWED_VALUES:
             continue
         invalid_entries.append({"override": raw, "value": normalized_value})
 
+    # Reject explicit empty values
+    if explicit_empty_keys:
+        allowed = ", ".join(_CODEX_REASONING_EFFORT_ALLOWED_VALUES)
+        return CodexReasoningEffortConfigIssue(
+            message=(
+                "Codex model_reasoning_effort override was provided with an explicit empty value."
+            ),
+            hint=(
+                "Remove the model_reasoning_effort override entirely, or use one of the supported values "
+                f"({allowed}). Do not use explicit empty markers."
+            ),
+            details={
+                "explicit_empty_keys": sorted(set(explicit_empty_keys)),
+                "allowed_values": list(_CODEX_REASONING_EFFORT_ALLOWED_VALUES),
+            },
+        )
+
+    # Reject invalid values
     if not invalid_entries:
         return None
 

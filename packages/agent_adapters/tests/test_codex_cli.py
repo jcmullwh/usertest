@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from agent_adapters.codex_cli import (
+    _classify_override_state,
     _resolve_executable,
     run_codex_exec,
     validate_codex_personality_config_overrides,
