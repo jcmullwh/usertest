@@ -800,6 +800,151 @@ def test_reports_export_tickets_cleans_stale_queued_plan_files_when_actioned_pla
     assert not stale_idea_path.exists()
 
 
+@pytest.mark.parametrize(
+    "bucket",
+    [
+        "2 - ready",
+        "3 - in_progress",
+        "4 - for_review",
+        "6 - archived",
+        "0.1 - deferred",
+    ],
+)
+def test_reports_export_tickets_dedupes_active_and_deferred_plan_buckets(
+    tmp_path: Path,
+    bucket: str,
+) -> None:
+    repo_root = _make_repo_root(tmp_path)
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    ticket = {
+        "ticket_id": "BLG-001",
+        "title": "Keep existing plan dedupe active",
+        "problem": "Duplicate plan files should not be generated.",
+        "severity": "high",
+        "confidence": 0.8,
+        "stage": "ready_for_ticket",
+        "evidence_atom_ids": ["target_a/20260102T000000Z/claude/0:suggested_change:1"],
+        "change_surface": {"user_visible": False, "kinds": []},
+        "suggested_owner": "docs",
+    }
+    fingerprint = ticket_export_fingerprint(ticket)
+
+    _write_json(
+        compiled_dir / "target_a.backlog.json",
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [ticket],
+        },
+    )
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    existing_dir = owner_repo / ".agents" / "plans" / bucket
+    existing_dir.mkdir(parents=True, exist_ok=True)
+    existing_path = existing_dir / f"20260211_{fingerprint}_existing.md"
+    existing_path.write_text("# Existing plan\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+            ]
+        )
+    assert exc.value.code == 0
+
+    export_doc = json.loads((compiled_dir / "target_a.tickets_export.json").read_text())
+    assert export_doc["stats"]["exports_total"] == 0
+    assert export_doc["stats"]["skipped_existing_plan"] == 1
+    assert export_doc["stats"]["idea_files_written"] == 0
+    assert existing_path.exists()
+
+
+def test_reports_export_tickets_ignores_stray_discarded_plan_for_dedupe(
+    tmp_path: Path,
+) -> None:
+    repo_root = _make_repo_root(tmp_path)
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    ticket = {
+        "ticket_id": "BLG-001",
+        "title": "Regenerate after rejected generated solution",
+        "problem": "A discarded markdown file without a ledger entry should not block export.",
+        "severity": "high",
+        "confidence": 0.8,
+        "stage": "ready_for_ticket",
+        "evidence_atom_ids": ["target_a/20260102T000000Z/claude/0:suggested_change:1"],
+        "change_surface": {"user_visible": False, "kinds": []},
+        "suggested_owner": "docs",
+    }
+    fingerprint = ticket_export_fingerprint(ticket)
+
+    _write_json(
+        compiled_dir / "target_a.backlog.json",
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [ticket],
+        },
+    )
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(actions_path, {"version": 1, "actions": []})
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    discarded_dir = owner_repo / ".agents" / "plans" / "0.2 - discarded"
+    discarded_dir.mkdir(parents=True, exist_ok=True)
+    discarded_path = discarded_dir / f"20260211_{fingerprint}_bad-solution.md"
+    discarded_path.write_text("# Rejected generated plan\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+            ]
+        )
+    assert exc.value.code == 0
+
+    export_doc = json.loads((compiled_dir / "target_a.tickets_export.json").read_text())
+    assert export_doc["stats"]["exports_total"] == 1
+    assert export_doc["stats"]["skipped_existing_plan"] == 0
+    assert export_doc["stats"]["skipped_discarded"] == 0
+    assert export_doc["stats"]["idea_files_written"] == 1
+    assert discarded_path.exists()
+    assert list((owner_repo / ".agents" / "plans" / "2 - ready").glob(f"*{fingerprint}*.md"))
+
+
 def test_cleanup_stale_ticket_idea_files_includes_owner_repo_root_when_no_repo_inputs(
     tmp_path: Path,
 ) -> None:

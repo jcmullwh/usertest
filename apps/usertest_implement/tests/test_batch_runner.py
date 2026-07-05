@@ -13,6 +13,7 @@ from usertest_implement.batch_runner import (
     _batch_subprocess_env,
     _collect_wave_candidates,
     _pick_launchable_candidate_index,
+    _refresh_backlog,
     _write_stream,
 )
 
@@ -270,6 +271,42 @@ def test_write_stream_ignores_oserror_from_closed_pipe() -> None:
             raise AssertionError("flush should not be called after a write failure")
 
     _write_stream(BrokenStream(), "hello")
+
+
+def test_refresh_backlog_uses_normal_export_dedupe_flags(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def _capture(argv: list[str], **_: Any) -> None:
+        calls.append(argv)
+
+    monkeypatch.setattr("usertest_implement.batch_runner._run_logged_command", _capture)
+
+    source = BacklogSource(
+        name="usertest",
+        runs_dir=tmp_path / "runs" / "usertest",
+        target="usertest",
+    )
+
+    _refresh_backlog(
+        repo_root=tmp_path,
+        source=source,
+        repo_input=str(tmp_path),
+        backlog_python=tmp_path / "python.exe",
+        agent="codex",
+        model="gpt-5.5",
+        batch_dir_path=tmp_path / "batch",
+    )
+
+    export_calls = [argv for argv in calls if "export-tickets" in argv]
+    assert len(export_calls) == 1
+    export_cmd = export_calls[0]
+    assert "--stage" in export_cmd
+    assert export_cmd[export_cmd.index("--stage") + 1] == "ready_for_ticket"
+    assert "--include-actioned" not in export_cmd
+    assert "--skip-plan-folder-dedupe" not in export_cmd
 
 
 def test_collect_wave_candidates_prefers_ready_queue_over_refresh(

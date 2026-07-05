@@ -484,8 +484,6 @@ def _refresh_backlog(
             repo_input,
             "--stage",
             "ready_for_ticket",
-            "--include-actioned",
-            "--skip-plan-folder-dedupe",
             "--out-json",
             str(export_path),
         ],
