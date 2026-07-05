@@ -90,6 +90,29 @@ def test_scan_plan_ticket_index_treats_archived_as_actioned(tmp_path: Path) -> N
     assert index[fingerprint]["buckets"] == ["6 - archived"]
 
 
+def test_scan_plan_ticket_index_can_exclude_discarded_for_export_dedupe(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path
+    discarded_dir = owner_root / ".agents" / "plans" / "0.2 - discarded"
+    discarded_dir.mkdir(parents=True, exist_ok=True)
+
+    fingerprint = "0123456789abcdef"
+    (discarded_dir / f"20260228_{fingerprint}_bad-solution.md").write_text(
+        "# Discarded plan\n",
+        encoding="utf-8",
+    )
+
+    full_index = scan_plan_ticket_index(owner_root=owner_root)
+    export_dedupe_index = scan_plan_ticket_index(
+        owner_root=owner_root,
+        include_discarded=False,
+    )
+
+    assert full_index[fingerprint]["status"] == "discarded"
+    assert fingerprint not in export_dedupe_index
+
+
 def test_scan_plan_ticket_index_normalizes_legacy_tkt_filenames(tmp_path: Path) -> None:
     owner_root = tmp_path
     complete_dir = owner_root / ".agents" / "plans" / "5 - complete"

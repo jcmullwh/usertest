@@ -2226,11 +2226,11 @@ def _cleanup_actioned_plan_queue_duplicates(*, owner_repo_root: Path) -> int:
     if not queue_dirs:
         return 0
 
-    index = _scan_plan_ticket_index(owner_root=owner_root)
+    index = _scan_plan_ticket_index(owner_root=owner_root, include_discarded=False)
     for meta in index.values():
         if not isinstance(meta, dict):
             continue
-        if _normalize_atom_status(_coerce_string(meta.get("status"))) != "actioned":
+        if meta.get("status") != "actioned":
             continue
         paths = [item for item in meta.get("paths", []) if isinstance(item, str) and item]
         for path_s in paths:
@@ -5189,7 +5189,10 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 swept_actioned_bucket_dupes_removed += _dedupe_actioned_plan_ticket_files(
                     owner_root=owner_key,
                 )
-                plan_index_cache[owner_key] = _scan_plan_ticket_index(owner_root=owner_key)
+                plan_index_cache[owner_key] = _scan_plan_ticket_index(
+                    owner_root=owner_key,
+                    include_discarded=False,
+                )
             existing = plan_index_cache[owner_key].get(fingerprint)
             if isinstance(existing, dict):
                 skipped_existing_plan += 1

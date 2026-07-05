@@ -316,13 +316,21 @@ def sync_atom_actions_from_dequeued_plan_folders(
     }
 
 
-def scan_plan_ticket_index(*, owner_root: Path) -> dict[str, dict[str, Any]]:
+def scan_plan_ticket_index(
+    *,
+    owner_root: Path,
+    include_discarded: bool = True,
+) -> dict[str, dict[str, Any]]:
     """Build fingerprint-to-plan index from `.agents/plans` folders.
 
     Parameters
     ----------
     owner_root:
         Repository root containing `.agents/plans`.
+    include_discarded:
+        Include the non-actioned discarded bucket in the returned index. Disable
+        this for export dedupe so rejected generated tickets do not block future
+        ticket generation.
 
     Returns
     -------
@@ -336,6 +344,8 @@ def scan_plan_ticket_index(*, owner_root: Path) -> dict[str, dict[str, Any]]:
 
     index: dict[str, dict[str, Any]] = {}
     for bucket_dir in sorted([p for p in plans_dir.iterdir() if p.is_dir()], key=lambda p: p.name):
+        if not include_discarded and bucket_dir.name in DISCARDED_PLAN_BUCKETS:
+            continue
         desired_status = PLAN_BUCKET_TO_TICKET_STATUS.get(bucket_dir.name)
         if desired_status is None:
             continue
