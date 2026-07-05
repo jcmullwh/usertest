@@ -1983,8 +1983,11 @@ def _run_review_for_selected_ticket(
 def _build_handoff_summary(
     *,
     branch: str,
+    commit_requested: bool,
     commit_performed: bool,
+    push_requested: bool,
     push_ref: dict[str, Any] | None,
+    pr_requested: bool,
     pr_ref: dict[str, Any] | None,
     ci_gate: dict[str, Any] | None,
     review_required: bool,
@@ -2042,8 +2045,11 @@ def _build_handoff_summary(
     return {
         "schema_version": 1,
         "branch": branch,
+        "commit_requested": bool(commit_requested),
         "commit_performed": bool(commit_performed),
+        "push_requested": bool(push_requested),
         "pushed": pushed,
+        "pr_requested": bool(pr_requested),
         "pr_created": pr_created,
         "pr_url": pr_url,
         "ci_required": pr_created,
@@ -2773,8 +2779,11 @@ def _run_selected_ticket(
 
     handoff_summary = _build_handoff_summary(
         branch=branch,
+        commit_requested=bool(args.commit),
         commit_performed=commit_performed,
+        push_requested=bool(args.push),
         push_ref=push_ref,
+        pr_requested=bool(args.pr),
         pr_ref=pr_ref,
         ci_gate=_read_json(run_dir / "ci_gate.json"),
         review_required=review_required,

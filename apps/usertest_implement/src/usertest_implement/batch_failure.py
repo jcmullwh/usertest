@@ -142,6 +142,34 @@ def classify_run_outcome(
     if isinstance(handoff_summary, dict):
         ci_status = str(handoff_summary.get("ci_status") or "").strip().lower()
         ci_conclusion = str(handoff_summary.get("ci_conclusion") or "").strip().lower()
+        commit_requested = handoff_summary.get("commit_requested") is True
+        push_requested = handoff_summary.get("push_requested") is True
+        pr_requested = handoff_summary.get("pr_requested") is True
+        if handoff_summary.get("final_status") == "success":
+            if commit_requested and handoff_summary.get("commit_performed") is not True:
+                return {
+                    "failure_class": "ticket_regression",
+                    "retryable": False,
+                    "global_blocker": False,
+                    "summary": "Requested commit was not created for the ticket patch.",
+                    "evidence": {"run_dir": str(run_dir)},
+                }
+            if push_requested and handoff_summary.get("pushed") is not True:
+                return {
+                    "failure_class": "ticket_regression",
+                    "retryable": False,
+                    "global_blocker": False,
+                    "summary": "Requested push was not completed for the ticket patch.",
+                    "evidence": {"run_dir": str(run_dir)},
+                }
+            if pr_requested and handoff_summary.get("pr_created") is not True:
+                return {
+                    "failure_class": "ticket_regression",
+                    "retryable": False,
+                    "global_blocker": False,
+                    "summary": "Requested PR was not created for the ticket patch.",
+                    "evidence": {"run_dir": str(run_dir)},
+                }
         if (
             handoff_summary.get("final_status") == "success"
             and handoff_summary.get("pr_created") is not True

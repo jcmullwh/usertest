@@ -210,6 +210,33 @@ def test_classify_run_outcome_accepts_local_exercise_success(tmp_path: Path) -> 
     assert failure["global_blocker"] is False
 
 
+def test_classify_run_outcome_rejects_missing_requested_pr(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "verification.json").write_text(
+        json.dumps({"passed": True}),
+        encoding="utf-8",
+    )
+
+    failure = classify_run_outcome(
+        run_dir=run_dir,
+        handoff_summary={
+            "commit_requested": True,
+            "commit_performed": False,
+            "push_requested": True,
+            "pushed": False,
+            "pr_requested": True,
+            "pr_created": False,
+            "ci_required": False,
+            "final_status": "success",
+        },
+    )
+
+    assert failure["failure_class"] == "ticket_regression"
+    assert failure["global_blocker"] is False
+    assert "commit" in failure["summary"].lower()
+
+
 def test_batch_subprocess_env_includes_repo_src_paths(
     tmp_path: Path,
     monkeypatch,
