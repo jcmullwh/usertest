@@ -2420,7 +2420,7 @@ def _resolve_shell_capability(
             allowed_tools=allowed_tools,
         )
 
-    if agent_norm == "codex" and backend_norm != "local":
+    if probe_status == "passed":
         return ShellCapability(
             state="available",
             agent=agent,
@@ -2431,28 +2431,7 @@ def _resolve_shell_capability(
             reason_code=None,
             reason_type=None,
             reason=(
-                "Codex shell execution is isolated by the runner execution backend "
-                f"({backend_norm})."
-            ),
-            policy_status=policy_status_norm,
-            policy_reason=policy_reason,
-            allowed_tools=allowed_tools,
-        )
-
-    if agent_norm == "codex" and not operating_system.strip().lower().startswith("windows"):
-        return ShellCapability(
-            state="available",
-            agent=agent,
-            operating_system=operating_system,
-            backend=backend_norm,
-            sandbox_mode=sandbox_mode,
-            probe_status=probe_status,
-            reason_code=None,
-            reason_type=None,
-            reason=(
-                "Codex local shell execution is treated as available on non-Windows hosts; "
-                "Windows local Codex shell paths remain unprobed unless a successful probe is "
-                "recorded."
+                "Shell probe passed for the effective agent execution path."
             ),
             policy_status=policy_status_norm,
             policy_reason=policy_reason,
@@ -2495,6 +2474,34 @@ def _resolve_shell_capability(
         policy_reason=policy_reason,
         allowed_tools=allowed_tools,
     )
+
+
+def _shell_probe_result_from_preflight_meta(preflight_meta: dict[str, Any]) -> dict[str, Any] | None:
+    if not isinstance(preflight_meta, dict):
+        return None
+
+    error = preflight_meta.get("error")
+    if isinstance(error, str) and error.strip():
+        return {
+            "ok": False,
+            "exit_code": 1,
+            "error": error.strip(),
+            "reason": error.strip(),
+        }
+
+    if "exit_code" in preflight_meta:
+        exit_code_raw = preflight_meta.get("exit_code")
+        exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 1
+        stderr = preflight_meta.get("stderr")
+        stdout = preflight_meta.get("stdout")
+        return {
+            "ok": exit_code == 0,
+            "exit_code": exit_code,
+            "stderr_excerpt": stderr if isinstance(stderr, str) else "",
+            "stdout_excerpt": stdout if isinstance(stdout, str) else "",
+        }
+
+    return None
 
 
 def _policy_allows_edits(*, agent: str, policy_cfg: dict[str, Any]) -> bool:
@@ -5684,9 +5691,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         )
         shell_capability_summary = shell_capability.to_dict()
 
+        early_shell_capability_state = shell_capability_summary.get("state")
+        defer_codex_shell_probe = (
+            request.agent == "codex" and early_shell_capability_state == "unprobed"
+        )
         if (
             bool(resolved_inputs.mission.requires_shell)
-            and shell_capability_summary.get("state") != "available"
+            and early_shell_capability_state != "available"
+            and not defer_codex_shell_probe
         ):
             requires_edits = bool(resolved_inputs.mission.requires_edits)
 
@@ -6345,6 +6357,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
 
             host_os = _runner_host_os()
+            shell_probe_result = _shell_probe_result_from_preflight_meta(preflight_meta)
             shell_capability = _resolve_shell_capability(
                 agent=request.agent,
                 operating_system=host_os,
@@ -6353,6 +6366,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 policy_status=shell_status,
                 policy_reason=shell_reason,
                 allowed_tools=allowed_tools,
+                probe_result=shell_probe_result,
             )
             shell_capability_summary = shell_capability.to_dict()
 

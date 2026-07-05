@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import runner_core.runner as runner_mod
 from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
-from runner_core.runner import _resolve_shell_capability
+from runner_core.runner import _resolve_shell_capability, _shell_probe_result_from_preflight_meta
 
 
 def _install_task_requires_shell_mission(target_repo: Path) -> None:
@@ -123,6 +124,50 @@ def test_shell_capability_resolver_classifies_codex_windows_probe_failures() -> 
     assert powershell["reason_code"] == "codex_windows_powershell_prepayload_failed"
 
 
+def test_codex_nonlocal_backend_requires_probe_evidence() -> None:
+    unprobed = _resolve_shell_capability(
+        agent="codex",
+        operating_system="Linux",
+        backend="docker",
+        sandbox_mode="danger-full-access",
+        policy_status="unknown",
+        policy_reason="Codex CLI command execution depends on sandbox policy.",
+        allowed_tools=None,
+    ).to_dict()
+    assert unprobed["state"] == "unprobed"
+    assert unprobed["probe_status"] == "not_run"
+
+    available = _resolve_shell_capability(
+        agent="codex",
+        operating_system="Linux",
+        backend="docker",
+        sandbox_mode="danger-full-access",
+        policy_status="unknown",
+        policy_reason="Codex CLI command execution depends on sandbox policy.",
+        allowed_tools=None,
+        probe_result={"ok": True, "exit_code": 0},
+    ).to_dict()
+    assert available["state"] == "available"
+    assert available["probe_status"] == "passed"
+
+
+def test_shell_probe_result_uses_existing_backend_probe_meta() -> None:
+    passed = _shell_probe_result_from_preflight_meta({"exit_code": 0, "stderr": ""})
+    assert passed == {
+        "ok": True,
+        "exit_code": 0,
+        "stderr_excerpt": "",
+        "stdout_excerpt": "",
+    }
+
+    failed = _shell_probe_result_from_preflight_meta(
+        {"error": "thread panicked in windows-sandbox-rs before payload"}
+    )
+    assert failed is not None
+    assert failed["ok"] is False
+    assert "windows-sandbox-rs" in failed["error"]
+
+
 def test_shell_required_unprobed_capability_blocks_dispatch_and_writes_report(
     tmp_path: Path,
     monkeypatch,
@@ -169,3 +214,76 @@ def test_shell_required_unprobed_capability_blocks_dispatch_and_writes_report(
     report_md = (result.run_dir / "report.md").read_text(encoding="utf-8")
     assert "Shell capability: unprobed" in report_md
     assert "codex_windows_shell_unprobed" in report_md
+
+
+def test_shell_required_backend_probe_failure_blocks_dispatch_and_classifies(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_task_requires_shell_mission(target)
+
+    monkeypatch.setattr(runner_mod, "_runner_host_os", lambda: "Windows")
+    monkeypatch.setattr(
+        runner_mod,
+        "prepare_execution_backend",
+        lambda **_: SimpleNamespace(
+            sandbox_instance=SimpleNamespace(close=lambda: None),
+            command_prefix=["docker", "exec", "fake-container"],
+            workspace_mount=None,
+            run_dir_mount=None,
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "probe_commands_in_container",
+        lambda **_: (
+            {},
+            {
+                "error": (
+                    "thread panicked in windows-sandbox-rs before shell payload execution"
+                )
+            },
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_validate_python_capability",
+        lambda **_: {
+            "runtime_selection": SimpleNamespace(selected=None),
+            "runtime_summary": {"selected": None},
+            "context_probe": None,
+            "validation": {
+                "required": False,
+                "enabled": True,
+                "reason_code": None,
+                "reason_type": None,
+                "reason": None,
+                "validated_python_executable": None,
+            },
+        },
+    )
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": "definitely-not-run-codex"}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(repo=str(target), agent="codex", policy="safe", exec_backend="docker"),
+    )
+
+    assert result.exit_code != 0
+    assert not (result.run_dir / "agent_attempts.json").exists()
+
+    error_payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    shell_capability = error_payload["preflight"]["shell_capability"]
+    assert shell_capability["state"] == "blocked"
+    assert shell_capability["probe_status"] == "failed"
+    assert shell_capability["reason_code"] == "codex_windows_sandbox_panic"
