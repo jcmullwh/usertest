@@ -215,6 +215,21 @@ def _read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8") if path.exists() else ""
 
 
+def _clear_agent_output_files(*paths: Path) -> None:
+    for path in paths:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
+
+
+def _stderr_excerpt(path: Path, *, max_chars: int = 1200) -> str:
+    text = _read_text(path).strip()
+    if len(text) <= max_chars:
+        return text
+    return text[-max_chars:]
+
+
 def _write_json(path: Path, payload: Any) -> None:
     """Write JSON payload with stable formatting.
 
@@ -1260,11 +1275,18 @@ def run_backlog_prompt(
 
     out_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = out_dir / f"{tag}.prompt.txt"
+    response_path = out_dir / f"{tag}.response.txt"
     raw_events_path = out_dir / f"{tag}.raw_events.jsonl"
     last_message_path = out_dir / f"{tag}.last_message.txt"
     stderr_path = out_dir / f"{tag}.stderr.txt"
 
     prompt_path.write_text(prompt, encoding="utf-8")
+    _clear_agent_output_files(response_path)
+
+    def _read_and_persist_response() -> str:
+        response = _read_text(last_message_path)
+        response_path.write_text(response, encoding="utf-8")
+        return response
 
     workspace: Path | None = None
     if workspace_dir is not None:
@@ -1287,7 +1309,7 @@ def run_backlog_prompt(
                 allowed_tools=allowed_tools,
                 include_directories=include_directories,
             )
-            return _read_text(last_message_path)
+            return _read_and_persist_response()
 
     _run_agent_in_workspace(
         agent=agent,
@@ -1302,7 +1324,7 @@ def run_backlog_prompt(
         include_directories=include_directories,
     )
 
-    return _read_text(last_message_path)
+    return _read_and_persist_response()
 
 
 def _run_agent_in_workspace(
@@ -1322,9 +1344,10 @@ def _run_agent_in_workspace(
     include_dirs = [
         d for d in (include_directories or []) if isinstance(d, str) and d.strip()
     ]
+    _clear_agent_output_files(raw_events_path, last_message_path, stderr_path)
     if agent == "codex":
         with _codex_host_login_env():
-            run_codex_exec(
+            result = run_codex_exec(
                 workspace_dir=workspace,
                 prompt=prompt,
                 raw_events_path=raw_events_path,
@@ -1335,11 +1358,18 @@ def _run_agent_in_workspace(
                 binary=_agent_binary(cfg, "codex", "codex"),
                 model=model,
                 config_overrides=_codex_overrides(cfg),
+                ignore_rules=True,
                 skip_git_repo_check=True,
+            )
+        if getattr(result, "exit_code", 0) != 0:
+            excerpt = _stderr_excerpt(stderr_path)
+            detail = f": {excerpt}" if excerpt else ""
+            raise RuntimeError(
+                f"Codex backlog prompt failed exit_code={result.exit_code}{detail}"
             )
         return
     if agent == "claude":
-        run_claude_print(
+        result = run_claude_print(
             workspace_dir=workspace,
             prompt=prompt,
             raw_events_path=raw_events_path,
@@ -1351,9 +1381,15 @@ def _run_agent_in_workspace(
             allowed_tools=tools,
             permission_mode=None,
         )
+        if getattr(result, "exit_code", 0) != 0:
+            excerpt = _stderr_excerpt(stderr_path)
+            detail = f": {excerpt}" if excerpt else ""
+            raise RuntimeError(
+                f"Claude backlog prompt failed exit_code={result.exit_code}{detail}"
+            )
         return
     if agent == "gemini":
-        run_gemini(
+        result = run_gemini(
             workspace_dir=workspace,
             prompt=prompt,
             raw_events_path=raw_events_path,
@@ -1367,6 +1403,12 @@ def _run_agent_in_workspace(
             allowed_tools=tools,
             include_directories=include_dirs,
         )
+        if getattr(result, "exit_code", 0) != 0:
+            excerpt = _stderr_excerpt(stderr_path)
+            detail = f": {excerpt}" if excerpt else ""
+            raise RuntimeError(
+                f"Gemini backlog prompt failed exit_code={result.exit_code}{detail}"
+            )
         return
     raise ValueError(f"Unsupported backlog agent: {agent!r}")
 

@@ -79,8 +79,9 @@ tasks.lint_fix = ["pdm", "run", "ruff", "check", "--fix", "."]
         task_name: str,
         project_id: str,
         extra_env: dict[str, str] | None = None,
+        force_install: bool = False,
     ):
-        del cwd, task_name, project_id, extra_env
+        del cwd, task_name, project_id, extra_env, force_install
         calls.append(cmd)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
@@ -129,8 +130,9 @@ tasks.lint = ["pdm", "run", "ruff", "check", "."]
         task_name: str,
         project_id: str,
         extra_env: dict[str, str] | None = None,
+        force_install: bool = False,
     ):
-        del cwd, task_name, project_id, extra_env
+        del cwd, task_name, project_id, extra_env, force_install
         calls.append(cmd)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 

@@ -99,8 +99,9 @@ def test_run_test_bootstraps_requirements_and_injects_pythonpath(
         task_name: str,
         project_id: str,
         extra_env: dict[str, str] | None = None,
+        force_install: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        del cmd, cwd, task_name, project_id
+        del cmd, cwd, task_name, project_id, force_install
         task_envs.append(extra_env)
         return subprocess.CompletedProcess(args=["python", "-m", "pytest", "-q"], returncode=0)
 
@@ -179,8 +180,9 @@ def test_run_lint_bootstraps_requirements_and_injects_pythonpath(
         task_name: str,
         project_id: str,
         extra_env: dict[str, str] | None = None,
+        force_install: bool = False,
     ) -> subprocess.CompletedProcess[str]:
-        del cmd, cwd, task_name, project_id
+        del cmd, cwd, task_name, project_id, force_install
         task_envs.append(extra_env)
         return subprocess.CompletedProcess(args=["python", "-m", "ruff", "check", "src"], returncode=0)
 
@@ -248,11 +250,15 @@ def test_run_test_retries_install_when_pdm_pytest_missing(
         task_name: str,
         project_id: str,
         extra_env: dict[str, str] | None = None,
+        force_install: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         del cmd, cwd, project_id, extra_env
         task_calls.append(task_name)
         if task_name == "install":
+            assert force_install is True
             state["installed"] = True
+        else:
+            assert force_install is False
         return subprocess.CompletedProcess(args=["pdm", task_name], returncode=0)
 
     monkeypatch.setattr(scaffold, "_run_manifest_task", fake_run_manifest_task)
@@ -260,6 +266,77 @@ def test_run_test_retries_install_when_pdm_pytest_missing(
     rc = scaffold.cmd_run(_run_args(task="test"))
     assert rc == 0
     assert task_calls == ["install", "test"]
+
+
+def test_run_lint_retries_install_with_forced_cache_bypass_when_pdm_ruff_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path
+    project_dir = repo_root / "demo"
+    (project_dir / ".venv").mkdir(parents=True)
+
+    monkeypatch.setattr(scaffold, "_repo_root", lambda: repo_root)
+    monkeypatch.setattr(
+        scaffold,
+        "_load_projects",
+        lambda _: [
+            {
+                "id": "demo",
+                "path": "demo",
+                "tasks": {
+                    "install": ["pdm", "install"],
+                    "lint": ["pdm", "run", "ruff", "check", "."],
+                },
+            }
+        ],
+    )
+
+    state = {"installed": False}
+
+    def fake_probe(
+        argv: list[str],
+        *,
+        cwd: Path,
+        env: dict[str, str] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        del cwd, env
+        if argv == ["pdm", "run", "ruff", "--version"]:
+            return subprocess.CompletedProcess(
+                args=argv,
+                returncode=0 if state["installed"] else 1,
+                stdout="ruff 0.12.0\n" if state["installed"] else "",
+                stderr="" if state["installed"] else "ruff missing",
+            )
+        return subprocess.CompletedProcess(args=argv, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(scaffold, "_probe", fake_probe)
+
+    task_calls: list[str] = []
+
+    def fake_run_manifest_task(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        task_name: str,
+        project_id: str,
+        extra_env: dict[str, str] | None = None,
+        force_install: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        del cmd, cwd, project_id, extra_env
+        task_calls.append(task_name)
+        if task_name == "install":
+            assert force_install is True
+            state["installed"] = True
+        else:
+            assert force_install is False
+        return subprocess.CompletedProcess(args=["pdm", task_name], returncode=0)
+
+    monkeypatch.setattr(scaffold, "_run_manifest_task", fake_run_manifest_task)
+
+    rc = scaffold.cmd_run(_run_args(task="lint"))
+    assert rc == 0
+    assert task_calls == ["install", "lint"]
 
 
 def test_resolve_argv_uses_python_module_fallback_for_pdm(

@@ -12,35 +12,30 @@ ref: main                    # optional (git ref)
 policy: auto
 
 personas:
+  - representative_workflow_evaluator
   - quickstart_sprinter
-  - ci_bot
 
 missions:
-  # Missions can be strings...
+  # Compare a representative validation path with a lightweight preflight probe.
+  - verify_install_to_result
   - first_output_smoke
-
-  # ...or mappings with requirement overrides for dry-run validation.
-  # This is useful when the mission prompt implies shell/edits but the mission file
-  # isn't annotated with requires_shell/requires_edits yet.
-  - id: verify_install_to_result
-    requires_shell: true
 
 seeds: [0, 1]
 
 agents:
   - agent: codex
     models:
-      - GPT-5.3-Codex
-      - GPT-5.2-Codex
+      - gpt-5.5
+      - gpt-5.4-mini
     policy: auto
 
   - agent: claude
     models:
-      - claude-3-7-sonnet
+      - sonnet
     # You can force a policy, but mismatches will be caught in the dry-run validation.
-    policy: inspect
+    policy: auto
 
   - agent: gemini
     models:
-      - gemini-2.0-pro
+      - auto
     policy: auto

@@ -20,6 +20,38 @@ _WINDOWS_OFFLINE_FIRST_SUCCESS_CMD = (
     r"powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\offline_first_success.ps1"
 )
 _POSIX_OFFLINE_FIRST_SUCCESS_CMD = "bash ./scripts/offline_first_success.sh"
+_SOURCE_RELATIVE_PATHS = (
+    "apps/usertest/src",
+    "apps/usertest_backlog/src",
+    "apps/usertest_implement/src",
+    "packages/runner_core/src",
+    "packages/agent_adapters/src",
+    "packages/normalized_events/src",
+    "packages/reporter/src",
+    "packages/sandbox_runner/src",
+    "packages/triage_engine/src",
+    "packages/backlog_core/src",
+    "packages/backlog_miner/src",
+    "packages/backlog_repo/src",
+    "packages/run_artifacts/src",
+)
+
+
+def _prefer_checkout_sources() -> None:
+    repo_root = Path(__file__).resolve().parents[4]
+    if not (repo_root / "tools" / "scaffold" / "monorepo.toml").exists():
+        return
+    for rel_path in reversed(_SOURCE_RELATIVE_PATHS):
+        source_path = (repo_root / rel_path).resolve()
+        if not source_path.exists():
+            continue
+        source_path_s = str(source_path)
+        if source_path_s in sys.path:
+            sys.path.remove(source_path_s)
+        sys.path.insert(0, source_path_s)
+
+
+_prefer_checkout_sources()
 
 
 def _one_command_first_success_remediation() -> str:
@@ -73,6 +105,20 @@ try:
 except ModuleNotFoundError as exc:
     if _is_missing_module(exc, "runner_core"):
         raise SystemExit(_from_source_import_remediation(missing_module="runner_core")) from exc
+    raise
+
+try:
+    from backlog_repo import (
+        DISCARDED_PLAN_BUCKET,
+        load_atom_actions_yaml,
+        load_backlog_actions_yaml,
+        reconcile_atom_actions_from_plan_folders,
+        write_atom_actions_yaml,
+        write_backlog_actions_yaml,
+    )
+except ModuleNotFoundError as exc:
+    if _is_missing_module(exc, "backlog_repo"):
+        raise SystemExit(_from_source_import_remediation(missing_module="backlog_repo")) from exc
     raise
 
 try:
@@ -168,7 +214,7 @@ _SETTINGS_COMMON_SPECS: dict[str, _SettingsValueSpec] = {
         allow_none=True,
     ),
     "implementation_review_model": _SettingsValueSpec("str", allow_none=True),
-    "ci_timeout_seconds": _SettingsValueSpec("float"),
+    "ci_timeout_seconds": _SettingsValueSpec("float", allow_none=True),
     "skip_ci_wait": _SettingsValueSpec("bool"),
     "draft_pr_on_ci_failure": _SettingsValueSpec("bool"),
     "commit": _SettingsValueSpec("bool"),
@@ -233,6 +279,50 @@ _configure_console_output()
 
 def _utc_now_z() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _default_atom_actions_path(repo_root: Path) -> Path:
+    return repo_root / "configs" / "backlog_atom_actions.yaml"
+
+
+def _default_backlog_actions_path(repo_root: Path) -> Path:
+    return repo_root / "configs" / "backlog_actions.yaml"
+
+
+def _sync_ticket_atom_actions(
+    *,
+    repo_root: Path,
+    owner_root: Path,
+    atom_actions_path: Path | None = None,
+    discard_fingerprint: str | None = None,
+    discard_reason: str | None = None,
+    discard_note: str | None = None,
+    discarded_path: Path | None = None,
+    discarded_at: str | None = None,
+) -> dict[str, Any]:
+    resolved_atom_actions_path = atom_actions_path or _default_atom_actions_path(repo_root)
+    atom_actions = load_atom_actions_yaml(resolved_atom_actions_path)
+    sync_at = discarded_at or _utc_now_z()
+    meta = reconcile_atom_actions_from_plan_folders(
+        atom_actions=atom_actions,
+        owner_roots=[owner_root.resolve()],
+        generated_at=sync_at,
+    )
+    if discard_fingerprint is not None:
+        for entry in atom_actions.values():
+            discarded_fingerprints = [
+                item for item in entry.get("discarded_fingerprints", []) if isinstance(item, str)
+            ]
+            if discard_fingerprint not in discarded_fingerprints:
+                continue
+            entry["last_discard_reason"] = discard_reason
+            entry["last_discarded_at"] = sync_at
+            if discard_note:
+                entry["last_discard_note"] = discard_note
+            if discarded_path is not None:
+                entry["last_discarded_path"] = str(discarded_path)
+    write_atom_actions_yaml(resolved_atom_actions_path, atom_actions)
+    return meta
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
@@ -542,6 +632,19 @@ def _write_json(path: Path, obj: object) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
+def _optional_timeout_seconds(value: Any) -> float | None:
+    if value is None:
+        return None
+    timeout_seconds = float(value)
+    if timeout_seconds <= 0:
+        return None
+    return timeout_seconds
+
+
+def _ci_timeout_seconds_arg(value: Any) -> float | None:
+    return _optional_timeout_seconds(value)
+
+
 def _resolve_ledger_path(*, repo_root: Path, raw: Path | None) -> Path:
     ledger_path = raw if raw is not None else _DEFAULT_LEDGER_PATH
     if ledger_path.is_absolute():
@@ -570,7 +673,7 @@ def _wait_for_ci_success(
     branch: str,
     head_sha: str,
     workflow: str,
-    timeout_seconds: float,
+    timeout_seconds: float | None,
 ) -> dict[str, Any]:
     """
     Wait for GitHub Actions CI to pass for the current branch HEAD before opening a PR.
@@ -631,7 +734,7 @@ def _wait_for_ci_success(
     limit = 50
     while True:
         elapsed = time.monotonic() - started_monotonic
-        if elapsed > timeout_seconds:
+        if timeout_seconds is not None and elapsed > timeout_seconds:
             summary["error"] = (
                 f"Timed out waiting to find a GitHub Actions run for {workflow} "
                 f"(branch={branch}, head_sha={head_sha})."
@@ -688,7 +791,7 @@ def _wait_for_ci_success(
     poll_interval_seconds = 10.0
     while True:
         elapsed = time.monotonic() - started_monotonic
-        if elapsed > timeout_seconds:
+        if timeout_seconds is not None and elapsed > timeout_seconds:
             summary["error"] = f"Timed out waiting for GitHub Actions run {run_id} to complete."
             summary["finished_at_utc"] = _utc_now_z()
             _write_json(run_dir / "ci_gate.json", summary)
@@ -2245,6 +2348,7 @@ def _run_selected_ticket(
                 to_bucket="3 - in_progress",
                 dry_run=False,
             )
+            _sync_ticket_atom_actions(repo_root=repo_root, owner_root=selected.owner_root)
         except Exception as e:
             print(f"WARNING: failed to move ticket to in_progress: {e}", file=sys.stderr)
 
@@ -2448,7 +2552,9 @@ def _run_selected_ticket(
                                 "skip_reason": "flag --skip-ci-wait",
                                 "started_at_utc": _utc_now_z(),
                                 "finished_at_utc": _utc_now_z(),
-                                "timeout_seconds": float(args.ci_timeout_seconds or 0),
+                                "timeout_seconds": _ci_timeout_seconds_arg(
+                                    args.ci_timeout_seconds
+                                ),
                             },
                         )
                     else:
@@ -2474,7 +2580,9 @@ def _run_selected_ticket(
                                     "skip_reason": "branch_not_pushed",
                                     "started_at_utc": _utc_now_z(),
                                     "finished_at_utc": _utc_now_z(),
-                                    "timeout_seconds": float(args.ci_timeout_seconds or 0),
+                                    "timeout_seconds": _ci_timeout_seconds_arg(
+                                        args.ci_timeout_seconds
+                                    ),
                                 },
                             )
                         else:
@@ -2498,13 +2606,13 @@ def _run_selected_ticket(
                                         "skip_reason": "head_sha_unavailable",
                                         "started_at_utc": _utc_now_z(),
                                         "finished_at_utc": _utc_now_z(),
-                                        "timeout_seconds": float(args.ci_timeout_seconds or 0),
+                                        "timeout_seconds": _ci_timeout_seconds_arg(
+                                            args.ci_timeout_seconds
+                                        ),
                                     },
                                 )
                             else:
-                                ci_timeout = float(args.ci_timeout_seconds or 0)
-                                if ci_timeout <= 0:
-                                    ci_timeout = 3600
+                                ci_timeout = _ci_timeout_seconds_arg(args.ci_timeout_seconds)
                                 ci_ref = _wait_for_ci_success(
                                     run_dir=run_dir,
                                     workspace_dir=workspace_dir,
@@ -2586,6 +2694,7 @@ def _run_selected_ticket(
                 to_bucket="4 - for_review",
                 dry_run=False,
             )
+            _sync_ticket_atom_actions(repo_root=repo_root, owner_root=selected.owner_root)
         except Exception as e:
             print(f"WARNING: failed to move ticket to for_review: {e}", file=sys.stderr)
 
@@ -2875,6 +2984,7 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
             to_bucket="5 - complete",
             dry_run=False,
         )
+        _sync_ticket_atom_actions(repo_root=repo_root, owner_root=selected.owner_root)
     update_ledger_file(
         ledger_path,
         fingerprint=selected.fingerprint,
@@ -2893,7 +3003,7 @@ def _cmd_maintenance_images_list(args: argparse.Namespace) -> int:
     repo_root = _resolve_repo_root(getattr(args, "repo_root", None))
     payload = list_local_maintenance_images(
         repo_root=repo_root,
-        timeout_seconds=float(args.timeout_seconds),
+        timeout_seconds=_optional_timeout_seconds(args.timeout_seconds),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
@@ -2908,7 +3018,7 @@ def _cmd_maintenance_images_cleanup(args: argparse.Namespace) -> int:
         dry_run = _load_maintenance_docker_config(repo_root=repo_root).cleanup_dry_run_default
     payload = cleanup_local_maintenance_images(
         repo_root=repo_root,
-        timeout_seconds=float(args.timeout_seconds),
+        timeout_seconds=_optional_timeout_seconds(args.timeout_seconds),
         dry_run=bool(dry_run),
     )
     print(json.dumps(payload, indent=2, ensure_ascii=False))
@@ -3010,14 +3120,78 @@ def _cmd_tickets_run_next(args: argparse.Namespace) -> int:
 
 
 def _cmd_tickets_move(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
     owner_root = args.owner_root.resolve()
+    if str(args.to_bucket) == DISCARDED_PLAN_BUCKET:
+        (owner_root / ".agents" / "plans" / DISCARDED_PLAN_BUCKET).mkdir(
+            parents=True,
+            exist_ok=True,
+        )
     dest = move_ticket_file(
         owner_root=owner_root,
         fingerprint=str(args.fingerprint),
         to_bucket=str(args.to_bucket),
         dry_run=bool(args.dry_run),
     )
+    if not bool(args.dry_run):
+        _sync_ticket_atom_actions(repo_root=repo_root, owner_root=owner_root)
     print(str(dest))
+    return 0
+
+
+def _cmd_tickets_discard(args: argparse.Namespace) -> int:
+    repo_root = _resolve_repo_root(args.repo_root)
+    owner_root = args.owner_root.resolve()
+    fingerprint = str(args.fingerprint).strip().lower()
+    discarded_at = _utc_now_z()
+    discard_dir = owner_root / ".agents" / "plans" / DISCARDED_PLAN_BUCKET
+    discard_dir.mkdir(parents=True, exist_ok=True)
+
+    dest = move_ticket_file(
+        owner_root=owner_root,
+        fingerprint=fingerprint,
+        to_bucket=DISCARDED_PLAN_BUCKET,
+        dry_run=False,
+    )
+
+    actions_path = args.actions_yaml or _default_backlog_actions_path(repo_root)
+    actions = load_backlog_actions_yaml(actions_path)
+    entry = dict(actions.get(fingerprint) or {})
+    entry.update(
+        {
+            "fingerprint": fingerprint,
+            "status": "discarded",
+            "discard_reason": str(args.reason),
+            "discarded_at": discarded_at,
+            "discarded_path": str(dest),
+            "owner_root": str(owner_root),
+        }
+    )
+    if args.note:
+        entry["discard_note"] = str(args.note)
+    actions[fingerprint] = entry
+    write_backlog_actions_yaml(actions_path, actions)
+
+    atom_sync = _sync_ticket_atom_actions(
+        repo_root=repo_root,
+        owner_root=owner_root,
+        atom_actions_path=args.atom_actions_yaml,
+        discard_fingerprint=fingerprint,
+        discard_reason=str(args.reason),
+        discard_note=str(args.note) if args.note else None,
+        discarded_path=dest,
+        discarded_at=discarded_at,
+    )
+    payload = {
+        "schema_version": 1,
+        "fingerprint": fingerprint,
+        "discard_reason": str(args.reason),
+        "discarded_path": str(dest),
+        "actions_yaml": str(actions_path),
+        "atom_actions_yaml": str(args.atom_actions_yaml or _default_atom_actions_path(repo_root)),
+        "atom_sync": atom_sync,
+    }
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
 
 
@@ -3176,8 +3350,8 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--ci-timeout-seconds",
         type=float,
-        default=3600,
-        help="Timeout waiting for GitHub Actions CI before creating a PR.",
+        default=None,
+        help="Optional timeout waiting for GitHub Actions CI before creating a PR.",
     )
     parser.add_argument(
         "--skip-ci-wait",
@@ -3428,7 +3602,7 @@ def build_parser() -> argparse.ArgumentParser:
     maintenance_images_list_p.add_argument(
         "--timeout-seconds",
         type=float,
-        default=120.0,
+        default=None,
         help="Timeout for Docker inventory commands.",
     )
     maintenance_images_list_p.set_defaults(func=_cmd_maintenance_images_list)
@@ -3453,7 +3627,7 @@ def build_parser() -> argparse.ArgumentParser:
     maintenance_images_cleanup_p.add_argument(
         "--timeout-seconds",
         type=float,
-        default=120.0,
+        default=None,
         help="Timeout for Docker cleanup commands.",
     )
     maintenance_images_cleanup_p.set_defaults(func=_cmd_maintenance_images_cleanup)
@@ -3545,6 +3719,30 @@ def build_parser() -> argparse.ArgumentParser:
     tickets_move_p.add_argument("--to-bucket", required=True)
     tickets_move_p.add_argument("--dry-run", action="store_true")
     tickets_move_p.set_defaults(func=_cmd_tickets_move)
+
+    tickets_discard_p = tickets_sub.add_parser(
+        "discard",
+        help="Move a generated ticket to the non-actioned discarded bucket.",
+    )
+    tickets_discard_p.add_argument("--owner-root", type=Path, default=Path.cwd())
+    tickets_discard_p.add_argument("--fingerprint", required=True)
+    tickets_discard_p.add_argument(
+        "--reason",
+        required=True,
+        choices=["bad_solution", "duplicate", "obsolete", "not_repro", "other"],
+    )
+    tickets_discard_p.add_argument("--note")
+    tickets_discard_p.add_argument(
+        "--actions-yaml",
+        type=Path,
+        help="Backlog action ledger path (defaults to configs/backlog_actions.yaml).",
+    )
+    tickets_discard_p.add_argument(
+        "--atom-actions-yaml",
+        type=Path,
+        help="Atom action ledger path (defaults to configs/backlog_atom_actions.yaml).",
+    )
+    tickets_discard_p.set_defaults(func=_cmd_tickets_discard)
 
     add_batch_subcommands(sub)
 

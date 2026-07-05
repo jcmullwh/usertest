@@ -71,9 +71,9 @@ For a deterministic end-to-end sanity check (doctor -> deps -> CLI help -> pytes
 - **One-command smoke (per OS):** `scripts/smoke.ps1` (Windows) / `scripts/smoke.sh` (macOS/Linux)
 - **Shareable repo snapshot ZIP:** `scripts/snapshot_repo.ps1` (Windows) / `scripts/snapshot_repo.sh` (macOS/Linux)
 
-## Fastest output (no setup)
+## Preview a run artifact (no setup)
 
-Open the checked-in golden fixture artifacts directly (no Python deps required):
+Open the checked-in golden fixture artifacts directly (no Python deps required) to see what a run directory looks like. This is a fixture preview, not a usertest or installation check:
 
 - `examples/golden_runs/minimal_codex_run/report.md`
 - `examples/golden_runs/minimal_codex_run/metrics.json`
@@ -238,17 +238,30 @@ macOS/Linux:
 
 ## Run a single target
 
-After install (editable or PYTHONPATH), run:
+Representative validation (default built-in path):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy write`
+
+Defaults come from `configs/catalog.yaml`:
+
+- persona: `representative_workflow_evaluator`
+- mission: `verify_install_to_result`
+
+This path is intended to answer: “Can a real user install this repo, run its main workflow, and get a representative result?”
+
+Preflight probe (faster, weaker evidence):
+
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL_OR_DIR" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke`
+
+Use this only to establish sign-of-life or isolate the first blocker. It is not enough evidence for adoption-quality conclusions.
 
 Local directory example (initializes `.usertest/` scaffold):
 
 `python -m usertest.cli init-usertest --repo-root . --repo "PATH_TO_LOCAL_DIR"`
 
-Then run against that directory (requires an agent CLI + credentials):
+Then run against that directory with representative validation (requires an agent CLI + credentials):
 
-`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_TO_LOCAL_DIR" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result`
 
 List built-in personas/missions:
 
@@ -258,34 +271,35 @@ List built-in personas/missions:
 
 ## Backlog CLI
 
+
 Backlog mining/inclusion commands are provided by the separate backlog CLI app:
 
 `python -m usertest_backlog.cli --help`
 
 Defaults are configured in `configs/catalog.yaml`.
 
-Example: quick output with defaults-first mission:
+Example: representative output with defaults-first mission:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id burst_user --mission-id produce_default_output`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id produce_default_output`
 
 Claude Code variant:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent claude --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent claude --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result`
 
 Gemini variant:
 
-`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent gemini --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke`
+`python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent gemini --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result`
 
 ### Evaluate a published Python package (fresh install)
 
 To usertest a deployed Python package (fresh install into an isolated virtualenv before the agent
 runs), pass a pip target:
 
-`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker`
+`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result --exec-backend docker`
 
-This repo provides support for private registries(GitLab PyPI in particular); in that case also set the additionaly flags below with environment variables and optionally `GITLAB_BASE_URL`. For details, see `docs/monorepo-packages.md`.`
+This repo provides support for private registries (GitLab PyPI in particular); in that case also set the additional flags below with environment variables and optionally `GITLAB_BASE_URL`. For details, see `docs/monorepo-packages.md`.
 
-`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id quickstart_sprinter --mission-id first_output_smoke --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
+`python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD`
 
 Notes:
 
@@ -299,16 +313,16 @@ Execution-policy notes:
 - Execution policies apply to agent tool permissions during `run`/`batch`; host-side CLI commands
   such as `python -m usertest.cli --help` are unaffected.
 - `--policy safe` is strictest (no writes; and for Claude/Gemini, no shell commands).
-- `--policy inspect` is read-only but allows shell commands (recommended for first-success probing
-  workflows on Claude/Gemini).
-- Built-in `first_output_smoke` / `produce_default_output` missions require edits; use `--policy write` for those runs.
+- `--policy inspect` is read-only but allows shell commands. Use it for preflight probes, blocker isolation, and other read-only exploration.
+- `--policy write` is the normal choice for representative install-to-result validation.
 - Which policy should I use?
   - Read-only + shell (no edits): `--policy inspect`
-  - Any workflow that requires edits: `--policy write`
+  - Representative workflows that may need setup/output creation: `--policy write`
   - Claude/Gemini with *no shell commands at all*: `--policy safe`
   - Common missions:
     - `privacy_locked_run`: `--policy inspect`
-    - `first_output_smoke`: `--policy write`
+    - `first_output_smoke`: `--policy inspect` (preflight only)
+    - `verify_install_to_result`: `--policy write`
     - `produce_default_output`: `--policy write`
 - If you need repo-specific tool probes, add `--preflight-command <CMD>` (repeatable) and optional
   `--require-preflight-command <CMD>`.

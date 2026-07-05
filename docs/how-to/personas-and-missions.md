@@ -100,7 +100,7 @@ Optional but common:
 ---
 id: my_team
 name: My Team Evaluator
-extends: quickstart_sprinter
+extends: representative_workflow_evaluator
 ---
 
 ## Snapshot
@@ -154,7 +154,7 @@ Common optional fields:
 ---
 id: first_run
 name: First run for our stack
-extends: first_output_smoke
+extends: verify_install_to_result
 tags: [repo_specific]
 requires_shell: true
 requires_edits: false
@@ -162,17 +162,20 @@ requires_edits: false
 
 ## Goal
 
-Produce one meaningful output using the repo’s default workflow.
+Produce one representative result using the repo’s default workflow.
 
 ## What counts as success
 
-- A command that produces a real output (file or terminal output).
-- Clear prerequisites and repeatable steps.
+- The documented/default workflow is actually executed.
+- The run produces a user-visible result during this run.
+- The result is tied to the repo’s main value, not just a side path.
+- At least one explicit sanity or correctness check is included.
 
 ## Constraints
 
 - Do not publish/deploy.
-- If blocked, try 1–2 reasonable fixes, then stop and report.
+- CLI help, import-only checks, and checked-in fixtures do not count by themselves.
+- If blocked, try 1–2 reasonable fixes, then stop and report the blocker and the next representative step.
 ```
 
 ---
@@ -207,5 +210,5 @@ usertest missions list --repo "PATH/TO/TARGET"
 Then run with the IDs:
 
 ```bash
-usertest run --repo-root . --repo "PATH/TO/TARGET" --persona-id my_team --mission-id first_run --policy inspect --agent codex
+usertest run --repo-root . --repo "PATH/TO/TARGET" --persona-id my_team --mission-id first_run --policy write --agent codex
 ```

@@ -18,6 +18,7 @@ def test_parser_smoke() -> None:
     assert args.move_on_start is True
     assert args.move_on_commit is True
     assert args.draft_pr_on_ci_failure is True
+    assert args.ci_timeout_seconds is None
 
 
 def test_parser_base_branch_override() -> None:
@@ -71,7 +72,7 @@ def test_parser_maintenance_images_cleanup_defaults_to_config_dry_run_choice() -
     parser = build_parser()
     args = parser.parse_args(["maintenance-images", "cleanup"])
     assert args.dry_run is None
-    assert args.timeout_seconds == 120.0
+    assert args.timeout_seconds is None
 
 
 def test_parser_maintenance_images_cleanup_dry_run_override() -> None:

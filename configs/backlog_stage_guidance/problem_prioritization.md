@@ -6,6 +6,15 @@ Decide which problems merit deeper research now (`selected_for_research=true`), 
 should be deferred (`p2` / `p3` / `watch`), and which can be deprioritized. The
 prioritization decision must be explicit and inspectable.
 
+## Duration guardrail
+
+Stage artifacts and tool calls must not invent sleeps, polling delays, retry delays, or
+timeout values. If waiting behavior is part of the path being analyzed, use an existing
+repo-configured value or document the limitation instead of making up a duration. This
+also applies to tool calls: do not pass `timeout`, `timeout_ms`, or similar duration
+parameters to shell/tool invocations unless the assigned evidence includes that exact
+configured value.
+
 ## Priority buckets
 
 | Bucket | Meaning |

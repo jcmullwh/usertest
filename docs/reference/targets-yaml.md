@@ -19,8 +19,8 @@ Example:
         ref: "main"
         agent: "codex"
         policy: "safe"
-        persona_id: "quickstart_sprinter"
-        mission_id: "first_output_smoke"
+        persona_id: "representative_workflow_evaluator"
+        mission_id: "verify_install_to_result"
         seed: 0
 
 ## Per-target fields
@@ -40,7 +40,8 @@ If omitted, these fall back to the corresponding CLI flag values (or to catalog 
 - `persona_id` (string | null): which persona to run. If omitted/null, the catalog default may be used.
 - `mission_id` (string | null): which mission to run. If omitted/null, the catalog default may be used.
 - `seed` (integer): a label used for comparability across runs.
-- `model` (string | null): optional model override (if supported by the selected agent).
+- `model` (string | null): optional model override (if supported by the selected agent). If omitted
+  or null, the selected agent's `configs/agents.yaml` `default_model` is used when configured.
 
 ### Advanced fields
 

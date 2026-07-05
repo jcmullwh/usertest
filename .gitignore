@@ -94,6 +94,9 @@ backup_artifacts/
 ############################################
 .agents/**
 !.agents/.gitkeep
+!.agents/plans/
+!.agents/plans/0.2 - discarded/
+!.agents/plans/0.2 - discarded/.gitkeep
 
 
 ############################################
@@ -107,7 +110,4 @@ backup_artifacts/
 ############################################
 **/lint_report.json
 # usertest: allow reading run artifacts under runs/usertest for agent file tools.
-!runs/
 runs/*
-!runs/usertest/
-!runs/usertest/**

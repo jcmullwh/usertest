@@ -321,7 +321,7 @@ def test_run_once_retries_provider_capacity_then_succeeds(
         assert attempt["agent_exec_wall_seconds"] >= 0
 
 
-def test_run_once_fails_fast_when_codex_personality_warning_detected_during_retry_flow(
+def test_run_once_allows_runtime_only_codex_personality_warning_during_retry_flow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -354,17 +354,17 @@ def test_run_once_fails_fast_when_codex_personality_warning_detected_during_retr
         ),
     )
 
-    assert result.exit_code == 1
-    assert any(
-        "code=codex_model_messages_missing" in str(line) for line in result.report_validation_errors
-    )
-    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
-    assert len(attempts["attempts"]) == 1
-    assert attempts["attempts"][0]["failure_subtype"] == "invalid_agent_config"
+    assert result.exit_code == 0
+    assert result.report_validation_errors == []
+    assert not (result.run_dir / "error.json").exists()
 
-    error_obj = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
-    assert error_obj.get("type") == "AgentConfigInvalid"
-    assert error_obj.get("code") == "codex_model_messages_missing"
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert len(attempts["attempts"]) == 2
+    assert attempts["attempts"][0]["failure_subtype"] == "provider_capacity"
+
+    stderr_text = (result.run_dir / "agent_stderr.txt").read_text(encoding="utf-8")
+    assert "Model personality requested but model_messages is missing" not in stderr_text
+    assert "classification=runtime_notice" in stderr_text
 
 
 def test_run_once_records_codex_metadata_capture_for_capability_warnings(
@@ -594,7 +594,7 @@ def test_run_once_verification_rejection_sentinel_fails_fast_without_followup(
     assert error_payload.get("code") == "verification_rejected_sentinel"
 
 
-def test_run_once_fails_fast_when_codex_personality_warning_detected_during_verification_flow(
+def test_run_once_allows_runtime_only_codex_personality_warning_during_verification_flow(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -654,14 +654,17 @@ def test_run_once_fails_fast_when_codex_personality_warning_detected_during_veri
         ),
     )
 
-    assert result.exit_code == 1
-    assert any(
-        "code=codex_model_messages_missing" in str(line) for line in result.report_validation_errors
-    )
+    assert result.exit_code == 0
+    assert result.report_validation_errors == []
+    assert not (result.run_dir / "error.json").exists()
 
     attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
-    assert len(attempts["attempts"]) == 1
-    assert attempts["attempts"][0]["failure_subtype"] == "invalid_agent_config"
+    assert len(attempts["attempts"]) == 2
+    assert attempts["attempts"][0].get("followup_reason") == "verification_failed"
+
+    stderr_text = (result.run_dir / "agent_stderr.txt").read_text(encoding="utf-8")
+    assert "Model personality requested but model_messages is missing" not in stderr_text
+    assert "classification=runtime_notice" in stderr_text
 
 
 def test_run_once_uses_last_message_for_capacity_failures_with_empty_stderr(

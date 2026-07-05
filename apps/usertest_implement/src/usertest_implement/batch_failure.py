@@ -142,6 +142,20 @@ def classify_run_outcome(
     if isinstance(handoff_summary, dict):
         ci_status = str(handoff_summary.get("ci_status") or "").strip().lower()
         ci_conclusion = str(handoff_summary.get("ci_conclusion") or "").strip().lower()
+        if (
+            handoff_summary.get("final_status") == "success"
+            and handoff_summary.get("pr_created") is not True
+            and handoff_summary.get("ci_required") is not True
+        ):
+            verification = _read_json_if_exists(run_dir / "verification.json")
+            if verification is None or verification.get("passed") is True:
+                return {
+                    "failure_class": "success",
+                    "retryable": False,
+                    "global_blocker": False,
+                    "summary": "Local exercise run completed without remote handoff.",
+                    "evidence": {"run_dir": str(run_dir)},
+                }
         if handoff_summary.get("final_status") == "success" and (
             ci_status == "success" or ci_conclusion == "success"
         ):

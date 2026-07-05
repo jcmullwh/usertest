@@ -9,5 +9,9 @@ missions_dirs:
 personas_dirs:
   - .usertest/personas
 
+defaults:
+  persona_id: repo_adoption_gatekeeper
+  mission_id: self_end_to_end_run_single_target
+
 meta:
   note: Repo-specific usertest missions/personas for agentic-usertest-monorepo.

@@ -35,7 +35,7 @@ def infer_observed_model(*, run_dir: Path) -> str | None:
     Best-effort model inference from run artifacts.
 
     Preference order:
-    1) `target_ref.json["model"]` (explicit, user-provided via `--model`)
+    1) `target_ref.json["model"]` (effective model from `--model` or agent default)
     2) `agent_attempts.json` warnings (some agent CLIs log `model=...` to stderr)
     3) `agent_stderr.txt` (fallback)
     """

@@ -908,6 +908,7 @@ def _run_manifest_task(
     task_name: str,
     project_id: str,
     extra_env: dict[str, str] | None = None,
+    force_install: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     if not _is_pdm_command(cmd):
         if not extra_env:
@@ -952,12 +953,22 @@ def _run_manifest_task(
         install_cmd=cmd,
         cache_enabled=_install_cache_enabled(),
     )
-    if cache_state.enabled and _local_install_metadata_matches(state=cache_state):
+    if (
+        not force_install
+        and cache_state.enabled
+        and _local_install_metadata_matches(state=cache_state)
+    ):
         _eprint(f"INFO: {project_id}: maint-venv-cache hit-local ({cache_state.fingerprint[:12]}).")
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-    if _install_cache_restore(state=cache_state, project_dir=cwd, project_id=project_id):
+    if (
+        not force_install
+        and _install_cache_restore(state=cache_state, project_dir=cwd, project_id=project_id)
+    ):
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
-    if _install_cache_restore_from_seed(state=cache_state, project_dir=cwd, project_id=project_id):
+    if (
+        not force_install
+        and _install_cache_restore_from_seed(state=cache_state, project_dir=cwd, project_id=project_id)
+    ):
         _install_cache_save(state=cache_state, project_dir=cwd, project_id=project_id)
         return subprocess.CompletedProcess(args=cmd, returncode=0, stdout="", stderr="")
 
@@ -1442,6 +1453,7 @@ def _ensure_ruff_available_for_lint(
             task_name="install",
             project_id=project_id,
             extra_env=extra_env,
+            force_install=True,
         )
         if install_cp.returncode == 0:
             cp = _probe(probe_argv, cwd=cwd, env=env)
@@ -1486,6 +1498,7 @@ def _ensure_pytest_available_for_test(
             task_name="install",
             project_id=project_id,
             extra_env=extra_env,
+            force_install=True,
         )
         if install_cp.returncode == 0:
             cp = _probe(probe_argv, cwd=cwd, env=env)

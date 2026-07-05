@@ -54,6 +54,7 @@ def test_parser_smoke() -> None:
     )
     assert args.exec_use_target_sandbox_cli_install is True
     args = parser.parse_args(["run", "--repo", "C:\\tmp\\x"])
+    assert args.exec_backend == "docker"
     assert args.exec_use_host_agent_login is True
     args = parser.parse_args(
         [
@@ -102,11 +103,15 @@ def test_parser_smoke() -> None:
         parser.parse_args(["reports", "backlog", "--target", "x", "--dry-run"])
 
     args = parser.parse_args(["batch", "--targets", "configs/targets.yaml"])
+    assert args.exec_backend == "docker"
     assert args.exec_use_host_agent_login is True
     args = parser.parse_args(
         ["batch", "--targets", "configs/targets.yaml", "--exec-use-api-key-auth"]
     )
     assert args.exec_use_host_agent_login is False
+
+    args = parser.parse_args(["matrix", "plan", "--spec", "configs/matrix.yaml"])
+    assert args.exec_backend == "docker"
 
     args = parser.parse_args(["init-usertest", "--repo", "C:\\tmp\\x"])
     assert args.repo == Path("C:\\tmp\\x")

@@ -304,6 +304,78 @@ def test_reports_export_tickets_applies_stage_gates_and_ledger_skip(tmp_path: Pa
     assert "Research / ADR Template" in research_body
 
 
+def test_reports_export_tickets_skips_discarded_fingerprints_by_default(tmp_path: Path) -> None:
+    repo_root = _make_repo_root(tmp_path)
+    runs_dir = tmp_path / "runs" / "usertest"
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    owner_repo = tmp_path / "owner_repo"
+    owner_repo.mkdir(parents=True, exist_ok=True)
+
+    ticket = {
+        "ticket_id": "BLG-001",
+        "title": "Discarded generated solution should not re-export",
+        "problem": "The generated solution was rejected.",
+        "severity": "high",
+        "confidence": 0.9,
+        "stage": "ready_for_ticket",
+        "evidence_atom_ids": ["target_a/20260101T000000Z/codex/0:suggested_change:1"],
+        "change_surface": {"user_visible": True, "kinds": ["docs_change"], "notes": ""},
+        "breadth": {"missions": 1, "targets": 1, "repo_inputs": 1, "agents": 1, "runs": 1},
+        "suggested_owner": "docs",
+    }
+    fingerprint = ticket_export_fingerprint(ticket)
+    _write_json(
+        compiled_dir / "target_a.backlog.json",
+        {
+            "schema_version": 1,
+            "scope": {"repo_input": str(owner_repo)},
+            "tickets": [ticket],
+        },
+    )
+    actions_path = tmp_path / "backlog_actions.yaml"
+    _write_yaml(
+        actions_path,
+        {
+            "version": 1,
+            "actions": [
+                {
+                    "fingerprint": fingerprint,
+                    "status": "discarded",
+                    "discard_reason": "bad_solution",
+                }
+            ],
+        },
+    )
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--actions-yaml",
+                str(actions_path),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-dedupe",
+            ]
+        )
+
+    assert exc.value.code == 0
+    export_doc = json.loads((compiled_dir / "target_a.tickets_export.json").read_text())
+    assert export_doc["stats"]["exports_total"] == 0
+    assert export_doc["stats"]["skipped_discarded"] == 1
+    assert export_doc["stats"]["skipped_actioned"] == 0
+    assert export_doc["filters"]["include_discarded"] is False
+
+
 def test_reports_export_tickets_include_full_stage_context_in_ticket_body(tmp_path: Path) -> None:
     repo_root = _make_repo_root(tmp_path)
     runs_dir = tmp_path / "runs" / "usertest"

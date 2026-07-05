@@ -6,6 +6,15 @@ Extract explicit problem records from observed evidence atoms. A problem record 
 structured statement that a problem exists, grounded in one or more atoms. It is not a
 solution proposal.
 
+## Duration guardrail
+
+Stage artifacts and tool calls must not invent sleeps, polling delays, retry delays, or
+timeout values. If waiting behavior is part of the path being analyzed, use an existing
+repo-configured value or document the limitation instead of making up a duration. This
+also applies to tool calls: do not pass `timeout`, `timeout_ms`, or similar duration
+parameters to shell/tool invocations unless the assigned evidence includes that exact
+configured value.
+
 ## What to favor
 
 - Recurring stability problems observed across multiple runs or agents.

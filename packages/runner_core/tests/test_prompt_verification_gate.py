@@ -289,6 +289,86 @@ def test_codex_uses_model_instructions_file_for_large_append_prompt(
     assert not any(item.startswith("developer_instructions=") for item in overrides)
 
 
+def test_run_once_uses_agent_default_model_when_request_model_is_omitted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_binary(tmp_path)
+
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_commands_local",
+        lambda commands, **kwargs: (
+            {cmd: True for cmd in commands},
+            {"command_probe_details": {cmd: {"present": True} for cmd in commands}},
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_agent_cli_version",
+        lambda **kwargs: {
+            "ok": True,
+            "argv": [str(kwargs.get("binary", "codex")), "--version"],
+            "returncode": 0,
+            "stdout": "codex test stub\n",
+            "stderr": "",
+        },
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_agent_auth_present_local",
+        lambda **kwargs: (True, "test_stub"),
+    )
+
+    captured: dict[str, object] = {}
+
+    def _fake_run_codex_exec(**kwargs: object) -> CodexExecResult:
+        captured["model"] = kwargs.get("model")
+        raw_events_path = kwargs["raw_events_path"]
+        last_message_path = kwargs["last_message_path"]
+        stderr_path = kwargs["stderr_path"]
+        assert isinstance(raw_events_path, Path)
+        assert isinstance(last_message_path, Path)
+        assert isinstance(stderr_path, Path)
+        payload = {"id": "1", "msg": {"type": "agent_message", "message": "ok"}}
+        raw_events_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+        last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        return CodexExecResult(
+            argv=["codex", "--model", str(kwargs.get("model"))],
+            exit_code=0,
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+        )
+
+    monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
+
+    result = run_once(
+        RunnerConfig(
+            repo_root=runner_root,
+            runs_dir=tmp_path / "runs",
+            agents={"codex": {"binary": dummy_binary, "default_model": "gpt-5.5"}},
+            policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+        ),
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert captured["model"] == "gpt-5.5"
+    target_ref = json.loads((result.run_dir / "target_ref.json").read_text(encoding="utf-8"))
+    assert target_ref["model"] == "gpt-5.5"
+    assert target_ref["model_source"] == "agent_default"
+
+
 def test_verification_broker_handoff_uses_shared_launcher_resolution() -> None:
     launcher = runner_mod.resolve_verification_launcher(command_prefix=[])
     argv = runner_mod._verification_shell_argv(command_prefix=[], command="echo ok")

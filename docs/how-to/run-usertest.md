@@ -12,21 +12,33 @@ If you don’t yet have a working environment, start with `docs/tutorials/gettin
 
 ## Run a single target
 
-### Local directory
+### Representative validation (default built-in path)
 
 ```text
-python -m usertest.cli run --repo-root . --repo "PATH/TO/TARGET" --agent codex --policy inspect
+python -m usertest.cli run --repo-root . --repo "PATH/TO/TARGET" --agent codex --policy write
 ```
-
-### Git URL
 
 ```text
-python -m usertest.cli run --repo-root . --repo "https://github.com/org/repo.git" --agent codex --policy inspect
+python -m usertest.cli run --repo-root . --repo "https://github.com/org/repo.git" --agent codex --policy write
 ```
 
----
+Defaults come from `configs/catalog.yaml`:
+
+- persona: `representative_workflow_evaluator`
+- mission: `verify_install_to_result`
+
+Use this path when you want evidence that a real user can reach a representative result.
+
+### Faster preflight probe
+
+```text
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id quickstart_sprinter --mission-id first_output_smoke
+```
+
+Use this only to establish sign-of-life or isolate the first blocker.
 
 ## Choose a persona + mission
+
 
 List built-ins:
 
@@ -38,7 +50,7 @@ python -m usertest.cli missions list --repo-root .
 Run with explicit IDs:
 
 ```text
-python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --persona-id burst_user --mission-id produce_default_output
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id produce_default_output
 ```
 
 ---
@@ -46,8 +58,8 @@ python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex 
 ## Policies: safe vs inspect vs write
 
 - Use `--policy safe` when you want the strictest mode.
-- Use `--policy inspect` for most onboarding probes (read-only + shell).
-- Use `--policy write` when you intentionally want edits.
+- Use `--policy inspect` for preflight probes and read-only blocker isolation.
+- Use `--policy write` for representative install-to-result validation and other workflows that may need setup/output creation.
 
 Policies apply to **agent tool permissions during the run**.
 They do not redact artifacts.
@@ -115,7 +127,7 @@ The Docker backend is useful when you want:
 - a more repeatable environment
 
 ```text
-python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker
 ```
 
 By default, Docker runs reuse host agent logins by mounting `~/.codex`, `~/.claude`, and/or
@@ -124,7 +136,7 @@ By default, Docker runs reuse host agent logins by mounting `~/.codex`, `~/.clau
 If you want API-key auth for Codex instead:
 
 ```text
-python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker --exec-use-api-key-auth --exec-env OPENAI_API_KEY
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker --exec-use-api-key-auth --exec-env OPENAI_API_KEY
 ```
 
 ### Docker cache (`--exec-cache`)
@@ -167,7 +179,7 @@ Defaults:
 Example (override the host cache directory):
 
 ```text
-python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy inspect --exec-backend docker --exec-cache warm --exec-cache-dir runs/_cache/usertest-ci
+python -m usertest.cli run --repo-root . --repo "PATH_OR_GIT_URL" --agent codex --policy write --exec-backend docker --exec-cache warm --exec-cache-dir runs/_cache/usertest-ci
 ```
 
 ---
@@ -179,7 +191,7 @@ To test the “fresh install” experience (instead of a repo checkout), use a `
 Example (GitLab PyPI credentials are passed through as exec env vars):
 
 ```text
-python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy safe --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD
+python -m usertest.cli run --repo-root . --repo "pip:agent-adapters" --agent codex --policy write --persona-id representative_workflow_evaluator --mission-id verify_install_to_result --exec-backend docker --exec-env GITLAB_PYPI_PROJECT_ID --exec-env GITLAB_PYPI_USERNAME --exec-env GITLAB_PYPI_PASSWORD
 ```
 
 See `docs/monorepo-packages.md` for details.

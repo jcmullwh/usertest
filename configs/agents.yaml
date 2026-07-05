@@ -6,6 +6,8 @@ agents:
   codex:
     binary: codex
     subcommand: exec
+    # Latest recommended Codex model for complex coding and agentic workflows.
+    default_model: gpt-5.5
     supports_json_schema: false
     raw_events_format: jsonl
     # Optional: extra packages to install into the docker sandbox_cli image when
@@ -16,11 +18,10 @@ agents:
       pip: []
       npm_global: ["@openai/codex"]
     # Default Codex config overrides passed via `codex exec -c key=value`.
-    # This is useful for guarding against unsupported values in a user's `~/.codex/config.toml`.
-    # If personality/model_personality is configured here, model_messages must also be configured.
+    # Headless repo runs use `codex exec --ignore-user-config`, so these are the
+    # repo-owned defaults instead of relying on interactive user config.
     config_overrides:
       - "model_reasoning_effort=high"
-      - 'model_messages=[{"role":"system","content":"Follow the provided system, mission, and repo instructions exactly."}]'
     args:
       json_events: ["--json"]
       last_message: ["--output-last-message"]
@@ -29,6 +30,8 @@ agents:
 
   claude:
     binary: claude
+    # Claude Code alias for latest Sonnet on the Anthropic API; currently Sonnet 5.
+    default_model: sonnet
     supports_json_schema: true
     raw_events_format: jsonl
     output_format: stream-json
@@ -41,6 +44,8 @@ agents:
 
   gemini:
     binary: gemini
+    # Gemini CLI's recommended Auto routing default for current Gemini model families.
+    default_model: auto
     supports_json_schema: false
     raw_events_format: jsonl
     output_format: stream-json

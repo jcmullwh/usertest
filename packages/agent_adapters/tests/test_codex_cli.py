@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
@@ -73,6 +74,57 @@ def _make_refresh_token_reused_dummy_codex(tmp_path: Path) -> str:
     return str(wrapper)
 
 
+def _make_argv_dump_dummy_codex(tmp_path: Path) -> str:
+    script = tmp_path / "dummy_codex_argv_dump.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import os",
+                "import sys",
+                "",
+                "",
+                "def main() -> None:",
+                "    sys.stdin.read()",
+                "    out = os.environ['CODEX_ARGV_OUT']",
+                "    with open(out, 'w', encoding='utf-8', newline='\\n') as f:",
+                "        json.dump(sys.argv[1:], f)",
+                "",
+                "",
+                "if __name__ == '__main__':",
+                "    main()",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    if os.name == "nt":
+        wrapper = tmp_path / "dummy_codex_argv_dump.cmd"
+        wrapper.write_text(
+            f"@echo off\r\n\"{sys.executable}\" \"{script}\" %*\r\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        return str(wrapper)
+
+    wrapper = tmp_path / "dummy_codex_argv_dump.sh"
+    wrapper.write_text(
+        "\n".join(
+            [
+                "#!/usr/bin/env bash",
+                f"\"{sys.executable}\" \"{script}\" \"$@\"",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    wrapper.chmod(0o755)
+    return str(wrapper)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows-only PATH resolution for .cmd files")
 def test_resolve_executable_finds_cmd_on_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -117,6 +169,49 @@ def test_run_codex_exec_fails_fast_on_refresh_token_reused(tmp_path: Path) -> No
     assert "codex login" in stderr_text
 
 
+def test_run_codex_exec_ignores_user_config_for_headless_runs(tmp_path: Path) -> None:
+    dummy_binary = _make_argv_dump_dummy_codex(tmp_path)
+    argv_path = tmp_path / "argv.json"
+
+    result = run_codex_exec(
+        workspace_dir=tmp_path,
+        prompt="test",
+        raw_events_path=tmp_path / "raw_events.jsonl",
+        last_message_path=tmp_path / "last_message.txt",
+        stderr_path=tmp_path / "stderr.txt",
+        sandbox="read-only",
+        ask_for_approval="never",
+        binary=dummy_binary,
+        env_overrides={"CODEX_ARGV_OUT": str(argv_path)},
+    )
+
+    assert result.exit_code == 0
+    argv = json.loads(argv_path.read_text(encoding="utf-8"))
+    assert argv[argv.index("exec") + 1] == "--ignore-user-config"
+
+
+def test_run_codex_exec_can_ignore_rules_for_isolated_runs(tmp_path: Path) -> None:
+    dummy_binary = _make_argv_dump_dummy_codex(tmp_path)
+    argv_path = tmp_path / "argv.json"
+
+    result = run_codex_exec(
+        workspace_dir=tmp_path,
+        prompt="test",
+        raw_events_path=tmp_path / "raw_events.jsonl",
+        last_message_path=tmp_path / "last_message.txt",
+        stderr_path=tmp_path / "stderr.txt",
+        sandbox="read-only",
+        ask_for_approval="never",
+        binary=dummy_binary,
+        ignore_rules=True,
+        env_overrides={"CODEX_ARGV_OUT": str(argv_path)},
+    )
+
+    assert result.exit_code == 0
+    argv = json.loads(argv_path.read_text(encoding="utf-8"))
+    assert "--ignore-rules" in argv
+
+
 def test_validate_codex_personality_config_overrides_requires_model_messages() -> None:
     for key in ("model_personality", "personality"):
         issue = validate_codex_personality_config_overrides(
@@ -137,11 +232,24 @@ def test_validate_codex_personality_config_overrides_accepts_matching_model_mess
     issue = validate_codex_personality_config_overrides(
         [
             'personality="pragmatic"',
-            'model_messages=[{"role":"system","content":"Be concise."}]',
+            'model_messages=[{role="system", content="Be concise."}]',
         ]
     )
 
     assert issue is None
+
+
+def test_validate_codex_personality_config_overrides_rejects_none_without_model_messages() -> None:
+    issue = validate_codex_personality_config_overrides(
+        [
+            'personality="none"',
+            "model_reasoning_effort=high",
+        ]
+    )
+
+    assert issue is not None
+    assert "model_messages is missing" in issue.message
+    assert issue.details.get("personality_keys") == ["personality"]
 
 
 def test_validate_codex_reasoning_effort_config_overrides_rejects_invalid_value() -> None:

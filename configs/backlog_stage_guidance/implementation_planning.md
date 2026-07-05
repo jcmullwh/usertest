@@ -6,6 +6,15 @@ Convert the selected solution into an actionable change plan. This is where
 `proposed_fix` and `implementation_steps` appear for the first time, backed by all
 prior stage evidence.
 
+## Duration guardrail
+
+Stage artifacts and tool calls must not invent sleeps, polling delays, retry delays, or
+timeout values. If waiting behavior is part of the path being analyzed, use an existing
+repo-configured value or document the limitation instead of making up a duration. This
+also applies to tool calls: do not pass `timeout`, `timeout_ms`, or similar duration
+parameters to shell/tool invocations unless the assigned evidence includes that exact
+configured value.
+
 ## What to include in a change plan
 
 - A concrete description of what to change and why (grounded in research + selection).

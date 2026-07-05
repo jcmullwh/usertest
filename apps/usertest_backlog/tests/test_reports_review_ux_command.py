@@ -346,3 +346,87 @@ def test_reports_review_ux_internal_profile_includes_review_domain_and_accept_ex
     assert "accept_existing_surface" in prompt_text
     assert '"review_domain": "behavior_compat"' in prompt_text
     assert '"breadth_profile": "internal_maintenance"' in prompt_text
+
+
+def test_reports_review_ux_reads_snapshot_named_by_repo_input_slug(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    repo_input = r"I:\code\repo_alpha"
+
+    compiled_dir = runs_dir / "target_a" / "_compiled"
+    backlog_path = compiled_dir / "repo_alpha.backlog.json"
+    selection_path = compiled_dir / "repo_alpha.solution_selection.json"
+
+    selection_item = {
+        "problem_id": "problem:test",
+        "title": "Add dry-run review status",
+        "problem": "Operators cannot tell what review considered.",
+        "severity": "medium",
+        "confidence": 0.6,
+        "stage": "research_required",
+        "needs_ux_review": True,
+        "selected_option_id": "option:test:most_comprehensive",
+        "selected_family_id": "most_comprehensive",
+        "selection_rationale": "User-visible reporting change needs review.",
+        "repo_intent_alignment": "Keep reports auditable.",
+        "why_other_options_were_not_selected": "Narrower alternatives miss report UX.",
+        "change_surface": {
+            "user_visible": True,
+            "kinds": ["report_change"],
+            "notes": "Adds status to generated report output.",
+        },
+        "breadth": {
+            "missions": 1,
+            "targets": 1,
+            "repo_inputs": 1,
+            "agents": 1,
+            "runs": 1,
+        },
+    }
+    _write_json(backlog_path, {"schema_version": 1, "tickets": []})
+    _write_json(
+        selection_path,
+        {"schema_version": 1, "stage": "solution_selection", "items": [selection_item]},
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "intent-snapshot",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--repo-input",
+                repo_input,
+            ]
+        )
+    assert exc.value.code == 0
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "review-ux",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--repo-input",
+                repo_input,
+                "--dry-run",
+            ]
+        )
+    assert exc.value.code == 0
+
+    out_json = compiled_dir / "repo_alpha.ux_review.json"
+    assert out_json.exists()
+    doc = json.loads(out_json.read_text(encoding="utf-8"))
+    assert doc["inputs"]["intent_snapshot_json"].endswith("repo_alpha.intent_snapshot.json")

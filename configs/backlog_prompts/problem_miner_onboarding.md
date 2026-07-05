@@ -46,11 +46,23 @@ file tools that enforce token limits.
 Requirements:
 
 - Read `atoms.json` before producing any output. It is a small manifest JSON object with:
+  - `index_file`: a compact markdown index of all atoms
   - `chunks`: a list of chunk descriptors (each has `file`, `atom_count`, `bytes`, `sha256`)
   - `total_atom_count`
   - `max_records_per_miner`
-- Then read every chunk file listed in `chunks[*].file` (relative to the workspace).
-  Each chunk file is a JSON array of atom dicts (each has `atom_id` and `text` at minimum).
+- Then read the markdown index listed by `index_file`.
+- Use the per-atom markdown files listed as `atom_file` in the index for full text when
+  the preview is not enough. These files are small enough to read whole.
+- When reading atom files on Windows, read one atom file per command, for example
+  `Get-Content -Raw -LiteralPath atoms_by_id/atom_0001.md`.
+- Do not pass multiple atom paths to one `Get-Content` command, and do not use
+  comma-separated file lists.
+- Use the chunk markdown files listed in `chunks[*].text_file` only when broader chunk
+  context is needed.
+- Do not use PowerShell array slicing or line ranges to read markdown chunks.
+- Do not run JSON parser loops over the chunk files. The JSON files are retained as the
+  canonical structured copy, but the markdown index and markdown chunks are the preferred
+  agent-readable view.
 
-Use the atoms from all chunk files as the sole evidence. Every record must cite one or
+Use the atoms from these workspace files as the sole evidence. Every record must cite one or
 more atom IDs via `evidence_atom_ids`.

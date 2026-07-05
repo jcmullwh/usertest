@@ -20,6 +20,7 @@ import yaml
 _SEVERITY_PATTERN = re.compile(r"^- Severity:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
 _EXPORT_KIND_PATTERN = re.compile(r"^- Export kind:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
 _FINGERPRINT_PATTERN = re.compile(r"^- Fingerprint:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
+LATEST_CODEX_MODEL = "gpt-5.5"
 
 
 @dataclass
@@ -40,7 +41,6 @@ class LoopContext:
     review_agent: str
     review_model: str | None
     allowed_severities: set[str]
-    sleep_seconds: float
     cleanup_interval_seconds: float
     log_path: Path
     state_path: Path
@@ -95,7 +95,6 @@ def _run_logged(
     *,
     cwd: Path,
     label: str,
-    timeout_seconds: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess while appending its stdout/stderr to the shared loop log."""
 
@@ -111,7 +110,6 @@ def _run_logged(
             stderr=handle,
             text=True,
             check=False,
-            timeout=timeout_seconds,
         )
         handle.write(f"{_utc_now_z()} END {label} rc={proc.returncode}\n")
     return proc
@@ -123,7 +121,6 @@ def _run_captured(
     *,
     cwd: Path,
     label: str,
-    timeout_seconds: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a subprocess and return captured stdout/stderr while logging the command."""
 
@@ -135,7 +132,6 @@ def _run_captured(
         capture_output=True,
         text=True,
         check=False,
-        timeout=timeout_seconds,
     )
     if proc.stdout.strip():
         _append_log(ctx, f"{label} stdout:\n{proc.stdout.rstrip()}")
@@ -153,7 +149,6 @@ def _docker_healthy(ctx: LoopContext) -> bool:
         ["docker", "version", "--format", "{{json .}}"],
         cwd=ctx.repo_root,
         label="docker version",
-        timeout_seconds=30,
     )
     return proc.returncode == 0
 
@@ -179,12 +174,9 @@ def _run_maintenance_cleanup(ctx: LoopContext) -> None:
             str(ctx.repo_root),
             "maintenance-images",
             "cleanup",
-            "--timeout-seconds",
-            "60",
         ],
         cwd=ctx.repo_root,
         label="maintenance-images cleanup",
-        timeout_seconds=120,
     )
     ctx.last_cleanup_monotonic = time.monotonic()
     if proc.returncode != 0:
@@ -305,7 +297,6 @@ def _gh_pr_view(ctx: LoopContext, pr_url: str) -> dict[str, Any] | None:
         ],
         cwd=ctx.owner_root,
         label=f"gh pr view {pr_url}",
-        timeout_seconds=60,
     )
     if proc.returncode != 0:
         return None
@@ -338,7 +329,6 @@ def _move_ticket(ctx: LoopContext, fingerprint: str, to_bucket: str) -> bool:
         ],
         cwd=ctx.repo_root,
         label=f"tickets move {fingerprint} -> {to_bucket}",
-        timeout_seconds=60,
     )
     return proc.returncode == 0
 
@@ -400,7 +390,6 @@ def _merge_review(ctx: LoopContext, fingerprint: str) -> bool:
         ],
         cwd=ctx.repo_root,
         label=f"review merge {fingerprint}",
-        timeout_seconds=120,
     )
     return proc.returncode == 0
 
@@ -497,15 +486,31 @@ def _refresh_backlog(ctx: LoopContext) -> bool:
         ),
         (
             "reports intent-snapshot",
-            [*common, "intent-snapshot", *root_flags],
+            [*common, "intent-snapshot", *root_flags, "--repo-input", ctx.repo_input],
         ),
         (
             "reports review-ux",
-            [*common, "review-ux", *root_flags, "--agent", ctx.review_agent],
+            [
+                *common,
+                "review-ux",
+                *root_flags,
+                "--repo-input",
+                ctx.repo_input,
+                "--agent",
+                ctx.review_agent,
+            ],
         ),
         (
             "reports export-tickets",
-            [*common, "export-tickets", *root_flags, "--stage", "ready_for_ticket"],
+            [
+                *common,
+                "export-tickets",
+                *root_flags,
+                "--repo-input",
+                ctx.repo_input,
+                "--stage",
+                "ready_for_ticket",
+            ],
         ),
     ]
     if ctx.backlog_model:
@@ -610,7 +615,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--settings-profile", default="default")
     parser.add_argument("--backlog-agent", choices=["claude", "codex", "gemini"], default="codex")
-    parser.add_argument("--backlog-model", default="gpt-5.4")
+    parser.add_argument("--backlog-model", default=LATEST_CODEX_MODEL)
     parser.add_argument("--implementation-agent", choices=["claude", "codex", "gemini"], default="codex")
     parser.add_argument("--implementation-model", default=None)
     parser.add_argument("--review-agent", choices=["claude", "codex", "gemini"], default="claude")
@@ -622,7 +627,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=["blocker", "high"],
         help="Repeatable severity filter for ready-ticket selection.",
     )
-    parser.add_argument("--sleep-seconds", type=float, default=60.0)
     parser.add_argument("--cleanup-interval-seconds", type=float, default=21600.0)
     parser.add_argument(
         "--log-path",
@@ -679,7 +683,6 @@ def main(argv: list[str] | None = None) -> int:
         review_agent=str(args.review_agent),
         review_model=str(args.review_model).strip() if isinstance(args.review_model, str) and args.review_model and str(args.review_model).strip() else None,
         allowed_severities={str(value).strip().lower() for value in args.severities if str(value).strip()},
-        sleep_seconds=float(args.sleep_seconds),
         cleanup_interval_seconds=float(args.cleanup_interval_seconds),
         log_path=args.log_path if args.log_path.is_absolute() else (repo_root / args.log_path).resolve(),
         state_path=args.state_path if args.state_path.is_absolute() else (repo_root / args.state_path).resolve(),
@@ -703,30 +706,28 @@ def main(argv: list[str] | None = None) -> int:
             batch_ok = _run_batch_pass(ctx)
             _reconcile_review_queue(ctx)
             if not batch_ok:
-                _append_log(ctx, f"batch pass returned non-zero; sleeping {ctx.sleep_seconds:.0f}s")
-            else:
-                _append_log(ctx, f"batch pass complete; sleeping {ctx.sleep_seconds:.0f}s")
+                _append_log(ctx, "batch pass returned non-zero; stopping continuous loop")
+                _write_state(
+                    ctx,
+                    status="failed",
+                    current_action="stopped_after_batch_failure",
+                )
+                return 1
 
-            _write_state(
-                ctx,
-                status="idle",
-                current_action="sleep",
-                sleep_seconds=ctx.sleep_seconds,
-            )
-            time.sleep(ctx.sleep_seconds)
+            _append_log(ctx, "batch pass complete; starting next pass")
+            _write_state(ctx, status="running", current_action="next_batch")
         except KeyboardInterrupt:
             _append_log(ctx, "continuous implementation loop interrupted")
             return 130
         except Exception as exc:
-            _append_log(ctx, f"UNHANDLED ERROR: {exc!r}")
+            _append_log(ctx, f"UNHANDLED ERROR: {exc!r}; stopping continuous loop")
             _write_state(
                 ctx,
                 status="error",
                 current_action="exception",
                 error=repr(exc),
-                sleep_seconds=ctx.sleep_seconds,
             )
-            time.sleep(ctx.sleep_seconds)
+            return 1
 
 
 if __name__ == "__main__":

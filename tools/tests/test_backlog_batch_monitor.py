@@ -21,13 +21,13 @@ def test_parse_batch_stdout_tracks_success_and_failures() -> None:
     mod = _load_module()
     snapshot = mod.parse_batch_stdout(
         [
-            "[2026-03-07T19:47:41Z] BEGIN phase=blocking_high_usertest_implement severities=['blocker', 'high'] workers=['worker_index=1 agent=codex model=gpt-5.4', 'worker_index=2 agent=claude model=<default>']",
+            "[2026-03-07T19:47:41Z] BEGIN phase=blocking_high_usertest_implement severities=['blocker', 'high'] workers=['worker_index=1 agent=codex model=gpt-5.5', 'worker_index=2 agent=claude model=<default>']",
             "[2026-03-07T19:47:41Z] PHASE blocking_high_usertest_implement cycle=1",
             "[2026-03-07T19:47:44Z] REFRESH source=usertest_implement reason=initial_refresh fingerprint=242f9064b005",
             "[2026-03-07T19:47:50Z] WAVE phase=blocking_high_usertest_implement cycle=1 candidates=4 parallel=2",
-            "[2026-03-07T19:48:01Z] LAUNCH source=usertest_implement fingerprint=abc123 severity=blocker worker=worker_index=1 agent=codex model=gpt-5.4 ticket_path=I:\\repo\\a.md",
+            "[2026-03-07T19:48:01Z] LAUNCH source=usertest_implement fingerprint=abc123 severity=blocker worker=worker_index=1 agent=codex model=gpt-5.5 ticket_path=I:\\repo\\a.md",
             "[2026-03-07T19:48:02Z] LAUNCH source=usertest_implement fingerprint=def456 severity=high worker=worker_index=2 agent=claude model=<default> ticket_path=I:\\repo\\b.md",
-            "[2026-03-07T19:49:02Z] SUCCESS source=usertest_implement fingerprint=abc123 worker=worker_index=1 agent=codex model=gpt-5.4 run_dir=I:\\runs\\a branch=backlog/abc pushed=True pr_created=True pr_url=https://example/pr/1",
+            "[2026-03-07T19:49:02Z] SUCCESS source=usertest_implement fingerprint=abc123 worker=worker_index=1 agent=codex model=gpt-5.5 run_dir=I:\\runs\\a branch=backlog/abc pushed=True pr_created=True pr_url=https://example/pr/1",
             "[2026-03-07T19:49:05Z] FAIL source=usertest_implement fingerprint=def456 worker=worker_index=2 agent=claude model=<default> error=Implementation run failed for b",
         ]
     )
@@ -73,8 +73,8 @@ def test_build_snapshot_reads_authoritative_batch_state(tmp_path: Path) -> None:
   "batch_id": "20260308T010203Z",
   "phase": "blocking_high_usertest_implement",
   "status": "blocked",
-  "workers": [{"worker_index": 1, "agent": "codex", "model": "gpt-5.4"}],
-  "in_flight": [{"fingerprint": "abc123", "severity": "blocker", "ticket_path": "I:/repo/a.md", "worker": {"worker_index": 1, "agent": "codex", "model": "gpt-5.4"}, "launched_utc": "2026-03-08T01:02:03Z"}],
+  "workers": [{"worker_index": 1, "agent": "codex", "model": "gpt-5.5"}],
+  "in_flight": [{"fingerprint": "abc123", "severity": "blocker", "ticket_path": "I:/repo/a.md", "worker": {"worker_index": 1, "agent": "codex", "model": "gpt-5.5"}, "launched_utc": "2026-03-08T01:02:03Z"}],
   "completed": [],
   "failed": []
 }
@@ -93,7 +93,7 @@ def test_build_snapshot_reads_authoritative_batch_state(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     (batch_dir / "ticket_outcomes.jsonl").write_text(
-        '{"fingerprint":"abc123","worker":{"worker_index":1,"agent":"codex","model":"gpt-5.4"},"run_dir":"I:/runs/a","handoff_summary":{"pr_url":"https://example/pr/1"},"failure":{"failure_class":"success"},"completed_utc":"2026-03-08T01:06:00Z"}\n',
+        '{"fingerprint":"abc123","worker":{"worker_index":1,"agent":"codex","model":"gpt-5.5"},"run_dir":"I:/runs/a","handoff_summary":{"pr_url":"https://example/pr/1"},"failure":{"failure_class":"success"},"completed_utc":"2026-03-08T01:06:00Z"}\n',
         encoding="utf-8",
     )
 
@@ -131,7 +131,7 @@ def test_build_snapshot_ignores_stale_legacy_log_data_when_batch_state_exists(tm
   "batch_id": "20260308T010203Z",
   "phase": "blocking_high_usertest_implement",
   "status": "running",
-  "workers": [{"worker_index": 1, "agent": "codex", "model": "gpt-5.4"}],
+  "workers": [{"worker_index": 1, "agent": "codex", "model": "gpt-5.5"}],
   "in_flight": [],
   "completed": [],
   "failed": []

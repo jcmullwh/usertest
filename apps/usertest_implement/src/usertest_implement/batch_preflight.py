@@ -20,7 +20,6 @@ def _run(
     argv: list[str],
     *,
     cwd: Path,
-    timeout_seconds: float | None = None,
 ) -> subprocess.CompletedProcess[str]:
     command = list(argv)
     resolved = shutil.which(command[0])
@@ -34,7 +33,6 @@ def _run(
         encoding="utf-8",
         errors="replace",
         check=False,
-        timeout=timeout_seconds,
     )
 
 
@@ -49,12 +47,47 @@ def _write_log(path: Path, proc: subprocess.CompletedProcess[str]) -> None:
 
 
 def _load_yaml(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {}
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     return raw if isinstance(raw, dict) else {}
 
 
+def _batch_remote_handoff_requested(*, repo_root: Path, batch_config: dict[str, Any]) -> bool:
+    defaults = batch_config.get("defaults", {})
+    if not isinstance(defaults, dict):
+        return True
+
+    settings_raw = defaults.get("run_settings_path") or "configs/usertest_implement_settings.yaml"
+    settings_path = Path(str(settings_raw))
+    if not settings_path.is_absolute():
+        settings_path = repo_root / settings_path
+    if not settings_path.exists():
+        return True
+
+    settings = _load_yaml(settings_path)
+    profiles = settings.get("profiles", {})
+    if not isinstance(profiles, dict):
+        return True
+
+    profile_name = str(
+        defaults.get("run_settings_profile") or settings.get("default_profile") or "default"
+    )
+    profile = profiles.get(profile_name)
+    if not isinstance(profile, dict):
+        return True
+
+    run_common = profile.get("run_common", {})
+    if not isinstance(run_common, dict):
+        return True
+
+    push = bool(run_common.get("push", True))
+    pr = bool(run_common.get("pr", True))
+    return push or pr
+
+
 def _git_branch(repo_root: Path) -> str:
-    proc = _run(["git", "branch", "--show-current"], cwd=repo_root, timeout_seconds=10)
+    proc = _run(["git", "branch", "--show-current"], cwd=repo_root)
     branch = proc.stdout.strip()
     if proc.returncode != 0 or not branch:
         raise RuntimeError("Unable to determine git branch.")
@@ -62,7 +95,7 @@ def _git_branch(repo_root: Path) -> str:
 
 
 def _git_head(repo_root: Path) -> str:
-    proc = _run(["git", "rev-parse", "HEAD"], cwd=repo_root, timeout_seconds=10)
+    proc = _run(["git", "rev-parse", "HEAD"], cwd=repo_root)
     sha = proc.stdout.strip()
     if proc.returncode != 0 or not sha:
         raise RuntimeError("Unable to determine git HEAD.")
@@ -125,7 +158,7 @@ def _gitlab_registry_probe() -> dict[str, Any] | None:
     auth = base64.b64encode(f"{username}:{password}".encode()).decode("ascii")
     request = Request(url, headers={"Authorization": f"Basic {auth}"})
     try:
-        with urlopen(request, timeout=15) as response:  # noqa: S310
+        with urlopen(request) as response:  # noqa: S310
             content_type = str(response.headers.get("Content-Type") or "")
             body = response.read(512)
     except HTTPError as exc:
@@ -168,7 +201,7 @@ def run_batch_preflight(
     preflight_dir.mkdir(parents=True, exist_ok=True)
 
     if bool(defaults.get("require_clean_git", True)):
-        proc = _run(["git", "status", "--porcelain"], cwd=repo_root, timeout_seconds=15)
+        proc = _run(["git", "status", "--porcelain"], cwd=repo_root)
         _write_log(preflight_dir / "git_status.log", proc)
         if proc.returncode != 0:
             blockers.append(
@@ -201,7 +234,6 @@ def run_batch_preflight(
                 "--keep-going",
             ],
             cwd=repo_root,
-            timeout_seconds=None,
         )
         _write_log(preflight_dir / "local_lint.log", lint_proc)
         if lint_proc.returncode != 0:
@@ -225,7 +257,6 @@ def run_batch_preflight(
                 "--keep-going",
             ],
             cwd=repo_root,
-            timeout_seconds=None,
         )
         _write_log(preflight_dir / "local_test.log", test_proc)
         if test_proc.returncode != 0:
@@ -241,20 +272,31 @@ def run_batch_preflight(
     branch = _git_branch(repo_root)
     head_sha = _git_head(repo_root)
     base_ci_run_url: str | None = None
+    require_base_ci = bool(defaults.get("require_ci_green_for_base", True))
+    require_github = require_base_ci or _batch_remote_handoff_requested(
+        repo_root=repo_root,
+        batch_config=batch_config,
+    )
 
-    gh_auth_proc = _run(["gh", "auth", "status"], cwd=repo_root, timeout_seconds=30)
-    _write_log(preflight_dir / "gh_auth.log", gh_auth_proc)
-    if gh_auth_proc.returncode != 0:
-        blockers.append(
-            _blocker(
-                blocker_id="batch_control_plane",
-                failure_class="batch_control_plane",
-                summary="GitHub CLI auth is not ready for batch push/PR operations.",
-                evidence={"path": str(preflight_dir / "gh_auth.log")},
+    if require_github:
+        gh_auth_proc = _run(["gh", "auth", "status"], cwd=repo_root)
+        _write_log(preflight_dir / "gh_auth.log", gh_auth_proc)
+        if gh_auth_proc.returncode != 0:
+            blockers.append(
+                _blocker(
+                    blocker_id="batch_control_plane",
+                    failure_class="batch_control_plane",
+                    summary="GitHub CLI auth is not ready for batch push/PR operations.",
+                    evidence={"path": str(preflight_dir / "gh_auth.log")},
+                )
             )
+    else:
+        (preflight_dir / "gh_auth.log").write_text(
+            "skipped: run settings do not request push/PR and base CI preflight is disabled.\n",
+            encoding="utf-8",
         )
 
-    if bool(defaults.get("require_ci_green_for_base", True)):
+    if require_base_ci:
         ci_proc = _run(
             [
                 "gh",
@@ -270,7 +312,6 @@ def run_batch_preflight(
                 "databaseId,headSha,event,status,conclusion,createdAt,url",
             ],
             cwd=repo_root,
-            timeout_seconds=30,
         )
         _write_log(preflight_dir / "base_ci.log", ci_proc)
         if ci_proc.returncode != 0:
@@ -314,7 +355,7 @@ def run_batch_preflight(
             if isinstance(agent_cfg, dict)
             else default_binaries.get(agent, agent)
         )
-        proc = _run([binary, "--version"], cwd=repo_root, timeout_seconds=20)
+        proc = _run([binary, "--version"], cwd=repo_root)
         _write_log(preflight_dir / f"agent_{agent}.log", proc)
         if proc.returncode != 0:
             blockers.append(
@@ -327,7 +368,7 @@ def run_batch_preflight(
             )
 
     if exec_backend == "docker":
-        docker_version = _run(["docker", "version"], cwd=repo_root, timeout_seconds=30)
+        docker_version = _run(["docker", "version"], cwd=repo_root)
         _write_log(preflight_dir / "docker_version.log", docker_version)
         if docker_version.returncode != 0:
             blockers.append(
@@ -338,7 +379,7 @@ def run_batch_preflight(
                     evidence={"path": str(preflight_dir / "docker_version.log")},
                 )
             )
-        docker_buildx = _run(["docker", "buildx", "ls"], cwd=repo_root, timeout_seconds=30)
+        docker_buildx = _run(["docker", "buildx", "ls"], cwd=repo_root)
         _write_log(preflight_dir / "docker_buildx.log", docker_buildx)
         if docker_buildx.returncode != 0:
             blockers.append(
@@ -368,7 +409,6 @@ def run_batch_preflight(
                     str(temp_root),
                 ],
                 cwd=repo_root,
-                timeout_seconds=120,
             )
         _write_log(preflight_dir / "docker_build.log", docker_build)
         if docker_build.returncode != 0:

@@ -12,6 +12,8 @@ tested.
 ### `configs/agents.yaml`
 
 Defines how to invoke each agent CLI adapter (binary path, default args, model config, etc.).
+Each agent may define `default_model`; that value is passed to the adapter when a run omits
+`--model`. Per-run `--model` and target/matrix model values still override the agent default.
 
 Used by:
 

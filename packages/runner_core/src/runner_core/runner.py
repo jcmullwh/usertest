@@ -160,6 +160,31 @@ class RunResult:
     report_validation_errors: list[str]
 
 
+def _resolve_effective_agent_model(
+    *,
+    agent: str,
+    agent_cfg: dict[str, Any],
+    requested_model: str | None,
+) -> tuple[str | None, str | None]:
+    if requested_model is not None and requested_model.strip():
+        return requested_model.strip(), "request"
+
+    if "default_model" not in agent_cfg:
+        return None, None
+
+    raw_default = agent_cfg.get("default_model")
+    if raw_default is None:
+        return None, None
+    if not isinstance(raw_default, str):
+        raise ValueError(
+            f"configs/agents.yaml agents.{agent}.default_model must be a string or null."
+        )
+    default_model = raw_default.strip()
+    if not default_model:
+        return None, None
+    return default_model, "agent_default"
+
+
 _BASE_PREFLIGHT_COMMANDS = [
     "git",
     "rg",
@@ -232,6 +257,13 @@ _FAILURE_SUBTYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "tool_use_id_collision",
+        (
+            re.compile(r"`tool_use`\s+ids\s+must\s+be\s+unique", re.IGNORECASE),
+            re.compile(r"tool_use\s+ids\s+must\s+be\s+unique", re.IGNORECASE),
+        ),
+    ),
+    (
         "disk_full",
         (
             re.compile(r"\bENOSPC\b", re.IGNORECASE),
@@ -300,6 +332,7 @@ _CODEX_TURN_METADATA_TIMEOUT_CODE = "turn_metadata_header_timeout"
 _CODEX_MODEL_REFRESH_TIMEOUT_CODE = "codex_model_refresh_timeout"
 _CODEX_MODEL_REFRESH_TIMEOUT_HINT = "hint=Codex model refresh timed out; model list may be stale."
 _MAX_AGENT_RETRY_DELAY_SECONDS = 60.0
+_CODEX_EMPTY_OVERRIDE_VALUES = frozenset({"", "[]", "{}", "''", '""'})
 _READ_FILE_NOT_FOUND_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(
         r"Error executing tool read_file:\s*File not found(?::\s*|\s+)(?P<path>\S+)",
@@ -327,6 +360,34 @@ _CLAUDE_RESET_EXTRACT_RE = re.compile(
 _CLAUDE_IANA_TZ_IN_PARENS_RE = re.compile(r"\((?P<tz>[A-Za-z_]+/[A-Za-z_]+)\)")
 _RAW_EVENTS_PLAINTEXT_EXCERPT_TAIL_BYTES = 24_000
 _RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS = 4_000
+
+
+def _codex_config_key_matches_suffix(*, key: str, suffix: str) -> bool:
+    normalized = key.strip().lower().replace("-", "_")
+    return normalized == suffix or normalized.endswith("." + suffix)
+
+
+def _codex_config_value_is_present(value: str) -> bool:
+    compact = value.strip().replace(" ", "")
+    return compact.lower() not in _CODEX_EMPTY_OVERRIDE_VALUES
+
+
+def _codex_personality_override_requested(config_overrides: Sequence[str]) -> bool:
+    for raw in config_overrides:
+        key_raw, sep, value_raw = raw.partition("=")
+        if not sep:
+            continue
+        key = key_raw.strip()
+        if not key:
+            continue
+        if not (
+            _codex_config_key_matches_suffix(key=key, suffix="personality")
+            or _codex_config_key_matches_suffix(key=key, suffix="model_personality")
+        ):
+            continue
+        if _codex_config_value_is_present(value_raw):
+            return True
+    return False
 
 
 def _new_codex_metadata_capture_summary() -> dict[str, Any]:
@@ -493,7 +554,12 @@ _GEMINI_PROVIDER_CAPACITY_MODEL_RE = re.compile(
 )
 
 
-def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
+def _sanitize_agent_stderr_text(
+    *,
+    agent: str,
+    text: str,
+    codex_personality_warning_as_error: bool = True,
+) -> str:
     if not text:
         return text
 
@@ -846,32 +912,56 @@ def _sanitize_agent_stderr_text(*, agent: str, text: str) -> str:
                 ]
             )
         if saw_personality_warning:
-            lines.extend(
-                [
-                    (
-                        "[codex_error_hint] code=codex_model_messages_missing "
-                        "classification=invalid_agent_config"
-                    ),
-                    (
-                        "hint=Codex personality/model_personality was requested but model_messages "
-                        "is missing. Fix your Codex config overrides (configs/agents.yaml or "
-                        "--agent-config) by providing model_messages alongside personality."
-                    ),
-                ]
-            )
+            if codex_personality_warning_as_error:
+                lines.extend(
+                    [
+                        (
+                            "[codex_error_hint] code=codex_model_messages_missing "
+                            "classification=invalid_agent_config"
+                        ),
+                        (
+                            "hint=Codex personality/model_personality was requested but "
+                            "model_messages is missing. Fix your Codex config overrides "
+                            "(configs/agents.yaml or --agent-config) by providing model_messages "
+                            "alongside personality."
+                        ),
+                    ]
+                )
+            else:
+                lines.extend(
+                    [
+                        (
+                            "[codex_warning_summary] code=codex_model_messages_missing "
+                            "classification=runtime_notice"
+                        ),
+                        (
+                            "hint=Codex runtime emitted a personality/model_messages warning, "
+                            "but this run did not request a repo-owned personality override."
+                        ),
+                    ]
+                )
         return "\n".join(lines)
 
     return text
 
 
-def _sanitize_agent_stderr_file(*, agent: str, path: Path) -> None:
+def _sanitize_agent_stderr_file(
+    *,
+    agent: str,
+    path: Path,
+    codex_personality_warning_as_error: bool = True,
+) -> None:
     if agent not in {"gemini", "codex", "claude"} or not path.exists():
         return
     try:
         raw = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return
-    sanitized = _sanitize_agent_stderr_text(agent=agent, text=raw)
+    sanitized = _sanitize_agent_stderr_text(
+        agent=agent,
+        text=raw,
+        codex_personality_warning_as_error=codex_personality_warning_as_error,
+    )
     if sanitized == raw:
         return
     try:
@@ -1135,6 +1225,10 @@ def _is_retryable_transient_network_failure(text: str) -> bool:
     if not text.strip():
         return True
     return not any(pattern.search(text) for pattern in _NON_RETRYABLE_TRANSIENT_NETWORK_PATTERNS)
+
+
+def _is_retryable_tool_use_id_collision_failure(text: str) -> bool:
+    return bool(text.strip())
 
 
 def _agent_binary_for_preflight_probe(*, agent: str, agent_cfg: dict[str, Any]) -> str | None:
@@ -4912,6 +5006,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             },
         )
 
+        agent_cfg = config.agents.get(request.agent, {}) if isinstance(config.agents, dict) else {}
+        agent_cfg_dict = agent_cfg if isinstance(agent_cfg, dict) else {}
+        effective_model, model_source = _resolve_effective_agent_model(
+            agent=request.agent,
+            agent_cfg=agent_cfg_dict,
+            requested_model=request.model,
+        )
+
         target_ref: dict[str, Any] = {
             "repo_input": acquired.repo_input,
             "ref": acquired.ref,
@@ -4923,12 +5025,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             "obfuscate_agent_docs": bool(request.obfuscate_agent_docs),
             "requested_persona_id": request.persona_id,
             "requested_mission_id": request.mission_id,
-            **({"model": request.model} if request.model is not None else {}),
+            **({"model": effective_model} if effective_model is not None else {}),
+            **({"model_source": model_source} if model_source is not None else {}),
         }
+        if request.model is not None and request.model.strip():
+            target_ref["requested_model"] = request.model.strip()
         _write_json(run_dir / "target_ref.json", target_ref)
 
-        agent_cfg = config.agents.get(request.agent, {}) if isinstance(config.agents, dict) else {}
-        agent_cfg_dict = agent_cfg if isinstance(agent_cfg, dict) else {}
         codex_binary = agent_cfg_dict.get("binary", "codex")
         codex_subcommand = agent_cfg_dict.get("subcommand", "exec")
         default_overrides: list[str] = []
@@ -4937,6 +5040,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             default_overrides = [x for x in raw_defaults if isinstance(x, str)]
 
         combined_overrides = [*default_overrides, *request.agent_config_overrides]
+        codex_personality_override_requested = (
+            _codex_personality_override_requested(combined_overrides)
+            if request.agent == "codex"
+            else False
+        )
         preflight_warnings: list[dict[str, Any]] = []
         if request.agent == "codex":
             reasoning_issue = validate_codex_reasoning_effort_config_overrides(combined_overrides)
@@ -6888,8 +6996,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         ask_for_approval=str(codex_ask_for_approval or "never"),
                         binary=str(codex_binary),
                         subcommand=str(codex_subcommand),
-                        model=request.model,
+                        model=effective_model,
                         config_overrides=codex_overrides,
+                        ignore_rules=True,
                         command_prefix=command_prefix,
                         env_overrides=agent_env_overrides,
                         agent_last_message_path=codex_last_message_for_attempt,
@@ -6905,7 +7014,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         stderr_path=stderr_attempt_path,
                         binary=str(claude_binary),
                         output_format=str(claude_output_format),
-                        model=request.model,
+                        model=effective_model,
                         allowed_tools=claude_allowed_tools,
                         permission_mode=claude_permission_mode,
                         system_prompt_file=system_prompt_path_for_agent,
@@ -6927,7 +7036,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     binary=str(gemini_binary),
                     output_format=str(gemini_output_format),
                     sandbox=gemini_sandbox_enabled,
-                    model=request.model,
+                    model=effective_model,
                     system_prompt_file=system_prompt_path_for_agent,
                     approval_mode=gemini_approval_mode,
                     allowed_tools=gemini_allowed_tools,
@@ -7107,9 +7216,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         raw_attempt_stderr_text = ""
 
                 codex_personality_warning_line = ""
-                codex_personality_warning_detected = bool(
+                codex_personality_warning_seen = bool(
                     request.agent == "codex"
                     and _CODEX_PERSONALITY_MISSING_MESSAGES_WARNING in raw_attempt_stderr_text
+                )
+                codex_personality_warning_detected = bool(
+                    codex_personality_warning_seen and codex_personality_override_requested
                 )
                 codex_metadata_capture = (
                     _codex_metadata_capture_from_stderr(raw_attempt_stderr_text)
@@ -7127,7 +7239,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         warning_line=codex_personality_warning_line,
                     )
 
-                _sanitize_agent_stderr_file(agent=request.agent, path=stderr_attempt_path)
+                _sanitize_agent_stderr_file(
+                    agent=request.agent,
+                    path=stderr_attempt_path,
+                    codex_personality_warning_as_error=codex_personality_warning_detected,
+                )
 
                 attempt_stderr_text = ""
                 if stderr_attempt_path.exists():
@@ -7613,6 +7729,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         and _is_retryable_transient_network_failure(failure_text)
                     ):
                         retry_reason = "transient_network"
+                    elif (
+                        request.agent == "claude"
+                        and failure_subtype == "tool_use_id_collision"
+                        and _is_retryable_tool_use_id_collision_failure(failure_text)
+                    ):
+                        retry_reason = "tool_use_id_collision"
 
                 if retry_reason is not None:
                     raw_delay_seconds = rate_limit_backoff_seconds * (
@@ -7987,7 +8109,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             failure_subtype = _classify_failure_subtype(combined_text)
             if (
                 stderr_text
-                and failure_subtype in {"provider_capacity", "transient_network"}
+                and failure_subtype
+                in {"provider_capacity", "transient_network", "tool_use_id_collision"}
                 and "[runner_retry_summary]" not in stderr_text
             ):
                 retryable = True
@@ -7995,6 +8118,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     retryable = _is_retryable_provider_capacity_failure(combined_text)
                 elif failure_subtype == "transient_network":
                     retryable = _is_retryable_transient_network_failure(combined_text)
+                elif failure_subtype == "tool_use_id_collision":
+                    retryable = (
+                        request.agent == "claude"
+                        and _is_retryable_tool_use_id_collision_failure(combined_text)
+                    )
 
                 retry_summary_lines = [
                     (

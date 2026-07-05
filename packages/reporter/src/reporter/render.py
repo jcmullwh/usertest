@@ -194,6 +194,52 @@ def _render_task_run_report(
         lines.append(summary.strip())
         lines.append("")
 
+    representative = (
+        report.get("representative_workflow")
+        if isinstance(report.get("representative_workflow"), dict)
+        else {}
+    )
+    representative_entry = (
+        representative.get("entry_point")
+        if isinstance(representative.get("entry_point"), str)
+        else None
+    )
+    representative_workflow = (
+        representative.get("workflow")
+        if isinstance(representative.get("workflow"), str)
+        else None
+    )
+    representative_reason = (
+        representative.get("why_representative")
+        if isinstance(representative.get("why_representative"), str)
+        else None
+    )
+    representative_result = (
+        representative.get("user_visible_result")
+        if isinstance(representative.get("user_visible_result"), str)
+        else None
+    )
+    if any(
+        value
+        for value in (
+            representative_entry,
+            representative_workflow,
+            representative_reason,
+            representative_result,
+        )
+    ):
+        lines.append("## Representative workflow")
+        lines.append("")
+        if representative_entry:
+            lines.append(f"- Entry point: {representative_entry.strip()}")
+        if representative_workflow:
+            lines.append(f"- Workflow: {representative_workflow.strip()}")
+        if representative_reason:
+            lines.append(f"- Why representative: {representative_reason.strip()}")
+        if representative_result:
+            lines.append(f"- User-visible result: {representative_result.strip()}")
+        lines.append("")
+
     steps = report.get("steps")
     steps_list = steps if isinstance(steps, list) else []
     if steps_list:
@@ -253,6 +299,25 @@ def _render_task_run_report(
     else:
         lines.append("_None._")
     lines.append("")
+
+    verification = report.get("verification")
+    verification_list = verification if isinstance(verification, list) else []
+    if verification_list:
+        lines.append("## Verification")
+        lines.append("")
+        for item in verification_list:
+            if not isinstance(item, dict):
+                continue
+            check = item.get("check") if isinstance(item.get("check"), str) else ""
+            result = item.get("result") if isinstance(item.get("result"), str) else ""
+            evidence = item.get("evidence") if isinstance(item.get("evidence"), str) else ""
+            header = check.strip() or "check"
+            lines.append(f"- {header}")
+            if result:
+                lines.append(f"  Result: {result.strip()}")
+            if evidence:
+                lines.append(f"  Evidence: {evidence.strip()}")
+        lines.append("")
 
     issues = report.get("issues")
     issues_list = issues if isinstance(issues, list) else []
