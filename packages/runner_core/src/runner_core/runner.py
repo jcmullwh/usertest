@@ -2452,13 +2452,7 @@ def _resolve_shell_capability(
             allowed_tools=allowed_tools,
         )
 
-    codex_local_windows_unprobed = (
-        agent_norm == "codex"
-        and backend_norm == "local"
-        and operating_system.strip().lower().startswith("windows")
-        and probe_status != "passed"
-    )
-    if policy_status_norm == "allowed" and not codex_local_windows_unprobed:
+    if policy_status_norm == "allowed" and agent_norm != "codex":
         return ShellCapability(
             state="available",
             agent=agent,

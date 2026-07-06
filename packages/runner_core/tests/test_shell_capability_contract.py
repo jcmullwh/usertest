@@ -137,7 +137,7 @@ def test_codex_nonlocal_backend_requires_explicit_shell_evidence() -> None:
     assert unprobed["state"] == "unprobed"
     assert unprobed["probe_status"] == "not_run"
 
-    policy_available = _resolve_shell_capability(
+    policy_only = _resolve_shell_capability(
         agent="codex",
         operating_system="Linux",
         backend="docker",
@@ -146,8 +146,8 @@ def test_codex_nonlocal_backend_requires_explicit_shell_evidence() -> None:
         policy_reason="Codex sandbox policy is explicitly configured as danger-full-access.",
         allowed_tools=None,
     ).to_dict()
-    assert policy_available["state"] == "available"
-    assert policy_available["probe_status"] == "not_run"
+    assert policy_only["state"] == "unprobed"
+    assert policy_only["probe_status"] == "not_run"
 
     available = _resolve_shell_capability(
         agent="codex",
