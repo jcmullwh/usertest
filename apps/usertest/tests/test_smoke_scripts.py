@@ -57,3 +57,16 @@ def test_first_run_wrappers_delegate_to_shared_launcher_contract() -> None:
     assert "apps/usertest_backlog/tests/test_smoke.py" in launcher_text
     assert "apps/usertest_implement/tests/test_smoke.py" in launcher_text
     assert "pip install -U pdm" in launcher_text
+
+
+def test_windows_python_preflight_prefers_path_python_without_tiny_total_budget() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    text = (repo_root / "scripts" / "python_preflight.ps1").read_text(encoding="utf-8")
+
+    assert "Fail fast (default: within ~5s total)" not in text
+    assert "_Resolve-PythonPreflightTimeoutSeconds" in text
+    assert "USERTEST_PYTHON_PREFLIGHT_TIMEOUT_SECONDS" in text
+    assert "No usable Python interpreter found after probing candidates" in text
+    path_python_loop = "foreach ($entry in (_Get-WindowsWhereAll -CommandName 'python'))"
+    py_launcher_loop = "foreach ($entry in (_Get-WindowsPy0pInterpreters))"
+    assert text.index(path_python_loop) < text.index(py_launcher_loop)
