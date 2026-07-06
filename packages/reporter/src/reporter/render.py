@@ -344,6 +344,66 @@ def _render_task_run_report(
                 lines.append(f"  Suggested fix: {suggested_fix.strip()}")
         lines.append("")
 
+    extensions = report.get("extensions")
+    extensions_dict = extensions if isinstance(extensions, dict) else {}
+    shell_capability = extensions_dict.get("shell_capability")
+    shell_capability_dict = shell_capability if isinstance(shell_capability, dict) else {}
+    if shell_capability_dict:
+        state = (
+            shell_capability_dict.get("state")
+            if isinstance(shell_capability_dict.get("state"), str)
+            else "unknown"
+        )
+        reason_code = (
+            shell_capability_dict.get("reason_code")
+            if isinstance(shell_capability_dict.get("reason_code"), str)
+            else None
+        )
+        reason = (
+            shell_capability_dict.get("reason")
+            if isinstance(shell_capability_dict.get("reason"), str)
+            else None
+        )
+        agent = (
+            shell_capability_dict.get("agent")
+            if isinstance(shell_capability_dict.get("agent"), str)
+            else None
+        )
+        backend = (
+            shell_capability_dict.get("backend")
+            if isinstance(shell_capability_dict.get("backend"), str)
+            else None
+        )
+        operating_system = (
+            shell_capability_dict.get("operating_system")
+            if isinstance(shell_capability_dict.get("operating_system"), str)
+            else None
+        )
+        sandbox_mode = (
+            shell_capability_dict.get("sandbox_mode")
+            if isinstance(shell_capability_dict.get("sandbox_mode"), str)
+            else None
+        )
+        lines.append("## Runner diagnostics")
+        lines.append("")
+        lines.append(f"- Shell capability: {state}")
+        if reason_code:
+            lines.append(f"  Reason code: {reason_code}")
+        if reason:
+            lines.append(f"  Reason: {reason.strip()}")
+        details = []
+        if agent:
+            details.append(f"agent={agent}")
+        if operating_system:
+            details.append(f"os={operating_system}")
+        if backend:
+            details.append(f"backend={backend}")
+        if sandbox_mode:
+            details.append(f"sandbox={sandbox_mode}")
+        if details:
+            lines.append(f"  Effective path: {', '.join(details)}")
+        lines.append("")
+
     next_actions = report.get("next_actions")
     next_actions_list = (
         [x for x in next_actions if isinstance(x, str) and x.strip()]

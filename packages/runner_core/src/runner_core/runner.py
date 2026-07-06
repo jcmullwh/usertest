@@ -165,6 +165,48 @@ class RunResult:
     report_validation_errors: list[str]
 
 
+@dataclass(frozen=True)
+class ShellCapability:
+    """
+    Canonical runner-side shell capability decision for an effective agent run.
+
+    The legacy policy inference reports agent-specific allowlist terms such as
+    ``allowed``/``blocked``/``unknown``.  Shell-required missions need a stricter shared contract:
+    they may dispatch only when this canonical state is ``available``.  ``blocked`` and
+    ``unprobed`` are terminal preflight states for shell-required missions and carry structured
+    reason details for artifacts.
+    """
+
+    state: str
+    agent: str
+    operating_system: str
+    backend: str
+    sandbox_mode: str | None
+    probe_status: str
+    reason_code: str | None
+    reason_type: str | None
+    reason: str
+    policy_status: str
+    policy_reason: str
+    allowed_tools: list[str] | None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "agent": self.agent,
+            "operating_system": self.operating_system,
+            "backend": self.backend,
+            "sandbox_mode": self.sandbox_mode,
+            "probe_status": self.probe_status,
+            "reason_code": self.reason_code,
+            "reason_type": self.reason_type,
+            "reason": self.reason,
+            "policy_status": self.policy_status,
+            "policy_reason": self.policy_reason,
+            "allowed_tools": self.allowed_tools,
+        }
+
+
 def _resolve_effective_agent_model(
     *,
     agent: str,
@@ -2139,6 +2181,7 @@ def _build_auth_missing_hints(
 def _infer_shell_policy_status(
     *,
     agent: str,
+    codex_policy: dict[str, Any] | None = None,
     claude_policy: dict[str, Any],
     gemini_policy: dict[str, Any],
     has_outer_sandbox: bool,
@@ -2198,6 +2241,19 @@ def _infer_shell_policy_status(
         )
 
     if agent == "codex":
+        codex_policy = codex_policy if isinstance(codex_policy, dict) else {}
+        sandbox_raw = codex_policy.get("sandbox")
+        sandbox = (
+            str(sandbox_raw).strip()
+            if isinstance(sandbox_raw, str) and str(sandbox_raw).strip()
+            else ""
+        )
+        if sandbox in {"read-only", "workspace-write", "danger-full-access"}:
+            return (
+                "allowed",
+                f"Codex sandbox policy is explicitly configured as {sandbox}.",
+                None,
+            )
         return (
             "unknown",
             (
@@ -2212,6 +2268,263 @@ def _infer_shell_policy_status(
         f"Unknown agent={agent!r}; cannot infer shell allowlist status.",
         None,
     )
+
+
+def _codex_shell_probe_failure_reason(
+    *,
+    operating_system: str,
+    probe_result: dict[str, Any] | None,
+) -> tuple[str, str] | None:
+    if not isinstance(probe_result, dict):
+        return None
+
+    passed_raw = probe_result.get("passed")
+    ok_raw = probe_result.get("ok")
+    exit_code = probe_result.get("exit_code")
+    probe_failed = False
+    if isinstance(passed_raw, bool):
+        probe_failed = not passed_raw
+    elif isinstance(ok_raw, bool):
+        probe_failed = not ok_raw
+    elif isinstance(exit_code, int):
+        probe_failed = exit_code != 0
+    if not probe_failed:
+        return None
+
+    text_parts: list[str] = []
+    for key in (
+        "stderr",
+        "stderr_tail",
+        "stderr_excerpt",
+        "stdout",
+        "stdout_tail",
+        "stdout_excerpt",
+        "details",
+        "error",
+        "reason",
+    ):
+        value = probe_result.get(key)
+        if isinstance(value, str) and value.strip():
+            text_parts.append(value.strip())
+    text = "\n".join(text_parts)
+    lowered = text.lower()
+
+    os_is_windows = operating_system.strip().lower().startswith("windows")
+    if os_is_windows and "windows-sandbox-rs" in lowered:
+        return (
+            "codex_windows_sandbox_panic",
+            "Codex Windows sandbox probe failed before shell payload execution.",
+        )
+    if os_is_windows and "powershell" in lowered and (
+        "pre-payload" in lowered
+        or "before payload" in lowered
+        or "before shell payload" in lowered
+    ):
+        return (
+            "codex_windows_powershell_prepayload_failed",
+            "Codex PowerShell probe failed before shell payload execution.",
+        )
+    if os_is_windows and (
+        "access is denied" in lowered
+        or "failed to launch" in lowered
+        or "failed to spawn" in lowered
+        or "could not launch" in lowered
+    ):
+        return (
+            "codex_windows_shell_launch_failed",
+            "Codex Windows shell probe could not launch the shell payload.",
+        )
+    return (
+        "shell_probe_failed",
+        "Shell probe failed before the runner could mark shell capability available.",
+    )
+
+
+def _resolve_codex_sandbox_mode(
+    *,
+    request: RunRequest,
+    codex_policy: dict[str, Any],
+    has_sandbox_backend: bool,
+) -> str:
+    sandbox_policy_raw = codex_policy.get("sandbox", "read-only")
+    sandbox_policy = (
+        str(sandbox_policy_raw)
+        if isinstance(sandbox_policy_raw, str) and sandbox_policy_raw.strip()
+        else "read-only"
+    )
+    if has_sandbox_backend and request.policy == "write":
+        return "danger-full-access"
+    return sandbox_policy
+
+
+def _resolve_shell_capability(
+    *,
+    agent: str,
+    operating_system: str,
+    backend: str,
+    sandbox_mode: str | None,
+    policy_status: str,
+    policy_reason: str,
+    allowed_tools: list[str] | None,
+    probe_result: dict[str, Any] | None = None,
+) -> ShellCapability:
+    """
+    Resolve the canonical shell capability for the effective agent execution path.
+
+    ``available`` is the only state that may dispatch shell-required missions.  ``blocked`` means
+    the runner has a concrete policy/backend/probe reason.  ``unprobed`` means the runner cannot
+    prove shell availability from the effective agent/OS/backend/sandbox tuple and must not treat
+    unknown capability as available.
+    """
+
+    agent_norm = agent.strip().lower()
+    backend_norm = backend.strip().lower() if backend.strip() else "local"
+    policy_status_norm = policy_status.strip().lower() if policy_status.strip() else "unknown"
+    probe_status = "not_run"
+
+    if isinstance(probe_result, dict):
+        passed_raw = probe_result.get("passed")
+        ok_raw = probe_result.get("ok")
+        exit_code = probe_result.get("exit_code")
+        if passed_raw is True or ok_raw is True or exit_code == 0:
+            probe_status = "passed"
+        elif passed_raw is False or ok_raw is False or (
+            isinstance(exit_code, int) and exit_code != 0
+        ):
+            probe_status = "failed"
+        else:
+            probe_status = "unknown"
+
+    if probe_status == "failed":
+        if agent_norm == "codex":
+            reason_code, reason = _codex_shell_probe_failure_reason(
+                operating_system=operating_system,
+                probe_result=probe_result,
+            ) or (
+                "shell_probe_failed",
+                "Codex shell probe failed before shell capability could be marked available.",
+            )
+        else:
+            reason_code = "shell_probe_failed"
+            reason = (
+                "Shell probe failed before shell capability could be marked available."
+            )
+        return ShellCapability(
+            state="blocked",
+            agent=agent,
+            operating_system=operating_system,
+            backend=backend_norm,
+            sandbox_mode=sandbox_mode,
+            probe_status=probe_status,
+            reason_code=reason_code,
+            reason_type=_reason_type_for_code(reason_code),
+            reason=reason,
+            policy_status=policy_status_norm,
+            policy_reason=policy_reason,
+            allowed_tools=allowed_tools,
+        )
+
+    if policy_status_norm == "blocked":
+        return ShellCapability(
+            state="blocked",
+            agent=agent,
+            operating_system=operating_system,
+            backend=backend_norm,
+            sandbox_mode=sandbox_mode,
+            probe_status=probe_status,
+            reason_code="shell_policy_blocked",
+            reason_type="configuration",
+            reason=policy_reason or "Shell commands are blocked by agent policy.",
+            policy_status=policy_status_norm,
+            policy_reason=policy_reason,
+            allowed_tools=allowed_tools,
+        )
+
+    if probe_status == "passed":
+        return ShellCapability(
+            state="available",
+            agent=agent,
+            operating_system=operating_system,
+            backend=backend_norm,
+            sandbox_mode=sandbox_mode,
+            probe_status=probe_status,
+            reason_code=None,
+            reason_type=None,
+            reason=(
+                "Shell probe passed for the effective agent execution path."
+            ),
+            policy_status=policy_status_norm,
+            policy_reason=policy_reason,
+            allowed_tools=allowed_tools,
+        )
+
+    if policy_status_norm == "allowed" and agent_norm != "codex":
+        return ShellCapability(
+            state="available",
+            agent=agent,
+            operating_system=operating_system,
+            backend=backend_norm,
+            sandbox_mode=sandbox_mode,
+            probe_status=probe_status,
+            reason_code=None,
+            reason_type=None,
+            reason=policy_reason or "Shell commands are enabled for this agent policy.",
+            policy_status=policy_status_norm,
+            policy_reason=policy_reason,
+            allowed_tools=allowed_tools,
+        )
+
+    reason_code = "shell_capability_unprobed"
+    if agent_norm == "codex" and operating_system.strip().lower().startswith("windows"):
+        reason_code = "codex_windows_shell_unprobed"
+    return ShellCapability(
+        state="unprobed",
+        agent=agent,
+        operating_system=operating_system,
+        backend=backend_norm,
+        sandbox_mode=sandbox_mode,
+        probe_status=probe_status,
+        reason_code=reason_code,
+        reason_type="runtime",
+        reason=(
+            "Shell capability is not proven for the effective agent execution path; "
+            "unknown shell capability is not treated as available for shell-required missions."
+        ),
+        policy_status=policy_status_norm,
+        policy_reason=policy_reason,
+        allowed_tools=allowed_tools,
+    )
+
+
+def _shell_probe_result_from_preflight_meta(
+    preflight_meta: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(preflight_meta, dict):
+        return None
+
+    error = preflight_meta.get("error")
+    if isinstance(error, str) and error.strip():
+        return {
+            "ok": False,
+            "exit_code": 1,
+            "error": error.strip(),
+            "reason": error.strip(),
+        }
+
+    shell_probe = preflight_meta.get("shell_probe")
+    if isinstance(shell_probe, dict):
+        exit_code_raw = shell_probe.get("exit_code")
+        exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 1
+        stderr = shell_probe.get("stderr")
+        stdout = shell_probe.get("stdout")
+        return {
+            "ok": exit_code == 0,
+            "exit_code": exit_code,
+            "stderr_excerpt": stderr if isinstance(stderr, str) else "",
+            "stdout_excerpt": stdout if isinstance(stdout, str) else "",
+        }
+
+    return None
 
 
 def _policy_allows_edits(*, agent: str, policy_cfg: dict[str, Any]) -> bool:
@@ -2234,11 +2547,27 @@ def _policy_allows_shell(
 
     status, _reason, _allowed_tools = _infer_shell_policy_status(
         agent=agent,
+        codex_policy=policy_cfg.get("codex", {}),
         claude_policy=claude_policy,
         gemini_policy=gemini_policy,
         has_outer_sandbox=(str(exec_backend) == "docker"),
     )
-    return status == "allowed"
+    sandbox_mode: str | None = None
+    if agent == "codex":
+        codex_policy = policy_cfg.get("codex", {})
+        codex_policy = codex_policy if isinstance(codex_policy, dict) else {}
+        sandbox_raw = codex_policy.get("sandbox")
+        sandbox_mode = sandbox_raw if isinstance(sandbox_raw, str) and sandbox_raw.strip() else None
+    capability = _resolve_shell_capability(
+        agent=agent,
+        operating_system=_runner_host_os(),
+        backend=str(exec_backend or "local"),
+        sandbox_mode=sandbox_mode,
+        policy_status=status,
+        policy_reason=_reason,
+        allowed_tools=_allowed_tools,
+    )
+    return capability.state == "available"
 
 
 def _recommended_shell_policy_and_exec_backend(
@@ -4818,6 +5147,105 @@ def _write_json(path: Path, payload: Any) -> None:
     )
 
 
+def _schema_is_task_run_v1(schema_dict: dict[str, Any]) -> bool:
+    properties = schema_dict.get("properties")
+    properties_dict = properties if isinstance(properties, dict) else {}
+    kind = properties_dict.get("kind")
+    kind_dict = kind if isinstance(kind, dict) else {}
+    return kind_dict.get("const") == "task_run_v1"
+
+
+def _maybe_write_shell_capability_block_report_artifacts(
+    *,
+    run_dir: Path,
+    target_ref: dict[str, Any],
+    schema_dict: dict[str, Any],
+    mission_id: str | None,
+    message: str,
+    hint: str,
+    shell_capability: dict[str, Any],
+) -> None:
+    """
+    Write normal report artifacts for shell-capability preflight blocks when the mission's
+    existing schema is the task-run report schema.
+
+    This keeps blocked shell-required runs auditable through the same report.json/report.md
+    surface used by completed task missions, without introducing a new command, mode, or schema.
+    """
+
+    if not _schema_is_task_run_v1(schema_dict):
+        return
+
+    state = shell_capability.get("state")
+    state_s = state if isinstance(state, str) and state.strip() else "unknown"
+    reason = shell_capability.get("reason")
+    reason_s = reason if isinstance(reason, str) and reason.strip() else message
+    reason_code = shell_capability.get("reason_code")
+    reason_code_s = reason_code if isinstance(reason_code, str) and reason_code.strip() else None
+    mission_label = mission_id or "selected mission"
+    report = {
+        "schema_version": 1,
+        "kind": "task_run_v1",
+        "status": "failure",
+        "confidence": 1.0,
+        "goal": f"Run mission '{mission_label}'.",
+        "summary": (
+            f"Runner blocked dispatch before starting the agent because canonical shell "
+            f"capability is {state_s}."
+        ),
+        "steps": [
+            {
+                "name": "Resolve shell capability",
+                "attempts": [
+                    {
+                        "action": (
+                            "Resolve effective agent, OS, backend, sandbox, policy, "
+                            "and probe state."
+                        ),
+                        "result": f"canonical shell capability state={state_s}",
+                        "evidence": "preflight.json -> shell_capability",
+                    }
+                ],
+                "outcome": message,
+            }
+        ],
+        "outputs": [
+            {
+                "label": "Preflight artifact",
+                "path": "preflight.json",
+                "description": "Contains canonical shell capability details.",
+            },
+            {
+                "label": "Preflight error",
+                "path": "error.json",
+                "description": "Contains the loud blocked dispatch result.",
+            },
+        ],
+        "issues": [
+            {
+                "severity": "error",
+                "title": f"Shell capability {state_s}",
+                "details": reason_s,
+                "evidence": (
+                    f"state={state_s}"
+                    + (f"; reason_code={reason_code_s}" if reason_code_s else "")
+                ),
+                "suggested_fix": hint,
+            }
+        ],
+        "next_actions": [hint],
+        "extensions": {"shell_capability": shell_capability},
+    }
+    validation_errors = validate_report(report, schema_dict)
+    if validation_errors:
+        _write_json(run_dir / "report_validation_errors.json", validation_errors)
+        return
+
+    _write_json(run_dir / "report.json", report)
+    md = render_report_markdown(report=report, metrics=None, target_ref=target_ref)
+    (run_dir / "report.md").write_text(md, encoding="utf-8", newline="\n")
+
+
 def _git_diff(path: Path) -> str:
     proc = subprocess.run(
         ["git", "-C", str(path), "diff"],
@@ -5039,6 +5467,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         "run_started_utc": _utc_now_z(),
         "phases": {},
     }
+    shell_capability_summary: dict[str, Any] | None = None
     codex_metadata_capture_summary: dict[str, Any] | None = None
     if request.agent == "codex":
         codex_metadata_capture_summary = _new_codex_metadata_capture_summary()
@@ -5230,6 +5659,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         # Fail fast: permission requirements are validated before any expensive backend setup.
         shell_status, shell_reason, allowed_tools = _infer_shell_policy_status(
             agent=request.agent,
+            codex_policy=codex_policy,
             claude_policy=claude_policy,
             gemini_policy=gemini_policy,
             has_outer_sandbox=(request.exec_backend == "docker"),
@@ -5262,12 +5692,40 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 request = replace(request, exec_backend="docker")
                 shell_status, shell_reason, allowed_tools = _infer_shell_policy_status(
                     agent=request.agent,
+                    codex_policy=codex_policy,
                     claude_policy=claude_policy,
                     gemini_policy=gemini_policy,
                     has_outer_sandbox=True,
                 )
 
-        if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
+        host_os_for_shell_capability = _runner_host_os()
+        early_codex_sandbox_mode: str | None = None
+        if request.agent == "codex":
+            early_codex_sandbox_mode = _resolve_codex_sandbox_mode(
+                request=request,
+                codex_policy=codex_policy,
+                has_sandbox_backend=(str(request.exec_backend) == "docker"),
+            )
+        shell_capability = _resolve_shell_capability(
+            agent=request.agent,
+            operating_system=host_os_for_shell_capability,
+            backend=str(request.exec_backend or "local"),
+            sandbox_mode=early_codex_sandbox_mode,
+            policy_status=shell_status,
+            policy_reason=shell_reason,
+            allowed_tools=allowed_tools,
+        )
+        shell_capability_summary = shell_capability.to_dict()
+
+        early_shell_capability_state = shell_capability_summary.get("state")
+        defer_codex_shell_probe = (
+            request.agent == "codex" and early_shell_capability_state == "unprobed"
+        )
+        if (
+            bool(resolved_inputs.mission.requires_shell)
+            and early_shell_capability_state != "available"
+            and not defer_codex_shell_probe
+        ):
             requires_edits = bool(resolved_inputs.mission.requires_edits)
 
             suggested_policy = "write" if requires_edits else "inspect"
@@ -5322,6 +5780,19 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
                 if suggested_exec_backend == "docker" and str(request.exec_backend) == "local":
                     hint = f"{hint} Also add `--exec-backend docker`."
+                if shell_capability_summary.get("state") == "unprobed":
+                    message = (
+                        f"Mission '{effective_spec.mission_id}' requires shell commands, but "
+                        f"canonical shell capability for agent '{request.agent}' is unprobed "
+                        "in the effective execution path."
+                    )
+                    hint = (
+                        "Use a backend/policy combination with canonical shell capability "
+                        "available (recommended: `--exec-backend docker` for local Windows "
+                        "Codex runs)."
+                    )
+                    if suggested_exec_backend == "local":
+                        suggested_exec_backend = "docker"
 
             suggested_command_argv: list[str] = [
                 "python",
@@ -5355,9 +5826,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "status": shell_status,
                             "reason": shell_reason,
                             "allowed_tools": allowed_tools,
+                            "canonical": shell_capability_summary,
                         },
                         "edits": {"allowed": bool(allow_edits)},
                     },
+                    "shell_capability": shell_capability_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -5385,10 +5858,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "status": shell_status,
                                 "reason": shell_reason,
                                 "allowed_tools": allowed_tools,
+                                "canonical": shell_capability_summary,
                             }
-                        }
+                        },
+                        "shell_capability": shell_capability_summary,
                     },
                 },
+            )
+            _maybe_write_shell_capability_block_report_artifacts(
+                run_dir=run_dir,
+                target_ref=target_ref,
+                schema_dict=effective_spec.report_schema_dict,
+                mission_id=effective_spec.mission_id,
+                message=message,
+                hint=hint,
+                shell_capability=shell_capability_summary,
             )
             return RunResult(
                 run_dir=run_dir,
@@ -5416,9 +5900,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "status": shell_status,
                             "reason": shell_reason,
                             "allowed_tools": allowed_tools,
+                            "canonical": shell_capability_summary,
                         },
                         "edits": {"allowed": bool(allow_edits)},
                     },
+                    "shell_capability": shell_capability_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -5502,9 +5988,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "status": shell_status,
                             "reason": shell_reason,
                             "allowed_tools": allowed_tools,
+                            "canonical": shell_capability_summary,
                         },
                         "edits": {"allowed": bool(allow_edits)},
                     },
+                    "shell_capability": shell_capability_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -5798,15 +6286,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             codex_sandbox_mode: str | None = None
             codex_ask_for_approval: str | None = None
             if request.agent == "codex":
-                sandbox_policy_raw = codex_policy.get("sandbox", "read-only")
-                sandbox_policy = (
-                    str(sandbox_policy_raw)
-                    if isinstance(sandbox_policy_raw, str) and sandbox_policy_raw.strip()
-                    else "read-only"
+                codex_sandbox_mode = _resolve_codex_sandbox_mode(
+                    request=request,
+                    codex_policy=codex_policy,
+                    has_sandbox_backend=sandbox is not None,
                 )
-                if sandbox is not None and request.policy == "write":
-                    sandbox_policy = "danger-full-access"
-                codex_sandbox_mode = sandbox_policy
 
                 ask_for_approval_raw = codex_policy.get("ask_for_approval", "never")
                 codex_ask_for_approval = (
@@ -5893,10 +6377,27 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         else "run_shell_command not enabled"
                     )
             else:
-                shell_reason = (
-                    "Codex CLI command execution depends on Codex sandbox policy/approvals. "
-                    "This runner can't reliably precompute allowlist outcome."
+                shell_status, shell_reason, allowed_tools = _infer_shell_policy_status(
+                    agent=request.agent,
+                    codex_policy=codex_policy,
+                    claude_policy=claude_policy,
+                    gemini_policy=gemini_policy,
+                    has_outer_sandbox=(sandbox is not None),
                 )
+
+            host_os = _runner_host_os()
+            shell_probe_result = _shell_probe_result_from_preflight_meta(preflight_meta)
+            shell_capability = _resolve_shell_capability(
+                agent=request.agent,
+                operating_system=host_os,
+                backend=str(request.exec_backend or "local"),
+                sandbox_mode=codex_sandbox_mode if request.agent == "codex" else None,
+                policy_status=shell_status,
+                policy_reason=shell_reason,
+                allowed_tools=allowed_tools,
+                probe_result=shell_probe_result,
+            )
+            shell_capability_summary = shell_capability.to_dict()
 
             probe_details = preflight_meta.get("command_probe_details")
             probe_details_dict = probe_details if isinstance(probe_details, dict) else {}
@@ -6137,9 +6638,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "status": shell_status,
                             "reason": shell_reason,
                             "allowed_tools": allowed_tools,
+                            "canonical": shell_capability_summary,
                         },
                         "edits": {"allowed": bool(allow_edits)},
                     },
+                    "shell_capability": shell_capability_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -6250,7 +6753,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     report_validation_errors=[],
                 )
 
-            if bool(resolved_inputs.mission.requires_shell) and shell_status == "blocked":
+            if (
+                bool(resolved_inputs.mission.requires_shell)
+                and shell_capability_summary.get("state") != "available"
+            ):
                 suggested_policy = (
                     "write" if bool(resolved_inputs.mission.requires_edits) else "inspect"
                 )
@@ -6296,6 +6802,19 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     )
                     if suggested_exec_backend == "docker" and str(request.exec_backend) == "local":
                         hint = f"{hint} Also add `--exec-backend docker`."
+                    if shell_capability_summary.get("state") == "unprobed":
+                        message = (
+                            f"Mission '{effective_spec.mission_id}' requires shell commands, but "
+                            f"canonical shell capability for agent '{request.agent}' is unprobed "
+                            "in the effective execution path."
+                        )
+                        hint = (
+                            "Use a backend/policy combination with canonical shell capability "
+                            "available (recommended: `--exec-backend docker` for local Windows "
+                            "Codex runs)."
+                        )
+                        if suggested_exec_backend == "local":
+                            suggested_exec_backend = "docker"
                 suggested_command_parts: list[str] = [
                     "python",
                     "-m",
@@ -6340,10 +6859,21 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                     "status": shell_status,
                                     "reason": shell_reason,
                                     "allowed_tools": allowed_tools,
+                                    "canonical": shell_capability_summary,
                                 }
-                            }
+                            },
+                            "shell_capability": shell_capability_summary,
                         },
                     },
+                )
+                _maybe_write_shell_capability_block_report_artifacts(
+                    run_dir=run_dir,
+                    target_ref=target_ref,
+                    schema_dict=effective_spec.report_schema_dict,
+                    mission_id=effective_spec.mission_id,
+                    message=message,
+                    hint=hint,
+                    shell_capability=shell_capability_summary,
                 )
                 return RunResult(
                     run_dir=run_dir,
@@ -6872,9 +7402,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "status": shell_status,
                                 "reason": shell_reason,
                                 "allowed_tools": allowed_tools,
+                                "canonical": shell_capability_summary,
                             },
                             "edits": {"allowed": bool(allow_edits)},
                         },
+                        "shell_capability": shell_capability_summary,
                         "workspace_root_snapshot": preflight_workspace_snapshot,
                     },
                     "bootstrap": bootstrap.meta if bootstrap is not None else None,
@@ -6889,7 +7421,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
             preflight_summary_md = _format_preflight_summary_md(
                 execution_shell=execution_shell,
-                shell_status=shell_status,
+                shell_status=str(shell_capability_summary.get("state") or shell_status),
                 python_runtime_summary=python_runtime_summary,
                 python_toolchain_capability=python_toolchain_capability_summary,
                 pip_probe=pip_probe,
@@ -8445,6 +8977,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             }
             extensions["verification"] = verification_extension
             extensions["python_toolchain_capability"] = python_toolchain_capability_summary
+            if isinstance(shell_capability_summary, dict):
+                extensions["shell_capability"] = shell_capability_summary
             _write_json(run_dir / "report.json", report_json)
         elif agent_exit_code != 0 and not report_validation_errors:
             report_validation_errors = run_errors
