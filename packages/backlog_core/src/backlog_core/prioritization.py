@@ -23,6 +23,8 @@ _SOURCE_STRENGTH: dict[str, float] = {
     "run_failure_event": 1.00,
     "report_validation_error": 0.90,
     "command_failure": 0.85,
+    "token_monitoring_signal": 0.80,
+    "token_monitoring_error": 0.75,
     "capability_warning_artifact": 0.70,
     "capability_notice_artifact": 0.60,
     "agent_stderr_artifact": 0.60,
