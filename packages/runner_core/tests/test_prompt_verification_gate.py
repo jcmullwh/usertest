@@ -206,6 +206,12 @@ def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_
     assert verify_cmd not in prompt_text
     assert "it blocks until verification finishes" in prompt_text
     assert "it must pass before you finish" in prompt_text
+    assert "timing guidance" in prompt_text
+    assert "recommended first wait" in prompt_text
+    assert "use one long wait rather than frequent short polling" in prompt_text
+    assert "continuous wait/poll loops are not" in prompt_text
+    assert "do not call verification hung until it exceeds" in prompt_text
+    assert "verification_timing_profile.json" in prompt_text
     assert "Codex workspace sandbox is enabled" in prompt_text
     assert "--exec-backend docker" in prompt_text
 

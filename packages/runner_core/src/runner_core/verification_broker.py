@@ -50,6 +50,10 @@ _BROKER_ARTIFACT_REQUIRED_STATUSES = {"passed", "failed", "timed_out"}
 _BROKER_WORKSPACE_HASH_REQUIRED_STATUSES = {"passed"}
 
 
+def default_verification_hang_guard_seconds() -> float:
+    return _BROKER_DEFAULT_COMMAND_TIMEOUT_SECONDS
+
+
 @dataclass(frozen=True)
 class VerificationBrokerRequestResult:
     request_id: str

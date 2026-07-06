@@ -34,6 +34,9 @@ Verification gate:
 - By default, `--verify-reuse auto` exposes one runner-owned final handoff verification command to the
   agent. If the agent uses that command successfully and does not change the workspace afterward,
   `usertest-implement` reuses that proof instead of rerunning the full gate after agent exit.
+- The final handoff prompt includes a compact `verification_timing_profile.json` generated from recent
+  verification artifacts (excluding `_workspaces`). It distinguishes expected wait time from the high
+  hang guard and tells agents to prefer one long wait over frequent progress polling.
 - Use `--verify-reuse off` to force the older behavior and always run a separate post-agent verification pass.
 - Disable the default gate with `--skip-verify` (debugging only; expect CI failures).
 - `runner_core` may run follow-up attempts automatically when verification fails; see `agent_attempts.json`
