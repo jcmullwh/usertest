@@ -132,6 +132,22 @@ except ModuleNotFoundError as exc:
     raise
 
 try:
+    from token_monitoring import (
+        analyze_run as analyze_token_run,
+    )
+    from token_monitoring import (
+        public_analysis_payload,
+        write_batch_context,
+        write_run_monitoring,
+    )
+except ModuleNotFoundError as exc:
+    if _is_missing_module(exc, "token_monitoring"):
+        raise SystemExit(
+            _from_source_import_remediation(missing_module="token_monitoring")
+        ) from exc
+    raise
+
+try:
     from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
     from runner_core.catalog import discover_missions, discover_personas, load_catalog_config
     from runner_core.pathing import slugify
@@ -363,10 +379,7 @@ def _probe_command_responsive(*, command: str, timeout_seconds: float) -> str | 
             return None
         code = candidate.reason_code or "probe_failed"
         reason = candidate.reason or "interpreter health probe failed"
-        return (
-            f"command {command!r} resolves to an unusable Python interpreter "
-            f"({code}): {reason}"
-        )
+        return f"command {command!r} resolves to an unusable Python interpreter ({code}): {reason}"
 
     resolved = shutil.which(command)
     if resolved is None:
@@ -445,9 +458,9 @@ def _prevalidate_batch_requests(
                             (req.agent, binary, "path_missing"), []
                         ).append(idx)
                 elif shutil.which(binary) is None:
-                    missing_agent_binaries.setdefault((req.agent, binary, "not_on_path"), []).append(
-                        idx
-                    )
+                    missing_agent_binaries.setdefault(
+                        (req.agent, binary, "not_on_path"), []
+                    ).append(idx)
 
         if req.policy not in cfg.policies:
             _append_targets_error(
@@ -809,7 +822,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=[],
         help=(
             "Repeatable shell command to run as a required verification gate before handing off "
-            "(e.g., --verify-command \"python -m pytest -q\"). Fails the run (and may trigger "
+            '(e.g., --verify-command "python -m pytest -q"). Fails the run (and may trigger '
             "agent follow-ups) if any command exits non-zero."
         ),
     )
@@ -1421,6 +1434,63 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to monorepo root (auto-detected by default).",
     )
 
+    token_monitor_p = sub.add_parser(
+        "token-monitor",
+        help="Metadata-only token inefficiency monitoring commands.",
+    )
+    token_monitor_sub = token_monitor_p.add_subparsers(dest="token_monitor_cmd", required=True)
+    token_monitor_analyze_p = token_monitor_sub.add_parser(
+        "analyze",
+        help="Analyze one run directory and write token monitoring artifacts.",
+    )
+    token_monitor_analyze_p.add_argument(
+        "--run-dir",
+        required=True,
+        type=Path,
+        help="Run directory to analyze.",
+    )
+    token_monitor_analyze_p.add_argument(
+        "--codex-sessions-root",
+        type=Path,
+        help="Override Codex sessions root (defaults to CODEX_HOME/sessions or ~/.codex/sessions).",
+    )
+    token_monitor_analyze_p.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Output directory for derived artifacts (defaults to --run-dir).",
+    )
+    token_monitor_analyze_p.add_argument(
+        "--no-write",
+        action="store_true",
+        help="Print metadata-only analysis JSON without writing artifacts.",
+    )
+    token_monitor_analyze_p.add_argument(
+        "--repo-root",
+        type=Path,
+        help="Path to monorepo root (auto-detected by default).",
+    )
+
+    token_monitor_batch_p = token_monitor_sub.add_parser(
+        "batch-context",
+        help="Analyze batch/control-plane context without assigning completed-run tokens.",
+    )
+    token_monitor_batch_p.add_argument(
+        "--batch-dir",
+        required=True,
+        type=Path,
+        help="Batch directory to analyze.",
+    )
+    token_monitor_batch_p.add_argument(
+        "--output-dir",
+        type=Path,
+        help="Output directory for derived artifacts (defaults to --batch-dir).",
+    )
+    token_monitor_batch_p.add_argument(
+        "--repo-root",
+        type=Path,
+        help="Path to monorepo root (auto-detected by default).",
+    )
+
     return parser
 
 
@@ -1444,7 +1514,13 @@ def _resolve_optional_path(repo_root: Path, arg: Path | None) -> Path | None:
 def _default_builtin_sandbox_cli_context(repo_root: Path) -> Path:
     """Resolve the built-in sandbox_cli Docker context from source or package layout."""
     candidates = (
-        repo_root / "packages" / "sandbox_runner" / "builtins" / "docker" / "contexts" / "sandbox_cli",
+        repo_root
+        / "packages"
+        / "sandbox_runner"
+        / "builtins"
+        / "docker"
+        / "contexts"
+        / "sandbox_cli",
         repo_root
         / "packages"
         / "sandbox_runner"
@@ -1775,7 +1851,9 @@ def _cmd_batch(args: argparse.Namespace) -> int:
         if values is None:
             return []
         if not isinstance(values, list):
-            parse_errors.append(f"args: {flag} must be repeatable strings; got {type(values).__name__}.")
+            parse_errors.append(
+                f"args: {flag} must be repeatable strings; got {type(values).__name__}."
+            )
             return []
         normalized: list[str] = []
         for vidx, value in enumerate(values):
@@ -2205,9 +2283,7 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             exec_keep_container=bool(args.exec_keep_container),
             exec_rebuild_image=bool(args.exec_rebuild_image),
             agent_rate_limit_retries=(
-                retries_value
-                if retries_value is not None
-                else int(args.agent_rate_limit_retries)
+                retries_value if retries_value is not None else int(args.agent_rate_limit_retries)
             ),
             agent_rate_limit_backoff_seconds=(
                 backoff_seconds_value
@@ -2254,7 +2330,9 @@ def _cmd_batch(args: argparse.Namespace) -> int:
             for idx, req in requests
         ]
         print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
-        print("Batch validation passed; no targets were executed (--print-requests).", file=sys.stderr)
+        print(
+            "Batch validation passed; no targets were executed (--print-requests).", file=sys.stderr
+        )
         return 0
     if validate_only:
         print("Batch validation passed; no targets were executed (validate-only).", file=sys.stderr)
@@ -3516,6 +3594,7 @@ def _cmd_report(args: argparse.Namespace) -> int:
     run_dir = run_dir.resolve()
 
     if args.recompute_metrics:
+
         def _parse_ts(ts: str) -> datetime | None:
             ts = ts.strip()
             if not ts:
@@ -4076,6 +4155,53 @@ def _cmd_reports_analyze(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_token_monitor_analyze(args: argparse.Namespace) -> int:
+    """Execute token-monitor analyze for a run directory."""
+    repo_root = _resolve_repo_root(args.repo_root)
+    run_dir = _resolve_optional_path(repo_root, args.run_dir) or args.run_dir.resolve()
+    sessions_root = (
+        (
+            _resolve_optional_path(repo_root, args.codex_sessions_root)
+            or args.codex_sessions_root.resolve()
+        )
+        if args.codex_sessions_root is not None
+        else None
+    )
+    output_dir = (
+        (_resolve_optional_path(repo_root, args.output_dir) or args.output_dir.resolve())
+        if args.output_dir is not None
+        else None
+    )
+
+    if args.no_write:
+        analysis = analyze_token_run(run_dir, codex_sessions_root=sessions_root)
+        print(json.dumps(public_analysis_payload(analysis), indent=2, ensure_ascii=False))
+        return 0
+
+    write_run_monitoring(run_dir, codex_sessions_root=sessions_root, output_dir=output_dir)
+    destination = output_dir or run_dir
+    print(str(destination / "token_monitoring.json"))
+    print(str(destination / "token_monitoring.md"))
+    print(str(destination / "token_causal_trace.jsonl"))
+    return 0
+
+
+def _cmd_token_monitor_batch_context(args: argparse.Namespace) -> int:
+    """Execute token-monitor batch-context for a batch directory."""
+    repo_root = _resolve_repo_root(args.repo_root)
+    batch_dir = _resolve_optional_path(repo_root, args.batch_dir) or args.batch_dir.resolve()
+    output_dir = (
+        (_resolve_optional_path(repo_root, args.output_dir) or args.output_dir.resolve())
+        if args.output_dir is not None
+        else None
+    )
+    write_batch_context(batch_dir, output_dir=output_dir)
+    destination = output_dir or batch_dir
+    print(str(destination / "token_batch_context.json"))
+    print(str(destination / "token_batch_context.md"))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> None:
     """Run the CLI entrypoint."""
     parser = build_parser()
@@ -4109,6 +4235,12 @@ def main(argv: list[str] | None = None) -> None:
             raise SystemExit(_cmd_reports_compile(args))
         if args.reports_cmd == "analyze":
             raise SystemExit(_cmd_reports_analyze(args))
+        raise SystemExit(2)
+    if args.cmd == "token-monitor":
+        if args.token_monitor_cmd == "analyze":
+            raise SystemExit(_cmd_token_monitor_analyze(args))
+        if args.token_monitor_cmd == "batch-context":
+            raise SystemExit(_cmd_token_monitor_batch_context(args))
         raise SystemExit(2)
     raise SystemExit(2)
 

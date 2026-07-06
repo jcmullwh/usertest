@@ -21,6 +21,7 @@ _EDITABLE_INSTALL_TARGETS = (
     "packages/backlog_core",
     "packages/backlog_miner",
     "packages/backlog_repo",
+    "packages/token_monitoring",
     "apps/usertest",
     "apps/usertest_backlog",
     "apps/usertest_implement",
@@ -38,6 +39,7 @@ _SOURCE_RELATIVE_PATHS = (
     "packages/backlog_core/src",
     "packages/backlog_miner/src",
     "packages/backlog_repo/src",
+    "packages/token_monitoring/src",
     "packages/run_artifacts/src",
 )
 _SMOKE_IMPORT_MODULES = (
@@ -51,6 +53,7 @@ _SMOKE_IMPORT_MODULES = (
     "backlog_core",
     "backlog_miner",
     "backlog_repo",
+    "token_monitoring",
     "normalized_events",
     "reporter",
     "run_artifacts",
