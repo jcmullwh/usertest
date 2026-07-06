@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
-import token_monitoring
 
 import runner_core.runner as runner
 
@@ -22,7 +23,11 @@ def test_token_monitoring_hook_writes_success_artifact(
         )
         return {"schema_version": 1}
 
-    monkeypatch.setattr(token_monitoring, "write_run_monitoring", fake_write_run_monitoring)
+    monkeypatch.setitem(
+        sys.modules,
+        "token_monitoring",
+        SimpleNamespace(write_run_monitoring=fake_write_run_monitoring),
+    )
 
     runner._maybe_write_token_monitoring_artifacts(run_dir)
 
@@ -39,7 +44,11 @@ def test_token_monitoring_hook_failure_is_non_fatal(
     def fake_write_run_monitoring(_path: Path) -> dict[str, object]:
         raise RuntimeError("monitor failed")
 
-    monkeypatch.setattr(token_monitoring, "write_run_monitoring", fake_write_run_monitoring)
+    monkeypatch.setitem(
+        sys.modules,
+        "token_monitoring",
+        SimpleNamespace(write_run_monitoring=fake_write_run_monitoring),
+    )
 
     runner._maybe_write_token_monitoring_artifacts(run_dir)
 

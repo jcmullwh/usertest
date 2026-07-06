@@ -12,8 +12,15 @@ into derived artifacts.
 
 ## Canonical smoke
 
+## Standalone package checkout (recommended first path)
+
 ```bash
 pdm run smoke
 pdm run test
 pdm run lint
 ```
+
+## Monorepo contributor workflow
+
+Use the monorepo scaffold commands from the repository root when validating this
+package together with the rest of the workspace.
