@@ -103,6 +103,63 @@ def test_probe_agent_shell_launch_uses_codex_adapter_path(tmp_path: Path) -> Non
     assert "workspace-write" in result.argv
 
 
+def test_probe_agent_shell_launch_accepts_codex_command_execution_aggregated_output(
+    tmp_path: Path,
+) -> None:
+    script = tmp_path / "codex_aggregated_output.py"
+    script.write_text(
+        "\n".join(
+            [
+                "from __future__ import annotations",
+                "import json",
+                "import sys",
+                "sys.stdin.read()",
+                "event = {",
+                "    'item': {",
+                "        'type': 'command_execution',",
+                "        'command': '/bin/bash -lc \"printf shell_probe=ok\"',",
+                "        'aggregated_output': 'shell_probe=ok\\n',",
+                "        'exit_code': 0,",
+                "        'status': 'completed',",
+                "    }",
+                "}",
+                "print(json.dumps(event))",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    if os.name == "nt":
+        binary = tmp_path / "codex_aggregated_output.cmd"
+        binary.write_text(
+            f"@echo off\r\n\"{sys.executable}\" \"{script}\" %*\r\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+    else:
+        binary = tmp_path / "codex_aggregated_output.sh"
+        binary.write_text(
+            "#!/bin/sh\n" f"exec \"{sys.executable}\" \"{script}\" \"$@\"\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        binary.chmod(binary.stat().st_mode | stat.S_IEXEC)
+
+    result = probe_agent_shell_launch(
+        agent="codex",
+        workspace_dir=tmp_path,
+        artifacts_dir=tmp_path / "probe",
+        binary=str(binary),
+        codex_sandbox="workspace-write",
+        codex_ask_for_approval="never",
+    ).to_dict()
+
+    assert result["ok"] is True
+    assert result["marker_seen"] is True
+    assert result["marker_source"] == "codex.command_execution"
+
+
 def test_probe_agent_shell_launch_uses_claude_and_gemini_adapter_paths(tmp_path: Path) -> None:
     binary = _make_marker_agent(tmp_path)
 

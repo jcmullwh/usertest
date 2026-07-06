@@ -303,7 +303,7 @@ def _gemini_marker_source(payload: dict[str, Any]) -> str | None:
 
 
 def _marker_in_shell_fields(payload: dict[str, Any]) -> bool:
-    for key in ("stdout", "output", "stderr"):
+    for key in ("stdout", "output", "stderr", "aggregated_output"):
         value = payload.get(key)
         if isinstance(value, str) and _SHELL_PROBE_MARKER in value:
             return True
