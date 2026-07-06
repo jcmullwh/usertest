@@ -22,6 +22,7 @@ def test_run_help_mentions_settings_loaded_remote_write_defaults(
     assert "auto-loaded default settings profile enables it unless --no-push" in normalized
     assert "auto-loaded default settings profile enables it unless --no-pr" in normalized
     assert "do not run the agent, commit, push, create PRs, or move tickets" in normalized
+    assert "default backlog refresh still runs unless" in normalized
 
 
 def test_run_dry_run_prints_settings_loaded_commit_push_pr_defaults(

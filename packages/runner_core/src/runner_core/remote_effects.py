@@ -403,7 +403,10 @@ REMOTE_EFFECTS: tuple[CommandRemoteEffects, ...] = (
         pull_requests=Effect("default", "Parser defaults and default settings set pr: true."),
         summary="Refreshes backlog exports, selects the next local ticket, then implements it with commit/push/PR enabled by default.",
         modifiers=(
-            RemoteEffectModifier("--dry-run", "Prints selected ticket, effective settings, and run request; does not run the agent or finalize git."),
+            RemoteEffectModifier(
+                "--dry-run",
+                "Prints selected ticket, effective settings, and run request; still performs the default backlog refresh unless --no-refresh-backlog is also passed.",
+            ),
             RemoteEffectModifier("--no-refresh-backlog", "Skips the backlog refresh/export phase."),
             RemoteEffectModifier("--no-commit/--no-push/--no-pr", "Disable the corresponding remote-write handoff steps."),
         ),
@@ -411,16 +414,19 @@ REMOTE_EFFECTS: tuple[CommandRemoteEffects, ...] = (
     ),
     CommandRemoteEffects(
         command="usertest-implement review run",
-        boundary="local-only",
+        boundary="remote-write",
         local_artifacts=LOCAL_ARTIFACTS,
         sensitive_artifacts=SENSITIVE_RUN_ARTIFACTS,
         draft_exports=NO_EFFECT,
         commits=NO_EFFECT,
         pushes=NO_EFFECT,
-        pull_requests=NO_EFFECT,
-        summary="Runs a local implementation-review agent pass for an existing PR-backed ticket.",
+        pull_requests=Effect("default", "Publishes a PR review comment with gh pr review."),
+        summary="Runs an implementation-review agent pass for an existing PR-backed ticket and publishes the review comment.",
         modifiers=(
-            RemoteEffectModifier("--dry-run", "Prints the review run request without running the agent."),
+            RemoteEffectModifier(
+                "--dry-run",
+                "Prints the review run request without running the agent or publishing a PR review.",
+            ),
         ),
     ),
     CommandRemoteEffects(

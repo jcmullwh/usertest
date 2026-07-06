@@ -134,6 +134,11 @@ Entry points:
   - Standard flow: refresh backlog exports (including `review-ux`) and implement the next ticket (research-first).
   - With the default settings profile, this flow commits, pushes, and opens a PR unless you pass
     the existing `--no-commit`, `--no-push`, and/or `--no-pr` flags.
+  - `--dry-run` stops implementation/finalization, but the default backlog refresh still runs
+    unless you also pass `--no-refresh-backlog`.
+- `usertest-implement review run`
+  - Runs the implementation-review agent and posts the resulting PR review comment by default.
+  - `--dry-run` prints the review request without running the agent or publishing the PR review.
 
 ---
 

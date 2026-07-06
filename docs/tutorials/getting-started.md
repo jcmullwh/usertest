@@ -134,6 +134,8 @@ Legend:
   `configs/usertest_implement_settings.yaml` profile enables `commit`, `push`, and `pr` for
   `usertest-implement run` / `tickets run-next`; disable those with existing `--no-commit`,
   `--no-push`, and `--no-pr` flags when you want a local-only implementation pass.
+  On `tickets run-next`, `--dry-run` stops implementation/finalization but the default backlog
+  refresh still runs unless `--no-refresh-backlog` is also passed.
 
 ### Target-local `.usertest/`
 

@@ -99,6 +99,16 @@ def test_implementation_settings_defaults_match_remote_write_contract() -> None:
         assert effect.pull_requests.by_default
         assert effect.defaults_source is not None
 
+    review_run = REMOTE_EFFECTS_BY_COMMAND["usertest-implement review run"]
+    assert review_run.boundary == "remote-write"
+    assert review_run.pull_requests.by_default
+
+
+def test_run_next_dry_run_discloses_refresh_behavior() -> None:
+    run_next = REMOTE_EFFECTS_BY_COMMAND["usertest-implement tickets run-next"]
+    dry_run = next(mod for mod in run_next.modifiers if mod.name == "--dry-run")
+    assert "--no-refresh-backlog" in dry_run.effect
+
 
 def test_existing_dry_run_and_print_modifiers_are_classified() -> None:
     expected_modifiers = {
@@ -108,6 +118,7 @@ def test_existing_dry_run_and_print_modifiers_are_classified() -> None:
         "usertest-backlog reports sync-atom-actions": {"--dry-run"},
         "usertest token-monitor analyze": {"--no-write"},
         "usertest-implement run": {"--dry-run", "--no-commit", "--no-push", "--no-pr"},
+        "usertest-implement review run": {"--dry-run"},
         "usertest-implement tickets run-next": {
             "--dry-run",
             "--no-refresh-backlog",

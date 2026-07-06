@@ -3304,7 +3304,8 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         action="store_true",
         help=(
             "Print selected ticket, effective settings, and run request; do not run the agent, "
-            "commit, push, create PRs, or move tickets."
+            "commit, push, create PRs, or move tickets. For tickets run-next, the default "
+            "backlog refresh still runs unless --no-refresh-backlog is also passed."
         ),
     )
 
