@@ -4,7 +4,7 @@
 # - Prefer repo-local .venv when present
 # - Avoid WindowsApps launcher shims (App Execution Alias)
 # - Detect "Access is denied" / blocked launch failures
-# - Fail fast (default: within ~5s total) with actionable remediation
+# - Probe each candidate with a configurable timeout and actionable remediation
 
 $ErrorActionPreference = 'Stop'
 
@@ -26,6 +26,28 @@ function _Quote-ProcessArg {
     return '"' + ($Value -replace '"', '\\"') + '"'
 }
 
+function _Resolve-PythonPreflightTimeoutSeconds {
+    [CmdletBinding()]
+    param()
+
+    $raw = [string]$env:USERTEST_PYTHON_PREFLIGHT_TIMEOUT_SECONDS
+    if (-not $raw.Trim()) {
+        return 0.0
+    }
+
+    try {
+        $parsed = [double]::Parse($raw.Trim(), [System.Globalization.CultureInfo]::InvariantCulture)
+    }
+    catch {
+        return 0.0
+    }
+
+    if ($parsed -gt 0) {
+        return $parsed
+    }
+    return 0.0
+}
+
 function _Invoke-ProcessWithTimeout {
     [CmdletBinding()]
     param(
@@ -34,10 +56,9 @@ function _Invoke-ProcessWithTimeout {
         [Parameter(Mandatory = $true)]
         [string[]]$Arguments,
         [Parameter(Mandatory = $false)]
-        [double]$TimeoutSeconds = 5.0
+        [double]$TimeoutSeconds = 0.0
     )
 
-    $timeoutMs = [Math]::Max(100, [int]([double]$TimeoutSeconds * 1000))
     $psi = New-Object System.Diagnostics.ProcessStartInfo
     $psi.FileName = $FilePath
     $psi.Arguments = (($Arguments | ForEach-Object { _Quote-ProcessArg -Value $_ }) -join ' ')
@@ -50,14 +71,20 @@ function _Invoke-ProcessWithTimeout {
     $proc.StartInfo = $psi
 
     $null = $proc.Start()
-    if (-not $proc.WaitForExit($timeoutMs)) {
-        try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
-        return @{
-            TimedOut = $true
-            ExitCode = $null
-            Stdout   = ""
-            Stderr   = ""
+    if ($TimeoutSeconds -gt 0) {
+        $timeoutMs = [Math]::Max(100, [int]([double]$TimeoutSeconds * 1000))
+        if (-not $proc.WaitForExit($timeoutMs)) {
+            try { $proc.Kill($true) } catch { try { $proc.Kill() } catch { } }
+            return @{
+                TimedOut = $true
+                ExitCode = $null
+                Stdout   = ""
+                Stderr   = ""
+            }
         }
+    }
+    else {
+        $proc.WaitForExit()
     }
 
     return @{
@@ -79,10 +106,13 @@ function _Get-VenvPythonPath {
 }
 
 function _Get-WindowsWhereAll {
-    param([Parameter(Mandatory = $true)][string]$CommandName)
+    param(
+        [Parameter(Mandatory = $true)][string]$CommandName,
+        [Parameter(Mandatory = $false)][double]$TimeoutSeconds = 0.0
+    )
 
     try {
-        $proc = _Invoke-ProcessWithTimeout -FilePath 'where.exe' -Arguments @($CommandName) -TimeoutSeconds 2.0
+        $proc = _Invoke-ProcessWithTimeout -FilePath 'where.exe' -Arguments @($CommandName) -TimeoutSeconds $TimeoutSeconds
     }
     catch {
         return @()
@@ -103,8 +133,12 @@ function _Get-WindowsWhereAll {
 }
 
 function _Get-WindowsPy0pInterpreters {
+    param(
+        [Parameter(Mandatory = $false)][double]$TimeoutSeconds = 0.0
+    )
+
     try {
-        $proc = _Invoke-ProcessWithTimeout -FilePath 'py' -Arguments @('-0p') -TimeoutSeconds 2.0
+        $proc = _Invoke-ProcessWithTimeout -FilePath 'py' -Arguments @('-0p') -TimeoutSeconds $TimeoutSeconds
     }
     catch {
         return @()
@@ -200,7 +234,7 @@ function Test-PythonInterpreter {
         [Parameter(Mandatory = $true)]
         [string]$CommandPath,
         [Parameter(Mandatory = $false)]
-        [double]$TimeoutSeconds = 5.0
+        [double]$TimeoutSeconds = 0.0
     )
 
     $probeCode = "import encodings, json, sys; print(json.dumps({'executable': sys.executable, 'version': sys.version.split()[0]}))"
@@ -288,10 +322,15 @@ function Resolve-UsablePython {
         [Parameter(Mandatory = $false)]
         [string]$VenvDirName = ".venv",
         [Parameter(Mandatory = $false)]
-        [double]$TimeoutSeconds = 5.0
+        [double]$TimeoutSeconds = 0.0
     )
 
-    $deadline = [DateTime]::UtcNow.AddSeconds([Math]::Max(0.1, [double]$TimeoutSeconds))
+    if ($TimeoutSeconds -gt 0) {
+        $probeTimeoutSeconds = [double]$TimeoutSeconds
+    }
+    else {
+        $probeTimeoutSeconds = _Resolve-PythonPreflightTimeoutSeconds
+    }
     $rejections = @()
 
     $seen = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
@@ -327,10 +366,6 @@ function Resolve-UsablePython {
         Add-Candidate -Name 'virtual_env' -CommandPath (_Get-VenvPythonPath -VenvRoot $virtualEnv)
     }
 
-    foreach ($entry in (_Get-WindowsPy0pInterpreters)) {
-        Add-Candidate -Name 'py_0p' -CommandPath $entry
-    }
-
     foreach ($entry in (_Get-WindowsWhereAll -CommandName 'python')) {
         if (-not (_Is-WindowsAppsAliasPath -PathText $entry)) {
             Add-Candidate -Name 'where_python' -CommandPath $entry
@@ -343,7 +378,7 @@ function Resolve-UsablePython {
         }
     }
 
-    foreach ($commandName in @('py', 'python', 'python3')) {
+    foreach ($commandName in @('python', 'python3')) {
         $cmd = Get-Command $commandName -ErrorAction SilentlyContinue
         if ($cmd) {
             $resolved = $cmd.Source
@@ -358,12 +393,18 @@ function Resolve-UsablePython {
         }
     }
 
-    foreach ($candidate in $candidates) {
-        $remaining = ($deadline - [DateTime]::UtcNow).TotalSeconds
-        if ($remaining -le 0) {
-            break
-        }
+    foreach ($entry in (_Get-WindowsPy0pInterpreters)) {
+        Add-Candidate -Name 'py_0p' -CommandPath $entry
+    }
 
+    $pyCommand = Get-Command 'py' -ErrorAction SilentlyContinue
+    if ($pyCommand) {
+        $resolvedPy = $pyCommand.Source
+        if (-not $resolvedPy) { $resolvedPy = $pyCommand.Path }
+        Add-Candidate -Name 'command_py' -CommandPath $resolvedPy
+    }
+
+    foreach ($candidate in $candidates) {
         $name = $candidate.Name
         $resolved = $candidate.CommandPath
 
@@ -378,7 +419,7 @@ function Resolve-UsablePython {
         }
 
         try {
-            $probe = Test-PythonInterpreter -CommandPath $resolved -TimeoutSeconds $remaining
+            $probe = Test-PythonInterpreter -CommandPath $resolved -TimeoutSeconds $probeTimeoutSeconds
         }
         catch {
             $rejections += "[$name] interpreter probe failed: $($_.Exception.Message) ($resolved)"
@@ -406,8 +447,13 @@ function Resolve-UsablePython {
         }
     }
 
+    $timeoutLabel = "caller or CI job timeout"
+    if ($probeTimeoutSeconds -gt 0) {
+        $timeoutLabel = "~$probeTimeoutSeconds seconds"
+    }
+
     $lines = @()
-    $lines += "No usable Python interpreter found (within ~$TimeoutSeconds seconds)."
+    $lines += "No usable Python interpreter found after probing candidates (per-probe timeout: $timeoutLabel)."
     $lines += ""
     $lines += "Tried:"
     if ($rejections.Count -eq 0) {
