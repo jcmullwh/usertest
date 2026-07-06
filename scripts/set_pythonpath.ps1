@@ -27,6 +27,7 @@ $paths = @(
     (Join-Path $RepoRoot "packages/backlog_core/src"),
     (Join-Path $RepoRoot "packages/backlog_miner/src"),
     (Join-Path $RepoRoot "packages/backlog_repo/src"),
+    (Join-Path $RepoRoot "packages/token_monitoring/src"),
     (Join-Path $RepoRoot "packages/run_artifacts/src")
 )
 

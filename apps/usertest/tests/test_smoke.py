@@ -82,6 +82,10 @@ def test_parser_smoke() -> None:
 
     args = parser.parse_args(["reports", "analyze", "--target", "x"])
     assert args.target == "x"
+    args = parser.parse_args(["token-monitor", "analyze", "--run-dir", "runs/x/y/codex/0"])
+    assert args.token_monitor_cmd == "analyze"
+    args = parser.parse_args(["token-monitor", "batch-context", "--batch-dir", "runs/_batch/x/y"])
+    assert args.token_monitor_cmd == "batch-context"
     args = parser.parse_args(
         [
             "reports",

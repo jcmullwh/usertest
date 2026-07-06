@@ -33,6 +33,7 @@ _SOURCE_RELATIVE_PATHS = (
     "packages/backlog_core/src",
     "packages/backlog_miner/src",
     "packages/backlog_repo/src",
+    "packages/token_monitoring/src",
     "packages/run_artifacts/src",
 )
 

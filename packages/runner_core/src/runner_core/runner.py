@@ -545,7 +545,7 @@ def _extract_raw_events_plaintext_excerpt(raw_events_path: Path) -> str:
         return ""
     text = "\n".join(kept).strip()
     if len(text) > _RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS:
-        text = text[-_RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS :]
+        text = text[-_RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS:]
     return text
 
 
@@ -595,6 +595,8 @@ def _format_claude_quota_exhaustion_stderr(
     if provider_message.strip():
         lines.extend(["", "[provider_message]", provider_message.strip()])
     return "\n".join(lines).strip()
+
+
 _GEMINI_PROVIDER_CAPACITY_MODEL_RE = re.compile(
     r"No capacity available for model\s+(?P<model>[A-Za-z0-9_.:-]+)",
     re.IGNORECASE,
@@ -1178,9 +1180,10 @@ def _verification_commands_need_source_bootstrap(commands: Sequence[str]) -> boo
         command = raw.strip()
         if not command:
             continue
-        if _SCAFFOLD_SCRIPT_PATTERN.search(command) is not None and _SCAFFOLD_RUN_PATTERN.search(
-            command
-        ) is not None:
+        if (
+            _SCAFFOLD_SCRIPT_PATTERN.search(command) is not None
+            and _SCAFFOLD_RUN_PATTERN.search(command) is not None
+        ):
             return True
     return verification_commands_need_pytest(tuple(commands))
 
@@ -1411,14 +1414,13 @@ def _probe_commands_local(
                 if not usable:
                     reason_code = "probe_failed"
                     stderr = (proc.stderr or "").strip()
-                    reason = (
-                        "bash probe exited non-zero"
-                        + (f": {stderr}" if stderr else f" (exit_code={proc.returncode})")
+                    reason = "bash probe exited non-zero" + (
+                        f": {stderr}" if stderr else f" (exit_code={proc.returncode})"
                     )
             except subprocess.TimeoutExpired:
                 usable = False
                 reason_code = "unresponsive"
-                reason = "bash probe timed out (2.0s) running `bash -lc \"echo ok\"`."
+                reason = 'bash probe timed out (2.0s) running `bash -lc "echo ok"`.'
             except OSError as e:
                 usable = False
                 reason_code = "blocked"
@@ -1677,10 +1679,7 @@ def _format_preflight_summary_md(
         ):
             lines.append("- Final handoff verification:")
             lines.append(f"  - timeout_seconds: {timeout_label}")
-            lines.append(
-                "  - command: "
-                f"`{verification_broker_command.strip()}`"
-            )
+            lines.append(f"  - command: `{verification_broker_command.strip()}`")
             lines.append(
                 "  - note: run this once you believe the work is complete; it blocks "
                 "until verification finishes, it must pass before you finish, and you "
@@ -1942,12 +1941,9 @@ def _build_binary_missing_hints(
     hints: dict[str, str] = {}
 
     hints["verify"] = f"`{required_binary} --version`"
-    hints["config"] = (
-        f"Update `configs/agents.yaml` `agents.{agent}.binary` to a valid path/name."
-    )
+    hints["config"] = f"Update `configs/agents.yaml` `agents.{agent}.binary` to a valid path/name."
     hints["doctor"] = (
-        "Run `python -m agent_adapters.cli doctor` to check which agent CLIs "
-        "are on PATH."
+        "Run `python -m agent_adapters.cli doctor` to check which agent CLIs are on PATH."
     )
     hints["offline_validation"] = (
         "To validate the pipeline without executing agent CLIs, use "
@@ -1975,9 +1971,8 @@ def _build_binary_missing_hints(
                 f"`sandbox/sandbox.json` (container_name={container_name!r})."
             )
     else:
-        hints["install"] = (
-            f"Install `{required_binary}` on PATH"
-            + (f"; suggested: {install_hint}." if install_hint else ".")
+        hints["install"] = f"Install `{required_binary}` on PATH" + (
+            f"; suggested: {install_hint}." if install_hint else "."
         )
 
     return hints
@@ -1994,11 +1989,7 @@ def _probe_agent_cli_version(
     if env_overrides is not None and not command_prefix:
         env = os.environ.copy()
         env.update(
-            {
-                k: v
-                for k, v in env_overrides.items()
-                if isinstance(k, str) and isinstance(v, str)
-            }
+            {k: v for k, v in env_overrides.items() if isinstance(k, str) and isinstance(v, str)}
         )
 
     binary_to_run = binary
@@ -2087,11 +2078,7 @@ def _agent_auth_present_local(
     if env_overrides:
         merged = dict(os.environ)
         merged.update(
-            {
-                k: v
-                for k, v in env_overrides.items()
-                if isinstance(k, str) and isinstance(v, str)
-            }
+            {k: v for k, v in env_overrides.items() if isinstance(k, str) and isinstance(v, str)}
         )
         env = merged  # type: ignore[assignment]
 
@@ -2315,10 +2302,14 @@ def _codex_shell_probe_failure_reason(
             "codex_windows_sandbox_panic",
             "Codex Windows sandbox probe failed before shell payload execution.",
         )
-    if os_is_windows and "powershell" in lowered and (
-        "pre-payload" in lowered
-        or "before payload" in lowered
-        or "before shell payload" in lowered
+    if (
+        os_is_windows
+        and "powershell" in lowered
+        and (
+            "pre-payload" in lowered
+            or "before payload" in lowered
+            or "before shell payload" in lowered
+        )
     ):
         return (
             "codex_windows_powershell_prepayload_failed",
@@ -2388,8 +2379,10 @@ def _resolve_shell_capability(
         exit_code = probe_result.get("exit_code")
         if passed_raw is True or ok_raw is True or exit_code == 0:
             probe_status = "passed"
-        elif passed_raw is False or ok_raw is False or (
-            isinstance(exit_code, int) and exit_code != 0
+        elif (
+            passed_raw is False
+            or ok_raw is False
+            or (isinstance(exit_code, int) and exit_code != 0)
         ):
             probe_status = "failed"
         else:
@@ -2450,9 +2443,7 @@ def _resolve_shell_capability(
             probe_status=probe_status,
             reason_code=None,
             reason_type=None,
-            reason=(
-                "Shell probe passed for the effective agent execution path."
-            ),
+            reason=("Shell probe passed for the effective agent execution path."),
             policy_status=policy_status_norm,
             policy_reason=policy_reason,
             allowed_tools=allowed_tools,
@@ -2678,6 +2669,7 @@ def _stage_agent_prompt_file(*, run_dir: Path, name: str, src_path: Path) -> Pat
     dest_path = dest_dir / name
     shutil.copyfile(src_path, dest_path)
     return dest_path
+
 
 def _agent_path_for_staged_file(
     staged_path: Path, *, run_dir: Path, run_dir_mount: str | None
@@ -2957,7 +2949,7 @@ def _build_followup_prompt(
     schema_dict: dict[str, Any],
     prior_last_message_text: str,
     attempt_number: int,
-    ) -> str:
+) -> str:
     errors = [str(e).strip() for e in report_validation_errors if str(e).strip()]
     error_block = "\n".join(f"- {line}" for line in errors[:20]) or "- (no error details)"
 
@@ -3080,9 +3072,7 @@ def _merge_command_rewrite_meta(
 
     rewrites: list[dict[str, Any]] = []
     if existing.get("kind") == "multi" and isinstance(existing.get("rewrites"), list):
-        rewrites.extend(
-            item for item in existing["rewrites"] if isinstance(item, dict)
-        )
+        rewrites.extend(item for item in existing["rewrites"] if isinstance(item, dict))
     else:
         rewrites.append(existing)
 
@@ -3408,9 +3398,8 @@ def _maybe_rewrite_windows_bash_smoke_verification_command(
         if "--require-doctor" in lower:
             switches.append("-RequireDoctor")
 
-        ps_cmd = (
-            "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1"
-            + (" " + " ".join(switches) if switches else "")
+        ps_cmd = "powershell -NoProfile -ExecutionPolicy Bypass -File .\\scripts\\smoke.ps1" + (
+            " " + " ".join(switches) if switches else ""
         )
         return {
             "action": "rewrite",
@@ -3481,14 +3470,14 @@ def _tail_text_for_prompt(text: str, *, max_chars: int = 2000) -> str:
 _PYTHON_CONTEXT_HEALTH_PROBE = (
     "import encodings, json, os, sys; "
     "print(json.dumps({"
-    "\"executable\": sys.executable, "
-    "\"version\": sys.version.split()[0], "
-    "\"prefix\": sys.prefix, "
-    "\"base_prefix\": getattr(sys, \"base_prefix\", None), "
-    "\"real_prefix\": getattr(sys, \"real_prefix\", None), "
-    "\"exec_prefix\": sys.exec_prefix, "
-    "\"base_exec_prefix\": getattr(sys, \"base_exec_prefix\", None), "
-    "\"virtual_env\": os.environ.get(\"VIRTUAL_ENV\")"
+    '"executable": sys.executable, '
+    '"version": sys.version.split()[0], '
+    '"prefix": sys.prefix, '
+    '"base_prefix": getattr(sys, "base_prefix", None), '
+    '"real_prefix": getattr(sys, "real_prefix", None), '
+    '"exec_prefix": sys.exec_prefix, '
+    '"base_exec_prefix": getattr(sys, "base_exec_prefix", None), '
+    '"virtual_env": os.environ.get("VIRTUAL_ENV")'
     "}))"
 )
 
@@ -3692,8 +3681,7 @@ def _probe_same_shell_python_command(
 
         if effective_prefix:
             health_probe_command = (
-                f"{shlex.quote(command_name)} -c "
-                f"{shlex.quote(_PYTHON_CONTEXT_HEALTH_PROBE)}"
+                f"{shlex.quote(command_name)} -c {shlex.quote(_PYTHON_CONTEXT_HEALTH_PROBE)}"
             )
             argv = _verification_shell_argv(
                 command_prefix=effective_prefix,
@@ -3945,8 +3933,7 @@ def _context_verified_runtime_candidate(
     python_context_probe: dict[str, Any] | None,
 ) -> dict[str, Any] | None:
     probe_passed = bool(
-        isinstance(python_context_probe, dict)
-        and python_context_probe.get("passed", False)
+        isinstance(python_context_probe, dict) and python_context_probe.get("passed", False)
     )
     if not probe_passed:
         return None
@@ -4355,16 +4342,10 @@ def _probe_python_context_capability(
     probe_command = f"python -c {shlex.quote(_PYTHON_CONTEXT_HEALTH_PROBE)}"
     effective_command = probe_command
     direct_argv: list[str] | None = None
-    if (
-        not command_prefix
-        and isinstance(python_executable, str)
-        and python_executable.strip()
-    ):
+    if not command_prefix and isinstance(python_executable, str) and python_executable.strip():
         selected_python = python_executable.strip()
         direct_argv = [selected_python, "-c", _PYTHON_CONTEXT_HEALTH_PROBE]
-        effective_command = (
-            f"{shlex.quote(selected_python)} -c <health_probe>"
-        )
+        effective_command = f"{shlex.quote(selected_python)} -c <health_probe>"
     elif not command_prefix:
         effective_command, _ = _rewrite_verification_command_for_python(
             probe_command,
@@ -4569,9 +4550,10 @@ def _run_verification_subprocess(
         stderr_path.write_text(stderr_text, encoding="utf-8", newline="\n")
         return exit_code, False, False
 
-    with stdout_path.open("w", encoding="utf-8", newline="\n") as stdout_handle, stderr_path.open(
-        "w", encoding="utf-8", newline="\n"
-    ) as stderr_handle:
+    with (
+        stdout_path.open("w", encoding="utf-8", newline="\n") as stdout_handle,
+        stderr_path.open("w", encoding="utf-8", newline="\n") as stderr_handle,
+    ):
         proc = subprocess.Popen(
             argv,
             stdout=stdout_handle,
@@ -4731,9 +4713,7 @@ def _run_verification_commands(
             )
             if decision is not None:
                 rewrite_meta = (
-                    decision.get("rewrite")
-                    if isinstance(decision.get("rewrite"), dict)
-                    else None
+                    decision.get("rewrite") if isinstance(decision.get("rewrite"), dict) else None
                 )
                 action = decision.get("action")
                 if action == "skip":
@@ -4801,8 +4781,7 @@ def _run_verification_commands(
             host_dispatch_validation = {
                 "kind": host_normalization.kind or "host_shell_portability_blocked",
                 "reason": (
-                    host_normalization.reason
-                    or "Command is not portable to the active shell."
+                    host_normalization.reason or "Command is not portable to the active shell."
                 ),
                 "hint": host_normalization.hint
                 or "Rewrite the command for the active shell, or report the portability issue.",
@@ -4974,15 +4953,11 @@ def _run_verification_commands(
                             progress_base=progress_base,
                         )
                         try:
-                            stdout_text = stdout_path.read_text(
-                                encoding="utf-8", errors="replace"
-                            )
+                            stdout_text = stdout_path.read_text(encoding="utf-8", errors="replace")
                         except OSError:
                             stdout_text = ""
                         try:
-                            stderr_text = stderr_path.read_text(
-                                encoding="utf-8", errors="replace"
-                            )
+                            stderr_text = stderr_path.read_text(encoding="utf-8", errors="replace")
                         except OSError:
                             stderr_text = ""
                         ripgrep_rewritten = True
@@ -5042,9 +5017,7 @@ def _run_verification_commands(
         if progress_callback is not None:
             finished_progress = dict(progress_base)
             finished_progress["phase"] = (
-                "cancelled"
-                if cancelled
-                else ("timed_out" if timed_out else "finished_command")
+                "cancelled" if cancelled else ("timed_out" if timed_out else "finished_command")
             )
             finished_progress["elapsed_seconds"] = wall_seconds
             finished_progress["updated_utc"] = _utc_now_z()
@@ -5147,6 +5120,24 @@ def _write_json(path: Path, payload: Any) -> None:
     )
 
 
+def _maybe_write_token_monitoring_artifacts(run_dir: Path) -> None:
+    try:
+        from token_monitoring import write_run_monitoring
+
+        write_run_monitoring(run_dir)
+    except Exception as exc:  # noqa: BLE001
+        _write_json(
+            run_dir / "token_monitoring_error.json",
+            {
+                "schema_version": 1,
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "generated_at_utc": _utc_now_z(),
+                "non_fatal": True,
+            },
+        )
+
+
 def _schema_is_task_run_v1(schema_dict: dict[str, Any]) -> bool:
     properties = schema_dict.get("properties")
     properties_dict = properties if isinstance(properties, dict) else {}
@@ -5227,8 +5218,7 @@ def _maybe_write_shell_capability_block_report_artifacts(
                 "title": f"Shell capability {state_s}",
                 "details": reason_s,
                 "evidence": (
-                    f"state={state_s}"
-                    + (f"; reason_code={reason_code_s}" if reason_code_s else "")
+                    f"state={state_s}" + (f"; reason_code={reason_code_s}" if reason_code_s else "")
                 ),
                 "suggested_fix": hint,
             }
@@ -6009,11 +5999,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "capability": "shell_commands",
                     "message": message,
                     **({"hint": hint} if hint else {}),
-                    **(
-                        {"suggested_command": suggested_command}
-                        if suggested_command
-                        else {}
-                    ),
+                    **({"suggested_command": suggested_command} if suggested_command else {}),
                     "preflight": {
                         "capabilities": {
                             "shell_commands": {
@@ -6588,9 +6574,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 "runtime": python_runtime_summary,
                 "validation": dict(python_validation_summary),
                 "context_probe": (
-                    dict(python_context_probe)
-                    if isinstance(python_context_probe, dict)
-                    else None
+                    dict(python_context_probe) if isinstance(python_context_probe, dict) else None
                 ),
                 "modules": {
                     "pip": dict(pip_probe) if isinstance(pip_probe, dict) else None,
@@ -6953,13 +6937,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             ["--ref", json.dumps(request.ref, ensure_ascii=False)]
                         )
                     if effective_spec.persona_id:
-                        suggested_command_parts.extend(
-                            ["--persona-id", effective_spec.persona_id]
-                        )
+                        suggested_command_parts.extend(["--persona-id", effective_spec.persona_id])
                     if effective_spec.mission_id:
-                        suggested_command_parts.extend(
-                            ["--mission-id", effective_spec.mission_id]
-                        )
+                        suggested_command_parts.extend(["--mission-id", effective_spec.mission_id])
                     suggested_command = " ".join(suggested_command_parts)
                 else:
                     message = (
@@ -6976,11 +6956,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "capability": "shell_commands",
                         "message": message,
                         **({"hint": hint} if hint else {}),
-                        **(
-                            {"suggested_command": suggested_command}
-                            if suggested_command
-                            else {}
-                        ),
+                        **({"suggested_command": suggested_command} if suggested_command else {}),
                         "preflight": {
                             "capabilities": {
                                 "shell_commands": {
@@ -7017,9 +6993,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
 
                 suggested_command: str | None = None
-                if (
-                    exec_backend == "docker"
-                    and not bool(getattr(request, "exec_rebuild_image", False))
+                if exec_backend == "docker" and not bool(
+                    getattr(request, "exec_rebuild_image", False)
                 ):
                     suggested_command_parts: list[str] = [
                         "python",
@@ -7235,9 +7210,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 and float(verification_timeout_seconds) <= 0.0
             ):
                 verification_timeout_seconds = None
-            verification_reuse_mode = str(
-                getattr(request, "verification_reuse_mode", "auto") or "auto"
-            ).strip().lower()
+            verification_reuse_mode = (
+                str(getattr(request, "verification_reuse_mode", "auto") or "auto").strip().lower()
+            )
             if verification_reuse_mode not in {"auto", "off"}:
                 raise ValueError(
                     "verification_reuse_mode must be one of {'auto', 'off'}; "
@@ -7369,9 +7344,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "configured": bool(verification_commands),
                         "mode": verification_reuse_mode,
                         "commands": (
-                            []
-                            if verification_reuse_mode == "auto"
-                            else verification_commands
+                            [] if verification_reuse_mode == "auto" else verification_commands
                         ),
                         "final_handoff_command": verification_broker_command,
                         "timeout_seconds": effective_verification_timeout_seconds,
@@ -7442,9 +7415,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
                 if shell_command_guidance_md.strip():
                     execution_notes_md = (
-                        execution_notes_md.rstrip()
-                        + "\n"
-                        + shell_command_guidance_md.strip()
+                        execution_notes_md.rstrip() + "\n" + shell_command_guidance_md.strip()
                     )
                 prompt = build_prompt_from_template(
                     template_text=effective_spec.prompt_template_text,
@@ -7763,9 +7734,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         _python_exec_for_verification: str | None = python_exec_for_verification,
                     ) -> dict[str, Any]:
                         broker_progress_callback = (
-                            (
-                                lambda payload: progress_callback(payload, status="running")
-                            )
+                            (lambda payload: progress_callback(payload, status="running"))
                             if progress_callback is not None
                             else None
                         )
@@ -7923,16 +7892,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     latest_status = getattr(broker_latest_result, "status", None)
                     if isinstance(latest_status, str) and latest_status.strip():
                         attempt_broker_response_status = latest_status.strip()
-                    latest_failure_reason = getattr(
-                        broker_latest_result, "failure_reason", None
-                    )
-                    if (
-                        isinstance(latest_failure_reason, str)
-                        and latest_failure_reason.strip()
-                    ):
-                        attempt_broker_response_failure_reason = (
-                            latest_failure_reason.strip()
-                        )
+                    latest_failure_reason = getattr(broker_latest_result, "failure_reason", None)
+                    if isinstance(latest_failure_reason, str) and latest_failure_reason.strip():
+                        attempt_broker_response_failure_reason = latest_failure_reason.strip()
                     attempt_broker_missing_required_artifacts = list(
                         verification_broker_missing_result_artifacts(broker_latest_result)
                     )
@@ -7967,8 +7929,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 commands_configured=verification_commands,
                             )
                             if broker_latest_result.status == "passed":
-                                attempt_verification_workspace_hash = (
-                                    compute_workspace_state_hash(acquired.workspace_dir)
+                                attempt_verification_workspace_hash = compute_workspace_state_hash(
+                                    acquired.workspace_dir
                                 )
                                 expected_hash = (
                                     broker_latest_result.workspace_hash_after_verification
@@ -7985,15 +7947,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 ):
                                     attempt_broker_reuse_candidate = True
                                     attempt_verification_source = "broker_reuse"
-                                    attempt_verification_summary = (
-                                        _decorate_verification_summary(
-                                            broker_summary,
-                                            source="broker_reuse",
-                                            reused=True,
-                                            workspace_hash=attempt_verification_workspace_hash,
-                                            broker_request_id=broker_latest_result.request_id,
-                                            broker_artifacts_dir=broker_latest_result.artifacts_dir,
-                                        )
+                                    attempt_verification_summary = _decorate_verification_summary(
+                                        broker_summary,
+                                        source="broker_reuse",
+                                        reused=True,
+                                        workspace_hash=attempt_verification_workspace_hash,
+                                        broker_request_id=broker_latest_result.request_id,
+                                        broker_artifacts_dir=broker_latest_result.artifacts_dir,
                                     )
                                     verification_reuse_selected_source = "broker_reuse"
                                     verification_reuse_fallback_reason = None
@@ -8077,9 +8037,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         verification_reuse_fallback_reason = broker_reuse_fallback_reason
                         verification_reuse_selected_request_id = None
                         verification_reuse_selected_attempt = attempt_number
-                        verification_reuse_selected_artifacts_dir = str(
-                            attempt_verification_summary.get("artifacts_dir") or ""
-                        ).strip() or None
+                        verification_reuse_selected_artifacts_dir = (
+                            str(attempt_verification_summary.get("artifacts_dir") or "").strip()
+                            or None
+                        )
                     attempt_verification_passed = bool(
                         attempt_verification_summary.get("passed", False)
                     )
@@ -8152,8 +8113,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "verification": {
                                     "summary_path": (
                                         str(Path(artifacts_dir.strip()) / "verification.json")
-                                        if isinstance(artifacts_dir, str)
-                                        and artifacts_dir.strip()
+                                        if isinstance(artifacts_dir, str) and artifacts_dir.strip()
                                         else None
                                     ),
                                     "command": attempt_verification_rejected_sentinel_command,
@@ -8174,8 +8134,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         )
                         if attempt_broker_response_failure_reason is not None:
                             attempt_verification_errors.append(
-                                "broker_failure_reason="
-                                f"{attempt_broker_response_failure_reason}"
+                                f"broker_failure_reason={attempt_broker_response_failure_reason}"
                             )
                         commands = attempt_verification_summary.get("commands")
                         if isinstance(commands, list) and commands:
@@ -8235,9 +8194,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                         if attempt_verification_rejected_sentinel
                                         else _verification_terminal_reason(
                                             attempt_verification_summary
-                                            if isinstance(
-                                                attempt_verification_summary, dict
-                                            )
+                                            if isinstance(attempt_verification_summary, dict)
                                             else {}
                                         )
                                     )
@@ -8269,15 +8226,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         ),
                         "broker_request_id": attempt_broker_request_id,
                         "broker_response_status": attempt_broker_response_status,
-                        "broker_response_failure_reason": (
-                            attempt_broker_response_failure_reason
-                        ),
+                        "broker_response_failure_reason": (attempt_broker_response_failure_reason),
                         "broker_missing_required_artifacts": (
                             attempt_broker_missing_required_artifacts
                         ),
-                        "broker_response_contract_error": (
-                            attempt_broker_response_contract_error
-                        ),
+                        "broker_response_contract_error": (attempt_broker_response_contract_error),
                         "reuse_candidate": (
                             attempt_broker_reuse_candidate if verification_commands else False
                         ),
@@ -8507,8 +8460,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         dst.write_text("", encoding="utf-8")
                     except OSError as exc:
                         materialization_errors.append(
-                            "failed_selected_attempt_artifact_placeholder="
-                            f"{label}:{dst}:{exc}"
+                            f"failed_selected_attempt_artifact_placeholder={label}:{dst}:{exc}"
                         )
                     return
                 try:
@@ -8634,13 +8586,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             phases = run_meta.get("phases")
             if isinstance(phases, dict):
                 if verification_commands:
-                    phases["verification_seconds"] = max(
-                        0.0, float(verification_seconds_total)
-                    )
+                    phases["verification_seconds"] = max(0.0, float(verification_seconds_total))
                 phases["verification_source"] = verification_reuse_selected_source
-                phases["verification_reused"] = (
-                    verification_reuse_selected_source == "broker_reuse"
-                )
+                phases["verification_reused"] = verification_reuse_selected_source == "broker_reuse"
                 phases["verification_broker_seconds"] = max(
                     0.0, float(verification_broker_seconds_total)
                 )
@@ -9053,7 +9001,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 user_errors.append(f"traceback={traceback_path.name}")
 
             derived_hint = (
-                "Common causes on Windows: invalid filename characters (< > : \" / \\\\ | ? *), "
+                'Common causes on Windows: invalid filename characters (< > : " / \\\\ | ? *), '
                 "overly long paths, or output streams that reject writes. "
                 "See error_traceback.txt for the failing operation."
             )
@@ -9123,3 +9071,5 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             _write_json(run_dir / "run_meta.json", run_meta)
         except Exception:  # noqa: BLE001
             pass
+
+        _maybe_write_token_monitoring_artifacts(run_dir)
