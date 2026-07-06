@@ -24,7 +24,7 @@ profiles:
       dry_run: false
       verification_profile: default_handoff
       verification_commands: []
-      verification_timeout_seconds: null
+      verification_timeout_seconds: 10800
       skip_verify: false
       verify_reuse: auto
       implementation_review_agent: claude
