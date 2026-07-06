@@ -124,6 +124,27 @@ def test_shell_capability_resolver_classifies_codex_windows_probe_failures() -> 
     assert powershell["reason_code"] == "codex_windows_powershell_prepayload_failed"
 
 
+def test_failed_shell_probe_blocks_non_codex_agents() -> None:
+    for agent, allowed_tools in (("claude", ["Bash"]), ("gemini", ["run_shell_command"])):
+        blocked = _resolve_shell_capability(
+            agent=agent,
+            operating_system="Linux",
+            backend="docker",
+            sandbox_mode=None,
+            policy_status="allowed",
+            policy_reason="policy permits shell commands",
+            allowed_tools=allowed_tools,
+            probe_result={
+                "ok": False,
+                "exit_code": 2,
+                "stderr_excerpt": "backend shell probe failed",
+            },
+        ).to_dict()
+        assert blocked["state"] == "blocked"
+        assert blocked["probe_status"] == "failed"
+        assert blocked["reason_code"] == "shell_probe_failed"
+
+
 def test_codex_nonlocal_backend_requires_explicit_shell_evidence() -> None:
     unprobed = _resolve_shell_capability(
         agent="codex",

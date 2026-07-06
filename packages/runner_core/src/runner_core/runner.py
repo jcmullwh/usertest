@@ -2395,14 +2395,20 @@ def _resolve_shell_capability(
         else:
             probe_status = "unknown"
 
-    if agent_norm == "codex" and probe_status == "failed":
-        reason_code, reason = _codex_shell_probe_failure_reason(
-            operating_system=operating_system,
-            probe_result=probe_result,
-        ) or (
-            "shell_probe_failed",
-            "Codex shell probe failed before shell capability could be marked available.",
-        )
+    if probe_status == "failed":
+        if agent_norm == "codex":
+            reason_code, reason = _codex_shell_probe_failure_reason(
+                operating_system=operating_system,
+                probe_result=probe_result,
+            ) or (
+                "shell_probe_failed",
+                "Codex shell probe failed before shell capability could be marked available.",
+            )
+        else:
+            reason_code = "shell_probe_failed"
+            reason = (
+                "Shell probe failed before shell capability could be marked available."
+            )
         return ShellCapability(
             state="blocked",
             agent=agent,
