@@ -48,6 +48,7 @@ from runner_core.agent_prompt_files import _materialize_agent_prompt_into_worksp
 from runner_core.catalog import load_catalog_config
 from runner_core.execution_backend import prepare_execution_backend
 from runner_core.pathing import (
+    LOCAL_BACKEND_RUN_DIR_ALIAS,
     agent_path_join,
     normalize_agent_path,
     slugify,
@@ -1890,32 +1891,42 @@ def _docker_exec_backend_available() -> bool:
 def _gemini_include_directories_for_workspace(*, workspace_dir: Path) -> list[str]:
     """
     Gemini CLI may apply gitignore-like "ignore patterns" to file tools (read/search), which can
-    hide local-only run artifacts (this repo ignores `runs/`).
+    hide local-only run artifacts (this repo ignores `runs/`) as well as the dot-prefixed
+    `LOCAL_BACKEND_RUN_DIR_ALIAS` staging directory used to surface run_dir-scoped content
+    (verification broker client/artifacts) to a workspace-confined agent on local backend.
 
     When a workspace contains `runs/usertest/`, explicitly include that directory so agents can
-    read generated `report.md` / `report.json` / `metrics.json` during triage flows.
+    read generated `report.md` / `report.json` / `metrics.json` during triage flows. Likewise,
+    always include the run_dir alias directory when present so Gemini's file tools can read
+    verification artifacts staged there.
     """
+
+    includes: list[str] = []
 
     # Gemini CLI runs inside the runner's Docker sandbox (Linux). Always pass POSIX-style
     # include-directories to avoid `runs\\usertest` being interpreted as a literal path segment.
     include_rel = agent_path_join("runs", "usertest")
     candidate = workspace_dir / "runs" / "usertest"
     if candidate.is_dir():
-        return [include_rel]
+        includes.append(include_rel)
+    else:
+        # Some missions run this repo's own CLI inside the workspace and then try to inspect the
+        # resulting artifacts under `runs/usertest/...`. Gemini CLI's file tools may ignore
+        # `runs/` by default, so ensure the directory exists up front for this runner repo so we
+        # can pass `--include-directories runs/usertest` at process start.
+        marker = workspace_dir / "tools" / "scaffold" / "monorepo.toml"
+        if marker.exists():
+            try:
+                candidate.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                pass
+            else:
+                includes.append(include_rel)
 
-    # Some missions run this repo's own CLI inside the workspace and then try to inspect the
-    # resulting artifacts under `runs/usertest/...`. Gemini CLI's file tools may ignore `runs/`
-    # by default, so ensure the directory exists up front for this runner repo so we can pass
-    # `--include-directories runs/usertest` at process start.
-    marker = workspace_dir / "tools" / "scaffold" / "monorepo.toml"
-    if marker.exists():
-        try:
-            candidate.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            return []
-        return [include_rel]
+    if (workspace_dir / LOCAL_BACKEND_RUN_DIR_ALIAS).is_dir():
+        includes.append(LOCAL_BACKEND_RUN_DIR_ALIAS)
 
-    return []
+    return includes
 
 
 _RUNS_USERTEST_GITIGNORE_MARKER = (
@@ -2850,16 +2861,41 @@ def _agent_path_for_staged_file(
     return agent_path_join(mount, rel)
 
 
+def _run_dir_agent_visible_root(
+    *, run_dir: Path, run_dir_mount: str | None, workspace_dir: Path
+) -> Path:
+    """
+    Resolve the canonical physical root for run_dir-scoped content that an agent's own
+    exec/read tools must reach at runtime: the verification broker's client script and its
+    per-attempt request/response files.
+
+    Docker backend bind-mounts `run_dir` into the sandbox alongside the workspace, so
+    physical storage stays under `run_dir` (already reachable there). Local backend has no
+    such mount: an agent confined to its own workspace -- and any subprocess it spawns, such
+    as the broker client script -- cannot reach `run_dir` at all, so physical storage must
+    live inside `workspace_dir` instead, under an alias excluded from workspace state
+    hashing (see `workspace_state_hash.py`) so this runner-owned scratch content never
+    affects agent-change detection.
+    """
+    if run_dir_mount is not None:
+        return run_dir
+    return workspace_dir / LOCAL_BACKEND_RUN_DIR_ALIAS
+
+
 def _verification_broker_client_command(
     *,
     run_dir: Path,
     run_dir_mount: str | None,
+    workspace_dir: Path,
     contract: VerificationBrokerContract,
 ) -> str:
-    client_root = run_dir / "verification_broker" / "client"
+    physical_root = _run_dir_agent_visible_root(
+        run_dir=run_dir, run_dir_mount=run_dir_mount, workspace_dir=workspace_dir
+    )
+    client_root = physical_root / "verification_broker" / "client"
     client_root_for_agent = _agent_path_for_staged_file(
         client_root,
-        run_dir=run_dir,
+        run_dir=physical_root,
         run_dir_mount=run_dir_mount,
     )
     return render_verification_broker_command(
@@ -3189,12 +3225,11 @@ def _build_verification_followup_prompt(
     schema_json = json.dumps(schema_dict, indent=2, ensure_ascii=False)
 
     artifacts_hint = ""
-    artifacts_dir = verification_summary.get("artifacts_dir")
-    if isinstance(artifacts_dir, str) and artifacts_dir.strip():
+    artifacts_dir_for_agent = verification_summary.get("artifacts_dir_for_agent")
+    if isinstance(artifacts_dir_for_agent, str) and artifacts_dir_for_agent.strip():
         artifacts_hint = (
-            "\n\nVerification artifacts:\n"
-            f"- Host: {artifacts_dir.strip()}\n"
-            f"- Docker: /run_dir/{artifacts_dir.strip()}\n"
+            "\n\nVerification artifacts: "
+            f"{artifacts_dir_for_agent.strip()}\n"
         )
 
     return (
@@ -4811,6 +4846,8 @@ def _run_verification_commands(
     deadline_monotonic: float | None = None,
     deadline_seconds: float | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
+    run_dir_mount: str | None = None,
+    workspace_dir: Path | None = None,
 ) -> dict[str, Any]:
     attempt_dir_rel = (
         artifacts_dir_rel
@@ -5262,7 +5299,40 @@ def _run_verification_commands(
             "commands": results,
         }
     )
+
+    # `artifacts_dir` above is a run_dir-relative label kept for host-side bookkeeping
+    # (reports, error records). It is not, by itself, resolvable by an agent: on docker
+    # backend it is missing the mount prefix, and on local backend run_dir is not reachable
+    # from the agent's own workspace at all. `artifacts_dir_for_agent` is the companion path
+    # actually safe to surface to the agent, always derived from the same canonical
+    # mount-aware resolution used for the verification broker client command.
+    artifacts_dir_for_agent: str | None
+    mirror_dir: Path | None = None
+    if run_dir_mount is not None:
+        artifacts_dir_for_agent = _agent_path_for_staged_file(
+            attempt_dir, run_dir=run_dir, run_dir_mount=run_dir_mount
+        )
+    elif workspace_dir is not None:
+        mirror_dir = workspace_dir / LOCAL_BACKEND_RUN_DIR_ALIAS / attempt_dir_rel
+        artifacts_dir_for_agent = str(mirror_dir.resolve())
+    else:
+        artifacts_dir_for_agent = None
+    summary["artifacts_dir_for_agent"] = artifacts_dir_for_agent
+
     _write_json(attempt_dir / "verification.json", summary)
+
+    if mirror_dir is not None:
+        # Local backend has no run_dir mount, so an agent confined to its own workspace
+        # cannot read `attempt_dir` at its real (run_dir) location. Mirror the finished
+        # attempt directory into the workspace so the reported `artifacts_dir_for_agent`
+        # path actually resolves to a readable file. `run_dir` remains the durable,
+        # canonical copy of these artifacts regardless of backend.
+        try:
+            mirror_dir.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(attempt_dir, mirror_dir, dirs_exist_ok=True)
+        except OSError:
+            summary["artifacts_dir_for_agent"] = None
+
     return summary
 
 
@@ -7637,6 +7707,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 verification_broker_command = _verification_broker_client_command(
                     run_dir=run_dir,
                     run_dir_mount=backend.run_dir_mount,
+                    workspace_dir=acquired.workspace_dir,
                     contract=verification_broker_contract,
                 )
 
@@ -7965,18 +8036,23 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 broker_request_ids: list[str] = []
                 if verification_commands and verification_reuse_mode == "auto":
                     assert verification_broker_contract is not None
-                    client_root = run_dir / "verification_broker" / "client"
+                    broker_physical_root = _run_dir_agent_visible_root(
+                        run_dir=run_dir,
+                        run_dir_mount=backend.run_dir_mount,
+                        workspace_dir=acquired.workspace_dir,
+                    )
+                    client_root = broker_physical_root / "verification_broker" / "client"
                     attempt_broker_root = (
-                        run_dir / "verification_broker" / f"attempt{attempt_number}"
+                        broker_physical_root / "verification_broker" / f"attempt{attempt_number}"
                     )
                     client_root_for_agent = _agent_path_for_staged_file(
                         client_root,
-                        run_dir=run_dir,
+                        run_dir=broker_physical_root,
                         run_dir_mount=backend.run_dir_mount,
                     )
                     attempt_root_for_agent = _agent_path_for_staged_file(
                         attempt_broker_root,
-                        run_dir=run_dir,
+                        run_dir=broker_physical_root,
                         run_dir_mount=backend.run_dir_mount,
                     )
 
@@ -8013,10 +8089,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             artifacts_dir_rel=Path("verification")
                             / f"attempt{_attempt_number}"
                             / f"broker_request_{request_index:02d}",
+                            run_dir_mount=backend.run_dir_mount,
+                            workspace_dir=acquired.workspace_dir,
                         )
 
                     broker_session = VerificationBrokerAttempt(
-                        run_dir=run_dir,
+                        run_dir=broker_physical_root,
                         attempt_number=attempt_number,
                         client_root=client_root,
                         client_root_for_agent=client_root_for_agent,
@@ -8045,6 +8123,23 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         broker_results = broker_session.results()
                         broker_attempt_rows = broker_session.artifact_rows()
                         broker_latest_result = broker_session.latest_result()
+                        if backend.run_dir_mount is None:
+                            # The broker's client/request/response files were staged inside
+                            # the workspace (see `broker_physical_root` above) so a
+                            # workspace-confined agent -- and the client subprocess it
+                            # spawns -- could reach them on local backend. Mirror them back
+                            # into run_dir once the attempt is done so run_dir remains the
+                            # durable, complete audit trail regardless of backend (tooling
+                            # such as batch failure classification inspects
+                            # `run_dir/verification_broker/...` directly).
+                            try:
+                                shutil.copytree(
+                                    broker_physical_root / "verification_broker",
+                                    run_dir / "verification_broker",
+                                    dirs_exist_ok=True,
+                                )
+                            except OSError:
+                                pass
                 agent_exec_wall_seconds = time.monotonic() - agent_exec_start_monotonic
 
                 raw_attempt_stderr_text = ""
@@ -8269,6 +8364,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "python_executable": python_exec_for_verification,
                             "python_toolchain_capability": python_toolchain_capability_summary,
                             "env_overrides": agent_env_overrides,
+                            "run_dir_mount": backend.run_dir_mount,
+                            "workspace_dir": acquired.workspace_dir,
                         }
                         if verification_reuse_mode == "auto":
                             verification_kwargs["artifacts_dir_rel"] = (

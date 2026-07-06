@@ -14,6 +14,7 @@ import pytest
 import runner_core.runner as runner_mod
 import runner_core.verification_broker as broker_mod
 from runner_core import RunnerConfig, RunRequest, run_once
+from runner_core.pathing import LOCAL_BACKEND_RUN_DIR_ALIAS
 from runner_core.verification_broker import VerificationBrokerAttempt
 from runner_core.workspace_state_hash import WorkspaceStateHash
 
@@ -170,6 +171,17 @@ def _stub_codex_binary_preflight(monkeypatch: pytest.MonkeyPatch) -> None:
         "_agent_auth_present_local",
         lambda **kwargs: (True, "test_stub"),
     )
+
+
+def _local_backend_broker_root(*, workspace_dir: Path) -> Path:
+    """
+    Full `run_once()` flows on local backend (no docker `run_dir` mount) stage the
+    verification broker's client script and per-attempt request/response files inside the
+    workspace instead of under `run_dir`, since a workspace-confined agent (and any
+    subprocess it spawns, like the broker client script) cannot reach `run_dir` at all. See
+    `_run_dir_agent_visible_root` in `runner.py`.
+    """
+    return workspace_dir / LOCAL_BACKEND_RUN_DIR_ALIAS
 
 
 def _run_broker_wrapper(*, run_dir: Path, workspace_dir: Path) -> subprocess.CompletedProcess[str]:
@@ -648,12 +660,12 @@ def test_run_once_reuses_broker_verification_without_post_agent_rerun(
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
-        run_dir = last_message_path.parent
+        workspace_dir = Path(str(kwargs["workspace_dir"]))
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
         broker = _run_broker_wrapper(
-            run_dir=run_dir,
-            workspace_dir=Path(str(kwargs["workspace_dir"])),
+            run_dir=_local_backend_broker_root(workspace_dir=workspace_dir),
+            workspace_dir=workspace_dir,
         )
         assert broker.returncode == 0, broker.stderr or broker.stdout
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
@@ -708,15 +720,15 @@ def test_run_once_uses_latest_broker_result_within_single_attempt(
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
-        run_dir = last_message_path.parent
         workspace_dir = Path(str(kwargs["workspace_dir"]))
+        broker_root = _local_backend_broker_root(workspace_dir=workspace_dir)
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
 
-        first = _run_broker_wrapper(run_dir=run_dir, workspace_dir=workspace_dir)
+        first = _run_broker_wrapper(run_dir=broker_root, workspace_dir=workspace_dir)
         assert first.returncode != 0
         (workspace_dir / "marker.txt").write_text("ok\n", encoding="utf-8")
-        second = _run_broker_wrapper(run_dir=run_dir, workspace_dir=workspace_dir)
+        second = _run_broker_wrapper(run_dir=broker_root, workspace_dir=workspace_dir)
         assert second.returncode == 0, second.stderr or second.stdout
 
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
@@ -774,7 +786,6 @@ def test_run_once_uses_failed_broker_result_directly_before_followup(
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
-        run_dir = last_message_path.parent
         workspace_dir = Path(str(kwargs["workspace_dir"]))
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
@@ -782,7 +793,10 @@ def test_run_once_uses_failed_broker_result_directly_before_followup(
         if state["attempt"] >= 2:
             (workspace_dir / "marker.txt").write_text("ok\n", encoding="utf-8")
 
-        broker = _run_broker_wrapper(run_dir=run_dir, workspace_dir=workspace_dir)
+        broker = _run_broker_wrapper(
+            run_dir=_local_backend_broker_root(workspace_dir=workspace_dir),
+            workspace_dir=workspace_dir,
+        )
         if state["attempt"] == 1:
             assert broker.returncode != 0
         else:
@@ -891,11 +905,13 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_response_is_incompl
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
-        run_dir = last_message_path.parent
         workspace_dir = Path(str(kwargs["workspace_dir"]))
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
-        broker = _run_broker_wrapper(run_dir=run_dir, workspace_dir=workspace_dir)
+        broker = _run_broker_wrapper(
+            run_dir=_local_backend_broker_root(workspace_dir=workspace_dir),
+            workspace_dir=workspace_dir,
+        )
         assert broker.returncode != 0
         assert "incomplete broker response" in broker.stderr
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
@@ -982,10 +998,12 @@ def test_run_once_fails_closed_when_selected_attempt_artifact_is_missing(
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
-        run_dir = last_message_path.parent
         workspace_dir = Path(str(kwargs["workspace_dir"]))
         stderr_path.write_text("", encoding="utf-8")
-        broker = _run_broker_wrapper(run_dir=run_dir, workspace_dir=workspace_dir)
+        broker = _run_broker_wrapper(
+            run_dir=_local_backend_broker_root(workspace_dir=workspace_dir),
+            workspace_dir=workspace_dir,
+        )
         assert broker.returncode == 0, broker.stderr or broker.stdout
         if raw_events_path.exists():
             raw_events_path.unlink()
@@ -1070,3 +1088,281 @@ def test_run_once_serializes_failed_terminal_reason_into_report(
     assert verification["terminal_reason"] == "failed"
     report = json.loads((result.run_dir / "report.json").read_text(encoding="utf-8"))
     assert report["extensions"]["verification"]["terminal_reason"] == "failed"
+
+
+# --- Canonical agent-visible path contract -------------------------------------------------
+#
+# On local backend there is no `run_dir` bind mount into a sandbox: an agent confined to its
+# own workspace (and any subprocess it spawns, such as the broker client script) cannot reach
+# `run_dir` at all. The tests below cover the canonical mechanism that both the verification
+# broker command and surfaced verification artifacts must be derived from, per
+# `_run_dir_agent_visible_root` / `_agent_path_for_staged_file` / `_run_verification_commands`
+# in `runner.py`.
+
+
+def test_run_dir_agent_visible_root_stays_under_run_dir_for_docker_mount(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    physical_root = runner_mod._run_dir_agent_visible_root(
+        run_dir=run_dir,
+        run_dir_mount="/run_dir",
+        workspace_dir=workspace_dir,
+    )
+    assert physical_root == run_dir
+
+
+def test_run_dir_agent_visible_root_uses_workspace_alias_for_local_backend(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    physical_root = runner_mod._run_dir_agent_visible_root(
+        run_dir=run_dir,
+        run_dir_mount=None,
+        workspace_dir=workspace_dir,
+    )
+    assert physical_root == workspace_dir / LOCAL_BACKEND_RUN_DIR_ALIAS
+
+
+def test_run_verification_commands_reports_mount_path_for_docker_backend(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = runner_mod._run_verification_commands(
+        run_dir=run_dir,
+        attempt_number=1,
+        commands=[_verification_command()],
+        command_prefix=[],
+        cwd=workspace_dir,
+        timeout_seconds=30.0,
+        python_executable=sys.executable,
+        run_dir_mount="/run_dir",
+        workspace_dir=workspace_dir,
+    )
+
+    assert summary["passed"] is True
+    assert summary["artifacts_dir_for_agent"] == "/run_dir/verification/attempt1"
+    # Docker's bind mount already makes `run_dir` reachable; no workspace mirror is needed.
+    assert not (workspace_dir / LOCAL_BACKEND_RUN_DIR_ALIAS).exists()
+    assert (run_dir / "verification" / "attempt1" / "verification.json").exists()
+
+
+def test_run_verification_commands_mirrors_artifacts_into_workspace_for_local_backend(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    summary = runner_mod._run_verification_commands(
+        run_dir=run_dir,
+        attempt_number=1,
+        commands=[_verification_command()],
+        command_prefix=[],
+        cwd=workspace_dir,
+        timeout_seconds=30.0,
+        python_executable=sys.executable,
+        run_dir_mount=None,
+        workspace_dir=workspace_dir,
+    )
+
+    assert summary["passed"] is True
+    # `artifacts_dir` remains the run_dir-relative bookkeeping label...
+    assert summary["artifacts_dir"] == "verification/attempt1"
+    # ...but `artifacts_dir_for_agent` must resolve to a real, readable file inside the
+    # workspace, since run_dir itself is unreachable from a workspace-confined agent on
+    # local backend.
+    agent_path = Path(summary["artifacts_dir_for_agent"])
+    assert agent_path.is_relative_to(workspace_dir.resolve())
+    assert (agent_path / "verification.json").exists()
+    mirrored = json.loads((agent_path / "verification.json").read_text(encoding="utf-8"))
+    assert mirrored["passed"] is True
+    # The canonical, durable copy remains under run_dir regardless of backend.
+    assert (run_dir / "verification" / "attempt1" / "verification.json").exists()
+
+
+def test_build_verification_followup_prompt_surfaces_agent_visible_path_only(
+    tmp_path: Path,
+) -> None:
+    prompt = runner_mod._build_verification_followup_prompt(
+        base_prompt="base",
+        verification_summary={
+            "commands": [],
+            "artifacts_dir": "verification/attempt1",
+            "artifacts_dir_for_agent": str(tmp_path / "workspace" / "verification" / "attempt1"),
+        },
+        schema_dict={},
+        prior_last_message_text="prior",
+        attempt_number=1,
+    )
+    assert "Verification artifacts:" in prompt
+    assert str(tmp_path / "workspace" / "verification" / "attempt1") in prompt
+    # The old hardcoded dual Host/Docker guess must not reappear.
+    assert "- Host:" not in prompt
+    assert "- Docker:" not in prompt
+
+
+def test_verification_broker_response_prefers_agent_visible_artifacts_dir(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    agent_visible = (
+        tmp_path / "workspace" / LOCAL_BACKEND_RUN_DIR_ALIAS / "verification" / "attempt1"
+    )
+    summary = {
+        "schema_version": 1,
+        "attempt_number": 1,
+        "commands_configured": [_verification_command()],
+        "passed": False,
+        "started_utc": "2026-03-07T00:00:00Z",
+        "finished_utc": "2026-03-07T00:00:01Z",
+        "wall_seconds": 0.01,
+        "artifacts_dir": "verification/attempt1/broker_request_01",
+        "artifacts_dir_for_agent": str(agent_visible),
+        "commands": [
+            {
+                "command": _verification_command(),
+                "exit_code": 1,
+                "timed_out": False,
+            }
+        ],
+    }
+    broker = _make_broker_attempt(run_dir=run_dir, verifier=lambda _: summary)
+    broker.start()
+    try:
+        completed = _run_broker_wrapper(run_dir=run_dir, workspace_dir=tmp_path)
+    finally:
+        broker.stop()
+
+    assert completed.returncode != 0
+    assert str(agent_visible) in completed.stderr
+    assert "verification/attempt1/broker_request_01" not in completed.stderr
+
+
+def test_workspace_state_hash_excludes_local_backend_run_dir_alias(tmp_path: Path) -> None:
+    from runner_core.workspace_state_hash import compute_workspace_state_hash
+
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+    (workspace_dir / "real_file.txt").write_text("hello\n", encoding="utf-8")
+
+    before = compute_workspace_state_hash(workspace_dir)
+
+    alias_dir = workspace_dir / LOCAL_BACKEND_RUN_DIR_ALIAS / "verification_broker" / "client"
+    alias_dir.mkdir(parents=True)
+    (alias_dir / "verify_client.sh").write_text("#!/bin/sh\necho hi\n", encoding="utf-8")
+
+    after = compute_workspace_state_hash(workspace_dir)
+
+    assert after.sha256 == before.sha256
+    assert after.file_count == before.file_count
+
+
+def test_gemini_include_directories_includes_local_backend_alias_when_present(
+    tmp_path: Path,
+) -> None:
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    assert LOCAL_BACKEND_RUN_DIR_ALIAS not in runner_mod._gemini_include_directories_for_workspace(
+        workspace_dir=workspace_dir
+    )
+
+    (workspace_dir / LOCAL_BACKEND_RUN_DIR_ALIAS).mkdir()
+    assert LOCAL_BACKEND_RUN_DIR_ALIAS in runner_mod._gemini_include_directories_for_workspace(
+        workspace_dir=workspace_dir
+    )
+
+
+def test_run_once_local_backend_verification_broker_and_artifacts_are_workspace_readable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """
+    Reproduces the reported failure mode end to end: on local backend, with a codex
+    workspace-write policy (no docker `run_dir` mount), the final verification broker
+    command must reference a path inside the agent's own workspace, and the surfaced
+    verification artifact path must resolve to a real, readable file there too.
+    """
+
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    _stub_codex_binary_preflight(monkeypatch)
+
+    captured: dict[str, Path] = {}
+
+    def _fake_run_codex_exec(**kwargs: object) -> object:
+        raw_events_path = Path(str(kwargs["raw_events_path"]))
+        last_message_path = Path(str(kwargs["last_message_path"]))
+        stderr_path = Path(str(kwargs["stderr_path"]))
+        workspace_dir = Path(str(kwargs["workspace_dir"]))
+        captured["workspace_dir"] = workspace_dir
+        raw_events_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        broker = _run_broker_wrapper(
+            run_dir=_local_backend_broker_root(workspace_dir=workspace_dir),
+            workspace_dir=workspace_dir,
+        )
+        assert broker.returncode == 0, broker.stderr or broker.stdout
+        last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
+        return SimpleNamespace(exit_code=0, argv=["codex", "exec"])
+
+    monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": "codex"}},
+        policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+            verification_commands=(_verification_command(),),
+            verification_reuse_mode="auto",
+            keep_workspace=True,
+        ),
+    )
+
+    assert result.exit_code == 0
+    workspace_dir = captured["workspace_dir"]
+
+    # The final broker command handed to the agent must live inside its own workspace, not
+    # at a host-only run_dir path outside it.
+    verification_config = json.loads(
+        (result.run_dir / "verification_config.json").read_text(encoding="utf-8")
+    )
+    final_command = verification_config["final_handoff_command"]
+    assert str(workspace_dir.resolve()) in final_command
+    assert str(result.run_dir.resolve()) not in final_command
+
+    # The surfaced verification artifact path must resolve to a real, readable file inside
+    # the workspace.
+    verification = json.loads((result.run_dir / "verification.json").read_text(encoding="utf-8"))
+    artifacts_dir_for_agent = verification["artifacts_dir_for_agent"]
+    assert artifacts_dir_for_agent is not None
+    assert Path(artifacts_dir_for_agent).is_relative_to(workspace_dir.resolve())
+    assert (Path(artifacts_dir_for_agent) / "verification.json").exists()
+
+    # The broker's request/response trail is mirrored back into run_dir once the attempt
+    # completes, so run_dir remains the durable, complete audit trail regardless of backend
+    # (e.g. usertest_implement's batch failure classification inspects
+    # `run_dir/verification_broker/...` directly and must keep working on local backend).
+    broker_requests = list(
+        (result.run_dir / "verification_broker").glob("attempt*/requests/*.json")
+    )
+    assert broker_requests
+    for request_path in broker_requests:
+        response_path = request_path.parent.parent / "responses" / request_path.name
+        assert response_path.exists()

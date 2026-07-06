@@ -386,6 +386,7 @@ def test_verification_broker_handoff_uses_shared_launcher_resolution() -> None:
     command = runner_mod._verification_broker_client_command(
         run_dir=Path("/tmp/run"),
         run_dir_mount="/run_dir",
+        workspace_dir=Path("/tmp/workspace"),
         contract=contract,
     )
     assert launcher.broker_wrapper_name in command
