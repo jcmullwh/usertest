@@ -211,6 +211,43 @@ class ShellCapability:
         }
 
 
+@dataclass(frozen=True)
+class DelegationCapability:
+    """
+    Runner-side delegation/subagent capability discovery for the effective agent policy.
+
+    The runner must not guess provider-specific delegation tool names.  Tool names are only treated
+    as detected when supplied by a documented adapter/config contract, or by a future local probe
+    that can prove them for the installed CLI.  Unknown capability is therefore explicit rather than
+    silently equivalent to unavailable.
+    """
+
+    state: str
+    agent: str
+    cli_version: str | None
+    configured_allowed_tools: list[str] | None
+    delegation_tool_names: list[str]
+    available_under_policy: bool | None
+    evidence_source: str
+    confidence: str
+    reason: str
+    cli_version_probe: dict[str, Any] | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "state": self.state,
+            "agent": self.agent,
+            "cli_version": self.cli_version,
+            "configured_allowed_tools": self.configured_allowed_tools,
+            "delegation_tool_names": list(self.delegation_tool_names),
+            "available_under_policy": self.available_under_policy,
+            "evidence_source": self.evidence_source,
+            "confidence": self.confidence,
+            "reason": self.reason,
+            "cli_version_probe": self.cli_version_probe,
+        }
+
+
 def _resolve_effective_agent_model(
     *,
     agent: str,
@@ -2233,6 +2270,163 @@ def _probe_agent_cli_version(
         "stdout_excerpt": stdout[:300] if stdout else None,
         "stderr_excerpt": stderr[:300] if stderr else None,
     }
+
+
+def _agent_cli_version_from_probe(version_probe: dict[str, Any] | None) -> str | None:
+    if not isinstance(version_probe, dict) or not bool(version_probe.get("ok")):
+        return None
+    for key in ("stdout_excerpt", "stderr_excerpt"):
+        value = version_probe.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip().splitlines()[0][:120]
+    return None
+
+
+def _agent_policy_for_delegation(
+    *,
+    agent: str,
+    policy_cfg: dict[str, Any],
+) -> dict[str, Any]:
+    raw = policy_cfg.get(agent)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _configured_allowed_tools_for_agent(
+    *,
+    agent: str,
+    policy_cfg: dict[str, Any],
+) -> list[str] | None:
+    agent_policy = _agent_policy_for_delegation(agent=agent, policy_cfg=policy_cfg)
+    raw_allowed = agent_policy.get("allowed_tools")
+    if isinstance(raw_allowed, list):
+        return [x for x in raw_allowed if isinstance(x, str) and x.strip()]
+    return None
+
+
+def _delegation_tools_from_adapter_contract(
+    *,
+    agent_cfg: dict[str, Any],
+) -> tuple[list[str], str | None]:
+    """
+    Return delegation tool names declared by adapter configuration.
+
+    Supported contract keys:
+    - ``delegation_tools: [tool, ...]``
+    - ``delegation: {tools: [tool, ...]}``
+
+    These keys are intentionally opt-in.  The runner does not embed provider-specific names here;
+    defaults should be populated only after a local CLI probe or adapter documentation confirms the
+    installed agent version's contract.
+    """
+
+    raw_tools = agent_cfg.get("delegation_tools")
+    source = "agent_config.delegation_tools"
+    if not isinstance(raw_tools, list):
+        raw_delegation = agent_cfg.get("delegation")
+        delegation = raw_delegation if isinstance(raw_delegation, dict) else {}
+        raw_tools = delegation.get("tools")
+        source = "agent_config.delegation.tools"
+
+    if not isinstance(raw_tools, list):
+        return [], None
+
+    tools: list[str] = []
+    seen: set[str] = set()
+    for item in raw_tools:
+        if not isinstance(item, str):
+            continue
+        tool = item.strip()
+        if not tool or tool in seen:
+            continue
+        tools.append(tool)
+        seen.add(tool)
+    if not tools:
+        return [], None
+    return tools, source
+
+
+def _resolve_delegation_capability(
+    *,
+    agent: str,
+    agent_cfg: dict[str, Any],
+    policy_cfg: dict[str, Any],
+    cli_version_probe: dict[str, Any] | None = None,
+) -> DelegationCapability:
+    agent_norm = agent.strip().lower()
+    allowed_tools = _configured_allowed_tools_for_agent(agent=agent_norm, policy_cfg=policy_cfg)
+    delegation_tool_names, evidence_source = _delegation_tools_from_adapter_contract(
+        agent_cfg=agent_cfg
+    )
+    cli_version = _agent_cli_version_from_probe(cli_version_probe)
+    version_probe_copy = dict(cli_version_probe) if isinstance(cli_version_probe, dict) else None
+
+    if not delegation_tool_names:
+        return DelegationCapability(
+            state="unknown",
+            agent=agent_norm or agent,
+            cli_version=cli_version,
+            configured_allowed_tools=allowed_tools,
+            delegation_tool_names=[],
+            available_under_policy=None,
+            evidence_source="none",
+            confidence="low",
+            reason=(
+                "No delegation tool names were detected from a local CLI probe or documented "
+                "adapter contract; capability is unknown and not guessed."
+            ),
+            cli_version_probe=version_probe_copy,
+        )
+
+    if allowed_tools is None:
+        return DelegationCapability(
+            state="available",
+            agent=agent_norm or agent,
+            cli_version=cli_version,
+            configured_allowed_tools=None,
+            delegation_tool_names=delegation_tool_names,
+            available_under_policy=True,
+            evidence_source=str(evidence_source or "agent_config"),
+            confidence="high",
+            reason=(
+                "Delegation tools are declared by adapter contract, and the selected policy does "
+                "not define an allowed_tools allowlist for this agent."
+            ),
+            cli_version_probe=version_probe_copy,
+        )
+
+    exposed = [tool for tool in delegation_tool_names if tool in allowed_tools]
+    if exposed:
+        return DelegationCapability(
+            state="available",
+            agent=agent_norm or agent,
+            cli_version=cli_version,
+            configured_allowed_tools=allowed_tools,
+            delegation_tool_names=delegation_tool_names,
+            available_under_policy=True,
+            evidence_source=str(evidence_source or "agent_config"),
+            confidence="high",
+            reason=(
+                "Delegation tools are declared by adapter contract and exposed by the selected "
+                "policy allowed_tools."
+            ),
+            cli_version_probe=version_probe_copy,
+        )
+
+    return DelegationCapability(
+        state="unavailable",
+        agent=agent_norm or agent,
+        cli_version=cli_version,
+        configured_allowed_tools=allowed_tools,
+        delegation_tool_names=delegation_tool_names,
+        available_under_policy=False,
+        evidence_source=str(evidence_source or "agent_config"),
+        confidence="high",
+        reason=(
+            "Delegation tools are declared by adapter contract, but the selected policy "
+            "allowed_tools does not expose any of them."
+        ),
+        cli_version_probe=version_probe_copy,
+    )
 
 
 def _agent_auth_env_var_candidates(agent: str) -> tuple[str, ...]:
@@ -6064,6 +6258,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             allowed_tools=allowed_tools,
         )
         shell_capability_summary = shell_capability.to_dict()
+        delegation_capability_summary = _resolve_delegation_capability(
+            agent=request.agent,
+            agent_cfg=agent_cfg_dict,
+            policy_cfg=policy_cfg,
+            cli_version_probe=None,
+        ).to_dict()
 
         early_shell_capability_state = shell_capability_summary.get("state")
         defer_shell_launch_probe = (
@@ -6177,9 +6377,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "allowed_tools": allowed_tools,
                             "canonical": shell_capability_summary,
                         },
+                        "delegation": delegation_capability_summary,
                         "edits": {"allowed": bool(allow_edits)},
                     },
                     "shell_capability": shell_capability_summary,
+                    "delegation_capability": delegation_capability_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -6208,9 +6410,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "reason": shell_reason,
                                 "allowed_tools": allowed_tools,
                                 "canonical": shell_capability_summary,
-                            }
+                            },
+                            "delegation": delegation_capability_summary,
                         },
                         "shell_capability": shell_capability_summary,
+                        "delegation_capability": delegation_capability_summary,
                     },
                 },
             )
@@ -6251,9 +6455,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "allowed_tools": allowed_tools,
                             "canonical": shell_capability_summary,
                         },
+                        "delegation": delegation_capability_summary,
                         "edits": {"allowed": bool(allow_edits)},
                     },
                     "shell_capability": shell_capability_summary,
+                    "delegation_capability": delegation_capability_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -6339,9 +6545,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "allowed_tools": allowed_tools,
                             "canonical": shell_capability_summary,
                         },
+                        "delegation": delegation_capability_summary,
                         "edits": {"allowed": bool(allow_edits)},
                     },
                     "shell_capability": shell_capability_summary,
+                    "delegation_capability": delegation_capability_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -6365,8 +6573,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "status": shell_status,
                                 "reason": shell_reason,
                                 "allowed_tools": allowed_tools,
-                            }
-                        }
+                            },
+                            "delegation": delegation_capability_summary,
+                        },
+                        "delegation_capability": delegation_capability_summary,
                     },
                 },
             )
@@ -7081,6 +7291,27 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 if required_agent_binary is not None
                 else None
             )
+            agent_cli_version_probe: dict[str, Any] | None = None
+            if required_agent_binary is not None and required_agent_binary_present is True:
+                version_timeout_seconds = 2.5
+                # Gemini CLI is a Node-based binary and can exceed the default 2.5s budget,
+                # especially under `docker exec` where process startup overhead is higher.
+                if str(request.agent).strip().lower() == "gemini":
+                    version_timeout_seconds = 8.0
+                agent_cli_version_probe = _probe_agent_cli_version(
+                    binary=required_agent_binary,
+                    command_prefix=command_prefix,
+                    env_overrides=agent_env_overrides,
+                    timeout_seconds=version_timeout_seconds,
+                )
+                preflight_meta["agent_cli_version_probe"] = dict(agent_cli_version_probe)
+
+            delegation_capability_summary = _resolve_delegation_capability(
+                agent=request.agent,
+                agent_cfg=agent_cfg_dict,
+                policy_cfg=policy_cfg,
+                cli_version_probe=agent_cli_version_probe,
+            ).to_dict()
 
             python_toolchain_capability_summary = _build_python_toolchain_capability_summary(
                 python_validation_required=python_validation_required,
@@ -7118,9 +7349,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "allowed_tools": allowed_tools,
                             "canonical": shell_capability_summary,
                         },
+                        "delegation": delegation_capability_summary,
                         "edits": {"allowed": bool(allow_edits)},
                     },
                     "shell_capability": shell_capability_summary,
+                    "delegation_capability": delegation_capability_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -7553,18 +7786,19 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             ):
                 exec_backend = str(getattr(request, "exec_backend", "local") or "local").strip()
 
-                version_timeout_seconds = 2.5
-                # Gemini CLI is a Node-based binary and can exceed the default 2.5s budget,
-                # especially under `docker exec` where process startup overhead is higher.
-                if str(request.agent).strip().lower() == "gemini":
-                    version_timeout_seconds = 8.0
-
-                version_probe = _probe_agent_cli_version(
-                    binary=required_agent_binary,
-                    command_prefix=command_prefix,
-                    env_overrides=agent_env_overrides,
-                    timeout_seconds=version_timeout_seconds,
-                )
+                version_probe = agent_cli_version_probe
+                if version_probe is None:
+                    version_timeout_seconds = 2.5
+                    # Gemini CLI is a Node-based binary and can exceed the default 2.5s budget,
+                    # especially under `docker exec` where process startup overhead is higher.
+                    if str(request.agent).strip().lower() == "gemini":
+                        version_timeout_seconds = 8.0
+                    version_probe = _probe_agent_cli_version(
+                        binary=required_agent_binary,
+                        command_prefix=command_prefix,
+                        env_overrides=agent_env_overrides,
+                        timeout_seconds=version_timeout_seconds,
+                    )
                 if not bool(version_probe.get("ok")):
                     message = (
                         f"Required agent binary '{required_agent_binary}' is present but failed "
@@ -7906,9 +8140,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "allowed_tools": allowed_tools,
                                 "canonical": shell_capability_summary,
                             },
+                            "delegation": delegation_capability_summary,
                             "edits": {"allowed": bool(allow_edits)},
                         },
                         "shell_capability": shell_capability_summary,
+                        "delegation_capability": delegation_capability_summary,
                         "workspace_root_snapshot": preflight_workspace_snapshot,
                     },
                     "bootstrap": bootstrap.meta if bootstrap is not None else None,

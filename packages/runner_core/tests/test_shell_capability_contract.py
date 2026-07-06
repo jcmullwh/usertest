@@ -8,7 +8,11 @@ from normalized_events import iter_events_jsonl
 
 import runner_core.runner as runner_mod
 from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
-from runner_core.runner import _resolve_shell_capability, _shell_probe_result_from_preflight_meta
+from runner_core.runner import (
+    _resolve_delegation_capability,
+    _resolve_shell_capability,
+    _shell_probe_result_from_preflight_meta,
+)
 
 
 def _install_task_requires_shell_mission(target_repo: Path) -> None:
@@ -419,3 +423,52 @@ def test_shell_required_backend_probe_failure_blocks_dispatch_and_classifies(
     assert shell_capability["state"] == "blocked"
     assert shell_capability["probe_status"] == "failed"
     assert shell_capability["reason_code"] == "codex_windows_sandbox_panic"
+
+
+def test_delegation_capability_resolver_available_unavailable_unknown() -> None:
+    available = _resolve_delegation_capability(
+        agent="claude",
+        agent_cfg={"delegation_tools": ["Task"]},
+        policy_cfg={"claude": {"allowed_tools": ["Read", "Task"]}},
+        cli_version_probe={"ok": True, "stdout_excerpt": "claude 1.2.3"},
+    ).to_dict()
+    assert available["state"] == "available"
+    assert available["available_under_policy"] is True
+    assert available["delegation_tool_names"] == ["Task"]
+    assert available["cli_version"] == "claude 1.2.3"
+    assert available["evidence_source"] == "agent_config.delegation_tools"
+
+    unavailable = _resolve_delegation_capability(
+        agent="gemini",
+        agent_cfg={"delegation": {"tools": ["delegate"]}},
+        policy_cfg={"gemini": {"allowed_tools": ["read_file"]}},
+        cli_version_probe={"ok": True, "stdout_excerpt": "gemini 0.30.0"},
+    ).to_dict()
+    assert unavailable["state"] == "unavailable"
+    assert unavailable["available_under_policy"] is False
+    assert unavailable["delegation_tool_names"] == ["delegate"]
+    assert unavailable["evidence_source"] == "agent_config.delegation.tools"
+
+    unknown = _resolve_delegation_capability(
+        agent="codex",
+        agent_cfg={},
+        policy_cfg={"codex": {"sandbox": "workspace-write"}},
+        cli_version_probe={"ok": False, "error": "timeout"},
+    ).to_dict()
+    assert unknown["state"] == "unknown"
+    assert unknown["available_under_policy"] is None
+    assert unknown["delegation_tool_names"] == []
+    assert unknown["confidence"] == "low"
+    assert "not guessed" in unknown["reason"]
+
+
+def test_delegation_capability_codex_contract_available_without_tool_allowlist() -> None:
+    capability = _resolve_delegation_capability(
+        agent="codex",
+        agent_cfg={"delegation_tools": ["spawn_agent"]},
+        policy_cfg={"codex": {"sandbox": "workspace-write", "allow_edits": True}},
+        cli_version_probe={"ok": True, "stdout_excerpt": "codex-cli 9.9.9"},
+    ).to_dict()
+    assert capability["state"] == "available"
+    assert capability["configured_allowed_tools"] is None
+    assert capability["available_under_policy"] is True

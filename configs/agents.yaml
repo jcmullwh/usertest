@@ -22,6 +22,9 @@ agents:
     # repo-owned defaults instead of relying on interactive user config.
     config_overrides:
       - "model_reasoning_effort=high"
+    # Optional delegation capability contract. Leave unset until a local CLI probe or
+    # adapter documentation confirms the installed CLI's delegation/subagent tool names.
+    # delegation_tools: []
     args:
       json_events: ["--json"]
       last_message: ["--output-last-message"]
@@ -36,6 +39,9 @@ agents:
     raw_events_format: jsonl
     output_format: stream-json
     notes: "Implemented (headless `claude -p`)."
+    # Optional delegation capability contract. Leave unset until a local CLI probe or
+    # adapter documentation confirms the installed CLI's delegation/subagent tool names.
+    # delegation_tools: []
     sandbox_cli_install:
       # Claude Code is commonly installed via npm; keep deps minimal.
       apt: [nodejs]
@@ -50,6 +56,9 @@ agents:
     raw_events_format: jsonl
     output_format: stream-json
     notes: "Implemented (headless `gemini --output-format stream-json`)."
+    # Optional delegation capability contract. Leave unset until a local CLI probe or
+    # adapter documentation confirms the installed CLI's delegation/subagent tool names.
+    # delegation_tools: []
     sandbox_cli_install:
       apt: [nodejs]
       pip: []
