@@ -113,10 +113,13 @@ Entry points:
 - `usertest-implement run`
   - Implement a single exported backlog ticket in a target repo.
   - Writes a run directory under `runs/usertest_implement/…` with ticket linkage artifacts (treat as sensitive by default; see `docs/ops/security.md`).
-  - Optional git finalization:
-    - `--commit` creates a branch + commit in the kept workspace.
-    - `--push` pushes the branch to the configured remote.
-    - `--pr` attempts best-effort PR creation using GitHub CLI (`gh`). (`gh` must be on `PATH` and authenticated.)
+  - Git finalization is controlled by existing flags and by the auto-loaded
+    `configs/usertest_implement_settings.yaml` profile. The parser defaults are local, but the
+    default settings profile enables `commit: true`, `push: true`, and `pr: true`.
+    - `--commit` / `--no-commit` creates or disables a branch + commit in the kept workspace.
+    - `--push` / `--no-push` pushes or disables pushing the branch to the configured remote.
+    - `--pr` / `--no-pr` attempts or disables best-effort PR creation using GitHub CLI (`gh`).
+      (`gh` must be on `PATH` and authenticated.)
 
 ### Reports utilities
 
@@ -129,6 +132,8 @@ Entry points:
   - Work with `.agents/plans/*` ticket queues.
 - `usertest-implement tickets run-next`
   - Standard flow: refresh backlog exports (including `review-ux`) and implement the next ticket (research-first).
+  - With the default settings profile, this flow commits, pushes, and opens a PR unless you pass
+    the existing `--no-commit`, `--no-push`, and/or `--no-pr` flags.
 
 ---
 

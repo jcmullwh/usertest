@@ -3299,7 +3299,14 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         ),
     )
 
-    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Print selected ticket, effective settings, and run request; do not run the agent, "
+            "commit, push, create PRs, or move tickets."
+        ),
+    )
 
     parser.add_argument(
         "--verify-command",
@@ -3359,7 +3366,10 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         "--commit",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Create branch + commit changes in kept workspace.",
+        help=(
+            "Create branch + commit changes in kept workspace. Parser default is disabled, but "
+            "the auto-loaded default settings profile enables it unless --no-commit is passed."
+        ),
     )
     parser.add_argument("--branch", help="Branch name override.")
     parser.add_argument("--commit-message", dest="commit_message", help="Commit message override.")
@@ -3378,7 +3388,10 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         "--push",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Push branch to remote.",
+        help=(
+            "Push branch to remote. Parser default is disabled, but the auto-loaded default "
+            "settings profile enables it unless --no-push is passed."
+        ),
     )
     parser.add_argument("--remote-name", default="origin")
     parser.add_argument("--remote-url")
@@ -3392,7 +3405,10 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         "--pr",
         action=argparse.BooleanOptionalAction,
         default=False,
-        help="Best-effort PR creation via gh.",
+        help=(
+            "Best-effort PR creation via gh. Parser default is disabled, but the auto-loaded "
+            "default settings profile enables it unless --no-pr is passed."
+        ),
     )
 
     parser.add_argument(

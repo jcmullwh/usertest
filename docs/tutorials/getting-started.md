@@ -101,6 +101,40 @@ Built-in missions live under `configs/missions/builtin/`.
 
 Policies are configured in `configs/policies.yaml`.
 
+Policies are **not** artifact-redaction rules and are **not** a guarantee that a command is local-only.
+Run artifacts can still contain prompts, transcripts, tool output, target paths, patches, or other
+sensitive data. Treat run/export artifacts as sensitive until you review and redact them.
+
+### CLI remote-effect boundaries
+
+The existing CLIs use separate flags for dry runs, printing resolved requests, ticket export,
+and implementation handoff. Use this table as the first-use boundary:
+
+<!-- BEGIN REMOTE_EFFECTS_TABLE -->
+| Command | Boundary | Local artifacts | Sensitive artifacts | Draft/export | Commit | Push | PR/merge | Key modifiers / defaults |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `usertest run` | local-only | Default | Default | No | No | No | No | --policy safe\|inspect\|write; --exec-network none |
+| `usertest batch` | local-only | Default | Default | No | No | No | No | --validate-only; --print-requests |
+| `usertest report` | local-only | Default | May | No | No | No | No | - |
+| `usertest init-usertest` | local-only | Default | No | No | No | No | No | - |
+| `usertest-backlog reports backlog` | local-only | Default | May | No | No | No | No | --dry-run |
+| `usertest-backlog reports export-tickets` | draft/export | Default | May | Default | No | No | No | - |
+| `usertest-implement run` | remote-write | Default | Default | No | Default | Default | Default | --dry-run; --no-commit; --no-push; --no-pr; --settings/--settings-profile; defaults: configs/usertest_implement_settings.yaml profiles.default.run_common |
+| `usertest-implement tickets run-next` | remote-write | Default | Default | Default | Default | Default | Default | --dry-run; --no-refresh-backlog; --no-commit/--no-push/--no-pr; defaults: configs/usertest_implement_settings.yaml profiles.default.run_common + tickets_run_next |
+| `usertest-implement tickets move` | local-only | Default | No | No | No | No | No | --dry-run |
+| `usertest-implement review merge` | remote-write | Default | May | No | No | No | May | - |
+<!-- END REMOTE_EFFECTS_TABLE -->
+
+Legend:
+
+- **local-only**: the command may write local files but has no built-in commit, push, PR, or merge step.
+- **draft/export**: the command writes local draft ticket/export artifacts and local ledgers; it does
+  not publish them to an issue tracker.
+- **remote-write**: the command can write to git hosting or PR state. In particular, the default
+  `configs/usertest_implement_settings.yaml` profile enables `commit`, `push`, and `pr` for
+  `usertest-implement run` / `tickets run-next`; disable those with existing `--no-commit`,
+  `--no-push`, and `--no-pr` flags when you want a local-only implementation pass.
+
 ### Target-local `.usertest/`
 
 If you want repo-specific personas/missions **versioned inside the target repo**, add a
