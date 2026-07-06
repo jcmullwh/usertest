@@ -2494,14 +2494,12 @@ def _resolve_shell_capability(
         passed_raw = probe_result.get("passed")
         ok_raw = probe_result.get("ok")
         exit_code = probe_result.get("exit_code")
-        if passed_raw is True or ok_raw is True or exit_code == 0:
-            probe_status = "passed"
-        elif (
-            passed_raw is False
-            or ok_raw is False
-            or (isinstance(exit_code, int) and exit_code != 0)
-        ):
+        if passed_raw is False or ok_raw is False:
             probe_status = "failed"
+        elif passed_raw is True or ok_raw is True:
+            probe_status = "passed"
+        elif isinstance(exit_code, int):
+            probe_status = "passed" if exit_code == 0 else "failed"
         else:
             probe_status = "unknown"
 

@@ -22,6 +22,7 @@ class AgentShellProbeResult:
     last_message_path: Path
     stderr_path: Path
     marker_seen: bool
+    marker_source: str | None
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -42,6 +43,7 @@ class AgentShellProbeResult:
             "ok": ok,
             "exit_code": self.exit_code,
             "marker_seen": self.marker_seen,
+            "marker_source": self.marker_source,
             "stdout_excerpt": _excerpt(stdout_tail),
             "stderr_excerpt": _excerpt(stderr_tail),
             "last_message_excerpt": _excerpt(last_message),
@@ -180,6 +182,7 @@ def probe_agent_shell_launch(
             last_message_path=last_message_path,
             stderr_path=stderr_path,
             marker_seen=False,
+            marker_source=None,
             error=str(exc),
         )
 
@@ -195,8 +198,8 @@ def _probe_prompt(agent: str) -> str:
     return (
         "Shell capability preflight probe.\n"
         f"{shell_hint} to run a command that prints exactly {_SHELL_PROBE_MARKER}.\n"
-        "Do not read or write repository files. After the shell command completes, reply exactly "
-        f"{_SHELL_PROBE_MARKER}.\n"
+        "Do not read or write repository files. After the shell command completes, briefly report "
+        "that the preflight probe finished.\n"
     )
 
 
@@ -209,13 +212,7 @@ def _result_from_paths(
     last_message_path: Path,
     stderr_path: Path,
 ) -> AgentShellProbeResult:
-    combined = "\n".join(
-        [
-            _read_tail(raw_events_path),
-            _read_text(last_message_path),
-            _read_tail(stderr_path),
-        ]
-    )
+    marker_source = _find_shell_marker_source(agent=agent, raw_events_path=raw_events_path)
     return AgentShellProbeResult(
         agent=agent,
         argv=argv,
@@ -223,8 +220,94 @@ def _result_from_paths(
         raw_events_path=raw_events_path,
         last_message_path=last_message_path,
         stderr_path=stderr_path,
-        marker_seen=_SHELL_PROBE_MARKER in combined,
+        marker_seen=marker_source is not None,
+        marker_source=marker_source,
     )
+
+
+def _find_shell_marker_source(*, agent: str, raw_events_path: Path) -> str | None:
+    for payload in _iter_json_payloads(raw_events_path):
+        if agent == "codex":
+            source = _codex_marker_source(payload)
+        elif agent == "claude":
+            source = _claude_marker_source(payload)
+        elif agent == "gemini":
+            source = _gemini_marker_source(payload)
+        else:
+            source = None
+        if source is not None:
+            return source
+    return None
+
+
+def _iter_json_payloads(path: Path) -> list[dict[str, Any]]:
+    payloads: list[dict[str, Any]] = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return payloads
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            payload = json.loads(stripped)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            payloads.append(payload)
+    return payloads
+
+
+def _codex_marker_source(payload: dict[str, Any]) -> str | None:
+    msg = payload.get("msg")
+    msg_dict = msg if isinstance(msg, dict) else {}
+    if msg_dict.get("type") == "exec_command_end" and _marker_in_shell_fields(msg_dict):
+        return "codex.exec_command_end"
+
+    item = payload.get("item")
+    item_dict = item if isinstance(item, dict) else {}
+    if item_dict.get("type") == "command_execution" and _marker_in_shell_fields(item_dict):
+        return "codex.command_execution"
+    return None
+
+
+def _claude_marker_source(payload: dict[str, Any]) -> str | None:
+    message = payload.get("message")
+    message_dict = message if isinstance(message, dict) else {}
+    content = message_dict.get("content")
+    if not isinstance(content, list):
+        return None
+    for block in content:
+        block_dict = block if isinstance(block, dict) else {}
+        if block_dict.get("type") != "tool_result":
+            continue
+        content_value = block_dict.get("content")
+        if isinstance(content_value, str) and _SHELL_PROBE_MARKER in content_value:
+            return "claude.tool_result"
+        if isinstance(content_value, list):
+            for item in content_value:
+                item_dict = item if isinstance(item, dict) else {}
+                text = item_dict.get("text") or item_dict.get("content")
+                if isinstance(text, str) and _SHELL_PROBE_MARKER in text:
+                    return "claude.tool_result"
+    return None
+
+
+def _gemini_marker_source(payload: dict[str, Any]) -> str | None:
+    if payload.get("type") != "tool_result":
+        return None
+    if _marker_in_shell_fields(payload):
+        return "gemini.tool_result"
+    return None
+
+
+def _marker_in_shell_fields(payload: dict[str, Any]) -> bool:
+    for key in ("stdout", "output", "stderr"):
+        value = payload.get(key)
+        if isinstance(value, str) and _SHELL_PROBE_MARKER in value:
+            return True
+    return False
 
 
 def _read_text(path: Path) -> str:

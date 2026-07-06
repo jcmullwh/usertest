@@ -175,6 +175,25 @@ def test_failed_shell_probe_blocks_non_codex_agents() -> None:
         assert blocked["probe_status"] == "failed"
         assert blocked["reason_code"] == "shell_probe_failed"
 
+    marker_missing = _resolve_shell_capability(
+        agent="claude",
+        operating_system="Linux",
+        backend="docker",
+        sandbox_mode=None,
+        policy_status="allowed",
+        policy_reason="policy permits shell commands",
+        allowed_tools=["Bash"],
+        probe_result={
+            "kind": "agent_shell_payload",
+            "ok": False,
+            "exit_code": 0,
+            "reason": "Agent shell probe did not emit required marker.",
+        },
+    ).to_dict()
+    assert marker_missing["state"] == "blocked"
+    assert marker_missing["probe_status"] == "failed"
+    assert marker_missing["reason_code"] == "shell_probe_failed"
+
 
 def test_codex_nonlocal_backend_requires_explicit_shell_evidence() -> None:
     unprobed = _resolve_shell_capability(
