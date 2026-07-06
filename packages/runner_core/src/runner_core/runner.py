@@ -22,6 +22,7 @@ from agent_adapters import (
     normalize_claude_events,
     normalize_codex_events,
     normalize_gemini_events,
+    probe_agent_shell_launch,
     run_claude_print,
     run_codex_exec,
     run_gemini,
@@ -2617,6 +2618,37 @@ def _shell_probe_result_from_preflight_meta(
 ) -> dict[str, Any] | None:
     if not isinstance(preflight_meta, dict):
         return None
+
+    agent_shell_probe = preflight_meta.get("agent_shell_probe")
+    if isinstance(agent_shell_probe, dict):
+        exit_code_raw = agent_shell_probe.get("exit_code")
+        exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 1
+        ok = agent_shell_probe.get("ok")
+        return {
+            "kind": "agent_shell_payload",
+            "ok": bool(ok) if isinstance(ok, bool) else exit_code == 0,
+            "exit_code": exit_code,
+            "stderr_excerpt": (
+                agent_shell_probe.get("stderr_excerpt")
+                if isinstance(agent_shell_probe.get("stderr_excerpt"), str)
+                else ""
+            ),
+            "stdout_excerpt": (
+                agent_shell_probe.get("stdout_excerpt")
+                if isinstance(agent_shell_probe.get("stdout_excerpt"), str)
+                else ""
+            ),
+            "details": (
+                agent_shell_probe.get("last_message_excerpt")
+                if isinstance(agent_shell_probe.get("last_message_excerpt"), str)
+                else ""
+            ),
+            "reason": (
+                agent_shell_probe.get("reason")
+                if isinstance(agent_shell_probe.get("reason"), str)
+                else ""
+            ),
+        }
 
     error = preflight_meta.get("error")
     if isinstance(error, str) and error.strip():
@@ -6461,6 +6493,89 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     else "never"
                 )
 
+            codex_overrides = list(combined_overrides)
+            codex_instructions_path_for_agent: str | None = system_prompt_path_for_agent
+            if staged_append_system_prompt is not None:
+                if staged_system_prompt is not None:
+                    try:
+                        base_payload = staged_system_prompt.read_text(encoding="utf-8")
+                    except OSError:
+                        base_payload = ""
+                    try:
+                        append_payload = staged_append_system_prompt.read_text(encoding="utf-8")
+                    except OSError:
+                        append_payload = ""
+                    merged_parts: list[str] = []
+                    if base_payload.strip():
+                        merged_parts.append(base_payload.rstrip())
+                    if append_payload.strip():
+                        merged_parts.append(append_payload.strip())
+                    if merged_parts:
+                        staged_codex_instructions = _stage_agent_prompt_text(
+                            run_dir=run_dir,
+                            name="codex_model_instructions.md",
+                            text="\n\n".join(merged_parts).rstrip() + "\n",
+                        )
+                        codex_instructions_path_for_agent = _agent_path_for_staged_file(
+                            staged_codex_instructions,
+                            run_dir=run_dir,
+                            run_dir_mount=backend.run_dir_mount,
+                        )
+                else:
+                    codex_instructions_path_for_agent = _agent_path_for_staged_file(
+                        staged_append_system_prompt,
+                        run_dir=run_dir,
+                        run_dir_mount=backend.run_dir_mount,
+                    )
+            if codex_instructions_path_for_agent is not None:
+                codex_overrides.append(
+                    "model_instructions_file="
+                    + toml_basic_string(codex_instructions_path_for_agent)
+                )
+
+            claude_cfg = config.agents.get("claude", {}) if isinstance(config.agents, dict) else {}
+            claude_binary = (
+                claude_cfg.get("binary", "claude") if isinstance(claude_cfg, dict) else "claude"
+            )
+            claude_output_format = (
+                claude_cfg.get("output_format", "stream-json")
+                if isinstance(claude_cfg, dict)
+                else "stream-json"
+            )
+            claude_allowed_tools: list[str] = []
+            raw_claude_allowed = claude_policy.get("allowed_tools")
+            if isinstance(raw_claude_allowed, list):
+                claude_allowed_tools = [x for x in raw_claude_allowed if isinstance(x, str)]
+            claude_permission_mode = claude_policy.get("permission_mode")
+            claude_permission_mode = (
+                claude_permission_mode if isinstance(claude_permission_mode, str) else None
+            )
+
+            gemini_cfg = config.agents.get("gemini", {}) if isinstance(config.agents, dict) else {}
+            gemini_binary = (
+                gemini_cfg.get("binary", "gemini") if isinstance(gemini_cfg, dict) else "gemini"
+            )
+            gemini_output_format = (
+                gemini_cfg.get("output_format", "stream-json")
+                if isinstance(gemini_cfg, dict)
+                else "stream-json"
+            )
+            gemini_sandbox_enabled = _effective_gemini_cli_sandbox(
+                policy_value=gemini_policy.get("sandbox", True),
+                has_outer_sandbox=sandbox is not None,
+            )
+            gemini_approval_mode = gemini_policy.get("approval_mode", "default")
+            gemini_approval_mode = (
+                gemini_approval_mode if isinstance(gemini_approval_mode, str) else "default"
+            )
+            gemini_allowed_tools: list[str] = []
+            raw_gemini_allowed = gemini_policy.get("allowed_tools")
+            if isinstance(raw_gemini_allowed, list):
+                gemini_allowed_tools = [x for x in raw_gemini_allowed if isinstance(x, str)]
+            gemini_env_overrides: dict[str, str] | None = None
+            if agent_env_overrides is not None:
+                gemini_env_overrides = dict(agent_env_overrides)
+
             required_agent_binary = _agent_binary_for_preflight_probe(
                 agent=request.agent,
                 agent_cfg=agent_cfg_dict,
@@ -6546,6 +6661,58 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     gemini_policy=gemini_policy,
                     has_outer_sandbox=(sandbox is not None),
                 )
+
+            if (
+                bool(resolved_inputs.mission.requires_shell)
+                and str(shell_status).strip().lower() != "blocked"
+                and not (
+                    isinstance(preflight_meta.get("error"), str)
+                    and preflight_meta.get("error", "").strip()
+                )
+            ):
+                probe_dir = run_dir / "agent_shell_probe"
+                codex_probe_last_message_for_agent = (
+                    _agent_path_for_staged_file(
+                        probe_dir / "agent_last_message.txt",
+                        run_dir=run_dir,
+                        run_dir_mount=backend.run_dir_mount,
+                    )
+                    if request.agent == "codex" and backend.run_dir_mount
+                    else None
+                )
+                agent_shell_probe = probe_agent_shell_launch(
+                    agent=request.agent,
+                    workspace_dir=workspace_dir_for_agent,
+                    artifacts_dir=probe_dir,
+                    binary=str(
+                        {
+                            "codex": codex_binary,
+                            "claude": claude_binary,
+                            "gemini": gemini_binary,
+                        }.get(request.agent, gemini_binary)
+                    ),
+                    model=effective_model,
+                    command_prefix=command_prefix,
+                    env_overrides=(
+                        gemini_env_overrides if request.agent == "gemini" else agent_env_overrides
+                    ),
+                    codex_sandbox=codex_sandbox_mode,
+                    codex_ask_for_approval=codex_ask_for_approval,
+                    codex_subcommand=str(codex_subcommand),
+                    codex_config_overrides=codex_overrides,
+                    codex_agent_last_message_path=codex_probe_last_message_for_agent,
+                    claude_output_format=str(claude_output_format),
+                    claude_allowed_tools=claude_allowed_tools,
+                    claude_permission_mode=claude_permission_mode,
+                    gemini_output_format=str(gemini_output_format),
+                    gemini_sandbox=gemini_sandbox_enabled,
+                    gemini_approval_mode=gemini_approval_mode,
+                    gemini_allowed_tools=gemini_allowed_tools,
+                    gemini_include_directories=_gemini_include_directories_for_workspace(
+                        workspace_dir=acquired.workspace_dir
+                    ),
+                )
+                preflight_meta["agent_shell_probe"] = agent_shell_probe.to_dict()
 
             host_os = _runner_host_os()
             shell_probe_result = _shell_probe_result_from_preflight_meta(preflight_meta)
@@ -7614,89 +7781,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     f"Prompt template substitution failed for {template_path}:\n{e}"
                 ) from e
             (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-
-            codex_overrides = list(combined_overrides)
-            codex_instructions_path_for_agent: str | None = system_prompt_path_for_agent
-            if staged_append_system_prompt is not None:
-                if staged_system_prompt is not None:
-                    try:
-                        base_payload = staged_system_prompt.read_text(encoding="utf-8")
-                    except OSError:
-                        base_payload = ""
-                    try:
-                        append_payload = staged_append_system_prompt.read_text(encoding="utf-8")
-                    except OSError:
-                        append_payload = ""
-                    merged_parts: list[str] = []
-                    if base_payload.strip():
-                        merged_parts.append(base_payload.rstrip())
-                    if append_payload.strip():
-                        merged_parts.append(append_payload.strip())
-                    if merged_parts:
-                        staged_codex_instructions = _stage_agent_prompt_text(
-                            run_dir=run_dir,
-                            name="codex_model_instructions.md",
-                            text="\n\n".join(merged_parts).rstrip() + "\n",
-                        )
-                        codex_instructions_path_for_agent = _agent_path_for_staged_file(
-                            staged_codex_instructions,
-                            run_dir=run_dir,
-                            run_dir_mount=backend.run_dir_mount,
-                        )
-                else:
-                    codex_instructions_path_for_agent = _agent_path_for_staged_file(
-                        staged_append_system_prompt,
-                        run_dir=run_dir,
-                        run_dir_mount=backend.run_dir_mount,
-                    )
-            if codex_instructions_path_for_agent is not None:
-                codex_overrides.append(
-                    "model_instructions_file="
-                    + toml_basic_string(codex_instructions_path_for_agent)
-                )
-
-            claude_cfg = config.agents.get("claude", {}) if isinstance(config.agents, dict) else {}
-            claude_binary = (
-                claude_cfg.get("binary", "claude") if isinstance(claude_cfg, dict) else "claude"
-            )
-            claude_output_format = (
-                claude_cfg.get("output_format", "stream-json")
-                if isinstance(claude_cfg, dict)
-                else "stream-json"
-            )
-            claude_allowed_tools: list[str] = []
-            raw_claude_allowed = claude_policy.get("allowed_tools")
-            if isinstance(raw_claude_allowed, list):
-                claude_allowed_tools = [x for x in raw_claude_allowed if isinstance(x, str)]
-            claude_permission_mode = claude_policy.get("permission_mode")
-            claude_permission_mode = (
-                claude_permission_mode if isinstance(claude_permission_mode, str) else None
-            )
-
-            gemini_cfg = config.agents.get("gemini", {}) if isinstance(config.agents, dict) else {}
-            gemini_binary = (
-                gemini_cfg.get("binary", "gemini") if isinstance(gemini_cfg, dict) else "gemini"
-            )
-            gemini_output_format = (
-                gemini_cfg.get("output_format", "stream-json")
-                if isinstance(gemini_cfg, dict)
-                else "stream-json"
-            )
-            gemini_sandbox_enabled = _effective_gemini_cli_sandbox(
-                policy_value=gemini_policy.get("sandbox", True),
-                has_outer_sandbox=sandbox is not None,
-            )
-            gemini_approval_mode = gemini_policy.get("approval_mode", "default")
-            gemini_approval_mode = (
-                gemini_approval_mode if isinstance(gemini_approval_mode, str) else "default"
-            )
-            gemini_allowed_tools: list[str] = []
-            raw_gemini_allowed = gemini_policy.get("allowed_tools")
-            if isinstance(raw_gemini_allowed, list):
-                gemini_allowed_tools = [x for x in raw_gemini_allowed if isinstance(x, str)]
-            gemini_env_overrides: dict[str, str] | None = None
-            if agent_env_overrides is not None:
-                gemini_env_overrides = dict(agent_env_overrides)
 
             if (
                 request.agent == "codex"
@@ -9110,6 +9194,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             extensions["python_toolchain_capability"] = python_toolchain_capability_summary
             if isinstance(shell_capability_summary, dict):
                 extensions["shell_capability"] = shell_capability_summary
+            if bool(resolved_inputs.mission.requires_shell):
+                final_report_validation_errors = validate_report(
+                    report_json,
+                    effective_spec.report_schema_dict,
+                    require_shell_capability=True,
+                )
+                if final_report_validation_errors:
+                    report_validation_errors = final_report_validation_errors
             _write_json(run_dir / "report.json", report_json)
         elif agent_exit_code != 0 and not report_validation_errors:
             report_validation_errors = run_errors
