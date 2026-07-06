@@ -711,6 +711,117 @@ def test_extract_backlog_atoms_ignores_ripgrep_no_matches_from_events(tmp_path: 
     ] == []
 
 
+def test_extract_backlog_atoms_emits_token_monitoring_signal_atoms(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "token_monitoring.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "signals": [
+                    {
+                        "signal_id": "broad_source_config_read",
+                        "confidence": "authoritative",
+                        "causal_mechanism": (
+                            "Source/config exploration was retained in context."
+                        ),
+                        "token_dimensions_affected": {
+                            "total_tokens": 130000,
+                            "input_tokens": 125000,
+                            "cached_input_tokens": 100000,
+                            "uncached_input_tokens": 25000,
+                            "output_tokens": 5000,
+                            "reasoning_output_tokens": 500,
+                        },
+                        "evidence": {
+                            "call_count": 3,
+                            "call_indexes": [4, 5, "6"],
+                            "paths_from_calls": ["packages/runner_core/src/runner_core/runner.py"],
+                            "raw_prompt": "do not copy this raw prompt text",
+                        },
+                        "mitigation_lever": "Use targeted section reads.",
+                        "false_positive_risk": "Low.",
+                        "confirmed_by_counters": True,
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    signal = next(
+        atom for atom in atoms_doc["atoms"] if atom.get("source") == "token_monitoring_signal"
+    )
+    assert signal["token_signal_id"] == "broad_source_config_read"
+    assert signal["severity_hint"] == "high"
+    assert signal["token_dimensions_affected"]["input_tokens"] == 125000
+    assert signal["evidence_call_count"] == 3
+    assert signal["evidence_call_indexes"] == [4, 5, 6]
+    assert signal["evidence_paths_preview"] == [
+        "packages/runner_core/src/runner_core/runner.py"
+    ]
+    assert signal["confirmed_by_counters"] is True
+    assert "do not copy this raw prompt text" not in json.dumps(signal)
+    assert atoms_doc["totals"]["source_counts"]["token_monitoring_signal"] == 1
+
+
+def test_extract_backlog_atoms_emits_token_monitoring_error_atoms(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "token_monitoring_error.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "type": "RuntimeError",
+                "message": "monitor failed",
+                "generated_at_utc": "2026-01-01T00:00:01Z",
+                "non_fatal": True,
+            },
+            ensure_ascii=False,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "timestamp_utc": "2026-01-01T00:00:00Z",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "report_validation_errors": None,
+            "error": None,
+        }
+    ]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+    error_atom = next(
+        atom for atom in atoms_doc["atoms"] if atom.get("source") == "token_monitoring_error"
+    )
+    assert error_atom["severity_hint"] == "high"
+    assert error_atom["error_type"] == "RuntimeError"
+    assert error_atom["non_fatal"] is True
+    assert atoms_doc["totals"]["source_counts"]["token_monitoring_error"] == 1
+
+
 def test_parse_ticket_list_recovers_array_and_normalizes() -> None:
     raw = """
     Notes before JSON.

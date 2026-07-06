@@ -124,3 +124,45 @@ def test_compute_problem_priority_signals_ranks_blockers_higher() -> None:
     assert blocker["bucket_candidate"] in {"p0", "p1"}
     assert minor["bucket_candidate"] in {"p2", "p3", "watch"}
 
+
+def test_compute_problem_priority_signals_scores_token_monitoring_sources() -> None:
+    atoms = [
+        {
+            "atom_id": "runA:token_monitoring_signal:1",
+            "run_id": "runA",
+            "agent": "codex",
+            "mission_id": "m1",
+            "source": "token_monitoring_signal",
+        },
+        {
+            "atom_id": "runB:token_monitoring_error:1",
+            "run_id": "runB",
+            "agent": "codex",
+            "mission_id": "m1",
+            "source": "token_monitoring_error",
+        },
+    ]
+    problem_records = [
+        {
+            "problem_id": "problem:token-monitoring",
+            "title": "Token monitoring surfaced waste",
+            "problem": "Monitoring identified avoidable context resend.",
+            "user_impact": "Runs consume unnecessary tokens.",
+            "severity": "high",
+            "confidence": 0.8,
+            "evidence_atom_ids": [
+                "runA:token_monitoring_signal:1",
+                "runB:token_monitoring_error:1",
+            ],
+            "evidence_summary": "Monitoring signal and hook error.",
+            "problem_status": "identified",
+        }
+    ]
+
+    [signal] = compute_problem_priority_signals(problem_records, atoms)
+    sources = signal["score_breakdown"]["sources"]
+    assert sources["source_counts"] == {
+        "token_monitoring_error": 1,
+        "token_monitoring_signal": 1,
+    }
+    assert sources["source_strength_score"] == 0.775

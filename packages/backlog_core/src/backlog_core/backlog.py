@@ -92,6 +92,8 @@ _TRUST_SOURCE_WEIGHTS: dict[str, float] = {
     "run_failure_event": 1.00,
     "error_json": 0.95,
     "report_validation_error": 0.90,
+    "token_monitoring_signal": 0.80,
+    "token_monitoring_error": 0.75,
     "agent_stderr_artifact": 0.85,
     "capability_warning_artifact": 0.20,
     "capability_notice_artifact": 0.20,
@@ -401,6 +403,10 @@ def _infer_severity_hint(*, source: str, text: str, priority: str | None = None)
         return "low"
     if source == "capability_notice_artifact":
         return "low"
+    if source == "token_monitoring_signal":
+        return "medium"
+    if source == "token_monitoring_error":
+        return "high"
     if source == "confidence_missing":
         return "low"
     if source == "confusion_point":
@@ -461,6 +467,90 @@ def _iter_unique_capped_strings(value: Any, *, limit: int) -> list[str]:
         if len(out) >= limit:
             break
     return out
+
+
+def _coerce_int(value: Any) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value.strip())
+        except ValueError:
+            return None
+    return None
+
+
+def _read_optional_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        parsed = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _token_monitoring_dimensions(value: Any) -> dict[str, int]:
+    if not isinstance(value, dict):
+        return {}
+    out: dict[str, int] = {}
+    for key in (
+        "total_tokens",
+        "input_tokens",
+        "cached_input_tokens",
+        "uncached_input_tokens",
+        "output_tokens",
+        "reasoning_output_tokens",
+    ):
+        parsed = _coerce_int(value.get(key))
+        if parsed is not None:
+            out[key] = parsed
+    return out
+
+
+def _token_monitoring_signal_severity(dimensions: dict[str, int]) -> str:
+    input_tokens = int(dimensions.get("input_tokens", 0))
+    total_tokens = int(dimensions.get("total_tokens", 0))
+    if input_tokens >= 100_000 or total_tokens >= 150_000:
+        return "high"
+    if input_tokens >= 10_000 or total_tokens >= 15_000:
+        return "medium"
+    return "low"
+
+
+def _token_monitoring_signal_text(
+    *,
+    signal_id: str,
+    causal_mechanism: str,
+    dimensions: dict[str, int],
+    mitigation: str | None,
+) -> str:
+    pieces = [f"Token inefficiency signal {signal_id}: {causal_mechanism}"]
+    input_tokens = dimensions.get("input_tokens")
+    if input_tokens is not None:
+        pieces.append(f"input_tokens={input_tokens}")
+    if mitigation:
+        pieces.append(f"mitigation={mitigation}")
+    return "; ".join(pieces)
+
+
+def _load_token_monitoring_artifacts(record: dict[str, Any], run_dir: Path) -> tuple[
+    dict[str, Any] | None,
+    dict[str, Any] | None,
+]:
+    monitoring = record.get("token_monitoring")
+    monitoring_obj = monitoring if isinstance(monitoring, dict) else None
+    if monitoring_obj is None:
+        monitoring_obj = _read_optional_json_object(run_dir / "token_monitoring.json")
+
+    monitoring_error = record.get("token_monitoring_error")
+    error_obj = monitoring_error if isinstance(monitoring_error, dict) else None
+    if error_obj is None:
+        error_obj = _read_optional_json_object(run_dir / "token_monitoring_error.json")
+
+    return monitoring_obj, error_obj
 
 
 def _extract_modern_report_atoms(
@@ -742,6 +832,78 @@ def extract_backlog_atoms(
             atoms.append(atom)
             source_counts[source] += 1
             severity_counts[severity_hint] += 1
+
+        token_monitoring, token_monitoring_error = _load_token_monitoring_artifacts(record, run_dir)
+        if isinstance(token_monitoring, dict):
+            signals_raw = token_monitoring.get("signals")
+            signals = signals_raw if isinstance(signals_raw, list) else []
+            for signal in signals:
+                if not isinstance(signal, dict):
+                    continue
+                signal_id = _coerce_string(signal.get("signal_id"))
+                causal_mechanism = _coerce_string(signal.get("causal_mechanism"))
+                if signal_id is None or causal_mechanism is None:
+                    continue
+                dimensions = _token_monitoring_dimensions(
+                    signal.get("token_dimensions_affected")
+                )
+                mitigation = _coerce_string(signal.get("mitigation_lever"))
+                evidence_raw = signal.get("evidence")
+                evidence = evidence_raw if isinstance(evidence_raw, dict) else {}
+                call_count = _coerce_int(evidence.get("call_count"))
+                call_indexes_raw = evidence.get("call_indexes")
+                call_indexes = (
+                    [
+                        parsed
+                        for item in call_indexes_raw[:20]
+                        for parsed in [_coerce_int(item)]
+                        if parsed is not None
+                    ]
+                    if isinstance(call_indexes_raw, list)
+                    else []
+                )
+                paths_preview = _iter_unique_capped_strings(
+                    [
+                        *_iter_unique_capped_strings(evidence.get("paths_from_calls"), limit=12),
+                        *_iter_unique_capped_strings(evidence.get("largest_read_files"), limit=12),
+                    ],
+                    limit=12,
+                )
+                _emit(
+                    "token_monitoring_signal",
+                    _token_monitoring_signal_text(
+                        signal_id=signal_id,
+                        causal_mechanism=causal_mechanism,
+                        dimensions=dimensions,
+                        mitigation=mitigation,
+                    ),
+                    token_signal_id=signal_id,
+                    token_signal_confidence=_coerce_string(signal.get("confidence")),
+                    token_dimensions_affected=dimensions if dimensions else None,
+                    confirmed_by_counters=signal.get("confirmed_by_counters") is True,
+                    mitigation_lever=mitigation,
+                    false_positive_risk=_coerce_string(signal.get("false_positive_risk")),
+                    evidence_call_count=call_count,
+                    evidence_call_indexes=call_indexes if call_indexes else None,
+                    evidence_paths_preview=paths_preview if paths_preview else None,
+                    token_monitoring_artifact="token_monitoring.json",
+                    severity_hint=_token_monitoring_signal_severity(dimensions),
+                )
+
+        if isinstance(token_monitoring_error, dict):
+            error_type = _coerce_string(token_monitoring_error.get("type")) or "unknown"
+            message = (
+                _coerce_string(token_monitoring_error.get("message"))
+                or "Token monitoring failed."
+            )
+            _emit(
+                "token_monitoring_error",
+                f"Token monitoring failed: type={error_type}; message={message}",
+                token_monitoring_artifact="token_monitoring_error.json",
+                error_type=error_type,
+                non_fatal=token_monitoring_error.get("non_fatal") is True,
+                generated_at_utc=_coerce_string(token_monitoring_error.get("generated_at_utc")),
+            )
 
         metrics_raw = record.get("metrics")
         metrics = metrics_raw if isinstance(metrics_raw, dict) else None
@@ -1071,6 +1233,8 @@ def add_atom_links(atoms: list[dict[str, Any]]) -> list[dict[str, Any]]:
         "command_failure",
         "run_failure_event",
         "report_validation_error",
+        "token_monitoring_signal",
+        "token_monitoring_error",
         "confusion_point",
         "confidence_missing",
     }
