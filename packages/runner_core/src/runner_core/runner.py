@@ -90,6 +90,7 @@ from runner_core.verification_broker import (
     VerificationBrokerAttempt,
     VerificationBrokerContract,
     VerificationBrokerRequestResult,
+    default_verification_hang_guard_seconds,
     probe_local_verification_launcher,
     probe_local_verification_python,
     render_verification_broker_command,
@@ -102,6 +103,7 @@ from runner_core.verification_broker import (
 from runner_core.verification_broker import (
     probe_windows_bash_usable as _probe_windows_bash_usable_impl,
 )
+from runner_core.verification_timing_profile import build_verification_timing_profile
 from runner_core.workspace_state_hash import WorkspaceStateHash, compute_workspace_state_hash
 
 
@@ -1668,6 +1670,77 @@ def _execution_shell_family(*, exec_backend: str, host_os: str) -> str:
     return "bash"
 
 
+def _format_seconds_for_prompt(value: Any) -> str:
+    if not isinstance(value, (int, float)):
+        return "unknown"
+    seconds = max(0.0, float(value))
+    if seconds >= 60.0:
+        minutes = seconds / 60.0
+        return f"{seconds:.0f}s (~{minutes:.1f} min)"
+    return f"{seconds:.0f}s"
+
+
+def _format_verification_timing_guidance_md(
+    *,
+    verification_timing_profile: dict[str, Any] | None,
+    verification_timing_profile_path: str | None,
+    verification_result_path: str | None,
+) -> list[str]:
+    if not isinstance(verification_timing_profile, dict):
+        return []
+    recommendations = verification_timing_profile.get("recommendations")
+    if not isinstance(recommendations, dict):
+        return []
+
+    expected = recommendations.get("expected_duration_range_seconds")
+    expected_dict = expected if isinstance(expected, dict) else {}
+    recommended_wait = recommendations.get("recommended_initial_wait_seconds")
+    check_after = recommendations.get("reasonable_check_after_seconds")
+    hang_guard = recommendations.get("high_hang_guard_seconds")
+    history_state = str(recommendations.get("history_state") or "unknown")
+    insufficient_reason = recommendations.get("insufficient_history_reason")
+
+    lines = ["  - timing guidance:"]
+    lines.append(
+        "    - expected duration range: "
+        f"p05={_format_seconds_for_prompt(expected_dict.get('low'))}, "
+        f"median={_format_seconds_for_prompt(expected_dict.get('typical'))}, "
+        f"p95={_format_seconds_for_prompt(expected_dict.get('high'))} "
+        f"(history={history_state})"
+    )
+    if isinstance(insufficient_reason, str) and insufficient_reason.strip():
+        lines.append(f"    - fallback reason: {insufficient_reason.strip()}")
+    lines.append(
+        "    - recommended first wait: "
+        f"{_format_seconds_for_prompt(recommended_wait)} before checking status"
+    )
+    lines.append(
+        "    - reasonable check cadence: wait near "
+        f"{_format_seconds_for_prompt(check_after)}; one or two checks are acceptable, "
+        "continuous wait/poll loops are not"
+    )
+    lines.append(
+        "    - hang guard: do not call verification hung until it exceeds "
+        f"{_format_seconds_for_prompt(hang_guard)} or shows concrete failure evidence"
+    )
+    lines.append(
+        "    - use one long wait rather than frequent short polling; do not repeatedly "
+        "poll only to watch progress"
+    )
+    if isinstance(verification_result_path, str) and verification_result_path.strip():
+        lines.append(
+            "    - after completion, inspect the final result at "
+            f"`{verification_result_path.strip()}` and any summary_path/artifacts_dir "
+            "printed by the verifier"
+        )
+    if (
+        isinstance(verification_timing_profile_path, str)
+        and verification_timing_profile_path.strip()
+    ):
+        lines.append(f"    - timing profile artifact: `{verification_timing_profile_path.strip()}`")
+    return lines
+
+
 def _format_preflight_summary_md(
     *,
     execution_shell: str,
@@ -1683,6 +1756,9 @@ def _format_preflight_summary_md(
     verification_broker_command: str | None,
     agent: str,
     codex_sandbox_mode: str | None,
+    verification_timing_profile: dict[str, Any] | None = None,
+    verification_timing_profile_path: str | None = None,
+    verification_result_path: str | None = None,
 ) -> str:
     shell_label = execution_shell.strip() or "unknown"
     if shell_label.lower() == "powershell":
@@ -1780,6 +1856,13 @@ def _format_preflight_summary_md(
                 "  - note: run this once you believe the work is complete; it blocks "
                 "until verification finishes, it must pass before you finish, and you "
                 "must not make further workspace changes after it passes."
+            )
+            lines.extend(
+                _format_verification_timing_guidance_md(
+                    verification_timing_profile=verification_timing_profile,
+                    verification_timing_profile_path=verification_timing_profile_path,
+                    verification_result_path=verification_result_path,
+                )
             )
         else:
             lines.append("- Verification gate:")
@@ -7631,6 +7714,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
             verification_broker_command: str | None = None
             verification_broker_contract: VerificationBrokerContract | None = None
+            verification_timing_profile: dict[str, Any] | None = None
+            verification_timing_profile_path_for_agent: str | None = None
+            verification_result_path_for_agent: str | None = None
             effective_verification_timeout_seconds = verification_timeout_seconds
             if verification_commands and verification_reuse_mode == "auto":
                 verification_broker_contract = resolve_verification_broker_contract(
@@ -7710,6 +7796,27 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     workspace_dir=acquired.workspace_dir,
                     contract=verification_broker_contract,
                 )
+                verification_timing_profile = build_verification_timing_profile(
+                    runs_dir=config.runs_dir,
+                    current_run_dir=run_dir,
+                    broker_timeout_guard_seconds=max(
+                        float(verification_broker_contract.effective_timeout_seconds),
+                        default_verification_hang_guard_seconds(),
+                    ),
+                    generated_utc=_utc_now_z(),
+                )
+                verification_timing_profile_path = run_dir / "verification_timing_profile.json"
+                _write_json(verification_timing_profile_path, verification_timing_profile)
+                verification_timing_profile_path_for_agent = _agent_path_for_staged_file(
+                    verification_timing_profile_path,
+                    run_dir=run_dir,
+                    run_dir_mount=backend.run_dir_mount,
+                )
+                verification_result_path_for_agent = _agent_path_for_staged_file(
+                    run_dir / "verification.json",
+                    run_dir=run_dir,
+                    run_dir_mount=backend.run_dir_mount,
+                )
 
             policy_json = json.dumps(
                 {
@@ -7760,6 +7867,16 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         ),
                         "final_handoff_command": verification_broker_command,
                         "timeout_seconds": effective_verification_timeout_seconds,
+                        "timing_profile_path": verification_timing_profile_path_for_agent,
+                        "timing_profile": {
+                            "run_count": verification_timing_profile.get("run_count"),
+                            "command_count": verification_timing_profile.get("command_count"),
+                            "recommendations": verification_timing_profile.get(
+                                "recommendations"
+                            ),
+                        }
+                        if isinstance(verification_timing_profile, dict)
+                        else None,
                     },
                     "preflight": {
                         "commands": preflight_commands_present,
@@ -7818,6 +7935,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 verification_broker_command=verification_broker_command,
                 agent=request.agent,
                 codex_sandbox_mode=codex_sandbox_mode,
+                verification_timing_profile=verification_timing_profile,
+                verification_timing_profile_path=verification_timing_profile_path_for_agent,
+                verification_result_path=verification_result_path_for_agent,
             )
 
             try:
