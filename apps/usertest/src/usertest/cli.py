@@ -3583,6 +3583,21 @@ def _cmd_lint(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_report_requires_shell_capability(run_dir: Path) -> bool:
+    preflight_path = run_dir / "preflight.json"
+    if not preflight_path.exists():
+        return False
+    try:
+        preflight = json.loads(preflight_path.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    if not isinstance(preflight, dict):
+        return False
+    requirements = preflight.get("mission_requirements")
+    requirements_dict = requirements if isinstance(requirements, dict) else {}
+    return bool(requirements_dict.get("requires_shell") is True)
+
+
 def _cmd_report(args: argparse.Namespace) -> int:
     """Execute the report subcommand for a run directory."""
     repo_root = _resolve_repo_root(args.repo_root)
@@ -3831,7 +3846,15 @@ def _cmd_report(args: argparse.Namespace) -> int:
             schema_raw = json.loads(fallback.read_text(encoding="utf-8"))
             schema = schema_raw if isinstance(schema_raw, dict) else None
 
-    errors = validate_report(report_raw, schema) if schema is not None else []
+    errors = (
+        validate_report(
+            report_raw,
+            schema,
+            require_shell_capability=_run_report_requires_shell_capability(run_dir),
+        )
+        if schema is not None
+        else []
+    )
 
     metrics: dict[str, Any] | None = None
     metrics_path = run_dir / "metrics.json"

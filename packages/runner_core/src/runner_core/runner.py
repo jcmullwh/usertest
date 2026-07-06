@@ -22,6 +22,7 @@ from agent_adapters import (
     normalize_claude_events,
     normalize_codex_events,
     normalize_gemini_events,
+    probe_agent_shell_launch,
     run_claude_print,
     run_codex_exec,
     run_gemini,
@@ -1440,9 +1441,103 @@ def _probe_commands_local(
         )
 
     meta: dict[str, Any] = {"command_probe_details": probe_details}
+    meta["shell_probe"] = _probe_local_shell_payload(
+        workspace_dir=workspace_dir,
+        env=effective_env,
+    )
     if python_probe is not None:
         meta["python_interpreter"] = python_probe.to_dict()
     return out, meta
+
+
+def _probe_local_shell_payload(
+    *,
+    workspace_dir: Path | None,
+    env: dict[str, str] | None,
+) -> dict[str, Any]:
+    """
+    Launch a payload-equivalent no-op through the local shell backend.
+
+    Command discovery alone is not enough to prove shell capability: process creation can still be
+    blocked by sandbox or host policy.  This probe is deliberately tiny, bounded, and records the
+    same canonical shape as the container probe so the shell capability resolver can distinguish
+    "command exists" from "payload launch works".
+    """
+
+    if os.name == "nt":
+        resolved = shutil.which("powershell", path=(env or os.environ).get("PATH"))
+        if resolved is None:
+            resolved = shutil.which("pwsh", path=(env or os.environ).get("PATH"))
+        if resolved is None:
+            return {
+                "kind": "backend_shell_payload",
+                "shell_family": "powershell",
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "PowerShell executable was not found for local shell payload probe.",
+                "reason_code": "not_found",
+            }
+        argv = [
+            resolved,
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Write-Output 'shell_probe=ok'",
+        ]
+        shell_family = "powershell"
+    else:
+        resolved = shutil.which("sh", path=(env or os.environ).get("PATH")) or "sh"
+        argv = [resolved, "-lc", "printf 'shell_probe=ok\\n'"]
+        shell_family = "sh"
+
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(workspace_dir) if workspace_dir is not None else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.5,
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "kind": "backend_shell_payload",
+            "shell_family": shell_family,
+            "exit_code": 124,
+            "stdout": "",
+            "stderr": "Local shell payload probe timed out.",
+            "reason_code": "unresponsive",
+            "probe_argv": argv,
+        }
+    except OSError as e:
+        return {
+            "kind": "backend_shell_payload",
+            "shell_family": shell_family,
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": f"Local shell payload probe failed to launch: {e}",
+            "reason_code": "blocked",
+            "probe_argv": argv,
+        }
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    marker_seen = "shell_probe=ok" in stdout.splitlines()
+    return {
+        "kind": "backend_shell_payload",
+        "shell_family": shell_family,
+        "exit_code": int(proc.returncode or 0) if marker_seen else 1,
+        "stdout": "shell_probe=ok" if marker_seen else stdout[:300],
+        "stderr": (
+            stderr[:300]
+            if marker_seen
+            else (stderr[:300] or "Local shell payload probe did not emit sentinel output.")
+        ),
+        "probe_argv": argv,
+    }
 
 
 def _format_windows_python_preflight_error(probe: Any) -> str:
@@ -2302,6 +2397,25 @@ def _codex_shell_probe_failure_reason(
             "codex_windows_sandbox_panic",
             "Codex Windows sandbox probe failed before shell payload execution.",
         )
+    if os_is_windows and (
+        "blocked by policy" in lowered
+        or "denied by policy" in lowered
+        or "policy-blocked" in lowered
+        or "policy blocked" in lowered
+        or (
+            "policy" in lowered
+            and (
+                "process launch" in lowered
+                or "process creation" in lowered
+                or "failed to launch" in lowered
+                or "failed to spawn" in lowered
+            )
+        )
+    ):
+        return (
+            "codex_windows_process_launch_blocked_by_policy",
+            "Codex Windows shell probe process launch was blocked by policy.",
+        )
     if (
         os_is_windows
         and "powershell" in lowered
@@ -2372,19 +2486,20 @@ def _resolve_shell_capability(
     backend_norm = backend.strip().lower() if backend.strip() else "local"
     policy_status_norm = policy_status.strip().lower() if policy_status.strip() else "unknown"
     probe_status = "not_run"
+    probe_kind: str | None = None
 
     if isinstance(probe_result, dict):
+        kind_raw = probe_result.get("kind")
+        probe_kind = kind_raw.strip() if isinstance(kind_raw, str) and kind_raw.strip() else None
         passed_raw = probe_result.get("passed")
         ok_raw = probe_result.get("ok")
         exit_code = probe_result.get("exit_code")
-        if passed_raw is True or ok_raw is True or exit_code == 0:
-            probe_status = "passed"
-        elif (
-            passed_raw is False
-            or ok_raw is False
-            or (isinstance(exit_code, int) and exit_code != 0)
-        ):
+        if passed_raw is False or ok_raw is False:
             probe_status = "failed"
+        elif passed_raw is True or ok_raw is True:
+            probe_status = "passed"
+        elif isinstance(exit_code, int):
+            probe_status = "passed" if exit_code == 0 else "failed"
         else:
             probe_status = "unknown"
 
@@ -2433,7 +2548,20 @@ def _resolve_shell_capability(
             allowed_tools=allowed_tools,
         )
 
-    if probe_status == "passed":
+    probe_proves_agent_shell_launch = True
+    if (
+        probe_status == "passed"
+        and probe_kind == "backend_shell_payload"
+        and agent_norm == "codex"
+        and backend_norm == "local"
+        and operating_system.strip().lower().startswith("windows")
+    ):
+        # A plain PowerShell/bash no-op can succeed on Windows while Codex's own sandboxed shell
+        # backend still fails before the payload command is invoked.  Do not upgrade local Windows
+        # Codex shell capability from a generic backend probe alone.
+        probe_proves_agent_shell_launch = False
+
+    if probe_status == "passed" and probe_proves_agent_shell_launch:
         return ShellCapability(
             state="available",
             agent=agent,
@@ -2449,25 +2577,24 @@ def _resolve_shell_capability(
             allowed_tools=allowed_tools,
         )
 
-    if policy_status_norm == "allowed" and agent_norm != "codex":
-        return ShellCapability(
-            state="available",
-            agent=agent,
-            operating_system=operating_system,
-            backend=backend_norm,
-            sandbox_mode=sandbox_mode,
-            probe_status=probe_status,
-            reason_code=None,
-            reason_type=None,
-            reason=policy_reason or "Shell commands are enabled for this agent policy.",
-            policy_status=policy_status_norm,
-            policy_reason=policy_reason,
-            allowed_tools=allowed_tools,
-        )
-
     reason_code = "shell_capability_unprobed"
+    reason = (
+        "Shell capability is not proven for the effective agent execution path; "
+        "unknown shell capability is not treated as available for shell-required missions."
+    )
+    if policy_status_norm == "allowed":
+        reason_code = "shell_command_discovered_without_launchability"
+        reason = (
+            "Shell policy/command discovery allows shell use, but no payload-equivalent "
+            "launch probe proved shell backend launchability."
+        )
     if agent_norm == "codex" and operating_system.strip().lower().startswith("windows"):
         reason_code = "codex_windows_shell_unprobed"
+        if probe_status == "passed" and not probe_proves_agent_shell_launch:
+            reason = (
+                "A generic local shell payload probe passed, but local Windows Codex shell "
+                "backend launchability was not proven under the Codex sandbox policy."
+            )
     return ShellCapability(
         state="unprobed",
         agent=agent,
@@ -2477,10 +2604,7 @@ def _resolve_shell_capability(
         probe_status=probe_status,
         reason_code=reason_code,
         reason_type="runtime",
-        reason=(
-            "Shell capability is not proven for the effective agent execution path; "
-            "unknown shell capability is not treated as available for shell-required missions."
-        ),
+        reason=reason,
         policy_status=policy_status_norm,
         policy_reason=policy_reason,
         allowed_tools=allowed_tools,
@@ -2492,6 +2616,37 @@ def _shell_probe_result_from_preflight_meta(
 ) -> dict[str, Any] | None:
     if not isinstance(preflight_meta, dict):
         return None
+
+    agent_shell_probe = preflight_meta.get("agent_shell_probe")
+    if isinstance(agent_shell_probe, dict):
+        exit_code_raw = agent_shell_probe.get("exit_code")
+        exit_code = exit_code_raw if isinstance(exit_code_raw, int) else 1
+        ok = agent_shell_probe.get("ok")
+        return {
+            "kind": "agent_shell_payload",
+            "ok": bool(ok) if isinstance(ok, bool) else exit_code == 0,
+            "exit_code": exit_code,
+            "stderr_excerpt": (
+                agent_shell_probe.get("stderr_excerpt")
+                if isinstance(agent_shell_probe.get("stderr_excerpt"), str)
+                else ""
+            ),
+            "stdout_excerpt": (
+                agent_shell_probe.get("stdout_excerpt")
+                if isinstance(agent_shell_probe.get("stdout_excerpt"), str)
+                else ""
+            ),
+            "details": (
+                agent_shell_probe.get("last_message_excerpt")
+                if isinstance(agent_shell_probe.get("last_message_excerpt"), str)
+                else ""
+            ),
+            "reason": (
+                agent_shell_probe.get("reason")
+                if isinstance(agent_shell_probe.get("reason"), str)
+                else ""
+            ),
+        }
 
     error = preflight_meta.get("error")
     if isinstance(error, str) and error.strip():
@@ -2509,6 +2664,9 @@ def _shell_probe_result_from_preflight_meta(
         stderr = shell_probe.get("stderr")
         stdout = shell_probe.get("stdout")
         return {
+            "kind": shell_probe.get("kind")
+            if isinstance(shell_probe.get("kind"), str)
+            else "backend_shell_payload",
             "ok": exit_code == 0,
             "exit_code": exit_code,
             "stderr_excerpt": stderr if isinstance(stderr, str) else "",
@@ -2557,6 +2715,11 @@ def _policy_allows_shell(
         policy_status=status,
         policy_reason=_reason,
         allowed_tools=_allowed_tools,
+        probe_result=(
+            {"kind": "static_policy_recommendation", "ok": True}
+            if status == "allowed"
+            else None
+        ),
     )
     return capability.state == "available"
 
@@ -3495,10 +3658,15 @@ def _reason_type_for_code(reason_code: str | None) -> str | None:
         "blocked",
         "unresponsive",
         "context_mismatch",
+        "codex_windows_process_launch_blocked_by_policy",
+        "codex_windows_powershell_prepayload_failed",
+        "codex_windows_shell_launch_failed",
     }:
         return "execution"
     if code in {"pip_missing", "pytest_missing", "pdm_missing"}:
         return "dependency"
+    if code in {"shell_policy_blocked"}:
+        return "configuration"
     if code in {
         "missing_stdlib",
         "runtime_probe_failed",
@@ -3506,6 +3674,11 @@ def _reason_type_for_code(reason_code: str | None) -> str | None:
         "pytest_probe_failed",
         "pdm_probe_failed",
         "probe_failed",
+        "shell_probe_failed",
+        "codex_windows_sandbox_panic",
+        "codex_windows_shell_unprobed",
+        "shell_capability_unprobed",
+        "shell_command_discovered_without_launchability",
     }:
         return "runtime"
     return "unknown"
@@ -5165,6 +5338,11 @@ def _maybe_write_shell_capability_block_report_artifacts(
     """
 
     if not _schema_is_task_run_v1(schema_dict):
+        _append_shell_capability_normalized_event(
+            run_dir=run_dir,
+            shell_capability=shell_capability,
+            blocked=True,
+        )
         return
 
     state = shell_capability.get("state")
@@ -5226,7 +5404,7 @@ def _maybe_write_shell_capability_block_report_artifacts(
         "next_actions": [hint],
         "extensions": {"shell_capability": shell_capability},
     }
-    validation_errors = validate_report(report, schema_dict)
+    validation_errors = validate_report(report, schema_dict, require_shell_capability=True)
     if validation_errors:
         _write_json(run_dir / "report_validation_errors.json", validation_errors)
         return
@@ -5234,6 +5412,33 @@ def _maybe_write_shell_capability_block_report_artifacts(
     _write_json(run_dir / "report.json", report)
     md = render_report_markdown(report=report, metrics=None, target_ref=target_ref)
     (run_dir / "report.md").write_text(md, encoding="utf-8", newline="\n")
+    _append_shell_capability_normalized_event(
+        run_dir=run_dir,
+        shell_capability=shell_capability,
+        blocked=True,
+    )
+
+
+def _append_shell_capability_normalized_event(
+    *,
+    run_dir: Path,
+    shell_capability: dict[str, Any],
+    blocked: bool,
+) -> None:
+    if not isinstance(shell_capability, dict):
+        return
+    event = make_event(
+        "preflight_shell_capability",
+        {
+            "capability": "shell_commands",
+            "blocked": bool(blocked),
+            "shell_capability": shell_capability,
+        },
+    )
+    path = run_dir / "normalized_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
 def _git_diff(path: Path) -> str:
@@ -5708,13 +5913,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         shell_capability_summary = shell_capability.to_dict()
 
         early_shell_capability_state = shell_capability_summary.get("state")
-        defer_codex_shell_probe = (
-            request.agent == "codex" and early_shell_capability_state == "unprobed"
+        defer_shell_launch_probe = (
+            early_shell_capability_state == "unprobed"
+            and str(shell_status).strip().lower() != "blocked"
         )
         if (
             bool(resolved_inputs.mission.requires_shell)
             and early_shell_capability_state != "available"
-            and not defer_codex_shell_probe
+            and not defer_shell_launch_probe
         ):
             requires_edits = bool(resolved_inputs.mission.requires_edits)
 
@@ -6285,6 +6491,89 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     else "never"
                 )
 
+            codex_overrides = list(combined_overrides)
+            codex_instructions_path_for_agent: str | None = system_prompt_path_for_agent
+            if staged_append_system_prompt is not None:
+                if staged_system_prompt is not None:
+                    try:
+                        base_payload = staged_system_prompt.read_text(encoding="utf-8")
+                    except OSError:
+                        base_payload = ""
+                    try:
+                        append_payload = staged_append_system_prompt.read_text(encoding="utf-8")
+                    except OSError:
+                        append_payload = ""
+                    merged_parts: list[str] = []
+                    if base_payload.strip():
+                        merged_parts.append(base_payload.rstrip())
+                    if append_payload.strip():
+                        merged_parts.append(append_payload.strip())
+                    if merged_parts:
+                        staged_codex_instructions = _stage_agent_prompt_text(
+                            run_dir=run_dir,
+                            name="codex_model_instructions.md",
+                            text="\n\n".join(merged_parts).rstrip() + "\n",
+                        )
+                        codex_instructions_path_for_agent = _agent_path_for_staged_file(
+                            staged_codex_instructions,
+                            run_dir=run_dir,
+                            run_dir_mount=backend.run_dir_mount,
+                        )
+                else:
+                    codex_instructions_path_for_agent = _agent_path_for_staged_file(
+                        staged_append_system_prompt,
+                        run_dir=run_dir,
+                        run_dir_mount=backend.run_dir_mount,
+                    )
+            if codex_instructions_path_for_agent is not None:
+                codex_overrides.append(
+                    "model_instructions_file="
+                    + toml_basic_string(codex_instructions_path_for_agent)
+                )
+
+            claude_cfg = config.agents.get("claude", {}) if isinstance(config.agents, dict) else {}
+            claude_binary = (
+                claude_cfg.get("binary", "claude") if isinstance(claude_cfg, dict) else "claude"
+            )
+            claude_output_format = (
+                claude_cfg.get("output_format", "stream-json")
+                if isinstance(claude_cfg, dict)
+                else "stream-json"
+            )
+            claude_allowed_tools: list[str] = []
+            raw_claude_allowed = claude_policy.get("allowed_tools")
+            if isinstance(raw_claude_allowed, list):
+                claude_allowed_tools = [x for x in raw_claude_allowed if isinstance(x, str)]
+            claude_permission_mode = claude_policy.get("permission_mode")
+            claude_permission_mode = (
+                claude_permission_mode if isinstance(claude_permission_mode, str) else None
+            )
+
+            gemini_cfg = config.agents.get("gemini", {}) if isinstance(config.agents, dict) else {}
+            gemini_binary = (
+                gemini_cfg.get("binary", "gemini") if isinstance(gemini_cfg, dict) else "gemini"
+            )
+            gemini_output_format = (
+                gemini_cfg.get("output_format", "stream-json")
+                if isinstance(gemini_cfg, dict)
+                else "stream-json"
+            )
+            gemini_sandbox_enabled = _effective_gemini_cli_sandbox(
+                policy_value=gemini_policy.get("sandbox", True),
+                has_outer_sandbox=sandbox is not None,
+            )
+            gemini_approval_mode = gemini_policy.get("approval_mode", "default")
+            gemini_approval_mode = (
+                gemini_approval_mode if isinstance(gemini_approval_mode, str) else "default"
+            )
+            gemini_allowed_tools: list[str] = []
+            raw_gemini_allowed = gemini_policy.get("allowed_tools")
+            if isinstance(raw_gemini_allowed, list):
+                gemini_allowed_tools = [x for x in raw_gemini_allowed if isinstance(x, str)]
+            gemini_env_overrides: dict[str, str] | None = None
+            if agent_env_overrides is not None:
+                gemini_env_overrides = dict(agent_env_overrides)
+
             required_agent_binary = _agent_binary_for_preflight_probe(
                 agent=request.agent,
                 agent_cfg=agent_cfg_dict,
@@ -6370,6 +6659,58 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     gemini_policy=gemini_policy,
                     has_outer_sandbox=(sandbox is not None),
                 )
+
+            if (
+                bool(resolved_inputs.mission.requires_shell)
+                and str(shell_status).strip().lower() != "blocked"
+                and not (
+                    isinstance(preflight_meta.get("error"), str)
+                    and preflight_meta.get("error", "").strip()
+                )
+            ):
+                probe_dir = run_dir / "agent_shell_probe"
+                codex_probe_last_message_for_agent = (
+                    _agent_path_for_staged_file(
+                        probe_dir / "agent_last_message.txt",
+                        run_dir=run_dir,
+                        run_dir_mount=backend.run_dir_mount,
+                    )
+                    if request.agent == "codex" and backend.run_dir_mount
+                    else None
+                )
+                agent_shell_probe = probe_agent_shell_launch(
+                    agent=request.agent,
+                    workspace_dir=workspace_dir_for_agent,
+                    artifacts_dir=probe_dir,
+                    binary=str(
+                        {
+                            "codex": codex_binary,
+                            "claude": claude_binary,
+                            "gemini": gemini_binary,
+                        }.get(request.agent, gemini_binary)
+                    ),
+                    model=effective_model,
+                    command_prefix=command_prefix,
+                    env_overrides=(
+                        gemini_env_overrides if request.agent == "gemini" else agent_env_overrides
+                    ),
+                    codex_sandbox=codex_sandbox_mode,
+                    codex_ask_for_approval=codex_ask_for_approval,
+                    codex_subcommand=str(codex_subcommand),
+                    codex_config_overrides=codex_overrides,
+                    codex_agent_last_message_path=codex_probe_last_message_for_agent,
+                    claude_output_format=str(claude_output_format),
+                    claude_allowed_tools=claude_allowed_tools,
+                    claude_permission_mode=claude_permission_mode,
+                    gemini_output_format=str(gemini_output_format),
+                    gemini_sandbox=gemini_sandbox_enabled,
+                    gemini_approval_mode=gemini_approval_mode,
+                    gemini_allowed_tools=gemini_allowed_tools,
+                    gemini_include_directories=_gemini_include_directories_for_workspace(
+                        workspace_dir=acquired.workspace_dir
+                    ),
+                )
+                preflight_meta["agent_shell_probe"] = agent_shell_probe.to_dict()
 
             host_os = _runner_host_os()
             shell_probe_result = _shell_probe_result_from_preflight_meta(preflight_meta)
@@ -7438,89 +7779,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     f"Prompt template substitution failed for {template_path}:\n{e}"
                 ) from e
             (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-
-            codex_overrides = list(combined_overrides)
-            codex_instructions_path_for_agent: str | None = system_prompt_path_for_agent
-            if staged_append_system_prompt is not None:
-                if staged_system_prompt is not None:
-                    try:
-                        base_payload = staged_system_prompt.read_text(encoding="utf-8")
-                    except OSError:
-                        base_payload = ""
-                    try:
-                        append_payload = staged_append_system_prompt.read_text(encoding="utf-8")
-                    except OSError:
-                        append_payload = ""
-                    merged_parts: list[str] = []
-                    if base_payload.strip():
-                        merged_parts.append(base_payload.rstrip())
-                    if append_payload.strip():
-                        merged_parts.append(append_payload.strip())
-                    if merged_parts:
-                        staged_codex_instructions = _stage_agent_prompt_text(
-                            run_dir=run_dir,
-                            name="codex_model_instructions.md",
-                            text="\n\n".join(merged_parts).rstrip() + "\n",
-                        )
-                        codex_instructions_path_for_agent = _agent_path_for_staged_file(
-                            staged_codex_instructions,
-                            run_dir=run_dir,
-                            run_dir_mount=backend.run_dir_mount,
-                        )
-                else:
-                    codex_instructions_path_for_agent = _agent_path_for_staged_file(
-                        staged_append_system_prompt,
-                        run_dir=run_dir,
-                        run_dir_mount=backend.run_dir_mount,
-                    )
-            if codex_instructions_path_for_agent is not None:
-                codex_overrides.append(
-                    "model_instructions_file="
-                    + toml_basic_string(codex_instructions_path_for_agent)
-                )
-
-            claude_cfg = config.agents.get("claude", {}) if isinstance(config.agents, dict) else {}
-            claude_binary = (
-                claude_cfg.get("binary", "claude") if isinstance(claude_cfg, dict) else "claude"
-            )
-            claude_output_format = (
-                claude_cfg.get("output_format", "stream-json")
-                if isinstance(claude_cfg, dict)
-                else "stream-json"
-            )
-            claude_allowed_tools: list[str] = []
-            raw_claude_allowed = claude_policy.get("allowed_tools")
-            if isinstance(raw_claude_allowed, list):
-                claude_allowed_tools = [x for x in raw_claude_allowed if isinstance(x, str)]
-            claude_permission_mode = claude_policy.get("permission_mode")
-            claude_permission_mode = (
-                claude_permission_mode if isinstance(claude_permission_mode, str) else None
-            )
-
-            gemini_cfg = config.agents.get("gemini", {}) if isinstance(config.agents, dict) else {}
-            gemini_binary = (
-                gemini_cfg.get("binary", "gemini") if isinstance(gemini_cfg, dict) else "gemini"
-            )
-            gemini_output_format = (
-                gemini_cfg.get("output_format", "stream-json")
-                if isinstance(gemini_cfg, dict)
-                else "stream-json"
-            )
-            gemini_sandbox_enabled = _effective_gemini_cli_sandbox(
-                policy_value=gemini_policy.get("sandbox", True),
-                has_outer_sandbox=sandbox is not None,
-            )
-            gemini_approval_mode = gemini_policy.get("approval_mode", "default")
-            gemini_approval_mode = (
-                gemini_approval_mode if isinstance(gemini_approval_mode, str) else "default"
-            )
-            gemini_allowed_tools: list[str] = []
-            raw_gemini_allowed = gemini_policy.get("allowed_tools")
-            if isinstance(raw_gemini_allowed, list):
-                gemini_allowed_tools = [x for x in raw_gemini_allowed if isinstance(x, str)]
-            gemini_env_overrides: dict[str, str] | None = None
-            if agent_env_overrides is not None:
-                gemini_env_overrides = dict(agent_env_overrides)
 
             if (
                 request.agent == "codex"
@@ -8866,6 +9124,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             if raw_ts_f is not None:
                 raw_ts_f.close()
 
+        if isinstance(shell_capability_summary, dict):
+            _append_shell_capability_normalized_event(
+                run_dir=run_dir,
+                shell_capability=shell_capability_summary,
+                blocked=False,
+            )
+
         diff_numstat: list[dict[str, Any]] = []
         if allow_edits:
             diff_numstat = _git_numstat(acquired.workspace_dir)
@@ -8927,6 +9192,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             extensions["python_toolchain_capability"] = python_toolchain_capability_summary
             if isinstance(shell_capability_summary, dict):
                 extensions["shell_capability"] = shell_capability_summary
+            if bool(resolved_inputs.mission.requires_shell):
+                final_report_validation_errors = validate_report(
+                    report_json,
+                    effective_spec.report_schema_dict,
+                    require_shell_capability=True,
+                )
+                if final_report_validation_errors:
+                    report_validation_errors = final_report_validation_errors
             _write_json(run_dir / "report.json", report_json)
         elif agent_exit_code != 0 and not report_validation_errors:
             report_validation_errors = run_errors

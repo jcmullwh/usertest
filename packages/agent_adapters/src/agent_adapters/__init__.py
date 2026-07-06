@@ -14,6 +14,7 @@ from agent_adapters.codex_cli import (
 from agent_adapters.codex_normalize import normalize_codex_events
 from agent_adapters.gemini_cli import GeminiRunResult, run_gemini
 from agent_adapters.gemini_normalize import normalize_gemini_events
+from agent_adapters.shell_probe import AgentShellProbeResult, probe_agent_shell_launch
 
 
 def _resolve_version() -> str:
@@ -34,9 +35,11 @@ __all__ = [
     "CodexPersonalityConfigIssue",
     "CodexReasoningEffortConfigIssue",
     "GeminiRunResult",
+    "AgentShellProbeResult",
     "normalize_claude_events",
     "normalize_codex_events",
     "normalize_gemini_events",
+    "probe_agent_shell_launch",
     "run_claude_print",
     "run_codex_exec",
     "validate_codex_personality_config_overrides",
