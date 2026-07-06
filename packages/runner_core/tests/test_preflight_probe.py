@@ -892,3 +892,78 @@ def test_run_once_fails_fast_when_required_preflight_command_missing(
     payload = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
     assert payload.get("type") == "AgentPreflightFailed"
     assert payload.get("subtype") == "required_command_unavailable"
+
+
+def test_run_once_records_delegation_capability_in_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    target = tmp_path / "target_repo"
+    target.mkdir()
+    (target / "README.md").write_text("# hi\n", encoding="utf-8")
+    _install_no_requirements_mission(target)
+
+    _install_dummy_version_binary(tmp_path, name="claude")
+    bin_dir = tmp_path / "bin"
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}")
+    if os.name == "nt":
+        monkeypatch.setenv("PATHEXT", f"{os.environ.get('PATHEXT', '')};.CMD")
+
+    home = tmp_path / "home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("CLAUDE_API_KEY", raising=False)
+
+    cfg = RunnerConfig(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        agents={"claude": {"binary": "claude", "delegation_tools": ["Task"]}},
+        policies={
+            "safe": {
+                "claude": {
+                    "allow_edits": False,
+                    "allowed_tools": ["Read", "Task"],
+                }
+            }
+        },
+    )
+
+    result = run_once(cfg, RunRequest(repo=str(target), agent="claude", policy="safe"))
+
+    assert result.exit_code == 1
+    payload = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
+    delegation = payload.get("delegation_capability")
+    assert delegation == payload.get("capabilities", {}).get("delegation")
+    delegation_by_agent = payload.get("delegation_capabilities")
+    assert delegation_by_agent == payload.get("capabilities", {}).get("delegation_by_agent")
+    assert set(delegation_by_agent) == {"codex", "claude", "gemini"}
+    assert delegation["agent"] == "claude"
+    assert delegation["state"] == "available"
+    assert delegation["available_under_policy"] is True
+    assert delegation["configured_allowed_tools"] == ["Read", "Task"]
+    assert delegation["delegation_tool_names"] == ["Task"]
+    assert delegation["cli_version"] == "claude 0.0.0"
+    assert delegation["evidence_source"] == "agent_config.delegation_tools"
+    assert payload.get("meta", {}).get("agent_cli_version_probe", {}).get("ok") is True
+    assert payload.get("meta", {}).get("agent_cli_version_probes", {}).get("claude", {}).get(
+        "ok"
+    ) is True
+
+    claude_delegation = delegation_by_agent["claude"]
+    assert claude_delegation == delegation
+    assert claude_delegation["state"] == "available"
+    assert claude_delegation["cli_version"] == "claude 0.0.0"
+    assert claude_delegation["cli_version_probe"]["ok"] is True
+
+    codex_delegation = delegation_by_agent["codex"]
+    assert codex_delegation["agent"] == "codex"
+    assert codex_delegation["state"] == "unknown"
+    assert codex_delegation["available_under_policy"] is None
+
+    gemini_delegation = delegation_by_agent["gemini"]
+    assert gemini_delegation["agent"] == "gemini"
+    assert gemini_delegation["state"] == "unknown"
+    assert gemini_delegation["available_under_policy"] is None
