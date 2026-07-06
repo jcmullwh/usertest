@@ -248,6 +248,9 @@ class DelegationCapability:
         }
 
 
+DELEGATION_CAPABILITY_AGENTS: tuple[str, ...] = ("codex", "claude", "gemini")
+
+
 def _resolve_effective_agent_model(
     *,
     agent: str,
@@ -2427,6 +2430,63 @@ def _resolve_delegation_capability(
         ),
         cli_version_probe=version_probe_copy,
     )
+
+
+def _agent_config_for_capability_probe(
+    *,
+    agents_cfg: dict[str, Any],
+    agent: str,
+) -> dict[str, Any]:
+    raw = agents_cfg.get(agent)
+    return raw if isinstance(raw, dict) else {}
+
+
+def _agent_version_probe_timeout_seconds(agent: str) -> float:
+    if str(agent).strip().lower() == "gemini":
+        # Gemini CLI is Node-based and can exceed the normal quick version-probe budget,
+        # especially through docker exec.
+        return 8.0
+    return 2.5
+
+
+def _resolve_delegation_capabilities(
+    *,
+    agents_cfg: dict[str, Any],
+    policy_cfg: dict[str, Any],
+    cli_version_probes: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, dict[str, Any]]:
+    probes = cli_version_probes if isinstance(cli_version_probes, dict) else {}
+    out: dict[str, dict[str, Any]] = {}
+    for agent in DELEGATION_CAPABILITY_AGENTS:
+        agent_cfg = _agent_config_for_capability_probe(
+            agents_cfg=agents_cfg,
+            agent=agent,
+        )
+        probe = probes.get(agent)
+        out[agent] = _resolve_delegation_capability(
+            agent=agent,
+            agent_cfg=agent_cfg,
+            policy_cfg=policy_cfg,
+            cli_version_probe=probe if isinstance(probe, dict) else None,
+        ).to_dict()
+    return out
+
+
+def _selected_delegation_capability(
+    *,
+    agent: str,
+    delegation_capabilities: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    agent_norm = str(agent).strip().lower()
+    selected = delegation_capabilities.get(agent_norm)
+    if isinstance(selected, dict):
+        return selected
+    return _resolve_delegation_capability(
+        agent=agent_norm or agent,
+        agent_cfg={},
+        policy_cfg={},
+        cli_version_probe=None,
+    ).to_dict()
 
 
 def _agent_auth_env_var_candidates(agent: str) -> tuple[str, ...]:
@@ -6258,12 +6318,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             allowed_tools=allowed_tools,
         )
         shell_capability_summary = shell_capability.to_dict()
-        delegation_capability_summary = _resolve_delegation_capability(
-            agent=request.agent,
-            agent_cfg=agent_cfg_dict,
+        agents_cfg_for_capabilities = config.agents if isinstance(config.agents, dict) else {}
+        delegation_capabilities_summary = _resolve_delegation_capabilities(
+            agents_cfg=agents_cfg_for_capabilities,
             policy_cfg=policy_cfg,
-            cli_version_probe=None,
-        ).to_dict()
+        )
+        delegation_capability_summary = _selected_delegation_capability(
+            agent=request.agent,
+            delegation_capabilities=delegation_capabilities_summary,
+        )
 
         early_shell_capability_state = shell_capability_summary.get("state")
         defer_shell_launch_probe = (
@@ -6378,10 +6441,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "canonical": shell_capability_summary,
                         },
                         "delegation": delegation_capability_summary,
+                        "delegation_by_agent": delegation_capabilities_summary,
                         "edits": {"allowed": bool(allow_edits)},
                     },
                     "shell_capability": shell_capability_summary,
                     "delegation_capability": delegation_capability_summary,
+                    "delegation_capabilities": delegation_capabilities_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -6412,9 +6477,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "canonical": shell_capability_summary,
                             },
                             "delegation": delegation_capability_summary,
+                            "delegation_by_agent": delegation_capabilities_summary,
                         },
                         "shell_capability": shell_capability_summary,
                         "delegation_capability": delegation_capability_summary,
+                        "delegation_capabilities": delegation_capabilities_summary,
                     },
                 },
             )
@@ -6456,10 +6523,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "canonical": shell_capability_summary,
                         },
                         "delegation": delegation_capability_summary,
+                        "delegation_by_agent": delegation_capabilities_summary,
                         "edits": {"allowed": bool(allow_edits)},
                     },
                     "shell_capability": shell_capability_summary,
                     "delegation_capability": delegation_capability_summary,
+                    "delegation_capabilities": delegation_capabilities_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -6546,10 +6615,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "canonical": shell_capability_summary,
                         },
                         "delegation": delegation_capability_summary,
+                        "delegation_by_agent": delegation_capabilities_summary,
                         "edits": {"allowed": bool(allow_edits)},
                     },
                     "shell_capability": shell_capability_summary,
                     "delegation_capability": delegation_capability_summary,
+                    "delegation_capabilities": delegation_capabilities_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -6575,8 +6646,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "allowed_tools": allowed_tools,
                             },
                             "delegation": delegation_capability_summary,
+                            "delegation_by_agent": delegation_capabilities_summary,
                         },
                         "delegation_capability": delegation_capability_summary,
+                        "delegation_capabilities": delegation_capabilities_summary,
                     },
                 },
             )
@@ -6941,6 +7014,18 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 agent=request.agent,
                 agent_cfg=agent_cfg_dict,
             )
+            delegation_agent_binaries: dict[str, str] = {}
+            for delegation_agent in DELEGATION_CAPABILITY_AGENTS:
+                delegation_agent_cfg = _agent_config_for_capability_probe(
+                    agents_cfg=agents_cfg_for_capabilities,
+                    agent=delegation_agent,
+                )
+                delegation_binary = _agent_binary_for_preflight_probe(
+                    agent=delegation_agent,
+                    agent_cfg=delegation_agent_cfg,
+                )
+                if delegation_binary is not None:
+                    delegation_agent_binaries[delegation_agent] = delegation_binary
 
             preflight_required_commands = [
                 cmd.strip()
@@ -6951,6 +7036,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             probe_commands = _build_preflight_command_list(request)
             if required_agent_binary is not None and required_agent_binary not in probe_commands:
                 probe_commands.append(required_agent_binary)
+            for delegation_binary in delegation_agent_binaries.values():
+                if delegation_binary not in probe_commands:
+                    probe_commands.append(delegation_binary)
             preflight_commands_present: dict[str, bool] = {}
             preflight_meta: dict[str, Any] = {}
             effective_probe_commands = list(probe_commands)
@@ -7292,12 +7380,9 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 else None
             )
             agent_cli_version_probe: dict[str, Any] | None = None
+            agent_cli_version_probes: dict[str, dict[str, Any]] = {}
             if required_agent_binary is not None and required_agent_binary_present is True:
-                version_timeout_seconds = 2.5
-                # Gemini CLI is a Node-based binary and can exceed the default 2.5s budget,
-                # especially under `docker exec` where process startup overhead is higher.
-                if str(request.agent).strip().lower() == "gemini":
-                    version_timeout_seconds = 8.0
+                version_timeout_seconds = _agent_version_probe_timeout_seconds(request.agent)
                 agent_cli_version_probe = _probe_agent_cli_version(
                     binary=required_agent_binary,
                     command_prefix=command_prefix,
@@ -7305,13 +7390,36 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     timeout_seconds=version_timeout_seconds,
                 )
                 preflight_meta["agent_cli_version_probe"] = dict(agent_cli_version_probe)
+                selected_agent_norm = str(request.agent).strip().lower()
+                if selected_agent_norm:
+                    agent_cli_version_probes[selected_agent_norm] = dict(agent_cli_version_probe)
 
-            delegation_capability_summary = _resolve_delegation_capability(
-                agent=request.agent,
-                agent_cfg=agent_cfg_dict,
+            for delegation_agent, delegation_binary in delegation_agent_binaries.items():
+                if delegation_agent in agent_cli_version_probes:
+                    continue
+                if preflight_commands_present.get(delegation_binary) is not True:
+                    continue
+                delegation_probe = _probe_agent_cli_version(
+                    binary=delegation_binary,
+                    command_prefix=command_prefix,
+                    env_overrides=agent_env_overrides,
+                    timeout_seconds=_agent_version_probe_timeout_seconds(delegation_agent),
+                )
+                agent_cli_version_probes[delegation_agent] = delegation_probe
+            if agent_cli_version_probes:
+                preflight_meta["agent_cli_version_probes"] = {
+                    agent: dict(probe) for agent, probe in agent_cli_version_probes.items()
+                }
+
+            delegation_capabilities_summary = _resolve_delegation_capabilities(
+                agents_cfg=agents_cfg_for_capabilities,
                 policy_cfg=policy_cfg,
-                cli_version_probe=agent_cli_version_probe,
-            ).to_dict()
+                cli_version_probes=agent_cli_version_probes,
+            )
+            delegation_capability_summary = _selected_delegation_capability(
+                agent=request.agent,
+                delegation_capabilities=delegation_capabilities_summary,
+            )
 
             python_toolchain_capability_summary = _build_python_toolchain_capability_summary(
                 python_validation_required=python_validation_required,
@@ -7350,10 +7458,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             "canonical": shell_capability_summary,
                         },
                         "delegation": delegation_capability_summary,
+                        "delegation_by_agent": delegation_capabilities_summary,
                         "edits": {"allowed": bool(allow_edits)},
                     },
                     "shell_capability": shell_capability_summary,
                     "delegation_capability": delegation_capability_summary,
+                    "delegation_capabilities": delegation_capabilities_summary,
                     "mission_requirements": {
                         "mission_id": effective_spec.mission_id,
                         "requires_shell": bool(resolved_inputs.mission.requires_shell),
@@ -8141,10 +8251,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                 "canonical": shell_capability_summary,
                             },
                             "delegation": delegation_capability_summary,
+                            "delegation_by_agent": delegation_capabilities_summary,
                             "edits": {"allowed": bool(allow_edits)},
                         },
                         "shell_capability": shell_capability_summary,
                         "delegation_capability": delegation_capability_summary,
+                        "delegation_capabilities": delegation_capabilities_summary,
                         "workspace_root_snapshot": preflight_workspace_snapshot,
                     },
                     "bootstrap": bootstrap.meta if bootstrap is not None else None,

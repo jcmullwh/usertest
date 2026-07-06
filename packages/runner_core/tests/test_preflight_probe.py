@@ -937,6 +937,9 @@ def test_run_once_records_delegation_capability_in_preflight(
     payload = json.loads((result.run_dir / "preflight.json").read_text(encoding="utf-8"))
     delegation = payload.get("delegation_capability")
     assert delegation == payload.get("capabilities", {}).get("delegation")
+    delegation_by_agent = payload.get("delegation_capabilities")
+    assert delegation_by_agent == payload.get("capabilities", {}).get("delegation_by_agent")
+    assert set(delegation_by_agent) == {"codex", "claude", "gemini"}
     assert delegation["agent"] == "claude"
     assert delegation["state"] == "available"
     assert delegation["available_under_policy"] is True
@@ -945,3 +948,22 @@ def test_run_once_records_delegation_capability_in_preflight(
     assert delegation["cli_version"] == "claude 0.0.0"
     assert delegation["evidence_source"] == "agent_config.delegation_tools"
     assert payload.get("meta", {}).get("agent_cli_version_probe", {}).get("ok") is True
+    assert payload.get("meta", {}).get("agent_cli_version_probes", {}).get("claude", {}).get(
+        "ok"
+    ) is True
+
+    claude_delegation = delegation_by_agent["claude"]
+    assert claude_delegation == delegation
+    assert claude_delegation["state"] == "available"
+    assert claude_delegation["cli_version"] == "claude 0.0.0"
+    assert claude_delegation["cli_version_probe"]["ok"] is True
+
+    codex_delegation = delegation_by_agent["codex"]
+    assert codex_delegation["agent"] == "codex"
+    assert codex_delegation["state"] == "unknown"
+    assert codex_delegation["available_under_policy"] is None
+
+    gemini_delegation = delegation_by_agent["gemini"]
+    assert gemini_delegation["agent"] == "gemini"
+    assert gemini_delegation["state"] == "unknown"
+    assert gemini_delegation["available_under_policy"] is None
