@@ -100,7 +100,7 @@ def classify_run_lifecycle(
     run_meta_read: JsonArtifactReadResult | None = None,
 ) -> RunLifecycleClassification:
     """
-    Classify a run directory from its durable artifact inventory.
+    Classify a run directory from its persisted artifact inventory.
 
     Contract:
     - terminal JSON artifacts are `report.json`, `error.json`, and
@@ -108,9 +108,9 @@ def classify_run_lifecycle(
     - unreadable terminal artifacts win so diagnostics stay loud;
     - terminal error and validation artifacts win over a successful report;
     - `report.json` is terminal success when no higher-precedence terminal artifact exists;
-    - if no terminal artifact exists, `run_meta.json["run_finished_utc"]` is the durable
-      completion marker used to distinguish completed-but-missing-report from a seed-only or
-      interrupted nonterminal directory.
+    - if no terminal artifact exists, `run_meta.json["run_finished_utc"]` is the best
+      available completion signal used to distinguish completed-but-missing-report from a
+      seed-only or interrupted nonterminal directory.
 
     Older directories without `run_meta.run_finished_utc` and without terminal artifacts are
     intentionally classified as `nonterminal` rather than `missing_report`: the existing artifact
