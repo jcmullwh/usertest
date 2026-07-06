@@ -18,6 +18,15 @@ def find_repo_root(start: Path | None = None) -> Path:
 
 _SLUG_RE = re.compile(r"[^a-zA-Z0-9._-]+")
 
+# On local backend there is no `run_dir` bind mount into a sandbox, so a workspace-scoped
+# agent (or a subprocess it spawns, such as the verification broker client script) has no
+# way to reach paths under `run_dir` at all. Content that an agent must read or write at
+# runtime (verification broker client/IPC files, mirrored verification artifacts) is staged
+# under this alias inside the workspace instead. It is excluded from workspace state
+# hashing (see `workspace_state_hash.py`) so this runner-owned scratch content never affects
+# agent-change detection.
+LOCAL_BACKEND_RUN_DIR_ALIAS = ".usertest_run_dir"
+
 
 def slugify(value: str) -> str:
     s = value.strip()

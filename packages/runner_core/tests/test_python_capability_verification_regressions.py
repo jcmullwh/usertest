@@ -326,6 +326,7 @@ def _run_fixture_backed_toolchain_case(
         python_toolchain_capability: dict[str, Any] | None = None,
         env_overrides: dict[str, str] | None = None,
         execution_shell: str | None = None,
+        **_ignored: Any,
     ) -> dict[str, Any]:
         del (
             command_prefix,

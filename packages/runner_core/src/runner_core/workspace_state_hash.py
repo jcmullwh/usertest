@@ -7,9 +7,17 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
-from runner_core.pathing import normalize_agent_path
+from runner_core.pathing import LOCAL_BACKEND_RUN_DIR_ALIAS, normalize_agent_path
 
 HashMode = Literal["git", "filesystem"]
+
+_EXCLUDED_TOP_LEVEL_DIRS = (".git", LOCAL_BACKEND_RUN_DIR_ALIAS)
+
+
+def _is_excluded_rel_path(rel: str) -> bool:
+    return any(
+        rel == excluded or rel.startswith(f"{excluded}/") for excluded in _EXCLUDED_TOP_LEVEL_DIRS
+    )
 
 
 @dataclass(frozen=True)
@@ -56,7 +64,7 @@ def _compute_git_workspace_state_hash(workspace_dir: Path) -> WorkspaceStateHash
     entries: list[tuple[str, bytes]] = []
     deleted_entries: list[str] = []
     for rel in tracked_and_untracked:
-        if not rel or rel.startswith(".git/"):
+        if not rel or _is_excluded_rel_path(rel):
             continue
         rel_norm = normalize_agent_path(rel)
         path = workspace_dir / Path(rel_norm)
@@ -72,7 +80,7 @@ def _compute_git_workspace_state_hash(workspace_dir: Path) -> WorkspaceStateHash
             continue
         entries.append((rel_norm, _encode_entry(rel_norm, kind, data)))
     for rel in deleted:
-        if not rel or rel.startswith(".git/"):
+        if not rel or _is_excluded_rel_path(rel):
             continue
         rel_norm = normalize_agent_path(rel)
         deleted_entries.append(rel_norm)
@@ -96,7 +104,7 @@ def _compute_filesystem_workspace_state_hash(workspace_dir: Path) -> WorkspaceSt
             rel = path.relative_to(workspace_dir).as_posix()
         except ValueError:
             continue
-        if not rel or rel == ".git" or rel.startswith(".git/"):
+        if not rel or _is_excluded_rel_path(rel):
             continue
         if path.is_symlink():
             kind = "symlink"

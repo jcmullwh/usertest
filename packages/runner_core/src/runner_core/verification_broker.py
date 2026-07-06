@@ -1118,7 +1118,17 @@ class VerificationBrokerAttempt:
             with self._active_request_lock:
                 self._active_cancel_event = None
 
-        artifacts_dir = summary.get("artifacts_dir")
+        # Prefer the canonical agent-visible artifact location (mount-aware on docker,
+        # workspace-relative on local backend) over the run_dir-relative bookkeeping label
+        # in `artifacts_dir`: this value is surfaced directly to the agent via the broker
+        # client's progress/failure messages, and a bare run_dir-relative path is not
+        # resolvable from the agent's own working directory.
+        artifacts_dir_for_agent = summary.get("artifacts_dir_for_agent")
+        artifacts_dir = (
+            artifacts_dir_for_agent
+            if isinstance(artifacts_dir_for_agent, str) and artifacts_dir_for_agent.strip()
+            else summary.get("artifacts_dir")
+        )
         artifacts_dir_s = (
             normalize_agent_path(artifacts_dir) if isinstance(artifacts_dir, str) else None
         )
