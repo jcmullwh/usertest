@@ -33,6 +33,7 @@ from usertest_implement.batch_state import (
     persist_state,
     state_path,
     utc_now_z,
+    write_json,
 )
 from usertest_implement.tickets import move_ticket_file
 
@@ -1087,6 +1088,24 @@ def _record_outcome(
     )
 
 
+def _write_batch_token_monitoring_artifacts(batch_dir_path: Path) -> None:
+    try:
+        from token_monitoring import write_batch_context
+
+        write_batch_context(batch_dir_path)
+    except Exception as exc:  # noqa: BLE001
+        write_json(
+            batch_dir_path / "token_batch_context_error.json",
+            {
+                "schema_version": 1,
+                "type": type(exc).__name__,
+                "message": str(exc),
+                "non_fatal": True,
+                "written_at_utc": utc_now_z(),
+            },
+        )
+
+
 def _update_state_lists(
     state: dict[str, Any],
     *,
@@ -1448,6 +1467,7 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
     if state["global_blockers"]:
         state["status"] = "blocked"
         persist_state(batch_dir_path, state)
+        _write_batch_token_monitoring_artifacts(batch_dir_path)
         return 2
     persist_state(batch_dir_path, state)
 
@@ -1492,8 +1512,10 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
         )
         state["status"] = "failed"
         persist_state(batch_dir_path, state)
+        _write_batch_token_monitoring_artifacts(batch_dir_path)
         raise
     persist_state(batch_dir_path, state)
+    _write_batch_token_monitoring_artifacts(batch_dir_path)
     print(str(batch_dir_path))
     return 0 if state.get("status") == "completed" else 2
 
