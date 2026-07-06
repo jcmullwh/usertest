@@ -2,7 +2,9 @@
 
 import json
 import os
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from usertest_implement.batch_failure import classify_run_outcome
@@ -14,8 +16,23 @@ from usertest_implement.batch_runner import (
     _collect_wave_candidates,
     _pick_launchable_candidate_index,
     _refresh_backlog,
+    _write_batch_token_monitoring_artifacts,
     _write_stream,
+    run_batch,
 )
+
+
+def _write_json(path: Path, payload: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def _write_jsonl(path: Path, records: list[object]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(record) + "\n" for record in records),
+        encoding="utf-8",
+    )
 
 
 def test_pick_launchable_candidate_index_respects_conflict_keys(tmp_path: Path) -> None:
@@ -271,6 +288,86 @@ def test_write_stream_ignores_oserror_from_closed_pipe() -> None:
             raise AssertionError("flush should not be called after a write failure")
 
     _write_stream(BrokenStream(), "hello")
+
+
+def test_write_batch_token_monitoring_artifacts_writes_context(tmp_path: Path) -> None:
+    batch_dir = tmp_path / "batch"
+    _write_json(
+        batch_dir / "batch_summary.json",
+        {"status": "blocked", "completed_count": 0, "failed_count": 1},
+    )
+    _write_json(batch_dir / "batch_state.json", {"status": "blocked", "completed": []})
+    _write_json(batch_dir / "global_blockers.json", {"global_blockers": [{"run_dir": None}]})
+    _write_jsonl(batch_dir / "ticket_outcomes.jsonl", [{"run_dir": None}])
+
+    _write_batch_token_monitoring_artifacts(batch_dir)
+
+    assert (batch_dir / "token_batch_context.json").exists()
+    assert (batch_dir / "token_batch_context.md").exists()
+    assert not (batch_dir / "token_batch_context_error.json").exists()
+
+
+def test_write_batch_token_monitoring_artifacts_is_non_fatal(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    batch_dir = tmp_path / "batch"
+    batch_dir.mkdir()
+
+    def _raise(_batch_dir: Path) -> dict[str, object]:
+        raise RuntimeError("monitor failed")
+
+    monkeypatch.setitem(
+        sys.modules,
+        "token_monitoring",
+        SimpleNamespace(write_batch_context=_raise),
+    )
+
+    _write_batch_token_monitoring_artifacts(batch_dir)
+
+    payload = json.loads((batch_dir / "token_batch_context_error.json").read_text())
+    assert payload["non_fatal"] is True
+    assert payload["type"] == "RuntimeError"
+
+
+def test_run_batch_writes_token_context_for_preflight_blocker(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    config_path = tmp_path / "batch.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "defaults:",
+                "  worker_roster:",
+                "    - agent: codex",
+                "phases:",
+                "  - name: phase",
+                "    sources:",
+                "      - name: src",
+                "        runs_dir: runs/src",
+                "        target: usertest",
+                "    severities: [high]",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner.run_batch_preflight",
+        lambda **_: {
+            "head_sha": "abc123",
+            "branch": "dev",
+            "base_ci_run_url": None,
+            "blockers": [{"blocker_id": "preflight", "class": "preflight"}],
+        },
+    )
+
+    assert run_batch(repo_root=tmp_path, config_path=config_path) == 2
+
+    batch_dirs = sorted((tmp_path / "runs" / "_batch" / "usertest_implement").iterdir())
+    assert batch_dirs
+    assert (batch_dirs[-1] / "token_batch_context.json").exists()
 
 
 def test_refresh_backlog_uses_normal_export_dedupe_flags(
