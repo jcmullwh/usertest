@@ -1440,9 +1440,103 @@ def _probe_commands_local(
         )
 
     meta: dict[str, Any] = {"command_probe_details": probe_details}
+    meta["shell_probe"] = _probe_local_shell_payload(
+        workspace_dir=workspace_dir,
+        env=effective_env,
+    )
     if python_probe is not None:
         meta["python_interpreter"] = python_probe.to_dict()
     return out, meta
+
+
+def _probe_local_shell_payload(
+    *,
+    workspace_dir: Path | None,
+    env: dict[str, str] | None,
+) -> dict[str, Any]:
+    """
+    Launch a payload-equivalent no-op through the local shell backend.
+
+    Command discovery alone is not enough to prove shell capability: process creation can still be
+    blocked by sandbox or host policy.  This probe is deliberately tiny, bounded, and records the
+    same canonical shape as the container probe so the shell capability resolver can distinguish
+    "command exists" from "payload launch works".
+    """
+
+    if os.name == "nt":
+        resolved = shutil.which("powershell", path=(env or os.environ).get("PATH"))
+        if resolved is None:
+            resolved = shutil.which("pwsh", path=(env or os.environ).get("PATH"))
+        if resolved is None:
+            return {
+                "kind": "backend_shell_payload",
+                "shell_family": "powershell",
+                "exit_code": 1,
+                "stdout": "",
+                "stderr": "PowerShell executable was not found for local shell payload probe.",
+                "reason_code": "not_found",
+            }
+        argv = [
+            resolved,
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            "Write-Output 'shell_probe=ok'",
+        ]
+        shell_family = "powershell"
+    else:
+        resolved = shutil.which("sh", path=(env or os.environ).get("PATH")) or "sh"
+        argv = [resolved, "-lc", "printf 'shell_probe=ok\\n'"]
+        shell_family = "sh"
+
+    try:
+        proc = subprocess.run(
+            argv,
+            cwd=str(workspace_dir) if workspace_dir is not None else None,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.5,
+            check=False,
+            env=env,
+        )
+    except subprocess.TimeoutExpired:
+        return {
+            "kind": "backend_shell_payload",
+            "shell_family": shell_family,
+            "exit_code": 124,
+            "stdout": "",
+            "stderr": "Local shell payload probe timed out.",
+            "reason_code": "unresponsive",
+            "probe_argv": argv,
+        }
+    except OSError as e:
+        return {
+            "kind": "backend_shell_payload",
+            "shell_family": shell_family,
+            "exit_code": 1,
+            "stdout": "",
+            "stderr": f"Local shell payload probe failed to launch: {e}",
+            "reason_code": "blocked",
+            "probe_argv": argv,
+        }
+
+    stdout = (proc.stdout or "").strip()
+    stderr = (proc.stderr or "").strip()
+    marker_seen = "shell_probe=ok" in stdout.splitlines()
+    return {
+        "kind": "backend_shell_payload",
+        "shell_family": shell_family,
+        "exit_code": int(proc.returncode or 0) if marker_seen else 1,
+        "stdout": "shell_probe=ok" if marker_seen else stdout[:300],
+        "stderr": (
+            stderr[:300]
+            if marker_seen
+            else (stderr[:300] or "Local shell payload probe did not emit sentinel output.")
+        ),
+        "probe_argv": argv,
+    }
 
 
 def _format_windows_python_preflight_error(probe: Any) -> str:
@@ -2302,6 +2396,25 @@ def _codex_shell_probe_failure_reason(
             "codex_windows_sandbox_panic",
             "Codex Windows sandbox probe failed before shell payload execution.",
         )
+    if os_is_windows and (
+        "blocked by policy" in lowered
+        or "denied by policy" in lowered
+        or "policy-blocked" in lowered
+        or "policy blocked" in lowered
+        or (
+            "policy" in lowered
+            and (
+                "process launch" in lowered
+                or "process creation" in lowered
+                or "failed to launch" in lowered
+                or "failed to spawn" in lowered
+            )
+        )
+    ):
+        return (
+            "codex_windows_process_launch_blocked_by_policy",
+            "Codex Windows shell probe process launch was blocked by policy.",
+        )
     if (
         os_is_windows
         and "powershell" in lowered
@@ -2372,8 +2485,11 @@ def _resolve_shell_capability(
     backend_norm = backend.strip().lower() if backend.strip() else "local"
     policy_status_norm = policy_status.strip().lower() if policy_status.strip() else "unknown"
     probe_status = "not_run"
+    probe_kind: str | None = None
 
     if isinstance(probe_result, dict):
+        kind_raw = probe_result.get("kind")
+        probe_kind = kind_raw.strip() if isinstance(kind_raw, str) and kind_raw.strip() else None
         passed_raw = probe_result.get("passed")
         ok_raw = probe_result.get("ok")
         exit_code = probe_result.get("exit_code")
@@ -2433,7 +2549,20 @@ def _resolve_shell_capability(
             allowed_tools=allowed_tools,
         )
 
-    if probe_status == "passed":
+    probe_proves_agent_shell_launch = True
+    if (
+        probe_status == "passed"
+        and probe_kind == "backend_shell_payload"
+        and agent_norm == "codex"
+        and backend_norm == "local"
+        and operating_system.strip().lower().startswith("windows")
+    ):
+        # A plain PowerShell/bash no-op can succeed on Windows while Codex's own sandboxed shell
+        # backend still fails before the payload command is invoked.  Do not upgrade local Windows
+        # Codex shell capability from a generic backend probe alone.
+        probe_proves_agent_shell_launch = False
+
+    if probe_status == "passed" and probe_proves_agent_shell_launch:
         return ShellCapability(
             state="available",
             agent=agent,
@@ -2449,25 +2578,24 @@ def _resolve_shell_capability(
             allowed_tools=allowed_tools,
         )
 
-    if policy_status_norm == "allowed" and agent_norm != "codex":
-        return ShellCapability(
-            state="available",
-            agent=agent,
-            operating_system=operating_system,
-            backend=backend_norm,
-            sandbox_mode=sandbox_mode,
-            probe_status=probe_status,
-            reason_code=None,
-            reason_type=None,
-            reason=policy_reason or "Shell commands are enabled for this agent policy.",
-            policy_status=policy_status_norm,
-            policy_reason=policy_reason,
-            allowed_tools=allowed_tools,
-        )
-
     reason_code = "shell_capability_unprobed"
+    reason = (
+        "Shell capability is not proven for the effective agent execution path; "
+        "unknown shell capability is not treated as available for shell-required missions."
+    )
+    if policy_status_norm == "allowed":
+        reason_code = "shell_command_discovered_without_launchability"
+        reason = (
+            "Shell policy/command discovery allows shell use, but no payload-equivalent "
+            "launch probe proved shell backend launchability."
+        )
     if agent_norm == "codex" and operating_system.strip().lower().startswith("windows"):
         reason_code = "codex_windows_shell_unprobed"
+        if probe_status == "passed" and not probe_proves_agent_shell_launch:
+            reason = (
+                "A generic local shell payload probe passed, but local Windows Codex shell "
+                "backend launchability was not proven under the Codex sandbox policy."
+            )
     return ShellCapability(
         state="unprobed",
         agent=agent,
@@ -2477,10 +2605,7 @@ def _resolve_shell_capability(
         probe_status=probe_status,
         reason_code=reason_code,
         reason_type="runtime",
-        reason=(
-            "Shell capability is not proven for the effective agent execution path; "
-            "unknown shell capability is not treated as available for shell-required missions."
-        ),
+        reason=reason,
         policy_status=policy_status_norm,
         policy_reason=policy_reason,
         allowed_tools=allowed_tools,
@@ -2509,6 +2634,9 @@ def _shell_probe_result_from_preflight_meta(
         stderr = shell_probe.get("stderr")
         stdout = shell_probe.get("stdout")
         return {
+            "kind": shell_probe.get("kind")
+            if isinstance(shell_probe.get("kind"), str)
+            else "backend_shell_payload",
             "ok": exit_code == 0,
             "exit_code": exit_code,
             "stderr_excerpt": stderr if isinstance(stderr, str) else "",
@@ -2557,6 +2685,11 @@ def _policy_allows_shell(
         policy_status=status,
         policy_reason=_reason,
         allowed_tools=_allowed_tools,
+        probe_result=(
+            {"kind": "static_policy_recommendation", "ok": True}
+            if status == "allowed"
+            else None
+        ),
     )
     return capability.state == "available"
 
@@ -3495,10 +3628,15 @@ def _reason_type_for_code(reason_code: str | None) -> str | None:
         "blocked",
         "unresponsive",
         "context_mismatch",
+        "codex_windows_process_launch_blocked_by_policy",
+        "codex_windows_powershell_prepayload_failed",
+        "codex_windows_shell_launch_failed",
     }:
         return "execution"
     if code in {"pip_missing", "pytest_missing", "pdm_missing"}:
         return "dependency"
+    if code in {"shell_policy_blocked"}:
+        return "configuration"
     if code in {
         "missing_stdlib",
         "runtime_probe_failed",
@@ -3506,6 +3644,11 @@ def _reason_type_for_code(reason_code: str | None) -> str | None:
         "pytest_probe_failed",
         "pdm_probe_failed",
         "probe_failed",
+        "shell_probe_failed",
+        "codex_windows_sandbox_panic",
+        "codex_windows_shell_unprobed",
+        "shell_capability_unprobed",
+        "shell_command_discovered_without_launchability",
     }:
         return "runtime"
     return "unknown"
@@ -5165,6 +5308,11 @@ def _maybe_write_shell_capability_block_report_artifacts(
     """
 
     if not _schema_is_task_run_v1(schema_dict):
+        _append_shell_capability_normalized_event(
+            run_dir=run_dir,
+            shell_capability=shell_capability,
+            blocked=True,
+        )
         return
 
     state = shell_capability.get("state")
@@ -5226,7 +5374,7 @@ def _maybe_write_shell_capability_block_report_artifacts(
         "next_actions": [hint],
         "extensions": {"shell_capability": shell_capability},
     }
-    validation_errors = validate_report(report, schema_dict)
+    validation_errors = validate_report(report, schema_dict, require_shell_capability=True)
     if validation_errors:
         _write_json(run_dir / "report_validation_errors.json", validation_errors)
         return
@@ -5234,6 +5382,33 @@ def _maybe_write_shell_capability_block_report_artifacts(
     _write_json(run_dir / "report.json", report)
     md = render_report_markdown(report=report, metrics=None, target_ref=target_ref)
     (run_dir / "report.md").write_text(md, encoding="utf-8", newline="\n")
+    _append_shell_capability_normalized_event(
+        run_dir=run_dir,
+        shell_capability=shell_capability,
+        blocked=True,
+    )
+
+
+def _append_shell_capability_normalized_event(
+    *,
+    run_dir: Path,
+    shell_capability: dict[str, Any],
+    blocked: bool,
+) -> None:
+    if not isinstance(shell_capability, dict):
+        return
+    event = make_event(
+        "preflight_shell_capability",
+        {
+            "capability": "shell_commands",
+            "blocked": bool(blocked),
+            "shell_capability": shell_capability,
+        },
+    )
+    path = run_dir / "normalized_events.jsonl"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("a", encoding="utf-8", newline="\n") as f:
+        f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
 
 def _git_diff(path: Path) -> str:
@@ -5708,13 +5883,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         shell_capability_summary = shell_capability.to_dict()
 
         early_shell_capability_state = shell_capability_summary.get("state")
-        defer_codex_shell_probe = (
-            request.agent == "codex" and early_shell_capability_state == "unprobed"
+        defer_shell_launch_probe = (
+            early_shell_capability_state == "unprobed"
+            and str(shell_status).strip().lower() != "blocked"
         )
         if (
             bool(resolved_inputs.mission.requires_shell)
             and early_shell_capability_state != "available"
-            and not defer_codex_shell_probe
+            and not defer_shell_launch_probe
         ):
             requires_edits = bool(resolved_inputs.mission.requires_edits)
 
@@ -8865,6 +9041,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         finally:
             if raw_ts_f is not None:
                 raw_ts_f.close()
+
+        if isinstance(shell_capability_summary, dict):
+            _append_shell_capability_normalized_event(
+                run_dir=run_dir,
+                shell_capability=shell_capability_summary,
+                blocked=False,
+            )
 
         diff_numstat: list[dict[str, Any]] = []
         if allow_edits:

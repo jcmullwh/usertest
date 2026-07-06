@@ -122,6 +122,52 @@ def test_task_run_schema_allows_nullable_output_path() -> None:
     errors = validate_report(report, schema)
     assert errors == []
 
+
+def test_validate_report_can_require_shell_capability_extension() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    schema_path = repo_root / "configs" / "report_schemas" / "task_run_v1.schema.json"
+    schema = load_schema(schema_path)
+
+    report = {
+        "schema_version": 1,
+        "kind": "task_run_v1",
+        "status": "failure",
+        "goal": "Run mission.",
+        "summary": "Blocked in preflight.",
+        "steps": [
+            {
+                "name": "Preflight",
+                "attempts": [{"action": "Resolve shell capability."}],
+                "outcome": "blocked",
+            }
+        ],
+        "outputs": [],
+        "next_actions": ["Use a launchable shell backend."],
+    }
+
+    missing_errors = validate_report(report, schema, require_shell_capability=True)
+    assert any("$.extensions.shell_capability" in error for error in missing_errors)
+
+    report["extensions"] = {
+        "shell_capability": {
+            "state": "blocked",
+            "agent": "codex",
+            "operating_system": "Windows",
+            "backend": "local",
+            "sandbox_mode": "workspace-write",
+            "probe_status": "failed",
+            "reason_code": "codex_windows_process_launch_blocked_by_policy",
+            "reason_type": "execution",
+            "reason": "Process launch was blocked by policy.",
+            "policy_status": "allowed",
+            "policy_reason": "Codex sandbox policy configured.",
+            "allowed_tools": None,
+        }
+    }
+
+    assert validate_report(report, schema, require_shell_capability=True) == []
+
+
 def test_task_run_evidence_schema_requires_verification_on_success() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     schema_path = repo_root / "configs" / "report_schemas" / "task_run_evidence_v1.schema.json"

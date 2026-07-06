@@ -4,6 +4,8 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from normalized_events import iter_events_jsonl
+
 import runner_core.runner as runner_mod
 from runner_core import RunnerConfig, RunRequest, find_repo_root, run_once
 from runner_core.runner import _resolve_shell_capability, _shell_probe_result_from_preflight_meta
@@ -49,6 +51,18 @@ def _install_task_requires_shell_mission(target_repo: Path) -> None:
 
 
 def test_shell_capability_resolver_available_blocked_and_unprobed() -> None:
+    discovery_only = _resolve_shell_capability(
+        agent="claude",
+        operating_system="Linux",
+        backend="local",
+        sandbox_mode=None,
+        policy_status="allowed",
+        policy_reason="claude.allowed_tools includes Bash",
+        allowed_tools=["Bash"],
+    ).to_dict()
+    assert discovery_only["state"] == "unprobed"
+    assert discovery_only["reason_code"] == "shell_command_discovered_without_launchability"
+
     available = _resolve_shell_capability(
         agent="claude",
         operating_system="Linux",
@@ -57,6 +71,7 @@ def test_shell_capability_resolver_available_blocked_and_unprobed() -> None:
         policy_status="allowed",
         policy_reason="claude.allowed_tools includes Bash",
         allowed_tools=["Bash"],
+        probe_result={"kind": "backend_shell_payload", "ok": True, "exit_code": 0},
     ).to_dict()
     assert available["state"] == "available"
     assert available["reason_code"] is None
@@ -122,6 +137,22 @@ def test_shell_capability_resolver_classifies_codex_windows_probe_failures() -> 
     ).to_dict()
     assert powershell["state"] == "blocked"
     assert powershell["reason_code"] == "codex_windows_powershell_prepayload_failed"
+
+    policy_blocked = _resolve_shell_capability(
+        agent="codex",
+        operating_system="Windows",
+        backend="local",
+        sandbox_mode="workspace-write",
+        policy_status="unknown",
+        policy_reason="Codex CLI command execution depends on sandbox policy.",
+        allowed_tools=None,
+        probe_result={
+            "ok": False,
+            "stderr_excerpt": "Process launch blocked by policy before payload execution",
+        },
+    ).to_dict()
+    assert policy_blocked["state"] == "blocked"
+    assert policy_blocked["reason_code"] == "codex_windows_process_launch_blocked_by_policy"
 
 
 def test_failed_shell_probe_blocks_non_codex_agents() -> None:
@@ -210,6 +241,7 @@ def test_shell_probe_result_uses_existing_backend_probe_meta() -> None:
         {"shell_probe": {"exit_code": 0, "stderr": ""}}
     )
     assert passed == {
+        "kind": "backend_shell_payload",
         "ok": True,
         "exit_code": 0,
         "stderr_excerpt": "",
@@ -270,6 +302,10 @@ def test_shell_required_unprobed_capability_blocks_dispatch_and_writes_report(
     report_md = (result.run_dir / "report.md").read_text(encoding="utf-8")
     assert "Shell capability: unprobed" in report_md
     assert "codex_windows_shell_unprobed" in report_md
+
+    events = list(iter_events_jsonl(result.run_dir / "normalized_events.jsonl"))
+    assert events[-1]["type"] == "preflight_shell_capability"
+    assert events[-1]["data"]["shell_capability"] == shell_capability
 
 
 def test_shell_required_backend_probe_failure_blocks_dispatch_and_classifies(
