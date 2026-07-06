@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from run_artifacts.capture import CaptureResult, TextCapturePolicy, capture_text_artifact
+from run_artifacts.lifecycle import classify_history_record_lifecycle
 from run_artifacts.path_normalization import normalize_agent_path
 from run_artifacts.run_failure_event import (
     classify_failure_kind,
@@ -758,7 +759,8 @@ def extract_backlog_atoms(
         run_ids.add(run_id)
 
         agent = str(record.get("agent") or "unknown")
-        status = str(record.get("status") or "unknown")
+        lifecycle = classify_history_record_lifecycle(record)
+        status = lifecycle.status
         timestamp_utc = record.get("timestamp_utc")
         timestamp_utc_s = timestamp_utc if isinstance(timestamp_utc, str) else None
         target_slug = _coerce_string(record.get("target_slug"))

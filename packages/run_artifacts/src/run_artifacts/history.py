@@ -4,12 +4,36 @@ import json
 import os
 import re
 from collections.abc import Iterator
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from run_artifacts.capture import TextCapturePolicy, TextExcerpt, capture_text_artifact
+from run_artifacts.lifecycle import (
+    STATUS_ERROR as _STATUS_ERROR,
+)
+from run_artifacts.lifecycle import (
+    STATUS_LEGACY_NO_TERMINAL_ARTIFACT as _STATUS_LEGACY_NO_TERMINAL_ARTIFACT,
+)
+from run_artifacts.lifecycle import (
+    STATUS_MISSING_REPORT as _STATUS_MISSING_REPORT,
+)
+from run_artifacts.lifecycle import (
+    STATUS_NONTERMINAL as _STATUS_NONTERMINAL,
+)
+from run_artifacts.lifecycle import (
+    STATUS_OK as _STATUS_OK,
+)
+from run_artifacts.lifecycle import (
+    STATUS_REPORT_VALIDATION_ERROR as _STATUS_REPORT_VALIDATION_ERROR,
+)
+from run_artifacts.lifecycle import (
+    STATUS_TERMINAL_ARTIFACT_UNREADABLE as _STATUS_TERMINAL_ARTIFACT_UNREADABLE,
+)
+from run_artifacts.lifecycle import (
+    JsonArtifactReadResult,
+    classify_run_lifecycle,
+)
 from run_artifacts.path_normalization import normalize_agent_path
 
 _TIMESTAMP_DIR_RE = re.compile(r"^[0-9]{8}T[0-9]{6}Z$")
@@ -21,26 +45,6 @@ _EMBED_DEFINITION_KEYS = {
     "prompt_template_md",
     "report_schema_json",
 }
-_STATUS_OK = "ok"
-_STATUS_ERROR = "error"
-_STATUS_MISSING_REPORT = "missing_report"
-_STATUS_LEGACY_NO_TERMINAL_ARTIFACT = "no_terminal_artifact"
-_STATUS_REPORT_VALIDATION_ERROR = "report_validation_error"
-_STATUS_TERMINAL_ARTIFACT_UNREADABLE = "terminal_artifact_unreadable"
-
-
-@dataclass(frozen=True)
-class JsonArtifactReadResult:
-    path: str
-    exists: bool
-    decode_ok: bool | None
-    parse_ok: bool | None
-    value: Any | None
-    error_phase: str | None
-    error_type: str | None
-    error_message: str | None
-    error_line: int | None = None
-    error_column: int | None = None
 
 
 def _parse_timestamp_dirname(name: str) -> str | None:
@@ -246,68 +250,20 @@ def _read_json(path: Path) -> Any | None:
     return _read_json_artifact(path).value
 
 
-def _artifact_read_details(result: JsonArtifactReadResult) -> dict[str, Any]:
-    details: dict[str, Any] = {
-        "path": result.path,
-        "exists": result.exists,
-        "decode_ok": result.decode_ok,
-        "parse_ok": result.parse_ok,
-        "error_phase": result.error_phase,
-        "error_type": result.error_type,
-        "error_message": result.error_message,
-    }
-    if result.error_line is not None:
-        details["error_line"] = result.error_line
-    if result.error_column is not None:
-        details["error_column"] = result.error_column
-    return details
-
-
-def _terminal_artifact_reads(
-    *,
-    report: JsonArtifactReadResult,
-    error: JsonArtifactReadResult,
-    report_validation_errors: JsonArtifactReadResult,
-) -> dict[str, dict[str, Any]]:
-    return {
-        "report.json": _artifact_read_details(report),
-        "error.json": _artifact_read_details(error),
-        "report_validation_errors.json": _artifact_read_details(report_validation_errors),
-    }
-
-
-def _has_artifact_read_failure(result: JsonArtifactReadResult) -> bool:
-    return result.exists and (result.decode_ok is False or result.parse_ok is False)
-
-
 def _derive_run_status(
     *,
     report_read: JsonArtifactReadResult,
     error_read: JsonArtifactReadResult,
     report_validation_errors_read: JsonArtifactReadResult,
+    run_meta_read: JsonArtifactReadResult | None = None,
 ) -> tuple[str, dict[str, dict[str, Any]]]:
-    terminal_artifact_reads = _terminal_artifact_reads(
-        report=report_read,
-        error=error_read,
-        report_validation_errors=report_validation_errors_read,
+    classification = classify_run_lifecycle(
+        report_read=report_read,
+        error_read=error_read,
+        report_validation_errors_read=report_validation_errors_read,
+        run_meta_read=run_meta_read,
     )
-
-    if any(
-        _has_artifact_read_failure(result)
-        for result in (report_read, error_read, report_validation_errors_read)
-    ):
-        return _STATUS_TERMINAL_ARTIFACT_UNREADABLE, terminal_artifact_reads
-    if isinstance(error_read.value, dict):
-        return _STATUS_ERROR, terminal_artifact_reads
-    if report_validation_errors_read.value is not None:
-        return _STATUS_REPORT_VALIDATION_ERROR, terminal_artifact_reads
-    if report_read.value is None:
-        # report.json is absent and we already ruled out unreadable/error/validation terminal
-        # artifacts above. In practice this means the run never produced the expected report
-        # artifact, whether because it predates the terminal-artifact contract or because it was
-        # interrupted before the terminal artifact was emitted.
-        return _STATUS_MISSING_REPORT, terminal_artifact_reads
-    return _STATUS_OK, terminal_artifact_reads
+    return classification.status, classification.terminal_artifact_reads
 
 
 def _history_text_policy(max_embed_bytes: int) -> TextCapturePolicy:
@@ -498,7 +454,8 @@ def iter_report_history(
             run_dir / "report_validation_errors.json"
         )
         report_validation_errors = report_validation_errors_read.value
-        run_meta = _read_json(run_dir / "run_meta.json")
+        run_meta_read = _read_json_artifact(run_dir / "run_meta.json")
+        run_meta = run_meta_read.value
         agent_attempts = _read_json(run_dir / "agent_attempts.json")
         ticket_ref = _read_json(run_dir / "ticket_ref.json")
         timing = _read_json(run_dir / "timing.json")
@@ -512,6 +469,7 @@ def iter_report_history(
             report_read=report_read,
             error_read=error_read,
             report_validation_errors_read=report_validation_errors_read,
+            run_meta_read=run_meta_read,
         )
 
         embedded: dict[str, Any] = {}
@@ -612,6 +570,7 @@ def write_report_history_jsonl(
     counts: dict[str, int] = {
         _STATUS_OK: 0,
         _STATUS_MISSING_REPORT: 0,
+        _STATUS_NONTERMINAL: 0,
         _STATUS_LEGACY_NO_TERMINAL_ARTIFACT: 0,
         _STATUS_REPORT_VALIDATION_ERROR: 0,
         _STATUS_TERMINAL_ARTIFACT_UNREADABLE: 0,
@@ -670,7 +629,8 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
     error = error_read.value
     report_validation_errors_read = _read_json_artifact(run_dir / "report_validation_errors.json")
     report_validation_errors = report_validation_errors_read.value
-    run_meta = _read_json(run_dir / "run_meta.json")
+    run_meta_read = _read_json_artifact(run_dir / "run_meta.json")
+    run_meta = run_meta_read.value
     agent_attempts = _read_json(run_dir / "agent_attempts.json")
 
     agent_exit_code: int | None = None
@@ -682,6 +642,7 @@ def load_run_record(run_dir: Path, *, runs_dir: Path) -> dict[str, Any] | None:
         report_read=report_read,
         error_read=error_read,
         report_validation_errors_read=report_validation_errors_read,
+        run_meta_read=run_meta_read,
     )
 
     ts_utc = _parse_timestamp_dirname(ts_dir) if isinstance(ts_dir, str) else None

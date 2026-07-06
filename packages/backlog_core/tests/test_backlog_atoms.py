@@ -4,6 +4,8 @@ import json
 from collections.abc import Sequence
 from pathlib import Path
 
+from run_artifacts.history import iter_report_history
+
 from backlog_core.backlog import (
     add_atom_links,
     build_backlog_document,
@@ -136,6 +138,55 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
     assert totals["source_counts"]["run_failure_event"] == 1
     assert totals["source_counts"].get("agent_stderr_artifact", 0) == 0
     assert totals["source_counts"].get("agent_last_message_artifact", 0) == 0
+
+
+def test_extract_backlog_atoms_does_not_emit_missing_report_for_nonterminal_run(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "target_ref.json").write_text(
+        json.dumps({"repo_input": "C:/repo/target_a"}) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "effective_run_spec.json").write_text("{}\n", encoding="utf-8")
+
+    records = list(iter_report_history(runs_dir, target_slug="target_a", embed="none"))
+    assert [record["status"] for record in records] == ["nonterminal"]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+
+    assert atoms_doc["totals"]["source_counts"].get("run_failure_event", 0) == 0
+    assert atoms_doc["capture_manifest"]["target_a/20260101T000000Z/codex/0"]
+
+
+def test_extract_backlog_atoms_emits_missing_report_for_completed_run_without_report(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "target_ref.json").write_text(
+        json.dumps({"repo_input": "C:/repo/target_a"}) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "effective_run_spec.json").write_text("{}\n", encoding="utf-8")
+    (run_dir / "run_meta.json").write_text(
+        json.dumps({"run_finished_utc": "2026-01-01T00:00:00Z"}) + "\n",
+        encoding="utf-8",
+    )
+
+    records = list(iter_report_history(runs_dir, target_slug="target_a", embed="none"))
+    assert [record["status"] for record in records] == ["missing_report"]
+
+    atoms_doc = extract_backlog_atoms(records, repo_root=tmp_path)
+
+    failure = next(
+        atom for atom in atoms_doc["atoms"] if atom.get("source") == "run_failure_event"
+    )
+    assert failure["failure_kind"] == "missing_report"
+    assert failure["severity_hint"] == "high"
 
 
 def test_extract_backlog_atoms_extracts_task_run_v1_report_blocks(tmp_path: Path) -> None:

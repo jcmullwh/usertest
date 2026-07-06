@@ -6,6 +6,11 @@ from run_artifacts.capture import (
     capture_text_artifact,
 )
 from run_artifacts.history import iter_report_history, write_report_history_jsonl
+from run_artifacts.lifecycle import (
+    RunLifecycleClassification,
+    classify_history_record_lifecycle,
+    classify_run_lifecycle,
+)
 from run_artifacts.run_failure_event import (
     classify_failure_kind,
     classify_known_stderr_warnings,
@@ -21,12 +26,15 @@ __all__ = [
     "TextCapturePolicy",
     "TextExcerpt",
     "capture_text_artifact",
+    "classify_history_record_lifecycle",
     "classify_failure_kind",
     "classify_known_stderr_warnings",
+    "classify_run_lifecycle",
     "coerce_validation_errors",
     "extract_error_artifacts",
     "iter_report_history",
     "render_failure_text",
+    "RunLifecycleClassification",
     "sanitize_error",
     "write_report_history_jsonl",
 ]
