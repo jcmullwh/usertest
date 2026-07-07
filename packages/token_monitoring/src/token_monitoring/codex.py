@@ -52,6 +52,16 @@ _SOURCE_EXTENSIONS = (
 _SECRET_VALUE_RE = re.compile(
     r"(?i)(api[_-]?key|token|password|secret|authorization)(\s*[=:]\s*)([^\s\"']+)"
 )
+_VERIFY_CLIENT_COMMAND_RE = re.compile(
+    r"""(?ix)
+    (^|[\s'"])
+    (sh|bash|python(?:3)?)(?:\.exe)?
+    \s+
+    [/\\]run_dir[/\\]verification_broker[/\\]client[/\\]verify_client\.(?:sh|py)
+    (?=$|[\s'"])
+    """
+)
+_TOOL_SESSION_ID_RE = re.compile(r"session ID\s+(\d+)")
 
 
 def zero_usage() -> dict[str, int]:
@@ -162,20 +172,16 @@ def _classify_command(command: str) -> str:
     lowered = command.lower()
     tokens = [t.lower() for t in _split_command(command)]
     token_set = set(tokens)
-    if any(
-        marker in lowered
-        for marker in (
-            "start-sleep",
-            " sleep ",
-            "read_thread_terminal",
-            "get-process",
-            "wait-process",
-            "tasklist",
-            "while ",
-            "poll",
-            "status",
-            "tail -f",
-        )
+    if _is_verify_client_command(command):
+        return "wait_poll"
+    if (
+        "start-sleep" in token_set
+        or "sleep" in token_set
+        or "wait-process" in token_set
+        or "wait" in token_set
+        or "watch" in token_set
+        or "tail -f" in lowered
+        or "read_thread_terminal" in lowered
     ):
         return "wait_poll"
     if any(marker in lowered for marker in ("pytest", "ruff", "mypy", "npm test", "pdm run")):
@@ -191,13 +197,52 @@ def _classify_command(command: str) -> str:
     return "tool"
 
 
-def _extract_action(event: dict[str, Any]) -> dict[str, Any] | None:
+def _is_verify_client_command(command: str) -> bool:
+    return bool(_VERIFY_CLIENT_COMMAND_RE.search(command))
+
+
+def _session_id_from_output(output: str) -> int | None:
+    match = _TOOL_SESSION_ID_RE.search(output)
+    if match is None:
+        return None
+    return int(match.group(1))
+
+
+def _extract_action(
+    event: dict[str, Any],
+    *,
+    active_verify_sessions: set[int] | None = None,
+) -> dict[str, Any] | None:
     payload = event.get("payload")
     if isinstance(payload, dict):
         payload_type = payload.get("type")
         if payload_type == "function_call":
             tool_name = str(payload.get("name") or "")
             args = _maybe_json_object(payload.get("arguments"))
+            if tool_name == "write_stdin":
+                session_id = args.get("session_id")
+                is_empty_wait = args.get("chars", "") == "" and isinstance(
+                    args.get("yield_time_ms"), int
+                )
+                if is_empty_wait:
+                    is_verifier = (
+                        isinstance(session_id, int)
+                        and active_verify_sessions is not None
+                        and session_id in active_verify_sessions
+                    )
+                    return {
+                        "type": "wait_poll",
+                        "tool_name": tool_name,
+                        "command_class": (
+                            "verifier_continuation_wait"
+                            if is_verifier
+                            else "terminal_continuation_wait"
+                        ),
+                        "paths": [],
+                        "session_id": session_id,
+                        "yield_time_ms": args.get("yield_time_ms"),
+                        "max_output_tokens": args.get("max_output_tokens"),
+                    }
             if tool_name == "multi_tool_use.parallel":
                 tool_uses = args.get("tool_uses")
                 if isinstance(tool_uses, list):
@@ -228,12 +273,17 @@ def _extract_action(event: dict[str, Any]) -> dict[str, Any] | None:
             command = _command_from_tool_args(tool_name, args)
             if command is not None:
                 action_type = _classify_command(command)
+                command_class = (
+                    "verifier_wait_start" if _is_verify_client_command(command) else action_type
+                )
                 return {
                     "type": action_type,
                     "tool_name": tool_name,
-                    "command_class": action_type,
+                    "command_class": command_class,
                     "command_excerpt": sanitize_command_for_metadata(command),
                     "paths": _paths_from_command(command),
+                    "yield_time_ms": args.get("yield_time_ms"),
+                    "max_output_tokens": args.get("max_output_tokens"),
                 }
             if tool_name:
                 if tool_name.endswith("read_thread_terminal"):
@@ -403,6 +453,8 @@ def parse_codex_session(path: Path) -> CodexSessionResult:
     pending_context: dict[str, Any] = {}
     recent_output_chars = 0
     malformed_lines = 0
+    pending_tool_calls: dict[str, dict[str, Any]] = {}
+    active_verify_sessions: set[int] = set()
 
     with path.open("r", encoding="utf-8") as f:
         for line_number, raw_line in enumerate(f, start=1):
@@ -428,6 +480,43 @@ def parse_codex_session(path: Path) -> CodexSessionResult:
             output_chars = _output_chars(event)
             if output_chars:
                 recent_output_chars = output_chars
+
+            payload = event.get("payload")
+            if isinstance(payload, dict):
+                payload_type = payload.get("type")
+                if payload_type == "function_call":
+                    call_id = payload.get("call_id")
+                    if isinstance(call_id, str):
+                        args = _maybe_json_object(payload.get("arguments"))
+                        pending_tool_calls[call_id] = {
+                            "name": payload.get("name"),
+                            "args": args,
+                            "command": _command_from_tool_args(str(payload.get("name") or ""), args)
+                            or "",
+                        }
+                elif payload_type == "function_call_output":
+                    call_id = payload.get("call_id")
+                    call = pending_tool_calls.pop(call_id, {}) if isinstance(call_id, str) else {}
+                    output = payload.get("output")
+                    output_text = output if isinstance(output, str) else ""
+                    command = str(call.get("command") or "")
+                    args = call.get("args") if isinstance(call.get("args"), dict) else {}
+                    name = str(call.get("name") or "")
+                    if name == "exec_command" and _is_verify_client_command(command):
+                        session_id = _session_id_from_output(output_text)
+                        if (
+                            session_id is not None
+                            and "Process running with session ID" in output_text
+                        ):
+                            active_verify_sessions.add(session_id)
+                    elif name == "write_stdin":
+                        session_id = args.get("session_id")
+                        if (
+                            isinstance(session_id, int)
+                            and session_id in active_verify_sessions
+                            and "Process exited" in output_text
+                        ):
+                            active_verify_sessions.discard(session_id)
 
             usage_pair = _event_token_usage(event)
             if usage_pair is not None:
@@ -456,7 +545,7 @@ def parse_codex_session(path: Path) -> CodexSessionResult:
                     pending_context["retained_output_chars"] = recent_output_chars
                 continue
 
-            action = _extract_action(event)
+            action = _extract_action(event, active_verify_sessions=active_verify_sessions)
             if action is None or pending_usage is None:
                 continue
 
