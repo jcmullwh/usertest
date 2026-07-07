@@ -7,11 +7,11 @@ from pathlib import Path, PurePosixPath
 
 import yaml
 
-from usertest_implement.cli import (
-    SelectedTicket,
+from usertest_implement.selection import (
     _resolve_default_branch_name,
     _should_move_ticket_to_review,
 )
+from usertest_implement.shared import SelectedTicket
 
 
 def _write_json(path: Path, obj: object) -> None:
@@ -58,11 +58,11 @@ def test_resolve_default_branch_name_uses_rerun_suffix_when_remote_branch_exists
         return branch in {"backlog/682b47583ab4", "backlog/682b47583ab4-rerun-1"}
 
     monkeypatch.setattr(
-        "usertest_implement.cli._resolve_remote_url_for_push",
+        "usertest_implement.selection._resolve_remote_url_for_push",
         lambda **_: "https://github.com/jcmullwh/usertest.git",
     )
     monkeypatch.setattr(
-        "usertest_implement.cli._remote_branch_exists",
+        "usertest_implement.selection._remote_branch_exists",
         _fake_remote_branch_exists,
     )
 
@@ -253,6 +253,7 @@ def test_run_dry_run_requires_fingerprint_with_tickets_export(tmp_path: Path) ->
         check=False,
     )
     assert proc.returncode != 0
+    assert "Provide --fingerprint with --tickets-export." in (proc.stderr + proc.stdout)
 
 
 def test_tickets_run_next_dry_run_defaults_to_implementation_only(tmp_path: Path) -> None:
@@ -403,6 +404,57 @@ def test_run_dry_run_can_disable_verification_reuse(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stderr or proc.stdout
     payload = json.loads(proc.stdout)
     assert payload["run_request"]["verification_reuse_mode"] == "off"
+
+
+def test_run_dry_run_honors_verify_timeout_seconds(tmp_path: Path) -> None:
+    export_path = tmp_path / "tickets_export.json"
+    _write_json(
+        export_path,
+        {
+            "schema_version": 1,
+            "exports": [
+                {
+                    "fingerprint": "1212121212121212",
+                    "export_kind": "implementation",
+                    "title": "Ticket Timeout",
+                    "labels": [],
+                    "body_markdown": "# Timeout\n",
+                    "source_ticket": {
+                        "fingerprint": "1212121212121212",
+                        "stage": "ready_for_ticket",
+                        "severity": "low",
+                    },
+                    "owner_repo": {
+                        "root": str(tmp_path),
+                        "repo_input": str(tmp_path),
+                        "idea_path": str(tmp_path / "timeout.md"),
+                    },
+                }
+            ],
+        },
+    )
+
+    proc = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "usertest_implement.cli",
+            "run",
+            "--dry-run",
+            "--tickets-export",
+            str(export_path),
+            "--fingerprint",
+            "1212121212121212",
+            "--verify-timeout-seconds",
+            "1234",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert proc.returncode == 0, proc.stderr or proc.stdout
+    payload = json.loads(proc.stdout)
+    assert payload["run_request"]["verification_timeout_seconds"] == 1234.0
 
 
 def test_run_dry_run_defaults_to_maintenance_profile_for_same_repo_targets() -> None:

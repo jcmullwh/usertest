@@ -8,17 +8,19 @@ from types import SimpleNamespace
 import pytest
 from runner_core.runner import RunResult
 
-import usertest_implement.cli as implement_cli
-from usertest_implement.cli import (
-    SelectedTicket,
+from usertest_implement.ci import _wait_for_ci_success
+from usertest_implement.commands.review import _cmd_review_merge, _cmd_review_run
+from usertest_implement.commands.run import _run_selected_ticket
+from usertest_implement.review_context import (
     _build_final_review_summary,
     _build_pr_review_body,
-    _cmd_review_merge,
-    _cmd_review_run,
     _collect_pr_review_context,
-    _read_json,
     _run_gh_json,
     _run_gh_text,
+)
+from usertest_implement.shared import (
+    SelectedTicket,
+    _read_json,
 )
 
 
@@ -281,24 +283,27 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
         )
         return RunResult(run_dir=review_run_dir, exit_code=0, report_validation_errors=[])
 
-    monkeypatch.setattr("usertest_implement.cli._load_runner_config", lambda _repo_root: object())
     monkeypatch.setattr(
-        "usertest_implement.cli._collect_pr_review_context",
+        "usertest_implement.commands.review._load_runner_config",
+        lambda _repo_root: object(),
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._collect_pr_review_context",
         _fake_collect_pr_review_context,
     )
     monkeypatch.setattr(
-        "usertest_implement.cli._git_remote_url",
+        "usertest_implement.commands.review._git_remote_url",
         lambda *, repo_dir, remote_name: "https://example.invalid/repo.git",
     )
     monkeypatch.setattr(
-        "usertest_implement.cli._infer_git_root",
+        "usertest_implement.commands.review._infer_git_root",
         lambda path: owner_root,
     )
     monkeypatch.setattr(
-        "usertest_implement.cli._maintenance_profile_is_eligible",
+        "usertest_implement.commands.review._maintenance_profile_is_eligible",
         lambda *, repo_root, repo_input: False,
     )
-    monkeypatch.setattr("usertest_implement.cli.run_once", _fake_run_once)
+    monkeypatch.setattr("usertest_implement.commands.review.run_once", _fake_run_once)
 
     def _fake_subprocess_run(
         argv,
@@ -323,7 +328,7 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
         assert "- Decision: `approved`" in body_text
         return SimpleNamespace(returncode=0, stdout="review submitted", stderr="")
 
-    monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr("usertest_implement.commands.review.subprocess.run", _fake_subprocess_run)
 
     exit_code = _cmd_review_run(
         _review_run_args(
@@ -418,7 +423,7 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
     )
 
     monkeypatch.setattr(
-        "usertest_implement.cli._collect_pr_review_context",
+        "usertest_implement.commands.review._collect_pr_review_context",
         lambda **_: {
             "pr": {
                 "number": 4,
@@ -442,7 +447,7 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
 
         return _Proc()
 
-    monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr("usertest_implement.commands.review.subprocess.run", _fake_subprocess_run)
 
     exit_code = _cmd_review_merge(
         _review_simple_args(
@@ -480,18 +485,21 @@ def test_run_defers_review_until_for_review_and_green_ci(
         )
         return SimpleNamespace(run_dir=impl_run_dir, exit_code=0, report_validation_errors=[])
 
-    monkeypatch.setattr("usertest_implement.cli.run_once", _fake_run_once)
+    monkeypatch.setattr("usertest_implement.commands.run.run_once", _fake_run_once)
     monkeypatch.setattr(
-        "usertest_implement.cli._maintenance_profile_is_eligible",
+        "usertest_implement.commands.run._maintenance_profile_is_eligible",
         lambda **_: False,
     )
-    monkeypatch.setattr("usertest_implement.cli._git_head_sha", lambda _workspace_dir: "abc123")
     monkeypatch.setattr(
-        "usertest_implement.cli.finalize_commit",
+        "usertest_implement.commands.run._git_head_sha",
+        lambda _workspace_dir: "abc123",
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.run.finalize_commit",
         lambda **_: {"commit_performed": True, "branch": "backlog/test", "head_commit": "abc123"},
     )
     monkeypatch.setattr(
-        "usertest_implement.cli.finalize_push",
+        "usertest_implement.commands.run.finalize_push",
         lambda **_: {"pushed": True, "remote_name": "origin", "remote_url": "https://example.invalid/repo.git"},
     )
     review_run_dir = repo_root / "runs" / "review" / "0"
@@ -512,35 +520,17 @@ def test_run_defers_review_until_for_review_and_green_ci(
         )
 
     monkeypatch.setattr(
-        "usertest_implement.cli._run_review_for_selected_ticket",
+        "usertest_implement.commands.run._run_review_for_selected_ticket",
         _fake_run_review_for_selected_ticket,
     )
 
-    def _fake_subprocess_run(
-        argv,
-        cwd=None,
-        capture_output=None,
-        text=None,
-        encoding=None,
-        errors=None,
-        check=None,
-    ):
+    def _fake_run_gh_text(*, cwd: Path, argv: list[str]) -> str:
+        assert cwd == workspace_dir
         if argv[:3] == ["gh", "pr", "create"]:
-            assert text is True
-            assert encoding == "utf-8"
-            assert errors == "replace"
-            return SimpleNamespace(
-                returncode=0,
-                stdout="https://example.invalid/pr/55\n",
-                stderr="",
-            )
-        raise AssertionError(f"unexpected subprocess call: {argv}")
+            return "https://example.invalid/pr/55\n"
+        raise AssertionError(f"unexpected gh call: {argv}")
 
-    monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
-    monkeypatch.setattr(
-        "usertest_implement.cli.shutil.which", 
-        lambda cmd: "/usr/bin/gh" if cmd == "gh" else None
-    )
+    monkeypatch.setattr("usertest_implement.commands.run._run_gh_text", _fake_run_gh_text)
 
     args = argparse.Namespace(
         repo_root=repo_root,
@@ -607,7 +597,7 @@ def test_run_defers_review_until_for_review_and_green_ci(
         export_index=None,
     )
 
-    exit_code = implement_cli._run_selected_ticket(
+    exit_code = _run_selected_ticket(
         args=args,
         repo_root=repo_root,
         cfg=cfg,
@@ -644,35 +634,31 @@ def test_run_records_missing_gh_when_pr_create_exec_fails(
         )
         return SimpleNamespace(run_dir=impl_run_dir, exit_code=0, report_validation_errors=[])
 
-    monkeypatch.setattr("usertest_implement.cli.run_once", _fake_run_once)
+    monkeypatch.setattr("usertest_implement.commands.run.run_once", _fake_run_once)
     monkeypatch.setattr(
-        "usertest_implement.cli._maintenance_profile_is_eligible",
+        "usertest_implement.commands.run._maintenance_profile_is_eligible",
         lambda **_: False,
     )
-    monkeypatch.setattr("usertest_implement.cli._git_head_sha", lambda _workspace_dir: "abc123")
     monkeypatch.setattr(
-        "usertest_implement.cli.finalize_commit",
+        "usertest_implement.commands.run._git_head_sha",
+        lambda _workspace_dir: "abc123",
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.run.finalize_commit",
         lambda **_: {"commit_performed": True, "branch": "backlog/test", "head_commit": "abc123"},
     )
     monkeypatch.setattr(
-        "usertest_implement.cli.finalize_push",
+        "usertest_implement.commands.run.finalize_push",
         lambda **_: {"pushed": True, "remote_name": "origin", "remote_url": "https://example.invalid/repo.git"},
     )
 
-    def _fake_subprocess_run(
-        argv,
-        cwd=None,
-        capture_output=None,
-        text=None,
-        check=None,
-        encoding=None,
-        errors=None,
-    ):
+    def _fake_run_gh_text(*, cwd: Path, argv: list[str]) -> str:
+        assert cwd == workspace_dir
         if argv[:3] == ["gh", "pr", "create"]:
-            raise OSError("CreateProcess failed")
-        raise AssertionError(f"unexpected subprocess call: {argv}")
+            raise RuntimeError("gh not found on PATH")
+        raise AssertionError(f"unexpected gh call: {argv}")
 
-    monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr("usertest_implement.commands.run._run_gh_text", _fake_run_gh_text)
 
     args = argparse.Namespace(
         repo_root=repo_root,
@@ -739,7 +725,7 @@ def test_run_records_missing_gh_when_pr_create_exec_fails(
         export_index=None,
     )
 
-    exit_code = implement_cli._run_selected_ticket(
+    exit_code = _run_selected_ticket(
         args=args,
         repo_root=repo_root,
         cfg=cfg,
@@ -783,7 +769,10 @@ def test_review_run_refuses_when_ticket_not_in_for_review(monkeypatch, tmp_path:
         f"    last_run_dir: {json.dumps(str(impl_run_dir))}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("usertest_implement.cli._load_runner_config", lambda _repo_root: object())
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._load_runner_config",
+        lambda _repo_root: object(),
+    )
 
     try:
         _cmd_review_run(
@@ -829,10 +818,13 @@ def test_review_run_refuses_when_pr_gate_not_green(monkeypatch, tmp_path: Path) 
         f"    last_run_dir: {json.dumps(str(impl_run_dir))}\n",
         encoding="utf-8",
     )
-    monkeypatch.setattr("usertest_implement.cli._load_runner_config", lambda _repo_root: object())
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._load_runner_config",
+        lambda _repo_root: object(),
+    )
 
     monkeypatch.setattr(
-        "usertest_implement.cli._collect_pr_review_context",
+        "usertest_implement.commands.review._collect_pr_review_context",
         lambda **_: {
             "pr": {
                 "number": 57,
@@ -928,14 +920,14 @@ def test_wait_for_ci_success_polls_view_until_completed_success(
             return SimpleNamespace(returncode=0, stdout=json.dumps(payload), stderr="")
         raise AssertionError(f"unexpected subprocess call: {argv}")
 
-    monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_run)
-    monkeypatch.setattr("usertest_implement.cli.time.sleep", lambda _seconds: None)
+    monkeypatch.setattr("usertest_implement.review_context.subprocess.run", _fake_run)
+    monkeypatch.setattr("usertest_implement.ci.time.sleep", lambda _seconds: None)
     monkeypatch.setattr(
-        "usertest_implement.cli.time.monotonic",
+        "usertest_implement.ci.time.monotonic",
         lambda: next(monotonic_values),
     )
 
-    summary = implement_cli._wait_for_ci_success(
+    summary = _wait_for_ci_success(
         run_dir=run_dir,
         workspace_dir=workspace_dir,
         branch="backlog/test",
@@ -968,7 +960,7 @@ def test_run_gh_text_returns_empty_string_when_stdout_missing(monkeypatch, tmp_p
         assert errors == "replace"
         return SimpleNamespace(returncode=0, stdout=None, stderr=None)
 
-    monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr("usertest_implement.review_context.subprocess.run", _fake_subprocess_run)
 
     assert _run_gh_text(cwd=tmp_path, argv=["gh", "pr", "diff", "123"]) == ""
 
@@ -977,7 +969,7 @@ def test_run_gh_text_reports_missing_gh(monkeypatch, tmp_path: Path) -> None:
     def _fake_subprocess_run(*_args, **_kwargs):
         raise FileNotFoundError("gh")
 
-    monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr("usertest_implement.review_context.subprocess.run", _fake_subprocess_run)
 
     with pytest.raises(RuntimeError, match="gh not found on PATH"):
         _run_gh_text(cwd=tmp_path, argv=["gh", "pr", "diff", "123"])
@@ -998,7 +990,7 @@ def test_run_gh_json_accepts_missing_stdout_as_null(monkeypatch, tmp_path: Path)
         assert errors == "replace"
         return SimpleNamespace(returncode=0, stdout=None, stderr=None)
 
-    monkeypatch.setattr("usertest_implement.cli.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr("usertest_implement.review_context.subprocess.run", _fake_subprocess_run)
 
     assert _run_gh_json(cwd=tmp_path, argv=["gh", "pr", "view", "123", "--json", "number"]) is None
 
@@ -1026,8 +1018,8 @@ def test_collect_pr_review_context_handles_empty_diff(monkeypatch, tmp_path: Pat
             return "apps/usertest_implement/src/usertest_implement/cli.py\n"
         return ""
 
-    monkeypatch.setattr("usertest_implement.cli._run_gh_json", _fake_gh_json)
-    monkeypatch.setattr("usertest_implement.cli._run_gh_text", _fake_gh_text)
+    monkeypatch.setattr("usertest_implement.review_context._run_gh_json", _fake_gh_json)
+    monkeypatch.setattr("usertest_implement.review_context._run_gh_text", _fake_gh_text)
 
     context = _collect_pr_review_context(
         workspace_dir=tmp_path,

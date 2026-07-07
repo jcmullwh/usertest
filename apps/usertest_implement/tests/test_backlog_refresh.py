@@ -3,7 +3,7 @@ from __future__ import annotations
 from argparse import Namespace
 from pathlib import Path
 
-from usertest_implement import cli as implement_cli
+import usertest_implement.commands.run as run_commands
 
 
 def test_refresh_backlog_exports_ready_for_ticket_only(monkeypatch: object, tmp_path: Path) -> None:
@@ -16,7 +16,7 @@ def test_refresh_backlog_exports_ready_for_ticket_only(monkeypatch: object, tmp_
         assert cwd == repo_root
         calls.append((label, argv))
 
-    monkeypatch.setattr(implement_cli, "_run_workflow_step", _capture)
+    monkeypatch.setattr(run_commands, "_run_workflow_step", _capture)
 
     args = Namespace(
         backlog_runs_dir=None,
@@ -27,7 +27,7 @@ def test_refresh_backlog_exports_ready_for_ticket_only(monkeypatch: object, tmp_
         review_model=None,
     )
 
-    implement_cli._refresh_backlog_for_ticket_implementation(args=args, repo_root=repo_root)
+    run_commands._refresh_backlog_for_ticket_implementation(args=args, repo_root=repo_root)
 
     export_calls = [argv for label, argv in calls if label == "reports export-tickets"]
     assert len(export_calls) == 1

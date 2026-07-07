@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -10,9 +12,11 @@ from usertest_implement.cli import build_parser
 @pytest.mark.parametrize(
     "module_name",
     [
+        "usertest_implement.shared",
         "usertest_implement.ci",
         "usertest_implement.parser",
         "usertest_implement.review_context",
+        "usertest_implement.selection",
         "usertest_implement.settings",
         "usertest_implement.commands.maintenance_images",
         "usertest_implement.commands.reports",
@@ -23,6 +27,71 @@ from usertest_implement.cli import build_parser
 )
 def test_planned_implement_module_boundaries_import(module_name: str) -> None:
     assert importlib.import_module(module_name).__name__ == module_name
+
+
+@pytest.mark.parametrize(
+    ("module_name", "function_name"),
+    [
+        ("usertest_implement.settings", "_apply_cli_settings"),
+        ("usertest_implement.ci", "_wait_for_ci_success"),
+        ("usertest_implement.review_context", "_collect_pr_review_context"),
+        ("usertest_implement.selection", "_select_ticket_from_owner_root"),
+        ("usertest_implement.parser", "build_parser"),
+        ("usertest_implement.commands.run", "_cmd_run"),
+        ("usertest_implement.commands.review", "_cmd_review_run"),
+        ("usertest_implement.commands.tickets", "_cmd_tickets_discard"),
+        ("usertest_implement.commands.maintenance_images", "_cmd_maintenance_images_list"),
+        ("usertest_implement.commands.reports", "_cmd_reports_summarize"),
+    ],
+)
+def test_implement_cli_behaviors_live_in_extracted_modules(
+    module_name: str,
+    function_name: str,
+) -> None:
+    module = importlib.import_module(module_name)
+
+    assert callable(getattr(module, function_name))
+
+
+def test_cli_facade_stays_thin() -> None:
+    cli_path = Path(__file__).resolve().parents[1] / "src" / "usertest_implement" / "cli.py"
+    source = cli_path.read_text(encoding="utf-8")
+
+    assert len(source.splitlines()) <= 90
+    assert "def _cmd_" not in source
+    assert ".add_parser(" not in source
+    assert ".add_argument(" not in source
+
+
+@pytest.mark.parametrize(
+    "module_relpath",
+    [
+        "ci.py",
+        "parser.py",
+        "review_context.py",
+        "selection.py",
+        "settings.py",
+        "commands/maintenance_images.py",
+        "commands/reports.py",
+        "commands/review.py",
+        "commands/run.py",
+        "commands/tickets.py",
+    ],
+)
+def test_extracted_modules_do_not_import_cli_facade(module_relpath: str) -> None:
+    module_path = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "usertest_implement"
+        / module_relpath
+    )
+    tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            assert node.module != "usertest_implement.cli"
+        elif isinstance(node, ast.Import):
+            assert all(alias.name != "usertest_implement.cli" for alias in node.names)
 
 
 @pytest.mark.parametrize(
