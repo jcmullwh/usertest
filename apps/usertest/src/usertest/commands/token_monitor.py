@@ -1,11 +1,14 @@
-"""Parser wiring for the ``usertest token-monitor`` command group."""
-
+# ruff: noqa: E501
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 
-from usertest.cli import _cmd_token_monitor_analyze, _cmd_token_monitor_batch_context
+from token_monitoring import analyze_run as analyze_token_run
+from token_monitoring import public_analysis_payload, write_batch_context, write_run_monitoring
+
+from usertest.commands.shared import _resolve_optional_path, _resolve_repo_root
 
 
 def add_token_monitor_command(sub: argparse._SubParsersAction) -> None:
@@ -69,5 +72,49 @@ def add_token_monitor_command(sub: argparse._SubParsersAction) -> None:
     token_monitor_analyze_p.set_defaults(func=_cmd_token_monitor_analyze)
     token_monitor_batch_p.set_defaults(func=_cmd_token_monitor_batch_context)
 
+def _cmd_token_monitor_analyze(args: argparse.Namespace) -> int:
+    """Execute token-monitor analyze for a run directory."""
+    repo_root = _resolve_repo_root(args.repo_root)
+    run_dir = _resolve_optional_path(repo_root, args.run_dir) or args.run_dir.resolve()
+    sessions_root = (
+        (
+            _resolve_optional_path(repo_root, args.codex_sessions_root)
+            or args.codex_sessions_root.resolve()
+        )
+        if args.codex_sessions_root is not None
+        else None
+    )
+    output_dir = (
+        (_resolve_optional_path(repo_root, args.output_dir) or args.output_dir.resolve())
+        if args.output_dir is not None
+        else None
+    )
 
-__all__ = ["add_token_monitor_command"]
+    if args.no_write:
+        analysis = analyze_token_run(run_dir, codex_sessions_root=sessions_root)
+        print(json.dumps(public_analysis_payload(analysis), indent=2, ensure_ascii=False))
+        return 0
+
+    write_run_monitoring(run_dir, codex_sessions_root=sessions_root, output_dir=output_dir)
+    destination = output_dir or run_dir
+    print(str(destination / "token_monitoring.json"))
+    print(str(destination / "token_monitoring.md"))
+    print(str(destination / "token_causal_trace.jsonl"))
+    return 0
+
+def _cmd_token_monitor_batch_context(args: argparse.Namespace) -> int:
+    """Execute token-monitor batch-context for a batch directory."""
+    repo_root = _resolve_repo_root(args.repo_root)
+    batch_dir = _resolve_optional_path(repo_root, args.batch_dir) or args.batch_dir.resolve()
+    output_dir = (
+        (_resolve_optional_path(repo_root, args.output_dir) or args.output_dir.resolve())
+        if args.output_dir is not None
+        else None
+    )
+    write_batch_context(batch_dir, output_dir=output_dir)
+    destination = output_dir or batch_dir
+    print(str(destination / "token_batch_context.json"))
+    print(str(destination / "token_batch_context.md"))
+    return 0
+
+__all__ = ['add_token_monitor_command', '_cmd_token_monitor_analyze', '_cmd_token_monitor_batch_context']

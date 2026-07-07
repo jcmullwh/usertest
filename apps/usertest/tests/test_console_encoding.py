@@ -4,7 +4,7 @@ import io
 
 import pytest
 
-import usertest.cli as cli
+import usertest.commands.shared as shared
 
 
 def _make_cp1252_stream() -> tuple[io.BytesIO, io.TextIOWrapper]:
@@ -20,7 +20,7 @@ def test_enable_console_backslashreplace_prevents_unicodeencodeerror() -> None:
         strict_stream.flush()
 
     raw, stream = _make_cp1252_stream()
-    cli._enable_console_backslashreplace(stream)
+    shared._enable_console_backslashreplace(stream)
     stream.write("\u2192")
     stream.flush()
 
@@ -32,10 +32,10 @@ def test_configure_console_output_makes_stdout_and_stderr_safe(
 ) -> None:
     stdout_raw, stdout_stream = _make_cp1252_stream()
     stderr_raw, stderr_stream = _make_cp1252_stream()
-    monkeypatch.setattr(cli.sys, "stdout", stdout_stream)
-    monkeypatch.setattr(cli.sys, "stderr", stderr_stream)
+    monkeypatch.setattr(shared.sys, "stdout", stdout_stream)
+    monkeypatch.setattr(shared.sys, "stderr", stderr_stream)
 
-    cli._configure_console_output()
+    shared._configure_console_output()
     print("stdout arrow: \u2192", file=stdout_stream)
     print("stderr arrow: \u2192", file=stderr_stream)
     stdout_stream.flush()

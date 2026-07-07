@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import ast
 import importlib
+from pathlib import Path
 
 import pytest
 
 from usertest.cli import build_parser
+
+USERTEST_SRC = Path(__file__).resolve().parents[1] / "src" / "usertest"
 
 
 @pytest.mark.parametrize(
@@ -102,3 +106,23 @@ def test_usertest_command_group_help_contracts(
     out = capsys.readouterr().out
     for snippet in snippets:
         assert snippet in out
+
+
+def test_public_cli_entrypoint_stays_thin() -> None:
+    source = (USERTEST_SRC / "cli.py").read_text(encoding="utf-8")
+
+    assert len(source.splitlines()) <= 80
+    assert "def _cmd_" not in source
+    assert ".add_argument(" not in source
+    assert ".add_parser(" not in source
+
+
+def test_command_modules_do_not_import_public_cli_entrypoint() -> None:
+    command_dir = USERTEST_SRC / "commands"
+    for path in command_dir.glob("*.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                assert node.module != "usertest.cli", path
+            elif isinstance(node, ast.Import):
+                assert all(alias.name != "usertest.cli" for alias in node.names), path
