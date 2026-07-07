@@ -90,7 +90,7 @@ def test_run_analysis_emits_actionable_signals_without_raw_output(tmp_path: Path
             _token_event(260000, 140000),
             _call("Start-Sleep -Seconds 60"),
             _token_event(400000, 140000),
-            _call("Get-Process python"),
+            _call("Start-Sleep -Seconds 60"),
         ],
     )
 

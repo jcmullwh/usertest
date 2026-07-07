@@ -51,6 +51,34 @@ def _function_call(command: str) -> dict[str, object]:
     }
 
 
+def _tool_call(
+    *,
+    name: str,
+    call_id: str,
+    arguments: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call",
+            "name": name,
+            "call_id": call_id,
+            "arguments": json.dumps(arguments),
+        },
+    }
+
+
+def _tool_output(call_id: str, output: str) -> dict[str, object]:
+    return {
+        "type": "response_item",
+        "payload": {
+            "type": "function_call_output",
+            "call_id": call_id,
+            "output": output,
+        },
+    }
+
+
 def test_reconciled_monotonic_session_is_accepted(tmp_path: Path) -> None:
     session = tmp_path / "rollout-2026-07-05T00-00-00-thread-1.jsonl"
     _write_session(
@@ -72,6 +100,77 @@ def test_reconciled_monotonic_session_is_accepted(tmp_path: Path) -> None:
     assert result.final_usage["input_tokens"] == 25
     assert result.trace[0]["action"]["type"] == "source_read"
     assert result.trace[1]["action"]["type"] == "wait_poll"
+
+
+def test_status_text_inside_source_command_is_not_wait_poll(tmp_path: Path) -> None:
+    session = tmp_path / "rollout-2026-07-05T00-00-00-thread-1.jsonl"
+    _write_session(
+        session,
+        [
+            _token_event(10, 10),
+            _function_call(
+                "sed -n '1,220p' append_system_prompt.md && "
+                "printf '\\n--- git status ---\\n' && git status --short"
+            ),
+        ],
+    )
+
+    result = parse_codex_session(session)
+
+    assert result.accepted is True
+    assert result.trace[0]["action"]["type"] == "source_read"
+
+
+def test_verifier_client_continuation_wait_is_detected(tmp_path: Path) -> None:
+    session = tmp_path / "rollout-2026-07-05T00-00-00-thread-1.jsonl"
+    _write_session(
+        session,
+        [
+            _token_event(100, 100),
+            _tool_call(
+                name="exec_command",
+                call_id="call-start",
+                arguments={
+                    "cmd": "sh /run_dir/verification_broker/client/verify_client.sh",
+                    "yield_time_ms": 30000,
+                    "max_output_tokens": 50000,
+                },
+            ),
+            _tool_output(
+                "call-start",
+                "Process running with session ID 12\n"
+                "Original token count: 1200\n"
+                "verification status=running\n",
+            ),
+            _token_event(250, 150),
+            _tool_call(
+                name="write_stdin",
+                call_id="call-wait",
+                arguments={
+                    "session_id": 12,
+                    "chars": "",
+                    "yield_time_ms": 300000,
+                    "max_output_tokens": 60000,
+                },
+            ),
+            _tool_output(
+                "call-wait",
+                "Process exited with code 0\n"
+                "Original token count: 2500\n"
+                "verification status=running\nverification passed\n",
+            ),
+        ],
+    )
+
+    result = parse_codex_session(session)
+
+    assert result.accepted is True
+    assert result.trace[0]["action"]["type"] == "wait_poll"
+    assert result.trace[0]["action"]["command_class"] == "verifier_wait_start"
+    assert result.trace[1]["action"]["type"] == "wait_poll"
+    assert result.trace[1]["action"]["command_class"] == "verifier_continuation_wait"
+    assert result.trace[1]["action"]["yield_time_ms"] == 300000
+    assert result.trace[1]["context_evidence"]["retained_output_chars"] > 0
 
 
 def test_non_monotonic_session_is_rejected(tmp_path: Path) -> None:
