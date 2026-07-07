@@ -677,9 +677,9 @@ def _format_verification_timing_guidance_md(
         f"{_format_seconds_for_prompt(recommended_wait)} before checking status"
     )
     lines.append(
-        "    - reasonable check cadence: wait near "
-        f"{_format_seconds_for_prompt(check_after)}; one or two checks are acceptable, "
-        "continuous wait/poll loops are not"
+        "    - reasonable check cadence: if verification is expected to take minutes, "
+        f"wait near {_format_seconds_for_prompt(check_after)} before checking again; "
+        "one or two checks are acceptable, continuous wait/poll loops are not"
     )
     lines.append(
         "    - hang guard: do not call verification hung until it exceeds "
@@ -691,7 +691,7 @@ def _format_verification_timing_guidance_md(
     )
     if isinstance(verification_result_path, str) and verification_result_path.strip():
         lines.append(
-            "    - after completion, inspect the final result at "
+            "    - artifact paths to inspect after the result returns: final result "
             f"`{verification_result_path.strip()}` and any summary_path/artifacts_dir "
             "printed by the verifier"
         )
