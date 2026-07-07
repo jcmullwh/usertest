@@ -169,12 +169,48 @@ def _setup_target_repo(tmp_path: Path) -> Path:
 
 def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_note(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner_root = _setup_runner_root(tmp_path)
     target = _setup_target_repo(tmp_path)
     dummy_binary = _make_dummy_codex_binary(tmp_path)
 
     verify_cmd = "python -c 'import sys; sys.exit(0)'"
+    raw_history_sentinel = "RAW_HISTORICAL_ARTIFACT_DUMP_SENTINEL"
+    raw_progress_sentinel = "RAW_PROGRESS_LOG_SENTINEL"
+    timing_profile = {
+        "schema_version": 1,
+        "run_count": 9,
+        "command_count": 27,
+        "run_wall_seconds": {"count": 9, "p05": 62.0, "median": 510.0, "p95": 1330.0},
+        "slowest_commands": [
+            {
+                "label": raw_history_sentinel,
+                "command": "pytest --very-large-history",
+                "wall_seconds": 1330.0,
+                "artifact_path": "/raw/historical/verification.json",
+            }
+        ],
+        "progress_log": raw_progress_sentinel * 1000,
+        "recommendations": {
+            "history_state": "sufficient",
+            "insufficient_history_reason": None,
+            "recommended_initial_wait_seconds": 1330.0,
+            "reasonable_check_after_seconds": 1330.0,
+            "high_hang_guard_seconds": 10_800.0,
+            "expected_duration_range_seconds": {
+                "low": 62.0,
+                "typical": 510.0,
+                "high": 1330.0,
+            },
+            "basis": "sufficient_history_p95",
+        },
+    }
+    monkeypatch.setattr(
+        runner_mod,
+        "build_verification_timing_profile",
+        lambda **_: timing_profile,
+    )
 
     cfg = RunnerConfig(
         repo_root=runner_root,
@@ -207,11 +243,29 @@ def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_
     assert "it blocks until verification finishes" in prompt_text
     assert "it must pass before you finish" in prompt_text
     assert "timing guidance" in prompt_text
+    assert (
+        "expected duration range: p05=62s (~1.0 min), "
+        "median=510s (~8.5 min), p95=1330s"
+    ) in prompt_text
     assert "recommended first wait" in prompt_text
+    assert "if verification is expected to take minutes, wait near" in prompt_text
     assert "use one long wait rather than frequent short polling" in prompt_text
+    assert "do not repeatedly poll only to watch progress" in prompt_text
+    assert "one or two checks are acceptable" in prompt_text
     assert "continuous wait/poll loops are not" in prompt_text
     assert "do not call verification hung until it exceeds" in prompt_text
+    assert "or shows concrete failure evidence" in prompt_text
+    assert "artifact paths to inspect after the result returns" in prompt_text
+    assert "summary_path/artifacts_dir" in prompt_text
     assert "verification_timing_profile.json" in prompt_text
+    assert raw_history_sentinel not in prompt_text
+    assert raw_progress_sentinel not in prompt_text
+    environment_json = prompt_text.split("```json\n", 1)[1].split("\n```", 1)[0]
+    environment = json.loads(environment_json)
+    compact_timing_profile = environment["verification_gate"]["timing_profile"]
+    assert set(compact_timing_profile) == {"run_count", "command_count", "recommendations"}
+    assert compact_timing_profile["run_count"] == 9
+    assert compact_timing_profile["command_count"] == 27
     assert "Codex workspace sandbox is enabled" in prompt_text
     assert "Do not treat a blocked shell command as proof" in prompt_text
     assert "allow_edits=true" in prompt_text
