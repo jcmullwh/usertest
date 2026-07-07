@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from usertest_backlog.cli import main
+from usertest_backlog.commands.triage import _coerce_pr_items
 
 
 def test_triage_prs_writes_json_and_markdown(tmp_path: Path) -> None:
@@ -40,3 +41,17 @@ def test_triage_prs_writes_json_and_markdown(tmp_path: Path) -> None:
     assert "PR Triage Report" in markdown
     assert "PR #101" in markdown
     assert "PR #102" in markdown
+
+
+def test_coerce_pr_items_strips_file_entries() -> None:
+    items = _coerce_pr_items(
+        [
+            {
+                "number": 1,
+                "title": "Normalize files",
+                "files": [" src/app.py ", "\tREADME.md", "   "],
+            }
+        ]
+    )
+
+    assert items[0]["files"] == ["src/app.py", "README.md"]

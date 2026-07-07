@@ -143,7 +143,11 @@ def _coerce_pr_items(raw_payload: Any) -> list[dict[str, Any]]:
             )
         body = _coerce_string(item.get("body")) or ""
         files_raw = item.get("files")
-        files = [entry for entry in files_raw if isinstance(entry, str) and entry.strip()] if isinstance(files_raw, list) else []
+        files = (
+            [entry.strip() for entry in files_raw if isinstance(entry, str) and entry.strip()]
+            if isinstance(files_raw, list)
+            else []
+        )
 
         normalized.append(
             {

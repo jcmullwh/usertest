@@ -442,6 +442,14 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                     file=sys.stderr,
                 )
 
+        if selected_priority and not resolved_repo_input and not dry_run:
+            print(
+                "[stage3] Missing repo_input for repro+research. Provide --repo-input "
+                "or ensure run history contains exactly one local repo_input.",
+                file=sys.stderr,
+            )
+            return 2
+
         stage3_doc = _run_repro_research_stage(
             repo_root=repo_root,
             repo_input=resolved_repo_input,
