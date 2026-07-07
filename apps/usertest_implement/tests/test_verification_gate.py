@@ -7,7 +7,9 @@ from types import SimpleNamespace
 import pytest
 from runner_core import RunnerConfig
 
-import usertest_implement.cli as implement_cli
+import usertest_implement.commands.run as run_commands
+from usertest_implement.cli import build_parser
+from usertest_implement.shared import SelectedTicket
 
 
 def test_verification_failure_blocks_commit_and_returns_nonzero(
@@ -37,15 +39,15 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
     def fail_if_called(*_args: object, **_kwargs: object) -> object:
         raise AssertionError("finalize_commit must not be called when verification fails")
 
-    monkeypatch.setattr(implement_cli, "run_once", fake_run_once)
-    monkeypatch.setattr(implement_cli, "finalize_commit", fail_if_called)
+    monkeypatch.setattr(run_commands, "run_once", fake_run_once)
+    monkeypatch.setattr(run_commands, "finalize_commit", fail_if_called)
 
     target_repo = tmp_path / "target_repo"
     target_repo.mkdir(parents=True, exist_ok=True)
     ticket_path = tmp_path / "ticket.md"
     ticket_path.write_text("# ticket\n", encoding="utf-8")
 
-    parser = implement_cli.build_parser()
+    parser = build_parser()
     args = parser.parse_args(
         [
             "run",
@@ -68,7 +70,7 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
         agents={},
         policies={},
     )
-    selected = implement_cli.SelectedTicket(
+    selected = SelectedTicket(
         fingerprint="fp",
         title="Test ticket",
         export_kind="implementation",
@@ -80,7 +82,7 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
         export_index=None,
     )
 
-    exit_code = implement_cli._run_selected_ticket(
+    exit_code = run_commands._run_selected_ticket(
         args=args,
         repo_root=tmp_path,
         cfg=cfg,

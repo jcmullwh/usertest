@@ -1,3 +1,9 @@
-"""Planned command-handler package for the ``usertest-implement`` CLI."""
+"""Command handlers for the ``usertest-implement`` CLI."""
 
-__all__: tuple[str, ...] = ()
+__all__ = [
+    "maintenance_images",
+    "reports",
+    "review",
+    "run",
+    "tickets",
+]

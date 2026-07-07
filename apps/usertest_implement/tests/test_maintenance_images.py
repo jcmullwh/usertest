@@ -4,7 +4,7 @@ import argparse
 import json
 from pathlib import Path
 
-import usertest_implement.cli as implement_cli
+import usertest_implement.commands.maintenance_images as maintenance_commands
 
 
 def test_cmd_maintenance_images_list_emits_json(monkeypatch, capsys, tmp_path: Path) -> None:
@@ -13,12 +13,12 @@ def test_cmd_maintenance_images_list_emits_json(monkeypatch, capsys, tmp_path: P
     repo_root = tmp_path / "repo"
     repo_root.mkdir()
     monkeypatch.setattr(
-        implement_cli,
+        maintenance_commands,
         "list_local_maintenance_images",
         lambda **_kwargs: {"schema_version": 1, "entries": []},
     )
 
-    result = implement_cli._cmd_maintenance_images_list(
+    result = maintenance_commands._cmd_maintenance_images_list(
         argparse.Namespace(repo_root=repo_root, timeout_seconds=12.0)
     )
 
@@ -37,9 +37,9 @@ def test_cmd_maintenance_images_cleanup_passes_dry_run(monkeypatch, capsys, tmp_
         captured.update(kwargs)
         return {"schema_version": 1, "deleted_tags": []}
 
-    monkeypatch.setattr(implement_cli, "cleanup_local_maintenance_images", _fake_cleanup)
+    monkeypatch.setattr(maintenance_commands, "cleanup_local_maintenance_images", _fake_cleanup)
 
-    result = implement_cli._cmd_maintenance_images_cleanup(
+    result = maintenance_commands._cmd_maintenance_images_cleanup(
         argparse.Namespace(repo_root=repo_root, timeout_seconds=5.0, dry_run=True)
     )
 
