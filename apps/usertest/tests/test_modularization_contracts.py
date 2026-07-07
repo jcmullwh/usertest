@@ -8,19 +8,25 @@ from usertest.cli import build_parser
 
 
 @pytest.mark.parametrize(
-    "module_name",
+    ("module_name", "registration_name"),
     [
-        "usertest.parser",
-        "usertest.commands.batch",
-        "usertest.commands.lint",
-        "usertest.commands.matrix",
-        "usertest.commands.reports",
-        "usertest.commands.run",
-        "usertest.commands.token_monitor",
+        ("usertest.parser", "build_parser"),
+        ("usertest.commands.batch", "add_batch_command"),
+        ("usertest.commands.lint", "add_lint_command"),
+        ("usertest.commands.matrix", "add_matrix_command"),
+        ("usertest.commands.reports", "add_report_commands"),
+        ("usertest.commands.run", "add_run_command"),
+        ("usertest.commands.token_monitor", "add_token_monitor_command"),
     ],
 )
-def test_planned_usertest_module_boundaries_import(module_name: str) -> None:
-    assert importlib.import_module(module_name).__name__ == module_name
+def test_usertest_module_boundaries_have_parser_wiring(
+    module_name: str, registration_name: str
+) -> None:
+    module = importlib.import_module(module_name)
+    registration = getattr(module, registration_name)
+
+    assert callable(registration)
+    assert registration.__module__ == module_name
 
 
 @pytest.mark.parametrize(

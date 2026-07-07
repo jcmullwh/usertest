@@ -1,8 +1,12 @@
-"""Planned command-handler package for the public ``usertest`` CLI.
+"""Command parser modules for the public ``usertest`` CLI."""
 
-The current implementation still lives in :mod:`usertest.cli`.  These importable
-modules reserve the extraction boundaries covered by the modularization design
-note so future behavior-preserving moves have stable, focused destinations.
-"""
+from __future__ import annotations
 
-__all__: tuple[str, ...] = ()
+__all__ = [
+    "batch",
+    "lint",
+    "matrix",
+    "reports",
+    "run",
+    "token_monitor",
+]
