@@ -9,8 +9,8 @@ from typing import Any
 import pytest
 from runner_core import find_repo_root
 
-import usertest.cli
 from usertest.cli import main
+from usertest.commands import batch as batch_command
 
 
 def test_batch_fails_before_running_when_tool_hangs(
@@ -39,7 +39,7 @@ def test_batch_fails_before_running_when_tool_hangs(
     )
 
     monkeypatch.setattr(
-        usertest.cli.shutil,
+        batch_command.shutil,
         "which",
         lambda cmd: cmd if cmd in {"node", "npm"} else None,
     )
@@ -49,9 +49,9 @@ def test_batch_fails_before_running_when_tool_hangs(
             raise subprocess.TimeoutExpired(cmd=cmd, timeout=float(kwargs.get("timeout", 0)))
         return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
 
-    monkeypatch.setattr(usertest.cli.subprocess, "run", _fake_run)
+    monkeypatch.setattr(batch_command.subprocess, "run", _fake_run)
     monkeypatch.setattr(
-        usertest.cli,
+        batch_command,
         "run_once",
         lambda *_args, **_kwargs: pytest.fail("run_once should not run after batch validation"),
     )
@@ -101,7 +101,7 @@ def test_batch_validates_mission_ids_upfront(
     )
 
     monkeypatch.setattr(
-        usertest.cli,
+        batch_command,
         "run_once",
         lambda *_args, **_kwargs: pytest.fail("run_once should not run after batch validation"),
     )
@@ -151,7 +151,7 @@ def test_batch_validate_only_exits_zero_without_running(
     )
 
     monkeypatch.setattr(
-        usertest.cli,
+        batch_command,
         "run_once",
         lambda *_args, **_kwargs: pytest.fail("run_once should not run in --validate-only mode"),
     )
@@ -199,7 +199,7 @@ def test_batch_print_requests_exits_zero_and_outputs_json(
     )
 
     monkeypatch.setattr(
-        usertest.cli,
+        batch_command,
         "run_once",
         lambda *_args, **_kwargs: pytest.fail("run_once should not run in --print-requests mode"),
     )
@@ -297,9 +297,9 @@ def test_batch_fails_fast_when_agent_binary_missing(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(usertest.cli.shutil, "which", lambda _cmd: None)
+    monkeypatch.setattr(batch_command.shutil, "which", lambda _cmd: None)
     monkeypatch.setattr(
-        usertest.cli,
+        batch_command,
         "run_once",
         lambda *_args, **_kwargs: pytest.fail("run_once should not run after batch validation"),
     )
@@ -355,7 +355,7 @@ def test_batch_reports_legacy_keys_and_other_errors_together(
     )
 
     monkeypatch.setattr(
-        usertest.cli,
+        batch_command,
         "run_once",
         lambda *_args, **_kwargs: pytest.fail("run_once should not run after batch validation"),
     )

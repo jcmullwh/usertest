@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from usertest.cli import _from_source_import_remediation
+from usertest.commands.shared import _from_source_import_remediation
 
 
 def test_from_source_import_remediation_mentions_supported_fixes() -> None:
