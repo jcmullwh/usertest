@@ -844,6 +844,11 @@ def _format_preflight_summary_md(
             f"(sandbox={sandbox_label}); commands/files outside the workspace may be unavailable. "
             "If you need a consistent toolchain, consider `--exec-backend docker`."
         )
+        lines.append(
+            "- Do not treat a blocked shell command as proof that the workspace is read-only. "
+            "When `allow_edits=true` and the sandbox is workspace-write, retry with simpler "
+            "sandbox-compatible commands or file-edit tools before reporting an edit blocker."
+        )
 
     return "\n".join(lines)
 
