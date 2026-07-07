@@ -604,18 +604,18 @@ def test_resolve_owner_repo_root_normalizes_local_and_remote_repo_inputs(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from usertest_backlog import cli as backlog_cli
+    from usertest_backlog import shared as backlog_shared
 
     repo_root = tmp_path / "repo_root"
     repo_root.mkdir(parents=True, exist_ok=True)
 
     monkeypatch.setattr(
-        backlog_cli,
+        backlog_shared,
         "_git_remote_urls",
         lambda _repo_root: ["https://github.com/jcmullwh/usertest.git"],
     )
 
-    owner_root, owner_input, resolution = backlog_cli._resolve_owner_repo_root(
+    owner_root, owner_input, resolution = backlog_shared._resolve_owner_repo_root(
         ticket={
             "repo_inputs_citing": [
                 str(repo_root),

@@ -18,10 +18,10 @@ def _patch_hashing_embedder(monkeypatch: pytest.MonkeyPatch) -> None:
 
     from triage_engine.testing import HashingEmbedder
 
-    import usertest_backlog.cli as backlog_cli
+    import usertest_backlog.commands.triage as triage_commands
 
     monkeypatch.setattr(
-        backlog_cli,
+        triage_commands,
         "resolve_embedder",
         lambda _spec: (HashingEmbedder(), {"embedder": "hash_test_only"}),
     )
