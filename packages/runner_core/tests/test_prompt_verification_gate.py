@@ -213,6 +213,8 @@ def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_
     assert "do not call verification hung until it exceeds" in prompt_text
     assert "verification_timing_profile.json" in prompt_text
     assert "Codex workspace sandbox is enabled" in prompt_text
+    assert "Do not treat a blocked shell command as proof" in prompt_text
+    assert "allow_edits=true" in prompt_text
     assert "--exec-backend docker" in prompt_text
 
 
