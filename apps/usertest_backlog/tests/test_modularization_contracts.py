@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -8,25 +10,34 @@ from usertest_backlog.cli import build_parser
 
 
 @pytest.mark.parametrize(
-    "module_name",
+    ("module_name", "function_name"),
     [
-        "usertest_backlog.parser",
-        "usertest_backlog.commands.atom_actions",
-        "usertest_backlog.commands.export_tickets",
-        "usertest_backlog.commands.plan_cleanup",
-        "usertest_backlog.commands.reports",
-        "usertest_backlog.commands.review_ux",
-        "usertest_backlog.workflows.implementation_planning",
-        "usertest_backlog.workflows.prioritization",
-        "usertest_backlog.workflows.problem_mining",
-        "usertest_backlog.workflows.reproduction_research",
-        "usertest_backlog.workflows.solution_options",
-        "usertest_backlog.workflows.solution_selection",
-        "usertest_backlog.workflows.staged",
+        ("usertest_backlog.parser", "build_parser"),
+        ("usertest_backlog.commands.atom_actions", "_cmd_reports_sync_atom_actions"),
+        ("usertest_backlog.commands.dispatch", "dispatch"),
+        ("usertest_backlog.commands.export_tickets", "_cmd_reports_export_tickets"),
+        ("usertest_backlog.commands.plan_cleanup", "_cleanup_stale_ticket_idea_files"),
+        ("usertest_backlog.commands.reports", "_cmd_reports_compile"),
+        ("usertest_backlog.commands.review_ux", "_cmd_reports_review_ux"),
+        ("usertest_backlog.commands.triage", "_cmd_triage_atoms"),
+        (
+            "usertest_backlog.workflows.implementation_planning",
+            "_run_implementation_planning_stage",
+        ),
+        ("usertest_backlog.workflows.prioritization", "_run_problem_prioritization_stage"),
+        ("usertest_backlog.workflows.problem_mining", "_run_problem_mining_stage"),
+        ("usertest_backlog.workflows.reproduction_research", "_run_repro_research_stage"),
+        ("usertest_backlog.workflows.solution_options", "_run_solution_optioning_stage"),
+        ("usertest_backlog.workflows.solution_selection", "_run_solution_selection_stage"),
+        ("usertest_backlog.workflows.staged", "_cmd_reports_backlog"),
     ],
 )
-def test_planned_backlog_module_boundaries_import(module_name: str) -> None:
-    assert importlib.import_module(module_name).__name__ == module_name
+def test_planned_backlog_module_boundaries_own_real_functions(
+    module_name: str, function_name: str
+) -> None:
+    module = importlib.import_module(module_name)
+    func = getattr(module, function_name)
+    assert func.__module__ == module_name
 
 
 @pytest.mark.parametrize(
@@ -80,3 +91,48 @@ def test_backlog_command_group_help_contracts(
     out = capsys.readouterr().out
     for snippet in snippets:
         assert snippet in out
+
+
+def test_public_cli_entrypoint_stays_thin() -> None:
+    cli_path = Path(__file__).parents[1] / "src" / "usertest_backlog" / "cli.py"
+    source = cli_path.read_text(encoding="utf-8")
+
+    assert len(source.splitlines()) <= 80
+    assert "def _cmd_" not in source
+    assert ".add_argument(" not in source
+    assert ".add_parser(" not in source
+
+
+@pytest.mark.parametrize(
+    "module_name",
+    [
+        "commands.atom_actions",
+        "commands.dispatch",
+        "commands.export_tickets",
+        "commands.plan_cleanup",
+        "commands.reports",
+        "commands.review_ux",
+        "commands.triage",
+        "workflows.implementation_planning",
+        "workflows.prioritization",
+        "workflows.problem_mining",
+        "workflows.reproduction_research",
+        "workflows.solution_options",
+        "workflows.solution_selection",
+        "workflows.staged",
+    ],
+)
+def test_backlog_modules_do_not_import_public_cli_entrypoint(module_name: str) -> None:
+    module_path = (
+        Path(__file__).parents[1]
+        / "src"
+        / "usertest_backlog"
+        / Path(*module_name.split(".")).with_suffix(".py")
+    )
+
+    tree = ast.parse(module_path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            assert all(alias.name != "usertest_backlog.cli" for alias in node.names)
+        if isinstance(node, ast.ImportFrom):
+            assert node.module != "usertest_backlog.cli"

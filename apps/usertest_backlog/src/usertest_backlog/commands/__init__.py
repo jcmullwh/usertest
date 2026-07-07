@@ -1,3 +1,11 @@
-"""Planned command-handler package for the ``usertest-backlog`` CLI."""
+"""Command-handler package for the ``usertest-backlog`` CLI."""
 
-__all__: tuple[str, ...] = ()
+__all__ = [
+    "atom_actions",
+    "dispatch",
+    "export_tickets",
+    "plan_cleanup",
+    "reports",
+    "review_ux",
+    "triage",
+]
