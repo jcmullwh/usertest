@@ -29,7 +29,6 @@ _BROKER_MIN_INTERNAL_DEADLINE_SECONDS = 60.0
 _BROKER_INTERNAL_DEADLINE_GRACE_SECONDS = 30.0
 _BROKER_CLIENT_WAIT_GRACE_SECONDS = 15.0
 _BROKER_STOP_JOIN_TIMEOUT_SECONDS = 10.0
-_BROKER_PROGRESS_HEARTBEAT_SECONDS = 5.0
 _BROKER_TERMINAL_STATUSES = {"passed", "failed", "timed_out", "cancelled"}
 _BROKER_REQUIRED_RESPONSE_ARTIFACT_FIELDS = ("artifacts_dir", "summary_path")
 _BROKER_REQUIRED_RESULT_ARTIFACT_FIELDS = (
@@ -1572,33 +1571,6 @@ def _render_success_message(request_id: str, payload: dict[str, object]) -> str:
     return "; ".join(parts)
 
 
-def _render_progress_message(request_id: str, payload: dict[str, object]) -> str:
-    status = str(payload.get("status") or "").strip() or "pending"
-    progress = payload.get("progress")
-    progress_dict = progress if isinstance(progress, dict) else {}
-    message = str(progress_dict.get("message") or "").strip()
-    phase = str(progress_dict.get("phase") or "").strip()
-    command_index = progress_dict.get("command_index")
-    command_count = progress_dict.get("command_count")
-    elapsed = progress_dict.get("elapsed_seconds")
-    deadline = str(payload.get("deadline_utc") or "").strip()
-
-    parts = [f"verification status={status} (request_id={request_id})"]
-    if phase:
-        parts.append(f"phase={phase}")
-    if message:
-        parts.append(message)
-    if isinstance(command_index, int) and isinstance(command_count, int):
-        parts.append(f"command={command_index}/{command_count}")
-    if isinstance(elapsed, (int, float)):
-        parts.append(f"elapsed={float(elapsed):.1f}s")
-    if deadline:
-        parts.append(f"deadline_utc={deadline}")
-    if bool(payload.get("cancel_requested")):
-        parts.append("cancel_requested=true")
-    return "; ".join(parts)
-
-
 def main() -> int:
     request_id = "req_" + uuid.uuid4().hex
     request_path = REQUEST_DIR / f"{request_id}.json"
@@ -1664,7 +1636,6 @@ if __name__ == "__main__":
             "__NO_ARTIFACT_FAILURE_REASON_PREFIXES__",
             repr(tuple(_BROKER_NO_ARTIFACT_FAILURE_REASON_PREFIXES)),
         )
-        .replace("__HEARTBEAT_SECONDS__", repr(float(_BROKER_PROGRESS_HEARTBEAT_SECONDS)))
         .replace("__ALLOWED_STATUSES__", json.dumps(list(contract["allowed_statuses"])))
         .replace(
             "__ARTIFACT_REQUIRED_STATUSES__",

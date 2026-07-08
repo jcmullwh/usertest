@@ -367,7 +367,13 @@ def test_verification_broker_client_failure_output_only_includes_failed_command_
     assert "commands=2" in completed.stderr
     assert "failed_commands=1" in completed.stderr
     assert "failed_command 2" in completed.stderr
+    assert "\nfailed_command 2" in completed.stderr
+    assert "\\nfailed_command 2" not in completed.stderr
     assert "stderr_tail:" in completed.stderr
+    assert (
+        "failed_command 2; command=fail; exit_code=2; "
+        "wall_seconds=2.00s; timed_out=false\nstderr_tail:"
+    ) in completed.stderr
     assert retained_tail in completed.stderr
     assert truncated_prefix not in completed.stderr
     assert passing_tail not in completed.stderr
