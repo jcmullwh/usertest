@@ -2,13 +2,13 @@
 
 This changelog summarizes the `v0.2.0` work currently on `dev` since the last shared commit with
 `main` (`8fd5377`, "Merge pull request #5 from jcmullwh/Update-README"). It covers the release
-candidate represented by `dev` at `f1b77a6` on 2026-03-15 and is intended to accompany the merge
-back to `main`.
+candidate represented by `dev` at `91d82d1b`, as checked on 2026-07-08, and is intended to
+accompany the merge back to `main`.
 
 Scope at a glance:
 
-- 269 commits ahead of `main`
-- 91 first-parent PR merges into `dev`
+- 370 commits ahead of `main`
+- 127 first-parent PR merges into `dev`
 - Major workstreams across onboarding, runner reliability, backlog automation, implementation
   workflow automation, and maintenance/ops tooling
 
