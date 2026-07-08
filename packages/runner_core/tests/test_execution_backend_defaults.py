@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -661,6 +662,103 @@ def test_prepare_maintenance_profile_prefers_local_image_and_plans_cache_mounts(
     assert prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ENABLED"] == "1"
     assert prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ROOT"] == "/cache/usertest_maint_venvs"
     assert prep.env_overrides["USERTEST_MAINT_VENV_SEED_ROOT"] == "/opt/usertest_maint_seed"
+
+
+def test_prepare_maintenance_profile_uses_branch_alias_as_build_cache_when_hash_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    cache_dir = tmp_path / "cache"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    context_dir = run_dir / "sandbox" / "maintenance_image_context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        backend_mod,
+        "_load_maintenance_docker_config",
+        lambda repo_root: backend_mod.MaintenanceDockerConfig(
+            local_image_repo="usertest-maintenance",
+            published_image_repo="ghcr.io/jcmullwh/usertest-maintenance",
+            pull_policy="if_missing",
+            seed_root="/opt/usertest_maint_seed",
+            cache_root_subdir="usertest_maint_venvs",
+            publish_branches=("dev", "main"),
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_prepare_maintenance_image_context",
+        lambda **_kwargs: (
+            context_dir,
+            {"python_major_minor": "3.11", "pdm_version": "2.26.2"},
+        ),
+    )
+    monkeypatch.setattr(backend_mod, "compute_image_hash", lambda **_kwargs: "d" * 64)
+    monkeypatch.setattr(backend_mod, "_docker_image_exists_local", lambda **_kwargs: False)
+    monkeypatch.setattr(backend_mod, "_git_current_branch", lambda **_kwargs: "dev")
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_pull_image",
+        lambda **_kwargs: subprocess.CompletedProcess(
+            args=["docker", "pull"], returncode=1, stdout="", stderr="not found"
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_pull_images",
+        lambda **kwargs: [
+            {
+                "argv": ["docker", "pull", kwargs["refs"][0]],
+                "ref": kwargs["refs"][0],
+                "returncode": 0,
+                "stdout": "",
+                "stderr": "",
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_compute_install_cache_fingerprints",
+        lambda **_kwargs: {"projects": []},
+    )
+    captured_build: dict[str, object] = {}
+
+    def _fake_build(**kwargs):
+        captured_build.update(kwargs)
+
+    monkeypatch.setattr(backend_mod, "_build_maintenance_image", _fake_build)
+
+    request = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+        verification_commands=("smoke", "install", "lint", "test"),
+    )
+
+    prep = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        maintenance_venv_reuse_enabled=True,
+        timeout_seconds=30.0,
+    )
+
+    expected_cache_ref = "ghcr.io/jcmullwh/usertest-maintenance:dev-latest"
+    assert captured_build["cache_from"] == [expected_cache_ref]
+    assert prep.image_source == "built"
+    assert prep.metadata["image"]["build_cache_from"] == [expected_cache_ref]
+    assert prep.metadata["image"]["alias_pull_attempts"][0]["ref"] == expected_cache_ref
 
 
 def test_prepare_maintenance_profile_runs_cleanup_and_records_artifact(

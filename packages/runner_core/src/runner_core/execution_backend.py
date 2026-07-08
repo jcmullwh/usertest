@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 import tomllib
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -317,6 +318,33 @@ def _docker_pull_image(
     return proc
 
 
+def _docker_pull_images(
+    *, refs: Sequence[str], timeout_seconds: float | None, log_path: Path
+) -> list[dict[str, Any]]:
+    """Pull candidate image refs and persist compact per-ref results."""
+
+    results: list[dict[str, Any]] = []
+    for ref in refs:
+        proc = _run_subprocess(
+            ["docker", "pull", ref],
+            timeout_seconds=timeout_seconds,
+        )
+        results.append(
+            {
+                "argv": ["docker", "pull", ref],
+                "ref": ref,
+                "returncode": proc.returncode,
+                "stdout": proc.stdout,
+                "stderr": proc.stderr,
+            }
+        )
+    log_path.write_text(
+        json.dumps(results, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return results
+
+
 def _docker_tag_image(*, source_ref: str, target_ref: str, timeout_seconds: float | None) -> None:
     proc = _run_subprocess(
         ["docker", "tag", source_ref, target_ref],
@@ -613,6 +641,38 @@ def _git_remote_url(*, repo_dir: Path, remote_name: str = "origin") -> str | Non
     return out if out else None
 
 
+def _git_current_branch(*, repo_dir: Path) -> str | None:
+    proc = _run_subprocess(
+        ["git", "-C", str(repo_dir), "branch", "--show-current"],
+    )
+    if proc.returncode != 0:
+        return None
+    out = (proc.stdout or "").strip()
+    return out if out else None
+
+
+def _maintenance_branch_cache_refs(
+    *,
+    cfg: MaintenanceDockerConfig,
+    repo_root: Path,
+) -> list[str]:
+    branch = _git_current_branch(repo_dir=repo_root)
+    if branch is None or branch not in set(cfg.publish_branches):
+        return []
+    tags = [f"{branch}-latest"]
+    if branch == "main":
+        tags.append("latest")
+    refs: list[str] = []
+    seen: set[str] = set()
+    for tag in tags:
+        ref = f"{cfg.published_image_repo}:{tag}"
+        if ref in seen:
+            continue
+        seen.add(ref)
+        refs.append(ref)
+    return refs
+
+
 def _read_json_artifact(path: Path) -> dict[str, Any]:
     raw = json.loads(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
@@ -708,6 +768,7 @@ def _build_maintenance_image(
     context_dir: Path,
     local_ref: str,
     published_ref: str,
+    cache_from: Sequence[str] = (),
     timeout_seconds: float | None,
     log_path: Path,
 ) -> None:
@@ -721,6 +782,7 @@ def _build_maintenance_image(
         published_ref,
         "-f",
         "Dockerfile",
+        *[part for ref in cache_from for part in ("--cache-from", ref)],
         ".",
     ]
     try:
@@ -778,6 +840,8 @@ def _prepare_maintenance_profile(
     local_ref = f"{cfg.local_image_repo}:{tag_suffix}"
     published_ref = f"{cfg.published_image_repo}:{tag_suffix}"
     pull_attempted = False
+    alias_pull_attempts: list[dict[str, Any]] = []
+    build_cache_from: list[str] = []
     build_performed = False
     image_source = ""
 
@@ -787,6 +851,7 @@ def _prepare_maintenance_profile(
             context_dir=context_dir,
             local_ref=local_ref,
             published_ref=published_ref,
+            cache_from=build_cache_from,
             timeout_seconds=timeout_seconds,
             log_path=build_log_path,
         )
@@ -811,6 +876,22 @@ def _prepare_maintenance_profile(
                         timeout_seconds=timeout_seconds,
                     )
                 image_source = "pulled"
+            else:
+                candidate_cache_refs = _maintenance_branch_cache_refs(
+                    cfg=cfg,
+                    repo_root=repo_root,
+                )
+                if candidate_cache_refs:
+                    alias_pull_attempts = _docker_pull_images(
+                        refs=candidate_cache_refs,
+                        timeout_seconds=timeout_seconds,
+                        log_path=run_dir / "sandbox" / "maintenance_docker_cache_pulls.json",
+                    )
+                    build_cache_from = [
+                        str(item["ref"])
+                        for item in alias_pull_attempts
+                        if item.get("returncode") == 0 and item.get("ref")
+                    ]
 
         if not image_source:
             build_log_path = run_dir / "sandbox" / "maintenance_docker_build.log"
@@ -818,6 +899,7 @@ def _prepare_maintenance_profile(
                 context_dir=context_dir,
                 local_ref=local_ref,
                 published_ref=published_ref,
+                cache_from=build_cache_from,
                 timeout_seconds=timeout_seconds,
                 log_path=build_log_path,
             )
@@ -923,6 +1005,8 @@ def _prepare_maintenance_profile(
             "published_ref": published_ref,
             "source": image_source,
             "pull_attempted": pull_attempted,
+            "alias_pull_attempts": alias_pull_attempts,
+            "build_cache_from": build_cache_from,
             "build_performed": build_performed,
             "context_dir": str(context_dir),
             "context_metadata": context_meta,
