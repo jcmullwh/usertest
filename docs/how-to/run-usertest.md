@@ -165,9 +165,12 @@ path for normal usertest runs against arbitrary targets.
 
 For same-repo `usertest-implement` handoff runs, verification now also defaults to reuse mode:
 
-- the prompt exposes one runner-owned final handoff verification command instead of the raw gate commands
-- if that command passes and the workspace is unchanged afterward, the run reuses that proof instead of
-  rerunning the full verification gate after the agent exits
+- the prompt tells the agent to return its final JSON report when the work is ready instead of
+  waiting on a long verifier command in the model transcript
+- the runner then requests verification once through the broker, blocks outside the model loop,
+  and finalizes automatically if it passes
+- if the agent explicitly requested verification through the broker before returning, the run can
+  still select that proof when the workspace is unchanged afterward
 - the selected verification result is recorded in `verification.json`, and the reuse/fallback decision is
   recorded in `verification_reuse.json`
 

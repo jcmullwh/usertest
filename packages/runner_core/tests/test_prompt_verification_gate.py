@@ -235,24 +235,23 @@ def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_
     assert result.exit_code == 0
 
     prompt_text = (result.run_dir / "prompt.txt").read_text(encoding="utf-8")
-    expected_wrapper = "verify_client.ps1" if os.name == "nt" else "verify_client.sh"
     assert "Final handoff verification" in prompt_text
-    assert expected_wrapper in prompt_text
     assert "timeout_seconds: 10800" in prompt_text
     assert verify_cmd not in prompt_text
-    assert "it blocks until verification finishes" in prompt_text
-    assert "it must pass before you finish" in prompt_text
+    assert "runner-owned blocking wait" in prompt_text
+    assert "do not launch or poll a verification command yourself" in prompt_text
+    assert "return the required final JSON report" in prompt_text
+    assert "The runner will request verification once" in prompt_text
+    assert "finalize automatically if it passes" in prompt_text
+    assert "re-enter the agent with one compact fix prompt" in prompt_text
     assert "timing guidance" in prompt_text
     assert (
         "expected duration range: p05=62s (~1.0 min), "
         "median=510s (~8.5 min), p95=1330s"
     ) in prompt_text
-    assert "recommended first wait" in prompt_text
-    assert "if verification is expected to take minutes, wait near" in prompt_text
-    assert "use one long wait rather than frequent short polling" in prompt_text
-    assert "do not repeatedly poll only to watch progress" in prompt_text
-    assert "one or two checks are acceptable" in prompt_text
-    assert "continuous wait/poll loops are not" in prompt_text
+    assert "runner expected blocking wait" in prompt_text
+    assert "the runner owns the wait and will only re-enter you if a fix is needed" in prompt_text
+    assert "internal check cadence" in prompt_text
     assert "do not call verification hung until it exceeds" in prompt_text
     assert "or shows concrete failure evidence" in prompt_text
     assert "artifact paths to inspect after the result returns" in prompt_text
