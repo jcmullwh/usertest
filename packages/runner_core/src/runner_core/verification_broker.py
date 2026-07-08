@@ -29,7 +29,6 @@ _BROKER_MIN_INTERNAL_DEADLINE_SECONDS = 60.0
 _BROKER_INTERNAL_DEADLINE_GRACE_SECONDS = 30.0
 _BROKER_CLIENT_WAIT_GRACE_SECONDS = 15.0
 _BROKER_STOP_JOIN_TIMEOUT_SECONDS = 10.0
-_BROKER_PROGRESS_HEARTBEAT_SECONDS = 5.0
 _BROKER_TERMINAL_STATUSES = {"passed", "failed", "timed_out", "cancelled"}
 _BROKER_REQUIRED_RESPONSE_ARTIFACT_FIELDS = ("artifacts_dir", "summary_path")
 _BROKER_REQUIRED_RESULT_ARTIFACT_FIELDS = (
@@ -37,6 +36,7 @@ _BROKER_REQUIRED_RESULT_ARTIFACT_FIELDS = (
     "summary_path",
     "verification_summary",
 )
+_BROKER_MODEL_VISIBLE_TAIL_CHARS = 1200
 _BROKER_NO_ARTIFACT_FAILURE_REASONS = frozenset(
     {"async_verifier_disabled", "invalid_request_token", "runner_shutdown"}
 )
@@ -52,6 +52,89 @@ _BROKER_WORKSPACE_HASH_REQUIRED_STATUSES = {"passed"}
 
 def default_verification_hang_guard_seconds() -> float:
     return _BROKER_DEFAULT_COMMAND_TIMEOUT_SECONDS
+
+
+def _clip_model_visible_tail(text: object) -> str | None:
+    if not isinstance(text, str) or not text.strip():
+        return None
+    cleaned = text.strip()
+    if len(cleaned) <= _BROKER_MODEL_VISIBLE_TAIL_CHARS:
+        return cleaned
+    return cleaned[-_BROKER_MODEL_VISIBLE_TAIL_CHARS:] + "\n...[truncated to tail]"
+
+
+def _verification_command_failed(command: dict[str, Any]) -> bool:
+    exit_code = command.get("exit_code")
+    return (
+        (isinstance(exit_code, int) and exit_code != 0)
+        or bool(command.get("timed_out"))
+        or bool(command.get("cancelled"))
+        or bool(command.get("dispatch_blocked"))
+        or bool(command.get("rejected_sentinel"))
+    )
+
+
+def _compact_verification_result(
+    summary: dict[str, Any] | None,
+    *,
+    status: str | None,
+    failure_reason: str | None,
+    artifacts_dir: str | None,
+    summary_path: str | None,
+) -> dict[str, Any] | None:
+    if not isinstance(summary, dict):
+        return None
+    commands = summary.get("commands")
+    command_list = (
+        [item for item in commands if isinstance(item, dict)]
+        if isinstance(commands, list)
+        else []
+    )
+    failed_commands: list[dict[str, Any]] = []
+    for fallback_index, command in enumerate(command_list, start=1):
+        if not _verification_command_failed(command):
+            continue
+        index = command.get("index")
+        failed: dict[str, Any] = {
+            "index": index if isinstance(index, int) else fallback_index,
+        }
+        cmd = command.get("command")
+        if isinstance(cmd, str) and cmd.strip():
+            failed["command"] = cmd.strip()
+        exit_code = command.get("exit_code")
+        if isinstance(exit_code, int):
+            failed["exit_code"] = exit_code
+        wall_seconds = command.get("wall_seconds")
+        if isinstance(wall_seconds, (int, float)):
+            failed["wall_seconds"] = float(wall_seconds)
+        for key in ("timed_out", "cancelled"):
+            value = command.get(key)
+            if isinstance(value, bool):
+                failed[key] = value
+        stdout_tail = _clip_model_visible_tail(command.get("stdout_tail"))
+        stderr_tail = _clip_model_visible_tail(command.get("stderr_tail"))
+        if stdout_tail:
+            failed["stdout_tail"] = stdout_tail
+        if stderr_tail:
+            failed["stderr_tail"] = stderr_tail
+        failed_commands.append(failed)
+
+    compact: dict[str, Any] = {
+        "status": str(
+            status or summary.get("terminal_reason") or summary.get("status") or ""
+        ).strip()
+        or None,
+        "failure_reason": failure_reason,
+        "artifacts_dir": artifacts_dir,
+        "summary_path": summary_path,
+        "command_count": len(command_list),
+        "failed_command_count": len(failed_commands),
+        "failed_commands": failed_commands,
+    }
+    wall_seconds = summary.get("wall_seconds")
+    if isinstance(wall_seconds, (int, float)):
+        compact["wall_seconds"] = float(wall_seconds)
+    return compact
 
 
 @dataclass(frozen=True)
@@ -105,7 +188,7 @@ class VerificationBrokerRequestResult:
         }
 
     def to_response_dict(self) -> dict[str, Any]:
-        return {
+        payload = {
             "schema_version": 2,
             "request_id": self.request_id,
             "attempt": self.attempt,
@@ -127,6 +210,16 @@ class VerificationBrokerRequestResult:
             "finished_utc": self.finished_utc,
             "progress": dict(self.progress) if isinstance(self.progress, dict) else None,
         }
+        compact = _compact_verification_result(
+            self.verification_summary,
+            status=self.status,
+            failure_reason=self.failure_reason,
+            artifacts_dir=self.artifacts_dir,
+            summary_path=self.summary_path,
+        )
+        if compact is not None:
+            payload["verification_compact"] = compact
+        return payload
 
 
 @dataclass(frozen=True)
@@ -935,6 +1028,7 @@ class VerificationBrokerAttempt:
 
     def _handle_request(self, *, request_id: str, request_path: Path) -> None:
         response_path = self.responses_dir / f"{request_id}.json"
+        progress_artifact_path = self.attempt_root / "progress" / f"{request_id}.jsonl"
         started_utc = self.utc_now_fn()
         deadline_utc = _compute_deadline_utc(
             started_utc, deadline_seconds=self._internal_deadline_seconds
@@ -1058,6 +1152,12 @@ class VerificationBrokerAttempt:
                 verification_summary=None,
             )
             self._write_response_snapshot(response_path=response_path, result=snapshot)
+            try:
+                progress_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+                with progress_artifact_path.open("a", encoding="utf-8", newline="\n") as f:
+                    f.write(json.dumps(snapshot.to_response_dict(), ensure_ascii=False) + "\n")
+            except OSError:
+                pass
 
         with self._active_request_lock:
             self._active_cancel_event = cancel_event
@@ -1190,6 +1290,12 @@ class VerificationBrokerAttempt:
             progress=_normalize_progress_snapshot(summary.get("progress")),
             verification_summary=summary,
         )
+        try:
+            progress_artifact_path.parent.mkdir(parents=True, exist_ok=True)
+            with progress_artifact_path.open("a", encoding="utf-8", newline="\n") as f:
+                f.write(json.dumps(result.to_response_dict(), ensure_ascii=False) + "\n")
+        except OSError:
+            pass
         self._record_result(result=result, response_path=response_path)
 
     def _write_response_snapshot(
@@ -1393,40 +1499,75 @@ def _render_failure_message(request_id: str, payload: dict[str, object]) -> str:
     failure_reason = str(payload.get("failure_reason") or "").strip()
     summary_path = str(payload.get("summary_path") or "").strip()
     artifacts_dir = str(payload.get("artifacts_dir") or "").strip()
+    compact = payload.get("verification_compact")
+    compact_dict = compact if isinstance(compact, dict) else {}
     parts = [f"verification failed (request_id={request_id}, status={status})"]
     if failure_reason:
         parts.append(f"failure_reason={failure_reason}")
+    command_count = compact_dict.get("command_count")
+    failed_command_count = compact_dict.get("failed_command_count")
+    wall_seconds = compact_dict.get("wall_seconds")
+    if isinstance(command_count, int):
+        parts.append(f"commands={command_count}")
+    if isinstance(failed_command_count, int):
+        parts.append(f"failed_commands={failed_command_count}")
+    if isinstance(wall_seconds, (int, float)):
+        parts.append(f"wall_seconds={float(wall_seconds):.2f}s")
+    if artifacts_dir:
+        parts.append(f"artifacts_dir={artifacts_dir}")
     if summary_path:
         parts.append(f"summary_path={summary_path}")
-    elif artifacts_dir:
+    lines = ["; ".join(parts)]
+    failed_commands = compact_dict.get("failed_commands")
+    failed_list = failed_commands if isinstance(failed_commands, list) else []
+    for item in failed_list:
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index")
+        command = str(item.get("command") or "").strip()
+        exit_code = item.get("exit_code")
+        command_parts = [
+            f"failed_command {index}" if isinstance(index, int) else "failed_command",
+        ]
+        if command:
+            command_parts.append(f"command={command}")
+        if isinstance(exit_code, int):
+            command_parts.append(f"exit_code={exit_code}")
+        command_wall_seconds = item.get("wall_seconds")
+        if isinstance(command_wall_seconds, (int, float)):
+            command_parts.append(f"wall_seconds={float(command_wall_seconds):.2f}s")
+        timed_out = item.get("timed_out")
+        if isinstance(timed_out, bool):
+            command_parts.append(f"timed_out={str(timed_out).lower()}")
+        cancelled = item.get("cancelled")
+        if isinstance(cancelled, bool):
+            command_parts.append(f"cancelled={str(cancelled).lower()}")
+        lines.append("; ".join(command_parts))
+        stdout_tail = item.get("stdout_tail")
+        stderr_tail = item.get("stderr_tail")
+        if isinstance(stdout_tail, str) and stdout_tail.strip():
+            lines.extend(["stdout_tail:", stdout_tail.strip()])
+        if isinstance(stderr_tail, str) and stderr_tail.strip():
+            lines.extend(["stderr_tail:", stderr_tail.strip()])
+    return "\\n".join(lines)
+
+
+def _render_success_message(request_id: str, payload: dict[str, object]) -> str:
+    summary_path = str(payload.get("summary_path") or "").strip()
+    artifacts_dir = str(payload.get("artifacts_dir") or "").strip()
+    compact = payload.get("verification_compact")
+    compact_dict = compact if isinstance(compact, dict) else {}
+    parts = [f"verification passed (request_id={request_id})"]
+    command_count = compact_dict.get("command_count")
+    wall_seconds = compact_dict.get("wall_seconds")
+    if isinstance(command_count, int):
+        parts.append(f"commands={command_count}")
+    if isinstance(wall_seconds, (int, float)):
+        parts.append(f"wall_seconds={float(wall_seconds):.2f}s")
+    if artifacts_dir:
         parts.append(f"artifacts_dir={artifacts_dir}")
-    return "; ".join(parts)
-
-
-def _render_progress_message(request_id: str, payload: dict[str, object]) -> str:
-    status = str(payload.get("status") or "").strip() or "pending"
-    progress = payload.get("progress")
-    progress_dict = progress if isinstance(progress, dict) else {}
-    message = str(progress_dict.get("message") or "").strip()
-    phase = str(progress_dict.get("phase") or "").strip()
-    command_index = progress_dict.get("command_index")
-    command_count = progress_dict.get("command_count")
-    elapsed = progress_dict.get("elapsed_seconds")
-    deadline = str(payload.get("deadline_utc") or "").strip()
-
-    parts = [f"verification status={status} (request_id={request_id})"]
-    if phase:
-        parts.append(f"phase={phase}")
-    if message:
-        parts.append(message)
-    if isinstance(command_index, int) and isinstance(command_count, int):
-        parts.append(f"command={command_index}/{command_count}")
-    if isinstance(elapsed, (int, float)):
-        parts.append(f"elapsed={float(elapsed):.1f}s")
-    if deadline:
-        parts.append(f"deadline_utc={deadline}")
-    if bool(payload.get("cancel_requested")):
-        parts.append("cancel_requested=true")
+    if summary_path:
+        parts.append(f"summary_path={summary_path}")
     return "; ".join(parts)
 
 
@@ -1445,8 +1586,6 @@ def main() -> int:
     print(f"verification requested (request_id={request_id})", flush=True)
 
     deadline = time.monotonic() + float(WAIT_TIMEOUT_SECONDS)
-    last_progress_key = ""
-    last_heartbeat_monotonic = 0.0
     while True:
         if response_path.exists():
             response_payload, error = _load_response(response_path, request_id)
@@ -1461,27 +1600,8 @@ def main() -> int:
                 "timed_out",
                 "cancelled",
             }
-            progress = response_payload.get("progress")
-            progress_dict = progress if isinstance(progress, dict) else {}
-            progress_key = json.dumps(
-                {
-                    "status": status,
-                    "sequence": progress_dict.get("sequence"),
-                    "message": progress_dict.get("message"),
-                    "cancel_requested": bool(response_payload.get("cancel_requested")),
-                },
-                sort_keys=True,
-            )
-            now = time.monotonic()
-            if progress_key != last_progress_key or (
-                not terminal
-                and (now - last_heartbeat_monotonic) >= __HEARTBEAT_SECONDS__
-            ):
-                print(_render_progress_message(request_id, response_payload), flush=True)
-                last_progress_key = progress_key
-                last_heartbeat_monotonic = now
             if status == "passed":
-                print(f"verification passed (request_id={request_id})", flush=True)
+                print(_render_success_message(request_id, response_payload), flush=True)
                 return 0
             if terminal:
                 print(_render_failure_message(request_id, response_payload), file=sys.stderr)
@@ -1516,7 +1636,6 @@ if __name__ == "__main__":
             "__NO_ARTIFACT_FAILURE_REASON_PREFIXES__",
             repr(tuple(_BROKER_NO_ARTIFACT_FAILURE_REASON_PREFIXES)),
         )
-        .replace("__HEARTBEAT_SECONDS__", repr(float(_BROKER_PROGRESS_HEARTBEAT_SECONDS)))
         .replace("__ALLOWED_STATUSES__", json.dumps(list(contract["allowed_statuses"])))
         .replace(
             "__ARTIFACT_REQUIRED_STATUSES__",
