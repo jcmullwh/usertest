@@ -673,21 +673,20 @@ def _format_verification_timing_guidance_md(
     if isinstance(insufficient_reason, str) and insufficient_reason.strip():
         lines.append(f"    - fallback reason: {insufficient_reason.strip()}")
     lines.append(
-        "    - recommended first wait: "
-        f"{_format_seconds_for_prompt(recommended_wait)} before checking status"
+        "    - runner expected blocking wait: "
+        f"{_format_seconds_for_prompt(recommended_wait)} before a status check would normally help"
     )
     lines.append(
-        "    - reasonable check cadence: if verification is expected to take minutes, "
-        f"wait near {_format_seconds_for_prompt(check_after)} before checking again; "
-        "one or two checks are acceptable, continuous wait/poll loops are not"
+        "    - model guidance: do not issue repeated wait/poll actions for normal "
+        "completion; the runner owns the wait and will only re-enter you if a fix is needed"
     )
     lines.append(
         "    - hang guard: do not call verification hung until it exceeds "
         f"{_format_seconds_for_prompt(hang_guard)} or shows concrete failure evidence"
     )
     lines.append(
-        "    - use one long wait rather than frequent short polling; do not repeatedly "
-        "poll only to watch progress"
+        "    - internal check cadence: if an operator inspects a long verification manually, "
+        f"wait near {_format_seconds_for_prompt(check_after)} before checking again"
     )
     if isinstance(verification_result_path, str) and verification_result_path.strip():
         lines.append(
@@ -813,11 +812,19 @@ def _format_preflight_summary_md(
         ):
             lines.append("- Final handoff verification:")
             lines.append(f"  - timeout_seconds: {timeout_label}")
-            lines.append(f"  - command: `{verification_broker_command.strip()}`")
             lines.append(
-                "  - note: run this once you believe the work is complete; it blocks "
-                "until verification finishes, it must pass before you finish, and you "
-                "must not make further workspace changes after it passes."
+                "  - mode: runner-owned blocking wait; do not launch or poll a "
+                "verification command yourself during normal completion."
+            )
+            lines.append(
+                "  - note: when you believe the work is complete, return the required "
+                "final JSON report. The runner will request verification once, wait for "
+                "the broker/client result, and finalize automatically if it passes."
+            )
+            lines.append(
+                "  - failure handling: if verification fails, the runner will re-enter "
+                "the agent with one compact fix prompt containing the failing command "
+                "tails and artifact paths."
             )
             lines.extend(
                 _format_verification_timing_guidance_md(
@@ -5378,10 +5385,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "verification_gate": {
                         "configured": bool(verification_commands),
                         "mode": verification_reuse_mode,
+                        "runner_owned_blocking_wait": bool(
+                            verification_commands and verification_reuse_mode == "auto"
+                        ),
                         "commands": (
                             [] if verification_reuse_mode == "auto" else verification_commands
                         ),
-                        "final_handoff_command": verification_broker_command,
+                        "final_handoff_command": (
+                            None
+                            if verification_reuse_mode == "auto"
+                            else verification_broker_command
+                        ),
                         "timeout_seconds": effective_verification_timeout_seconds,
                         "timing_profile_path": verification_timing_profile_path_for_agent,
                         "timing_profile": {
@@ -5756,7 +5770,14 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     )
                 finally:
                     if broker_session is not None:
-                        broker_session.stop()
+                        broker_session.stop(
+                            join_timeout_seconds=(
+                                verification_broker_contract.client_wait_timeout_seconds
+                                if verification_broker_contract is not None
+                                else None
+                            ),
+                            cancel_pending=False,
+                        )
                         broker_request_ids = broker_session.request_ids()
                         broker_results = broker_session.results()
                         broker_attempt_rows = broker_session.artifact_rows()
@@ -5906,6 +5927,95 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     and verification_commands
                 ):
                     broker_reuse_fallback_reason: str | None = None
+                    if (
+                        verification_reuse_mode == "auto"
+                        and broker_latest_result is None
+                        and not attempt_broker_requested
+                    ):
+                        runner_owned_broker = VerificationBrokerAttempt(
+                            run_dir=broker_physical_root,
+                            attempt_number=attempt_number,
+                            client_root=client_root,
+                            client_root_for_agent=client_root_for_agent,
+                            attempt_root_for_agent=attempt_root_for_agent,
+                            contract=verification_broker_contract,
+                            verifier=_run_broker_verification,
+                            workspace_hash_fn=lambda: compute_workspace_state_hash(
+                                acquired.workspace_dir
+                            ),
+                            utc_now_fn=_utc_now_z,
+                            run_async_verifier=True,
+                        )
+                        runner_owned_broker.start()
+                        try:
+                            broker_latest_result = runner_owned_broker.request_and_wait(
+                                request_origin="runner_after_agent_ready",
+                            )
+                        finally:
+                            runner_owned_broker.stop(request_settle_seconds=0.0)
+                            if backend.run_dir_mount is None:
+                                try:
+                                    shutil.copytree(
+                                        broker_physical_root / "verification_broker",
+                                        run_dir / "verification_broker",
+                                        dirs_exist_ok=True,
+                                    )
+                                except OSError:
+                                    pass
+                        broker_request_ids = runner_owned_broker.request_ids()
+                        broker_results = runner_owned_broker.results()
+                        broker_attempt_rows = runner_owned_broker.artifact_rows()
+                        for broker_result, broker_row in zip(
+                            broker_results,
+                            broker_attempt_rows,
+                            strict=False,
+                        ):
+                            summary = getattr(broker_result, "verification_summary", None)
+                            if isinstance(summary, dict):
+                                wall_seconds = summary.get("wall_seconds")
+                                if isinstance(wall_seconds, (int, float)):
+                                    verification_broker_seconds_total += max(
+                                        0.0, float(wall_seconds)
+                                    )
+                            row = dict(broker_row)
+                            row["request_origin"] = "runner_after_agent_ready"
+                            verification_reuse_requests.append(row)
+                        attempt_broker_requested = bool(broker_attempt_rows or broker_request_ids)
+                        if broker_latest_result is None and broker_results:
+                            broker_latest_result = broker_results[-1]
+                        if broker_latest_result is not None:
+                            latest_request_id = getattr(broker_latest_result, "request_id", None)
+                            if isinstance(latest_request_id, str) and latest_request_id.strip():
+                                attempt_broker_request_id = latest_request_id.strip()
+                            latest_status = getattr(broker_latest_result, "status", None)
+                            if isinstance(latest_status, str) and latest_status.strip():
+                                attempt_broker_response_status = latest_status.strip()
+                            latest_failure_reason = getattr(
+                                broker_latest_result, "failure_reason", None
+                            )
+                            if (
+                                isinstance(latest_failure_reason, str)
+                                and latest_failure_reason.strip()
+                            ):
+                                attempt_broker_response_failure_reason = (
+                                    latest_failure_reason.strip()
+                                )
+                            attempt_broker_missing_required_artifacts = list(
+                                verification_broker_missing_result_artifacts(
+                                    broker_latest_result
+                                )
+                            )
+                            _broker_payload, broker_payload_error = (
+                                validate_verification_broker_response_payload(
+                                    broker_latest_result.to_response_dict(),
+                                    request_id=broker_latest_result.request_id,
+                                )
+                            )
+                            if broker_payload_error is not None:
+                                attempt_broker_response_contract_error = broker_payload_error
+                                attempt_broker_response_failure_reason = (
+                                    "incomplete_broker_response"
+                                )
                     if (
                         verification_reuse_mode == "auto"
                         and broker_latest_result is not None

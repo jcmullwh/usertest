@@ -833,6 +833,7 @@ class VerificationBrokerAttempt:
         self._active_request_lock = threading.Lock()
         self._active_cancel_event: threading.Event | None = None
         self._stop = threading.Event()
+        self._cancel_pending_on_stop = True
         self._request_settle_seconds = 2.0
         self._drain_deadline_monotonic: float | None = None
         self._internal_deadline_seconds = contract.internal_deadline_seconds
@@ -867,14 +868,16 @@ class VerificationBrokerAttempt:
         *,
         join_timeout_seconds: float | None = None,
         request_settle_seconds: float = 2.0,
+        cancel_pending: bool = True,
     ) -> None:
         if self._thread is None:
             return
+        self._cancel_pending_on_stop = bool(cancel_pending)
         self._request_settle_seconds = max(0.0, float(request_settle_seconds))
         self._drain_deadline_monotonic = time.monotonic() + self._request_settle_seconds
         self._stop.set()
         with self._active_request_lock:
-            if self._active_cancel_event is not None:
+            if self._cancel_pending_on_stop and self._active_cancel_event is not None:
                 self._active_cancel_event.set()
         if join_timeout_seconds is None:
             join_timeout_seconds = _BROKER_STOP_JOIN_TIMEOUT_SECONDS
@@ -919,9 +922,58 @@ class VerificationBrokerAttempt:
             request_ids.append(request_id.strip())
         return request_ids
 
+    def request_and_wait(
+        self,
+        *,
+        request_origin: str = "runner",
+        timeout_seconds: float | None = None,
+    ) -> VerificationBrokerRequestResult | None:
+        """
+        Submit a verification request through the same request/response broker contract
+        used by the agent-visible client, then block in the runner process until the
+        broker records a terminal result.
+
+        This is intentionally file-backed rather than a direct verifier call: the
+        durable `verification_broker/attempt*/requests` and `responses` artifacts stay
+        identical to client-originated requests while avoiding model-visible wait/poll
+        turns when the agent has already returned a valid "work is ready" report.
+        """
+
+        if self._thread is None:
+            return None
+        self.requests_dir.mkdir(parents=True, exist_ok=True)
+        self.responses_dir.mkdir(parents=True, exist_ok=True)
+        request_id = "req_" + uuid.uuid4().hex
+        origin = request_origin.strip() if isinstance(request_origin, str) else ""
+        _write_json_atomic(
+            self.requests_dir / f"{request_id}.json",
+            {
+                "schema_version": 1,
+                "request_id": request_id,
+                "request_token": self.request_token,
+                "request_origin": origin or "runner",
+            },
+        )
+        wait_timeout = (
+            self.contract.client_wait_timeout_seconds
+            if timeout_seconds is None
+            else max(0.0, float(timeout_seconds))
+        )
+        deadline = time.monotonic() + wait_timeout
+        while True:
+            with self._results_lock:
+                for result in self._results:
+                    if result.request_id == request_id:
+                        return result
+            if time.monotonic() >= deadline:
+                return None
+            time.sleep(self._poll_seconds)
+
     def _worker_loop(self) -> None:
         while True:
-            processed = self._process_ready_requests(cancel_pending=self._stop.is_set())
+            processed = self._process_ready_requests(
+                cancel_pending=self._stop.is_set() and self._cancel_pending_on_stop
+            )
             if self._stop.is_set():
                 if processed or self._has_unprocessed_requests():
                     self._drain_deadline_monotonic = (
@@ -1110,7 +1162,7 @@ class VerificationBrokerAttempt:
             self._record_result(result=result, response_path=response_path)
             return
 
-        if self._stop.is_set():
+        if self._stop.is_set() and self._cancel_pending_on_stop:
             self._cancel_request(
                 request_id=request_id,
                 request_path=request_path,

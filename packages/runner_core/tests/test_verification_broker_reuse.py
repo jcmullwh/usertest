@@ -212,6 +212,34 @@ def _run_broker_wrapper(*, run_dir: Path, workspace_dir: Path) -> subprocess.Com
     )
 
 
+def _start_broker_wrapper(*, run_dir: Path, workspace_dir: Path) -> subprocess.Popen[str]:
+    client_root = run_dir / "verification_broker" / "client"
+    if os.name == "nt":
+        wrapper = client_root / "verify_client.ps1"
+        return subprocess.Popen(
+            [
+                "powershell",
+                "-NoProfile",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-File",
+                str(wrapper),
+            ],
+            cwd=str(workspace_dir),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    wrapper = client_root / "verify_client.sh"
+    return subprocess.Popen(
+        ["sh", str(wrapper)],
+        cwd=str(workspace_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+
 def _make_broker_attempt(
     *,
     run_dir: Path,
@@ -782,6 +810,70 @@ def test_run_once_reuses_broker_verification_without_post_agent_rerun(
     assert report["extensions"]["verification"]["terminal_reason"] == "passed"
 
 
+def test_run_once_waits_for_agent_requested_broker_verification_after_agent_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    _stub_codex_binary_preflight(monkeypatch)
+    broker_processes: list[subprocess.Popen[str]] = []
+
+    def _fake_run_codex_exec(**kwargs: object) -> object:
+        raw_events_path = Path(str(kwargs["raw_events_path"]))
+        last_message_path = Path(str(kwargs["last_message_path"]))
+        stderr_path = Path(str(kwargs["stderr_path"]))
+        workspace_dir = Path(str(kwargs["workspace_dir"]))
+        raw_events_path.write_text("", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        broker_processes.append(
+            _start_broker_wrapper(
+                run_dir=_local_backend_broker_root(workspace_dir=workspace_dir),
+                workspace_dir=workspace_dir,
+            )
+        )
+        last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
+        return SimpleNamespace(exit_code=0, argv=["codex", "exec"])
+
+    monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": "codex"}},
+        policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+            verification_commands=(_verification_command(),),
+            verification_reuse_mode="auto",
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert broker_processes
+    stdout, stderr = broker_processes[0].communicate(timeout=10)
+    assert broker_processes[0].returncode == 0, stderr or stdout
+
+    verification = json.loads((result.run_dir / "verification.json").read_text(encoding="utf-8"))
+    assert verification["source"] == "broker_reuse"
+    assert verification["reused"] is True
+    assert verification["passed"] is True
+    assert not (result.run_dir / "verification" / "attempt1" / "post_agent_rerun").exists()
+
+    reuse = json.loads((result.run_dir / "verification_reuse.json").read_text(encoding="utf-8"))
+    assert reuse["selected_source"] == "broker_reuse"
+    assert reuse["selected_request_id"] == reuse["requests"][0]["request_id"]
+    assert "request_origin" not in reuse["requests"][0]
+
+
 def test_run_once_uses_latest_broker_result_within_single_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -916,7 +1008,7 @@ def test_run_once_uses_failed_broker_result_directly_before_followup(
     assert not (result.run_dir / "verification" / "attempt1" / "post_agent_rerun").exists()
 
 
-def test_run_once_falls_back_to_post_agent_rerun_when_broker_command_not_requested(
+def test_run_once_runner_requests_broker_verification_when_agent_returns_ready(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -957,14 +1049,22 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_command_not_request
 
     assert result.exit_code == 0
     verification = json.loads((result.run_dir / "verification.json").read_text(encoding="utf-8"))
-    assert verification["source"] == "post_agent_rerun"
-    assert verification["reused"] is False
+    assert verification["source"] == "broker_reuse"
+    assert verification["reused"] is True
     assert verification["passed"] is True
-    assert (result.run_dir / "verification" / "attempt1" / "post_agent_rerun").exists()
+    assert not (result.run_dir / "verification" / "attempt1" / "post_agent_rerun").exists()
 
     reuse = json.loads((result.run_dir / "verification_reuse.json").read_text(encoding="utf-8"))
-    assert reuse["selected_source"] == "post_agent_rerun"
-    assert reuse["fallback_reason"] == "broker_not_requested"
+    assert reuse["selected_source"] == "broker_reuse"
+    assert reuse["fallback_reason"] is None
+    assert reuse["selected_request_id"]
+    assert reuse["requests"][0]["request_origin"] == "runner_after_agent_ready"
+
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    attempt_verification = attempts["attempts"][0]["verification"]
+    assert attempt_verification["source"] == "broker_reuse"
+    assert attempt_verification["broker_requested"] is True
+    assert attempt_verification["broker_response_status"] == "passed"
 
 
 def test_run_once_falls_back_to_post_agent_rerun_when_broker_response_is_incomplete(
