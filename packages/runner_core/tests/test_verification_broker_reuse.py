@@ -317,6 +317,62 @@ def test_verification_broker_client_waits_for_async_failure(tmp_path: Path) -> N
     assert "verification.json" in completed.stderr
 
 
+def test_verification_broker_client_failure_output_only_includes_failed_command_tails(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "run"
+    passing_tail = "PASSING_COMMAND_TAIL_SHOULD_NOT_BE_MODEL_VISIBLE"
+    truncated_prefix = "FAILED_PREFIX_SHOULD_BE_TRUNCATED"
+    retained_tail = "FAILED_RETAINED_TAIL"
+    summary = {
+        "schema_version": 1,
+        "attempt_number": 1,
+        "commands_configured": ["pass", "fail"],
+        "passed": False,
+        "status": "failed",
+        "terminal_reason": "failed",
+        "failure_reason": "verification_failed",
+        "started_utc": "2026-03-07T00:00:00Z",
+        "finished_utc": "2026-03-07T00:00:01Z",
+        "wall_seconds": 12.34,
+        "artifacts_dir": "verification/attempt1/broker_request_01",
+        "commands": [
+            {
+                "index": 1,
+                "command": "pass",
+                "exit_code": 0,
+                "wall_seconds": 1.0,
+                "timed_out": False,
+                "stdout_tail": passing_tail,
+                "stderr_tail": passing_tail,
+            },
+            {
+                "index": 2,
+                "command": "fail",
+                "exit_code": 2,
+                "wall_seconds": 2.0,
+                "timed_out": False,
+                "stderr_tail": truncated_prefix + ("x" * 1400) + retained_tail,
+            },
+        ],
+    }
+    broker = _make_broker_attempt(run_dir=run_dir, verifier=lambda _: summary)
+    broker.start()
+    try:
+        completed = _run_broker_wrapper(run_dir=run_dir, workspace_dir=tmp_path)
+    finally:
+        broker.stop()
+
+    assert completed.returncode != 0
+    assert "commands=2" in completed.stderr
+    assert "failed_commands=1" in completed.stderr
+    assert "failed_command 2" in completed.stderr
+    assert "stderr_tail:" in completed.stderr
+    assert retained_tail in completed.stderr
+    assert truncated_prefix not in completed.stderr
+    assert passing_tail not in completed.stderr
+
+
 def test_verification_broker_client_rejects_passed_response_missing_required_artifacts(
     tmp_path: Path,
 ) -> None:
@@ -358,7 +414,9 @@ def test_verification_broker_client_rejects_passed_response_missing_required_art
     assert payload["summary_path"] is None
 
 
-def test_verification_broker_client_surfaces_progress_updates(tmp_path: Path) -> None:
+def test_verification_broker_client_keeps_progress_updates_in_artifacts(
+    tmp_path: Path,
+) -> None:
     run_dir = tmp_path / "run"
 
     def _verifier(_: int, **kwargs: object) -> dict[str, object]:
@@ -405,8 +463,18 @@ def test_verification_broker_client_surfaces_progress_updates(tmp_path: Path) ->
         broker.stop()
 
     assert completed.returncode == 0, completed.stderr
-    assert "verification status=" in completed.stdout
-    assert "phase=running_command" in completed.stdout
+    assert "verification passed" in completed.stdout
+    assert "commands=1" in completed.stdout
+    assert "wall_seconds=0.40s" in completed.stdout
+    assert "verification status=" not in completed.stdout
+    assert "phase=running_command" not in completed.stdout
+    progress_files = sorted(
+        (run_dir / "verification_broker" / "attempt1" / "progress").glob("*.jsonl")
+    )
+    assert progress_files
+    progress_text = progress_files[-1].read_text(encoding="utf-8")
+    assert "running_command" in progress_text
+    assert "verification_compact" in progress_text
 
 
 def test_verification_broker_client_rejects_incomplete_pass_response(tmp_path: Path) -> None:
@@ -1205,6 +1273,57 @@ def test_build_verification_followup_prompt_surfaces_agent_visible_path_only(
     # The old hardcoded dual Host/Docker guess must not reappear.
     assert "- Host:" not in prompt
     assert "- Docker:" not in prompt
+
+
+def test_build_verification_followup_prompt_truncates_tails_and_prior_output() -> None:
+    passing_tail = "PASSING_TAIL_NOT_INCLUDED"
+    old_failed_tail = "OLD_FAILED_TAIL_TRUNCATED"
+    retained_failed_tail = "RETAINED_FAILED_TAIL"
+    prior = "p" * 4500
+    prompt = runner_mod._build_verification_followup_prompt(
+        base_prompt="base",
+        verification_summary={
+            "status": "failed",
+            "terminal_reason": "failed",
+            "failure_reason": "verification_failed",
+            "wall_seconds": 9.87,
+            "artifacts_dir_for_agent": "/agent/verification/attempt1",
+            "commands": [
+                {
+                    "index": 1,
+                    "command": "pass",
+                    "exit_code": 0,
+                    "wall_seconds": 1.0,
+                    "stdout_tail": passing_tail,
+                    "stderr_tail": passing_tail,
+                },
+                {
+                    "index": 2,
+                    "command": "fail",
+                    "exit_code": 1,
+                    "wall_seconds": 2.0,
+                    "stderr_tail": old_failed_tail + ("x" * 1400) + retained_failed_tail,
+                },
+            ],
+        },
+        schema_dict={},
+        prior_last_message_text=prior,
+        attempt_number=1,
+    )
+
+    assert "status=failed" in prompt
+    assert "command_count=2" in prompt
+    assert "wall_seconds_total=9.87" in prompt
+    assert "failed_command 2) fail" in prompt
+    assert retained_failed_tail in prompt
+    assert old_failed_tail not in prompt
+    assert passing_tail not in prompt
+    assert prompt.count("...[truncated]") == 1
+    previous_output = prompt.split("Previous assistant output:\n```\n", 1)[1].split(
+        "\n```\n\nFix the issues",
+        1,
+    )[0]
+    assert len(previous_output) == 4000 + len("\n...[truncated]")
 
 
 def test_verification_broker_response_prefers_agent_visible_artifacts_dir(
