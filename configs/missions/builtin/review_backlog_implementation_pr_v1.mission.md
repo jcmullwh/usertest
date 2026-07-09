@@ -55,3 +55,20 @@ Use `issues[]` for concrete findings. Put blocking findings there instead of hid
 3) Check for implementation defects, regressions, missing tests/docs, or incomplete follow-through.
 4) Ground the decision in the current CI and PR state provided in the prompt.
 5) Produce a clear approve / changes_requested / blocked outcome.
+
+## Delegation guidance
+
+Use delegation only when it helps preserve parent context or improve independent review coverage. Good candidates are:
+
+- broad read-only exploration of large files or cross-module contracts
+- test failure triage and log summarization
+- independent review of implementation risks
+- narrow investigation of one module or workflow
+
+Do not delegate small, obvious reviews where delegation overhead would add noise. When you do delegate, require a concise
+summary back to the parent covering findings, paths, risks, and recommended review disposition; keep raw broad-source
+dumps, full logs, and copied file contents out of the parent context unless a short excerpt is essential evidence.
+
+Delegation is not a scope gate. If no delegation tool or capability is available, perform the full review yourself rather
+than under-scoping, skipping necessary investigation, or treating the lack of delegation as a reason to leave review
+criteria unchecked.
