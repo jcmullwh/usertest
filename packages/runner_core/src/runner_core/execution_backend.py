@@ -90,6 +90,20 @@ class MaintenanceProfilePreparation:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class MaintenanceImageResolution:
+    image_ref: str
+    env_hash: str
+    image_source: Literal["local", "pulled", "built"]
+    image_resolution_seconds: float
+    context_metadata: dict[str, Any]
+    metadata: dict[str, Any]
+
+
+def _utc_now_z() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
 def _default_sandbox_env_overrides(
     *,
     cache_mode: Literal["cold", "warm"],
@@ -816,19 +830,27 @@ def _build_maintenance_image(
         )
 
 
-def _prepare_maintenance_profile(
+def resolve_maintenance_docker_image(
     *,
     repo_root: Path,
     run_dir: Path,
-    workspace_dir: Path,
-    request: RunRequest,
-    cache_mode: Literal["cold", "warm"],
-    cache_dir: Path | None,
-    maintenance_venv_reuse_enabled: bool,
+    force_rebuild: bool = False,
     timeout_seconds: float | None,
-) -> MaintenanceProfilePreparation:
+    artifact_path: Path | None = None,
+) -> MaintenanceImageResolution:
+    """
+    Resolve the maintenance Docker image once and persist the immutable image contract.
+
+    This function owns the expensive/local-Docker-mutating part of the maintenance profile:
+    context preparation, environment hashing, local lookup, pull/tag, branch-alias cache pulls,
+    build, and optional cleanup.  Per-ticket runs can later consume the persisted metadata via
+    ``RunRequest.exec_maintenance_image_metadata_path`` without repeating these operations.
+    """
+
     started = time.monotonic()
     cfg = _load_maintenance_docker_config(repo_root=repo_root)
+    sandbox_dir = run_dir / "sandbox"
+    sandbox_dir.mkdir(parents=True, exist_ok=True)
     context_dir, context_meta = _prepare_maintenance_image_context(
         repo_root=repo_root,
         run_dir=run_dir,
@@ -843,10 +865,13 @@ def _prepare_maintenance_profile(
     alias_pull_attempts: list[dict[str, Any]] = []
     build_cache_from: list[str] = []
     build_performed = False
-    image_source = ""
+    image_source: Literal["local", "pulled", "built"] | None = None
+    pull_log_path: Path | None = None
+    alias_pull_log_path: Path | None = None
+    build_log_path: Path | None = None
 
-    if bool(getattr(request, "exec_rebuild_image", False)):
-        build_log_path = run_dir / "sandbox" / "maintenance_docker_build.log"
+    if force_rebuild:
+        build_log_path = sandbox_dir / "maintenance_docker_build.log"
         _build_maintenance_image(
             context_dir=context_dir,
             local_ref=local_ref,
@@ -862,7 +887,7 @@ def _prepare_maintenance_profile(
     else:
         if cfg.pull_policy in {"if_missing", "always"}:
             pull_attempted = True
-            pull_log_path = run_dir / "sandbox" / "maintenance_docker_pull.json"
+            pull_log_path = sandbox_dir / "maintenance_docker_pull.json"
             pull_proc = _docker_pull_image(
                 ref=published_ref,
                 timeout_seconds=timeout_seconds,
@@ -882,10 +907,11 @@ def _prepare_maintenance_profile(
                     repo_root=repo_root,
                 )
                 if candidate_cache_refs:
+                    alias_pull_log_path = sandbox_dir / "maintenance_docker_cache_pulls.json"
                     alias_pull_attempts = _docker_pull_images(
                         refs=candidate_cache_refs,
                         timeout_seconds=timeout_seconds,
-                        log_path=run_dir / "sandbox" / "maintenance_docker_cache_pulls.json",
+                        log_path=alias_pull_log_path,
                     )
                     build_cache_from = [
                         str(item["ref"])
@@ -893,8 +919,8 @@ def _prepare_maintenance_profile(
                         if item.get("returncode") == 0 and item.get("ref")
                     ]
 
-        if not image_source:
-            build_log_path = run_dir / "sandbox" / "maintenance_docker_build.log"
+        if image_source is None:
+            build_log_path = sandbox_dir / "maintenance_docker_build.log"
             _build_maintenance_image(
                 context_dir=context_dir,
                 local_ref=local_ref,
@@ -905,6 +931,166 @@ def _prepare_maintenance_profile(
             )
             build_performed = True
             image_source = "built"
+
+    artifacts = {
+        "context_metadata": str(sandbox_dir / "maintenance_image_context.json"),
+        "pull_log": str(pull_log_path) if pull_log_path is not None else None,
+        "alias_pull_log": str(alias_pull_log_path) if alias_pull_log_path is not None else None,
+        "build_log": str(build_log_path) if build_log_path is not None else None,
+    }
+    metadata: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "maintenance_image_resolution",
+        "profile": "maintenance",
+        "generated_at": _utc_now_z(),
+        "repo_identity": {
+            "local_git_root": str(repo_root),
+            "origin_url": _git_remote_url(repo_dir=repo_root),
+        },
+        "image": {
+            "env_hash": env_hash,
+            "image_ref": local_ref,
+            "local_ref": local_ref,
+            "published_ref": published_ref,
+            "source": image_source,
+            "pull_attempted": pull_attempted,
+            "alias_pull_attempts": alias_pull_attempts,
+            "build_cache_from": build_cache_from,
+            "build_performed": build_performed,
+            "context_dir": str(context_dir),
+            "context_metadata": context_meta,
+        },
+        "artifacts": artifacts,
+        "timings": {
+            "image_resolution_seconds": max(0.0, time.monotonic() - started),
+        },
+    }
+    if cfg.cleanup_enabled and cfg.cleanup_on_prepare:
+        cleanup_artifact_path = sandbox_dir / "maintenance_image_cleanup.json"
+        try:
+            cleanup_summary = cleanup_local_maintenance_images(
+                repo_root=repo_root,
+                dry_run=cfg.cleanup_dry_run_default,
+                timeout_seconds=timeout_seconds,
+                artifact_path=cleanup_artifact_path,
+            )
+        except Exception as exc:  # noqa: BLE001
+            cleanup_summary = {
+                "schema_version": 1,
+                "cleanup_enabled": True,
+                "dry_run": bool(cfg.cleanup_dry_run_default),
+                "repos_scanned": list(_maintenance_repo_names(cfg=cfg)),
+                "protected_tags": list(_maintenance_protected_tags(cfg=cfg)),
+                "kept_tags": [],
+                "deleted_tags": [],
+                "deleted_image_ids": [],
+                "errors": [f"Automatic maintenance image cleanup failed: {exc}"],
+            }
+            _write_json(cleanup_artifact_path, cleanup_summary)
+        metadata["cleanup"] = cleanup_summary
+
+    if artifact_path is not None:
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json(artifact_path, metadata)
+
+    return MaintenanceImageResolution(
+        image_ref=local_ref,
+        env_hash=env_hash,
+        image_source=image_source,
+        image_resolution_seconds=cast(float, metadata["timings"]["image_resolution_seconds"]),
+        context_metadata=context_meta,
+        metadata=metadata,
+    )
+
+
+def _load_pre_resolved_maintenance_image(
+    *,
+    metadata_path: Path,
+) -> MaintenanceImageResolution:
+    metadata = _read_json_artifact(metadata_path)
+    image = metadata.get("image")
+    if not isinstance(image, dict):
+        raise ValueError(
+            "Pre-resolved maintenance image metadata missing image object: "
+            f"{metadata_path}"
+        )
+
+    env_hash = image.get("env_hash")
+    image_ref = image.get("image_ref") or image.get("local_ref")
+    image_source = image.get("source")
+    context_meta = image.get("context_metadata")
+    if not isinstance(env_hash, str) or not env_hash.strip():
+        raise ValueError(
+            "Pre-resolved maintenance image metadata missing image.env_hash: "
+            f"{metadata_path}"
+        )
+    if not isinstance(image_ref, str) or not image_ref.strip():
+        raise ValueError(
+            "Pre-resolved maintenance image metadata missing image.image_ref: "
+            f"{metadata_path}"
+        )
+    if image_source not in {"local", "pulled", "built"}:
+        raise ValueError(
+            "Pre-resolved maintenance image metadata image.source must be one of "
+            f"local|pulled|built: {metadata_path}"
+        )
+    if not isinstance(context_meta, dict):
+        raise ValueError(
+            "Pre-resolved maintenance image metadata missing image.context_metadata: "
+            f"{metadata_path}"
+        )
+    timings = metadata.get("timings")
+    image_resolution_seconds = 0.0
+    if isinstance(timings, dict) and isinstance(
+        timings.get("image_resolution_seconds"), (int, float)
+    ):
+        image_resolution_seconds = max(0.0, float(timings["image_resolution_seconds"]))
+
+    return MaintenanceImageResolution(
+        image_ref=image_ref.strip(),
+        env_hash=env_hash.strip(),
+        image_source=cast(Literal["local", "pulled", "built"], image_source),
+        image_resolution_seconds=image_resolution_seconds,
+        context_metadata=cast(dict[str, Any], context_meta),
+        metadata=metadata,
+    )
+
+
+def _prepare_maintenance_profile(
+    *,
+    repo_root: Path,
+    run_dir: Path,
+    workspace_dir: Path,
+    request: RunRequest,
+    cache_mode: Literal["cold", "warm"],
+    cache_dir: Path | None,
+    maintenance_venv_reuse_enabled: bool,
+    timeout_seconds: float | None,
+) -> MaintenanceProfilePreparation:
+    cfg = _load_maintenance_docker_config(repo_root=repo_root)
+    pre_resolved_metadata_path_raw = getattr(
+        request, "exec_maintenance_image_metadata_path", None
+    )
+    pre_resolved_metadata_path: Path | None = None
+    pre_resolved = False
+    if pre_resolved_metadata_path_raw is not None:
+        pre_resolved_metadata_path = Path(pre_resolved_metadata_path_raw).resolve()
+        image_resolution = _load_pre_resolved_maintenance_image(
+            metadata_path=pre_resolved_metadata_path,
+        )
+        pre_resolved = True
+    else:
+        image_resolution = resolve_maintenance_docker_image(
+            repo_root=repo_root,
+            run_dir=run_dir,
+            force_rebuild=bool(getattr(request, "exec_rebuild_image", False)),
+            timeout_seconds=timeout_seconds,
+        )
+
+    context_meta = image_resolution.context_metadata
+    env_hash = image_resolution.env_hash
+    local_ref = image_resolution.image_ref
+    image_source = image_resolution.image_source
 
     fingerprint_start = time.monotonic()
     python_major_minor = context_meta.get("python_major_minor")
@@ -991,6 +1177,13 @@ def _prepare_maintenance_profile(
         maintenance_venv_seed_root=cfg.seed_root if maintenance_venv_reuse_enabled else None,
     )
 
+    resolution_image_meta = image_resolution.metadata.get("image")
+    if not isinstance(resolution_image_meta, dict):
+        resolution_image_meta = {}
+    resolution_artifacts_meta = image_resolution.metadata.get("artifacts")
+    if not isinstance(resolution_artifacts_meta, dict):
+        resolution_artifacts_meta = {}
+
     metadata: dict[str, Any] = {
         "schema_version": 1,
         "profile": "maintenance",
@@ -1001,15 +1194,29 @@ def _prepare_maintenance_profile(
         },
         "image": {
             "env_hash": env_hash,
+            "image_ref": local_ref,
             "local_ref": local_ref,
-            "published_ref": published_ref,
+            "published_ref": resolution_image_meta.get("published_ref"),
             "source": image_source,
-            "pull_attempted": pull_attempted,
-            "alias_pull_attempts": alias_pull_attempts,
-            "build_cache_from": build_cache_from,
-            "build_performed": build_performed,
-            "context_dir": str(context_dir),
+            "pull_attempted": bool(resolution_image_meta.get("pull_attempted", False)),
+            "alias_pull_attempts": resolution_image_meta.get("alias_pull_attempts", []),
+            "build_cache_from": resolution_image_meta.get("build_cache_from", []),
+            "build_performed": bool(resolution_image_meta.get("build_performed", False)),
+            "context_dir": resolution_image_meta.get("context_dir"),
             "context_metadata": context_meta,
+            "pre_resolved": pre_resolved,
+            "pre_resolved_image_ref": local_ref if pre_resolved else None,
+            "pre_resolved_metadata_path": (
+                str(pre_resolved_metadata_path) if pre_resolved_metadata_path is not None else None
+            ),
+        },
+        "image_resolution": {
+            "pre_resolved": pre_resolved,
+            "metadata_path": (
+                str(pre_resolved_metadata_path) if pre_resolved_metadata_path is not None else None
+            ),
+            "provenance": image_resolution.metadata,
+            "artifacts": resolution_artifacts_meta,
         },
         "cache": {
             "host_cache_dir": str(host_cache_dir) if host_cache_dir is not None else None,
@@ -1020,42 +1227,24 @@ def _prepare_maintenance_profile(
         "verification_contract": verification_contract,
         "timings": {
             "fingerprint_seconds": fingerprint_seconds,
-            "image_resolution_seconds": max(0.0, time.monotonic() - started),
+            "image_resolution_seconds": (
+                0.0 if pre_resolved else image_resolution.image_resolution_seconds
+            ),
+            "pre_resolved_image_resolution_seconds": image_resolution.image_resolution_seconds,
             "container_start_seconds": None,
             "cache_mount_hits": cache_mount_hits,
             "seed_hits": None,
             "install_projects_run": None,
         },
     }
-    if cfg.cleanup_enabled and cfg.cleanup_on_prepare:
-        cleanup_artifact_path = run_dir / "sandbox" / "maintenance_image_cleanup.json"
-        try:
-            cleanup_summary = cleanup_local_maintenance_images(
-                repo_root=repo_root,
-                dry_run=cfg.cleanup_dry_run_default,
-                timeout_seconds=timeout_seconds,
-                artifact_path=cleanup_artifact_path,
-            )
-        except Exception as exc:  # noqa: BLE001
-            cleanup_summary = {
-                "schema_version": 1,
-                "cleanup_enabled": True,
-                "dry_run": bool(cfg.cleanup_dry_run_default),
-                "repos_scanned": list(_maintenance_repo_names(cfg=cfg)),
-                "protected_tags": list(_maintenance_protected_tags(cfg=cfg)),
-                "kept_tags": [],
-                "deleted_tags": [],
-                "deleted_image_ids": [],
-                "errors": [f"Automatic maintenance image cleanup failed: {exc}"],
-            }
-            _write_json(cleanup_artifact_path, cleanup_summary)
-        metadata["cleanup"] = cleanup_summary
+    if "cleanup" in image_resolution.metadata:
+        metadata["cleanup"] = image_resolution.metadata["cleanup"]
 
     return MaintenanceProfilePreparation(
         image_ref=local_ref,
         env_hash=env_hash,
         image_source=image_source,
-        image_resolution_seconds=max(0.0, time.monotonic() - started),
+        image_resolution_seconds=0.0 if pre_resolved else image_resolution.image_resolution_seconds,
         fingerprint_seconds=fingerprint_seconds,
         cache_mount_hits=cache_mount_hits,
         cache_mounts=cache_mounts,

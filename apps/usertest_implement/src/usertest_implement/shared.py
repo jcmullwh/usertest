@@ -349,6 +349,7 @@ _SETTINGS_COMMON_SPECS: dict[str, _SettingsValueSpec] = {
     "exec_cache": _SettingsValueSpec("choice", choices=("cold", "warm")),
     "exec_cache_dir": _SettingsValueSpec("path", allow_none=True),
     "maintenance_venv_cache": _SettingsValueSpec("bool"),
+    "exec_maintenance_image_metadata_path": _SettingsValueSpec("path", allow_none=True),
     "dry_run": _SettingsValueSpec("bool"),
     "verification_profile": _SettingsValueSpec(
         "choice",

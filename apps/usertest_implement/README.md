@@ -65,10 +65,15 @@ Maintenance install cache (Docker + warm cache):
   - `usertest-implement maintenance-images cleanup`
 - Automatic best-effort local image cleanup also runs after maintenance-image resolution using
   `configs/maintenance_docker.yaml`.
+- Batch preflight resolves the maintenance image once when Docker maintenance profile is active and
+  persists `preflight/maintenance_image.json` with the env hash, immutable image ref, source
+  (`local`, `pulled`, or `built`), pull/build artifacts, and timing. Ticket runs launched by that
+  batch pass the metadata via `--exec-maintenance-image-metadata` so they reuse the image ref without
+  repeating pull/build/tag work.
 - Batch runs record the current Docker serialization audit in `batch_state.json`,
   `batch_summary.json`, and `docker_resource_plan.json`. Under current defaults it remains
-  `parallel_safe: false` because image resolution is per-ticket, cleanup runs on prepare, and warm
-  maintenance venv cache hits are mounted writable.
+  `parallel_safe: false` because cleanup/image state and warm maintenance venv cache mounts still
+  need separate parallel-safety handling.
 
 Docker execution profile:
 

@@ -37,6 +37,21 @@ def test_parser_no_docker_overrides_default() -> None:
     assert args.exec_backend == "local"
 
 
+def test_parser_accepts_pre_resolved_maintenance_image_metadata() -> None:
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "run",
+            "--ticket-path",
+            "C:\\tmp\\ticket.md",
+            "--dry-run",
+            "--exec-maintenance-image-metadata",
+            "C:\\tmp\\maintenance_image.json",
+        ]
+    )
+    assert args.exec_maintenance_image_metadata_path == Path("C:\\tmp\\maintenance_image.json")
+
+
 def test_parser_opt_out_flags() -> None:
     parser = build_parser()
     args = parser.parse_args(

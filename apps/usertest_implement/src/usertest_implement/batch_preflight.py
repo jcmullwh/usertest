@@ -12,6 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import yaml
+from runner_core.execution_backend import resolve_maintenance_docker_image
 
 from usertest_implement.batch_state import utc_now_z
 
@@ -207,6 +208,9 @@ def run_batch_preflight(
     batch_config: dict[str, Any],
     worker_roster: list[dict[str, Any]],
     exec_backend: str,
+    exec_docker_profile: str = "standard",
+    resolve_maintenance_image: bool = False,
+    docker_timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     defaults = batch_config.get("defaults", {})
     blockers: list[dict[str, Any]] = []
@@ -435,6 +439,44 @@ def run_batch_preflight(
                     evidence={"path": str(preflight_dir / "docker_build.log")},
                 )
             )
+        if resolve_maintenance_image and exec_docker_profile == "maintenance":
+            maintenance_metadata_path = preflight_dir / "maintenance_image.json"
+            try:
+                resolution = resolve_maintenance_docker_image(
+                    repo_root=repo_root,
+                    run_dir=batch_dir / "preflight_maintenance_image",
+                    force_rebuild=False,
+                    timeout_seconds=docker_timeout_seconds,
+                    artifact_path=maintenance_metadata_path,
+                )
+                maintenance_image_metadata = {
+                    "path": str(maintenance_metadata_path),
+                    "env_hash": resolution.env_hash,
+                    "image_ref": resolution.image_ref,
+                    "source": resolution.image_source,
+                    "timings": resolution.metadata.get("timings", {}),
+                    "artifacts": resolution.metadata.get("artifacts", {}),
+                }
+            except Exception as exc:  # noqa: BLE001
+                maintenance_image_metadata = None
+                blockers.append(
+                    _blocker(
+                        blocker_id="infra_transient",
+                        failure_class="infra_transient",
+                        summary=(
+                            "Maintenance Docker image resolution failed during batch preflight."
+                        ),
+                        evidence={
+                            "path": str(maintenance_metadata_path),
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    )
+                )
+        else:
+            maintenance_image_metadata = None
+    else:
+        maintenance_image_metadata = None
 
     registry_blocker = _gitlab_registry_probe()
     if registry_blocker is not None:
@@ -444,5 +486,6 @@ def run_batch_preflight(
         "branch": branch,
         "head_sha": head_sha,
         "base_ci_run_url": base_ci_run_url,
+        "maintenance_image_metadata": maintenance_image_metadata,
         "blockers": blockers,
     }

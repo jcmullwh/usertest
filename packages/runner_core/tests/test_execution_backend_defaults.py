@@ -761,6 +761,204 @@ def test_prepare_maintenance_profile_uses_branch_alias_as_build_cache_when_hash_
     assert prep.metadata["image"]["alias_pull_attempts"][0]["ref"] == expected_cache_ref
 
 
+def test_resolve_maintenance_docker_image_records_pull_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    context_dir = run_dir / "sandbox" / "maintenance_image_context"
+    context_dir.mkdir(parents=True, exist_ok=True)
+    (context_dir / "Dockerfile").write_text("FROM python:3.11-slim\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        backend_mod,
+        "_load_maintenance_docker_config",
+        lambda repo_root: backend_mod.MaintenanceDockerConfig(
+            local_image_repo="usertest-maintenance",
+            published_image_repo="ghcr.io/example/usertest-maintenance",
+            pull_policy="if_missing",
+            seed_root="/opt/usertest_maint_seed",
+            cache_root_subdir="usertest_maint_venvs",
+            publish_branches=("dev", "main"),
+            cleanup_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_prepare_maintenance_image_context",
+        lambda **_kwargs: (
+            context_dir,
+            {"python_major_minor": "3.11", "pdm_version": "2.26.2"},
+        ),
+    )
+    monkeypatch.setattr(backend_mod, "compute_image_hash", lambda **_kwargs: "e" * 64)
+    monkeypatch.setattr(backend_mod, "_docker_image_exists_local", lambda **_kwargs: False)
+
+    def _fake_pull(**kwargs):
+        kwargs["log_path"].write_text(
+            json.dumps({"returncode": 0, "stdout": "pulled", "stderr": ""}) + "\n",
+            encoding="utf-8",
+        )
+        return subprocess.CompletedProcess(
+            args=["docker", "pull", kwargs["ref"]],
+            returncode=0,
+            stdout="pulled",
+            stderr="",
+        )
+
+    tagged: dict[str, str] = {}
+    monkeypatch.setattr(backend_mod, "_docker_pull_image", _fake_pull)
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_tag_image",
+        lambda **kwargs: tagged.update(
+            {"source": kwargs["source_ref"], "target": kwargs["target_ref"]}
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_build_maintenance_image",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("docker build should not run")),
+    )
+
+    artifact_path = run_dir / "preflight" / "maintenance_image.json"
+    resolution = backend_mod.resolve_maintenance_docker_image(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        timeout_seconds=30.0,
+        artifact_path=artifact_path,
+    )
+
+    assert resolution.image_source == "pulled"
+    assert resolution.image_ref == "usertest-maintenance:" + ("e" * 16)
+    assert tagged == {
+        "source": "ghcr.io/example/usertest-maintenance:" + ("e" * 16),
+        "target": "usertest-maintenance:" + ("e" * 16),
+    }
+    persisted = json.loads(artifact_path.read_text(encoding="utf-8"))
+    assert persisted["image"]["source"] == "pulled"
+    assert persisted["image"]["pull_attempted"] is True
+    assert persisted["artifacts"]["pull_log"].endswith("maintenance_docker_pull.json")
+    assert persisted["timings"]["image_resolution_seconds"] >= 0
+
+
+def test_prepare_maintenance_profile_consumes_pre_resolved_image_without_resolution(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo_root = tmp_path / "repo"
+    run_dir = tmp_path / "run"
+    workspace_dir = tmp_path / "workspace"
+    cache_dir = tmp_path / "cache"
+    repo_root.mkdir(parents=True, exist_ok=True)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    metadata_path = tmp_path / "batch" / "preflight" / "maintenance_image.json"
+    metadata_path.parent.mkdir(parents=True, exist_ok=True)
+    pre_resolved = {
+        "schema_version": 1,
+        "kind": "maintenance_image_resolution",
+        "profile": "maintenance",
+        "image": {
+            "env_hash": "f" * 64,
+            "image_ref": "usertest-maintenance:" + ("f" * 16),
+            "local_ref": "usertest-maintenance:" + ("f" * 16),
+            "published_ref": "ghcr.io/example/usertest-maintenance:" + ("f" * 16),
+            "source": "built",
+            "pull_attempted": True,
+            "alias_pull_attempts": [{"ref": "ghcr.io/example/usertest-maintenance:dev-latest"}],
+            "build_cache_from": ["ghcr.io/example/usertest-maintenance:dev-latest"],
+            "build_performed": True,
+            "context_dir": str(tmp_path / "context"),
+            "context_metadata": {"python_major_minor": "3.11", "pdm_version": "2.26.2"},
+        },
+        "artifacts": {
+            "pull_log": str(tmp_path / "pull.json"),
+            "alias_pull_log": str(tmp_path / "cache-pulls.json"),
+            "build_log": str(tmp_path / "build.log"),
+        },
+        "timings": {"image_resolution_seconds": 12.5},
+    }
+    metadata_path.write_text(json.dumps(pre_resolved) + "\n", encoding="utf-8")
+
+    monkeypatch.setattr(
+        backend_mod,
+        "_load_maintenance_docker_config",
+        lambda repo_root: backend_mod.MaintenanceDockerConfig(
+            local_image_repo="usertest-maintenance",
+            published_image_repo="ghcr.io/example/usertest-maintenance",
+            pull_policy="if_missing",
+            seed_root="/opt/usertest_maint_seed",
+            cache_root_subdir="usertest_maint_venvs",
+            publish_branches=("dev", "main"),
+            cleanup_enabled=False,
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_prepare_maintenance_image_context",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("context preparation should not run")
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_image_exists_local",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("local image resolution should not run")
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_pull_image",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("docker pull should not run")),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_build_maintenance_image",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("docker build should not run")),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_compute_install_cache_fingerprints",
+        lambda **_kwargs: {"projects": []},
+    )
+
+    request = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+        exec_maintenance_image_metadata_path=metadata_path,
+    )
+
+    prep = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=run_dir,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        maintenance_venv_reuse_enabled=True,
+        timeout_seconds=30.0,
+    )
+
+    assert prep.image_ref == "usertest-maintenance:" + ("f" * 16)
+    assert prep.image_source == "built"
+    assert prep.image_resolution_seconds == 0.0
+    assert prep.metadata["image"]["pre_resolved"] is True
+    assert prep.metadata["image"]["pre_resolved_image_ref"] == prep.image_ref
+    assert prep.metadata["image_resolution"]["metadata_path"] == str(metadata_path.resolve())
+    assert prep.metadata["image_resolution"]["provenance"]["image"]["source"] == "built"
+
+
 def test_prepare_maintenance_profile_runs_cleanup_and_records_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
