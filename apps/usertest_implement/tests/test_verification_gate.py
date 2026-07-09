@@ -9,6 +9,7 @@ from runner_core import RunnerConfig
 
 import usertest_implement.commands.run as run_commands
 from usertest_implement.cli import build_parser
+from usertest_implement.ledger import load_ledger
 from usertest_implement.shared import SelectedTicket
 
 
@@ -46,6 +47,7 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
     target_repo.mkdir(parents=True, exist_ok=True)
     ticket_path = tmp_path / "ticket.md"
     ticket_path.write_text("# ticket\n", encoding="utf-8")
+    ledger_path = tmp_path / "ledger.yaml"
 
     parser = build_parser()
     args = parser.parse_args(
@@ -59,6 +61,8 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
             "--commit",
             "--verify-command",
             "echo ok",
+            "--ledger",
+            str(ledger_path),
             "--no-move-on-start",
             "--no-move-on-commit",
         ]
@@ -92,6 +96,13 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
     assert exit_code == 2
     assert (run_dir / "ticket_ref.json").exists()
     assert (run_dir / "timing.json").exists()
+    resume_state = json.loads((run_dir / "ticket_resume_state.json").read_text(encoding="utf-8"))
+    assert resume_state["lifecycle_state"] == "verification_failed"
+    assert resume_state["blocking_reason"] == "Verification failed: echo nope"
+    ledger = load_ledger(ledger_path)
+    entry = ledger["actions"]["fp"]
+    assert entry["last_resume_state_path"] == str(run_dir / "ticket_resume_state.json")
+    assert entry["last_resume_lifecycle_state"] == "verification_failed"
 
     captured = capsys.readouterr()
     assert captured.out.strip().splitlines()[-1] == str(run_dir)

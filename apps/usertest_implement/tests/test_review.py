@@ -402,7 +402,16 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
     complete_path = owner_root / ".agents" / "plans" / "5 - complete" / ticket_path.name
     (owner_root / ".agents" / "plans" / "5 - complete").mkdir(parents=True, exist_ok=True)
     ledger_path = repo_root / ".agents" / "state" / "backlog_implement_actions.yaml"
+    impl_run_dir = repo_root / "runs" / "impl" / "2"
     review_run_dir = repo_root / "runs" / "review" / "2"
+    _write_json(
+        impl_run_dir / "ticket_ref.json",
+        {
+            "schema_version": 1,
+            "fingerprint": "cafebabecafebabe",
+            "owner_repo": {"root": str(owner_root), "idea_path": str(ticket_path)},
+        },
+    )
     _write_json(
         review_run_dir / "review_summary.json",
         {
@@ -411,6 +420,16 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
             "review_decision": "approved",
             "merge_ready": True,
             "ci_conclusion": "success",
+        },
+    )
+    _write_json(
+        review_run_dir / "review_ref.json",
+        {
+            "schema_version": 1,
+            "ticket_fingerprint": "cafebabecafebabe",
+            "ticket_path": str(ticket_path),
+            "implementation_run_dir": str(impl_run_dir),
+            "pr_url": "https://example.invalid/pr/4",
         },
     )
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
@@ -462,6 +481,12 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
     merge_ref = _read_json(review_run_dir / "merge_ref.json")
     assert isinstance(merge_ref, dict)
     assert merge_ref["merged"] is True
+    resume_state = _read_json(impl_run_dir / "ticket_resume_state.json")
+    assert isinstance(resume_state, dict)
+    assert resume_state["lifecycle_state"] == "complete"
+    ledger_text = ledger_path.read_text(encoding="utf-8")
+    assert "last_resume_state_path" in ledger_text
+    assert "last_resume_lifecycle_state: complete" in ledger_text.lower()
 
 
 def test_run_defers_review_until_for_review_and_green_ci(

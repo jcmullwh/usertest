@@ -1,6 +1,10 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from usertest_implement.resume_state import (
+    RESUME_STATE_ARTIFACT_NAME,
+    write_ticket_resume_state,
+)
 from usertest_implement.review_context import (
     _build_final_review_summary,
     _build_pr_review_body,
@@ -223,6 +227,24 @@ def _run_review_for_selected_ticket(
             "last_review_ci_conclusion": review_summary.get("ci_conclusion"),
         },
     )
+    resume_state = write_ticket_resume_state(
+        selected=selected,
+        run_dir=implementation_run_dir,
+        owner_root=owner_root,
+        branch=None,
+        exit_code=0,
+        review_run_dir=review_run_dir,
+    )
+    update_ledger_file(
+        ledger_path,
+        fingerprint=selected.fingerprint,
+        updates={
+            "last_resume_state_path": str(
+                implementation_run_dir / RESUME_STATE_ARTIFACT_NAME
+            ),
+            "last_resume_lifecycle_state": resume_state.get("lifecycle_state"),
+        },
+    )
     return review_run_dir, review_summary
 
 
@@ -371,6 +393,30 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
             "last_merged_at": merge_ref["merged_at_utc"],
         },
     )
+    review_ref = _read_json(review_run_dir / "review_ref.json")
+    implementation_run_dir_raw = (
+        review_ref.get("implementation_run_dir") if isinstance(review_ref, dict) else None
+    )
+    if isinstance(implementation_run_dir_raw, str) and implementation_run_dir_raw.strip():
+        implementation_run_dir = Path(implementation_run_dir_raw)
+        resume_state = write_ticket_resume_state(
+            selected=selected,
+            run_dir=implementation_run_dir,
+            owner_root=selected.owner_root,
+            branch=None,
+            exit_code=0,
+            review_run_dir=review_run_dir,
+        )
+        update_ledger_file(
+            ledger_path,
+            fingerprint=selected.fingerprint,
+            updates={
+                "last_resume_state_path": str(
+                    implementation_run_dir / RESUME_STATE_ARTIFACT_NAME
+                ),
+                "last_resume_lifecycle_state": resume_state.get("lifecycle_state"),
+            },
+        )
     print(pr_url)
     return 0
 

@@ -3,6 +3,10 @@ from __future__ import annotations
 
 from usertest_implement.ci import _ci_timeout_seconds_arg, _git_head_sha, _wait_for_ci_success
 from usertest_implement.commands.review import _run_review_for_selected_ticket
+from usertest_implement.resume_state import (
+    RESUME_STATE_ARTIFACT_NAME,
+    write_ticket_resume_state,
+)
 from usertest_implement.review_context import _run_gh_text
 from usertest_implement.selection import (
     _compose_ticket_blob,
@@ -922,6 +926,32 @@ def _run_selected_ticket(
         print("    gh auth status", file=sys.stderr)
         print("    gh pr create --help", file=sys.stderr)
         exit_code = max(exit_code, 5)
+
+    try:
+        resume_state = write_ticket_resume_state(
+            selected=selected,
+            run_dir=run_dir,
+            owner_root=selected.owner_root,
+            branch=branch,
+            exit_code=exit_code,
+            review_run_dir=review_run_dir,
+        )
+    except Exception as e:
+        resume_state = None
+        print(f"WARNING: failed to write {RESUME_STATE_ARTIFACT_NAME}: {e}", file=sys.stderr)
+
+    if ledger_path is not None and isinstance(resume_state, dict):
+        try:
+            update_ledger_file(
+                ledger_path,
+                fingerprint=selected.fingerprint,
+                updates={
+                    "last_resume_state_path": str(run_dir / RESUME_STATE_ARTIFACT_NAME),
+                    "last_resume_lifecycle_state": resume_state.get("lifecycle_state"),
+                },
+            )
+        except Exception as e:
+            print(f"WARNING: failed to update ledger resume state: {e}", file=sys.stderr)
 
     print(str(run_dir))
     return exit_code
