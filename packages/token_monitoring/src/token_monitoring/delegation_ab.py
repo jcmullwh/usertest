@@ -259,9 +259,19 @@ def _sum_int(rows: list[dict[str, Any]], path: tuple[str, ...]) -> int:
     return int(sum(_numeric_values(rows, path)))
 
 
+def _authoritative_token_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in rows
+        if row.get("tokens", {}).get("authoritative") is True
+    ]
+
+
 def _arm_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    token_rows = _authoritative_token_rows(rows)
     return {
         "run_count": len(rows),
+        "authoritative_token_run_count": len(token_rows),
         "completed_report_count": sum(
             1
             for row in rows
@@ -272,10 +282,10 @@ def _arm_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
             for row in rows
             if row.get("implementation_quality", {}).get("report_status") == "success"
         ),
-        "avg_parent_input_peak": _avg(rows, ("tokens", "parent_input_peak")),
-        "avg_parent_input_tokens": _avg(rows, ("tokens", "parent_input_tokens")),
-        "avg_combined_input_tokens": _avg(rows, ("tokens", "combined_input_tokens")),
-        "avg_combined_total_tokens": _avg(rows, ("tokens", "combined_total_tokens")),
+        "avg_parent_input_peak": _avg(token_rows, ("tokens", "parent_input_peak")),
+        "avg_parent_input_tokens": _avg(token_rows, ("tokens", "parent_input_tokens")),
+        "avg_combined_input_tokens": _avg(token_rows, ("tokens", "combined_input_tokens")),
+        "avg_combined_total_tokens": _avg(token_rows, ("tokens", "combined_total_tokens")),
         "broad_source_config_read_count": _sum_int(
             rows, ("signals", "broad_source_config_read_count")
         ),
@@ -307,6 +317,21 @@ def _pair_key(row: dict[str, Any]) -> str:
     return str(row.get("run_dir"))
 
 
+def _authoritative_token_delta(
+    *,
+    disabled: dict[str, Any],
+    enabled: dict[str, Any],
+    field: str,
+) -> int | None:
+    if disabled.get("tokens", {}).get("authoritative") is not True:
+        return None
+    if enabled.get("tokens", {}).get("authoritative") is not True:
+        return None
+    return int(enabled.get("tokens", {}).get(field, 0) or 0) - int(
+        disabled.get("tokens", {}).get(field, 0) or 0
+    )
+
+
 def _paired_comparisons(
     disabled_rows: list[dict[str, Any]], enabled_rows: list[dict[str, Any]]
 ) -> list[dict[str, Any]]:
@@ -321,14 +346,16 @@ def _paired_comparisons(
                 "pair_key": key,
                 "disabled_run_dir": disabled.get("run_dir"),
                 "enabled_run_dir": enabled.get("run_dir"),
-                "parent_input_peak_delta": int(
-                    enabled.get("tokens", {}).get("parent_input_peak", 0) or 0
-                )
-                - int(disabled.get("tokens", {}).get("parent_input_peak", 0) or 0),
-                "combined_input_tokens_delta": int(
-                    enabled.get("tokens", {}).get("combined_input_tokens", 0) or 0
-                )
-                - int(disabled.get("tokens", {}).get("combined_input_tokens", 0) or 0),
+                "parent_input_peak_delta": _authoritative_token_delta(
+                    disabled=disabled,
+                    enabled=enabled,
+                    field="parent_input_peak",
+                ),
+                "combined_input_tokens_delta": _authoritative_token_delta(
+                    disabled=disabled,
+                    enabled=enabled,
+                    field="combined_input_tokens",
+                ),
                 "large_context_resend_delta": int(
                     enabled.get("signals", {}).get("large_context_resend_count", 0) or 0
                 )
@@ -385,8 +412,14 @@ def _tradeoff_evaluation(
     token_delta_for_policy = (
         combined_total_delta if combined_total_delta is not None else combined_input_delta
     )
+    has_authoritative_token_data = (
+        int(disabled.get("authoritative_token_run_count", 0) or 0)
+        == int(disabled.get("run_count", 0) or 0)
+        and int(enabled.get("authoritative_token_run_count", 0) or 0)
+        == int(enabled.get("run_count", 0) or 0)
+    )
 
-    if token_delta_for_policy is None:
+    if not has_authoritative_token_data or token_delta_for_policy is None:
         conclusion = "token_tradeoff_unattributable"
         rationale = "At least one arm lacks authoritative token counters."
     elif token_delta_for_policy <= 0:

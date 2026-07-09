@@ -205,6 +205,46 @@ def test_delegation_ab_recommends_prompt_tightening_for_raw_leaks(tmp_path: Path
     assert any("Tighten delegation prompts/policy" in action for action in report["next_actions"])
 
 
+def test_delegation_ab_does_not_treat_unsupported_provider_tokens_as_zero(
+    tmp_path: Path,
+) -> None:
+    disabled = tmp_path / "disabled"
+    enabled = tmp_path / "enabled"
+    _base_run(disabled, thread_id="disabled-thread", delegation_events=[])
+    _base_run(
+        enabled,
+        thread_id="enabled-thread",
+        delegation_events=[
+            {"type": "delegation_invocation", "data": {"tool_name": "Agent"}},
+            {
+                "type": "delegation_result",
+                "data": {
+                    "tool_name": "Agent",
+                    "result_kind": "parent_context_summary",
+                    "output_chars": 240,
+                    "output_lines": 6,
+                },
+            },
+        ],
+    )
+    _write_json(disabled / "target_ref.json", {"agent": "claude"})
+    _write_json(enabled / "target_ref.json", {"agent": "claude"})
+
+    report = analyze_delegation_ab(
+        disabled_run_dirs=[disabled],
+        enabled_run_dirs=[enabled],
+    )
+
+    assert report["evidence_strength"] == "partial_missing_authoritative_token_join"
+    assert report["arms"]["delegation_disabled"]["authoritative_token_run_count"] == 0
+    assert report["arms"]["delegation_enabled"]["authoritative_token_run_count"] == 0
+    assert report["arms"]["delegation_disabled"]["avg_combined_total_tokens"] is None
+    assert report["arms"]["delegation_enabled"]["avg_combined_total_tokens"] is None
+    assert report["comparisons"][0]["combined_input_tokens_delta"] is None
+    assert report["tradeoff_evaluation"]["combined_total_tokens_delta"] is None
+    assert report["tradeoff_evaluation"]["conclusion"] == "token_tradeoff_unattributable"
+
+
 def test_write_delegation_ab_validation_writes_json_and_markdown(tmp_path: Path) -> None:
     sessions = tmp_path / "sessions"
     disabled = tmp_path / "disabled"
