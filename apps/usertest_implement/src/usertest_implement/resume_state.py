@@ -261,6 +261,7 @@ def build_ticket_resume_state(
     branch: str | None = None,
     exit_code: int | None = None,
     review_run_dir: Path | None = None,
+    ticket_path_override: Path | None = None,
 ) -> dict[str, Any]:
     workspace_ref = _read_json(run_dir / "workspace_ref.json")
     ticket_ref = _read_json(run_dir / "ticket_ref.json")
@@ -305,7 +306,7 @@ def build_ticket_resume_state(
         merge_ref=merge_ref_dict,
     )
 
-    ticket_path = _path_str(selected.idea_path)
+    ticket_path = _path_str(ticket_path_override) or _path_str(selected.idea_path)
     if isinstance(ticket_ref, dict):
         owner_repo = ticket_ref.get("owner_repo")
         if isinstance(owner_repo, dict):
@@ -355,6 +356,7 @@ def write_ticket_resume_state(
     branch: str | None = None,
     exit_code: int | None = None,
     review_run_dir: Path | None = None,
+    ticket_path_override: Path | None = None,
 ) -> dict[str, Any]:
     state = build_ticket_resume_state(
         selected=selected,
@@ -363,6 +365,7 @@ def write_ticket_resume_state(
         branch=branch,
         exit_code=exit_code,
         review_run_dir=review_run_dir,
+        ticket_path_override=ticket_path_override,
     )
     _write_json(run_dir / RESUME_STATE_ARTIFACT_NAME, state)
     return state

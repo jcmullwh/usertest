@@ -908,13 +908,13 @@ def _run_selected_ticket(
         print(f"  Workspace: {workspace_dir_str}", file=sys.stderr)
         print("  Remediation:", file=sys.stderr)
         remote = push_ref.get("remote_name") or args.remote_name
-        branch = None
+        remediation_branch = None
         if isinstance(git_ref, dict):
-            branch = git_ref.get("branch")
-        if not branch:
-            branch = args.branch or "<branch>"
+            remediation_branch = git_ref.get("branch")
+        if not remediation_branch:
+            remediation_branch = args.branch or branch or "<branch>"
         print(f"    cd {workspace_dir_str}", file=sys.stderr)
-        print(f"    git push --set-upstream {remote} {branch}", file=sys.stderr)
+        print(f"    git push --set-upstream {remote} {remediation_branch}", file=sys.stderr)
         exit_code = max(exit_code, 4)
 
     if args.pr and pr_ref is not None and pr_ref.get("error"):

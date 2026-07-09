@@ -377,8 +377,9 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
     if proc.returncode != 0:
         raise SystemExit(proc.stderr.strip() or proc.stdout.strip() or "gh pr merge failed")
 
+    completed_ticket_path = None
     if selected.owner_root is not None:
-        move_ticket_file(
+        completed_ticket_path = move_ticket_file(
             owner_root=selected.owner_root,
             fingerprint=selected.fingerprint,
             to_bucket="5 - complete",
@@ -406,6 +407,7 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
             branch=None,
             exit_code=0,
             review_run_dir=review_run_dir,
+            ticket_path_override=completed_ticket_path,
         )
         update_ledger_file(
             ledger_path,

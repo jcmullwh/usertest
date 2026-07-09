@@ -484,6 +484,7 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
     resume_state = _read_json(impl_run_dir / "ticket_resume_state.json")
     assert isinstance(resume_state, dict)
     assert resume_state["lifecycle_state"] == "complete"
+    assert resume_state["ticket"]["path"] == str(complete_path)
     ledger_text = ledger_path.read_text(encoding="utf-8")
     assert "last_resume_state_path" in ledger_text
     assert "last_resume_lifecycle_state: complete" in ledger_text.lower()
