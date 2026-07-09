@@ -19,6 +19,7 @@ from backlog_repo import (
     reconcile_atom_actions_from_plan_folders,
     write_atom_actions_yaml,
 )
+from runner_core.execution_backend import _load_maintenance_docker_config
 
 from usertest_implement.batch_failure import classify_run_outcome, write_batch_failure
 from usertest_implement.batch_preflight import run_batch_preflight
@@ -57,6 +58,24 @@ RUN_HISTORY_ARTIFACT_NAMES = {
     "target_ref.json",
     "ticket_ref.json",
     "timing.json",
+}
+DOCKER_RESOURCE_PLAN_REASON_SUMMARIES = {
+    "per_ticket_image_resolution": (
+        "Maintenance Docker image resolution currently runs inside each ticket run, so "
+        "parallel tickets can contend on pull/build/tag operations."
+    ),
+    "cleanup_on_prepare": (
+        "Maintenance image cleanup is configured to run during Docker profile preparation, "
+        "which mutates shared local Docker image state."
+    ),
+    "writable_shared_maintenance_venv_mounts": (
+        "Warm maintenance venv cache hits are mounted writable into project .venv paths, "
+        "so concurrent tickets can write through shared cache-backed mounts."
+    ),
+    "conservative_docker_scheduler_guard": (
+        "The batch scheduler still applies the existing Docker-wide conflict key until "
+        "Docker resource isolation is explicitly made parallel-safe."
+    ),
 }
 BACKLOG_INPUT_PATHS = (
     Path("apps/usertest_backlog/src/usertest_backlog"),
@@ -854,6 +873,147 @@ def _pick_launchable_candidate_index(
     return None
 
 
+def _run_common_settings(
+    *,
+    run_settings_path: Path,
+    run_settings_profile: str,
+) -> dict[str, Any]:
+    if not run_settings_path.exists():
+        return {}
+    settings_doc = _load_yaml(run_settings_path)
+    profiles = settings_doc.get("profiles", {})
+    profile_name = (
+        run_settings_profile
+        if run_settings_profile.strip()
+        else str(settings_doc.get("default_profile") or "default")
+    )
+    if not isinstance(profiles, dict) or not isinstance(profiles.get(profile_name), dict):
+        return {}
+    profile = profiles[profile_name]
+    run_common = profile.get("run_common", {})
+    return dict(run_common) if isinstance(run_common, dict) else {}
+
+
+def _bool_setting(value: object, *, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "yes", "on"}:
+            return True
+        if normalized in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def _docker_resource_reason(reason_id: str) -> dict[str, str]:
+    return {
+        "reason_id": reason_id,
+        "summary": DOCKER_RESOURCE_PLAN_REASON_SUMMARIES[reason_id],
+    }
+
+
+def _build_docker_resource_plan(
+    *,
+    repo_root: Path,
+    exec_backend: str,
+    run_settings_path: Path,
+    run_settings_profile: str,
+    repo_input: str,
+) -> dict[str, Any] | None:
+    """
+    Build the batch-level audit plan for Docker resource use.
+
+    This intentionally does not loosen the scheduler guard.  The plan records why the current
+    Docker backend remains serialized so future tickets can make each unsafe shared resource
+    explicit before changing scheduling behavior.
+    """
+
+    backend = exec_backend.strip().lower()
+    if backend != "docker":
+        return None
+
+    run_common = _run_common_settings(
+        run_settings_path=run_settings_path,
+        run_settings_profile=run_settings_profile,
+    )
+    requested_profile_raw = run_common.get("exec_docker_profile")
+    requested_profile = (
+        requested_profile_raw.strip()
+        if isinstance(requested_profile_raw, str) and requested_profile_raw.strip()
+        else None
+    )
+    from usertest_implement.shared import (
+        _maintenance_profile_is_eligible,
+        _resolve_exec_docker_profile,
+    )
+
+    maintenance_eligible = _maintenance_profile_is_eligible(
+        repo_root=repo_root,
+        repo_input=repo_input,
+    )
+    docker_profile = _resolve_exec_docker_profile(
+        exec_backend=backend,
+        requested_profile=requested_profile,
+        maintenance_eligible=maintenance_eligible,
+    )
+
+    cache_mode = str(run_common.get("exec_cache") or "warm").strip().lower() or "warm"
+    warm_cache = cache_mode == "warm"
+    maintenance_venv_cache_configured = _bool_setting(
+        run_common.get("maintenance_venv_cache"),
+        default=True,
+    )
+    maintenance_venv_cache = bool(warm_cache and maintenance_venv_cache_configured)
+    cleanup_on_prepare = False
+    if docker_profile == "maintenance":
+        maintenance_cfg = _load_maintenance_docker_config(repo_root=repo_root)
+        cleanup_on_prepare = bool(
+            maintenance_cfg.cleanup_enabled and maintenance_cfg.cleanup_on_prepare
+        )
+
+    # The current batch launcher starts each ticket independently and does not hand a resolved
+    # image reference to the ticket runner, so every ticket still performs its own maintenance
+    # profile image resolution.
+    pre_resolved_image_available = False
+
+    unsafe_reasons: list[dict[str, str]] = []
+    if not pre_resolved_image_available:
+        unsafe_reasons.append(_docker_resource_reason("per_ticket_image_resolution"))
+    if cleanup_on_prepare:
+        unsafe_reasons.append(_docker_resource_reason("cleanup_on_prepare"))
+    if docker_profile == "maintenance" and maintenance_venv_cache:
+        unsafe_reasons.append(_docker_resource_reason("writable_shared_maintenance_venv_mounts"))
+    if not unsafe_reasons:
+        unsafe_reasons.append(_docker_resource_reason("conservative_docker_scheduler_guard"))
+
+    return {
+        "schema_version": 1,
+        "generated_at": utc_now_z(),
+        "exec_backend": backend,
+        "docker_profile": docker_profile,
+        "configured_docker_profile": requested_profile,
+        "docker_profile_eligible": maintenance_eligible,
+        "cache_mode": cache_mode,
+        "warm_cache": warm_cache,
+        "maintenance_venv_cache_configured": maintenance_venv_cache_configured,
+        "maintenance_venv_cache": maintenance_venv_cache,
+        "cleanup_on_prepare": cleanup_on_prepare,
+        "pre_resolved_image_available": pre_resolved_image_available,
+        "pre_resolved_image_ref": None,
+        "parallel_safe": False,
+        "unsafe_reasons": unsafe_reasons,
+        "scheduler_guard": {
+            "unchanged": True,
+            "conflict_key": "batch_resource:docker",
+            "summary": (
+                "Docker-backed tickets remain serialized by the existing batch resource "
+                "conflict key."
+            ),
+        },
+    }
+
+
 def _add_batch_resource_conflicts(
     candidate: BatchCandidate,
     *,
@@ -1431,17 +1591,18 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
     ).resolve()
     run_settings_profile = str(defaults.get("run_settings_profile") or "default")
     repo_input = str(defaults.get("repo_input") or repo_root)
-    exec_backend = "docker"
-    if run_settings_path.exists():
-        settings_doc = _load_yaml(run_settings_path)
-        profiles = settings_doc.get("profiles", {})
-        default_profile_name = str(settings_doc.get("default_profile") or run_settings_profile)
-        profile_name = run_settings_profile or default_profile_name
-        if isinstance(profiles, dict) and isinstance(profiles.get(profile_name), dict):
-            profile = profiles[profile_name]
-            run_common = profile.get("run_common", {})
-            if isinstance(run_common, dict):
-                exec_backend = str(run_common.get("exec_backend") or exec_backend)
+    run_common = _run_common_settings(
+        run_settings_path=run_settings_path,
+        run_settings_profile=run_settings_profile,
+    )
+    exec_backend = str(run_common.get("exec_backend") or "docker")
+    docker_resource_plan = _build_docker_resource_plan(
+        repo_root=repo_root,
+        exec_backend=exec_backend,
+        run_settings_path=run_settings_path,
+        run_settings_profile=run_settings_profile,
+        repo_input=repo_input,
+    )
 
     preflight = run_batch_preflight(
         repo_root=repo_root,
@@ -1462,6 +1623,7 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
             {"worker_index": worker.worker_index, "agent": worker.agent, "model": worker.model}
             for worker in workers
         ],
+        docker_resource_plan=docker_resource_plan,
     )
     state["global_blockers"] = list(preflight.get("blockers", []))
     if state["global_blockers"]:

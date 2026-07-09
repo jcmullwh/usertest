@@ -65,6 +65,10 @@ Maintenance install cache (Docker + warm cache):
   - `usertest-implement maintenance-images cleanup`
 - Automatic best-effort local image cleanup also runs after maintenance-image resolution using
   `configs/maintenance_docker.yaml`.
+- Batch runs record the current Docker serialization audit in `batch_state.json`,
+  `batch_summary.json`, and `docker_resource_plan.json`. Under current defaults it remains
+  `parallel_safe: false` because image resolution is per-ticket, cleanup runs on prepare, and warm
+  maintenance venv cache hits are mounted writable.
 
 Docker execution profile:
 

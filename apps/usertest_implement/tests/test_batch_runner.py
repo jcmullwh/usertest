@@ -13,12 +13,19 @@ from usertest_implement.batch_runner import (
     BatchCandidate,
     _add_batch_resource_conflicts,
     _batch_subprocess_env,
+    _build_docker_resource_plan,
     _collect_wave_candidates,
     _pick_launchable_candidate_index,
     _refresh_backlog,
     _write_batch_token_monitoring_artifacts,
     _write_stream,
     run_batch,
+)
+from usertest_implement.batch_state import (
+    build_initial_state,
+    docker_resource_plan_path,
+    persist_state,
+    summary_path,
 )
 
 
@@ -33,6 +40,182 @@ def _write_jsonl(path: Path, records: list[object]) -> None:
         "".join(json.dumps(record) + "\n" for record in records),
         encoding="utf-8",
     )
+
+
+def _write_maintenance_docker_config(repo_root: Path, *, cleanup_on_prepare: bool = True) -> None:
+    path = repo_root / "configs" / "maintenance_docker.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "maintenance_docker:",
+                '  local_image_repo: "usertest-maintenance"',
+                '  published_image_repo: "ghcr.io/example/usertest-maintenance"',
+                '  pull_policy: "if_missing"',
+                '  seed_root: "/opt/usertest_maint_seed"',
+                '  cache_root_subdir: "usertest_maint_venvs"',
+                "  cleanup_enabled: true",
+                "  keep_local_count: 5",
+                "  keep_local_days: 7",
+                "  keep_branch_alias_tags: true",
+                "  protect_tags: []",
+                f"  cleanup_on_prepare: {str(cleanup_on_prepare).lower()}",
+                "  cleanup_dry_run_default: false",
+                "  publish_branches:",
+                '    - "dev"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_run_settings(
+    repo_root: Path,
+    *,
+    exec_backend: str = "docker",
+    exec_docker_profile: str | None = None,
+    exec_cache: str = "warm",
+    maintenance_venv_cache: bool = True,
+) -> Path:
+    path = repo_root / "configs" / "usertest_implement_settings.yaml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    profile_line = (
+        "      exec_docker_profile: null"
+        if exec_docker_profile is None
+        else f"      exec_docker_profile: {exec_docker_profile}"
+    )
+    path.write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "default_profile: default",
+                "profiles:",
+                "  default:",
+                "    run_common:",
+                f"      exec_backend: {exec_backend}",
+                profile_line,
+                f"      exec_cache: {exec_cache}",
+                f"      maintenance_venv_cache: {str(maintenance_venv_cache).lower()}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def test_default_docker_resource_plan_records_current_unsafe_resources(tmp_path: Path) -> None:
+    (tmp_path / ".git").mkdir()
+    settings_path = _write_run_settings(tmp_path)
+    _write_maintenance_docker_config(tmp_path)
+
+    plan = _build_docker_resource_plan(
+        repo_root=tmp_path,
+        exec_backend="docker",
+        run_settings_path=settings_path,
+        run_settings_profile="default",
+        repo_input=str(tmp_path),
+    )
+
+    assert plan is not None
+    assert plan["docker_profile"] == "maintenance"
+    assert plan["configured_docker_profile"] is None
+    assert plan["warm_cache"] is True
+    assert plan["cache_mode"] == "warm"
+    assert plan["maintenance_venv_cache"] is True
+    assert plan["maintenance_venv_cache_configured"] is True
+    assert plan["cleanup_on_prepare"] is True
+    assert plan["pre_resolved_image_available"] is False
+    assert plan["parallel_safe"] is False
+    assert plan["scheduler_guard"]["conflict_key"] == "batch_resource:docker"
+    assert [reason["reason_id"] for reason in plan["unsafe_reasons"]] == [
+        "per_ticket_image_resolution",
+        "cleanup_on_prepare",
+        "writable_shared_maintenance_venv_mounts",
+    ]
+
+
+def test_local_backend_has_no_docker_resource_plan(tmp_path: Path, monkeypatch: Any) -> None:
+    settings_path = _write_run_settings(tmp_path, exec_backend="local")
+
+    plan = _build_docker_resource_plan(
+        repo_root=tmp_path,
+        exec_backend="local",
+        run_settings_path=settings_path,
+        run_settings_profile="default",
+        repo_input=str(tmp_path),
+    )
+
+    assert plan is None
+
+    config_path = tmp_path / "batch.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "version: 1",
+                "defaults:",
+                "  worker_roster:",
+                "    - agent: codex",
+                "phases:",
+                "  - name: phase",
+                "    sources:",
+                "      - name: src",
+                "        runs_dir: runs/src",
+                "        target: usertest",
+                "    severities: [high]",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    captured: dict[str, object] = {}
+
+    def _preflight(**kwargs: object) -> dict[str, object]:
+        captured["exec_backend"] = kwargs.get("exec_backend")
+        return {
+            "head_sha": "abc123",
+            "branch": "dev",
+            "base_ci_run_url": None,
+            "blockers": [{"blocker_id": "preflight", "class": "preflight"}],
+        }
+
+    monkeypatch.setattr("usertest_implement.batch_runner.run_batch_preflight", _preflight)
+
+    assert run_batch(repo_root=tmp_path, config_path=config_path) == 2
+
+    batch_dirs = sorted((tmp_path / "runs" / "_batch" / "usertest_implement").iterdir())
+    persisted_state = json.loads((batch_dirs[-1] / "batch_state.json").read_text(encoding="utf-8"))
+    assert captured["exec_backend"] == "local"
+    assert "docker_resource_plan" not in persisted_state
+    assert not docker_resource_plan_path(batch_dirs[-1]).exists()
+
+
+def test_docker_resource_plan_is_rendered_to_batch_state_and_artifacts(tmp_path: Path) -> None:
+    plan = {
+        "schema_version": 1,
+        "parallel_safe": False,
+        "unsafe_reasons": [{"reason_id": "per_ticket_image_resolution"}],
+    }
+    batch_dir = tmp_path / "batch"
+    state = build_initial_state(
+        batch_id="20260709T000000Z",
+        batch_commit="abc123",
+        batch_branch="dev",
+        base_ci_run_url=None,
+        workers=[{"worker_index": 1, "agent": "codex", "model": None}],
+        docker_resource_plan=plan,
+    )
+
+    persist_state(batch_dir, state)
+
+    persisted_state = json.loads((batch_dir / "batch_state.json").read_text(encoding="utf-8"))
+    persisted_summary = json.loads(summary_path(batch_dir).read_text(encoding="utf-8"))
+    persisted_plan = json.loads(docker_resource_plan_path(batch_dir).read_text(encoding="utf-8"))
+    assert persisted_state["docker_resource_plan"] == plan
+    assert persisted_summary["docker_resource_plan"] == plan
+    assert persisted_plan == plan
 
 
 def test_pick_launchable_candidate_index_respects_conflict_keys(tmp_path: Path) -> None:
