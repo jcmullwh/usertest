@@ -270,6 +270,10 @@ class DelegationCapability:
     configured_allowed_tools: list[str] | None
     delegation_tool_names: list[str]
     available_under_policy: bool | None
+    policy_exposes_delegation: bool | None
+    cli_supports_delegation: bool | None
+    policy_status: str
+    cli_support_status: str
     evidence_source: str
     confidence: str
     reason: str
@@ -283,6 +287,10 @@ class DelegationCapability:
             "configured_allowed_tools": self.configured_allowed_tools,
             "delegation_tool_names": list(self.delegation_tool_names),
             "available_under_policy": self.available_under_policy,
+            "policy_exposes_delegation": self.policy_exposes_delegation,
+            "cli_supports_delegation": self.cli_supports_delegation,
+            "policy_status": self.policy_status,
+            "cli_support_status": self.cli_support_status,
             "evidence_source": self.evidence_source,
             "confidence": self.confidence,
             "reason": self.reason,
@@ -717,6 +725,7 @@ def _format_preflight_summary_md(
     verification_broker_command: str | None,
     agent: str,
     codex_sandbox_mode: str | None,
+    delegation_capability: dict[str, Any] | None = None,
     verification_timing_profile: dict[str, Any] | None = None,
     verification_timing_profile_path: str | None = None,
     verification_result_path: str | None = None,
@@ -788,6 +797,31 @@ def _format_preflight_summary_md(
         f"- Python: {python_label}; pip: {pip_label}",
         f"- Tools: {', '.join(tool_parts)}",
     ]
+    if isinstance(delegation_capability, dict):
+        delegation_state = delegation_capability.get("state")
+        delegation_state_s = (
+            delegation_state
+            if isinstance(delegation_state, str) and delegation_state.strip()
+            else "unknown"
+        )
+        policy_status = delegation_capability.get("policy_status")
+        policy_status_s = (
+            policy_status
+            if isinstance(policy_status, str) and policy_status.strip()
+            else "unknown"
+        )
+        cli_status = delegation_capability.get("cli_support_status")
+        cli_status_s = (
+            cli_status if isinstance(cli_status, str) and cli_status.strip() else "unknown"
+        )
+        tools_raw = delegation_capability.get("delegation_tool_names")
+        tools = [x for x in tools_raw if isinstance(x, str)] if isinstance(tools_raw, list) else []
+        tools_label = ", ".join(tools) if tools else "none"
+        lines.append(
+            "- Delegation: "
+            f"{delegation_state_s} (policy={policy_status_s}; cli={cli_status_s}; "
+            f"tools={tools_label})"
+        )
     if isinstance(pytest_probe, dict):
         pytest_ok = bool(pytest_probe.get("passed") is True)
         reason_code = pytest_probe.get("reason_code")
@@ -1171,30 +1205,91 @@ def _delegation_tools_from_adapter_contract(
     installed agent version's contract.
     """
 
+    tools, source, _confirmed_cli_versions = _delegation_contract_from_adapter_config(
+        agent_cfg=agent_cfg
+    )
+    return tools, source
+
+
+def _coerce_unique_str_list(raw: Any) -> list[str]:
+    if not isinstance(raw, list):
+        return []
+
+    values: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str):
+            continue
+        value = item.strip()
+        if not value or value in seen:
+            continue
+        values.append(value)
+        seen.add(value)
+    return values
+
+
+def _delegation_contract_from_adapter_config(
+    *,
+    agent_cfg: dict[str, Any],
+) -> tuple[list[str], str | None, list[str]]:
+    """
+    Return delegation tool contract declared by adapter configuration.
+
+    ``delegation.confirmed_cli_versions`` is optional for legacy/test contracts, but production
+    policy should set it when exposing a confirmed tool through ``allowed_tools``.  When present,
+    the capability resolver treats non-matching CLI versions as unsupported rather than silently
+    assuming the tool name still exists.
+    """
+
     raw_tools = agent_cfg.get("delegation_tools")
     source = "agent_config.delegation_tools"
-    if not isinstance(raw_tools, list):
+    confirmed_cli_versions: list[str] = []
+    if isinstance(raw_tools, list):
+        raw_versions = agent_cfg.get("delegation_confirmed_cli_versions")
+        confirmed_cli_versions = _coerce_unique_str_list(raw_versions)
+    else:
         raw_delegation = agent_cfg.get("delegation")
         delegation = raw_delegation if isinstance(raw_delegation, dict) else {}
         raw_tools = delegation.get("tools")
         source = "agent_config.delegation.tools"
+        confirmed_cli_versions = _coerce_unique_str_list(
+            delegation.get("confirmed_cli_versions")
+        )
 
-    if not isinstance(raw_tools, list):
-        return [], None
-
-    tools: list[str] = []
-    seen: set[str] = set()
-    for item in raw_tools:
-        if not isinstance(item, str):
-            continue
-        tool = item.strip()
-        if not tool or tool in seen:
-            continue
-        tools.append(tool)
-        seen.add(tool)
+    tools = _coerce_unique_str_list(raw_tools)
     if not tools:
-        return [], None
-    return tools, source
+        return [], None, []
+    return tools, source, confirmed_cli_versions
+
+
+def _cli_version_matches_confirmed(
+    *,
+    cli_version: str | None,
+    confirmed_cli_versions: list[str],
+) -> bool | None:
+    if not confirmed_cli_versions:
+        return True
+    if not isinstance(cli_version, str) or not cli_version.strip():
+        return None
+
+    observed = cli_version.strip()
+    for raw_expected in confirmed_cli_versions:
+        expected = raw_expected.strip()
+        if not expected:
+            continue
+        if expected.startswith("regex:"):
+            pattern = expected.removeprefix("regex:")
+            try:
+                if re.search(pattern, observed):
+                    return True
+            except re.error:
+                continue
+            continue
+        if expected.endswith("*") and observed.startswith(expected[:-1]):
+            return True
+        if observed == expected:
+            return True
+    return False
 
 
 def _resolve_delegation_capability(
@@ -1206,11 +1301,17 @@ def _resolve_delegation_capability(
 ) -> DelegationCapability:
     agent_norm = agent.strip().lower()
     allowed_tools = _configured_allowed_tools_for_agent(agent=agent_norm, policy_cfg=policy_cfg)
-    delegation_tool_names, evidence_source = _delegation_tools_from_adapter_contract(
-        agent_cfg=agent_cfg
+    delegation_tool_names, evidence_source, confirmed_cli_versions = (
+        _delegation_contract_from_adapter_config(
+            agent_cfg=agent_cfg
+        )
     )
     cli_version = _agent_cli_version_from_probe(cli_version_probe)
     version_probe_copy = dict(cli_version_probe) if isinstance(cli_version_probe, dict) else None
+    cli_version_matches = _cli_version_matches_confirmed(
+        cli_version=cli_version,
+        confirmed_cli_versions=confirmed_cli_versions,
+    )
 
     if not delegation_tool_names:
         return DelegationCapability(
@@ -1220,11 +1321,85 @@ def _resolve_delegation_capability(
             configured_allowed_tools=allowed_tools,
             delegation_tool_names=[],
             available_under_policy=None,
+            policy_exposes_delegation=None,
+            cli_supports_delegation=None,
+            policy_status="unknown_no_contract",
+            cli_support_status="unknown_no_contract",
             evidence_source="none",
             confidence="low",
             reason=(
                 "No delegation tool names were detected from a local CLI probe or documented "
                 "adapter contract; capability is unknown and not guessed."
+            ),
+            cli_version_probe=version_probe_copy,
+        )
+
+    if cli_version_matches is None:
+        return DelegationCapability(
+            state="unknown",
+            agent=agent_norm or agent,
+            cli_version=cli_version,
+            configured_allowed_tools=allowed_tools,
+            delegation_tool_names=delegation_tool_names,
+            available_under_policy=None,
+            policy_exposes_delegation=(
+                None
+                if allowed_tools is None
+                else bool([tool for tool in delegation_tool_names if tool in allowed_tools])
+            ),
+            cli_supports_delegation=None,
+            policy_status=(
+                "no_allowlist"
+                if allowed_tools is None
+                else (
+                    "exposed"
+                    if [tool for tool in delegation_tool_names if tool in allowed_tools]
+                    else "not_exposed"
+                )
+            ),
+            cli_support_status="unknown_cli_version",
+            evidence_source=str(evidence_source or "agent_config"),
+            confidence="low",
+            reason=(
+                "Delegation tools are declared by adapter contract, but the CLI version was "
+                "not available to verify against confirmed versions. Delegation is marked "
+                "unknown rather than guessed."
+            ),
+            cli_version_probe=version_probe_copy,
+        )
+
+    policy_exposes = (
+        True
+        if allowed_tools is None
+        else bool([tool for tool in delegation_tool_names if tool in allowed_tools])
+    )
+    policy_status = (
+        "no_allowlist"
+        if allowed_tools is None
+        else ("exposed" if policy_exposes else "not_exposed")
+    )
+
+    if cli_version_matches is False:
+        expected = ", ".join(confirmed_cli_versions)
+        observed = cli_version or "unknown"
+        return DelegationCapability(
+            state="unavailable",
+            agent=agent_norm or agent,
+            cli_version=cli_version,
+            configured_allowed_tools=allowed_tools,
+            delegation_tool_names=delegation_tool_names,
+            available_under_policy=False,
+            policy_exposes_delegation=policy_exposes,
+            cli_supports_delegation=False,
+            policy_status=policy_status,
+            cli_support_status="unsupported_cli_version",
+            evidence_source=str(evidence_source or "agent_config"),
+            confidence="high",
+            reason=(
+                "Delegation tools are declared by adapter contract, but the installed CLI "
+                f"version ({observed}) does not match the confirmed delegation versions "
+                f"({expected}). Treating this as CLI delegation unsupported until the "
+                "adapter contract is updated."
             ),
             cli_version_probe=version_probe_copy,
         )
@@ -1237,6 +1412,10 @@ def _resolve_delegation_capability(
             configured_allowed_tools=None,
             delegation_tool_names=delegation_tool_names,
             available_under_policy=True,
+            policy_exposes_delegation=True,
+            cli_supports_delegation=True,
+            policy_status=policy_status,
+            cli_support_status="supported",
             evidence_source=str(evidence_source or "agent_config"),
             confidence="high",
             reason=(
@@ -1255,6 +1434,10 @@ def _resolve_delegation_capability(
             configured_allowed_tools=allowed_tools,
             delegation_tool_names=delegation_tool_names,
             available_under_policy=True,
+            policy_exposes_delegation=True,
+            cli_supports_delegation=True,
+            policy_status=policy_status,
+            cli_support_status="supported",
             evidence_source=str(evidence_source or "agent_config"),
             confidence="high",
             reason=(
@@ -1271,11 +1454,15 @@ def _resolve_delegation_capability(
         configured_allowed_tools=allowed_tools,
         delegation_tool_names=delegation_tool_names,
         available_under_policy=False,
+        policy_exposes_delegation=False,
+        cli_supports_delegation=True,
+        policy_status="not_exposed",
+        cli_support_status="supported",
         evidence_source=str(evidence_source or "agent_config"),
         confidence="high",
         reason=(
-            "Delegation tools are declared by adapter contract, but the selected policy "
-            "allowed_tools does not expose any of them."
+            "Delegation tools are declared by adapter contract and supported by the CLI, "
+            "but the selected policy allowed_tools does not expose any of them."
         ),
         cli_version_probe=version_probe_copy,
     )
@@ -5467,6 +5654,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 verification_broker_command=verification_broker_command,
                 agent=request.agent,
                 codex_sandbox_mode=codex_sandbox_mode,
+                delegation_capability=delegation_capability_summary,
                 verification_timing_profile=verification_timing_profile,
                 verification_timing_profile_path=verification_timing_profile_path_for_agent,
                 verification_result_path=verification_result_path_for_agent,
