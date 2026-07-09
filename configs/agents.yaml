@@ -33,8 +33,8 @@ agents:
 
   claude:
     binary: claude
-    # Claude Code alias for latest Sonnet on the Anthropic API; currently Sonnet 5.
-    default_model: sonnet
+    # Pin to Anthropic's current Sonnet model instead of relying on Claude Code's alias resolution.
+    default_model: claude-sonnet-5
     supports_json_schema: true
     raw_events_format: jsonl
     output_format: stream-json
