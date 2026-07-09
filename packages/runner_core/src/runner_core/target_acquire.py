@@ -404,3 +404,34 @@ def acquire_target(*, repo: str, dest_dir: Path, ref: str | None) -> AcquiredTar
     except Exception:
         shutil.rmtree(dest_dir, ignore_errors=True)
         raise
+
+
+def acquire_existing_target(*, repo: str, workspace_dir: Path, ref: str | None) -> AcquiredTarget:
+    """Return an already materialized workspace as the acquired target.
+
+    This is intentionally narrower than :func:`acquire_target`: callers own the decision that the
+    workspace is safe to re-enter and the function must never delete or copy it. It exists for
+    durable resume flows where the previous implementation attempt left useful uncommitted changes
+    in its kept workspace.
+    """
+
+    resolved = workspace_dir.expanduser().resolve()
+    if not resolved.exists():
+        raise FileNotFoundError(resolved)
+    if not resolved.is_dir():
+        raise ValueError(f"resume workspace must be a directory, got: {resolved}")
+
+    if (resolved / ".git").exists():
+        if ref is not None and str(ref).strip():
+            _run_git(["checkout", str(ref).strip()], cwd=resolved)
+        sha = _run_git(["rev-parse", "HEAD"], cwd=resolved)
+    else:
+        sha = ""
+
+    return AcquiredTarget(
+        workspace_dir=resolved,
+        repo_input=repo,
+        ref=ref,
+        commit_sha=sha,
+        mode="existing",
+    )

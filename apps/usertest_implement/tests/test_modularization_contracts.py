@@ -100,8 +100,9 @@ def test_extracted_modules_do_not_import_cli_facade(module_relpath: str) -> None
         (
             ["--help"],
             [
-                "{run,review,maintenance-images,reports,tickets,batch}",
+                "{run,resume,review,maintenance-images,reports,tickets,batch}",
                 "Run one ticket implementation.",
+                "Resume a verification-failed implementation run from",
                 "Review and merge PR-backed implementation tickets.",
                 "Inspect and prune local maintenance-image tags.",
                 "Local ticket queue helpers",

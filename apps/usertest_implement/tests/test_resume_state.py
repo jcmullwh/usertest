@@ -9,7 +9,7 @@ from usertest_implement.resume_state import (
     LIFECYCLE_MERGE_READY,
     LIFECYCLE_PR_CREATION_FAILED,
     LIFECYCLE_REVIEW_CHANGES_REQUESTED,
-    LIFECYCLE_VERIFICATION_FAILED,
+    LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
     build_ticket_resume_state,
     write_ticket_resume_state,
 )
@@ -90,7 +90,7 @@ def test_resume_state_maps_verification_failure(tmp_path: Path) -> None:
         exit_code=2,
     )
 
-    assert state["lifecycle_state"] == LIFECYCLE_VERIFICATION_FAILED
+    assert state["lifecycle_state"] == LIFECYCLE_VERIFICATION_FAILED_RESUME_READY
     assert state["blocking_reason"] == "Verification failed: pytest"
     assert state["source_evidence_paths"]["verification"] == str(run_dir / "verification.json")
 

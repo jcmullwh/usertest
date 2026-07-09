@@ -120,6 +120,14 @@ Entry points:
     - `--push` / `--no-push` pushes or disables pushing the branch to the configured remote.
     - `--pr` / `--no-pr` attempts or disables best-effort PR creation using GitHub CLI (`gh`).
       (`gh` must be on `PATH` and authenticated.)
+- `usertest-implement resume --run-dir <run_dir>`
+  - Re-enters a run whose `ticket_resume_state.json` is
+    `verification_failed_resume_ready`.
+  - Builds a focused verification-failure prompt from the recorded verification, reuse, attempt,
+    workspace, ticket, and prior-report artifacts instead of replaying the original full ticket
+    prompt.
+  - Reuses the recorded workspace when it still exists, or checks out the recorded branch from the
+    inferred/overridden repo (`--repo`, `--ref`) when the workspace is gone.
 
 ### Reports utilities
 
