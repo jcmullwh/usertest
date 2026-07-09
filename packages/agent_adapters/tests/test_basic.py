@@ -317,3 +317,53 @@ def test_normalize_codex_events_uses_raw_ts_iter_for_per_line_timestamps(tmp_pat
         "2026-02-01T00:00:05+00:00",
         "2026-02-01T00:00:05+00:00",
     ]
+
+
+def test_normalize_codex_events_emits_delegation_events(tmp_path: Path) -> None:
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call",
+                            "name": "mcp__multi_agent__spawn_agent",
+                            "call_id": "call_agent",
+                            "arguments": json.dumps(
+                                {"task": "Inspect token monitoring tests", "agent": "codex"}
+                            ),
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "function_call_output",
+                            "call_id": "call_agent",
+                            "output": (
+                                "Summary: tests cover paths and risks. "
+                                "Next steps: patch run_analysis."
+                            ),
+                            "usage": {"input_tokens": 1200, "output_tokens": 150},
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    normalized = tmp_path / "normalized.jsonl"
+    normalize_codex_events(raw_events_path=raw, normalized_events_path=normalized)
+
+    events = list(iter_events_jsonl(normalized))
+    invocation = next(e for e in events if e["type"] == "delegation_invocation")
+    result = next(e for e in events if e["type"] == "delegation_result")
+    assert invocation["data"]["tool_name"] == "mcp__multi_agent__spawn_agent"
+    assert invocation["data"]["prompt_chars"] > 0
+    assert result["data"]["result_kind"] == "parent_context_summary"
+    assert result["data"]["token_usage"]["total_tokens"] == 1350

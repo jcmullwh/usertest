@@ -121,6 +121,123 @@ def _read_file_evidence(run_dir: Path) -> list[dict[str, Any]]:
     return out[:25]
 
 
+def _usage_from_event_data(data: dict[str, Any]) -> dict[str, int]:
+    usage = data.get("token_usage")
+    if not isinstance(usage, dict):
+        return zero_usage()
+    return {key: int(usage.get(key, 0)) for key in TOKEN_DIMENSIONS}
+
+
+def _delegation_evidence(run_dir: Path) -> dict[str, Any]:
+    invocation_count = 0
+    result_count = 0
+    summary_count = 0
+    raw_leak_count = 0
+    error_count = 0
+    delegated_usage = zero_usage()
+    invocations: list[dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
+
+    for event in _iter_jsonl(run_dir / "normalized_events.jsonl"):
+        event_type = event.get("type")
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        if event_type == "delegation_invocation":
+            invocation_count += 1
+            if len(invocations) < 20:
+                invocations.append(
+                    {
+                        "tool_name": data.get("tool_name"),
+                        "requested_agent": data.get("requested_agent"),
+                        "prompt_chars": data.get("prompt_chars"),
+                        "input_keys": data.get("input_keys"),
+                    }
+                )
+            continue
+        if event_type != "delegation_result":
+            continue
+        result_count += 1
+        result_kind = data.get("result_kind")
+        if result_kind == "parent_context_summary":
+            summary_count += 1
+        if bool(data.get("raw_broad_source_leak")) or result_kind == "raw_broad_source_leak":
+            raw_leak_count += 1
+        if bool(data.get("is_error")) or result_kind == "error":
+            error_count += 1
+        delegated_usage = add_usage(delegated_usage, _usage_from_event_data(data))
+        if len(results) < 20:
+            results.append(
+                {
+                    "tool_name": data.get("tool_name"),
+                    "result_kind": result_kind,
+                    "output_chars": data.get("output_chars"),
+                    "output_lines": data.get("output_lines"),
+                    "source_like_lines": data.get("source_like_lines"),
+                    "raw_broad_source_leak": bool(data.get("raw_broad_source_leak")),
+                    "token_usage": data.get("token_usage"),
+                }
+            )
+
+    if invocation_count == 0 and result_count == 0:
+        classification = "no_delegation"
+        interpretation = "No normalized delegation/subagent tool invocation was observed."
+    elif raw_leak_count > 0:
+        classification = "delegation_raw_broad_source_leak"
+        interpretation = (
+            "Delegation occurred, but at least one subagent result appears to have returned raw "
+            "broad source/log output into the parent context."
+        )
+    elif summary_count > 0 and any(delegated_usage.values()):
+        classification = "delegation_parent_context_tradeoff"
+        interpretation = (
+            "Delegation added separately reported total tokens while returning concise "
+            "parent-context summaries instead of raw broad-source output."
+        )
+    elif summary_count > 0:
+        classification = "delegation_parent_context_summary"
+        interpretation = (
+            "Delegation returned parent-context summaries; delegated token counters were not "
+            "present in normalized events."
+        )
+    else:
+        classification = "delegation_without_parent_summary"
+        interpretation = (
+            "Delegation was invoked, but no parent-context summary result was identified."
+        )
+
+    return {
+        "classification": classification,
+        "interpretation": interpretation,
+        "invocation_count": invocation_count,
+        "result_count": result_count,
+        "summary_count": summary_count,
+        "raw_broad_source_leak_count": raw_leak_count,
+        "error_count": error_count,
+        "delegated_token_dimensions": delegated_usage,
+        "invocations": invocations,
+        "results": results,
+    }
+
+
+def _token_totals_with_delegation(
+    *, parent_usage: dict[str, int], delegation: dict[str, Any]
+) -> dict[str, Any]:
+    delegated = delegation.get("delegated_token_dimensions")
+    delegated_usage = delegated if isinstance(delegated, dict) else zero_usage()
+    delegated_usage = {key: int(delegated_usage.get(key, 0)) for key in TOKEN_DIMENSIONS}
+    return {
+        "parent": _token_impact(parent_usage),
+        "delegated": _token_impact(delegated_usage),
+        "combined": add_usage(parent_usage, delegated_usage),
+        "parent_input_tokens": int(parent_usage.get("input_tokens", 0)),
+        "parent_total_tokens": int(parent_usage.get("total_tokens", 0)),
+        "delegated_total_tokens": int(delegated_usage.get("total_tokens", 0)),
+        "combined_total_tokens": int(parent_usage.get("total_tokens", 0))
+        + int(delegated_usage.get("total_tokens", 0)),
+    }
+
+
 def _agent_attempts_summary(run_dir: Path) -> dict[str, Any]:
     path = run_dir / "agent_attempts.json"
     if not path.exists():
@@ -201,6 +318,7 @@ def _build_signals(
     session: CodexSessionResult | None,
     read_files: list[dict[str, Any]],
     attempts: dict[str, Any],
+    delegation: dict[str, Any],
 ) -> list[dict[str, Any]]:
     signals: list[dict[str, Any]] = []
     if agent and agent != "codex":
@@ -223,7 +341,69 @@ def _build_signals(
                 confirmed_by_counters=False,
             )
         )
-        return signals
+
+    delegation_classification = delegation.get("classification")
+    if delegation_classification == "delegation_raw_broad_source_leak":
+        signals.append(
+            _signal(
+                signal_id="delegation_raw_broad_source_leak",
+                confidence="inferred",
+                causal_mechanism=(
+                    "A delegation/subagent result appears to have returned raw broad source or log "
+                    "output into the parent context instead of a concise summary."
+                ),
+                token_usage=zero_usage(),
+                evidence_path=run_dir / "normalized_events.jsonl",
+                evidence={
+                    "invocation_count": delegation.get("invocation_count"),
+                    "raw_broad_source_leak_count": delegation.get(
+                        "raw_broad_source_leak_count"
+                    ),
+                    "results": delegation.get("results", [])[:10]
+                    if isinstance(delegation.get("results"), list)
+                    else [],
+                },
+                mitigation=(
+                    "Require subagents to return concise findings and artifact references, not raw "
+                    "file dumps or full logs."
+                ),
+                false_positive_risk=(
+                    "Medium; raw-leak detection is heuristic and based on result size/source-like "
+                    "shape, not raw content retention counters."
+                ),
+                confirmed_by_counters=False,
+            )
+        )
+    elif delegation_classification == "delegation_parent_context_tradeoff":
+        delegated = delegation.get("delegated_token_dimensions")
+        token_usage = delegated if isinstance(delegated, dict) else zero_usage()
+        signals.append(
+            _signal(
+                signal_id="delegation_parent_context_tradeoff",
+                confidence="inferred",
+                causal_mechanism=(
+                    "Delegation reported additional non-parent token usage while returning concise "
+                    "parent-context summaries. Treat this as a total-token versus parent-context "
+                    "tradeoff, not simple token waste."
+                ),
+                token_usage={key: int(token_usage.get(key, 0)) for key in TOKEN_DIMENSIONS},
+                evidence_path=run_dir / "normalized_events.jsonl",
+                evidence={
+                    "invocation_count": delegation.get("invocation_count"),
+                    "summary_count": delegation.get("summary_count"),
+                    "delegated_token_dimensions": delegation.get("delegated_token_dimensions"),
+                },
+                mitigation=(
+                    "Compare quality and parent peak context alongside combined tokens before "
+                    "tightening delegation policy."
+                ),
+                false_positive_risk=(
+                    "Medium; delegated counters may come from provider telemetry and are not "
+                    "joined to parent local Codex counters."
+                ),
+                confirmed_by_counters=False,
+            )
+        )
 
     if session is None or not session.accepted:
         return signals
@@ -523,24 +703,35 @@ def analyze_run(run_dir: Path, *, codex_sessions_root: Path | None = None) -> di
 
     read_files = _read_file_evidence(run_dir)
     attempts = _agent_attempts_summary(run_dir)
+    delegation = _delegation_evidence(run_dir)
     signals = _build_signals(
         run_dir=run_dir,
         agent=agent,
         session=session,
         read_files=read_files,
         attempts=attempts,
+        delegation=delegation,
     )
     authoritative = bool(session is not None and session.accepted)
+    parent_dimensions = (
+        session.final_usage if authoritative and session is not None else zero_usage()
+    )
+    delegation["token_totals"] = _token_totals_with_delegation(
+        parent_usage=parent_dimensions, delegation=delegation
+    )
     token_summary = {
         "authoritative": authoritative,
-        "dimensions": session.final_usage
-        if authoritative and session is not None
-        else zero_usage(),
+        "dimensions": parent_dimensions,
         "model_call_count": session.model_call_count if session is not None else 0,
         "token_event_count": session.token_event_count if session is not None else 0,
         "peak_call": session.peak_call
         if session is not None
         else {"call_index": None, "token_usage": zero_usage()},
+        "parent_input_tokens": int(parent_dimensions.get("input_tokens", 0)),
+        "parent_total_tokens": int(parent_dimensions.get("total_tokens", 0)),
+        "delegated_token_dimensions": delegation["delegated_token_dimensions"],
+        "combined_token_dimensions": delegation["token_totals"]["combined"],
+        "combined_total_tokens": delegation["token_totals"]["combined_total_tokens"],
     }
 
     return {
@@ -551,6 +742,7 @@ def analyze_run(run_dir: Path, *, codex_sessions_root: Path | None = None) -> di
         "status_class": _status_class(run_dir),
         "join": join,
         "token_summary": token_summary,
+        "delegation_summary": delegation,
         "signals": signals,
         "exceptions": exceptions,
         "privacy": {
@@ -575,6 +767,12 @@ def render_monitoring_markdown(analysis: dict[str, Any]) -> str:
         f"- Agent: `{public.get('agent')}`",
         f"- Status: `{public.get('status_class')}`",
         f"- Join confidence: `{public.get('join', {}).get('confidence')}`",
+        f"- Delegation: `{public.get('delegation_summary', {}).get('classification')}`",
+        f"- Parent input tokens: `{public.get('token_summary', {}).get('parent_input_tokens')}`",
+        (
+            "- Combined total tokens: "
+            f"`{public.get('token_summary', {}).get('combined_total_tokens')}`"
+        ),
         "",
         "## Signals",
         "",

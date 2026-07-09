@@ -62,6 +62,39 @@ _VERIFY_CLIENT_COMMAND_RE = re.compile(
     """
 )
 _TOOL_SESSION_ID_RE = re.compile(r"session ID\s+(\d+)")
+_DELEGATION_TOOL_NAMES = {
+    "agent",
+    "invoke_agent",
+    "spawn_agent",
+    "delegate",
+    "subagent",
+    "sub_agent",
+}
+_DELEGATION_TOOL_SUFFIXES = (
+    ".agent",
+    ".invoke_agent",
+    ".spawn_agent",
+    "__agent",
+    "__invoke_agent",
+    "__spawn_agent",
+)
+
+
+def _is_delegation_tool_name(raw: Any) -> bool:
+    if not isinstance(raw, str):
+        return False
+    name = raw.strip().lower().replace("-", "_")
+    if not name:
+        return False
+    if name in _DELEGATION_TOOL_NAMES or name.endswith(_DELEGATION_TOOL_SUFFIXES):
+        return True
+    tail = re.split(r"[.:/]", name)[-1]
+    return (
+        tail in _DELEGATION_TOOL_NAMES
+        or "invoke_agent" in name
+        or "spawn_agent" in name
+        or "subagent" in name
+    )
 
 
 def zero_usage() -> dict[str, int]:
@@ -219,6 +252,16 @@ def _extract_action(
         if payload_type == "function_call":
             tool_name = str(payload.get("name") or "")
             args = _maybe_json_object(payload.get("arguments"))
+            if _is_delegation_tool_name(tool_name):
+                prompt = args.get("prompt") or args.get("task") or args.get("description")
+                return {
+                    "type": "delegation",
+                    "tool_name": tool_name,
+                    "command_class": "delegation_tool",
+                    "paths": [],
+                    "prompt_chars": len(prompt) if isinstance(prompt, str) else 0,
+                    "input_keys": sorted(str(key) for key in args.keys()),
+                }
             if tool_name == "write_stdin":
                 session_id = args.get("session_id")
                 is_empty_wait = args.get("chars", "") == "" and isinstance(
