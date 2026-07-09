@@ -57,6 +57,7 @@ RUN_HISTORY_ARTIFACT_NAMES = {
     "run_meta.json",
     "target_ref.json",
     "ticket_ref.json",
+    "ticket_resume_state.json",
     "timing.json",
 }
 DOCKER_RESOURCE_PLAN_REASON_SUMMARIES = {
