@@ -32,3 +32,44 @@ def test_prompt_templates_discourage_heredocs_and_shell_output_for_reports() -> 
         assert (
             "${execution_notes_md}" in template_text
         ), f"missing ${{execution_notes_md}} placeholder in {template_path}"
+
+
+def test_implementation_and_review_missions_guide_appropriate_delegation() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    mission_paths = [
+        repo_root / "configs" / "missions" / "builtin" / "implement_backlog_ticket_v1.mission.md",
+        repo_root
+        / "configs"
+        / "missions"
+        / "builtin"
+        / "implement_maintenance_backlog_ticket_v1.mission.md",
+        repo_root
+        / "configs"
+        / "missions"
+        / "builtin"
+        / "review_backlog_implementation_pr_v1.mission.md",
+    ]
+
+    required_phrases = (
+        "## Delegation guidance",
+        "Use delegation only when it helps",
+        "broad read-only exploration of large files or cross-module contracts",
+        "test failure triage and log summarization",
+        "independent review of implementation risks",
+        "narrow investigation of one module or workflow",
+        "Do not delegate small, obvious",
+        "require a concise summary back to the parent",
+        "keep raw broad-source",
+        "out of the parent context",
+        "Delegation is not a scope gate",
+        "rather than under-scoping",
+    )
+
+    for mission_path in mission_paths:
+        text = mission_path.read_text(encoding="utf-8")
+        normalized_text = " ".join(text.split())
+        for phrase in required_phrases:
+            normalized_phrase = " ".join(phrase.split())
+            assert (
+                normalized_phrase in normalized_text
+            ), f"missing delegation guidance phrase {phrase!r} in {mission_path}"
