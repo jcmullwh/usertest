@@ -154,7 +154,11 @@ def test_push_failure_resume_state_uses_resolved_branch_not_remediation_placehol
         return push_ref
 
     monkeypatch.setattr(run_commands, "run_once", fake_run_once)
-    monkeypatch.setattr(run_commands, "_resolve_default_branch_name", lambda **_: "backlog/resolved")
+    monkeypatch.setattr(
+        run_commands,
+        "_resolve_default_branch_name",
+        lambda **_: "backlog/resolved",
+    )
     monkeypatch.setattr(run_commands, "finalize_commit", fake_finalize_commit)
     monkeypatch.setattr(run_commands, "finalize_push", fake_finalize_push)
 
