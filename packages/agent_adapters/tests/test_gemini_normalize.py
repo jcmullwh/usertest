@@ -206,3 +206,42 @@ def test_normalize_gemini_events_handles_missing_tool_name(tmp_path: Path) -> No
         e.get("data", {}).get("category") for e in events if e.get("type") == "error"
     ]
     assert "tool_use_missing_tool_name" in error_categories
+
+
+def test_normalize_gemini_events_emits_delegation_raw_leak(tmp_path: Path) -> None:
+    raw_source = "\n".join(f"{i}: def function_{i}(): return {i}" for i in range(260))
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "tool_use",
+                        "tool_name": "invoke_agent",
+                        "tool_id": "agent_1",
+                        "parameters": {"prompt": "Inspect package broadly", "agent": "gemini"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "tool_result",
+                        "tool_id": "agent_1",
+                        "status": "success",
+                        "output": raw_source,
+                        "usageMetadata": {"totalTokenCount": 9000, "promptTokenCount": 7000},
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    normalized = tmp_path / "normalized.jsonl"
+    normalize_gemini_events(raw_events_path=raw, normalized_events_path=normalized)
+
+    result = next(e for e in iter_events_jsonl(normalized) if e["type"] == "delegation_result")
+    assert result["data"]["tool_name"] == "invoke_agent"
+    assert result["data"]["result_kind"] == "raw_broad_source_leak"
+    assert result["data"]["raw_broad_source_leak"] is True
+    assert result["data"]["token_usage"]["total_tokens"] == 9000

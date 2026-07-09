@@ -9,6 +9,11 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from agent_adapters.delegation import (
+    delegation_invocation_data,
+    delegation_result_data,
+    is_delegation_tool,
+)
 from agent_adapters.events import make_event
 from agent_adapters.failure_artifacts import (
     write_command_failure_artifacts,
@@ -208,9 +213,17 @@ def normalize_claude_events(
                     name = block.get("name")
                     tool_input = block.get("input")
                     if isinstance(tool_id, str) and tool_id and isinstance(name, str):
+                        normalized_input = tool_input if isinstance(tool_input, dict) else {}
+                        if is_delegation_tool(name):
+                            invocation = make_event(
+                                "delegation_invocation",
+                                delegation_invocation_data(name, normalized_input),
+                                ts=_next_ts(),
+                            )
+                            out_f.write(json.dumps(invocation, ensure_ascii=False) + "\n")
                         tool_uses[tool_id] = {
                             "name": name,
-                            "input": tool_input if isinstance(tool_input, dict) else {},
+                            "input": normalized_input,
                         }
                     continue
 
@@ -240,6 +253,20 @@ def normalize_claude_events(
                     tool_input = {}
 
                 is_error = bool(block.get("is_error", False))
+
+                if is_delegation_tool(name):
+                    result = make_event(
+                        "delegation_result",
+                        delegation_result_data(
+                            tool_name=str(tool_use.get("name", "")),
+                            tool_input=tool_input,
+                            result_payload=block.get("content"),
+                            is_error=is_error,
+                        ),
+                        ts=_next_ts(),
+                    )
+                    out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                    continue
 
                 if name == "bash":
                     cmd = tool_input.get("command") or tool_input.get("cmd")

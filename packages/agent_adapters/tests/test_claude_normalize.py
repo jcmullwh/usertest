@@ -285,3 +285,63 @@ def test_normalize_claude_events_writes_tool_failure_artifacts(tmp_path: Path) -
     artifacts = tool_call.get("data", {}).get("failure_artifacts")
     assert isinstance(artifacts, dict)
     assert (tmp_path / "tool_failures" / "tool_01_edit" / "tool.json").exists()
+
+
+def test_normalize_claude_events_emits_delegation_summary(tmp_path: Path) -> None:
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "assistant",
+                        "message": {
+                            "role": "assistant",
+                            "content": [
+                                {
+                                    "type": "tool_use",
+                                    "id": "agent_1",
+                                    "name": "Agent",
+                                    "input": {
+                                        "description": "review token monitor",
+                                        "prompt": "Read tests and summarize risks only.",
+                                    },
+                                }
+                            ],
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "user",
+                        "message": {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": "agent_1",
+                                    "content": (
+                                        "Findings summary: no raw source needed. "
+                                        "Recommended next step: add classification test."
+                                    ),
+                                    "is_error": False,
+                                }
+                            ],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    normalized = tmp_path / "normalized.jsonl"
+    normalize_claude_events(raw_events_path=raw, normalized_events_path=normalized)
+
+    events = list(iter_events_jsonl(normalized))
+    assert [e["type"] for e in events] == ["delegation_invocation", "delegation_result"]
+    result = events[1]
+    assert result["data"]["tool_name"] == "Agent"
+    assert result["data"]["result_kind"] == "parent_context_summary"
+    assert result["data"]["raw_broad_source_leak"] is False

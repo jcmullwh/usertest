@@ -9,6 +9,11 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
+from agent_adapters.delegation import (
+    delegation_invocation_data,
+    delegation_result_data,
+    is_delegation_tool,
+)
 from agent_adapters.events import make_event
 from agent_adapters.failure_artifacts import (
     write_command_failure_artifacts,
@@ -248,9 +253,17 @@ def normalize_gemini_events(
                     out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
 
                 if isinstance(tool_id, str) and tool_id and isinstance(name, str):
+                    normalized_input = params if isinstance(params, dict) else {}
+                    if is_delegation_tool(name):
+                        invocation = make_event(
+                            "delegation_invocation",
+                            delegation_invocation_data(name, normalized_input),
+                            ts=_next_ts(),
+                        )
+                        out_f.write(json.dumps(invocation, ensure_ascii=False) + "\n")
                     tool_uses[tool_id] = {
                         "name": name,
-                        "input": params if isinstance(params, dict) else {},
+                        "input": normalized_input,
                     }
                 continue
 
@@ -289,6 +302,20 @@ def normalize_gemini_events(
 
             status = payload.get("status")
             is_error = not (isinstance(status, str) and status.lower() == "success")
+
+            if is_delegation_tool(name):
+                result = make_event(
+                    "delegation_result",
+                    delegation_result_data(
+                        tool_name=str(tool_use.get("name", "")),
+                        tool_input=tool_input,
+                        result_payload=payload,
+                        is_error=is_error,
+                    ),
+                    ts=_next_ts(),
+                )
+                out_f.write(json.dumps(result, ensure_ascii=False) + "\n")
+                continue
 
             if name == "read_file":
                 path_raw = tool_input.get("file_path")

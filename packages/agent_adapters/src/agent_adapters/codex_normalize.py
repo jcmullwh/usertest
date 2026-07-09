@@ -9,6 +9,11 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
 
+from agent_adapters.delegation import (
+    delegation_invocation_data,
+    delegation_result_data,
+    is_delegation_tool,
+)
 from agent_adapters.events import make_event
 from agent_adapters.failure_artifacts import write_command_failure_artifacts
 
@@ -355,6 +360,33 @@ def normalize_codex_events(
 
     with normalized_events_path.open("w", encoding="utf-8", newline="\n") as out_f:
         call_ctx: dict[str, dict[str, Any]] = {}
+        delegation_calls: dict[str, dict[str, Any]] = {}
+
+        def _record_delegation_call(
+            *, call_id: str | None, tool_name: str, tool_input: dict[str, Any]
+        ) -> None:
+            invocation = make_event(
+                "delegation_invocation",
+                delegation_invocation_data(tool_name, tool_input),
+                ts=_next_ts(),
+            )
+            out_f.write(json.dumps(invocation, ensure_ascii=False) + "\n")
+            if call_id:
+                delegation_calls[call_id] = {"name": tool_name, "input": tool_input}
+
+        def _emit_delegation_result(*, call_id: str | None, result_payload: Any) -> bool:
+            if not call_id or call_id not in delegation_calls:
+                return False
+            tool_use = delegation_calls.pop(call_id)
+            data = delegation_result_data(
+                tool_name=str(tool_use.get("name", "")),
+                tool_input=tool_use.get("input") if isinstance(tool_use.get("input"), dict) else {},
+                result_payload=result_payload,
+                is_error=False,
+            )
+            event = make_event("delegation_result", data, ts=_next_ts())
+            out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
+            return True
         for raw_line, payload in _iter_codex_raw_lines(raw_events_path):
             if ts_iter is None:
                 line_ts = _next_raw_ts()
@@ -510,7 +542,67 @@ def normalize_codex_events(
                     out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")
                 continue
 
+            nested_payload = payload.get("payload")
+            if isinstance(nested_payload, dict):
+                nested_type = nested_payload.get("type")
+                if nested_type == "function_call":
+                    tool_name = nested_payload.get("name")
+                    arguments = nested_payload.get("arguments")
+                    tool_input: dict[str, Any]
+                    if isinstance(arguments, str):
+                        try:
+                            parsed_args = json.loads(arguments)
+                        except json.JSONDecodeError:
+                            parsed_args = {}
+                        tool_input = parsed_args if isinstance(parsed_args, dict) else {}
+                    else:
+                        tool_input = arguments if isinstance(arguments, dict) else {}
+                    if is_delegation_tool(tool_name):
+                        call_id = nested_payload.get("call_id")
+                        _record_delegation_call(
+                            call_id=call_id if isinstance(call_id, str) else None,
+                            tool_name=str(tool_name or ""),
+                            tool_input=tool_input,
+                        )
+                    continue
+                if nested_type == "function_call_output":
+                    call_id = nested_payload.get("call_id")
+                    _emit_delegation_result(
+                        call_id=call_id if isinstance(call_id, str) else None,
+                        result_payload=nested_payload,
+                    )
+                    continue
+
             payload_type = payload.get("type")
+            if payload_type == "function_call":
+                tool_name = payload.get("name")
+                arguments = payload.get("arguments")
+                tool_input: dict[str, Any]
+                if isinstance(arguments, str):
+                    try:
+                        parsed_args = json.loads(arguments)
+                    except json.JSONDecodeError:
+                        parsed_args = {}
+                    tool_input = parsed_args if isinstance(parsed_args, dict) else {}
+                else:
+                    tool_input = arguments if isinstance(arguments, dict) else {}
+                if is_delegation_tool(tool_name):
+                    call_id = payload.get("call_id")
+                    _record_delegation_call(
+                        call_id=call_id if isinstance(call_id, str) else None,
+                        tool_name=str(tool_name or ""),
+                        tool_input=tool_input,
+                    )
+                continue
+
+            if payload_type == "function_call_output":
+                call_id = payload.get("call_id")
+                _emit_delegation_result(
+                    call_id=call_id if isinstance(call_id, str) else None,
+                    result_payload=payload,
+                )
+                continue
+
             if not (isinstance(payload_type, str) and payload_type == "item.completed"):
                 continue
 
@@ -519,6 +611,34 @@ def normalize_codex_events(
                 continue
 
             item_type = item.get("type")
+            if item_type == "function_call":
+                tool_name = item.get("name")
+                raw_args = item.get("arguments")
+                if isinstance(raw_args, str):
+                    try:
+                        parsed_args = json.loads(raw_args)
+                    except json.JSONDecodeError:
+                        parsed_args = {}
+                    tool_input = parsed_args if isinstance(parsed_args, dict) else {}
+                else:
+                    tool_input = raw_args if isinstance(raw_args, dict) else {}
+                if is_delegation_tool(tool_name):
+                    call_id = item.get("call_id") or item.get("id")
+                    _record_delegation_call(
+                        call_id=call_id if isinstance(call_id, str) else None,
+                        tool_name=str(tool_name or ""),
+                        tool_input=tool_input,
+                    )
+                continue
+
+            if item_type == "function_call_output":
+                call_id = item.get("call_id") or item.get("id")
+                _emit_delegation_result(
+                    call_id=call_id if isinstance(call_id, str) else None,
+                    result_payload=item,
+                )
+                continue
+
             if item_type == "reasoning":
                 text = item.get("text")
                 if isinstance(text, str) and text:
