@@ -920,6 +920,7 @@ def _build_docker_resource_plan(
     run_settings_path: Path,
     run_settings_profile: str,
     repo_input: str,
+    maintenance_image_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """
     Build the batch-level audit plan for Docker resource use.
@@ -972,10 +973,17 @@ def _build_docker_resource_plan(
             maintenance_cfg.cleanup_enabled and maintenance_cfg.cleanup_on_prepare
         )
 
-    # The current batch launcher starts each ticket independently and does not hand a resolved
-    # image reference to the ticket runner, so every ticket still performs its own maintenance
-    # profile image resolution.
+    pre_resolved_image_ref = None
+    pre_resolved_metadata_path = None
     pre_resolved_image_available = False
+    if isinstance(maintenance_image_metadata, dict):
+        image_ref = maintenance_image_metadata.get("image_ref")
+        metadata_path = maintenance_image_metadata.get("path")
+        if isinstance(image_ref, str) and image_ref.strip():
+            pre_resolved_image_available = True
+            pre_resolved_image_ref = image_ref.strip()
+        if isinstance(metadata_path, str) and metadata_path.strip():
+            pre_resolved_metadata_path = metadata_path.strip()
 
     unsafe_reasons: list[dict[str, str]] = []
     if not pre_resolved_image_available:
@@ -1000,7 +1008,9 @@ def _build_docker_resource_plan(
         "maintenance_venv_cache": maintenance_venv_cache,
         "cleanup_on_prepare": cleanup_on_prepare,
         "pre_resolved_image_available": pre_resolved_image_available,
-        "pre_resolved_image_ref": None,
+        "pre_resolved_image_ref": pre_resolved_image_ref,
+        "pre_resolved_metadata_path": pre_resolved_metadata_path,
+        "pre_resolved_image": maintenance_image_metadata if pre_resolved_image_available else None,
         "parallel_safe": False,
         "unsafe_reasons": unsafe_reasons,
         "scheduler_guard": {
@@ -1053,6 +1063,7 @@ def _run_ticket_process(
     settings_path: Path,
     settings_profile: str,
     ticket_timeout_seconds: float | None,
+    maintenance_image_metadata_path: Path | None = None,
 ) -> TicketRunResult:
     command = [
         str(implement_python),
@@ -1075,6 +1086,13 @@ def _run_ticket_process(
     ]
     if worker.model is not None:
         command.extend(["--model", worker.model])
+    if maintenance_image_metadata_path is not None:
+        command.extend(
+            [
+                "--exec-maintenance-image-metadata",
+                str(maintenance_image_metadata_path),
+            ]
+        )
 
     started = time.monotonic()
     proc = subprocess.Popen(
@@ -1312,6 +1330,7 @@ def _drain_phase(
     repo_input: str,
     refresh_state: dict[str, SourceRefreshState],
     exec_backend: str,
+    maintenance_image_metadata_path: Path | None = None,
 ) -> None:
     defaults = config.get("defaults", {})
     refresh_agent = str(defaults.get("refresh_agent") or workers[0].agent)
@@ -1427,6 +1446,7 @@ def _drain_phase(
                         settings_path=settings_path,
                         settings_profile=settings_profile,
                         ticket_timeout_seconds=ticket_timeout_seconds,
+                        maintenance_image_metadata_path=maintenance_image_metadata_path,
                     )
                     in_flight[future] = (candidate, worker, candidate.execution_conflict_keys)
 
@@ -1596,12 +1616,17 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
         run_settings_profile=run_settings_profile,
     )
     exec_backend = str(run_common.get("exec_backend") or "docker")
-    docker_resource_plan = _build_docker_resource_plan(
+    preliminary_docker_resource_plan = _build_docker_resource_plan(
         repo_root=repo_root,
         exec_backend=exec_backend,
         run_settings_path=run_settings_path,
         run_settings_profile=run_settings_profile,
         repo_input=repo_input,
+    )
+    exec_docker_profile = (
+        str(preliminary_docker_resource_plan.get("docker_profile") or "standard")
+        if preliminary_docker_resource_plan is not None
+        else "standard"
     )
 
     preflight = run_batch_preflight(
@@ -1613,6 +1638,22 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
             for worker in workers
         ],
         exec_backend=exec_backend,
+        exec_docker_profile=exec_docker_profile,
+        resolve_maintenance_image=bool(
+            exec_backend.strip().lower() == "docker" and exec_docker_profile == "maintenance"
+        ),
+    )
+    docker_resource_plan = _build_docker_resource_plan(
+        repo_root=repo_root,
+        exec_backend=exec_backend,
+        run_settings_path=run_settings_path,
+        run_settings_profile=run_settings_profile,
+        repo_input=repo_input,
+        maintenance_image_metadata=(
+            preflight.get("maintenance_image_metadata")
+            if isinstance(preflight.get("maintenance_image_metadata"), dict)
+            else None
+        ),
     )
     state = build_initial_state(
         batch_id=batch_id,
@@ -1641,6 +1682,12 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
         raise FileNotFoundError(implement_python)
 
     refresh_state: dict[str, SourceRefreshState] = {}
+    maintenance_image_metadata_path: Path | None = None
+    maintenance_image_metadata = preflight.get("maintenance_image_metadata")
+    if isinstance(maintenance_image_metadata, dict):
+        raw_metadata_path = maintenance_image_metadata.get("path")
+        if isinstance(raw_metadata_path, str) and raw_metadata_path.strip():
+            maintenance_image_metadata_path = Path(raw_metadata_path).resolve()
     try:
         for phase in phases:
             _drain_phase(
@@ -1657,6 +1704,7 @@ def run_batch(*, repo_root: Path, config_path: Path) -> int:
                 repo_input=repo_input,
                 refresh_state=refresh_state,
                 exec_backend=exec_backend,
+                maintenance_image_metadata_path=maintenance_image_metadata_path,
             )
             if state.get("status") == "blocked":
                 break

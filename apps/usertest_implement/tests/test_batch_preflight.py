@@ -143,3 +143,60 @@ def test_batch_preflight_blocks_when_github_capability_probe_fails(
     assert ["gh", "auth", "status"] in called
     assert ["gh", "api", "user", "--jq", ".login"] in called
     assert [item["blocker_id"] for item in result["blockers"]] == ["batch_control_plane"]
+
+
+def test_batch_preflight_persists_resolved_maintenance_image_metadata(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    def fake_run(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        return _completed(argv)
+
+    class _Resolution:
+        env_hash = "a" * 64
+        image_ref = "usertest-maintenance:" + ("a" * 16)
+        image_source = "local"
+        metadata = {
+            "timings": {"image_resolution_seconds": 1.25},
+            "artifacts": {"pull_log": None, "build_log": None},
+        }
+
+    captured: dict[str, object] = {}
+
+    def fake_resolve(**kwargs):
+        captured.update(kwargs)
+        kwargs["artifact_path"].write_text(
+            '{"schema_version":1,"image":{"source":"local"}}\n',
+            encoding="utf-8",
+        )
+        return _Resolution()
+
+    monkeypatch.setattr(batch_preflight, "_run", fake_run)
+    monkeypatch.setattr(batch_preflight, "_git_branch", lambda _: "dev")
+    monkeypatch.setattr(batch_preflight, "_git_head", lambda _: "abc123")
+    monkeypatch.setattr(batch_preflight, "_gitlab_registry_probe", lambda: None)
+    monkeypatch.setattr(batch_preflight, "resolve_maintenance_docker_image", fake_resolve)
+
+    result = batch_preflight.run_batch_preflight(
+        repo_root=tmp_path,
+        batch_dir=tmp_path / "batch",
+        batch_config={
+            "defaults": {
+                "require_clean_git": False,
+                "require_local_green": False,
+                "require_ci_green_for_base": False,
+            }
+        },
+        worker_roster=[],
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+        resolve_maintenance_image=True,
+    )
+
+    metadata = result["maintenance_image_metadata"]
+    assert result["blockers"] == []
+    assert metadata["env_hash"] == "a" * 64
+    assert metadata["image_ref"] == "usertest-maintenance:" + ("a" * 16)
+    assert metadata["source"] == "local"
+    assert Path(metadata["path"]).exists()
+    assert captured["run_dir"] == tmp_path / "batch" / "preflight_maintenance_image"

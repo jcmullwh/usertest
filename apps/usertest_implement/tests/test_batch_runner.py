@@ -137,6 +137,38 @@ def test_default_docker_resource_plan_records_current_unsafe_resources(tmp_path:
     ]
 
 
+def test_docker_resource_plan_records_pre_resolved_maintenance_image(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    settings_path = _write_run_settings(tmp_path)
+    _write_maintenance_docker_config(tmp_path)
+
+    plan = _build_docker_resource_plan(
+        repo_root=tmp_path,
+        exec_backend="docker",
+        run_settings_path=settings_path,
+        run_settings_profile="default",
+        repo_input=str(tmp_path),
+        maintenance_image_metadata={
+            "path": str(tmp_path / "batch" / "preflight" / "maintenance_image.json"),
+            "env_hash": "a" * 64,
+            "image_ref": "usertest-maintenance:" + ("a" * 16),
+            "source": "local",
+            "timings": {"image_resolution_seconds": 1.0},
+            "artifacts": {"pull_log": None, "build_log": None},
+        },
+    )
+
+    assert plan is not None
+    assert plan["pre_resolved_image_available"] is True
+    assert plan["pre_resolved_image_ref"] == "usertest-maintenance:" + ("a" * 16)
+    assert plan["pre_resolved_metadata_path"].endswith("maintenance_image.json")
+    assert "per_ticket_image_resolution" not in [
+        reason["reason_id"] for reason in plan["unsafe_reasons"]
+    ]
+
+
 def test_local_backend_has_no_docker_resource_plan(tmp_path: Path, monkeypatch: Any) -> None:
     settings_path = _write_run_settings(tmp_path, exec_backend="local")
 

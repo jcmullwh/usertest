@@ -143,6 +143,16 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
             "(default: enabled). Use --no-maintenance-venv-cache to force full reinstalls."
         ),
     )
+    parser.add_argument(
+        "--exec-maintenance-image-metadata",
+        dest="exec_maintenance_image_metadata_path",
+        type=Path,
+        help=(
+            "Pre-resolved maintenance Docker image metadata JSON produced by batch preflight. "
+            "When provided with --exec-docker-profile maintenance, the run uses its immutable "
+            "image ref without repeating maintenance image pull/build/tag resolution."
+        ),
+    )
 
     parser.add_argument(
         "--dry-run",
@@ -355,6 +365,12 @@ def _add_review_execution_args(parser: argparse.ArgumentParser) -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Enable Docker maintenance venv cache reuse (default: enabled).",
+    )
+    parser.add_argument(
+        "--exec-maintenance-image-metadata",
+        dest="exec_maintenance_image_metadata_path",
+        type=Path,
+        help="Pre-resolved maintenance Docker image metadata JSON produced by batch preflight.",
     )
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument(

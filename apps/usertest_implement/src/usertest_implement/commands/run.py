@@ -359,6 +359,11 @@ def _run_selected_ticket(
         and exec_cache == "warm"
         and bool(getattr(args, "maintenance_venv_cache", True))
     )
+    exec_maintenance_image_metadata_path = getattr(
+        args, "exec_maintenance_image_metadata_path", None
+    )
+    if exec_maintenance_image_metadata_path is not None:
+        exec_maintenance_image_metadata_path = exec_maintenance_image_metadata_path.resolve()
 
     ticket_blob = _compose_ticket_blob(selected)
     request = RunRequest(
@@ -382,6 +387,7 @@ def _run_selected_ticket(
         exec_cache=exec_cache,
         exec_cache_dir=exec_cache_dir,
         exec_maintenance_venv_cache=maintenance_venv_cache,
+        exec_maintenance_image_metadata_path=exec_maintenance_image_metadata_path,
         exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
         exec_use_target_sandbox_cli_install=bool(args.exec_use_target_sandbox_cli_install),
     )
@@ -414,6 +420,11 @@ def _run_selected_ticket(
                 "exec_keep_container": request.exec_keep_container,
                 "exec_cache": request.exec_cache,
                 "exec_maintenance_venv_cache": request.exec_maintenance_venv_cache,
+                "exec_maintenance_image_metadata_path": (
+                    str(request.exec_maintenance_image_metadata_path)
+                    if request.exec_maintenance_image_metadata_path is not None
+                    else None
+                ),
                 "verification_profile": verification_profile,
                 "verification_commands": list(request.verification_commands),
                 "verification_timeout_seconds": request.verification_timeout_seconds,
