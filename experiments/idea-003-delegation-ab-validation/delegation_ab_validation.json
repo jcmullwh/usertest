@@ -1,0 +1,174 @@
+{
+  "schema_version": 1,
+  "generated_at_utc": "2026-07-09T11:28:27Z",
+  "validation_kind": "delegation_ab",
+  "evidence_strength": "partial_missing_authoritative_token_join",
+  "arms": {
+    "delegation_disabled": {
+      "run_count": 1,
+      "authoritative_token_run_count": 0,
+      "completed_report_count": 1,
+      "report_success_count": 1,
+      "avg_parent_input_peak": null,
+      "avg_parent_input_tokens": null,
+      "avg_combined_input_tokens": null,
+      "avg_combined_total_tokens": null,
+      "broad_source_config_read_count": 0,
+      "large_context_resend_count": 0,
+      "avg_elapsed_seconds": 333.9,
+      "verification_passed_count": 1,
+      "test_runs_total": 0,
+      "test_runs_failed_before_success": 0,
+      "delegation_invocation_count": 0,
+      "delegation_raw_broad_source_leak_count": 0
+    },
+    "delegation_enabled": {
+      "run_count": 1,
+      "authoritative_token_run_count": 0,
+      "completed_report_count": 1,
+      "report_success_count": 1,
+      "avg_parent_input_peak": null,
+      "avg_parent_input_tokens": null,
+      "avg_combined_input_tokens": null,
+      "avg_combined_total_tokens": null,
+      "broad_source_config_read_count": 0,
+      "large_context_resend_count": 0,
+      "avg_elapsed_seconds": 229.8,
+      "verification_passed_count": 1,
+      "test_runs_total": 0,
+      "test_runs_failed_before_success": 0,
+      "delegation_invocation_count": 1,
+      "delegation_raw_broad_source_leak_count": 0
+    }
+  },
+  "comparisons": [
+    {
+      "pair_key": "447b9812a01f72dd",
+      "disabled_run_dir": "I:\\code\\usertest\\runs\\usertest_implement\\_workspaces\\usertest_20260708T235342Z_codex_0\\runs\\usertest\\usertest\\20260709T110952Z\\claude\\447106",
+      "enabled_run_dir": "I:\\code\\usertest\\runs\\usertest_implement\\_workspaces\\usertest_20260708T235342Z_codex_0\\runs\\usertest\\usertest\\20260709T112311Z\\claude\\447108",
+      "parent_input_peak_delta": null,
+      "combined_input_tokens_delta": null,
+      "large_context_resend_delta": 0,
+      "quality_status": {
+        "disabled": "success",
+        "enabled": "success"
+      },
+      "verification_passed": {
+        "disabled": true,
+        "enabled": true
+      }
+    }
+  ],
+  "tradeoff_evaluation": {
+    "combined_input_tokens_delta": null,
+    "combined_total_tokens_delta": null,
+    "parent_input_peak_delta": null,
+    "paired_run_count": 1,
+    "conclusion": "token_tradeoff_unattributable",
+    "rationale": "At least one arm lacks authoritative token counters."
+  },
+  "runs": [
+    {
+      "run_dir": "I:\\code\\usertest\\runs\\usertest_implement\\_workspaces\\usertest_20260708T235342Z_codex_0\\runs\\usertest\\usertest\\20260709T110952Z\\claude\\447106",
+      "arm": "delegation_disabled",
+      "agent": "claude",
+      "ticket": {
+        "fingerprint": "447b9812a01f72dd",
+        "title": "IDEA-003 Ticket 05: Run representative delegation A/B validation"
+      },
+      "implementation_quality": {
+        "status_class": "completed_report",
+        "report_status": "success",
+        "report_issue_count": 3,
+        "report_validation_error_count": 0,
+        "commands_failed": 0,
+        "review_decision": null,
+        "review_merge_ready": null,
+        "review_finding_count": 0
+      },
+      "tokens": {
+        "parent_input_tokens": 0,
+        "parent_input_peak": 0,
+        "combined_input_tokens": 0,
+        "combined_total_tokens": 0,
+        "authoritative": false
+      },
+      "signals": {
+        "signal_ids": [
+          "unsupported_provider_gap"
+        ],
+        "broad_source_config_read_count": 0,
+        "large_context_resend_count": 0
+      },
+      "delegation": {
+        "classification": "no_delegation",
+        "invocation_count": 0,
+        "summary_count": 0,
+        "raw_broad_source_leak_count": 0,
+        "error_count": 0
+      },
+      "verification": {
+        "verification_present": true,
+        "verification_passed": true,
+        "elapsed_seconds": 333.8978594,
+        "test_runs_total": 0,
+        "test_runs_failed_before_success": 0
+      }
+    },
+    {
+      "run_dir": "I:\\code\\usertest\\runs\\usertest_implement\\_workspaces\\usertest_20260708T235342Z_codex_0\\runs\\usertest\\usertest\\20260709T112311Z\\claude\\447108",
+      "arm": "delegation_enabled",
+      "agent": "claude",
+      "ticket": {
+        "fingerprint": "447b9812a01f72dd",
+        "title": "IDEA-003 Ticket 05: Run representative delegation A/B validation"
+      },
+      "implementation_quality": {
+        "status_class": "completed_report",
+        "report_status": "success",
+        "report_issue_count": 3,
+        "report_validation_error_count": 0,
+        "commands_failed": 0,
+        "review_decision": null,
+        "review_merge_ready": null,
+        "review_finding_count": 0
+      },
+      "tokens": {
+        "parent_input_tokens": 0,
+        "parent_input_peak": 0,
+        "combined_input_tokens": 0,
+        "combined_total_tokens": 0,
+        "authoritative": false
+      },
+      "signals": {
+        "signal_ids": [
+          "unsupported_provider_gap"
+        ],
+        "broad_source_config_read_count": 0,
+        "large_context_resend_count": 0
+      },
+      "delegation": {
+        "classification": "delegation_parent_context_summary",
+        "invocation_count": 1,
+        "summary_count": 1,
+        "raw_broad_source_leak_count": 0,
+        "error_count": 0
+      },
+      "verification": {
+        "verification_present": true,
+        "verification_passed": true,
+        "elapsed_seconds": 229.80113979999442,
+        "test_runs_total": 0,
+        "test_runs_failed_before_success": 0
+      }
+    }
+  ],
+  "next_actions": [
+    "Run more same-ticket disabled/enabled maintenance pairs before making delegation more aggressive."
+  ],
+  "privacy": {
+    "contains_raw_prompt": false,
+    "contains_raw_source": false,
+    "contains_raw_command_output": false
+  }
+}

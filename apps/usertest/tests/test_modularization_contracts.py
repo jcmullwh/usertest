@@ -87,9 +87,10 @@ def test_usertest_module_boundaries_have_parser_wiring(
         (
             ["token-monitor", "--help"],
             [
-                "{analyze,batch-context}",
+                "{analyze,batch-context,delegation-ab}",
                 "Analyze one run directory and write token monitoring",
                 "Analyze batch/control-plane context",
+                "Compare delegation-disabled and delegation-enabled",
             ],
         ),
     ],
