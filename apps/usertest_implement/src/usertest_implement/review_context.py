@@ -94,7 +94,7 @@ def _collect_pr_review_context(*, workspace_dir: Path, pr_url: str) -> dict[str,
             "view",
             pr_url,
             "--json",
-            "number,url,title,state,isDraft,headRefName,baseRefName,mergeable,statusCheckRollup",
+            "number,url,title,state,isDraft,headRefName,baseRefName,mergeable,reviewDecision,statusCheckRollup",
         ],
     )
     if not isinstance(view_raw, dict):
