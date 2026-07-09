@@ -12,10 +12,19 @@ LIFECYCLE_AGENT_FAILED = "agent_failed"
 LIFECYCLE_VERIFICATION_FAILED = "verification_failed"
 LIFECYCLE_VERIFICATION_FAILED_RESUME_READY = "verification_failed_resume_ready"
 LIFECYCLE_PUSH_FAILED = "push_failed"
-LIFECYCLE_CI_FAILED = "ci_failed"
+LIFECYCLE_AWAITING_VERIFICATION = "awaiting_verification"
+LIFECYCLE_AWAITING_CI = "awaiting_ci"
+LIFECYCLE_AWAITING_PR_REVIEW = "awaiting_pr_review"
+LIFECYCLE_CI_FAILED_RESUME_READY = "ci_failed_resume_ready"
+LIFECYCLE_REVIEW_FAILED_RESUME_READY = "review_failed_resume_ready"
+# Canonical public constants now use the durable resume-ready names.  Legacy string
+# literals remain accepted by resume commands for old artifacts.
+LIFECYCLE_CI_FAILED = LIFECYCLE_CI_FAILED_RESUME_READY
+LIFECYCLE_REVIEW_CHANGES_REQUESTED = LIFECYCLE_REVIEW_FAILED_RESUME_READY
+LIFECYCLE_LEGACY_CI_FAILED = "ci_failed"
+LIFECYCLE_LEGACY_REVIEW_CHANGES_REQUESTED = "review_changes_requested"
 LIFECYCLE_PR_CREATION_FAILED = "pr_creation_failed"
 LIFECYCLE_AWAITING_REVIEW = "awaiting_review"
-LIFECYCLE_REVIEW_CHANGES_REQUESTED = "review_changes_requested"
 LIFECYCLE_REVIEW_BLOCKED = "review_blocked"
 LIFECYCLE_MERGE_READY = "merge_ready"
 LIFECYCLE_COMPLETE = "complete"
@@ -190,20 +199,20 @@ def _classify_resume_state(
         decision = (_clean_str(review_summary.get("review_decision")) or "").lower()
         if decision == "changes_requested":
             rationale = _clean_str(review_summary.get("rationale"))
-            return LIFECYCLE_REVIEW_CHANGES_REQUESTED, rationale or "Review requested changes."
+            return LIFECYCLE_REVIEW_FAILED_RESUME_READY, rationale or "Review requested changes."
         if decision == "blocked":
             rationale = _clean_str(review_summary.get("rationale"))
-            return LIFECYCLE_REVIEW_BLOCKED, rationale or "Review is blocked."
+            return LIFECYCLE_REVIEW_FAILED_RESUME_READY, rationale or "Review is blocked."
         if review_summary.get("merge_ready") is True:
             return LIFECYCLE_MERGE_READY, None
 
     if isinstance(handoff_summary, dict):
         decision = (_clean_str(handoff_summary.get("review_decision")) or "").lower()
         if decision == "changes_requested":
-            return LIFECYCLE_REVIEW_CHANGES_REQUESTED, "Review requested changes."
+            return LIFECYCLE_REVIEW_FAILED_RESUME_READY, "Review requested changes."
         if decision == "blocked":
             reason = _clean_str(handoff_summary.get("review_error")) or "Review is blocked."
-            return LIFECYCLE_REVIEW_BLOCKED, reason
+            return LIFECYCLE_REVIEW_FAILED_RESUME_READY, reason
         if handoff_summary.get("review_merge_ready") is True:
             return LIFECYCLE_MERGE_READY, None
 
@@ -220,7 +229,7 @@ def _classify_resume_state(
         error = _clean_str(ci_gate.get("error")) if isinstance(ci_gate, dict) else None
         run_url = _clean_str(ci_gate.get("run_url")) if isinstance(ci_gate, dict) else None
         detail = error or run_url or "CI gate failed."
-        return LIFECYCLE_CI_FAILED, detail
+        return LIFECYCLE_CI_FAILED_RESUME_READY, detail
 
     if isinstance(pr_ref, dict):
         requested = pr_ref.get("requested") is True
@@ -243,12 +252,15 @@ def _classify_resume_state(
         return LIFECYCLE_AGENT_FAILED, f"Implementation run exited with code {int(exit_code)}."
 
     if isinstance(pr_ref, dict) and pr_ref.get("created") is True:
-        return LIFECYCLE_AWAITING_REVIEW, "PR is open and awaiting implementation review."
+        return LIFECYCLE_AWAITING_PR_REVIEW, "PR is open and awaiting implementation review."
 
     if isinstance(handoff_summary, dict):
         if handoff_summary.get("final_status") == "success":
             if handoff_summary.get("pr_requested") is True:
-                return LIFECYCLE_AWAITING_REVIEW, "PR is open and awaiting implementation review."
+                return (
+                    LIFECYCLE_AWAITING_PR_REVIEW,
+                    "PR is open and awaiting implementation review.",
+                )
             return LIFECYCLE_IMPLEMENTED_LOCAL, None
 
     return LIFECYCLE_IN_PROGRESS, "Run has not produced a terminal resume state yet."

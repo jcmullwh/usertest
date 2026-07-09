@@ -19,6 +19,7 @@ from usertest_implement.batch_runner import (
     _add_batch_resource_conflicts,
     _batch_subprocess_env,
     _build_docker_resource_plan,
+    _collect_resume_ready_candidates,
     _collect_wave_candidates,
     _drain_phase,
     _pick_launchable_candidate_index,
@@ -1115,3 +1116,410 @@ def test_collect_wave_candidates_uses_per_ticket_fallback_when_conflict_metadata
     assert [candidate.fingerprint for candidate in candidates] == ["facefeedfacefeed"]
     assert candidates[0].execution_domain == "unknown"
     assert candidates[0].execution_conflict_keys == ("ticket:facefeedfacefeed",)
+
+
+def _state_for_batch_lifecycle_tests(tmp_path: Path) -> dict[str, Any]:
+    return build_initial_state(
+        batch_id="20260709T000000Z",
+        batch_commit="abc123",
+        batch_branch="dev",
+        base_ci_run_url=None,
+        workers=[{"worker_index": 1, "agent": "codex", "model": None}],
+    )
+
+
+def _phase_for_batch_lifecycle_tests(tmp_path: Path) -> PhaseConfig:
+    return PhaseConfig(
+        name="phase",
+        sources=[BacklogSource(name="src", runs_dir=tmp_path / "runs" / "src", target="usertest")],
+        severities={"high"},
+    )
+
+
+def test_drain_phase_parks_awaiting_pr_review_without_completing(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    candidate = _candidate_for_launch_wave(tmp_path, "aaaaaaaaaaaaaaaa", "runner_core")
+
+    def _collect(**_: Any) -> list[BatchCandidate]:
+        return [] if state.get("parked") else [candidate]
+
+    def _run_ticket(**kwargs: Any) -> TicketRunResult:
+        run_dir = tmp_path / "runs" / "awaiting_review"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            run_dir / "handoff_summary.json",
+            {
+                "final_status": "success",
+                "pr_created": True,
+                "pr_url": "https://example.invalid/pr/1",
+                "ci_status": "completed",
+                "ci_conclusion": "success",
+            },
+        )
+        _write_json(
+            run_dir / "ticket_resume_state.json",
+            {
+                "schema_version": 1,
+                "lifecycle_state": "awaiting_pr_review",
+                "blocking_reason": "PR is open.",
+            },
+        )
+        return TicketRunResult(
+            run_dir=run_dir,
+            returncode=0,
+            stdout=str(run_dir),
+            stderr="",
+            timed_out=False,
+            duration_seconds=0.01,
+        )
+
+    moved: list[str] = []
+    monkeypatch.setattr("usertest_implement.batch_runner._collect_wave_candidates", _collect)
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._claim_ticket",
+        lambda *, candidate, repo_root: candidate.ticket_path,
+    )
+    monkeypatch.setattr("usertest_implement.batch_runner._run_ticket_process", _run_ticket)
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._move_ticket_for_review",
+        lambda **_: moved.append("review") or (tmp_path / "review.md"),
+    )
+
+    state = _state_for_batch_lifecycle_tests(tmp_path)
+    _drain_phase(
+        phase=_phase_for_batch_lifecycle_tests(tmp_path),
+        repo_root=tmp_path,
+        batch_dir_path=tmp_path / "batch",
+        config={"defaults": {"max_phase_cycles": 2}},
+        state=state,
+        workers=[WorkerTemplate(worker_index=1, agent="codex")],
+        backlog_python=tmp_path / "python",
+        implement_python=tmp_path / "python",
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        repo_input=str(tmp_path),
+        refresh_state={},
+        exec_backend="local",
+    )
+
+    assert [item["lifecycle_state"] for item in state["parked"]] == ["awaiting_pr_review"]
+    assert state["completed"] == []
+    assert state["failed"] == []
+    assert moved == ["review"]
+    summary = json.loads(summary_path(tmp_path / "batch").read_text(encoding="utf-8"))
+    assert summary["parked_count"] == 1
+    assert summary["complete_count"] == 0
+
+
+def test_collect_wave_candidates_includes_resume_ready_ledger_entries(tmp_path: Path) -> None:
+    ticket_path = tmp_path / ".agents" / "plans" / "4 - for_review" / "ticket.md"
+    ticket_path.parent.mkdir(parents=True)
+    ticket_path.write_text(
+        "\n".join(
+            [
+                "# Resume me",
+                "",
+                "- Fingerprint: `bbbbbbbbbbbbbbbb`",
+                "- Execution domain: `runner_core`",
+                "- Execution conflict keys: `execution_domain:runner_core`",
+                "- Export kind: `implementation`",
+                "- Stage: `ready_for_ticket`",
+                "- Severity: `high`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    run_dir = tmp_path / "runs" / "old"
+    _write_json(
+        run_dir / "ticket_resume_state.json",
+        {
+            "schema_version": 1,
+            "lifecycle_state": "ci_failed_resume_ready",
+            "ticket": {
+                "fingerprint": "bbbbbbbbbbbbbbbb",
+                "path": str(ticket_path),
+                "title": "Resume me",
+            },
+            "owner_root": str(tmp_path),
+            "resume_attempts": [],
+        },
+    )
+    ledger_path = tmp_path / ".agents" / "state" / "backlog_implement_actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        "\n".join(
+            [
+                "schema_version: 1",
+                "actions:",
+                "  bbbbbbbbbbbbbbbb:",
+                "    fingerprint: bbbbbbbbbbbbbbbb",
+                f"    last_resume_state_path: {run_dir / 'ticket_resume_state.json'}",
+                "    last_resume_lifecycle_state: ci_failed_resume_ready",
+                f"    owner_root: {tmp_path}",
+                f"    idea_path: {ticket_path}",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    candidates = _collect_wave_candidates(
+        repo_root=tmp_path,
+        repo_input=str(tmp_path),
+        backlog_python=tmp_path / "python",
+        refresh_agent="codex",
+        refresh_model="gpt-5.5",
+        batch_dir_path=tmp_path / "batch",
+        sources=[BacklogSource(name="src", runs_dir=tmp_path / "runs" / "src", target="usertest")],
+        severities={"high"},
+        processed=set(),
+        refresh_state={},
+        resume_ledger_path=ledger_path,
+    )
+
+    assert len(candidates) == 1
+    assert candidates[0].is_resume is True
+    assert candidates[0].resume_lifecycle_state == "ci_failed_resume_ready"
+    assert candidates[0].resume_state_path == run_dir / "ticket_resume_state.json"
+
+
+def test_drain_phase_resumes_resume_ready_candidate_to_completion(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    state_path = tmp_path / "runs" / "old" / "ticket_resume_state.json"
+    _write_json(state_path, {"lifecycle_state": "review_failed_resume_ready"})
+    candidate = BatchCandidate(
+        source_name="resume_ready",
+        export_path=tmp_path / "ledger.yaml",
+        fingerprint="cccccccccccccccc",
+        severity="high",
+        title="Resume completion",
+        owner_root=tmp_path,
+        ticket_path=tmp_path / ".agents" / "plans" / "4 - for_review" / "ticket.md",
+        execution_domain="runner_core",
+        execution_conflict_keys=("execution_domain:runner_core",),
+        resume_state_path=state_path,
+        resume_lifecycle_state="review_failed_resume_ready",
+    )
+
+    def _collect(**_: Any) -> list[BatchCandidate]:
+        return [] if state.get("completed") else [candidate]
+
+    def _run_resume(**_: Any) -> TicketRunResult:
+        run_dir = tmp_path / "runs" / "resumed"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            run_dir / "handoff_summary.json",
+            {"final_status": "success", "pr_created": True},
+        )
+        _write_json(run_dir / "ticket_resume_state.json", {"lifecycle_state": "complete"})
+        return TicketRunResult(run_dir, 0, str(run_dir), "", False, 0.01)
+
+    completed_moves: list[str] = []
+    monkeypatch.setattr("usertest_implement.batch_runner._collect_wave_candidates", _collect)
+    monkeypatch.setattr("usertest_implement.batch_runner._run_resume_process", _run_resume)
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._move_ticket_complete",
+        lambda **_: completed_moves.append("complete") or (tmp_path / "complete.md"),
+    )
+
+    state = _state_for_batch_lifecycle_tests(tmp_path)
+    _drain_phase(
+        phase=_phase_for_batch_lifecycle_tests(tmp_path),
+        repo_root=tmp_path,
+        batch_dir_path=tmp_path / "batch",
+        config={"defaults": {"max_phase_cycles": 2, "resume_retry_limit": 1}},
+        state=state,
+        workers=[WorkerTemplate(worker_index=1, agent="codex")],
+        backlog_python=tmp_path / "python",
+        implement_python=tmp_path / "python",
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        repo_input=str(tmp_path),
+        refresh_state={},
+        exec_backend="local",
+    )
+
+    assert len(state["resumed"]) == 1
+    assert [item["lifecycle_state"] for item in state["completed"]] == ["complete"]
+    assert state["failed"] == []
+    assert completed_moves == ["complete"]
+
+
+def test_drain_phase_marks_failed_when_resume_attempts_are_exhausted(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    state_path = tmp_path / "runs" / "old" / "ticket_resume_state.json"
+    _write_json(state_path, {"lifecycle_state": "verification_failed_resume_ready"})
+    candidate = BatchCandidate(
+        source_name="resume_ready",
+        export_path=tmp_path / "ledger.yaml",
+        fingerprint="dddddddddddddddd",
+        severity="high",
+        title="Resume exhausted",
+        owner_root=tmp_path,
+        ticket_path=tmp_path / ".agents" / "plans" / "3 - in_progress" / "ticket.md",
+        execution_domain="runner_core",
+        execution_conflict_keys=("execution_domain:runner_core",),
+        resume_state_path=state_path,
+        resume_lifecycle_state="verification_failed_resume_ready",
+        resume_attempt_count=1,
+    )
+
+    def _collect(**_: Any) -> list[BatchCandidate]:
+        return [] if state.get("failed") else [candidate]
+
+    monkeypatch.setattr("usertest_implement.batch_runner._collect_wave_candidates", _collect)
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._run_resume_process",
+        lambda **_: (_ for _ in ()).throw(AssertionError("resume should not launch")),
+    )
+
+    state = _state_for_batch_lifecycle_tests(tmp_path)
+    _drain_phase(
+        phase=_phase_for_batch_lifecycle_tests(tmp_path),
+        repo_root=tmp_path,
+        batch_dir_path=tmp_path / "batch",
+        config={"defaults": {"max_phase_cycles": 2, "resume_retry_limit": 1}},
+        state=state,
+        workers=[WorkerTemplate(worker_index=1, agent="codex")],
+        backlog_python=tmp_path / "python",
+        implement_python=tmp_path / "python",
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        repo_input=str(tmp_path),
+        refresh_state={},
+        exec_backend="local",
+    )
+
+    assert len(state["failed"]) == 1
+    assert "Resume retry limit exhausted" in state["failed"][0]["summary"]
+    assert state["global_blockers"] == []
+    summary = json.loads(summary_path(tmp_path / "batch").read_text(encoding="utf-8"))
+    assert summary["failed_count"] == 1
+
+
+def test_drain_phase_parks_merge_ready_without_completing_ticket(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    candidate = _candidate_for_launch_wave(tmp_path, "eeeeeeeeeeeeeeee", "runner_core")
+
+    def _collect(**_: Any) -> list[BatchCandidate]:
+        return [] if state.get("parked") else [candidate]
+
+    def _run_ticket(**_: Any) -> TicketRunResult:
+        run_dir = tmp_path / "runs" / "merge_ready"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            run_dir / "handoff_summary.json",
+            {
+                "final_status": "success",
+                "pr_created": True,
+                "ci_status": "completed",
+                "ci_conclusion": "success",
+            },
+        )
+        _write_json(run_dir / "ticket_resume_state.json", {"lifecycle_state": "merge_ready"})
+        return TicketRunResult(run_dir, 0, str(run_dir), "", False, 0.01)
+
+    complete_moves: list[str] = []
+    monkeypatch.setattr("usertest_implement.batch_runner._collect_wave_candidates", _collect)
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._claim_ticket",
+        lambda *, candidate, repo_root: candidate.ticket_path,
+    )
+    monkeypatch.setattr("usertest_implement.batch_runner._run_ticket_process", _run_ticket)
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._move_ticket_for_review",
+        lambda **_: tmp_path / "review.md",
+    )
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._move_ticket_complete",
+        lambda **_: complete_moves.append("complete") or (tmp_path / "complete.md"),
+    )
+
+    state = _state_for_batch_lifecycle_tests(tmp_path)
+    _drain_phase(
+        phase=_phase_for_batch_lifecycle_tests(tmp_path),
+        repo_root=tmp_path,
+        batch_dir_path=tmp_path / "batch",
+        config={"defaults": {"max_phase_cycles": 2}},
+        state=state,
+        workers=[WorkerTemplate(worker_index=1, agent="codex")],
+        backlog_python=tmp_path / "python",
+        implement_python=tmp_path / "python",
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        repo_input=str(tmp_path),
+        refresh_state={},
+        exec_backend="local",
+    )
+
+    assert [item["lifecycle_state"] for item in state["parked"]] == ["merge_ready"]
+    assert state["completed"] == []
+    assert state["failed"] == []
+    assert complete_moves == []
+
+
+def test_collect_resume_ready_candidates_follows_latest_resumed_state(
+    tmp_path: Path,
+) -> None:
+    ticket_path = tmp_path / ".agents" / "plans" / "4 - for_review" / "ticket.md"
+    ticket_path.parent.mkdir(parents=True)
+    ticket_path.write_text(
+        "\n".join(
+            [
+                "# Already resumed",
+                "",
+                "- Fingerprint: `ffffffffffffffff`",
+                "- Export kind: `implementation`",
+                "- Stage: `ready_for_ticket`",
+                "- Severity: `high`",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    old_state = tmp_path / "runs" / "old" / "ticket_resume_state.json"
+    new_state = tmp_path / "runs" / "new" / "ticket_resume_state.json"
+    _write_json(
+        old_state,
+        {
+            "lifecycle_state": "verification_failed_resume_ready",
+            "last_resumed_state_path": str(new_state),
+            "resume_attempts": [{"run_dir": str(new_state.parent)}],
+            "ticket": {"fingerprint": "ffffffffffffffff", "path": str(ticket_path)},
+            "owner_root": str(tmp_path),
+        },
+    )
+    _write_json(new_state, {"lifecycle_state": "implemented_local"})
+    ledger_path = tmp_path / "ledger.yaml"
+    ledger_path.write_text(
+        "\n".join(
+            [
+                "schema_version: 1",
+                "actions:",
+                "  ffffffffffffffff:",
+                f"    last_resume_state_path: {old_state}",
+                "    last_resume_lifecycle_state: verification_failed_resume_ready",
+                f"    idea_path: {ticket_path}",
+                f"    owner_root: {tmp_path}",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    candidates = _collect_resume_ready_candidates(
+        repo_root=tmp_path,
+        ledger_path=ledger_path,
+        severities={"high"},
+        processed=set(),
+    )
+
+    assert candidates == []
