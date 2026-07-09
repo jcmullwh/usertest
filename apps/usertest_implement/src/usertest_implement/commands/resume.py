@@ -3,11 +3,19 @@ from __future__ import annotations
 
 from runner_core.verification_prompts import _build_verification_followup_prompt
 
+from usertest_implement.ci import _ci_timeout_seconds_arg, _git_head_sha, _wait_for_ci_success
 from usertest_implement.resume_state import (
+    LIFECYCLE_CI_FAILED,
+    LIFECYCLE_REVIEW_CHANGES_REQUESTED,
     LIFECYCLE_VERIFICATION_FAILED,
     LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
     RESUME_STATE_ARTIFACT_NAME,
     write_ticket_resume_state,
+)
+from usertest_implement.review_context import (
+    _coerce_pr_url,
+    _collect_pr_review_context,
+    _current_merge_gate_from_pr_context,
 )
 from usertest_implement.shared import *
 
@@ -22,6 +30,10 @@ _VALID_VERIFICATION_RESUME_STATES = {
     LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
     # Backward-compatible with runs written before the durable resume-ready state existed.
     LIFECYCLE_VERIFICATION_FAILED,
+}
+_VALID_PR_RESUME_STATES = {
+    LIFECYCLE_CI_FAILED,
+    LIFECYCLE_REVIEW_CHANGES_REQUESTED,
 }
 _PROMPT_ARTIFACT_MAX_CHARS = 5000
 _PROMPT_REPORT_MAX_CHARS = 6000
@@ -169,6 +181,280 @@ def _build_verification_resume_prompt(
         attempt_number=1,
     )
 
+
+
+def _review_run_dir_from_state(resume_state: dict[str, Any]) -> Path | None:
+    evidence = resume_state.get("source_evidence_paths")
+    if isinstance(evidence, dict):
+        for key in ("review_summary", "review_ref", "pr_review_ref"):
+            raw = _clean_str(evidence.get(key))
+            if raw is not None:
+                return Path(raw).parent
+    return None
+
+
+def _load_review_summary_for_resume(*, resume_state: dict[str, Any]) -> dict[str, Any] | None:
+    evidence = resume_state.get("source_evidence_paths")
+    if isinstance(evidence, dict):
+        raw = _clean_str(evidence.get("review_summary"))
+        if raw is not None:
+            data = _read_json(Path(raw))
+            if isinstance(data, dict):
+                return data
+    review_run_dir = _review_run_dir_from_state(resume_state)
+    if review_run_dir is not None:
+        data = _read_json(review_run_dir / "review_summary.json")
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _pr_url_from_resume_artifacts(
+    *,
+    run_dir: Path,
+    resume_state: dict[str, Any],
+    ticket_ref: dict[str, Any],
+) -> str | None:
+    raw = _clean_str(resume_state.get("pr_url"))
+    if raw is not None:
+        return raw
+    handoff_summary = _read_json(run_dir / "handoff_summary.json")
+    pr_ref = _read_json(run_dir / "pr_ref.json")
+    review_summary = _load_review_summary_for_resume(resume_state=resume_state)
+    pr_url = _coerce_pr_url(
+        handoff_summary=handoff_summary if isinstance(handoff_summary, dict) else None,
+        pr_ref=pr_ref if isinstance(pr_ref, dict) else None,
+    )
+    if pr_url is not None:
+        return pr_url
+    if isinstance(review_summary, dict):
+        raw = _clean_str(review_summary.get("pr_url"))
+        if raw is not None:
+            return raw
+    raw = _clean_str(ticket_ref.get("pr_url"))
+    return raw
+
+
+def _owner_root_from_resume(*, resume_state: dict[str, Any], ticket_ref: dict[str, Any]) -> Path | None:
+    raw = _clean_str(resume_state.get("owner_root"))
+    if raw is not None:
+        path = Path(raw)
+        if path.exists():
+            return path
+    owner_repo = ticket_ref.get("owner_repo") if isinstance(ticket_ref.get("owner_repo"), dict) else {}
+    raw = _clean_str(owner_repo.get("root"))
+    if raw is not None:
+        path = Path(raw)
+        if path.exists():
+            return path
+    return None
+
+
+def _pr_context_workspace(
+    *,
+    resume_state: dict[str, Any],
+    workspace_ref: dict[str, Any],
+    ticket_ref: dict[str, Any],
+) -> Path:
+    owner_root = _owner_root_from_resume(resume_state=resume_state, ticket_ref=ticket_ref)
+    if owner_root is not None:
+        return owner_root
+    for raw in (workspace_ref.get("workspace_dir"), resume_state.get("workspace_path")):
+        cleaned = _clean_str(raw)
+        if cleaned is None:
+            continue
+        path = Path(cleaned)
+        if path.exists():
+            return path
+    raise SystemExit(
+        "Cannot resume PR-backed run: no existing owner/workspace path is available to refresh PR state with gh. "
+        "Pass --repo for agent checkout after restoring a local owner/workspace, or rerun from a machine with the repository present."
+    )
+
+
+def _review_findings_for_resume(review_summary: dict[str, Any] | None) -> list[dict[str, Any]]:
+    if not isinstance(review_summary, dict):
+        return []
+    decision = (_clean_str(review_summary.get("review_decision")) or "").lower()
+    if decision != "changes_requested":
+        return []
+    findings = review_summary.get("findings")
+    if not isinstance(findings, list):
+        return []
+    return [item for item in findings if isinstance(item, dict)]
+
+
+def _failing_check_pointers(pr_context: dict[str, Any]) -> list[dict[str, Any]]:
+    checks = pr_context.get("checks")
+    if not isinstance(checks, list):
+        return []
+    failure_states = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
+    out: list[dict[str, Any]] = []
+    for check in checks:
+        if not isinstance(check, dict):
+            continue
+        state = str(check.get("state") or "").strip().upper()
+        if state not in failure_states:
+            continue
+        out.append(
+            {
+                "name": check.get("name"),
+                "state": check.get("state"),
+                "link": check.get("link"),
+                "bucket": check.get("bucket"),
+                "startedAt": check.get("startedAt"),
+                "completedAt": check.get("completedAt"),
+            }
+        )
+    return out
+
+
+def _artifact_path_map_for_pr_resume(
+    *,
+    run_dir: Path,
+    review_run_dir: Path | None,
+    state_path: Path,
+) -> dict[str, str]:
+    artifacts: dict[str, str] = {"resume_state": str(state_path)}
+    for name in (
+        "ticket_ref.json",
+        "workspace_ref.json",
+        "handoff_summary.json",
+        "pr_ref.json",
+        "ci_gate.json",
+        "git_ref.json",
+        "push_ref.json",
+        "report.json",
+    ):
+        path = run_dir / name
+        if path.exists():
+            artifacts[name.removesuffix(".json")] = str(path)
+    if review_run_dir is not None:
+        for name in ("review_summary.json", "review_ref.json", "pr_review_ref.json"):
+            path = review_run_dir / name
+            if path.exists():
+                artifacts[name.removesuffix(".json")] = str(path)
+    return artifacts
+
+
+def _build_pr_resume_prompt(
+    *,
+    original_run_dir: Path,
+    state_path: Path,
+    resume_state: dict[str, Any],
+    ticket_ref: dict[str, Any],
+    selected: SelectedTicket,
+    pr_url: str,
+    pr_context: dict[str, Any],
+    review_summary: dict[str, Any] | None,
+    branch: str,
+) -> str:
+    pr_json = json.dumps(pr_context.get("pr", {}), indent=2, ensure_ascii=False)
+    checks_json = json.dumps(pr_context.get("checks", []), indent=2, ensure_ascii=False)
+    failing_checks_json = json.dumps(_failing_check_pointers(pr_context), indent=2, ensure_ascii=False)
+    review_findings = _review_findings_for_resume(review_summary)
+    review_findings_json = json.dumps(review_findings, indent=2, ensure_ascii=False)
+    review_summary_json = json.dumps(review_summary or {}, indent=2, ensure_ascii=False)
+    artifact_paths = _artifact_path_map_for_pr_resume(
+        run_dir=original_run_dir,
+        review_run_dir=_review_run_dir_from_state(resume_state),
+        state_path=state_path,
+    )
+    artifact_paths_json = json.dumps(artifact_paths, indent=2, ensure_ascii=False)
+    handoff_summary = _read_json(original_run_dir / "handoff_summary.json")
+    handoff_json = json.dumps(handoff_summary if isinstance(handoff_summary, dict) else {}, indent=2, ensure_ascii=False)
+    ci_gate = _read_json(original_run_dir / "ci_gate.json")
+    ci_gate_json = json.dumps(ci_gate if isinstance(ci_gate, dict) else {}, indent=2, ensure_ascii=False)
+    changed_files = pr_context.get("changed_files")
+    changed_file_lines = (
+        "\n".join(f"- {path}" for path in changed_files)
+        if isinstance(changed_files, list) and changed_files
+        else "- <none>"
+    )
+    diff_excerpt = str(pr_context.get("diff_excerpt") or "").rstrip()
+    blocking_reason = _clean_str(resume_state.get("blocking_reason")) or "PR is blocked."
+
+    return (
+        "# Resume PR-backed ticket implementation\n\n"
+        "Resume an existing open pull request after review requested changes or CI failed. "
+        "Do not create a duplicate PR. Commit any necessary fixes to the existing PR branch and preserve unrelated work.\n\n"
+        f"Original run dir: {original_run_dir}\n"
+        f"Original resume state: {state_path}\n"
+        f"Lifecycle state: {_clean_str(resume_state.get('lifecycle_state')) or 'unknown'}\n"
+        f"Blocking reason: {blocking_reason}\n"
+        f"Existing PR: {pr_url}\n"
+        f"Existing PR branch: {branch}\n\n"
+        "# Ticket context\n\n"
+        f"Fingerprint: {selected.fingerprint}\n"
+        f"Title: {selected.title or ticket_ref.get('title') or 'Untitled ticket'}\n\n"
+        f"{selected.ticket_markdown.rstrip()}\n\n"
+        "# Prior implementation summary\n\n"
+        f"```json\n{handoff_json}\n```\n\n"
+        f"{_prior_report_block(original_run_dir)}\n\n"
+        "# Current PR metadata (refreshed immediately before this prompt)\n\n"
+        f"```json\n{pr_json}\n```\n\n"
+        "# Current PR checks (refreshed immediately before this prompt)\n\n"
+        f"```json\n{checks_json}\n```\n\n"
+        "# Failing check/log pointers\n\n"
+        f"```json\n{failing_checks_json}\n```\n\n"
+        "# Prior CI gate artifact\n\n"
+        f"```json\n{ci_gate_json}\n```\n\n"
+        "# Unresolved review findings\n\n"
+        "These are findings from the latest recorded automated review that still requested changes. "
+        "Treat them as unresolved unless the refreshed PR state clearly proves they are obsolete.\n\n"
+        f"```json\n{review_findings_json}\n```\n\n"
+        "# Latest recorded review summary\n\n"
+        f"```json\n{review_summary_json}\n```\n\n"
+        "# Run artifact paths\n\n"
+        f"```json\n{artifact_paths_json}\n```\n\n"
+        "# Changed files\n\n"
+        f"{changed_file_lines}\n\n"
+        "# Current PR diff excerpt\n\n"
+        f"```diff\n{diff_excerpt}\n```\n\n"
+        "# Required outcome\n\n"
+        "Make the smallest coherent fix. When complete, return the required JSON report only and mention "
+        "that this was a PR resume for the existing PR branch."
+    )
+
+
+def _current_pr_resume_noop_reason(
+    *,
+    pr_context: dict[str, Any],
+    review_summary: dict[str, Any] | None,
+) -> str | None:
+    current_merge_ready, current_gate = _current_merge_gate_from_pr_context(pr_context)
+    if not current_merge_ready:
+        return None
+    findings = _review_findings_for_resume(review_summary)
+    if findings:
+        pr_meta = pr_context.get("pr") if isinstance(pr_context.get("pr"), dict) else {}
+        review_decision = str(pr_meta.get("reviewDecision") or "").strip().upper()
+        if review_decision != "APPROVED":
+            return None
+    return "Current PR merge gate is already green: " + json.dumps(current_gate, ensure_ascii=False)
+
+
+def _resolve_pr_resume_target(
+    *,
+    args: argparse.Namespace,
+    run_dir: Path,
+    resume_state: dict[str, Any],
+    workspace_ref: dict[str, Any],
+    ticket_ref: dict[str, Any],
+    pr_context: dict[str, Any],
+) -> tuple[str, str, Path | None, str]:
+    pr_meta = pr_context.get("pr") if isinstance(pr_context.get("pr"), dict) else {}
+    branch = _clean_str(getattr(args, "ref", None)) or _clean_str(pr_meta.get("headRefName")) or _clean_str(resume_state.get("branch"))
+    if branch is None:
+        raise SystemExit("Cannot resume PR-backed run: current PR metadata and resume state are missing the PR branch.")
+    repo_input, _old_ref, resume_workspace_dir, workspace_strategy = _resolve_resume_target(
+        args=args,
+        run_dir=run_dir,
+        resume_state={**resume_state, "branch": branch},
+        workspace_ref=workspace_ref,
+        ticket_ref=ticket_ref,
+    )
+    return repo_input, branch, resume_workspace_dir, workspace_strategy
 
 def _selected_from_resume_state(
     *,
@@ -323,6 +609,410 @@ def _mark_original_resume_state(
     _write_json(state_path, state)
 
 
+
+def _cmd_resume_pr(
+    *,
+    args: argparse.Namespace,
+    repo_root: Path,
+    state_path: Path,
+    run_dir: Path,
+    resume_state: dict[str, Any],
+    lifecycle: str,
+) -> int:
+    workspace_ref = _read_json(run_dir / "workspace_ref.json")
+    ticket_ref = _read_json(run_dir / "ticket_ref.json")
+    if not isinstance(workspace_ref, dict):
+        raise SystemExit("Cannot resume PR-backed run: workspace_ref.json must contain an object.")
+    if not isinstance(ticket_ref, dict):
+        raise SystemExit("Cannot resume PR-backed run: ticket_ref.json must contain an object.")
+
+    selected = _selected_from_resume_state(resume_state=resume_state, ticket_ref=ticket_ref)
+    pr_url = _pr_url_from_resume_artifacts(
+        run_dir=run_dir,
+        resume_state=resume_state,
+        ticket_ref=ticket_ref,
+    )
+    if pr_url is None:
+        raise SystemExit("Cannot resume PR-backed run: no PR URL is recorded in resume/run artifacts.")
+
+    # This is the ticket's current-state refresh boundary: read live PR metadata/checks/diff just
+    # before deciding whether to prompt the resumed implementation agent.
+    pr_workspace = _pr_context_workspace(
+        resume_state=resume_state,
+        workspace_ref=workspace_ref,
+        ticket_ref=ticket_ref,
+    )
+    pr_context = _collect_pr_review_context(workspace_dir=pr_workspace, pr_url=pr_url)
+    review_summary = _load_review_summary_for_resume(resume_state=resume_state)
+    pr_meta = pr_context.get("pr") if isinstance(pr_context.get("pr"), dict) else {}
+    branch = _clean_str(getattr(args, "ref", None)) or _clean_str(pr_meta.get("headRefName")) or _clean_str(resume_state.get("branch"))
+    if branch is None:
+        raise SystemExit("Cannot resume PR-backed run: current PR metadata and resume state are missing the PR branch.")
+
+    noop_reason = _current_pr_resume_noop_reason(
+        pr_context=pr_context,
+        review_summary=review_summary,
+    )
+    if noop_reason is not None:
+        payload = {
+            "schema_version": 1,
+            "status": "noop_current_gates_green",
+            "reason": noop_reason,
+            "original_run_dir": str(run_dir),
+            "resume_state_path": str(state_path),
+            "pr_url": pr_url,
+            "branch": branch,
+            "current_pr_context": pr_context,
+        }
+        print(json.dumps(payload, indent=2, ensure_ascii=False))
+        return 0
+
+    repo_input, ref, resume_workspace_dir, workspace_strategy = _resolve_pr_resume_target(
+        args=args,
+        run_dir=run_dir,
+        resume_state=resume_state,
+        workspace_ref=workspace_ref,
+        ticket_ref=ticket_ref,
+        pr_context=pr_context,
+    )
+    prompt = _build_pr_resume_prompt(
+        original_run_dir=run_dir,
+        state_path=state_path,
+        resume_state=resume_state,
+        ticket_ref=ticket_ref,
+        selected=selected,
+        pr_url=pr_url,
+        pr_context=pr_context,
+        review_summary=review_summary,
+        branch=ref,
+    )
+
+    verification = _read_json(run_dir / "verification.json")
+    verification_commands = [
+        str(cmd).strip()
+        for cmd in (getattr(args, "verification_commands", None) or [])
+        if isinstance(cmd, str) and str(cmd).strip()
+    ]
+    if not verification_commands:
+        verification_commands = _commands_from_original_run(
+            run_dir,
+            verification if isinstance(verification, dict) else {},
+        )
+    verification_timeout_seconds = getattr(args, "verification_timeout_seconds", None)
+    if verification_timeout_seconds is None or verification_timeout_seconds <= 0:
+        verification_timeout_seconds = _timeout_from_original_run(run_dir)
+
+    exec_backend = str(args.exec_backend).strip().lower()
+    exec_docker_profile = _resolve_exec_docker_profile(
+        exec_backend=exec_backend,
+        requested_profile=getattr(args, "exec_docker_profile", None),
+        maintenance_eligible=_maintenance_profile_is_eligible(repo_root=repo_root, repo_input=repo_input),
+    )
+    exec_cache_dir = getattr(args, "exec_cache_dir", None)
+    if exec_cache_dir is not None:
+        exec_cache_dir = exec_cache_dir.resolve()
+    exec_cache = str(getattr(args, "exec_cache", "cold") or "cold")
+    if exec_cache == "warm" and exec_cache_dir is None:
+        exec_cache_dir = repo_root / "runs" / "_cache" / "usertest_implement"
+    maintenance_venv_cache = bool(exec_backend == "docker" and exec_cache == "warm" and bool(getattr(args, "maintenance_venv_cache", True)))
+    exec_maintenance_image_metadata_path = getattr(args, "exec_maintenance_image_metadata_path", None)
+    if exec_maintenance_image_metadata_path is not None:
+        exec_maintenance_image_metadata_path = exec_maintenance_image_metadata_path.resolve()
+
+    request = RunRequest(
+        repo=repo_input,
+        ref=ref,
+        agent=str(args.agent),
+        policy=str(args.policy),
+        persona_id=args.persona_id,
+        mission_id=args.mission_id,
+        seed=int(args.seed),
+        model=args.model,
+        agent_config_overrides=tuple(args.agent_config_override or []),
+        agent_append_system_prompt=prompt,
+        keep_workspace=True,
+        verification_commands=tuple(verification_commands),
+        verification_timeout_seconds=verification_timeout_seconds,
+        verification_reuse_mode=str(getattr(args, "verify_reuse", "auto") or "auto"),
+        exec_backend=exec_backend,
+        exec_docker_profile=exec_docker_profile,
+        exec_keep_container=bool(args.exec_keep_container),
+        exec_cache=exec_cache,
+        exec_cache_dir=exec_cache_dir,
+        exec_maintenance_venv_cache=maintenance_venv_cache,
+        exec_maintenance_image_metadata_path=exec_maintenance_image_metadata_path,
+        exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
+        exec_use_target_sandbox_cli_install=bool(args.exec_use_target_sandbox_cli_install),
+        resume_workspace_dir=resume_workspace_dir,
+    )
+
+    if args.dry_run:
+        print(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "resume_kind": "pr",
+                    "original_run_dir": str(run_dir),
+                    "resume_state_path": str(state_path),
+                    "workspace_strategy": workspace_strategy,
+                    "pr_url": pr_url,
+                    "branch": ref,
+                    "current_pr_context": pr_context,
+                    "unresolved_review_findings": _review_findings_for_resume(review_summary),
+                    "failing_check_pointers": _failing_check_pointers(pr_context),
+                    "run_request": {
+                        "repo": request.repo,
+                        "ref": request.ref,
+                        "agent": request.agent,
+                        "policy": request.policy,
+                        "model": request.model,
+                        "keep_workspace": request.keep_workspace,
+                        "resume_workspace_dir": str(request.resume_workspace_dir) if request.resume_workspace_dir is not None else None,
+                        "verification_commands": list(request.verification_commands),
+                        "verification_timeout_seconds": request.verification_timeout_seconds,
+                        "verification_reuse_mode": request.verification_reuse_mode,
+                        "commit": True,
+                        "push": True,
+                        "pr": False,
+                    },
+                    "prompt": prompt,
+                },
+                indent=2,
+                ensure_ascii=False,
+            )
+        )
+        return 0
+
+    if exec_backend == "docker":
+        _require_docker_available()
+
+    cfg = _load_runner_config(repo_root)
+    result = run_once(cfg, request)
+    resumed_run_dir = result.run_dir
+    _write_json(resumed_run_dir / "ticket_ref.json", ticket_ref)
+    _write_json(resumed_run_dir / "current_pr_context.json", pr_context)
+    _write_json(
+        resumed_run_dir / "resume_ref.json",
+        {
+            "schema_version": 1,
+            "resume_kind": "pr",
+            "resumed_from_run_dir": str(run_dir),
+            "resumed_from_resume_state_path": str(state_path),
+            "resumed_from_lifecycle_state": lifecycle,
+            "workspace_strategy": workspace_strategy,
+            "pr_url": pr_url,
+            "branch": ref,
+            "source_evidence_paths": _artifact_path_map_for_pr_resume(
+                run_dir=run_dir,
+                review_run_dir=_review_run_dir_from_state(resume_state),
+                state_path=state_path,
+            ),
+        },
+    )
+    _write_json(
+        resumed_run_dir / "pr_ref.json",
+        {
+            "schema_version": 1,
+            "requested": False,
+            "created": True,
+            "existing_pr": True,
+            "url": pr_url,
+            "branch": ref,
+            "title": pr_meta.get("title"),
+            "agent": str(args.agent),
+            "model": args.model,
+            "error": None,
+        },
+    )
+
+    exit_code = int(result.exit_code or 0)
+    if result.report_validation_errors:
+        exit_code = max(exit_code, 2)
+    verification_after = _read_json(resumed_run_dir / "verification.json")
+    if isinstance(verification_after, dict) and verification_after.get("passed") is False:
+        exit_code = max(exit_code, 2)
+
+    git_ref: dict[str, Any] | None = None
+    push_ref: dict[str, Any] | None = None
+    ci_ref: dict[str, Any] | None = None
+    commit_performed = False
+    if exit_code == 0:
+        commit_message = (
+            getattr(args, "commit_message", None)
+            or f"{selected.fingerprint}: Resume PR feedback"
+        )
+        git_ref = finalize_commit(
+            run_dir=resumed_run_dir,
+            branch=ref,
+            commit_message=commit_message,
+            git_user_name=getattr(args, "git_user_name", None),
+            git_user_email=getattr(args, "git_user_email", None),
+        )
+        commit_performed = bool(git_ref.get("commit_performed") is True)
+        if git_ref.get("error"):
+            exit_code = max(exit_code, 3)
+
+    if exit_code == 0:
+        push_candidates: list[Path] = []
+        workspace_after_for_push = _read_json(resumed_run_dir / "workspace_ref.json")
+        if isinstance(workspace_after_for_push, dict):
+            raw_workspace_for_push = _clean_str(workspace_after_for_push.get("workspace_dir"))
+            if raw_workspace_for_push is not None and (Path(raw_workspace_for_push) / ".git").exists():
+                push_candidates.append(Path(raw_workspace_for_push))
+        if selected.owner_root is not None and (selected.owner_root / ".git").exists():
+            push_candidates.append(selected.owner_root)
+        if _looks_like_local_path(repo_input) and (Path(repo_input) / ".git").exists():
+            push_candidates.append(Path(repo_input))
+        push_ref = finalize_push(
+            run_dir=resumed_run_dir,
+            remote_name=str(getattr(args, "remote_name", "origin") or "origin"),
+            remote_url=getattr(args, "remote_url", None),
+            candidate_repo_dirs=push_candidates,
+            branch=ref,
+            force_with_lease=bool(getattr(args, "force_push", False)),
+        )
+        if push_ref.get("error") or push_ref.get("pushed") is not True:
+            exit_code = max(exit_code, 4)
+
+    if exit_code == 0:
+        workspace_after = _read_json(resumed_run_dir / "workspace_ref.json")
+        workspace_dir = None
+        if isinstance(workspace_after, dict):
+            raw_workspace = _clean_str(workspace_after.get("workspace_dir"))
+            if raw_workspace is not None:
+                workspace_dir = Path(raw_workspace)
+        if bool(getattr(args, "skip_ci_wait", False)):
+            ci_ref = {
+                "schema_version": 1,
+                "workflow": "CI",
+                "branch": ref,
+                "head_sha": _git_head_sha(workspace_dir) if workspace_dir is not None else None,
+                "run_id": None,
+                "run_url": None,
+                "status": None,
+                "conclusion": None,
+                "passed": None,
+                "error": None,
+                "skipped": True,
+                "skip_reason": "flag --skip-ci-wait",
+                "started_at_utc": _utc_now_z(),
+                "finished_at_utc": _utc_now_z(),
+                "timeout_seconds": _ci_timeout_seconds_arg(getattr(args, "ci_timeout_seconds", None)),
+            }
+            _write_json(resumed_run_dir / "ci_gate.json", ci_ref)
+        elif workspace_dir is None:
+            ci_ref = {
+                "schema_version": 1,
+                "workflow": "CI",
+                "branch": ref,
+                "head_sha": None,
+                "passed": False,
+                "error": "Missing workspace_ref.json; cannot locate workspace for CI follow-up.",
+                "skipped": True,
+                "skip_reason": "workspace_missing",
+            }
+            _write_json(resumed_run_dir / "ci_gate.json", ci_ref)
+            exit_code = max(exit_code, 5)
+        else:
+            head_sha = _git_head_sha(workspace_dir)
+            if head_sha is None:
+                ci_ref = {
+                    "schema_version": 1,
+                    "workflow": "CI",
+                    "branch": ref,
+                    "head_sha": None,
+                    "passed": False,
+                    "error": "Unable to determine HEAD SHA for CI follow-up.",
+                    "skipped": True,
+                    "skip_reason": "head_sha_unavailable",
+                }
+                _write_json(resumed_run_dir / "ci_gate.json", ci_ref)
+                exit_code = max(exit_code, 5)
+            else:
+                ci_ref = _wait_for_ci_success(
+                    run_dir=resumed_run_dir,
+                    workspace_dir=workspace_dir,
+                    branch=ref,
+                    head_sha=head_sha,
+                    workflow="CI",
+                    timeout_seconds=_ci_timeout_seconds_arg(getattr(args, "ci_timeout_seconds", None)),
+                )
+                if ci_ref.get("passed") is not True:
+                    exit_code = max(exit_code, 5)
+
+    handoff_summary = {
+        "schema_version": 1,
+        "branch": ref,
+        "commit_requested": True,
+        "commit_performed": commit_performed,
+        "push_requested": True,
+        "pushed": bool(isinstance(push_ref, dict) and push_ref.get("pushed") is True),
+        "pr_requested": False,
+        "pr_created": True,
+        "pr_url": pr_url,
+        "ci_required": True,
+        "ci_status": ci_ref.get("status") if isinstance(ci_ref, dict) else None,
+        "ci_conclusion": ci_ref.get("conclusion") if isinstance(ci_ref, dict) else None,
+        "review_required": True,
+        "review_run_dir": None,
+        "review_decision": None,
+        "review_merge_ready": None,
+        "review_error": None,
+        "final_status": "success" if exit_code == 0 else "failed",
+        "resumed_from_run_dir": str(run_dir),
+        "resume_kind": "pr",
+    }
+    _write_json(resumed_run_dir / "handoff_summary.json", handoff_summary)
+
+    new_resume_lifecycle: object | None = None
+    try:
+        new_state = write_ticket_resume_state(
+            selected=selected,
+            run_dir=resumed_run_dir,
+            owner_root=selected.owner_root,
+            branch=ref,
+            exit_code=exit_code,
+        )
+        new_state["resumed_from_run_dir"] = str(run_dir)
+        new_state["resumed_from_resume_state_path"] = str(state_path)
+        new_state["workspace_strategy"] = workspace_strategy
+        new_state["resume_kind"] = "pr"
+        new_resume_lifecycle = new_state.get("lifecycle_state")
+        _write_json(resumed_run_dir / RESUME_STATE_ARTIFACT_NAME, new_state)
+        _mark_original_resume_state(
+            state_path=state_path,
+            resumed_run_dir=resumed_run_dir,
+            new_state_path=resumed_run_dir / RESUME_STATE_ARTIFACT_NAME,
+        )
+    except Exception as e:
+        print(f"WARNING: failed to update resume state: {e}", file=sys.stderr)
+
+    if getattr(args, "ledger", None) is not None:
+        try:
+            ledger_path = _resolve_ledger_path(repo_root=repo_root, raw=args.ledger)
+            updates: dict[str, Any] = {
+                "title": selected.title,
+                "owner_root": str(selected.owner_root) if selected.owner_root is not None else None,
+                "idea_path": str(selected.idea_path) if selected.idea_path is not None else None,
+                "last_run_dir": str(resumed_run_dir),
+                "last_exit_code": int(exit_code),
+                "last_branch": ref,
+                "last_pr_url": pr_url,
+                "last_resume_state_path": str(resumed_run_dir / RESUME_STATE_ARTIFACT_NAME),
+                "last_resume_lifecycle_state": new_resume_lifecycle,
+            }
+            if isinstance(git_ref, dict):
+                updates["last_head_commit"] = git_ref.get("head_commit")
+            if isinstance(push_ref, dict) and push_ref.get("pushed") is True:
+                updates["last_push_remote"] = push_ref.get("remote_name")
+                updates["last_push_remote_url"] = push_ref.get("remote_url")
+            update_ledger_file(ledger_path, fingerprint=selected.fingerprint, updates=updates)
+        except Exception as e:
+            print(f"WARNING: failed to update ledger for PR resume: {e}", file=sys.stderr)
+
+    print(str(resumed_run_dir))
+    return exit_code
+
 def _cmd_resume(args: argparse.Namespace) -> int:
     repo_root = _resolve_repo_root(args.repo_root)
 
@@ -332,10 +1022,20 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     if not isinstance(resume_state, dict):
         raise SystemExit(f"Cannot resume: missing or invalid resume state: {state_path}")
     lifecycle = _clean_str(resume_state.get("lifecycle_state"))
+    if lifecycle in _VALID_PR_RESUME_STATES:
+        return _cmd_resume_pr(
+            args=args,
+            repo_root=repo_root,
+            state_path=state_path,
+            run_dir=run_dir,
+            resume_state=resume_state,
+            lifecycle=lifecycle,
+        )
     if lifecycle not in _VALID_VERIFICATION_RESUME_STATES:
+        allowed = sorted(_VALID_VERIFICATION_RESUME_STATES | _VALID_PR_RESUME_STATES)
         raise SystemExit(
-            "Cannot resume: resume state must be verification_failed_resume_ready; "
-            f"got {lifecycle!r} in {state_path}."
+            "Cannot resume: resume state must be one of "
+            f"{allowed!r}; got {lifecycle!r} in {state_path}."
         )
 
     missing = [name for name in _REQUIRED_RESUME_ARTIFACTS if not (run_dir / name).exists()]

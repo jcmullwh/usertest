@@ -488,7 +488,41 @@ def _add_resume_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--remote-name",
         default="origin",
-        help="Remote name used to infer fallback repo URL from owner root (default: origin).",
+        help="Remote name used to infer fallback repo URL and push PR resumes (default: origin).",
+    )
+    parser.add_argument("--remote-url", help="Remote URL override used when pushing a PR resume.")
+    parser.add_argument("--force-push", dest="force_push", action="store_true")
+    parser.add_argument("--commit-message", dest="commit_message", help="Commit message override for PR resumes.")
+    parser.add_argument(
+        "--git-user-name",
+        dest="git_user_name",
+        help="Git user.name used for PR resume commits (default: usertest-implement).",
+    )
+    parser.add_argument(
+        "--git-user-email",
+        dest="git_user_email",
+        help="Git user.email used for PR resume commits (default: usertest-implement@local).",
+    )
+    parser.add_argument(
+        "--ci-timeout-seconds",
+        type=float,
+        default=None,
+        help="Optional timeout waiting for GitHub Actions CI after pushing a PR resume.",
+    )
+    parser.add_argument(
+        "--skip-ci-wait",
+        action="store_true",
+        help="Skip waiting for GitHub Actions CI after pushing a PR resume (not recommended).",
+    )
+    parser.add_argument(
+        "--ledger",
+        nargs="?",
+        const=_DEFAULT_LEDGER_PATH,
+        type=Path,
+        help=(
+            "Optional attempt ledger YAML to update after a PR resume. If provided without a value, "
+            "defaults to <repo_root>/.agents/state/backlog_implement_actions.yaml."
+        ),
     )
 
 
