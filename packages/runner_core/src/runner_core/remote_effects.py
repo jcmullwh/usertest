@@ -211,6 +211,21 @@ REMOTE_EFFECTS: tuple[CommandRemoteEffects, ...] = (
         summary="Writes metadata-only token monitoring artifacts for one local batch directory.",
     ),
     CommandRemoteEffects(
+        command="usertest token-monitor delegation-ab",
+        boundary="local-only",
+        local_artifacts=LOCAL_ARTIFACTS,
+        sensitive_artifacts=SENSITIVE_DERIVED_ARTIFACTS,
+        draft_exports=NO_EFFECT,
+        commits=NO_EFFECT,
+        pushes=NO_EFFECT,
+        pull_requests=NO_EFFECT,
+        summary=(
+            "Writes metadata-only A/B evidence comparing delegation-disabled and "
+            "delegation-enabled local run directories."
+        ),
+        modifiers=(RemoteEffectModifier("--no-write", "Prints analysis JSON without writing artifacts."),),
+    ),
+    CommandRemoteEffects(
         command="usertest init-usertest",
         boundary="local-only",
         local_artifacts=LOCAL_ARTIFACTS,

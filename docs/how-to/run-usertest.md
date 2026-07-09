@@ -118,6 +118,23 @@ Notes:
 
 ---
 
+## Compare delegation-disabled and delegation-enabled runs
+
+Before making delegation policy more aggressive, compare paired maintenance runs:
+
+```bash
+python -m usertest.cli token-monitor delegation-ab \
+  --disabled-run "RUN_DIR_WITHOUT_DELEGATION" \
+  --enabled-run "RUN_DIR_WITH_DELEGATION" \
+  --output-dir "experiments/idea-003-delegation-ab-validation"
+```
+
+The report is metadata-only and evaluates total input-token tradeoffs against
+parent-context pressure, quality/review findings, resend signals, verification
+behavior, and elapsed time. Raw source, prompts, and full logs are not copied.
+
+---
+
 ## Use the Docker execution backend
 
 The Docker backend is useful when you want:
