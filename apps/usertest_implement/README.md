@@ -51,8 +51,9 @@ Maintenance install cache (Docker + warm cache):
 - When Docker + warm cache are active, `usertest-implement` also enables maintenance venv cache reuse by default
   (`--maintenance-venv-cache`), so scaffold install tasks can restore per-project `.venv` snapshots from `/cache`.
 - Same-repo Docker runs now default to `--exec-docker-profile maintenance`, which resolves a dedicated
-  maintenance image (`local -> pull -> build`) and bind-mounts matching cached project `.venv`
-  directories directly into `/workspace/<project>/.venv` instead of copying them into each fresh workspace.
+  maintenance image (`local -> pull -> build`), copies matching cached project `.venv` directories
+  to per-run writable locations, and mounts those copies at `/workspace/<project>/.venv`. This keeps
+  cache hits fast without sharing one writable host `.venv` cache path across concurrent workers.
 - On cache miss, the maintenance image can seed `.venv` directories from `/opt/usertest_maint_seed`
   before scaffold falls through to a real `pdm install`.
 - Disable this behavior with `--no-maintenance-venv-cache` (forces full reinstall behavior).
@@ -72,8 +73,9 @@ Maintenance install cache (Docker + warm cache):
   repeating pull/build/tag work.
 - Batch runs record the current Docker serialization audit in `batch_state.json`,
   `batch_summary.json`, and `docker_resource_plan.json`. Under current defaults it remains
-  `parallel_safe: false` because cleanup/image state and warm maintenance venv cache mounts still
-  need separate parallel-safety handling.
+  `parallel_safe: false` because cleanup/image state still needs separate parallel-safety handling.
+  Warm maintenance venv cache hits use per-worker writable copies, and the selected cache strategy
+  is recorded in maintenance profile artifacts.
 
 Docker execution profile:
 

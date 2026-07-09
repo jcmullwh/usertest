@@ -126,6 +126,7 @@ def test_default_docker_resource_plan_records_current_unsafe_resources(tmp_path:
     assert plan["cache_mode"] == "warm"
     assert plan["maintenance_venv_cache"] is True
     assert plan["maintenance_venv_cache_configured"] is True
+    assert plan["maintenance_venv_cache_strategy"] == "per-worker-writable-copy"
     assert plan["cleanup_on_prepare"] is True
     assert plan["pre_resolved_image_available"] is False
     assert plan["parallel_safe"] is False
@@ -133,7 +134,6 @@ def test_default_docker_resource_plan_records_current_unsafe_resources(tmp_path:
     assert [reason["reason_id"] for reason in plan["unsafe_reasons"]] == [
         "per_ticket_image_resolution",
         "cleanup_on_prepare",
-        "writable_shared_maintenance_venv_mounts",
     ]
 
 
@@ -162,6 +162,7 @@ def test_docker_resource_plan_records_pre_resolved_maintenance_image(
 
     assert plan is not None
     assert plan["pre_resolved_image_available"] is True
+    assert plan["maintenance_venv_cache_strategy"] == "per-worker-writable-copy"
     assert plan["pre_resolved_image_ref"] == "usertest-maintenance:" + ("a" * 16)
     assert plan["pre_resolved_metadata_path"].endswith("maintenance_image.json")
     assert "per_ticket_image_resolution" not in [

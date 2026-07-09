@@ -17,7 +17,8 @@ resulting `.venv` directories into `/opt/usertest_maint_seed/<project>/<fingerpr
 
 The runtime maintenance profile can then:
 
-- mount matching host cache hits directly into `/workspace/<project>/.venv`
+- copy matching host cache hits to a per-run writable location and mount that copy into
+  `/workspace/<project>/.venv`
 - or copy a matching seeded `.venv` from `/opt/usertest_maint_seed` on cache miss
 
 This context is generated per environment hash and is meant to be used through the maintenance

@@ -68,10 +68,6 @@ DOCKER_RESOURCE_PLAN_REASON_SUMMARIES = {
         "Maintenance image cleanup is configured to run during Docker profile preparation, "
         "which mutates shared local Docker image state."
     ),
-    "writable_shared_maintenance_venv_mounts": (
-        "Warm maintenance venv cache hits are mounted writable into project .venv paths, "
-        "so concurrent tickets can write through shared cache-backed mounts."
-    ),
     "conservative_docker_scheduler_guard": (
         "The batch scheduler still applies the existing Docker-wide conflict key until "
         "Docker resource isolation is explicitly made parallel-safe."
@@ -990,8 +986,6 @@ def _build_docker_resource_plan(
         unsafe_reasons.append(_docker_resource_reason("per_ticket_image_resolution"))
     if cleanup_on_prepare:
         unsafe_reasons.append(_docker_resource_reason("cleanup_on_prepare"))
-    if docker_profile == "maintenance" and maintenance_venv_cache:
-        unsafe_reasons.append(_docker_resource_reason("writable_shared_maintenance_venv_mounts"))
     if not unsafe_reasons:
         unsafe_reasons.append(_docker_resource_reason("conservative_docker_scheduler_guard"))
 
@@ -1006,6 +1000,11 @@ def _build_docker_resource_plan(
         "warm_cache": warm_cache,
         "maintenance_venv_cache_configured": maintenance_venv_cache_configured,
         "maintenance_venv_cache": maintenance_venv_cache,
+        "maintenance_venv_cache_strategy": (
+            "per-worker-writable-copy"
+            if docker_profile == "maintenance" and maintenance_venv_cache
+            else "disabled"
+        ),
         "cleanup_on_prepare": cleanup_on_prepare,
         "pre_resolved_image_available": pre_resolved_image_available,
         "pre_resolved_image_ref": pre_resolved_image_ref,
