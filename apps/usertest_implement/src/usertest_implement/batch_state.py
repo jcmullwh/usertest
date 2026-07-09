@@ -96,6 +96,7 @@ def build_initial_state(
         "updated_utc": utc_now_z(),
         "global_blockers": [],
         "workers": workers,
+        "launch_waves": [],
         "in_flight": [],
         "completed": [],
         "failed": [],

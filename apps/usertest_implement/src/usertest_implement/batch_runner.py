@@ -68,10 +68,6 @@ DOCKER_RESOURCE_PLAN_REASON_SUMMARIES = {
         "Maintenance image cleanup is configured to run during Docker profile preparation, "
         "which mutates shared local Docker image state."
     ),
-    "conservative_docker_scheduler_guard": (
-        "The batch scheduler still applies the existing Docker-wide conflict key until "
-        "Docker resource isolation is explicitly made parallel-safe."
-    ),
 }
 BACKLOG_INPUT_PATHS = (
     Path("apps/usertest_backlog/src/usertest_backlog"),
@@ -921,9 +917,9 @@ def _build_docker_resource_plan(
     """
     Build the batch-level audit plan for Docker resource use.
 
-    This intentionally does not loosen the scheduler guard.  The plan records why the current
-    Docker backend remains serialized so future tickets can make each unsafe shared resource
-    explicit before changing scheduling behavior.
+    The resulting plan is the scheduler contract for Docker-backed batch launches.  The
+    Docker-wide scheduler guard may only be omitted when this plan proves image resolution is
+    batch-scoped and cleanup will not mutate shared Docker state during ticket execution.
     """
 
     backend = exec_backend.strip().lower()
@@ -972,7 +968,7 @@ def _build_docker_resource_plan(
     pre_resolved_image_ref = None
     pre_resolved_metadata_path = None
     pre_resolved_image_available = False
-    if isinstance(maintenance_image_metadata, dict):
+    if docker_profile == "maintenance" and isinstance(maintenance_image_metadata, dict):
         image_ref = maintenance_image_metadata.get("image_ref")
         metadata_path = maintenance_image_metadata.get("path")
         if isinstance(image_ref, str) and image_ref.strip():
@@ -986,8 +982,28 @@ def _build_docker_resource_plan(
         unsafe_reasons.append(_docker_resource_reason("per_ticket_image_resolution"))
     if cleanup_on_prepare:
         unsafe_reasons.append(_docker_resource_reason("cleanup_on_prepare"))
-    if not unsafe_reasons:
-        unsafe_reasons.append(_docker_resource_reason("conservative_docker_scheduler_guard"))
+    parallel_safe = not unsafe_reasons
+    scheduler_guard = (
+        {
+            "unchanged": False,
+            "conflict_key": None,
+            "omitted_conflict_key": "batch_resource:docker",
+            "summary": (
+                "Docker-backed tickets may launch concurrently when their ticket conflict "
+                "keys are disjoint because image resolution is batch-scoped and Docker "
+                "cleanup is not run during ticket execution."
+            ),
+        }
+        if parallel_safe
+        else {
+            "unchanged": True,
+            "conflict_key": "batch_resource:docker",
+            "summary": (
+                "Docker-backed tickets remain serialized by the existing batch resource "
+                "conflict key."
+            ),
+        }
+    )
 
     return {
         "schema_version": 1,
@@ -1010,26 +1026,32 @@ def _build_docker_resource_plan(
         "pre_resolved_image_ref": pre_resolved_image_ref,
         "pre_resolved_metadata_path": pre_resolved_metadata_path,
         "pre_resolved_image": maintenance_image_metadata if pre_resolved_image_available else None,
-        "parallel_safe": False,
+        "parallel_safe": parallel_safe,
         "unsafe_reasons": unsafe_reasons,
-        "scheduler_guard": {
-            "unchanged": True,
-            "conflict_key": "batch_resource:docker",
-            "summary": (
-                "Docker-backed tickets remain serialized by the existing batch resource "
-                "conflict key."
-            ),
-        },
+        "scheduler_guard": scheduler_guard,
     }
+
+
+def _docker_resource_plan_is_parallel_safe(
+    docker_resource_plan: dict[str, Any] | None,
+) -> bool:
+    return (
+        isinstance(docker_resource_plan, dict)
+        and docker_resource_plan.get("parallel_safe") is True
+    )
 
 
 def _add_batch_resource_conflicts(
     candidate: BatchCandidate,
     *,
     exec_backend: str,
+    docker_resource_plan: dict[str, Any] | None = None,
 ) -> BatchCandidate:
     extra_keys: tuple[str, ...] = ()
-    if exec_backend.strip().lower() == "docker":
+    if (
+        exec_backend.strip().lower() == "docker"
+        and not _docker_resource_plan_is_parallel_safe(docker_resource_plan)
+    ):
         extra_keys = ("batch_resource:docker",)
     if not extra_keys:
         return candidate
@@ -1296,6 +1318,49 @@ def _update_state_lists(
         ]
 
 
+def _record_launch_wave_decision(
+    state: dict[str, Any],
+    *,
+    phase_name: str,
+    cycle: int,
+    exec_backend: str,
+    candidates: list[BatchCandidate],
+) -> dict[str, Any]:
+    docker_resource_plan = state.get("docker_resource_plan")
+    docker_plan_parallel_safe = (
+        _docker_resource_plan_is_parallel_safe(docker_resource_plan)
+        if isinstance(docker_resource_plan, dict)
+        else None
+    )
+    docker_conflict_key_applied = any(
+        "batch_resource:docker" in candidate.execution_conflict_keys
+        for candidate in candidates
+    )
+    wave = {
+        "schema_version": 1,
+        "phase": phase_name,
+        "cycle": cycle,
+        "recorded_utc": utc_now_z(),
+        "exec_backend": exec_backend.strip().lower(),
+        "candidate_count": len(candidates),
+        "docker_resource_plan_parallel_safe": docker_plan_parallel_safe,
+        "docker_conflict_key_applied": docker_conflict_key_applied,
+        "docker_conflict_key": (
+            "batch_resource:docker" if docker_conflict_key_applied else None
+        ),
+        "candidate_conflict_keys": [
+            {
+                "fingerprint": candidate.fingerprint,
+                "execution_domain": candidate.execution_domain,
+                "execution_conflict_keys": list(candidate.execution_conflict_keys),
+            }
+            for candidate in candidates
+        ],
+    }
+    state.setdefault("launch_waves", []).append(wave)
+    return wave
+
+
 def _phase_blocker_id(failure_class: str, handoff_summary: dict[str, Any] | None) -> str:
     if (
         isinstance(handoff_summary, dict)
@@ -1383,14 +1448,37 @@ def _drain_phase(
             refresh_state=refresh_state,
         )
         candidates = [
-            _add_batch_resource_conflicts(candidate, exec_backend=exec_backend)
+            _add_batch_resource_conflicts(
+                candidate,
+                exec_backend=exec_backend,
+                docker_resource_plan=(
+                    state.get("docker_resource_plan")
+                    if isinstance(state.get("docker_resource_plan"), dict)
+                    else None
+                ),
+            )
             for candidate in candidates
         ]
         if not candidates:
             _print(f"DONE phase={phase.name} cycles={cycle - 1}")
             return
 
+        wave_decision = _record_launch_wave_decision(
+            state,
+            phase_name=phase.name,
+            cycle=cycle,
+            exec_backend=exec_backend,
+            candidates=candidates,
+        )
+        persist_state(batch_dir_path, state)
         _print(f"WAVE phase={phase.name} cycle={cycle} candidates={len(candidates)}")
+        if exec_backend.strip().lower() == "docker":
+            _print(
+                f"WAVE_DOCKER_GUARD phase={phase.name} cycle={cycle} "
+                f"parallel_safe={wave_decision['docker_resource_plan_parallel_safe']} "
+                f"docker_conflict_key_applied="
+                f"{wave_decision['docker_conflict_key_applied']}"
+            )
         queue = list(candidates)
         next_worker_index = 0
         active_conflict_keys: set[str] = set()

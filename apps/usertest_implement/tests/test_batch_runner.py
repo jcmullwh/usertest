@@ -3,6 +3,8 @@
 import json
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -11,10 +13,14 @@ from usertest_implement.batch_failure import classify_run_outcome
 from usertest_implement.batch_runner import (
     BacklogSource,
     BatchCandidate,
+    PhaseConfig,
+    TicketRunResult,
+    WorkerTemplate,
     _add_batch_resource_conflicts,
     _batch_subprocess_env,
     _build_docker_resource_plan,
     _collect_wave_candidates,
+    _drain_phase,
     _pick_launchable_candidate_index,
     _refresh_backlog,
     _write_batch_token_monitoring_artifacts,
@@ -165,8 +171,72 @@ def test_docker_resource_plan_records_pre_resolved_maintenance_image(
     assert plan["maintenance_venv_cache_strategy"] == "per-worker-writable-copy"
     assert plan["pre_resolved_image_ref"] == "usertest-maintenance:" + ("a" * 16)
     assert plan["pre_resolved_metadata_path"].endswith("maintenance_image.json")
+    assert plan["parallel_safe"] is False
+    assert plan["scheduler_guard"]["conflict_key"] == "batch_resource:docker"
     assert "per_ticket_image_resolution" not in [
         reason["reason_id"] for reason in plan["unsafe_reasons"]
+    ]
+    assert [reason["reason_id"] for reason in plan["unsafe_reasons"]] == [
+        "cleanup_on_prepare",
+    ]
+
+
+def test_docker_resource_plan_is_parallel_safe_after_batch_scoped_image_resolution(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    settings_path = _write_run_settings(tmp_path)
+    _write_maintenance_docker_config(tmp_path, cleanup_on_prepare=False)
+
+    plan = _build_docker_resource_plan(
+        repo_root=tmp_path,
+        exec_backend="docker",
+        run_settings_path=settings_path,
+        run_settings_profile="default",
+        repo_input=str(tmp_path),
+        maintenance_image_metadata={
+            "path": str(tmp_path / "batch" / "preflight" / "maintenance_image.json"),
+            "env_hash": "a" * 64,
+            "image_ref": "usertest-maintenance:" + ("a" * 16),
+            "source": "local",
+            "timings": {"image_resolution_seconds": 1.0},
+            "artifacts": {"pull_log": None, "build_log": None},
+        },
+    )
+
+    assert plan is not None
+    assert plan["cleanup_on_prepare"] is False
+    assert plan["pre_resolved_image_available"] is True
+    assert plan["parallel_safe"] is True
+    assert plan["unsafe_reasons"] == []
+    assert plan["scheduler_guard"]["conflict_key"] is None
+    assert plan["scheduler_guard"]["omitted_conflict_key"] == "batch_resource:docker"
+
+
+def test_standard_docker_resource_plan_remains_unsafe_without_batch_scoped_image(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / ".git").mkdir()
+    settings_path = _write_run_settings(tmp_path, exec_docker_profile="standard")
+
+    plan = _build_docker_resource_plan(
+        repo_root=tmp_path,
+        exec_backend="docker",
+        run_settings_path=settings_path,
+        run_settings_profile="default",
+        repo_input=str(tmp_path),
+        maintenance_image_metadata={
+            "path": str(tmp_path / "batch" / "preflight" / "maintenance_image.json"),
+            "image_ref": "usertest-maintenance:" + ("a" * 16),
+        },
+    )
+
+    assert plan is not None
+    assert plan["docker_profile"] == "standard"
+    assert plan["pre_resolved_image_available"] is False
+    assert plan["parallel_safe"] is False
+    assert [reason["reason_id"] for reason in plan["unsafe_reasons"]] == [
+        "per_ticket_image_resolution",
     ]
 
 
@@ -332,6 +402,274 @@ def test_docker_batch_resource_conflict_serializes_ticket_runs(tmp_path: Path) -
         queue,
         active_conflict_keys={"batch_resource:docker"},
     ) is None
+
+
+def test_parallel_safe_docker_resource_plan_omits_only_global_docker_conflict(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / "repo"
+    ticket_path = owner_root / ".agents" / "plans" / "2 - ready" / "ticket.md"
+    candidate = _add_batch_resource_conflicts(
+        BatchCandidate(
+            source_name="src",
+            export_path=tmp_path / "export.json",
+            fingerprint="aaaaaaaaaaaaaaaa",
+            severity="high",
+            title="First",
+            owner_root=owner_root,
+            ticket_path=ticket_path,
+            execution_domain="runner_core",
+            execution_conflict_keys=(
+                "execution_domain:runner_core",
+                "subsystem:verification_broker",
+            ),
+        ),
+        exec_backend="docker",
+        docker_resource_plan={"parallel_safe": True},
+    )
+
+    assert candidate.execution_conflict_keys == (
+        "execution_domain:runner_core",
+        "subsystem:verification_broker",
+    )
+    assert _pick_launchable_candidate_index(
+        [candidate],
+        active_conflict_keys={"subsystem:verification_broker"},
+    ) is None
+
+
+def _candidate_for_launch_wave(tmp_path: Path, fingerprint: str, domain: str) -> BatchCandidate:
+    owner_root = tmp_path / "repo"
+    ticket_path = owner_root / ".agents" / "plans" / "2 - ready" / f"{fingerprint}.md"
+    return BatchCandidate(
+        source_name="src",
+        export_path=tmp_path / "export.json",
+        fingerprint=fingerprint,
+        severity="high",
+        title=f"Ticket {fingerprint}",
+        owner_root=owner_root,
+        ticket_path=ticket_path,
+        execution_domain=domain,
+        execution_conflict_keys=(f"execution_domain:{domain}",),
+    )
+
+
+def test_drain_phase_launches_disjoint_docker_candidates_concurrently_when_safe(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    candidates = [
+        _candidate_for_launch_wave(tmp_path, "aaaaaaaaaaaaaaaa", "runner_core"),
+        _candidate_for_launch_wave(tmp_path, "bbbbbbbbbbbbbbbb", "docs"),
+    ]
+    starts: list[str] = []
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+    both_started = threading.Event()
+
+    def _collect(**_: Any) -> list[BatchCandidate]:
+        return candidates if not starts else []
+
+    def _run_ticket(**kwargs: Any) -> TicketRunResult:
+        nonlocal active, max_active
+        ticket_path = Path(kwargs["ticket_path"])
+        fingerprint = ticket_path.stem
+        run_dir = tmp_path / "runs" / fingerprint
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(run_dir / "verification.json", {"passed": True})
+        _write_json(
+            run_dir / "handoff_summary.json",
+            {"final_status": "success", "pr_created": False, "ci_required": False},
+        )
+        with lock:
+            starts.append(fingerprint)
+            active += 1
+            max_active = max(max_active, active)
+            if len(starts) == 2:
+                both_started.set()
+        both_started.wait(timeout=1.0)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return TicketRunResult(
+            run_dir=run_dir,
+            returncode=0,
+            stdout=str(run_dir),
+            stderr="",
+            timed_out=False,
+            duration_seconds=0.01,
+        )
+
+    monkeypatch.setattr("usertest_implement.batch_runner._collect_wave_candidates", _collect)
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._claim_ticket",
+        lambda *, candidate, repo_root: candidate.ticket_path,
+    )
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._move_ticket_for_review",
+        lambda **_: tmp_path / "review.md",
+    )
+    monkeypatch.setattr("usertest_implement.batch_runner._run_ticket_process", _run_ticket)
+
+    state = build_initial_state(
+        batch_id="20260709T000000Z",
+        batch_commit="abc123",
+        batch_branch="dev",
+        base_ci_run_url=None,
+        workers=[
+            {"worker_index": 1, "agent": "codex", "model": None},
+            {"worker_index": 2, "agent": "codex", "model": None},
+        ],
+        docker_resource_plan={"schema_version": 1, "parallel_safe": True},
+    )
+
+    _drain_phase(
+        phase=PhaseConfig(
+            name="phase",
+            sources=[
+                BacklogSource(
+                    name="src",
+                    runs_dir=tmp_path / "runs" / "src",
+                    target="usertest",
+                )
+            ],
+            severities={"high"},
+        ),
+        repo_root=tmp_path,
+        batch_dir_path=tmp_path / "batch",
+        config={"defaults": {"max_phase_cycles": 2}},
+        state=state,
+        workers=[
+            WorkerTemplate(worker_index=1, agent="codex"),
+            WorkerTemplate(worker_index=2, agent="codex"),
+        ],
+        backlog_python=tmp_path / "python",
+        implement_python=tmp_path / "python",
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        repo_input=str(tmp_path),
+        refresh_state={},
+        exec_backend="docker",
+    )
+
+    assert max_active == 2
+    assert len(state["completed"]) == 2
+    assert state["launch_waves"][0]["docker_resource_plan_parallel_safe"] is True
+    assert state["launch_waves"][0]["docker_conflict_key_applied"] is False
+    assert all(
+        "batch_resource:docker" not in item["execution_conflict_keys"]
+        for item in state["launch_waves"][0]["candidate_conflict_keys"]
+    )
+
+
+def test_drain_phase_serializes_disjoint_docker_candidates_when_plan_is_unsafe(
+    tmp_path: Path,
+    monkeypatch: Any,
+) -> None:
+    candidates = [
+        _candidate_for_launch_wave(tmp_path, "aaaaaaaaaaaaaaaa", "runner_core"),
+        _candidate_for_launch_wave(tmp_path, "bbbbbbbbbbbbbbbb", "docs"),
+    ]
+    starts: list[str] = []
+    active = 0
+    max_active = 0
+    lock = threading.Lock()
+
+    def _collect(**_: Any) -> list[BatchCandidate]:
+        return candidates if len(starts) < 2 else []
+
+    def _run_ticket(**kwargs: Any) -> TicketRunResult:
+        nonlocal active, max_active
+        ticket_path = Path(kwargs["ticket_path"])
+        fingerprint = ticket_path.stem
+        run_dir = tmp_path / "runs" / fingerprint
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(run_dir / "verification.json", {"passed": True})
+        _write_json(
+            run_dir / "handoff_summary.json",
+            {"final_status": "success", "pr_created": False, "ci_required": False},
+        )
+        with lock:
+            starts.append(fingerprint)
+            active += 1
+            max_active = max(max_active, active)
+        time.sleep(0.01)
+        with lock:
+            active -= 1
+        return TicketRunResult(
+            run_dir=run_dir,
+            returncode=0,
+            stdout=str(run_dir),
+            stderr="",
+            timed_out=False,
+            duration_seconds=0.01,
+        )
+
+    monkeypatch.setattr("usertest_implement.batch_runner._collect_wave_candidates", _collect)
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._claim_ticket",
+        lambda *, candidate, repo_root: candidate.ticket_path,
+    )
+    monkeypatch.setattr(
+        "usertest_implement.batch_runner._move_ticket_for_review",
+        lambda **_: tmp_path / "review.md",
+    )
+    monkeypatch.setattr("usertest_implement.batch_runner._run_ticket_process", _run_ticket)
+
+    state = build_initial_state(
+        batch_id="20260709T000000Z",
+        batch_commit="abc123",
+        batch_branch="dev",
+        base_ci_run_url=None,
+        workers=[
+            {"worker_index": 1, "agent": "codex", "model": None},
+            {"worker_index": 2, "agent": "codex", "model": None},
+        ],
+        docker_resource_plan={
+            "schema_version": 1,
+            "parallel_safe": False,
+            "unsafe_reasons": [{"reason_id": "per_ticket_image_resolution"}],
+        },
+    )
+
+    _drain_phase(
+        phase=PhaseConfig(
+            name="phase",
+            sources=[
+                BacklogSource(
+                    name="src",
+                    runs_dir=tmp_path / "runs" / "src",
+                    target="usertest",
+                )
+            ],
+            severities={"high"},
+        ),
+        repo_root=tmp_path,
+        batch_dir_path=tmp_path / "batch",
+        config={"defaults": {"max_phase_cycles": 2}},
+        state=state,
+        workers=[
+            WorkerTemplate(worker_index=1, agent="codex"),
+            WorkerTemplate(worker_index=2, agent="codex"),
+        ],
+        backlog_python=tmp_path / "python",
+        implement_python=tmp_path / "python",
+        settings_path=tmp_path / "settings.yaml",
+        settings_profile="default",
+        repo_input=str(tmp_path),
+        refresh_state={},
+        exec_backend="docker",
+    )
+
+    assert max_active == 1
+    assert len(state["completed"]) == 2
+    assert state["launch_waves"][0]["docker_resource_plan_parallel_safe"] is False
+    assert state["launch_waves"][0]["docker_conflict_key_applied"] is True
+    assert all(
+        "batch_resource:docker" in item["execution_conflict_keys"]
+        for item in state["launch_waves"][0]["candidate_conflict_keys"]
+    )
 
 
 def test_classify_run_outcome_detects_registry_json_failure(tmp_path: Path) -> None:
