@@ -72,10 +72,12 @@ Maintenance install cache (Docker + warm cache):
   batch pass the metadata via `--exec-maintenance-image-metadata` so they reuse the image ref without
   repeating pull/build/tag work.
 - Batch runs record the current Docker serialization audit in `batch_state.json`,
-  `batch_summary.json`, and `docker_resource_plan.json`. Under current defaults it remains
-  `parallel_safe: false` because cleanup/image state still needs separate parallel-safety handling.
-  Warm maintenance venv cache hits use per-worker writable copies, and the selected cache strategy
-  is recorded in maintenance profile artifacts.
+  `batch_summary.json`, and `docker_resource_plan.json`. When the resource plan is
+  `parallel_safe: true`, the scheduler omits only the Docker-wide `batch_resource:docker` conflict
+  key; per-domain and per-subsystem ticket conflict keys still serialize overlapping work. Unsafe
+  Docker plans keep the Docker-wide guard. Each batch launch wave records the safe/unsafe decision
+  and whether the Docker guard was applied. Warm maintenance venv cache hits use per-worker writable
+  copies, and the selected cache strategy is recorded in maintenance profile artifacts.
 
 Docker execution profile:
 
