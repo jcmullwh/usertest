@@ -60,6 +60,32 @@ def _safe_cache_project_id(project_id: str) -> str:
     return cleaned or "project"
 
 
+def _prepare_per_worker_venv_cache_copy(
+    *,
+    run_dir: Path,
+    project_id: str,
+    fingerprint: str,
+    source_venv_dir: Path,
+) -> Path:
+    """Return a writable per-run copy of a shared maintenance venv cache hit.
+
+    Maintenance cache entries live under the warm Docker cache directory and may be reused by
+    multiple ticket workers. Mounting those entries directly as a writable project ``.venv`` lets
+    concurrent containers mutate the same host directory. Instead, each container gets a copy
+    scoped to its run artifacts directory, while scaffold's install-cache code remains pointed at
+    the shared cache root for locked save/update operations.
+    """
+
+    safe_project_id = _safe_cache_project_id(project_id)
+    copy_root = run_dir / "sandbox" / "maintenance_venv_copies"
+    copy_venv_dir = copy_root / safe_project_id / fingerprint / "venv"
+    if copy_venv_dir.exists():
+        shutil.rmtree(copy_venv_dir, ignore_errors=True)
+    copy_venv_dir.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(source_venv_dir, copy_venv_dir, symlinks=True)
+    return copy_venv_dir.resolve()
+
+
 @dataclass(frozen=True)
 class MaintenanceDockerConfig:
     local_image_repo: str
@@ -1139,13 +1165,25 @@ def _prepare_maintenance_profile(
             else None
         )
         mounted_cache_hit = bool(host_venv_dir is not None and host_venv_dir.is_dir())
+        mount_host_path: Path | None = None
+        mount_read_only: bool | None = None
+        project_cache_strategy = (
+            "disabled" if host_cache_root is None else "per-worker-writable-copy"
+        )
         if mounted_cache_hit and host_venv_dir is not None:
             cache_mount_hits += 1
+            mount_host_path = _prepare_per_worker_venv_cache_copy(
+                run_dir=run_dir,
+                project_id=project_id,
+                fingerprint=fingerprint,
+                source_venv_dir=host_venv_dir.resolve(),
+            )
+            mount_read_only = False
             cache_mounts.append(
                 MountSpec(
-                    host_path=host_venv_dir.resolve(),
+                    host_path=mount_host_path,
                     container_path=f"/workspace/{project_path}/.venv",
-                    read_only=False,
+                    read_only=mount_read_only,
                 )
             )
         projects_meta.append(
@@ -1153,7 +1191,13 @@ def _prepare_maintenance_profile(
                 "id": project_id,
                 "path": project_path,
                 "fingerprint": fingerprint,
+                "cache_strategy": project_cache_strategy,
+                "host_venv_dir": (
+                    str(host_venv_dir.resolve()) if host_venv_dir is not None else None
+                ),
                 "mounted_cache_hit": mounted_cache_hit,
+                "mounted_host_path": str(mount_host_path) if mount_host_path is not None else None,
+                "mount_read_only": mount_read_only,
                 "seed_available": bool(maintenance_venv_reuse_enabled),
             }
         )
@@ -1176,6 +1220,8 @@ def _prepare_maintenance_profile(
         maintenance_venv_cache_root=container_cache_root,
         maintenance_venv_seed_root=cfg.seed_root if maintenance_venv_reuse_enabled else None,
     )
+
+    cache_strategy = "per-worker-writable-copy" if host_cache_root is not None else "disabled"
 
     resolution_image_meta = image_resolution.metadata.get("image")
     if not isinstance(resolution_image_meta, dict):
@@ -1219,8 +1265,28 @@ def _prepare_maintenance_profile(
             "artifacts": resolution_artifacts_meta,
         },
         "cache": {
+            "enabled": bool(host_cache_root is not None),
+            "strategy": cache_strategy,
+            "strategy_reason": (
+                "Shared warm-cache .venv hits are copied to a per-run writable directory before "
+                "being mounted into the project workspace, so concurrent workers never receive "
+                "the same host .venv cache path as a writable bind mount."
+                if host_cache_root is not None
+                else (
+                    "Maintenance venv cache is disabled because warm cache or reuse "
+                    "is not enabled."
+                )
+            ),
             "host_cache_dir": str(host_cache_dir) if host_cache_dir is not None else None,
+            "host_cache_root": (
+                str(host_cache_root.resolve()) if host_cache_root is not None else None
+            ),
             "container_cache_root": container_cache_root if host_cache_root is not None else None,
+            "copy_root": (
+                str((run_dir / "sandbox" / "maintenance_venv_copies").resolve())
+                if host_cache_root is not None
+                else None
+            ),
             "seed_root": cfg.seed_root if maintenance_venv_reuse_enabled else None,
             "projects": projects_meta,
         },
@@ -1445,6 +1511,14 @@ def prepare_execution_backend(
             ),
             "maintenance_cache_mount_count": (
                 maintenance_profile.cache_mount_hits if maintenance_profile is not None else 0
+            ),
+            "maintenance_cache_strategy": (
+                cast(dict[str, Any], maintenance_profile.metadata.get("cache", {})).get(
+                    "strategy"
+                )
+                if maintenance_profile is not None
+                and isinstance(maintenance_profile.metadata.get("cache"), dict)
+                else None
             ),
         },
     )

@@ -175,7 +175,8 @@ image profile by default. That profile:
 
 - resolves a maintenance image from `local -> pull -> build`
 - seeds project `.venv` directories inside the image under `/opt/usertest_maint_seed`
-- bind-mounts matching cached `.venv` directories directly into `/workspace/<project>/.venv`
+- copies matching cached `.venv` directories to a per-run writable location and mounts that copy
+  into `/workspace/<project>/.venv`
 
 This profile is intentionally maintenance-only. `usertest` still uses the generic `sandbox_cli`
 path for normal usertest runs against arbitrary targets.

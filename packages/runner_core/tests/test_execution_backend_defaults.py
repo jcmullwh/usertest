@@ -495,6 +495,11 @@ def test_prepare_execution_backend_maintenance_profile_uses_image_ref_and_update
             metadata={
                 "schema_version": 1,
                 "profile": "maintenance",
+                "cache": {
+                    "enabled": True,
+                    "strategy": "per-worker-writable-copy",
+                    "projects": [],
+                },
                 "timings": {
                     "fingerprint_seconds": 0.5,
                     "image_resolution_seconds": 1.5,
@@ -542,6 +547,7 @@ def test_prepare_execution_backend_maintenance_profile_uses_image_ref_and_update
     assert sandbox_meta["docker_profile"] == "maintenance"
     assert sandbox_meta["maintenance_image_source"] == "local"
     assert sandbox_meta["maintenance_cache_mount_count"] == 1
+    assert sandbox_meta["maintenance_cache_strategy"] == "per-worker-writable-copy"
 
 
 def test_prepare_execution_backend_maintenance_profile_rejects_custom_context(
@@ -659,9 +665,142 @@ def test_prepare_maintenance_profile_prefers_local_image_and_plans_cache_mounts(
     assert prep.image_source == "local"
     assert prep.cache_mount_hits == 1
     assert prep.cache_mounts[0].container_path == "/workspace/packages/demo/.venv"
+    assert prep.cache_mounts[0].read_only is False
+    assert prep.cache_mounts[0].host_path != mounted_venv.resolve()
+    assert prep.cache_mounts[0].host_path.is_relative_to(
+        (run_dir / "sandbox" / "maintenance_venv_copies").resolve()
+    )
+    assert prep.cache_mounts[0].host_path.exists()
     assert prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ENABLED"] == "1"
     assert prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ROOT"] == "/cache/usertest_maint_venvs"
     assert prep.env_overrides["USERTEST_MAINT_VENV_SEED_ROOT"] == "/opt/usertest_maint_seed"
+    assert prep.metadata["cache"]["enabled"] is True
+    assert prep.metadata["cache"]["strategy"] == "per-worker-writable-copy"
+    project_meta = prep.metadata["cache"]["projects"][0]
+    assert project_meta["cache_strategy"] == "per-worker-writable-copy"
+    assert project_meta["host_venv_dir"] == str(mounted_venv.resolve())
+    assert project_meta["mounted_host_path"] == str(prep.cache_mounts[0].host_path)
+    assert project_meta["mount_read_only"] is False
+
+    cold_run_dir = tmp_path / "run-cold"
+    cold_run_dir.mkdir(parents=True, exist_ok=True)
+    cold_prep = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=cold_run_dir,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="cold",
+        cache_dir=None,
+        maintenance_venv_reuse_enabled=False,
+        timeout_seconds=30.0,
+    )
+    assert cold_prep.cache_mounts == []
+    assert cold_prep.env_overrides["USERTEST_MAINT_VENV_CACHE_ENABLED"] == "0"
+    assert cold_prep.metadata["cache"]["enabled"] is False
+    assert cold_prep.metadata["cache"]["strategy"] == "disabled"
+    assert cold_prep.metadata["cache"]["projects"][0]["cache_strategy"] == "disabled"
+
+
+def test_prepare_maintenance_profile_concurrent_workers_get_distinct_writable_venv_mounts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two worker contexts must not writable-mount the same shared cache hit as .venv."""
+
+    repo_root = tmp_path / "repo"
+    workspace_dir = tmp_path / "workspace"
+    cache_dir = tmp_path / "cache"
+    run_dir_1 = tmp_path / "run-1"
+    run_dir_2 = tmp_path / "run-2"
+    run_dir_1.mkdir(parents=True, exist_ok=True)
+    run_dir_2.mkdir(parents=True, exist_ok=True)
+    workspace_dir.mkdir(parents=True, exist_ok=True)
+
+    import runner_core.execution_backend as backend_mod
+
+    monkeypatch.setattr(
+        backend_mod,
+        "_load_maintenance_docker_config",
+        lambda repo_root: backend_mod.MaintenanceDockerConfig(
+            local_image_repo="usertest-maintenance",
+            published_image_repo="ghcr.io/jcmullwh/usertest-maintenance",
+            pull_policy="if_missing",
+            seed_root="/opt/usertest_maint_seed",
+            cache_root_subdir="usertest_maint_venvs",
+            publish_branches=("dev", "main"),
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "resolve_maintenance_docker_image",
+        lambda **_kwargs: backend_mod.MaintenanceImageResolution(
+            image_ref="usertest-maintenance:abc123",
+            env_hash="a" * 64,
+            image_source="local",
+            image_resolution_seconds=0.0,
+            context_metadata={"python_major_minor": "3.11", "pdm_version": "2.26.2"},
+            metadata={"image": {"source": "local"}},
+        ),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_compute_install_cache_fingerprints",
+        lambda **_kwargs: {
+            "projects": [
+                {"id": "demo", "path": "packages/demo", "fingerprint": "f" * 64},
+            ]
+        },
+    )
+
+    shared_venv = cache_dir / "usertest_maint_venvs" / "demo" / ("f" * 64) / "venv"
+    shared_venv.mkdir(parents=True, exist_ok=True)
+    (shared_venv / "marker.txt").write_text("cached\n", encoding="utf-8")
+
+    request = RunRequest(
+        repo=".",
+        agent="codex",
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+    )
+
+    prep_1 = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=run_dir_1,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        maintenance_venv_reuse_enabled=True,
+        timeout_seconds=None,
+    )
+    prep_2 = backend_mod._prepare_maintenance_profile(
+        repo_root=repo_root,
+        run_dir=run_dir_2,
+        workspace_dir=workspace_dir,
+        request=request,
+        cache_mode="warm",
+        cache_dir=cache_dir,
+        maintenance_venv_reuse_enabled=True,
+        timeout_seconds=None,
+    )
+
+    mount_1 = prep_1.cache_mounts[0]
+    mount_2 = prep_2.cache_mounts[0]
+    assert mount_1.container_path == mount_2.container_path == "/workspace/packages/demo/.venv"
+    assert mount_1.read_only is False
+    assert mount_2.read_only is False
+    assert mount_1.host_path != mount_2.host_path
+    assert mount_1.host_path != shared_venv.resolve()
+    assert mount_2.host_path != shared_venv.resolve()
+    assert mount_1.host_path.is_relative_to(
+        (run_dir_1 / "sandbox" / "maintenance_venv_copies").resolve()
+    )
+    assert mount_2.host_path.is_relative_to(
+        (run_dir_2 / "sandbox" / "maintenance_venv_copies").resolve()
+    )
+    assert (mount_1.host_path / "marker.txt").read_text(encoding="utf-8") == "cached\n"
+    assert (mount_2.host_path / "marker.txt").read_text(encoding="utf-8") == "cached\n"
+    assert prep_1.metadata["cache"]["strategy"] == "per-worker-writable-copy"
+    assert prep_2.metadata["cache"]["strategy"] == "per-worker-writable-copy"
 
 
 def test_prepare_maintenance_profile_uses_branch_alias_as_build_cache_when_hash_missing(
