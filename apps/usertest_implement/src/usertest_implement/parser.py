@@ -10,6 +10,7 @@ from usertest_implement.commands.maintenance_images import (
     _cmd_maintenance_images_list,
 )
 from usertest_implement.commands.reports import _cmd_reports_summarize
+from usertest_implement.commands.resume import _cmd_resume
 from usertest_implement.commands.review import (
     _cmd_review_merge,
     _cmd_review_run,
@@ -385,6 +386,112 @@ def _add_review_execution_args(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def _add_resume_execution_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--repo", help="Fallback repo input when the recorded workspace is gone.")
+    parser.add_argument("--ref", help="Override recorded branch/ref for fallback checkout.")
+    parser.add_argument("--agent", choices=["claude", "codex", "gemini"], default="codex")
+    parser.add_argument("--model", help="Optional model override.")
+    parser.add_argument("--policy", default="write")
+    parser.add_argument("--persona-id", dest="persona_id", default=_DEFAULT_PERSONA_ID)
+    parser.add_argument("--mission-id", dest="mission_id", default=_DEFAULT_MISSION_ID)
+    parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--agent-config-override",
+        action="append",
+        default=[],
+        help="Repeatable agent config override strings.",
+    )
+
+    exec_backend_group = parser.add_mutually_exclusive_group()
+    exec_backend_group.add_argument(
+        "--exec-backend",
+        choices=["docker", "local"],
+        default="docker",
+        help="Execution backend (default: docker).",
+    )
+    exec_backend_group.add_argument(
+        "--no-docker",
+        dest="exec_backend",
+        action="store_const",
+        const="local",
+        help="Opt out of Docker sandboxing (exec_backend=local).",
+    )
+    run_auth_group = parser.add_mutually_exclusive_group()
+    run_auth_group.add_argument(
+        "--exec-use-host-agent-login",
+        dest="exec_use_host_agent_login",
+        action="store_true",
+        default=True,
+    )
+    run_auth_group.add_argument(
+        "--exec-use-api-key-auth",
+        dest="exec_use_host_agent_login",
+        action="store_false",
+    )
+    parser.add_argument("--exec-use-target-sandbox-cli-install", action="store_true", default=False)
+    parser.add_argument(
+        "--exec-docker-profile",
+        choices=["standard", "maintenance"],
+        help="Docker execution profile.",
+    )
+    parser.add_argument(
+        "--exec-keep-container",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Keep Docker container after the run (default: enabled).",
+    )
+    parser.add_argument(
+        "--exec-cache",
+        choices=["cold", "warm"],
+        default="warm",
+        help="Docker sandbox cache mode (default: warm).",
+    )
+    parser.add_argument(
+        "--exec-cache-dir",
+        type=Path,
+        help="Host directory mounted at /cache when --exec-cache warm.",
+    )
+    parser.add_argument(
+        "--maintenance-venv-cache",
+        dest="maintenance_venv_cache",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable Docker maintenance venv cache reuse (default: enabled).",
+    )
+    parser.add_argument(
+        "--exec-maintenance-image-metadata",
+        dest="exec_maintenance_image_metadata_path",
+        type=Path,
+        help="Pre-resolved maintenance Docker image metadata JSON produced by batch preflight.",
+    )
+    parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--verify-command",
+        action="append",
+        dest="verification_commands",
+        default=[],
+        help="Override verification commands for the resumed run (repeatable).",
+    )
+    parser.add_argument(
+        "--verify-timeout-seconds",
+        dest="verification_timeout_seconds",
+        type=float,
+        default=None,
+        help="Optional per-command timeout for verification commands.",
+    )
+    parser.add_argument(
+        "--verify-reuse",
+        choices=["auto", "off"],
+        default="auto",
+        help="Reuse runner-owned verification when available (default: auto).",
+    )
+    parser.add_argument(
+        "--remote-name",
+        default="origin",
+        help="Remote name used to infer fallback repo URL from owner root (default: origin).",
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="usertest-implement")
     parser.add_argument("--repo-root", type=Path, help="Path to the usertest runner repo root.")
@@ -409,6 +516,24 @@ def build_parser() -> argparse.ArgumentParser:
     _add_run_execution_args(run_p)
 
     run_p.set_defaults(func=_cmd_run)
+
+    resume_p = sub.add_parser(
+        "resume",
+        help="Resume a verification-failed implementation run from structured artifacts.",
+    )
+    resume_group = resume_p.add_mutually_exclusive_group(required=True)
+    resume_group.add_argument(
+        "--run-dir",
+        type=Path,
+        help="Original implementation run directory containing ticket_resume_state.json.",
+    )
+    resume_group.add_argument(
+        "--resume-state",
+        type=Path,
+        help="Path to the original ticket_resume_state.json.",
+    )
+    _add_resume_execution_args(resume_p)
+    resume_p.set_defaults(func=_cmd_resume)
 
     review_p = sub.add_parser("review", help="Review and merge PR-backed implementation tickets.")
     review_sub = review_p.add_subparsers(dest="review_cmd", required=True)

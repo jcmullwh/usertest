@@ -10,6 +10,7 @@ RESUME_STATE_ARTIFACT_NAME = "ticket_resume_state.json"
 
 LIFECYCLE_AGENT_FAILED = "agent_failed"
 LIFECYCLE_VERIFICATION_FAILED = "verification_failed"
+LIFECYCLE_VERIFICATION_FAILED_RESUME_READY = "verification_failed_resume_ready"
 LIFECYCLE_PUSH_FAILED = "push_failed"
 LIFECYCLE_CI_FAILED = "ci_failed"
 LIFECYCLE_PR_CREATION_FAILED = "pr_creation_failed"
@@ -209,8 +210,8 @@ def _classify_resume_state(
     if isinstance(verification, dict) and verification.get("passed") is False:
         command = _first_failing_verification_command(verification)
         if command is not None:
-            return LIFECYCLE_VERIFICATION_FAILED, f"Verification failed: {command}"
-        return LIFECYCLE_VERIFICATION_FAILED, "Verification failed."
+            return LIFECYCLE_VERIFICATION_FAILED_RESUME_READY, f"Verification failed: {command}"
+        return LIFECYCLE_VERIFICATION_FAILED_RESUME_READY, "Verification failed."
 
     if isinstance(push_ref, dict) and push_ref.get("error"):
         return LIFECYCLE_PUSH_FAILED, f"Push failed: {push_ref.get('error')}"

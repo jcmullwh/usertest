@@ -44,6 +44,13 @@ Verification gate:
 - `runner_core` may run follow-up attempts automatically when verification fails; see `agent_attempts.json`
   for the attempt sequence, `verification.json` for the selected verification result, and
   `verification_reuse.json` for the reuse/fallback decision log.
+- A run whose `ticket_resume_state.json` is `verification_failed_resume_ready` can be re-entered
+  without replaying the original full ticket prompt:
+  `usertest-implement resume --run-dir <run_dir>`. The resume command builds a focused prompt from
+  `verification.json`, `verification_reuse.json`, `agent_attempts.json`, `workspace_ref.json`,
+  `ticket_ref.json`, and any prior report output. It uses the same kept workspace when available;
+  otherwise it checks out the recorded branch from the inferred or explicitly supplied repo
+  (`--repo`/`--ref`).
 
 Maintenance install cache (Docker + warm cache):
 

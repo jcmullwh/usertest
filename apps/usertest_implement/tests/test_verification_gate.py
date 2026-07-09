@@ -97,12 +97,12 @@ def test_verification_failure_blocks_commit_and_returns_nonzero(
     assert (run_dir / "ticket_ref.json").exists()
     assert (run_dir / "timing.json").exists()
     resume_state = json.loads((run_dir / "ticket_resume_state.json").read_text(encoding="utf-8"))
-    assert resume_state["lifecycle_state"] == "verification_failed"
+    assert resume_state["lifecycle_state"] == "verification_failed_resume_ready"
     assert resume_state["blocking_reason"] == "Verification failed: echo nope"
     ledger = load_ledger(ledger_path)
     entry = ledger["actions"]["fp"]
     assert entry["last_resume_state_path"] == str(run_dir / "ticket_resume_state.json")
-    assert entry["last_resume_lifecycle_state"] == "verification_failed"
+    assert entry["last_resume_lifecycle_state"] == "verification_failed_resume_ready"
 
     captured = capsys.readouterr()
     assert captured.out.strip().splitlines()[-1] == str(run_dir)

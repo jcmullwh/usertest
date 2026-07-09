@@ -11,7 +11,7 @@ import pytest
 
 from runner_core.pathing import slugify
 from runner_core.prompt import TemplateSubstitutionError, build_prompt_from_template
-from runner_core.target_acquire import acquire_target
+from runner_core.target_acquire import acquire_existing_target, acquire_target
 
 
 def test_slugify() -> None:
@@ -78,6 +78,59 @@ def test_acquire_target_copy_ignores_generated_dirs(tmp_path: Path) -> None:
         assert (workspace / "src" / "runs" / "keep2.txt").exists()
     finally:
         shutil.rmtree(acquired.workspace_dir, ignore_errors=True)
+
+
+def test_acquire_existing_target_reuses_workspace_without_copying(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(
+        ["git", "-C", str(workspace), "init"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "config", "user.email", "usertest@local"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "config", "user.name", "usertest"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (workspace / "README.md").write_text("# hi\n", encoding="utf-8")
+    subprocess.run(
+        ["git", "-C", str(workspace), "add", "-A"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "commit", "-m", "init"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["git", "-C", str(workspace), "checkout", "-b", "resume-branch"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    acquired = acquire_existing_target(
+        repo=str(workspace),
+        workspace_dir=workspace,
+        ref="resume-branch",
+    )
+
+    assert acquired.workspace_dir == workspace.resolve()
+    assert acquired.mode == "existing"
+    assert acquired.ref == "resume-branch"
+    assert acquired.commit_sha
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows-only long path handling")

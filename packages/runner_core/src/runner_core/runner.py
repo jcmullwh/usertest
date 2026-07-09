@@ -165,7 +165,7 @@ from runner_core.stderr_diagnostics import (
 from runner_core.stderr_diagnostics import (
     _sanitize_agent_stderr_text as _sanitize_agent_stderr_text,
 )
-from runner_core.target_acquire import acquire_target
+from runner_core.target_acquire import acquire_existing_target, acquire_target
 from runner_core.verification_broker import (
     VerificationBrokerAttempt,
     VerificationBrokerContract,
@@ -245,6 +245,7 @@ class RunRequest:
     agent_rate_limit_backoff_seconds: float = 1.0
     agent_rate_limit_backoff_multiplier: float = 2.0
     agent_followup_attempts: int = 2
+    resume_workspace_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -3448,11 +3449,20 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
     workspace_id = f"{target_slug}_{timestamp}_{request.agent}_{request.seed}"
     try:
         preferred_workspace_dir = config.runs_dir / "_workspaces" / workspace_id
-        acquired = acquire_target(
-            repo=request.repo,
-            dest_dir=preferred_workspace_dir,
-            ref=request.ref,
-        )
+        resume_workspace_dir = request.resume_workspace_dir
+        if resume_workspace_dir is not None:
+            acquired = acquire_existing_target(
+                repo=request.repo,
+                workspace_dir=resume_workspace_dir,
+                ref=request.ref,
+            )
+        else:
+            acquired = acquire_target(
+                repo=request.repo,
+                dest_dir=preferred_workspace_dir,
+                ref=request.ref,
+            )
+        using_existing_workspace = acquired.mode == "existing"
 
         _write_json(
             run_dir / "workspace_ref.json",
@@ -3461,8 +3471,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 "workspace_id": workspace_id,
                 "workspace_dir": str(acquired.workspace_dir),
                 "keep_workspace_requested": bool(request.keep_workspace),
-                "will_cleanup_workspace": not (
-                    request.keep_workspace or request.exec_keep_container
+                "will_cleanup_workspace": (
+                    not using_existing_workspace
+                    and not (request.keep_workspace or request.exec_keep_container)
+                ),
+                "resume_workspace_requested": (
+                    str(resume_workspace_dir) if resume_workspace_dir is not None else None
                 ),
             },
         )
@@ -7372,6 +7386,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         cleanup_seconds: float | None = None
         if (
             acquired is not None
+            and acquired.mode != "existing"
             and not (request.keep_workspace or request.exec_keep_container)
             and acquired.workspace_dir.exists()
         ):
