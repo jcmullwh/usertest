@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import yaml
 from normalized_events import iter_events_jsonl
 
 import runner_core.runner as runner_mod
@@ -434,6 +435,10 @@ def test_delegation_capability_resolver_available_unavailable_unknown() -> None:
     ).to_dict()
     assert available["state"] == "available"
     assert available["available_under_policy"] is True
+    assert available["policy_exposes_delegation"] is True
+    assert available["cli_supports_delegation"] is True
+    assert available["policy_status"] == "exposed"
+    assert available["cli_support_status"] == "supported"
     assert available["delegation_tool_names"] == ["Task"]
     assert available["cli_version"] == "claude 1.2.3"
     assert available["evidence_source"] == "agent_config.delegation_tools"
@@ -446,6 +451,10 @@ def test_delegation_capability_resolver_available_unavailable_unknown() -> None:
     ).to_dict()
     assert unavailable["state"] == "unavailable"
     assert unavailable["available_under_policy"] is False
+    assert unavailable["policy_exposes_delegation"] is False
+    assert unavailable["cli_supports_delegation"] is True
+    assert unavailable["policy_status"] == "not_exposed"
+    assert unavailable["cli_support_status"] == "supported"
     assert unavailable["delegation_tool_names"] == ["delegate"]
     assert unavailable["evidence_source"] == "agent_config.delegation.tools"
 
@@ -457,6 +466,8 @@ def test_delegation_capability_resolver_available_unavailable_unknown() -> None:
     ).to_dict()
     assert unknown["state"] == "unknown"
     assert unknown["available_under_policy"] is None
+    assert unknown["policy_status"] == "unknown_no_contract"
+    assert unknown["cli_support_status"] == "unknown_no_contract"
     assert unknown["delegation_tool_names"] == []
     assert unknown["confidence"] == "low"
     assert "not guessed" in unknown["reason"]
@@ -472,3 +483,73 @@ def test_delegation_capability_codex_contract_available_without_tool_allowlist()
     assert capability["state"] == "available"
     assert capability["configured_allowed_tools"] is None
     assert capability["available_under_policy"] is True
+
+
+def test_delegation_capability_distinguishes_policy_block_from_cli_version_block() -> None:
+    policy_blocked = _resolve_delegation_capability(
+        agent="claude",
+        agent_cfg={
+            "delegation": {
+                "tools": ["Agent"],
+                "confirmed_cli_versions": ["2.1.197 (Claude Code)"],
+            }
+        },
+        policy_cfg={"claude": {"allowed_tools": ["Read", "Edit", "Bash"]}},
+        cli_version_probe={"ok": True, "stdout_excerpt": "2.1.197 (Claude Code)"},
+    ).to_dict()
+    assert policy_blocked["state"] == "unavailable"
+    assert policy_blocked["policy_exposes_delegation"] is False
+    assert policy_blocked["cli_supports_delegation"] is True
+    assert policy_blocked["policy_status"] == "not_exposed"
+    assert policy_blocked["cli_support_status"] == "supported"
+    assert "policy allowed_tools does not expose" in policy_blocked["reason"]
+
+    cli_blocked = _resolve_delegation_capability(
+        agent="gemini",
+        agent_cfg={
+            "delegation": {
+                "tools": ["invoke_agent"],
+                "confirmed_cli_versions": ["0.50.0"],
+            }
+        },
+        policy_cfg={"gemini": {"allowed_tools": ["read_file", "invoke_agent"]}},
+        cli_version_probe={"ok": True, "stdout_excerpt": "0.51.0"},
+    ).to_dict()
+    assert cli_blocked["state"] == "unavailable"
+    assert cli_blocked["policy_exposes_delegation"] is True
+    assert cli_blocked["cli_supports_delegation"] is False
+    assert cli_blocked["policy_status"] == "exposed"
+    assert cli_blocked["cli_support_status"] == "unsupported_cli_version"
+    assert "does not match the confirmed delegation versions" in cli_blocked["reason"]
+
+
+def test_repo_write_policy_keeps_write_tools_and_adds_confirmed_delegation_tools() -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    policies = yaml.safe_load((repo_root / "configs" / "policies.yaml").read_text())["policies"]
+    agents = yaml.safe_load((repo_root / "configs" / "agents.yaml").read_text())["agents"]
+
+    write = policies["write"]
+    claude_tools = write["claude"]["allowed_tools"]
+    gemini_tools = write["gemini"]["allowed_tools"]
+
+    assert write["claude"]["allow_edits"] is True
+    assert {"Read", "Edit", "Bash", "Grep", "Glob"}.issubset(set(claude_tools))
+    assert agents["claude"]["delegation"]["tools"] == ["Agent"]
+    assert "Agent" in claude_tools
+
+    assert write["gemini"]["allow_edits"] is True
+    assert {
+        "read_file",
+        "search_file_content",
+        "write_file",
+        "replace",
+        "write_todos",
+        "run_shell_command",
+    }.issubset(set(gemini_tools))
+    assert agents["gemini"]["delegation"]["tools"] == ["invoke_agent"]
+    assert "invoke_agent" in gemini_tools
+
+    for policy_name in ("safe", "inspect"):
+        policy = policies[policy_name]
+        assert "Agent" not in policy["claude"]["allowed_tools"]
+        assert "invoke_agent" not in policy["gemini"]["allowed_tools"]
