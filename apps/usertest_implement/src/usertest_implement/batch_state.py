@@ -50,6 +50,10 @@ def summary_path(batch_dir_path: Path) -> Path:
     return batch_dir_path / "batch_summary.json"
 
 
+def docker_resource_plan_path(batch_dir_path: Path) -> Path:
+    return batch_dir_path / "docker_resource_plan.json"
+
+
 def load_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
@@ -78,8 +82,9 @@ def build_initial_state(
     batch_branch: str,
     base_ci_run_url: str | None,
     workers: list[dict[str, Any]],
+    docker_resource_plan: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    state = {
         "schema_version": 1,
         "batch_id": batch_id,
         "batch_commit": batch_commit,
@@ -95,11 +100,17 @@ def build_initial_state(
         "completed": [],
         "failed": [],
     }
+    if docker_resource_plan is not None:
+        state["docker_resource_plan"] = docker_resource_plan
+    return state
 
 
 def persist_state(batch_dir_path: Path, state: dict[str, Any]) -> None:
     state["updated_utc"] = utc_now_z()
     write_json(state_path(batch_dir_path), state)
+    docker_resource_plan = state.get("docker_resource_plan")
+    if isinstance(docker_resource_plan, dict):
+        write_json(docker_resource_plan_path(batch_dir_path), docker_resource_plan)
     write_json(
         blockers_path(batch_dir_path),
         {
@@ -109,16 +120,16 @@ def persist_state(batch_dir_path: Path, state: dict[str, Any]) -> None:
             "global_blockers": state.get("global_blockers", []),
         },
     )
-    write_json(
-        summary_path(batch_dir_path),
-        {
-            "schema_version": 1,
-            "batch_id": state.get("batch_id"),
-            "status": state.get("status"),
-            "phase": state.get("phase"),
-            "completed_count": len(state.get("completed", [])),
-            "failed_count": len(state.get("failed", [])),
-            "global_blocker_count": len(state.get("global_blockers", [])),
-            "generated_at": utc_now_z(),
-        },
-    )
+    summary = {
+        "schema_version": 1,
+        "batch_id": state.get("batch_id"),
+        "status": state.get("status"),
+        "phase": state.get("phase"),
+        "completed_count": len(state.get("completed", [])),
+        "failed_count": len(state.get("failed", [])),
+        "global_blocker_count": len(state.get("global_blockers", [])),
+        "generated_at": utc_now_z(),
+    }
+    if isinstance(docker_resource_plan, dict):
+        summary["docker_resource_plan"] = docker_resource_plan
+    write_json(summary_path(batch_dir_path), summary)
