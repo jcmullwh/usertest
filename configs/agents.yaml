@@ -39,12 +39,12 @@ agents:
     raw_events_format: jsonl
     output_format: stream-json
     notes: "Implemented (headless `claude -p`)."
-    # Delegation capability contract confirmed against Claude Code 2.1.197.
+    # Delegation capability contract confirmed against Claude Code 2.1.205.
     # Guard the version so a changed CLI marks delegation unavailable instead of
     # silently assuming the tool name is still valid.
     delegation:
       tools: ["Agent"]
-      confirmed_cli_versions: ["2.1.197 (Claude Code)"]
+      confirmed_cli_versions: ["2.1.205 (Claude Code)"]
     sandbox_cli_install:
       # Claude Code is commonly installed via npm; keep deps minimal.
       apt: [nodejs]

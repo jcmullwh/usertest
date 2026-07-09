@@ -491,11 +491,11 @@ def test_delegation_capability_distinguishes_policy_block_from_cli_version_block
         agent_cfg={
             "delegation": {
                 "tools": ["Agent"],
-                "confirmed_cli_versions": ["2.1.197 (Claude Code)"],
+                "confirmed_cli_versions": ["2.1.205 (Claude Code)"],
             }
         },
         policy_cfg={"claude": {"allowed_tools": ["Read", "Edit", "Bash"]}},
-        cli_version_probe={"ok": True, "stdout_excerpt": "2.1.197 (Claude Code)"},
+        cli_version_probe={"ok": True, "stdout_excerpt": "2.1.205 (Claude Code)"},
     ).to_dict()
     assert policy_blocked["state"] == "unavailable"
     assert policy_blocked["policy_exposes_delegation"] is False
