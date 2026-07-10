@@ -30,6 +30,12 @@ _SOURCE_STRENGTH: dict[str, float] = {
     "agent_stderr_artifact": 0.60,
     "agent_last_message_artifact": 0.55,
     "confusion_point": 0.70,
+    "report_outcome": 0.90,
+    "task_step_observation": 0.80,
+    "task_attempt_observation": 0.80,
+    "verification_observation": 0.85,
+    "boundary_observation": 0.75,
+    "batch_result_failure": 0.90,
     "suggested_change": 0.65,
     "confidence_missing": 0.60,
 }

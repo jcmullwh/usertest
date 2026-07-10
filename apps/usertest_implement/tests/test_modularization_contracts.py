@@ -100,10 +100,11 @@ def test_extracted_modules_do_not_import_cli_facade(module_relpath: str) -> None
         (
             ["--help"],
             [
-                "{run,resume,review,maintenance-images,reports,tickets,batch}",
+                    "{run,resume,review,outcome,maintenance-images,reports,tickets,batch}",
                 "Run one ticket implementation.",
                 "Resume a verification-failed implementation run from",
-                "Review and merge PR-backed implementation tickets.",
+                    "Review and merge PR-backed implementation tickets.",
+                    "Advance evidence-backed implementation outcomes",
                 "Inspect and prune local maintenance-image tags.",
                 "Local ticket queue helpers",
                 "Run and inspect maintenance implementation batches.",
@@ -128,8 +129,15 @@ def test_extracted_modules_do_not_import_cli_facade(module_relpath: str) -> None
                 "Merge a reviewed PR when review + CI are green.",
             ],
         ),
-        (
-            ["tickets", "--help"],
+            (
+                ["outcome", "--help"],
+                [
+                    "{run-role,advance}",
+                    "Atomically advance the outcome embedded in a completed",
+                ],
+            ),
+            (
+                ["tickets", "--help"],
             [
                 "{list,next,run-next,move,discard}",
                 "List tickets in .agents/plans.",

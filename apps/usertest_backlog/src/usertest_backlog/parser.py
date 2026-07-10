@@ -184,6 +184,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional match for target_ref.repo_input (path or git URL).",
     )
     reports_backlog_p.add_argument(
+        "--research-ref",
+        help=(
+            "Explicit source-of-truth Git ref for stage-3 acquisition. Defaults to "
+            "configs/backlog_research.yaml; research is blocked when neither is available."
+        ),
+    )
+    reports_backlog_p.add_argument(
         "--runs-dir",
         type=Path,
         help="Runs directory (defaults to <repo_root>/runs/usertest).",
@@ -315,7 +322,19 @@ def build_parser() -> argparse.ArgumentParser:
     reports_backlog_p.add_argument(
         "--dry-run",
         action="store_true",
-        help="Only extract/write atoms and prompts; skip LLM mining.",
+        help=(
+            "Run offline without agents: emit deterministic stages 1-2, a blocked stage-3 "
+            "research proof, and no stage 4-6 results."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--shadow",
+        action="store_true",
+        help=(
+            "Run the complete six-stage pipeline without exporting tickets and record "
+            "depth invariants for the configured consecutive-cycle export gate. Cannot be "
+            "combined with --dry-run."
+        ),
     )
     reports_backlog_p.add_argument(
         "--labelers",
@@ -636,7 +655,7 @@ def build_parser() -> argparse.ArgumentParser:
     reports_export_tickets_p = reports_sub.add_parser(
         "export-tickets",
         help=(
-            "Export staged backlog items as external ticket templates "
+            "Write staged ticket export artifacts and synchronize configured local plan files "
             "(with stage gates + action ledger)."
         ),
     )
@@ -910,8 +929,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     return parser
-
-
 
 
 __all__ = ["build_parser"]

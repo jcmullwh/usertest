@@ -1,7 +1,16 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from backlog_core import assess_research_readiness
+
 from usertest_backlog.shared import *
+from usertest_backlog.workflows.depth_contracts import (
+    assess_repo_grounding,
+    parse_optioning_response,
+    read_only_stage_tools,
+    read_repo_revision,
+    stage_include_directories,
+)
 
 
 def _render_solution_options_markdown(
@@ -10,11 +19,13 @@ def _render_solution_options_markdown(
     problem_records_by_id: dict[str, dict[str, Any]],
     family_order: list[str],
     family_labels_by_id: dict[str, str],
+    optioning_outcomes_by_id: dict[str, dict[str, Any]] | None = None,
     title: str = "Solution Options",
 ) -> str:
     """Render stage-4 solution options as a human-readable Markdown document."""
     lines: list[str] = [f"# {title}\n"]
-    if not options:
+    outcomes = optioning_outcomes_by_id or {}
+    if not options and not outcomes:
         lines.append("_No solution options produced._\n")
         return "\n".join(lines)
 
@@ -25,26 +36,38 @@ def _render_solution_options_markdown(
             continue
         by_problem.setdefault(pid.strip(), []).append(opt)
 
-    for pid in sorted(by_problem):
+    family_rank = {family_id: index for index, family_id in enumerate(family_order)}
+    for pid in sorted(set(by_problem) | set(outcomes)):
         rec = problem_records_by_id.get(pid) or {}
         rec_title = rec.get("title") or pid
         lines.append(f"## {rec_title}")
         lines.append(f"**Problem ID**: `{pid}`\n")
 
-        opts = by_problem[pid]
-        by_family: dict[str, dict[str, Any]] = {}
-        for opt in opts:
-            fid = opt.get("family_id")
-            if isinstance(fid, str) and fid.strip() and fid.strip() not in by_family:
-                by_family[fid.strip()] = opt
+        outcome = outcomes.get(pid) or {}
+        outcome_status = outcome.get("optioning_status")
+        if outcome_status:
+            lines.append(f"- Optioning status: `{outcome_status}`")
+        outcome_rationale = outcome.get("decision_rationale")
+        if isinstance(outcome_rationale, str) and outcome_rationale.strip():
+            lines.append(f"- Decision rationale: {outcome_rationale.strip()}")
+        if outcome_status:
+            lines.append("")
 
-        for fid in family_order or sorted(by_family):
-            opt = by_family.get(fid)
+        opts = sorted(
+            by_problem.get(pid, []),
+            key=lambda item: (
+                family_rank.get(str(item.get("family_id") or ""), len(family_rank)),
+                str(item.get("option_id") or ""),
+            ),
+        )
+        if not opts:
+            lines.append("_No evidence-backed option advanced._\n")
+            continue
+
+        for opt in opts:
+            fid = str(opt.get("family_id") or "unknown")
             label = family_labels_by_id.get(fid, fid)
             lines.append(f"### {label} (`{fid}`)")
-            if opt is None:
-                lines.append("_Missing option for this family._\n")
-                continue
 
             oid = opt.get("option_id") or "(no option_id)"
             lines.append(f"- Option ID: `{oid}`")
@@ -66,6 +89,17 @@ def _render_solution_options_markdown(
             rationale = opt.get("rationale") or ""
             if rationale:
                 lines.append(f"- Rationale: {rationale}")
+            coverage = opt.get("causal_coverage")
+            if isinstance(coverage, dict):
+                mechanism = coverage.get("mechanism_addressed")
+                if mechanism:
+                    lines.append(f"- Mechanism addressed: {mechanism}")
+                residual = coverage.get("residual_recurrence_paths")
+                if isinstance(residual, list) and residual:
+                    lines.append("- Residual recurrence paths: " + "; ".join(map(str, residual)))
+            scope = opt.get("scope_evidence")
+            if isinstance(scope, dict) and scope.get("scope_level"):
+                lines.append(f"- Scope evidence: `{scope.get('scope_level')}`")
             warn = opt.get("_parse_warning")
             if isinstance(warn, str) and warn.strip():
                 lines.append(f"> ⚠ parse warning: {warn.strip()}")
@@ -79,6 +113,7 @@ def _render_solution_options_markdown(
 def _run_solution_optioning_stage(
     *,
     repo_root: Path,
+    target_repo_roots_by_problem: dict[str, Path] | None = None,
     atoms: list[dict[str, Any]],
     problem_records: list[dict[str, Any]],
     priority_decisions: list[dict[str, Any]],
@@ -94,7 +129,7 @@ def _run_solution_optioning_stage(
     breadth_profile: str,
     stage_guidance_text: str,
 ) -> dict[str, Any]:
-    """Run stage 4 solution optioning and write the stage artifacts."""
+    """Run stage 4 using orchestrator prompts and per-problem target workspaces."""
     import json as _json
 
     stage = "solution_optioning"
@@ -103,7 +138,9 @@ def _run_solution_optioning_stage(
 
     taxonomy = pipeline_manifest.load_taxonomy()
     families_raw = taxonomy.get("solution_families")
-    families = [f for f in families_raw if isinstance(f, dict)] if isinstance(families_raw, list) else []
+    families = (
+        [f for f in families_raw if isinstance(f, dict)] if isinstance(families_raw, list) else []
+    )
     family_order: list[str] = []
     family_labels_by_id: dict[str, str] = {}
     for fam in families:
@@ -125,6 +162,7 @@ def _run_solution_optioning_stage(
     if not repo_intent_path.exists():
         raise FileNotFoundError(f"Missing repo intent doc: {repo_intent_path}")
     repo_intent_text = repo_intent_path.read_text(encoding="utf-8", errors="replace")
+    orchestrator_head_revision = read_repo_revision(repo_root)
 
     records_by_id: dict[str, dict[str, Any]] = {
         str(item.get("problem_id")): item
@@ -156,6 +194,7 @@ def _run_solution_optioning_stage(
     batch_breadth = compute_batch_breadth(atoms)
 
     all_options: list[dict[str, Any]] = []
+    optioning_outcomes: list[dict[str, Any]] = []
     warnings_list: list[str] = []
     status: str = "ok"
 
@@ -166,6 +205,90 @@ def _run_solution_optioning_stage(
         )
         rec = records_by_id.get(pid) or {}
         dec = priority_by_id.get(pid) or {}
+        priority_blockers: list[str] = []
+        if _coerce_string(dec.get("_parse_warning")) is not None:
+            priority_blockers.append("priority_parse_warning_present")
+        if dec.get("selected_for_research") is not True:
+            priority_blockers.append("priority_not_selected_for_research")
+        if _coerce_string(dec.get("problem_id")) != pid:
+            priority_blockers.append("priority_problem_id_mismatch")
+        if _coerce_string(dec.get("case_id")) != _coerce_string(rec.get("case_id")):
+            priority_blockers.append("priority_case_id_mismatch")
+        if priority_blockers:
+            optioning_outcomes.append(
+                {
+                    "problem_id": pid,
+                    "optioning_status": "insufficient_evidence",
+                    "decision_rationale": (
+                        "The upstream priority decision is not valid for progression: "
+                        + ", ".join(priority_blockers)
+                    ),
+                    "research_readiness_blockers": priority_blockers,
+                    "option_count": 0,
+                    "rejected_option_count": 0,
+                }
+            )
+            continue
+        research_ready, research_blockers = assess_research_readiness(dossier)
+        if research_ready:
+            receipt_ready, receipt_blockers = verify_persisted_research_evidence(dossier)
+            if not receipt_ready:
+                research_ready = False
+                research_blockers = [
+                    f"persisted_research_evidence_invalid:{blocker}" for blocker in receipt_blockers
+                ]
+        if not research_ready:
+            optioning_outcomes.append(
+                {
+                    "problem_id": pid,
+                    "optioning_status": "insufficient_evidence",
+                    "decision_rationale": (
+                        "Stage 3 research did not satisfy the evidence-readiness gate: "
+                        + ", ".join(research_blockers)
+                    ),
+                    "research_readiness_blockers": research_blockers,
+                    "option_count": 0,
+                    "rejected_option_count": 0,
+                }
+            )
+            continue
+        prompt_dossier = research_prompt_projection(dossier)
+        target_repo_root = (
+            target_repo_roots_by_problem.get(pid)
+            if target_repo_roots_by_problem is not None
+            else None
+        )
+        if target_repo_root is None:
+            optioning_outcomes.append(
+                {
+                    "problem_id": pid,
+                    "optioning_status": "insufficient_evidence",
+                    "decision_rationale": "No retained exact target workspace is available.",
+                    "research_readiness_blockers": ["target_workspace_missing"],
+                    "option_count": 0,
+                    "rejected_option_count": 0,
+                }
+            )
+            continue
+        research_revision = _coerce_string(dossier.get("repo_revision")) or ""
+        grounded, grounding_reasons, case_repo_context = assess_repo_grounding(
+            target_repo_root, research_revision
+        )
+        if not grounded:
+            optioning_outcomes.append(
+                {
+                    "problem_id": pid,
+                    "optioning_status": "insufficient_evidence",
+                    "decision_rationale": (
+                        "The read-only planning workspace cannot inspect the exact "
+                        f"research revision {research_revision!r}."
+                    ),
+                    "research_readiness_blockers": grounding_reasons,
+                    "option_count": 0,
+                    "rejected_option_count": 0,
+                }
+            )
+            continue
         evidence_ids = (
             rec.get("evidence_atom_ids") if isinstance(rec.get("evidence_atom_ids"), list) else []
         )
@@ -180,6 +303,10 @@ def _run_solution_optioning_stage(
             template_text.replace("{{REPO_INTENT_MD}}", repo_intent_text)
             .replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
             .replace("{{TAXONOMY_JSON}}", taxonomy_json)
+            .replace(
+                "{{REPO_CONTEXT_JSON}}",
+                _json.dumps(case_repo_context, ensure_ascii=False, indent=2),
+            )
             .replace("{{BREADTH_PROFILE}}", breadth_profile)
             .replace(
                 "{{PROBLEM_BREADTH_JSON}}",
@@ -203,7 +330,10 @@ def _run_solution_optioning_stage(
             )
             .replace("{{PROBLEM_RECORD_JSON}}", _json.dumps(rec, ensure_ascii=False, indent=2))
             .replace("{{PRIORITY_DECISION_JSON}}", _json.dumps(dec, ensure_ascii=False, indent=2))
-            .replace("{{RESEARCH_DOSSIER_JSON}}", _json.dumps(dossier, ensure_ascii=False, indent=2))
+            .replace(
+                "{{RESEARCH_DOSSIER_JSON}}",
+                _json.dumps(prompt_dossier, ensure_ascii=False, indent=2),
+            )
         )
 
         tag = f"solution_optioning_{idx:03d}"
@@ -218,26 +348,21 @@ def _run_solution_optioning_stage(
                 "[dry-run] stage-4 solution optioner prompt not executed (offline mode).\n",
                 encoding="utf-8",
             )
-            problem_slug = slugify(pid) or pid.replace(":", "_")
-            for fid in family_order:
-                label = family_labels_by_id.get(fid, fid)
-                opt = {
-                    "option_id": f"option:{problem_slug}:{fid}",
-                    "problem_id": pid,
-                    "family_id": fid,
-                    "summary": f"[dry-run] {label} option for {rec.get('title') or pid}",
-                    "tradeoffs": "dry_run: synthesized option; rerun without --dry-run for real tradeoffs",
-                    "recurrence_prevention": "dry_run: unknown (research not executed)",
-                    "change_surface_hypothesis": "unknown",
-                    "test_implications": "dry_run: add/adjust tests once research is complete",
-                    "rationale": "dry_run: synthesized from staged inputs; no agent executed",
-                    "option_status": "optioned",
-                }
-                options.append(opt)
-            parsed, parse_warnings = parse_solution_option_sets(
-                _json.dumps(options, ensure_ascii=False), known_family_ids=known_family_ids
+            dry_response = {
+                "problem_id": pid,
+                "optioning_status": "insufficient_evidence",
+                "decision_rationale": (
+                    "dry_run: no research execution or repository inspection occurred"
+                ),
+                "options": [],
+            }
+            outcome, options, parse_warnings = parse_optioning_response(
+                _json.dumps(dry_response, ensure_ascii=False),
+                expected_problem_id=pid,
+                known_family_ids=known_family_ids,
+                research_dossier=dossier,
             )
-            options = parsed
+            optioning_outcomes.append(outcome)
             warnings_list.extend(parse_warnings)
         else:
             try:
@@ -249,132 +374,40 @@ def _run_solution_optioning_stage(
                     agent=agent,
                     model=model,
                     cfg=cfg,
+                    workspace_dir=target_repo_root,
+                    allowed_tools=read_only_stage_tools(agent),
+                    include_directories=stage_include_directories(agent, target_repo_root),
                 )
-                parsed, parse_warnings = parse_solution_option_sets(
-                    response, known_family_ids=known_family_ids
+                outcome, options, parse_warnings = parse_optioning_response(
+                    response,
+                    expected_problem_id=pid,
+                    known_family_ids=known_family_ids,
+                    research_dossier=dossier,
                 )
-                options = parsed
+                optioning_outcomes.append(outcome)
                 warnings_list.extend(parse_warnings)
+                if outcome.get("optioning_status") == "invalid_output":
+                    status = "error"
             except Exception as exc:  # noqa: BLE001
                 status = "error"
                 warnings_list.append(f"solution_optioner_error: {pid}: {exc}")
+                optioning_outcomes.append(
+                    {
+                        "problem_id": pid,
+                        "optioning_status": "invalid_output",
+                        "decision_rationale": str(exc),
+                        "option_count": 0,
+                        "rejected_option_count": 0,
+                    }
+                )
                 continue
 
-        # Enforce exactly one option per family per problem_id.
-        by_family: dict[str, list[dict[str, Any]]] = {}
-        for opt in options:
-            fid = opt.get("family_id")
-            if isinstance(fid, str) and fid.strip():
-                by_family.setdefault(fid.strip(), []).append(opt)
-        for fid in family_order:
-            count = len(by_family.get(fid, []))
-            if count != 1:
-                status = "error"
-                warnings_list.append(
-                    f"solution_optioner_family_count_error: {pid}: {fid}: expected 1, got {count}"
-                )
         # Attach pid for any malformed options that forgot it.
         for opt in options:
             if opt.get("problem_id") is None:
                 opt["problem_id"] = pid
 
         all_options.extend(options)
-
-    # Relation-review stage after option generation.
-    relation_config_raw = yaml.safe_load(
-        pipeline_manifest.relation_review_config_path.read_text(encoding="utf-8")
-    )
-    relation_config = relation_config_raw if isinstance(relation_config_raw, dict) else {}
-
-    # Build one synthetic item per problem_id for relation review.
-    option_sets: list[dict[str, Any]] = []
-    for pid in focus_ids:
-        rec = records_by_id.get(pid) or {}
-        dossier = next(
-            (d for d in research_dossiers if isinstance(d, dict) and d.get("problem_id") == pid),
-            {},
-        )
-        opts = [o for o in all_options if o.get("problem_id") == pid]
-        joined = " | ".join(
-            [
-                f"{o.get('family_id')}: {o.get('summary')}"
-                for o in opts
-                if isinstance(o, dict) and o.get("summary")
-            ]
-        )
-        option_sets.append(
-            {
-                "problem_id": pid,
-                "title": rec.get("title") or pid,
-                "problem": rec.get("problem") or "",
-                "user_impact": rec.get("user_impact") or "",
-                "evidence_summary": rec.get("evidence_summary") or "",
-                "evidence_atom_ids": rec.get("evidence_atom_ids") or [],
-                "summary": joined,
-                "root_cause_hypotheses": dossier.get("root_cause_hypotheses") or [],
-            }
-        )
-
-    neighborhoods = rank_stage_related_items(
-        option_sets,
-        stage=stage,
-        relation_config=relation_config,
-        embedder=None,
-    )
-
-    allowed_actions = ["merge", "split", "same_cause_group", "keep_separate"]
-    rel_template = pipeline_manifest.template_text(pipeline_manifest.relation_reviewer_template)
-    rel_prompt = (
-        rel_template.replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
-        .replace("{{ALLOWED_ACTIONS}}", _json.dumps(allowed_actions, ensure_ascii=False, indent=2))
-        .replace("{{NEIGHBORHOODS_JSON}}", _json.dumps(neighborhoods, ensure_ascii=False, indent=2))
-    )
-    rel_tag = "solution_optioning_relation_review_001"
-    rel_out_dir = stage_artifacts_dir / rel_tag
-    rel_out_dir.mkdir(parents=True, exist_ok=True)
-    relation_decisions: list[dict[str, Any]] = []
-    if dry_run:
-        (rel_out_dir / f"{rel_tag}.prompt.txt").write_text(rel_prompt, encoding="utf-8")
-        (rel_out_dir / f"{rel_tag}.response.txt").write_text(
-            "[dry-run] relation-review prompt not executed (offline mode).\n",
-            encoding="utf-8",
-        )
-    else:
-        try:
-            rel_response = run_stage_prompt_json(
-                stage=stage,
-                prompt=rel_prompt,
-                out_dir=rel_out_dir,
-                tag=rel_tag,
-                agent=agent,
-                model=model,
-                cfg=cfg,
-            )
-            raw = json.loads(rel_response)
-            if not isinstance(raw, list):
-                raise ValueError("relation_reviewer_response_not_a_list")
-            relation_decisions = [d for d in raw if isinstance(d, dict)]
-        except Exception as exc:  # noqa: BLE001
-            status = "error"
-            warnings_list.append(f"solution_optioning_relation_review_error: {exc}")
-            relation_decisions = []
-
-    updated_option_sets = apply_relation_decisions(
-        option_sets,
-        relation_decisions,
-        stage=stage,
-    )
-    kept_ids = {
-        str(item.get("problem_id"))
-        for item in updated_option_sets
-        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
-    }
-    if kept_ids:
-        all_options = [
-            opt
-            for opt in all_options
-            if isinstance(opt, dict) and isinstance(opt.get("problem_id"), str) and opt.get("problem_id") in kept_ids
-        ]
 
     stage_doc = build_stage_document(
         stage,
@@ -384,6 +417,15 @@ def _run_solution_optioning_stage(
             "priority_decision_count": len(priority_decisions),
             "research_dossier_count": len(research_dossiers),
             "family_ids": family_order,
+            "orchestrator_head_revision": orchestrator_head_revision,
+            "orchestrator_repo_root": str(repo_root.resolve()),
+            "target_workspace_count": len(
+                {str(path.resolve()) for path in (target_repo_roots_by_problem or {}).values()}
+            )
+            if target_repo_roots_by_problem is not None
+            else 0,
+            "repo_access": "read_only",
+            "optioning_outcomes": optioning_outcomes,
             "dry_run": dry_run,
             "breadth_profile": breadth_profile,
             "batch_breadth": batch_breadth,
@@ -392,20 +434,27 @@ def _run_solution_optioning_stage(
             ),
             "solution_optioning_status": status,
             "solution_optioning_warnings": warnings_list,
-            "relation_review_decisions": len(relation_decisions),
-            "neighborhood_count": len(neighborhoods),
+            "post_research_relation_review": (
+                "runner_verified_mechanism_identity_v2; matching researched cases "
+                "are canonicalized before optioning"
+            ),
+            "post_research_canonical_bundle_count": sum(
+                1
+                for dossier in research_dossiers
+                if isinstance(dossier.get("post_research_same_mechanism_bundle"), dict)
+            ),
         },
         artifacts={
             "solution_options_json": str(out_json),
             "solution_options_md": str(out_md),
-            "relation_review_prompt": str(rel_out_dir / f"{rel_tag}.prompt.txt"),
-            "relation_review_response": str(rel_out_dir / f"{rel_tag}.response.txt"),
         },
     )
 
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_md.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(_json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    out_json.write_text(
+        _json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
     title = out_json.stem.removesuffix(".solution_options") or "Solution Options"
     out_md.write_text(
@@ -414,6 +463,11 @@ def _run_solution_optioning_stage(
             problem_records_by_id=records_by_id,
             family_order=family_order,
             family_labels_by_id=family_labels_by_id,
+            optioning_outcomes_by_id={
+                str(item["problem_id"]): item
+                for item in optioning_outcomes
+                if isinstance(item.get("problem_id"), str)
+            },
             title=f"{title} – Solution Options",
         ),
         encoding="utf-8",
@@ -422,8 +476,6 @@ def _run_solution_optioning_stage(
     print(f"[stage4] wrote {out_json}", file=sys.stderr)
     print(f"[stage4] wrote {out_md}", file=sys.stderr)
     return stage_doc
-
-
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

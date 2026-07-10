@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import re
@@ -16,6 +17,14 @@ from typing import Any
 
 import yaml
 
+_REPO_ROOT_FOR_IMPORTS = Path(__file__).resolve().parents[1]
+_IMPLEMENT_SRC = _REPO_ROOT_FOR_IMPORTS / "apps" / "usertest_implement" / "src"
+if str(_IMPLEMENT_SRC) not in sys.path:
+    sys.path.insert(0, str(_IMPLEMENT_SRC))
+
+from backlog_repo import is_generated_backlog_ticket  # noqa: E402
+
+from usertest_implement.batch_state import latest_batch_dir, load_json  # noqa: E402
 
 _SEVERITY_PATTERN = re.compile(r"^- Severity:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
 _EXPORT_KIND_PATTERN = re.compile(r"^- Export kind:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
@@ -48,6 +57,8 @@ class LoopContext:
     batch_config_path: Path
     implement_python: Path
     backlog_python: Path
+    backlog_research_ref: str = "origin/dev"
+    backlog_breadth_profile: str = "internal_maintenance"
     gh_bin: str = "gh"
     last_cleanup_monotonic: float = field(default=0.0)
     last_refresh_monotonic: float = field(default=0.0)
@@ -186,7 +197,7 @@ def _run_maintenance_cleanup(ctx: LoopContext) -> None:
 def _load_ledger(ctx: LoopContext) -> dict[str, Any]:
     """Load the implementation attempt ledger from `.agents/state`."""
 
-    ledger_path = ctx.repo_root / ".agents" / "state" / "backlog_implement_actions.yaml"
+    ledger_path = ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"
     if not ledger_path.exists():
         return {"actions": {}}
     raw = yaml.safe_load(ledger_path.read_text(encoding="utf-8"))
@@ -358,6 +369,8 @@ def _run_review(ctx: LoopContext, fingerprint: str) -> bool:
         fingerprint,
         "--agent",
         ctx.review_agent,
+        "--ledger",
+        str(ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"),
     ]
     if ctx.review_model:
         argv.extend(["--model", ctx.review_model])
@@ -370,8 +383,51 @@ def _run_review(ctx: LoopContext, fingerprint: str) -> bool:
     return proc.returncode == 0
 
 
+def _resume_failed_original_scenario(ctx: LoopContext, fingerprint: str) -> bool:
+    """Send a failed causal replay back through the existing PR resume path."""
+
+    ledger = _load_ledger(ctx)
+    actions_raw = ledger.get("actions")
+    entry = actions_raw.get(fingerprint) if isinstance(actions_raw, dict) else None
+    if not isinstance(entry, dict):
+        return False
+    run_dir_raw = entry.get("last_run_dir")
+    lifecycle = str(entry.get("last_resume_lifecycle_state") or "").strip().lower()
+    if (
+        not isinstance(run_dir_raw, str)
+        or not run_dir_raw.strip()
+        or lifecycle != "review_changes_requested"
+    ):
+        return False
+    argv = [
+        str(ctx.implement_python),
+        "-m",
+        "usertest_implement.cli",
+        "--repo-root",
+        str(ctx.repo_root),
+        "resume",
+        "--run-dir",
+        run_dir_raw,
+        "--repo",
+        ctx.repo_input,
+        "--agent",
+        ctx.implementation_agent,
+        "--ledger",
+        str(ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"),
+    ]
+    if ctx.implementation_model:
+        argv.extend(["--model", ctx.implementation_model])
+    proc = _run_logged(
+        ctx,
+        argv,
+        cwd=ctx.repo_root,
+        label=f"resume failed original scenario {fingerprint}",
+    )
+    return proc.returncode == 0
+
+
 def _merge_review(ctx: LoopContext, fingerprint: str) -> bool:
-    """Attempt to merge an approved review ticket."""
+    """Attempt merge; a failed causal proof resumes the same PR instead of stalling."""
 
     proc = _run_logged(
         ctx,
@@ -387,20 +443,49 @@ def _merge_review(ctx: LoopContext, fingerprint: str) -> bool:
             str(ctx.owner_root),
             "--fingerprint",
             fingerprint,
+            "--ledger",
+            str(ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"),
         ],
         cwd=ctx.repo_root,
         label=f"review merge {fingerprint}",
     )
+    if proc.returncode == 4:
+        return _resume_failed_original_scenario(ctx, fingerprint)
     return proc.returncode == 0
 
 
-def _reconcile_review_queue(ctx: LoopContext) -> None:
-    """Reconcile ledger-backed PR tickets so closed PRs requeue and approved PRs merge."""
+def _reconcile_review_queue(ctx: LoopContext) -> bool:
+    """Reconcile PRs while keeping incomplete outcome proof case-local."""
+
+    def merged_outcome_pending(fingerprint: str, pr_url: str) -> bool:
+        refreshed = _load_ledger(ctx)
+        actions_raw = refreshed.get("actions")
+        entry = actions_raw.get(fingerprint) if isinstance(actions_raw, dict) else None
+        if not isinstance(entry, dict):
+            return False
+        state = (
+            str(
+                entry.get("last_outcome_state")
+                or (
+                    entry.get("outcome", {}).get("state")
+                    if isinstance(entry.get("outcome"), dict)
+                    else ""
+                )
+            )
+            .strip()
+            .lower()
+        )
+        return bool(
+            entry.get("last_merge_pr_url") == pr_url
+            and isinstance(entry.get("last_merged_at"), str)
+            and str(entry.get("last_merged_at")).strip()
+            and state not in {"resolved", "mitigated"}
+        )
 
     ledger = _load_ledger(ctx)
     actions = ledger.get("actions", {})
     if not isinstance(actions, dict):
-        return
+        return True
     for fingerprint, entry_raw in sorted(actions.items()):
         if not isinstance(entry_raw, dict):
             continue
@@ -410,19 +495,49 @@ def _reconcile_review_queue(ctx: LoopContext) -> None:
         ticket_path = _find_ticket_path(ctx, fingerprint)
         if ticket_path is None:
             continue
+        try:
+            ticket_markdown = ticket_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            continue
+        if not is_generated_backlog_ticket(ticket_markdown):
+            # This loop is the automated backlog worker.  IDEA and other
+            # externally originated plans may share the same implementation
+            # metadata, but their review/merge lifecycle remains separate.
+            continue
         if (
             ticket_path.parent.name == "5 - complete"
             and entry_raw.get("last_merge_pr_url") == pr_url
             and isinstance(entry_raw.get("last_merged_at"), str)
             and str(entry_raw.get("last_merged_at")).strip()
+            and str(
+                entry_raw.get("last_outcome_state")
+                or (
+                    entry_raw.get("outcome", {}).get("state")
+                    if isinstance(entry_raw.get("outcome"), dict)
+                    else ""
+                )
+            )
+            .strip()
+            .lower()
+            in {"resolved", "mitigated"}
         ):
             continue
         pr_doc = _gh_pr_view(ctx, pr_url)
         if not isinstance(pr_doc, dict):
             continue
         if pr_doc.get("mergedAt"):
-            if ticket_path.parent.name != "5 - complete":
-                _move_ticket(ctx, fingerprint, "5 - complete")
+            # An out-of-band/already-completed merge still needs the normal merge
+            # finalizer. It writes merge provenance and drives original/live outcome
+            # roles; moving the file alone would falsely treat workflow motion as proof.
+            if not _merge_review(ctx, fingerprint):
+                if merged_outcome_pending(fingerprint, pr_url):
+                    _append_log(
+                        ctx,
+                        "Merged PR outcome progression remains case-locally pending; "
+                        f"continuing unrelated backlog work for {fingerprint}",
+                    )
+                    continue
+                return False
             continue
         state = str(pr_doc.get("state") or "").upper()
         if state == "CLOSED":
@@ -451,79 +566,15 @@ def _reconcile_review_queue(ctx: LoopContext) -> None:
                 and entry_raw.get("last_review_merge_ready") is True
             )
         if merge_ready:
-            _merge_review(ctx, fingerprint)
-
-
-def _refresh_backlog(ctx: LoopContext) -> bool:
-    """Run the full backlog refresh workflow used before ticket implementation."""
-
-    common = [
-        str(ctx.backlog_python),
-        "-m",
-        "usertest_backlog.cli",
-        "reports",
-    ]
-    root_flags = [
-        "--repo-root",
-        str(ctx.repo_root),
-        "--runs-dir",
-        str(ctx.runs_dir),
-        "--target",
-        ctx.target,
-    ]
-    steps: list[tuple[str, list[str]]] = [
-        (
-            "reports backlog",
-            [
-                *common,
-                "backlog",
-                *root_flags,
-                "--repo-input",
-                ctx.repo_input,
-                "--agent",
-                ctx.backlog_agent,
-            ],
-        ),
-        (
-            "reports intent-snapshot",
-            [*common, "intent-snapshot", *root_flags, "--repo-input", ctx.repo_input],
-        ),
-        (
-            "reports review-ux",
-            [
-                *common,
-                "review-ux",
-                *root_flags,
-                "--repo-input",
-                ctx.repo_input,
-                "--agent",
-                ctx.review_agent,
-            ],
-        ),
-        (
-            "reports export-tickets",
-            [
-                *common,
-                "export-tickets",
-                *root_flags,
-                "--repo-input",
-                ctx.repo_input,
-                "--stage",
-                "ready_for_ticket",
-            ],
-        ),
-    ]
-    if ctx.backlog_model:
-        steps[0][1].extend(["--model", ctx.backlog_model])
-    if ctx.review_model:
-        steps[2][1].extend(["--model", ctx.review_model])
-    _write_state(ctx, status="running", current_action="refresh_backlog")
-    for label, argv in steps:
-        proc = _run_logged(ctx, argv, cwd=ctx.repo_root, label=label)
-        if proc.returncode != 0:
-            _append_log(ctx, f"WARNING refresh step failed: {label}")
-            return False
-    ctx.last_refresh_monotonic = time.monotonic()
+            if not _merge_review(ctx, fingerprint):
+                if merged_outcome_pending(fingerprint, pr_url):
+                    _append_log(
+                        ctx,
+                        "Merged PR outcome progression remains case-locally pending; "
+                        f"continuing unrelated backlog work for {fingerprint}",
+                    )
+                    continue
+                return False
     return True
 
 
@@ -552,9 +603,13 @@ def _run_ticket(ctx: LoopContext, ticket_path: Path) -> bool:
         "--ticket-path",
         str(ticket_path),
         "--repo",
-        str(ctx.repo_root),
+        ctx.repo_input,
         "--ref",
         "dev",
+        "--runs-dir",
+        str(ctx.owner_root / "runs" / "usertest_implement"),
+        "--ledger",
+        str(ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"),
         "--agent",
         ctx.implementation_agent,
     ]
@@ -596,12 +651,59 @@ def _run_batch_pass(ctx: LoopContext) -> bool:
     return proc.returncode == 0
 
 
+def _latest_passing_terminal_proof(ctx: LoopContext) -> dict[str, Any] | None:
+    """Return the hash-verified final-zero proof for the latest batch, if any."""
+
+    latest = latest_batch_dir(ctx.owner_root)
+    if latest is None:
+        return None
+    state = load_json(latest / "batch_state.json")
+    if state is None or state.get("status") != "completed":
+        return None
+    summary_raw = state.get("terminal_proof")
+    summary = summary_raw if isinstance(summary_raw, dict) else {}
+    path_raw = summary.get("path")
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        return None
+    proof_path = Path(path_raw).resolve()
+    if not proof_path.is_relative_to(latest.resolve()) or not proof_path.is_file():
+        return None
+    payload = proof_path.read_bytes()
+    if hashlib.sha256(payload).hexdigest() != summary.get("sha256"):
+        return None
+    try:
+        proof = json.loads(payload.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(proof, dict) or proof.get("passed") is not True:
+        return None
+    recorded_content_hash = proof.get("proof_sha256")
+    unhashed = dict(proof)
+    unhashed.pop("proof_sha256", None)
+    computed_content_hash = hashlib.sha256(
+        json.dumps(
+            unhashed,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    if recorded_content_hash != computed_content_hash:
+        return None
+    if summary.get("proof_sha256") != recorded_content_hash:
+        return None
+    return proof
+
+
 def _build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser for the continuous implementation loop."""
 
     parser = argparse.ArgumentParser(
         prog="continuous_implement_loop",
-        description="Continuously refresh backlog tickets, implement blocker/high items, and merge approved PRs.",
+        description=(
+            "Continuously refresh backlog tickets, implement blocker/high items, "
+            "and merge approved PRs."
+        ),
     )
     parser.add_argument("--repo-root", type=Path, default=Path.cwd())
     parser.add_argument("--owner-root", type=Path, default=Path.cwd())
@@ -616,7 +718,15 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--settings-profile", default="default")
     parser.add_argument("--backlog-agent", choices=["claude", "codex", "gemini"], default="codex")
     parser.add_argument("--backlog-model", default=LATEST_CODEX_MODEL)
-    parser.add_argument("--implementation-agent", choices=["claude", "codex", "gemini"], default="codex")
+    parser.add_argument("--backlog-research-ref", default="origin/dev")
+    parser.add_argument(
+        "--backlog-breadth-profile",
+        choices=["external_generalization", "internal_maintenance"],
+        default="internal_maintenance",
+    )
+    parser.add_argument(
+        "--implementation-agent", choices=["claude", "codex", "gemini"], default="codex"
+    )
     parser.add_argument("--implementation-model", default=None)
     parser.add_argument("--review-agent", choices=["claude", "codex", "gemini"], default="claude")
     parser.add_argument("--review-model", default=None)
@@ -659,10 +769,16 @@ def main(argv: list[str] | None = None) -> int:
 
     repo_root = args.repo_root.resolve()
     owner_root = args.owner_root.resolve()
-    runs_dir = args.runs_dir if args.runs_dir.is_absolute() else (repo_root / args.runs_dir).resolve()
-    settings_path = args.settings if args.settings.is_absolute() else (repo_root / args.settings).resolve()
+    runs_dir = (
+        args.runs_dir if args.runs_dir.is_absolute() else (owner_root / args.runs_dir).resolve()
+    )
+    settings_path = (
+        args.settings if args.settings.is_absolute() else (repo_root / args.settings).resolve()
+    )
     batch_config_path = (
-        args.batch_config if args.batch_config.is_absolute() else (repo_root / args.batch_config).resolve()
+        args.batch_config
+        if args.batch_config.is_absolute()
+        else (repo_root / args.batch_config).resolve()
     )
     ctx = LoopContext(
         repo_root=repo_root,
@@ -672,24 +788,48 @@ def main(argv: list[str] | None = None) -> int:
         repo_input=(
             str(args.repo_input).strip()
             if isinstance(args.repo_input, str) and str(args.repo_input).strip()
-            else str(repo_root)
+            else str(owner_root)
         ),
         settings_path=settings_path,
         settings_profile=str(args.settings_profile),
         backlog_agent=str(args.backlog_agent),
-        backlog_model=str(args.backlog_model).strip() if isinstance(args.backlog_model, str) and args.backlog_model.strip() else None,
+        backlog_model=str(args.backlog_model).strip()
+        if isinstance(args.backlog_model, str) and args.backlog_model.strip()
+        else None,
+        backlog_research_ref=str(args.backlog_research_ref).strip(),
+        backlog_breadth_profile=str(args.backlog_breadth_profile).strip(),
         implementation_agent=str(args.implementation_agent),
-        implementation_model=str(args.implementation_model).strip() if isinstance(args.implementation_model, str) and args.implementation_model and str(args.implementation_model).strip() else None,
+        implementation_model=str(args.implementation_model).strip()
+        if isinstance(args.implementation_model, str)
+        and args.implementation_model
+        and str(args.implementation_model).strip()
+        else None,
         review_agent=str(args.review_agent),
-        review_model=str(args.review_model).strip() if isinstance(args.review_model, str) and args.review_model and str(args.review_model).strip() else None,
-        allowed_severities={str(value).strip().lower() for value in args.severities if str(value).strip()},
+        review_model=str(args.review_model).strip()
+        if isinstance(args.review_model, str)
+        and args.review_model
+        and str(args.review_model).strip()
+        else None,
+        allowed_severities={
+            str(value).strip().lower() for value in args.severities if str(value).strip()
+        },
         cleanup_interval_seconds=float(args.cleanup_interval_seconds),
-        log_path=args.log_path if args.log_path.is_absolute() else (repo_root / args.log_path).resolve(),
-        state_path=args.state_path if args.state_path.is_absolute() else (repo_root / args.state_path).resolve(),
-        pid_path=args.pid_path if args.pid_path.is_absolute() else (repo_root / args.pid_path).resolve(),
+        log_path=args.log_path
+        if args.log_path.is_absolute()
+        else (owner_root / args.log_path).resolve(),
+        state_path=args.state_path
+        if args.state_path.is_absolute()
+        else (owner_root / args.state_path).resolve(),
+        pid_path=args.pid_path
+        if args.pid_path.is_absolute()
+        else (owner_root / args.pid_path).resolve(),
         batch_config_path=batch_config_path,
-        implement_python=(repo_root / "apps" / "usertest_implement" / ".venv" / "Scripts" / "python.exe").resolve(),
-        backlog_python=(repo_root / "apps" / "usertest_backlog" / ".venv" / "Scripts" / "python.exe").resolve(),
+        implement_python=(
+            repo_root / "apps" / "usertest_implement" / ".venv" / "Scripts" / "python.exe"
+        ).resolve(),
+        backlog_python=(
+            repo_root / "apps" / "usertest_backlog" / ".venv" / "Scripts" / "python.exe"
+        ).resolve(),
     )
 
     ctx.pid_path.parent.mkdir(parents=True, exist_ok=True)
@@ -702,9 +842,21 @@ def main(argv: list[str] | None = None) -> int:
             if _maintenance_cleanup_due(ctx):
                 _run_maintenance_cleanup(ctx)
 
-            _reconcile_review_queue(ctx)
+            if not _reconcile_review_queue(ctx):
+                _write_state(
+                    ctx,
+                    status="waiting_for_outcome_verification",
+                    current_action="post_merge_outcome_progression",
+                )
+                return 2
             batch_ok = _run_batch_pass(ctx)
-            _reconcile_review_queue(ctx)
+            if not _reconcile_review_queue(ctx):
+                _write_state(
+                    ctx,
+                    status="waiting_for_outcome_verification",
+                    current_action="post_merge_outcome_progression",
+                )
+                return 2
             if not batch_ok:
                 _append_log(ctx, "batch pass returned non-zero; stopping continuous loop")
                 _write_state(
@@ -713,6 +865,20 @@ def main(argv: list[str] | None = None) -> int:
                     current_action="stopped_after_batch_failure",
                 )
                 return 1
+
+            terminal_proof = _latest_passing_terminal_proof(ctx)
+            if terminal_proof is not None:
+                _append_log(
+                    ctx,
+                    "automated backlog reached hash-verified final zero; stopping loop",
+                )
+                _write_state(
+                    ctx,
+                    status="completed",
+                    current_action="terminal_proof",
+                    terminal_proof=terminal_proof,
+                )
+                return 0
 
             _append_log(ctx, "batch pass complete; starting next pass")
             _write_state(ctx, status="running", current_action="next_batch")

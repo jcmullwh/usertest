@@ -2,9 +2,10 @@
 
 ## Goal
 
-Decide which problems merit deeper research now (`selected_for_research=true`), which
-should be deferred (`p2` / `p3` / `watch`), and which can be deprioritized. The
-prioritization decision must be explicit and inspectable.
+Rank every canonical problem for deeper research. Stage 1 has already separated noise,
+duplicates, proposals, and unresolved evidence from canonical problems, so priority
+controls research order and urgency—not whether a real problem is ever researched.
+Every valid decision must use `selected_for_research=true`.
 
 ## Duration guardrail
 
@@ -21,9 +22,9 @@ configured value.
 |--------|---------|
 | `p0` | Blocking: prevents a majority of runs from completing normally. Research now. |
 | `p1` | High: recurring issue that meaningfully degrades quality or confidence. Research now. |
-| `p2` | Medium: real problem, limited evidence breadth. Defer until more runs confirm. |
-| `p3` | Low: nice-to-have or isolated observation. Watch for recurrence. |
-| `watch` | Uncertain: insufficient evidence to prioritize. Re-evaluate next cycle. |
+| `p2` | Medium: real problem with limited evidence breadth. Research after p0/p1. |
+| `p3` | Low: isolated or low-impact problem. Research after higher-priority cases. |
+| `watch` | Uncertain mechanism or impact. Research to resolve the uncertainty after ranked cases. |
 
 ## What to favor for research now (p0 / p1)
 
@@ -33,19 +34,22 @@ configured value.
 - Problems that appear in more than one mission or target context.
 - Problems with strong signal from `run_failure_event` or `report_validation_error` atoms.
 
-## What to defer or watch
+## What to rank later without suppressing
 
 - Single-run observations of medium severity without corroboration.
 - Problems where confidence is low and evidence is sparse.
 - Problems that appear only in one agent or one persona context.
 - Problems that may be environmental rather than systematic.
 
+These signals lower ordering priority; they do not make a canonical problem ineligible.
+Research is responsible for determining whether the evidence establishes a mechanism.
+
 ## What to avoid
 
 - Do not propose solutions. This stage decides research priority only.
 - Do not invent new problem IDs; work only with the problem records from stage 1.
-- Do not silently drop problems. Problems not selected for research stay in the artifact
-  with `selected_for_research=false`.
+- Do not silently drop or indefinitely defer problems. Every canonical problem uses
+  `selected_for_research=true`; use the bucket to express ordering.
 - Do not use the word "simplest," "easiest," "quickest," or similar steering terms.
 
 ## Output contract

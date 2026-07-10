@@ -24,8 +24,10 @@ decides whether to act on them.
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
+
+from backlog_core.case_lineage import mint_case_id
 
 _LOG = logging.getLogger(__name__)
 
@@ -605,6 +607,12 @@ def apply_relation_decisions(
                 )
                 continue
             merged_evidence: list[str] = list(focus_item.get("evidence_atom_ids") or [])
+            merged_source_evidence: list[str] = list(
+                focus_item.get("source_evidence_atom_ids") or []
+            )
+            merged_derived_evidence: list[str] = list(
+                focus_item.get("derived_evidence_atom_ids") or []
+            )
             for tid in target_ids:
                 target_item = by_focus_id.get(tid)
                 if target_item is None:
@@ -614,6 +622,12 @@ def apply_relation_decisions(
                     )
                     continue
                 merged_evidence.extend(target_item.get("evidence_atom_ids") or [])
+                merged_source_evidence.extend(
+                    target_item.get("source_evidence_atom_ids") or []
+                )
+                merged_derived_evidence.extend(
+                    target_item.get("derived_evidence_atom_ids") or []
+                )
                 removed_ids.add(tid)
             # Deduplicate evidence IDs while preserving order.
             seen: set[str] = set()
@@ -623,6 +637,12 @@ def apply_relation_decisions(
                     seen.add(eid)
                     deduped.append(eid)
             focus_item["evidence_atom_ids"] = deduped
+            focus_item["source_evidence_atom_ids"] = list(
+                dict.fromkeys(merged_source_evidence)
+            )
+            focus_item["derived_evidence_atom_ids"] = list(
+                dict.fromkeys(merged_derived_evidence)
+            )
             focus_item["_merged_from"] = target_ids
             focus_item["_merge_rationale"] = rationale
             by_focus_id[focus_id] = focus_item
@@ -658,15 +678,15 @@ def apply_relation_decisions(
                 if str(t).strip()
             ]
             for iid in all_ids:
-                item = by_focus_id.get(iid)
-                if item is None:
+                group_item = by_focus_id.get(iid)
+                if group_item is None:
                     _LOG.warning(
                         "apply_relation_decisions: same_cause_group id=%s not found; skipping",
                         iid,
                     )
                     continue
-                item["same_cause_group_id"] = group_id
-                by_focus_id[iid] = item
+                group_item["same_cause_group_id"] = group_id
+                by_focus_id[iid] = group_item
             _LOG.info(
                 "apply_relation_decisions: stage=%s same_cause_group group=%s members=%s",
                 stage,
@@ -702,3 +722,535 @@ def apply_relation_decisions(
         result.append(by_focus_id.get(fid, item))
 
     return result
+
+
+def _clean_relation_string(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = value.strip()
+    return cleaned if cleaned else None
+
+
+def _clean_relation_string_list(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(
+            item.strip() for item in value if isinstance(item, str) and item.strip()
+        )
+    )
+
+
+def _relation_split_groups(
+    item: dict[str, Any], decision: dict[str, Any]
+) -> list[list[str]]:
+    """Validate explicit evidence partitions for a split decision."""
+
+    evidence_ids = _clean_relation_string_list(item.get("evidence_atom_ids"))
+    explicit_raw = decision.get("split_groups")
+    if not isinstance(explicit_raw, list) or not explicit_raw:
+        raise ValueError(
+            "canonicalize_problem_cases: split requires explicit split_groups; "
+            "run boundaries are not causal partitions"
+        )
+    groups: list[list[str]] = []
+    for index, raw_group in enumerate(explicit_raw):
+        if not isinstance(raw_group, dict):
+            raise ValueError(
+                "canonicalize_problem_cases: "
+                f"split_groups[{index}] must be an object with evidence_atom_ids"
+            )
+        group = _clean_relation_string_list(raw_group.get("evidence_atom_ids"))
+        if not group:
+            raise ValueError(
+                f"canonicalize_problem_cases: split_groups[{index}] is empty"
+            )
+        groups.append(group)
+
+    if len(groups) < 2:
+        raise ValueError(
+            "canonicalize_problem_cases: split requires at least two explicit evidence groups"
+        )
+    flattened = [atom_id for group in groups for atom_id in group]
+    if len(flattened) != len(set(flattened)):
+        raise ValueError("canonicalize_problem_cases: split groups overlap")
+    if set(flattened) != set(evidence_ids):
+        raise ValueError(
+            "canonicalize_problem_cases: split groups must partition all evidence_atom_ids"
+        )
+    return groups
+
+
+def canonicalize_problem_cases(
+    items: Sequence[dict[str, Any]],
+    decisions: Sequence[dict[str, Any]],
+    *,
+    stage: str = "problem_mining",
+    strict_review: bool = False,
+    verified_mechanism_sha256_by_case: Mapping[str, str] | None = None,
+    verified_relation_edges: set[tuple[str, str]] | None = None,
+) -> list[dict[str, Any]]:
+    """Apply reviewer decisions to canonical pre-research problem work units.
+
+    Unlike :func:`apply_relation_decisions`, this API is intentionally operational:
+    ``merge``, ``alias``, and ``same_cause_group`` collapse to one canonical case;
+    ``split`` creates distinct child cases.  All references are validated strictly so a
+    malformed new relation artifact cannot be silently ignored.
+    """
+
+    copied = [dict(item) for item in items]
+    if not copied:
+        if decisions:
+            raise ValueError("canonicalize_problem_cases: decisions supplied for no items")
+        return []
+
+    by_case: dict[str, dict[str, Any]] = {}
+    alias_to_case: dict[str, str] = {}
+    order: list[str] = []
+    for index, item in enumerate(copied):
+        case_id = _clean_relation_string(item.get("case_id"))
+        problem_id = _clean_relation_string(item.get("problem_id"))
+        if case_id is None or problem_id is None:
+            raise ValueError(
+                f"canonicalize_problem_cases: items[{index}] requires case_id and problem_id"
+            )
+        if case_id in by_case:
+            raise ValueError(f"canonicalize_problem_cases: duplicate case_id {case_id!r}")
+        by_case[case_id] = item
+        order.append(case_id)
+        for alias in [
+            case_id,
+            problem_id,
+            *_clean_relation_string_list(item.get("case_member_problem_ids")),
+        ]:
+            previous = alias_to_case.get(alias)
+            if previous is not None and previous != case_id:
+                raise ValueError(
+                    f"canonicalize_problem_cases: ambiguous item reference {alias!r}"
+                )
+            alias_to_case[alias] = case_id
+
+    parent = {case_id: case_id for case_id in order}
+
+    def find(case_id: str) -> str:
+        while parent[case_id] != case_id:
+            parent[case_id] = parent[parent[case_id]]
+            case_id = parent[case_id]
+        return case_id
+
+    def union(left: str, right: str) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parent[right_root] = left_root
+
+    def resolve(raw_id: Any, *, field: str) -> str:
+        identifier = _clean_relation_string(raw_id)
+        case_id = alias_to_case.get(identifier or "")
+        if case_id is None:
+            raise ValueError(
+                f"canonicalize_problem_cases: {field} references unknown item {identifier!r}"
+            )
+        return case_id
+
+    if strict_review:
+        decision_by_focus: dict[str, dict[str, Any]] = {}
+        peers_by_focus: dict[str, list[str]] = {}
+
+        def collapse_peers(decision: Mapping[str, Any]) -> list[str]:
+            action = _clean_relation_string(decision.get("action"))
+            if action == "merge":
+                return [
+                    resolve(target, field="target_ids")
+                    for target in _clean_relation_string_list(decision.get("target_ids"))
+                ]
+            if action == "alias":
+                return [resolve(decision.get("alias_target_id"), field="alias_target_id")]
+            if action == "same_cause_group":
+                focus = resolve(decision.get("focus_id"), field="focus_id")
+                return [
+                    case_id
+                    for case_id in (
+                        resolve(member, field="member_ids")
+                        for member in _clean_relation_string_list(decision.get("member_ids"))
+                    )
+                    if case_id != focus
+                ]
+            return []
+
+        def verified_mechanism_identity(case_id: str) -> str | None:
+            # This mapping is constructed by the runner from the persisted,
+            # self-hashed research receipt. Same-named fields in model output are
+            # intentionally inert.
+            value = _clean_relation_string(
+                (verified_mechanism_sha256_by_case or {}).get(case_id)
+            )
+            if (
+                value is not None
+                and len(value) == 64
+                and all(character in "0123456789abcdef" for character in value.casefold())
+            ):
+                return value.casefold()
+            return None
+
+        def objective_identity_edge(left: str, right: str, *, action: str) -> bool:
+            left_evidence = set(
+                _clean_relation_string_list(by_case[left].get("evidence_atom_ids"))
+            )
+            right_evidence = set(
+                _clean_relation_string_list(by_case[right].get("evidence_atom_ids"))
+            )
+            if left_evidence.intersection(right_evidence):
+                return True
+            relation_edge = tuple(sorted((left, right)))
+            if relation_edge in (verified_relation_edges or set()):
+                return True
+            left_mechanism = verified_mechanism_identity(left)
+            right_mechanism = verified_mechanism_identity(right)
+            return (
+                action == "same_cause_group"
+                and left_mechanism is not None
+                and left_mechanism == right_mechanism
+            )
+
+        errors_by_focus: dict[str, list[str]] = {}
+        for raw_decision in decisions:
+            decision = dict(raw_decision)
+            focus_case = resolve(decision.get("focus_id"), field="focus_id")
+            if focus_case in decision_by_focus:
+                raise ValueError(
+                    f"canonicalize_problem_cases: duplicate strict focus {focus_case}"
+                )
+            decision_by_focus[focus_case] = decision
+            errors = errors_by_focus.setdefault(focus_case, [])
+            action = _clean_relation_string(decision.get("action")) or ""
+            if action not in _VALID_ACTIONS:
+                errors.append(f"action_invalid:{action or '(missing)'}")
+            if _clean_relation_string(decision.get("rationale")) is None:
+                errors.append("rationale_missing")
+            confidence = decision.get("review_confidence")
+            if (
+                isinstance(confidence, bool)
+                or not isinstance(confidence, (int, float))
+                or not 0.0 <= float(confidence) <= 1.0
+            ):
+                errors.append("review_confidence_invalid")
+            try:
+                peers = collapse_peers(decision) if action in _VALID_ACTIONS else []
+            except ValueError as exc:
+                peers = []
+                errors.append(f"relation_reference_invalid:{exc}")
+            peers_by_focus[focus_case] = peers
+            if action in {"merge", "alias", "same_cause_group"} and not peers:
+                errors.append("collapse_peer_missing")
+            if action == "split":
+                try:
+                    _relation_split_groups(by_case[focus_case], decision)
+                except ValueError as exc:
+                    errors.append(f"split_partition_invalid:{exc}")
+            if action == "same_cause_group" and _clean_relation_string(
+                decision.get("group_id")
+            ) is None:
+                errors.append("same_cause_group_id_missing")
+            if not peers:
+                continue
+            if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or float(
+                confidence
+            ) < 0.7:
+                errors.append("collapse_confidence_insufficient")
+            evidence_refs = set(
+                _clean_relation_string_list(decision.get("evidence_atom_ids"))
+            )
+            focus_evidence = set(
+                _clean_relation_string_list(by_case[focus_case].get("evidence_atom_ids"))
+            )
+            if not evidence_refs.intersection(focus_evidence):
+                errors.append("collapse_focus_evidence_missing")
+            allowed_evidence = set(focus_evidence)
+            for peer_case in peers:
+                peer_evidence = set(
+                    _clean_relation_string_list(by_case[peer_case].get("evidence_atom_ids"))
+                )
+                allowed_evidence.update(peer_evidence)
+                if not evidence_refs.intersection(peer_evidence):
+                    errors.append(f"collapse_peer_evidence_missing:{peer_case}")
+                if not objective_identity_edge(focus_case, peer_case, action=action):
+                    errors.append(f"collapse_objective_identity_missing:{peer_case}")
+            if not evidence_refs.issubset(allowed_evidence):
+                errors.append("collapse_unrelated_evidence_cited")
+
+        active_cases = {
+            case_id
+            for case_id, item in by_case.items()
+            if item.get("_relation_candidate_only") is not True
+        }
+        if set(decision_by_focus) != active_cases:
+            missing = sorted(active_cases - set(decision_by_focus))
+            extra = sorted(set(decision_by_focus) - active_cases)
+            raise ValueError(
+                "canonicalize_problem_cases: strict focus partition mismatch "
+                f"missing={missing} extra={extra}"
+            )
+        for focus_case, decision in decision_by_focus.items():
+            for peer_case in peers_by_focus.get(focus_case, []):
+                if peer_case not in active_cases:
+                    continue
+                if focus_case not in peers_by_focus.get(peer_case, []):
+                    errors_by_focus[focus_case].append(
+                        f"collapse_not_reciprocal:{peer_case}"
+                    )
+                    errors_by_focus[peer_case].append(
+                        f"contradicted_collapse_from:{focus_case}"
+                    )
+                    continue
+                focus_action = _clean_relation_string(decision.get("action"))
+                peer_decision = decision_by_focus[peer_case]
+                peer_action = _clean_relation_string(peer_decision.get("action"))
+                compatible = {focus_action, peer_action} <= {"merge", "alias"}
+                if focus_action == peer_action == "same_cause_group":
+                    compatible = _clean_relation_string(
+                        decision.get("group_id")
+                    ) == _clean_relation_string(peer_decision.get("group_id"))
+                if focus_action == peer_action == "alias":
+                    compatible = False
+                if not compatible:
+                    errors_by_focus[focus_case].append(
+                        f"collapse_relation_incompatible:{peer_case}"
+                    )
+                    errors_by_focus[peer_case].append(
+                        f"collapse_relation_incompatible:{focus_case}"
+                    )
+
+        strict_decisions: list[dict[str, Any]] = []
+        for focus_case, decision in decision_by_focus.items():
+            validation_errors = list(dict.fromkeys(errors_by_focus[focus_case]))
+            if not validation_errors:
+                strict_decisions.append(decision)
+                continue
+            strict_decisions.append(
+                {
+                    "focus_id": decision.get("focus_id"),
+                    "action": "keep_separate",
+                    "rationale": (
+                        "Runner kept this case independent because the proposed relation "
+                        "lacked an objective identity edge: " + ", ".join(validation_errors)
+                    ),
+                    "review_confidence": 0.0,
+                    "provisional_relation_suggestion": decision,
+                    "relation_validation_errors": validation_errors,
+                }
+            )
+        decisions = strict_decisions
+
+    preferences: list[str] = []
+    split_by_case: dict[str, dict[str, Any]] = {}
+    group_by_case: dict[str, str] = {}
+    audit_by_case: dict[str, list[dict[str, Any]]] = {case_id: [] for case_id in order}
+
+    for index, raw_decision in enumerate(decisions):
+        decision = dict(raw_decision)
+        action = _clean_relation_string(decision.get("action"))
+        if action not in _VALID_ACTIONS:
+            raise ValueError(
+                f"canonicalize_problem_cases: decisions[{index}] invalid action {action!r}"
+            )
+        focus_case = resolve(decision.get("focus_id"), field="focus_id")
+        audit_entry = {
+            "action": action,
+            "rationale": _clean_relation_string(decision.get("rationale")) or "",
+            "review_confidence": decision.get("review_confidence"),
+        }
+        if isinstance(decision.get("provisional_relation_suggestion"), Mapping):
+            audit_entry["provisional_relation_suggestion"] = dict(
+                decision["provisional_relation_suggestion"]
+            )
+            audit_entry["relation_validation_errors"] = _clean_relation_string_list(
+                decision.get("relation_validation_errors")
+            )
+
+        if action == "keep_separate":
+            audit_by_case[focus_case].append(audit_entry)
+            continue
+        if action == "split":
+            if focus_case in split_by_case:
+                raise ValueError(
+                    f"canonicalize_problem_cases: duplicate split for {focus_case}"
+                )
+            split_by_case[focus_case] = decision
+            audit_by_case[focus_case].append(audit_entry)
+            continue
+        if action == "merge":
+            targets = _clean_relation_string_list(decision.get("target_ids"))
+            if not targets:
+                raise ValueError("canonicalize_problem_cases: merge requires target_ids")
+            preferences.append(focus_case)
+            for target in targets:
+                target_case = resolve(target, field="target_ids")
+                union(focus_case, target_case)
+                audit_by_case[focus_case].append({**audit_entry, "target_case_id": target_case})
+            continue
+        if action == "alias":
+            target_case = resolve(decision.get("alias_target_id"), field="alias_target_id")
+            preferences.append(target_case)
+            union(target_case, focus_case)
+            audit_by_case[focus_case].append({**audit_entry, "target_case_id": target_case})
+            continue
+
+        group_id = _clean_relation_string(decision.get("group_id"))
+        if group_id is None:
+            raise ValueError("canonicalize_problem_cases: same_cause_group requires group_id")
+        members = [focus_case]
+        members.extend(
+            resolve(member, field="member_ids")
+            for member in _clean_relation_string_list(decision.get("member_ids"))
+        )
+        members = list(dict.fromkeys(members))
+        if len(members) < 2:
+            raise ValueError(
+                "canonicalize_problem_cases: same_cause_group requires at least two members"
+            )
+        preferences.append(focus_case)
+        for member in members:
+            previous_group = group_by_case.get(member)
+            if previous_group is not None and previous_group != group_id:
+                raise ValueError(
+                    f"canonicalize_problem_cases: case {member} assigned conflicting groups"
+                )
+            group_by_case[member] = group_id
+            union(focus_case, member)
+            audit_by_case[member].append({**audit_entry, "group_id": group_id})
+
+    components: dict[str, list[str]] = {}
+    for case_id in order:
+        components.setdefault(find(case_id), []).append(case_id)
+
+    preference_rank = {case_id: rank for rank, case_id in enumerate(preferences)}
+    order_rank = {case_id: rank for rank, case_id in enumerate(order)}
+    canonical_records: list[dict[str, Any]] = []
+    for members in sorted(components.values(), key=lambda value: min(order_rank[v] for v in value)):
+        split_members = [case_id for case_id in members if case_id in split_by_case]
+        if split_members and len(members) > 1:
+            raise ValueError(
+                "canonicalize_problem_cases: split cannot be combined with merge/alias/"
+                "same_cause_group in one component"
+            )
+        preferred = min(
+            members,
+            key=lambda case_id: (
+                # A candidate-only record came from the persisted case registry.
+                # Its durable identity must survive a recurrence even when the
+                # reviewer uses merge/same_cause_group instead of the preferred
+                # alias spelling.
+                0 if by_case[case_id].get("_relation_candidate_only") is True else 1,
+                preference_rank.get(case_id, 10**9),
+                order_rank[case_id],
+            ),
+        )
+        base = dict(by_case[preferred])
+
+        if split_members:
+            split_case = split_members[0]
+            split_item = by_case[split_case]
+            groups = _relation_split_groups(split_item, split_by_case[split_case])
+            parent_problem_id = _clean_relation_string(split_item.get("problem_id")) or "problem"
+            parent_problem_ids = list(
+                dict.fromkeys(
+                    [parent_problem_id]
+                    + _clean_relation_string_list(
+                        split_item.get("case_member_problem_ids")
+                    )
+                )
+            )
+            for split_index, evidence_group in enumerate(groups, start=1):
+                child = dict(split_item)
+                child_case_id = mint_case_id(
+                    [split_case, *evidence_group], namespace="case_split"
+                )
+                child["case_id"] = child_case_id
+                child["problem_id"] = f"{parent_problem_id}:split:{split_index}"
+                child["canonical_problem_id"] = child["problem_id"]
+                child["case_member_problem_ids"] = [child["problem_id"]]
+                child["evidence_atom_ids"] = evidence_group
+                parent_source_ids = set(
+                    _clean_relation_string_list(
+                        split_item.get("source_evidence_atom_ids")
+                    )
+                )
+                parent_derived_ids = set(
+                    _clean_relation_string_list(
+                        split_item.get("derived_evidence_atom_ids")
+                    )
+                )
+                child["source_evidence_atom_ids"] = [
+                    atom_id for atom_id in evidence_group if atom_id in parent_source_ids
+                ]
+                child["derived_evidence_atom_ids"] = [
+                    atom_id for atom_id in evidence_group if atom_id in parent_derived_ids
+                ]
+                child["split_from_case_id"] = split_case
+                child["split_parent_problem_id"] = parent_problem_id
+                child["split_parent_problem_ids"] = parent_problem_ids
+                child["related_case_ids"] = list(
+                    dict.fromkeys(
+                        _clean_relation_string_list(child.get("related_case_ids"))
+                        + [split_case]
+                    )
+                )
+                child["case_relation_actions"] = audit_by_case[split_case]
+                canonical_records.append(child)
+            continue
+
+        evidence_ids: list[str] = []
+        source_evidence_ids: list[str] = []
+        derived_evidence_ids: list[str] = []
+        problem_ids: list[str] = []
+        relation_actions: list[dict[str, Any]] = []
+        group_ids: set[str] = set()
+        for member in members:
+            item = by_case[member]
+            evidence_ids.extend(_clean_relation_string_list(item.get("evidence_atom_ids")))
+            source_evidence_ids.extend(
+                _clean_relation_string_list(item.get("source_evidence_atom_ids"))
+            )
+            derived_evidence_ids.extend(
+                _clean_relation_string_list(item.get("derived_evidence_atom_ids"))
+            )
+            problem_id = _clean_relation_string(item.get("problem_id"))
+            if problem_id is not None:
+                problem_ids.append(problem_id)
+            problem_ids.extend(_clean_relation_string_list(item.get("case_member_problem_ids")))
+            relation_actions.extend(audit_by_case[member])
+            group_id = group_by_case.get(member) or _clean_relation_string(
+                item.get("same_cause_group_id")
+            )
+            if group_id is not None:
+                group_ids.add(group_id)
+        if len(group_ids) > 1:
+            raise ValueError(
+                f"canonicalize_problem_cases: component has conflicting group IDs {group_ids}"
+            )
+
+        canonical_problem_id = _clean_relation_string(base.get("problem_id"))
+        assert canonical_problem_id is not None
+        base["canonical_problem_id"] = canonical_problem_id
+        base["case_member_problem_ids"] = list(dict.fromkeys(problem_ids))
+        base["evidence_atom_ids"] = list(dict.fromkeys(evidence_ids))
+        base["source_evidence_atom_ids"] = list(dict.fromkeys(source_evidence_ids))
+        base["derived_evidence_atom_ids"] = list(dict.fromkeys(derived_evidence_ids))
+        absorbed = [case_id for case_id in members if case_id != preferred]
+        if absorbed:
+            base["absorbed_case_ids"] = absorbed
+        if relation_actions:
+            base["case_relation_actions"] = relation_actions
+        if group_ids:
+            base["same_cause_group_id"] = next(iter(group_ids))
+        canonical_records.append(base)
+
+    _LOG.info(
+        "canonicalize_problem_cases: stage=%s input=%d decisions=%d output=%d",
+        stage,
+        len(copied),
+        len(decisions),
+        len(canonical_records),
+    )
+    return canonical_records

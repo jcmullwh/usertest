@@ -1,0 +1,8 @@
+backlog_export_gate:
+  enabled: true
+  # State schema v6 / cycle schema v4 require the runner-owned research proof
+  # basis to remain stable. Earlier shadow state is rejected rather than migrated.
+  required_consecutive_shadow_cycles: 2
+  # Compatibility name: exactness applies to canonical case/plan intent across
+  # cycles. The latest complete rendered projection is still bound at export.
+  require_exact_export_projection: true

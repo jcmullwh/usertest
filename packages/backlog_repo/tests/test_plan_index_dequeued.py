@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from backlog_repo.plan_index import (
+    normalize_legacy_plan_ticket_files,
     reconcile_atom_actions_from_plan_folders,
     scan_plan_ticket_index,
     sync_atom_actions_from_dequeued_plan_folders,
@@ -74,6 +75,26 @@ def test_sync_atom_actions_from_dequeued_plan_folders_ignores_hidden_archive(
     assert atom_actions[atom_id]["status"] == "actioned"
 
 
+def test_nul_corrupt_dequeued_plan_cannot_demote_atom_lifecycle(tmp_path: Path) -> None:
+    owner_root = tmp_path
+    dequeued_dir = owner_root / ".agents" / "plans" / "_dequeued"
+    dequeued_dir.mkdir(parents=True, exist_ok=True)
+    atom_id = "usertest/20260220T194226Z/codex/0:suggested_change:2"
+    corrupt = dequeued_dir / "corrupt.md"
+    corrupt.write_bytes(f"Evidence: `{atom_id}`\n".encode() + b"\x00corrupt")
+    atom_actions = {atom_id: {"atom_id": atom_id, "status": "queued"}}
+
+    meta = sync_atom_actions_from_dequeued_plan_folders(
+        atom_actions=atom_actions,
+        owner_roots=[owner_root],
+        generated_at="2026-02-28T00:00:00Z",
+    )
+
+    assert meta["integrity_unknown_ticket_files"] == 1
+    assert meta["atoms_demoted"] == 0
+    assert atom_actions[atom_id]["status"] == "queued"
+
+
 def test_scan_plan_ticket_index_treats_archived_as_actioned(tmp_path: Path) -> None:
     owner_root = tmp_path
     archived_dir = owner_root / ".agents" / "plans" / "6 - archived"
@@ -113,7 +134,7 @@ def test_scan_plan_ticket_index_can_exclude_discarded_for_export_dedupe(
     assert fingerprint not in export_dedupe_index
 
 
-def test_scan_plan_ticket_index_normalizes_legacy_tkt_filenames(tmp_path: Path) -> None:
+def test_scan_plan_ticket_index_is_read_only_for_legacy_tkt_filenames(tmp_path: Path) -> None:
     owner_root = tmp_path
     complete_dir = owner_root / ".agents" / "plans" / "5 - complete"
     complete_dir.mkdir(parents=True, exist_ok=True)
@@ -132,9 +153,31 @@ def test_scan_plan_ticket_index_normalizes_legacy_tkt_filenames(tmp_path: Path) 
     normalized_path = complete_dir / f"20260228_{fingerprint}_legacy-complete-ticket.md"
 
     assert fingerprint in index
+    assert legacy_path.exists()
+    assert not normalized_path.exists()
+    assert index[fingerprint]["paths"] == [str(legacy_path)]
+    assert "Source ticket" in legacy_path.read_text(encoding="utf-8")
+
+
+def test_explicit_legacy_plan_maintenance_normalizes_files(tmp_path: Path) -> None:
+    complete_dir = tmp_path / ".agents" / "plans" / "5 - complete"
+    complete_dir.mkdir(parents=True, exist_ok=True)
+    fingerprint = "0123456789abcdef"
+    legacy_path = (
+        complete_dir
+        / f"20260228_TKT-123456789abc_{fingerprint}_legacy-complete-ticket.md"
+    )
+    legacy_path.write_text(
+        "# Legacy ticket\n\n- Source ticket: `TKT-123456789abc`\n",
+        encoding="utf-8",
+    )
+
+    result = normalize_legacy_plan_ticket_files(owner_root=tmp_path)
+
+    normalized_path = complete_dir / f"20260228_{fingerprint}_legacy-complete-ticket.md"
+    assert result == {"files_scanned": 1, "files_changed": 1}
     assert normalized_path.exists()
     assert not legacy_path.exists()
-    assert index[fingerprint]["paths"] == [str(normalized_path)]
     assert "Source ticket" not in normalized_path.read_text(encoding="utf-8")
 
 

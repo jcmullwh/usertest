@@ -1131,6 +1131,10 @@ def _agent_binary(cfg: RunnerConfig, agent: str, default: str) -> str:
     ----------
     cfg:
         Runner configuration.
+    workspace_dir:
+        Optional existing checkout to expose as the agent's working directory. Backlog
+        prompts always run with read-only execution semantics; callers should also pass
+        a read-only tool allowlist for backends whose sandbox is tool-based.
     agent:
         Agent identifier.
     default:
@@ -1397,7 +1401,7 @@ def _run_agent_in_workspace(
             stderr_path=stderr_path,
             binary=_agent_binary(cfg, "gemini", "gemini"),
             output_format=_agent_output_format(cfg, "gemini"),
-            sandbox=False,
+            sandbox=True,
             model=model,
             approval_mode="default",
             allowed_tools=tools,

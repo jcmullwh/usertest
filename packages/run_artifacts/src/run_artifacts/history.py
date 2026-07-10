@@ -5,6 +5,7 @@ import os
 import re
 from collections.abc import Iterator
 from datetime import datetime, timezone
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -45,6 +46,53 @@ _EMBED_DEFINITION_KEYS = {
     "prompt_template_md",
     "report_schema_json",
 }
+
+
+def _canonical_json_sha256(value: Any) -> str:
+    return sha256(
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def _verified_evidence_assignment_sidecar(
+    run_dir: Path,
+    *,
+    target_ref: Any,
+) -> tuple[dict[str, Any] | None, str]:
+    """Read the stage-3 parent binding only when every runner hash is intact."""
+
+    path = run_dir / "evidence_assignment.json"
+    if not path.is_file():
+        return None, "missing"
+    raw = _read_json(path)
+    if not isinstance(raw, dict):
+        return None, "unreadable"
+    supplied_sidecar_hash = raw.get("sidecar_sha256")
+    unsigned = {key: value for key, value in raw.items() if key != "sidecar_sha256"}
+    assignment = raw.get("evidence_assignment")
+    if (
+        raw.get("schema_version") != 1
+        or raw.get("producer") != "backlog_miner.research_runner"
+        or supplied_sidecar_hash != _canonical_json_sha256(unsigned)
+        or not isinstance(target_ref, dict)
+        or raw.get("target_ref_sha256") != _canonical_json_sha256(target_ref)
+        or not isinstance(assignment, dict)
+        or assignment.get("assignment_sha256")
+        != _canonical_json_sha256(
+            {
+                key: value
+                for key, value in assignment.items()
+                if key != "assignment_sha256"
+            }
+        )
+    ):
+        return None, "invalid"
+    return dict(assignment), "verified"
 
 
 def _parse_timestamp_dirname(name: str) -> str | None:
@@ -435,6 +483,12 @@ def iter_report_history(
             run_rel = None
 
         target_ref = _read_json(run_dir / "target_ref.json")
+        evidence_assignment, evidence_assignment_read_status = (
+            _verified_evidence_assignment_sidecar(
+                run_dir,
+                target_ref=target_ref,
+            )
+        )
         if normalized_repo_input is not None:
             candidate = None
             if isinstance(target_ref, dict):
@@ -539,6 +593,8 @@ def iter_report_history(
             "status": status,
             "agent_exit_code": agent_exit_code,
             "target_ref": target_ref,
+            "evidence_assignment": evidence_assignment,
+            "evidence_assignment_read_status": evidence_assignment_read_status,
             "effective_run_spec": effective_run_spec,
             "report": report,
             "metrics": metrics,

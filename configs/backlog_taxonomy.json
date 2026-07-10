@@ -3,21 +3,24 @@
   "solution_families": [
     {
       "family_id": "most_direct",
-      "label": "Most direct",
-      "description": "The smallest, most targeted change that addresses the specific problem instance without restructuring surrounding code or adding new abstractions. Preferred when the problem is well-bounded, the root cause is clear, and the change surface is narrow."
+      "label": "Targeted mechanism",
+      "description": "Optional lens for a mechanism confined to one evidenced consumer or failure path. Omit it when it is only a smaller wording of another option."
     },
     {
       "family_id": "most_robust",
-      "label": "Most robust",
-      "description": "A change that addresses the specific problem and adds defense-in-depth or broader correctness guarantees. May add validation, error handling, or test coverage beyond the minimum. Preferred when the problem has a plausible recurrence vector or when the direct fix is fragile."
+      "label": "Guarded mechanism",
+      "description": "Optional lens for a distinct mechanism whose defining behavior is an evidenced boundary check or defense against a specific recurrence path. Extra validation alone does not make a distinct option."
     },
     {
       "family_id": "most_comprehensive",
-      "label": "Most comprehensive",
-      "description": "A change that addresses the class of problem rather than just the observed instance. May involve a modest refactor, a new abstraction, or a policy-level fix. Preferred when research shows a repeated pattern, multiple closely related causes, or when the direct fix would be a band-aid."
+      "label": "Multi-path mechanism",
+      "description": "Optional lens for one mechanism proven across at least two independent consumers or failure paths. Shared or canonical abstractions require evidence references for each path."
     }
   ],
   "prompt_guardrails": {
+    "families_are_optional": true,
+    "maximum_options_per_problem": 3,
+    "selection_principle": "Family IDs are compatibility labels, not a breadth or quality ranking. Generate only genuinely distinct mechanisms and select by causal coverage.",
     "banned_optimization_adjectives": [
       "fastest",
       "quickest",

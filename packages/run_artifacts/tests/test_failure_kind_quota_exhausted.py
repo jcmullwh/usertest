@@ -82,3 +82,28 @@ def test_render_failure_text_includes_terminal_artifact_read_diagnostics() -> No
     assert "terminal_artifact_reads:" in text
     assert "report.json: parse JSONDecodeError" in text
     assert "line 1, column 2" in text
+
+
+def test_render_failure_text_preserves_captured_head_and_tail_for_mining() -> None:
+    head_marker = "HEAD-ROOT-CAUSE"
+    tail_marker = "TAIL-FINAL-DIAGNOSTIC"
+    text = render_failure_text(
+        failure_kind="error",
+        agent="codex",
+        status="error",
+        error=None,
+        report_validation_errors=[],
+        artifacts=None,
+        attachments=[
+            {
+                "path": "agent_stderr.txt",
+                "excerpt_head": head_marker + ("h" * 4_000),
+                "excerpt_tail": ("t" * 4_000) + tail_marker,
+                "truncated": True,
+            }
+        ],
+    )
+
+    assert head_marker in text
+    assert tail_marker in text
+    assert "middle omitted" in text

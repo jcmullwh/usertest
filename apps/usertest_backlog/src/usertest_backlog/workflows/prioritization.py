@@ -4,6 +4,113 @@ from __future__ import annotations
 from usertest_backlog.shared import *
 
 
+def _enforce_full_drain_research_policy(decisions: list[dict[str, Any]]) -> None:
+    """Make urgency a research-order decision, never a permanent case filter."""
+
+    for decision in decisions:
+        if isinstance(decision.get("problem_id"), str) and not decision.get(
+            "_parse_warning"
+        ):
+            # Eligibility is runner-owned. ``priority_status`` is model output and
+            # therefore cannot be allowed to turn a real canonical case into a
+            # permanent watch/defer bucket.
+            decision["selected_for_research"] = True
+            decision["priority_status"] = "prioritized"
+
+
+def _server_normalize_priority_decisions(
+    *,
+    decisions: list[dict[str, Any]],
+    problem_records: list[dict[str, Any]],
+    signals_by_problem_id: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Return one research-eligible decision for every canonical problem.
+
+    The model still supplies urgency and rationale when its response is valid. Missing,
+    duplicate, malformed, or explicitly blocked responses fall back to deterministic
+    runner signals instead of silently removing the case from stage 3.
+    """
+
+    valid_buckets = {"p0", "p1", "p2", "p3", "watch"}
+    expected_records = {
+        str(record["problem_id"]): record
+        for record in problem_records
+        if isinstance(record, dict)
+        and isinstance(record.get("problem_id"), str)
+        and str(record["problem_id"]).strip()
+    }
+    candidates: dict[str, list[dict[str, Any]]] = {}
+    warnings: list[str] = []
+    for decision in decisions:
+        problem_id = _coerce_string(decision.get("problem_id"))
+        if problem_id is None or problem_id not in expected_records:
+            warnings.append(
+                "prioritizer_unknown_problem_id:" + (problem_id or "(missing)")
+            )
+            continue
+        candidates.setdefault(problem_id, []).append(dict(decision))
+
+    normalized: list[dict[str, Any]] = []
+    for problem_id, record in expected_records.items():
+        model_candidates = candidates.get(problem_id, [])
+        use_model = (
+            len(model_candidates) == 1
+            and _coerce_string(model_candidates[0].get("_parse_warning")) is None
+        )
+        if len(model_candidates) > 1:
+            warnings.append(f"prioritizer_duplicate_problem_id:{problem_id}")
+        elif not model_candidates:
+            warnings.append(f"prioritizer_missing_problem_id:{problem_id}")
+        elif not use_model:
+            warnings.append(f"prioritizer_invalid_problem_decision:{problem_id}")
+
+        candidate = dict(model_candidates[0]) if use_model else {}
+        signals = signals_by_problem_id.get(problem_id, {})
+        bucket = _coerce_string(candidate.get("priority_bucket"))
+        if bucket not in valid_buckets:
+            bucket = _coerce_string(signals.get("bucket_candidate"))
+        if bucket not in valid_buckets:
+            bucket = "watch"
+        rationale = _coerce_string(candidate.get("priority_rationale"))
+        if rationale is None:
+            rationale = (
+                "Runner fallback retained this canonical case for causal research; "
+                "deterministic priority signals control ordering only."
+            )
+        evidence_ids = candidate.get("evidence_atom_ids_used")
+        record_evidence = {
+            value
+            for value in (
+                record.get("evidence_atom_ids")
+                if isinstance(record.get("evidence_atom_ids"), list)
+                else []
+            )
+            if isinstance(value, str) and value.strip()
+        }
+        cited = [
+            value
+            for value in (evidence_ids if isinstance(evidence_ids, list) else [])
+            if isinstance(value, str) and value in record_evidence
+        ]
+        if not cited:
+            cited = sorted(record_evidence)
+        candidate.pop("_parse_warning", None)
+        candidate.update(
+            {
+                "problem_id": problem_id,
+                "priority_bucket": bucket,
+                "selected_for_research": True,
+                "priority_rationale": rationale,
+                "evidence_atom_ids_used": cited,
+                "priority_status": "prioritized",
+                "selection_authority": "runner_full_drain_v1",
+                "model_priority_accepted": use_model,
+            }
+        )
+        normalized.append(candidate)
+    return normalized, warnings
+
+
 def _render_prioritized_problems_markdown(
     priority_decisions: list[dict[str, Any]],
     *,
@@ -22,13 +129,9 @@ def _render_prioritized_problems_markdown(
         rec_title = rec.get("title") or pid
         bucket = dec.get("priority_bucket") or "watch"
         selected = dec.get("selected_for_research")
-        selected_str = (
-            "true" if selected is True else "false" if selected is False else "?"
-        )
+        selected_str = "true" if selected is True else "false" if selected is False else "?"
         pre_score = dec.get("pre_score")
-        pre_str = (
-            f"{float(pre_score):.2f}" if isinstance(pre_score, (int, float)) else "?"
-        )
+        pre_str = f"{float(pre_score):.2f}" if isinstance(pre_score, (int, float)) else "?"
         lines.append(f"## {rec_title}")
         lines.append(
             f"**ID**: `{pid}` | **Bucket**: {bucket} | "
@@ -129,12 +232,17 @@ def _run_problem_prioritization_stage(
             signals = signals_by_problem_id.get(pid, {})
             bucket = signals.get("bucket_candidate") if isinstance(signals, dict) else None
             bucket_s = bucket if isinstance(bucket, str) else "watch"
-            selected = bucket_s in {"p0", "p1"}
+            # Every canonical stage-1 problem is real enough to merit causal research.
+            # Priority controls ordering, never permanent eligibility; otherwise a
+            # single-run p2/p3/watch case can remain unresearched forever.
+            selected = True
             pre_score = signals.get("pre_score") if isinstance(signals, dict) else None
-            score_breakdown = (
-                signals.get("score_breakdown") if isinstance(signals, dict) else None
+            score_breakdown = signals.get("score_breakdown") if isinstance(signals, dict) else None
+            cited = (
+                rec.get("evidence_atom_ids")
+                if isinstance(rec.get("evidence_atom_ids"), list)
+                else []
             )
-            cited = rec.get("evidence_atom_ids") if isinstance(rec.get("evidence_atom_ids"), list) else []
             cited_ids = [e for e in cited if isinstance(e, str) and e.strip()]
             decisions.append(
                 {
@@ -172,6 +280,13 @@ def _run_problem_prioritization_stage(
             error = str(exc)
             warnings_list.append(f"prioritizer_error: {exc}")
 
+    decisions, normalization_warnings = _server_normalize_priority_decisions(
+        decisions=decisions,
+        problem_records=problem_records,
+        signals_by_problem_id=signals_by_problem_id,
+    )
+    warnings_list.extend(normalization_warnings)
+
     # Enrich with deterministic signals so the artifact always shows the pre-score breakdown.
     for dec in decisions:
         pid = dec.get("problem_id")
@@ -185,6 +300,12 @@ def _run_problem_prioritization_stage(
                 dec["bucket_candidate"] = signals.get("bucket_candidate")
             if "score_breakdown" not in dec:
                 dec["score_breakdown"] = signals.get("score_breakdown")
+
+    # Stage 1 has already excluded noise, proposals, and duplicates. Once a canonical
+    # problem reaches prioritization it must enter research; the bucket determines
+    # urgency/order only. Keep this runner-owned so model conservatism cannot silently
+    # strand lower-frequency but legitimate problems.
+    _enforce_full_drain_research_policy(decisions)
 
     # Guardrail: stage 2 must not contain solution fields.
     forbidden_solution_fields = {
@@ -207,22 +328,6 @@ def _run_problem_prioritization_stage(
                 dec["_parse_warning"] = existing.strip() + "; " + msg
             else:
                 dec["_parse_warning"] = msg
-
-    expected_ids = [
-        item.get("problem_id")
-        for item in problem_records
-        if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
-    ]
-    expected_set = {pid for pid in expected_ids if isinstance(pid, str)}
-    found_set = {
-        pid for pid in (item.get("problem_id") for item in decisions) if isinstance(pid, str)
-    }
-    missing = sorted(expected_set - found_set)
-    if missing:
-        status = "error"
-        warnings_list.append(
-            "prioritizer_missing_problem_ids: missing decisions for: " + ", ".join(missing)
-        )
 
     stage_doc = build_stage_document(
         stage,
@@ -268,8 +373,6 @@ def _run_problem_prioritization_stage(
     print(f"[stage2] wrote {out_json}", file=sys.stderr)
     print(f"[stage2] wrote {out_md}", file=sys.stderr)
     return stage_doc
-
-
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -16,6 +16,7 @@ from backlog_core.backlog import (
     render_backlog_markdown,
     write_backlog_atoms,
 )
+from backlog_core.case_lineage import eligible_problem_mining_atoms, normalize_atom_lineage
 
 
 class _DeterministicEmbedder:
@@ -30,11 +31,92 @@ class _DeterministicEmbedder:
         return vectors
 
 
+def test_extract_backlog_atoms_quarantines_model_lineage_from_runner_research(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "target_ref": {"requested_mission_id": "backlog_repro_research"},
+            "report": {
+                "confusion_points": [
+                    {
+                        "summary": "Research found another symptom.",
+                        "impact": "The original case needs more evidence.",
+                    }
+                ],
+                "extensions": {
+                    "backlog_lineage": {
+                        "origin_stage": "observation",
+                        "evidence_role": "observation",
+                        "parent_case_id": "case:attacker-selected",
+                        "disposition": "novel_case",
+                        "novel_case_rationale": "Model prose is not a classification.",
+                    }
+                },
+            },
+        }
+    ]
+
+    extracted = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    atoms = normalize_atom_lineage(extracted, strict_new_output=True)
+
+    assert atoms
+    assert {atom["origin_stage"] for atom in atoms} == {"repro_research"}
+    assert {atom["evidence_role"] for atom in atoms} == {"research"}
+    assert {atom["parent_case_id"] for atom in atoms} == {None}
+    assert {atom["disposition"] for atom in atoms} == {"unresolved"}
+    assert all("novel_case_rationale" not in atom for atom in atoms)
+    assert eligible_problem_mining_atoms(atoms) == []
+
+
+def test_extract_backlog_atoms_uses_ticket_ref_as_implementation_parent(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "target_ref": {"mission_id": "implement_maintenance_backlog_ticket_v1"},
+            "ticket_ref": {"case_id": "case:trusted", "fingerprint": "ticket:trusted"},
+            "report": {
+                "confusion_points": [{"summary": "Implementation exposed a follow-up."}],
+                "extensions": {
+                    "backlog_lineage": {
+                        "parent_case_id": "case:attacker-selected",
+                        "case_id": "case:attacker-selected",
+                    }
+                },
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+
+    assert atoms
+    assert {atom["origin_stage"] for atom in atoms} == {"implementation"}
+    assert {atom["evidence_role"] for atom in atoms} == {"implementation"}
+    assert {atom["parent_case_id"] for atom in atoms} == {"case:trusted"}
+    assert {atom["case_id"] for atom in atoms} == {"case:trusted"}
+    assert {atom["disposition"] for atom in atoms} == {"supports_case"}
+
+
 def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> None:
     run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
     run_dir.mkdir(parents=True, exist_ok=True)
     (run_dir / "agent_stderr.txt").write_text(
-        "EPIPE writing to socket\n" + ("x" * 200 + "\n") * 6000,
+        "EPIPE writing to socket\n"
+        + ("x" * 200 + "\n") * 6000
+        + "TAIL ROOT CAUSE: provider closed the final stream\n",
         encoding="utf-8",
     )
     (run_dir / "agent_last_message.txt").write_text(
@@ -112,6 +194,10 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
     assert failure_atom["error"]["type"] == "AgentExecFailed"
     assert failure_atom["error"]["message"] == "command not found"
     assert failure_atom["terminal_artifact_reads"]["report.json"]["error_phase"] == "parse"
+    stderr_atom = next(item for item in atoms if item["source"] == "agent_stderr_artifact")
+    assert "EPIPE writing to socket" in stderr_atom["text"]
+    assert "TAIL ROOT CAUSE: provider closed the final stream" in stderr_atom["text"]
+    assert stderr_atom["atom_id"] in failure_atom["linked_atom_ids"]
 
     attachments = failure_atom["attachments"]
     stderr_attachment = next(item for item in attachments if item["path"] == "agent_stderr.txt")
@@ -136,8 +222,8 @@ def test_extract_backlog_atoms_preserves_structured_fields(tmp_path: Path) -> No
 
     totals = atoms_doc["totals"]
     assert totals["source_counts"]["run_failure_event"] == 1
-    assert totals["source_counts"].get("agent_stderr_artifact", 0) == 0
-    assert totals["source_counts"].get("agent_last_message_artifact", 0) == 0
+    assert totals["source_counts"]["agent_stderr_artifact"] == 1
+    assert totals["source_counts"]["agent_last_message_artifact"] == 1
 
 
 def test_extract_backlog_atoms_does_not_emit_missing_report_for_nonterminal_run(
@@ -250,6 +336,231 @@ def test_extract_backlog_atoms_extracts_task_run_v1_report_blocks(tmp_path: Path
         and atom.get("report_ux_block") == "unclear_points"
         for atom in atoms
     )
+
+
+def test_extract_backlog_atoms_retains_every_structured_issue_by_default(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    issue_titles = [f"Observed issue {index:02d}" for index in range(25)]
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "task_run_v1",
+                "status": "success",
+                "issues": [
+                    {
+                        "severity": "warn",
+                        "title": title,
+                        "details": f"Evidence details for {title}",
+                    }
+                    for title in issue_titles
+                ],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    extracted_titles = {
+        str(atom.get("text"))
+        for atom in atoms
+        if atom.get("report_issue_block") == "issues"
+        and atom.get("source") == "confusion_point"
+    }
+
+    assert extracted_titles == set(issue_titles)
+
+
+def test_extract_backlog_atoms_preserves_failed_task_outcome_steps_and_verification(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    count = 25
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "task_run_v1",
+                "status": "failure",
+                "goal": "Exercise the canonical workflow",
+                "summary": "The workflow failed before producing output.",
+                "steps": [
+                    {
+                        "name": f"step-{index}",
+                        "attempts": [
+                            {
+                                "action": f"run-{index}",
+                                "result": f"failed-{index}",
+                                "evidence": f"exact-output-{index}",
+                            }
+                        ],
+                        "outcome": f"outcome-{index}",
+                    }
+                    for index in range(count)
+                ],
+                "outputs": [],
+                "verification": [
+                    {
+                        "check": f"oracle-{index}",
+                        "result": f"not-satisfied-{index}",
+                        "evidence": f"oracle-evidence-{index}",
+                    }
+                    for index in range(count)
+                ],
+                # Deliberately omit optional issues[]. The observed failure must not be
+                # replaced by this proposal atom.
+                "next_actions": ["Repair the execution path."],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    outcomes = [atom for atom in atoms if atom.get("source") == "report_outcome"]
+    steps = [atom for atom in atoms if atom.get("source") == "task_step_observation"]
+    attempts = [
+        atom for atom in atoms if atom.get("source") == "task_attempt_observation"
+    ]
+    verification = [
+        atom for atom in atoms if atom.get("source") == "verification_observation"
+    ]
+    proposals = [atom for atom in atoms if atom.get("source") == "suggested_change"]
+
+    assert len(outcomes) == 1
+    assert outcomes[0]["report_status"] == "failure"
+    assert outcomes[0]["report_summary"] == "The workflow failed before producing output."
+    assert outcomes[0]["evidence_class"] == "observed"
+    assert len(steps) == count
+    assert len(attempts) == count
+    assert len(verification) == count
+    assert attempts[-1]["task_attempt"] == {
+        "action": "run-24",
+        "result": "failed-24",
+        "evidence": "exact-output-24",
+    }
+    assert verification[-1]["verification_check"]["evidence"] == "oracle-evidence-24"
+    assert proposals[0]["evidence_class"] == "proposal"
+
+
+def test_extract_backlog_atoms_preserves_every_boundary_risk_observation(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    count = 25
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "boundary_v1",
+                "status": "partial",
+                "constraints": ["read only"],
+                "observations": [
+                    {
+                        "category": "credentials",
+                        "summary": f"Shareable artifact exposes secret {index}",
+                        "where_found": f"artifact-{index}.txt",
+                        "evidence": f"token-{index}",
+                        "how_to_disable_or_avoid": f"disable-path-{index}",
+                        "risk_level": "high" if index == count - 1 else "medium",
+                    }
+                    for index in range(count)
+                ],
+                # Deliberately omit optional risks[].
+                "recommendations": ["Redact shareable artifacts."],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    observations = [
+        atom for atom in atoms if atom.get("source") == "boundary_observation"
+    ]
+
+    assert len(observations) == count
+    assert observations[-1]["severity_hint"] == "high"
+    assert observations[-1]["boundary_observation"] == {
+        "category": "credentials",
+        "summary": "Shareable artifact exposes secret 24",
+        "where_found": "artifact-24.txt",
+        "evidence": "token-24",
+        "how_to_disable_or_avoid": "disable-path-24",
+        "risk_level": "high",
+    }
+    assert all(atom["evidence_class"] == "observed" for atom in observations)
+    assert any(atom.get("source") == "report_outcome" for atom in atoms)
+
+
+def test_extract_backlog_atoms_preserves_every_failed_batch_result(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    count = 25
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {
+                "schema_version": 1,
+                "kind": "batch_v1",
+                "status": "partial",
+                "goal": "Process every input",
+                "inputs": [f"input-{index}" for index in range(count)],
+                "results": [
+                    {
+                        "input": f"input-{index}",
+                        "status": "failure",
+                        "outputs": [
+                            {
+                                "label": f"diagnostic-{index}",
+                                "path": f"diagnostics/{index}.json",
+                                "description": f"full diagnostic {index}",
+                            }
+                        ],
+                        "notes": f"parser rejected valid input {index}",
+                    }
+                    for index in range(count)
+                ],
+                "summary": "Every input failed.",
+                # Deliberately omit optional issues[].
+                "next_actions": ["Repair the parser."],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    failures = [
+        atom for atom in atoms if atom.get("source") == "batch_result_failure"
+    ]
+
+    assert len(failures) == count
+    assert failures[-1]["batch_result"]["outputs"] == [
+        {
+            "label": "diagnostic-24",
+            "path": "diagnostics/24.json",
+            "description": "full diagnostic 24",
+        }
+    ]
+    assert failures[-1]["batch_result"]["notes"] == "parser rejected valid input 24"
+    assert all(atom["evidence_class"] == "observed" for atom in failures)
+    assert any(atom.get("source") == "report_outcome" for atom in atoms)
 
 
 def test_extract_backlog_atoms_extracts_boundary_v1_risks_and_recommendations(
@@ -555,6 +866,38 @@ def test_extract_backlog_atoms_emits_command_failure_atoms_from_metrics(tmp_path
         if atom.get("source") == "command_failure_truncated"
     )
     assert trunc.get("omitted_count") == 3
+
+
+def test_extract_backlog_atoms_retains_every_command_failure_by_default(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    commands = [f"python tool_{index:02d}.py" for index in range(25)]
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "report": {},
+            "metrics": {
+                "commands_executed": len(commands),
+                "commands_failed": len(commands),
+                "failed_commands": [
+                    {"command": command, "exit_code": 1} for command in commands
+                ],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    failures = [atom for atom in atoms if atom.get("source") == "command_failure"]
+
+    assert [atom.get("command") for atom in failures] == commands
+    assert not any(
+        atom.get("source") == "command_failure_truncated" for atom in atoms
+    )
 
 
 def test_extract_backlog_atoms_reconciles_incomplete_metrics_with_events(tmp_path: Path) -> None:

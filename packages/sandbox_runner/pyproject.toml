@@ -41,6 +41,9 @@ python_version = "3.11"
 strict = true
 warn_unused_configs = true
 
+[tool.deptry]
+known_first_party = ["sandbox_runner"]
+
 [tool.ruff]
 target-version = "py311"
 line-length = 100

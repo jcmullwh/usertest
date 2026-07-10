@@ -341,7 +341,10 @@ REMOTE_EFFECTS: tuple[CommandRemoteEffects, ...] = (
         pull_requests=NO_EFFECT,
         summary="Runs the backlog pipeline and writes local stage artifacts/backlog documents.",
         modifiers=(
-            RemoteEffectModifier("--dry-run", "Synthesizes deterministic stage outputs without agent calls."),
+            RemoteEffectModifier(
+                "--dry-run",
+                "Writes offline stage artifacts without agent calls; blocked research cannot advance.",
+            ),
         ),
     ),
     CommandRemoteEffects(

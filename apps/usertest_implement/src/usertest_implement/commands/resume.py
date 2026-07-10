@@ -4,6 +4,7 @@ from __future__ import annotations
 from runner_core.verification_prompts import _build_verification_followup_prompt
 
 from usertest_implement.ci import _ci_timeout_seconds_arg, _git_head_sha, _wait_for_ci_success
+from usertest_implement.implementation_provenance import record_verified_implementation_head
 from usertest_implement.resume_state import (
     LIFECYCLE_CI_FAILED,
     LIFECYCLE_REVIEW_CHANGES_REQUESTED,
@@ -851,6 +852,26 @@ def _cmd_resume_pr(
         commit_performed = bool(git_ref.get("commit_performed") is True)
         if git_ref.get("error"):
             exit_code = max(exit_code, 3)
+        current_ticket_ref = _read_json(resumed_run_dir / "ticket_ref.json")
+        current_ticket_provenance = (
+            current_ticket_ref.get("ticket_provenance")
+            if isinstance(current_ticket_ref, dict)
+            and isinstance(current_ticket_ref.get("ticket_provenance"), dict)
+            else {}
+        )
+        if commit_performed and isinstance(
+            current_ticket_provenance.get("target_contract"), dict
+        ):
+            try:
+                record_verified_implementation_head(
+                    run_dir=resumed_run_dir,
+                    require_exact_base=False,
+                )
+            except ValueError as exc:
+                raise SystemExit(
+                    "Unable to bind resumed verification to the committed PR head: "
+                    f"{exc}"
+                ) from exc
 
     if exit_code == 0:
         push_candidates: list[Path] = []

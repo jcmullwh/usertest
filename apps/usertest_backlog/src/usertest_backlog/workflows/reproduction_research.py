@@ -1,7 +1,394 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from backlog_core.stage_contracts import evidence_assignment_sha256
+from backlog_miner.research_evidence import (
+    BlockedReplayExecutor,
+    DockerReplayExecutor,
+    PlatformRoutingReplayExecutor,
+    ReplayExecutor,
+    TrustedHostReplayExecutor,
+)
+
 from usertest_backlog.shared import *
+
+_REPLAY_EXECUTOR_MODES = frozenset(
+    {"blocked", "docker", "platform_router", "trusted_host"}
+)
+
+
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.relative_to(root)
+    except ValueError:
+        return False
+    return True
+
+
+def _configured_replay_executor(
+    *,
+    research_config: dict[str, Any],
+    repo_root: Path,
+    repo_input: str | None,
+) -> tuple[ReplayExecutor, dict[str, Any]]:
+    """Build the explicit stage-3 replay boundary from repo-owned configuration.
+
+    A missing mode remains fail-closed for checkouts that have not adopted the
+    replay contract.  When a mode is configured, its required fields are
+    validated before any research agent is launched.
+    """
+    mode_raw = research_config.get("replay_executor")
+    if mode_raw is None:
+        executor = BlockedReplayExecutor(reason="backlog_research.replay_executor_missing")
+        return executor, {
+            "executor": "blocked",
+            "reason": "backlog_research.replay_executor_missing",
+        }
+    if not isinstance(mode_raw, str) or mode_raw.strip() not in _REPLAY_EXECUTOR_MODES:
+        choices = "|".join(sorted(_REPLAY_EXECUTOR_MODES))
+        raise ValueError(f"backlog_research.replay_executor must be one of {choices}")
+    mode = mode_raw.strip()
+
+    image_raw = research_config.get("replay_docker_image")
+    roots_raw = research_config.get("replay_trusted_host_roots")
+    if mode == "platform_router":
+        if not isinstance(image_raw, str) or not image_raw.strip():
+            raise ValueError(
+                "backlog_research.replay_docker_image is required for "
+                "replay_executor=platform_router"
+            )
+        if not isinstance(roots_raw, list) or not roots_raw:
+            raise ValueError(
+                "backlog_research.replay_trusted_host_roots must be a non-empty "
+                "list for replay_executor=platform_router"
+            )
+        if not isinstance(repo_input, str) or not repo_input.strip():
+            raise ValueError(
+                "replay_executor=platform_router requires a local --repo-input path"
+            )
+        roots: list[Path] = []
+        for index, value in enumerate(roots_raw):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    "backlog_research.replay_trusted_host_roots"
+                    f"[{index}] must be a non-empty path string"
+                )
+            candidate = Path(value.strip()).expanduser()
+            if not candidate.is_absolute():
+                candidate = repo_root / candidate
+            candidate = candidate.resolve()
+            if not candidate.is_dir():
+                raise ValueError(
+                    "backlog_research.replay_trusted_host_roots"
+                    f"[{index}] is not an existing directory: {candidate}"
+                )
+            roots.append(candidate)
+        source_identity = Path(repo_input.strip()).expanduser()
+        if not source_identity.is_absolute():
+            source_identity = repo_root / source_identity
+        source_identity = source_identity.resolve()
+        if not source_identity.is_dir() or not any(
+            source_identity == root or _path_is_within(source_identity, root)
+            for root in roots
+        ):
+            raise ValueError(
+                "platform router repo_input is not an existing repository within "
+                f"replay_trusted_host_roots: {source_identity}"
+            )
+        host = TrustedHostReplayExecutor(
+            approved_source_roots=list(dict.fromkeys(roots)),
+            source_identity=source_identity,
+        )
+        docker = DockerReplayExecutor(image_ref=image_raw.strip())
+        host_platform = str(
+            host.isolation_receipt(source_workspace=source_identity).get("platform")
+            or "unknown"
+        )
+        routes: dict[str, ReplayExecutor] = {"linux": docker}
+        routes[host_platform] = host
+        return PlatformRoutingReplayExecutor(
+            default_executor=docker,
+            platform_executors=routes,
+        ), {
+            "executor": "platform_router",
+            "default_executor": "docker",
+            "docker_image": image_raw.strip(),
+            "approved_source_roots": [str(path) for path in dict.fromkeys(roots)],
+            "source_identity": str(source_identity),
+            "platform_routes": {
+                requirement: type(executor).__name__
+                for requirement, executor in routes.items()
+            },
+        }
+    if mode == "docker":
+        if not isinstance(image_raw, str) or not image_raw.strip():
+            raise ValueError(
+                "backlog_research.replay_docker_image is required for replay_executor=docker"
+            )
+        image = image_raw.strip()
+        if any(character.isspace() or ord(character) < 32 for character in image):
+            raise ValueError(
+                "backlog_research.replay_docker_image must be one Docker image reference"
+            )
+        if roots_raw not in (None, []):
+            raise ValueError(
+                "backlog_research.replay_trusted_host_roots is only valid for "
+                "replay_executor=trusted_host"
+            )
+        return DockerReplayExecutor(image_ref=image), {
+            "executor": "docker",
+            "docker_image": image,
+            "network": "none",
+            "host_environment": "not_forwarded",
+        }
+
+    if mode == "trusted_host":
+        if image_raw not in (None, ""):
+            raise ValueError(
+                "backlog_research.replay_docker_image is only valid for replay_executor=docker"
+            )
+        if not isinstance(roots_raw, list) or not roots_raw:
+            raise ValueError(
+                "backlog_research.replay_trusted_host_roots must be a non-empty list "
+                "for replay_executor=trusted_host"
+            )
+        roots: list[Path] = []
+        for index, value in enumerate(roots_raw):
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError(
+                    "backlog_research.replay_trusted_host_roots"
+                    f"[{index}] must be a non-empty path string"
+                )
+            candidate = Path(value.strip()).expanduser()
+            if not candidate.is_absolute():
+                candidate = repo_root / candidate
+            candidate = candidate.resolve()
+            if not candidate.is_dir():
+                raise ValueError(
+                    "backlog_research.replay_trusted_host_roots"
+                    f"[{index}] is not an existing directory: {candidate}"
+                )
+            roots.append(candidate)
+        unique_roots = list(dict.fromkeys(roots))
+        if not isinstance(repo_input, str) or not repo_input.strip():
+            raise ValueError("replay_executor=trusted_host requires a local --repo-input path")
+        source_identity = Path(repo_input.strip()).expanduser()
+        if not source_identity.is_absolute():
+            source_identity = repo_root / source_identity
+        source_identity = source_identity.resolve()
+        if not source_identity.is_dir():
+            raise ValueError(
+                "replay_executor=trusted_host requires an existing local repository: "
+                f"{source_identity}"
+            )
+        if not any(
+            source_identity == root or _path_is_within(source_identity, root)
+            for root in unique_roots
+        ):
+            raise ValueError(
+                f"trusted host repo_input is outside replay_trusted_host_roots: {source_identity}"
+            )
+        return TrustedHostReplayExecutor(
+            approved_source_roots=unique_roots,
+            source_identity=source_identity,
+        ), {
+            "executor": "trusted_host",
+            "approved_source_roots": [str(path) for path in unique_roots],
+            "source_identity": str(source_identity),
+            "network": "not_enforced",
+            "host_environment": "sanitized",
+        }
+
+    if image_raw not in (None, "") or roots_raw not in (None, []):
+        raise ValueError(
+            "blocked replay_executor cannot configure replay_docker_image or "
+            "replay_trusted_host_roots"
+        )
+    executor = BlockedReplayExecutor(reason="backlog_research.replay_executor_blocked")
+    return executor, {
+        "executor": "blocked",
+        "reason": "backlog_research.replay_executor_blocked",
+    }
+
+
+def _research_file_receipt(path: Path) -> dict[str, Any]:
+    digest = sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(path.resolve()),
+        "sha256": digest.hexdigest(),
+        "size_bytes": path.stat().st_size,
+    }
+
+
+def _origin_artifact_receipts(atom: dict[str, Any], *, repo_root: Path) -> list[dict[str, Any]]:
+    """Hash the retained source artifacts that make an atom auditable."""
+    run_dir_raw = atom.get("run_dir")
+    if not isinstance(run_dir_raw, str) or not run_dir_raw.strip():
+        return []
+    run_dir = Path(run_dir_raw)
+    if not run_dir.is_absolute():
+        run_dir = repo_root / run_dir
+    run_dir = run_dir.resolve()
+    if not run_dir.is_dir():
+        return []
+
+    candidates: list[Path] = []
+    artifacts_raw = atom.get("artifacts")
+    if isinstance(artifacts_raw, dict):
+        for value in artifacts_raw.values():
+            if not isinstance(value, str) or not value.strip():
+                continue
+            candidate = Path(value)
+            candidates.append(candidate if candidate.is_absolute() else run_dir / candidate)
+    artifact_ref_raw = atom.get("artifact_ref")
+    artifact_ref = artifact_ref_raw if isinstance(artifact_ref_raw, dict) else {}
+    artifact_path_raw = artifact_ref.get("path")
+    if isinstance(artifact_path_raw, str) and artifact_path_raw.strip():
+        candidate = Path(artifact_path_raw)
+        candidates.append(candidate if candidate.is_absolute() else run_dir / candidate)
+    attachments_raw = atom.get("attachments")
+    for attachment in attachments_raw if isinstance(attachments_raw, list) else []:
+        if not isinstance(attachment, dict):
+            continue
+        attachment_ref_raw = attachment.get("artifact_ref")
+        attachment_ref = (
+            attachment_ref_raw if isinstance(attachment_ref_raw, dict) else {}
+        )
+        attachment_path_raw = attachment_ref.get("path")
+        if not isinstance(attachment_path_raw, str) or not attachment_path_raw.strip():
+            continue
+        candidate = Path(attachment_path_raw)
+        candidates.append(candidate if candidate.is_absolute() else run_dir / candidate)
+
+    status = str(
+        atom.get("status")
+        or atom.get("report_status")
+        or atom.get("outcome")
+        or ""
+    ).casefold()
+    source = str(atom.get("source") or "").casefold()
+    failure_atom = (
+        status in {"failed", "failure", "error", "partial", "blocked"}
+        or any(marker in source for marker in ("failure", "error", "stderr"))
+        or bool(attachments_raw)
+    )
+    if failure_atom:
+        # Older retained failure records do not always project the attachment
+        # references onto each atom.  Hash the canonical full streams when they
+        # exist so research receives the actual diagnostic, not only an excerpt.
+        candidates.extend(
+            [run_dir / "agent_stderr.txt", run_dir / "agent_last_message.txt"]
+        )
+    for name in (
+        "report.json",
+        "error.json",
+        "report_validation_errors.json",
+        "normalized_events.jsonl",
+        "metrics.json",
+        "target_ref.json",
+    ):
+        candidates.append(run_dir / name)
+
+    receipts: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+            resolved.relative_to(run_dir)
+        except (OSError, ValueError):
+            continue
+        if resolved in seen or not resolved.is_file():
+            continue
+        seen.add(resolved)
+        receipts.append(_research_file_receipt(resolved))
+    return receipts
+
+
+def _evidence_assignment(
+    *,
+    case_id: str,
+    problem_id: str,
+    evidence_atom_ids: list[str],
+    evidence_atoms: list[dict[str, Any]],
+    repo_root: Path,
+) -> tuple[dict[str, Any], list[str]]:
+    decision_fields = {
+        "links",
+        "artifact_links",
+        "case_id",
+        "supporting_case_ids",
+        "disposition",
+        "disposition_status",
+        "disposition_receipt",
+        "disposition_revisit_when",
+        "evidence_role",
+        "origin_stage",
+        "parent_case_id",
+        "parent_problem_id",
+        "parent_ticket_fingerprint",
+        "derived_from_atom_ids",
+        "lineage_authorities",
+        "lineage_validation_errors",
+        "lineage_mining_blocker",
+        "legacy_report_lineage_claims",
+        "legacy_parent_problem_id",
+        "novel_case_rationale",
+    }
+
+    def source_evidence_projection(atom: dict[str, Any]) -> dict[str, Any]:
+        return {
+            key: value
+            for key, value in atom.items()
+            if key not in decision_fields
+            and not key.startswith(("case_", "disposition_", "lineage_", "parent_"))
+        }
+
+    receipts: list[dict[str, Any]] = []
+    missing: list[str] = []
+    by_id = {
+        str(atom.get("atom_id")): atom
+        for atom in evidence_atoms
+        if isinstance(atom.get("atom_id"), str)
+    }
+    for atom_id in evidence_atom_ids:
+        atom = by_id.get(atom_id)
+        if atom is None:
+            missing.append(atom_id)
+            continue
+        artifacts = _origin_artifact_receipts(atom, repo_root=repo_root)
+        atom_projection = source_evidence_projection(atom)
+        receipts.append(
+            {
+                "atom_id": atom_id,
+                "atom_sha256": sha256(
+                    json.dumps(
+                        atom_projection,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                        ensure_ascii=False,
+                    ).encode()
+                ).hexdigest(),
+                "atom_snapshot": atom_projection,
+                "source_projection_version": 1,
+                "artifact_receipts": artifacts,
+                "origin_evidence_mode": (
+                    "snapshot_and_artifacts" if artifacts else "signed_snapshot"
+                ),
+            }
+        )
+    assignment: dict[str, Any] = {
+        "status": "incomplete" if missing else "complete",
+        "errors": [f"origin_evidence_unavailable:{item}" for item in missing],
+        "case_id": case_id,
+        "problem_id": problem_id,
+        "expected_atom_ids": list(evidence_atom_ids),
+        "atom_receipts": receipts,
+    }
+    assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
+    return assignment, missing
 
 
 def _render_research_dossiers_markdown(
@@ -21,6 +408,8 @@ def _render_research_dossiers_markdown(
         rec = problem_records_by_id.get(str(pid)) or {}
         rec_title = rec.get("title") or pid
         status = dossier.get("reproduction_status") or "unknown"
+        research_status = dossier.get("research_status") or "unknown"
+        repo_revision = dossier.get("repo_revision") or "unknown"
         diff_cls = dossier.get("diff_classification") or "unknown"
         impl = dossier.get("implementation_performed")
         impl_s = "true" if impl is True else "false" if impl is False else "?"
@@ -28,13 +417,13 @@ def _render_research_dossiers_markdown(
         lines.append(f"## {rec_title}")
         lines.append(
             f"**ID**: `{pid}` | **Reproduction**: `{status}` | "
-            f"**Diff**: `{diff_cls}` | **Implementation performed**: {impl_s}\n"
+            f"**Research status**: `{research_status}` | **Diff**: `{diff_cls}` | "
+            f"**Implementation performed**: {impl_s}\n"
         )
+        lines.append(f"- Repository revision: `{repo_revision}`")
 
         writes_used = dossier.get("writes_used")
-        writes_used_s = (
-            "true" if writes_used is True else "false" if writes_used is False else "?"
-        )
+        writes_used_s = "true" if writes_used is True else "false" if writes_used is False else "?"
         writes_purpose = dossier.get("writes_purpose") or []
         purpose_list = (
             [p for p in writes_purpose if isinstance(p, str) and p.strip()]
@@ -59,27 +448,70 @@ def _render_research_dossiers_markdown(
             for r in diff_reasons_list[:12]:
                 lines.append(f"  - {r}")
 
-        hypos = dossier.get("root_cause_hypotheses") or []
-        hypos_list = (
-            [h for h in hypos if isinstance(h, str) and h.strip()]
-            if isinstance(hypos, list)
-            else []
-        )
-        if hypos_list:
+        hypotheses_raw = dossier.get("root_cause_hypotheses")
+        hypotheses = hypotheses_raw if isinstance(hypotheses_raw, list) else []
+        if hypotheses:
             lines.append("- Root cause hypotheses:")
-            for h in hypos_list[:8]:
-                lines.append(f"  - {h}")
+            for hypothesis in hypotheses[:8]:
+                if isinstance(hypothesis, dict):
+                    statement = hypothesis.get("statement")
+                    hypothesis_id = hypothesis.get("hypothesis_id")
+                    if isinstance(statement, str) and statement.strip():
+                        prefix = f"`{hypothesis_id}`: " if hypothesis_id else ""
+                        lines.append(f"  - {prefix}{statement.strip()}")
+                    support = hypothesis.get("supporting_evidence")
+                    support_items = support if isinstance(support, list) else []
+                    for evidence in support_items[:6]:
+                        if isinstance(evidence, str) and evidence.strip():
+                            lines.append(f"    - Supports: {evidence.strip()}")
+                    counter = hypothesis.get("counterevidence")
+                    counter_items = counter if isinstance(counter, list) else []
+                    for evidence in counter_items[:6]:
+                        if isinstance(evidence, str) and evidence.strip():
+                            lines.append(f"    - Counterevidence: {evidence.strip()}")
+                    attempts_raw = hypothesis.get("falsification_attempts")
+                    attempts = attempts_raw if isinstance(attempts_raw, list) else []
+                    for attempt in attempts[:6]:
+                        if not isinstance(attempt, dict):
+                            continue
+                        attempt_id = str(attempt.get("attempt_id") or "").strip()
+                        outcome = str(attempt.get("outcome") or "").strip()
+                        challenge_id = str(
+                            attempt.get("challenge_experiment_id") or ""
+                        ).strip()
+                        if attempt_id and outcome and challenge_id:
+                            lines.append(
+                                f"    - Falsification `{attempt_id}`: `{outcome}` via "
+                                f"`{challenge_id}`"
+                            )
+                elif isinstance(hypothesis, str) and hypothesis.strip():
+                    # Historical rendering only; strict new records use objects.
+                    lines.append(f"  - {hypothesis.strip()}")
 
-        unknowns = dossier.get("unknowns") or []
-        unknowns_list = (
-            [u for u in unknowns if isinstance(u, str) and u.strip()]
-            if isinstance(unknowns, list)
-            else []
-        )
-        if unknowns_list:
-            lines.append("- Unknowns / next evidence needed:")
-            for u in unknowns_list[:10]:
-                lines.append(f"  - {u}")
+        material_unknowns_raw = dossier.get("material_unknowns")
+        material_unknowns = material_unknowns_raw if isinstance(material_unknowns_raw, list) else []
+        if material_unknowns:
+            lines.append("- Material unknowns:")
+            for unknown in material_unknowns[:10]:
+                if not isinstance(unknown, dict):
+                    continue
+                text = unknown.get("unknown")
+                evidence_needed = unknown.get("evidence_needed")
+                affects = unknown.get("affects")
+                if isinstance(text, str) and text.strip():
+                    affects_items = affects if isinstance(affects, list) else []
+                    affects_s = ", ".join(str(item) for item in affects_items)
+                    lines.append(f"  - {text.strip()} (affects: {affects_s or 'unspecified'})")
+                    if isinstance(evidence_needed, str) and evidence_needed.strip():
+                        lines.append(f"    - Evidence needed: {evidence_needed.strip()}")
+
+        blocking_reasons = dossier.get("blocking_reasons")
+        blocking_items = blocking_reasons if isinstance(blocking_reasons, list) else []
+        if blocking_items:
+            lines.append("- Blocking reasons:")
+            for reason in blocking_items[:10]:
+                if isinstance(reason, str) and reason.strip():
+                    lines.append(f"  - {reason.strip()}")
 
         run_dir = dossier.get("run_dir")
         if isinstance(run_dir, str) and run_dir.strip():
@@ -107,9 +539,11 @@ def _run_repro_research_stage(
     *,
     repo_root: Path,
     repo_input: str | None,
+    repo_ref: str | None,
     target_slug: str | None,
     selected_priority_decisions: list[dict[str, Any]],
     problem_records: list[dict[str, Any]],
+    atoms: list[dict[str, Any]],
     artifacts_dir: Path,
     out_json: Path,
     out_md: Path,
@@ -117,6 +551,9 @@ def _run_repro_research_stage(
     model: str | None,
     cfg: RunnerConfig,
     dry_run: bool,
+    replay_timeout_seconds: float,
+    replay_executor: ReplayExecutor,
+    replay_executor_metadata: dict[str, Any],
 ) -> dict[str, Any]:
     """Run stage 3 reproduce-plus-research and write the stage artifacts."""
     import json as _json
@@ -126,6 +563,11 @@ def _run_repro_research_stage(
         for item in problem_records
         if isinstance(item, dict) and isinstance(item.get("problem_id"), str)
     }
+    atoms_by_id: dict[str, dict[str, Any]] = {
+        str(item.get("atom_id")): item
+        for item in atoms
+        if isinstance(item, dict) and isinstance(item.get("atom_id"), str)
+    }
 
     selected_payloads: list[dict[str, Any]] = []
     for dec in selected_priority_decisions:
@@ -133,16 +575,99 @@ def _run_repro_research_stage(
         if not isinstance(pid, str) or not pid.strip():
             continue
         rec = records_by_id.get(pid) or {}
+        case_id = rec.get("case_id")
+        case_id = case_id.strip() if isinstance(case_id, str) and case_id.strip() else ""
+        evidence_ids_raw = rec.get("evidence_atom_ids")
+        all_evidence_ids = (
+            [
+                atom_id.strip()
+                for atom_id in evidence_ids_raw
+                if isinstance(atom_id, str) and atom_id.strip()
+            ]
+            if isinstance(evidence_ids_raw, list)
+            else []
+        )
+        derived_ids_raw = rec.get("derived_evidence_atom_ids")
+        derived_ids = (
+            [
+                atom_id.strip()
+                for atom_id in derived_ids_raw
+                if isinstance(atom_id, str) and atom_id.strip()
+            ]
+            if isinstance(derived_ids_raw, list)
+            else []
+        )
+        source_ids_raw = rec.get("source_evidence_atom_ids")
+        evidence_ids = (
+            [
+                atom_id.strip()
+                for atom_id in source_ids_raw
+                if isinstance(atom_id, str) and atom_id.strip()
+            ]
+            if isinstance(source_ids_raw, list)
+            else [
+                atom_id for atom_id in all_evidence_ids if atom_id not in set(derived_ids)
+            ]
+        )
+        evidence_ids = list(dict.fromkeys(evidence_ids))
+        derived_ids = list(
+            dict.fromkeys(
+                [
+                    atom_id
+                    for atom_id in [*derived_ids, *all_evidence_ids]
+                    if atom_id not in set(evidence_ids)
+                ]
+            )
+        )
+        missing_evidence_atom_ids = [
+            atom_id for atom_id in evidence_ids if atom_id not in atoms_by_id
+        ]
+        if not rec:
+            missing_evidence_atom_ids.append(f"problem_record:{pid}")
+        elif not case_id:
+            missing_evidence_atom_ids.append(f"case_id:{pid}")
+        elif not evidence_ids:
+            missing_evidence_atom_ids.append(f"problem_evidence:{pid}")
+        evidence_atoms = [
+            atoms_by_id[atom_id] for atom_id in evidence_ids if atom_id in atoms_by_id
+        ]
+        derived_evidence_atoms = [
+            atoms_by_id[atom_id] for atom_id in derived_ids if atom_id in atoms_by_id
+        ]
+        assignment, assignment_missing = _evidence_assignment(
+            case_id=case_id,
+            problem_id=pid,
+            evidence_atom_ids=evidence_ids,
+            evidence_atoms=evidence_atoms,
+            repo_root=repo_root,
+        )
+        missing_evidence_atom_ids.extend(assignment_missing)
+        missing_evidence_atom_ids = list(dict.fromkeys(missing_evidence_atom_ids))
+        assignment["status"] = "incomplete" if missing_evidence_atom_ids else "complete"
+        assignment["errors"] = [
+            f"origin_evidence_unavailable:{item}" for item in missing_evidence_atom_ids
+        ]
+        assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
         payload = {
+            "case_id": case_id,
             "problem_id": pid,
             "problem_record": rec,
             "priority_decision": dec,
+            "expected_evidence_atom_ids": evidence_ids,
+            "missing_evidence_atom_ids": missing_evidence_atom_ids,
+            "evidence_atoms": evidence_atoms,
+            # Prior research/implementation output is context, never a mandatory
+            # symptom to reproduce and never an independent new problem source.
+            "derived_evidence_atom_ids": derived_ids,
+            "derived_evidence_atoms": derived_evidence_atoms,
+            "evidence_assignment": assignment,
         }
         selected_payloads.append(payload)
 
     stage_doc = run_repro_research_stage(
         repo_root=repo_root,
         repo_input=repo_input,
+        repo_ref=repo_ref,
         target_slug=target_slug,
         selected_problems=selected_payloads,
         artifacts_dir=artifacts_dir,
@@ -150,6 +675,9 @@ def _run_repro_research_stage(
         model=model,
         cfg=cfg,
         dry_run=dry_run,
+        replay_timeout_seconds=replay_timeout_seconds,
+        replay_executor=replay_executor,
+        replay_executor_metadata=replay_executor_metadata,
     )
 
     artifacts = stage_doc.get("artifacts")
@@ -160,7 +688,9 @@ def _run_repro_research_stage(
 
     out_json.parent.mkdir(parents=True, exist_ok=True)
     out_md.parent.mkdir(parents=True, exist_ok=True)
-    out_json.write_text(_json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    out_json.write_text(
+        _json.dumps(stage_doc, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
 
     items_raw = stage_doc.get("items") if isinstance(stage_doc, dict) else None
     dossiers = (
@@ -181,8 +711,6 @@ def _run_repro_research_stage(
     print(f"[stage3] wrote {out_json}", file=sys.stderr)
     print(f"[stage3] wrote {out_md}", file=sys.stderr)
     return stage_doc
-
-
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

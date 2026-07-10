@@ -9,6 +9,10 @@ from usertest_implement.commands.maintenance_images import (
     _cmd_maintenance_images_cleanup,
     _cmd_maintenance_images_list,
 )
+from usertest_implement.commands.outcome import (
+    _cmd_outcome_advance,
+    _cmd_outcome_run_role,
+)
 from usertest_implement.commands.reports import _cmd_reports_summarize
 from usertest_implement.commands.resume import _cmd_resume
 from usertest_implement.commands.review import (
@@ -546,6 +550,14 @@ def build_parser() -> argparse.ArgumentParser:
         required=False,
         help="Ticket fingerprint selector (requires --tickets-export).",
     )
+    run_p.add_argument(
+        "--runs-dir",
+        type=Path,
+        help=(
+            "Implementation artifact directory. Defaults to "
+            "<repo_root>/runs/usertest_implement."
+        ),
+    )
     _add_settings_args(run_p)
     _add_run_execution_args(run_p)
 
@@ -613,6 +625,99 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     review_merge_p.set_defaults(func=_cmd_review_merge)
+
+    outcome_p = sub.add_parser(
+        "outcome",
+        help="Advance evidence-backed implementation outcomes without conflating merge and resolution.",
+    )
+    outcome_sub = outcome_p.add_subparsers(dest="outcome_cmd", required=True)
+    outcome_role_p = outcome_sub.add_parser(
+        "run-role",
+        help=(
+            "Execute one runner-owned stage-6 original, live, mitigation-effect, or "
+            "recurrence proof role and write an advance-ready evidence JSON file."
+        ),
+    )
+    outcome_role_p.add_argument("--owner-root", type=Path, default=Path.cwd())
+    outcome_role_group = outcome_role_p.add_mutually_exclusive_group(required=True)
+    outcome_role_group.add_argument("--ticket-path", dest="ticket_path", type=Path)
+    outcome_role_group.add_argument("--fingerprint")
+    outcome_role_p.add_argument(
+        "--role",
+        required=True,
+        choices=["original_scenario", "live", "mitigation_effect", "recurrence"],
+    )
+    outcome_role_p.add_argument(
+        "--workspace",
+        type=Path,
+        help="Git checkout whose HEAD must equal the outcome's merged commit.",
+    )
+    outcome_role_p.add_argument(
+        "--out-dir",
+        type=Path,
+        help="Optional output directory under the configured runs root.",
+    )
+    outcome_role_p.add_argument(
+        "--timeout-seconds",
+        type=_optional_timeout_seconds,
+        default=None,
+        help=(
+            "Optional explicit role timeout. The default is unlimited; a timeout is "
+            "retained as blocked evidence and never converted to success."
+        ),
+    )
+    outcome_role_p.add_argument(
+        "--recurrence-refresh-receipt",
+        type=Path,
+        help=(
+            "Required for the recurrence role: centralized refresh receipt containing "
+            "two later stable shadow cycles, canonical-case/atom snapshots, and an "
+            "actual source-observation run after the prior outcome."
+        ),
+    )
+    outcome_role_p.set_defaults(func=_cmd_outcome_run_role)
+
+    outcome_advance_p = outcome_sub.add_parser(
+        "advance",
+        help="Atomically advance the outcome embedded in a completed ticket and its ledger entry.",
+    )
+    outcome_advance_p.add_argument("--owner-root", type=Path, default=Path.cwd())
+    outcome_advance_group = outcome_advance_p.add_mutually_exclusive_group(required=True)
+    outcome_advance_group.add_argument("--ticket-path", dest="ticket_path", type=Path)
+    outcome_advance_group.add_argument("--fingerprint")
+    outcome_advance_p.add_argument(
+        "--state",
+        required=True,
+        choices=[
+            "tests_verified",
+            "original_scenario_verified",
+            "live_verified",
+            "resolved",
+            "mitigated",
+            "unverified",
+        ],
+        help="Target lifecycle state; the current state must permit this transition.",
+    )
+    outcome_advance_p.add_argument(
+        "--evidence-json",
+        type=Path,
+        required=True,
+        help=(
+            "JSON object containing receipted evidence lists and optional remaining_risks "
+            "or recurrence_check updates."
+        ),
+    )
+    outcome_advance_p.add_argument(
+        "--ledger",
+        nargs="?",
+        const=_DEFAULT_LEDGER_PATH,
+        type=Path,
+        help=(
+            "Optional attempt ledger YAML. If provided without a value, defaults to "
+            "<repo_root>/.agents/state/backlog_implement_actions.yaml."
+        ),
+    )
+    outcome_advance_p.set_defaults(func=_cmd_outcome_advance)
 
     maintenance_images_p = sub.add_parser(
         "maintenance-images",
@@ -728,13 +833,34 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional model override for `usertest-backlog reports backlog`.",
     )
     tickets_run_next_p.add_argument(
+        "--backlog-research-ref",
+        default="origin/dev",
+        help="Exact Git ref used by every shadow research replay (default: origin/dev).",
+    )
+    tickets_run_next_p.add_argument(
+        "--backlog-breadth-profile",
+        choices=["external_generalization", "internal_maintenance"],
+        default="internal_maintenance",
+        help="One breadth profile shared by backlog and UX stages.",
+    )
+    tickets_run_next_p.add_argument(
+        "--backlog-actions-yaml",
+        type=Path,
+        help="Exact ticket action ledger shared with the shadow-backed export.",
+    )
+    tickets_run_next_p.add_argument(
+        "--backlog-atom-actions-yaml",
+        type=Path,
+        help="Exact atom action ledger shared by shadows and export.",
+    )
+    tickets_run_next_p.add_argument(
         "--review-agent",
         choices=["claude", "codex", "gemini"],
-        help="Agent CLI used for `usertest-backlog reports review-ux` (default: --backlog-agent).",
+        help="Compatibility alias; when set it must equal --backlog-agent.",
     )
     tickets_run_next_p.add_argument(
         "--review-model",
-        help="Optional model override for `usertest-backlog reports review-ux`.",
+        help="Compatibility alias; when set it must equal --backlog-model.",
     )
     _add_settings_args(tickets_run_next_p)
     _add_run_execution_args(tickets_run_next_p)

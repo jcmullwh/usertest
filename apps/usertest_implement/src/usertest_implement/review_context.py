@@ -1,6 +1,8 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from backlog_repo.plan_scope import assess_pr_plan_scope
+
 from usertest_implement.shared import *
 
 
@@ -65,23 +67,28 @@ def _classify_pr_checks(checks: list[dict[str, Any]]) -> tuple[str, str | None]:
     if not checks:
         return "pending", None
 
-    success_states = {"SUCCESS", "SKIPPING", "NEUTRAL"}
+    accepted_terminal_states = {"SUCCESS", "SKIPPING", "NEUTRAL"}
     failure_states = {"FAILURE", "ERROR", "TIMED_OUT", "CANCELLED", "ACTION_REQUIRED"}
     pending_states = {"PENDING", "QUEUED", "IN_PROGRESS", "WAITING", "REQUESTED"}
 
     saw_pending = False
+    saw_success = False
     for check in checks:
         state_raw = check.get("state")
         state = str(state_raw).strip().upper() if isinstance(state_raw, str) else ""
         if state in failure_states:
             return "completed", "failure"
+        if state == "SUCCESS":
+            saw_success = True
         if state in pending_states or not state:
             saw_pending = True
-        elif state not in success_states:
+        elif state not in accepted_terminal_states:
             saw_pending = True
 
     if saw_pending:
         return "pending", None
+    if not saw_success:
+        return "completed", "neutral"
     return "completed", "success"
 
 
@@ -94,7 +101,7 @@ def _collect_pr_review_context(*, workspace_dir: Path, pr_url: str) -> dict[str,
             "view",
             pr_url,
             "--json",
-            "number,url,title,state,isDraft,headRefName,baseRefName,mergeable,reviewDecision,statusCheckRollup",
+            "number,url,title,state,isDraft,headRefName,headRefOid,baseRefName,baseRefOid,mergeable,reviewDecision,statusCheckRollup",
         ],
     )
     if not isinstance(view_raw, dict):
@@ -136,8 +143,44 @@ def _collect_pr_review_context(*, workspace_dir: Path, pr_url: str) -> dict[str,
         "ci_status": ci_status,
         "ci_conclusion": ci_conclusion,
         "changed_files": changed_files,
+        "diff_full": diff_full,
         "diff_excerpt": diff_excerpt,
         "diff_truncated": diff_truncated,
+    }
+
+
+def _collect_merged_pr_provenance(*, workspace_dir: Path, pr_url: str) -> dict[str, str]:
+    """Read the authoritative merge commit and target branch after merge."""
+
+    raw = _run_gh_json(
+        cwd=workspace_dir,
+        argv=[
+            "gh",
+            "pr",
+            "view",
+            pr_url,
+            "--json",
+            "url,state,baseRefName,mergeCommit",
+        ],
+    )
+    if not isinstance(raw, dict):
+        raise RuntimeError("gh pr view returned non-object merge provenance")
+    state = str(raw.get("state") or "").strip().upper()
+    target_branch = raw.get("baseRefName")
+    merge_commit_raw = raw.get("mergeCommit")
+    merge_commit = (
+        merge_commit_raw.get("oid") if isinstance(merge_commit_raw, dict) else None
+    )
+    if state != "MERGED":
+        raise RuntimeError(f"PR did not report MERGED after merge command: {state!r}")
+    if not isinstance(target_branch, str) or not target_branch.strip():
+        raise RuntimeError("Merged PR provenance is missing baseRefName")
+    if not isinstance(merge_commit, str) or not merge_commit.strip():
+        raise RuntimeError("Merged PR provenance is missing mergeCommit.oid")
+    return {
+        "pr_url": str(raw.get("url") or pr_url).strip(),
+        "target_branch": target_branch.strip(),
+        "merged_commit": merge_commit.strip(),
     }
 
 
@@ -157,18 +200,35 @@ def _build_review_append_prompt(
     changed_files = pr_context.get("changed_files", [])
     changed_file_lines = "\n".join(f"- {path}" for path in changed_files) if changed_files else "- <none>"
     diff_excerpt = str(pr_context.get("diff_excerpt") or "").rstrip()
+    implementation_scope = pr_context.get("implementation_scope")
+    scope_json = json.dumps(
+        implementation_scope or {}, indent=2, ensure_ascii=False
+    )
 
     return (
         "# Review task\n\n"
-        "You are reviewing a PR-backed implementation of an already-selected backlog ticket.\n"
-        "Do not redesign the ticket. Review only whether the PR stays aligned with the chosen approach,\n"
-        "whether it adds unnecessary scope, whether there are implementation defects/regressions, and whether CI is green.\n\n"
+        "You are performing the causal acceptance review for a PR-backed implementation "
+        "of an already-selected backlog ticket.\n"
+        "Start with the researched failure mechanism, not the changed-file list. Determine "
+        "whether the diff changes that mechanism or merely suppresses a visible symptom; "
+        "whether verification actually exercises the ticket's bound original-scenario "
+        "oracle; and which causal paths, if any, can still reproduce the problem. Then "
+        "check defects, regressions, and CI. Do not redesign the ticket unless the evidence "
+        "shows that the selected mechanism is wrong or the implementation diverges from it.\n\n"
         "Your report must use `task_run_v1` and must set `report.extensions.review_summary` to an object with:\n"
         "- `review_decision`: `approved` | `changes_requested` | `blocked`\n"
         "- `approach_alignment`: `aligned` | `diverged` | `unclear`\n"
+        "- `mechanism_assessment`: `mechanism_addressed` | `symptom_only` | `unclear`\n"
+        "- `original_scenario_oracle`: `exercised` | `not_exercised` | `unclear`\n"
+        "- `causal_path_assessment`: `closed` | `residual` | `unclear`\n"
+        "- `remaining_causal_paths`: an array naming every known residual path (empty only when none remain)\n"
         "- `scope_assessment`: `appropriate` | `excessive` | `unclear`\n"
         "- `rationale`: short string\n\n"
-        "Use `issues[]` for findings. Do not modify repository source files. Do not merge the PR.\n\n"
+        "An approval requires `mechanism_addressed`, `exercised`, and `closed`. A test that "
+        "does not replay the bound oracle is not original-scenario verification. Put every "
+        "symptom-only change, unexercised oracle, or residual causal path in `issues[]`; use "
+        "high or critical severity when it invalidates the claimed resolution. Do not modify "
+        "repository source files. Do not merge the PR.\n\n"
         "# Ticket markdown\n\n"
         f"{selected.ticket_markdown.rstrip()}\n\n"
         "# Handoff summary\n\n"
@@ -181,12 +241,21 @@ def _build_review_append_prompt(
         f"```json\n{pr_json}\n```\n\n"
         "# Current PR checks\n\n"
         f"```json\n{checks_json}\n```\n\n"
-        "# Changed files\n\n"
-        f"{changed_file_lines}\n\n"
         "# PR diff excerpt\n\n"
         "```diff\n"
         f"{diff_excerpt}\n"
-        "```\n"
+        "```\n\n"
+        "# Scope advisory and immutable head/target gate\n\n"
+        "Scope is secondary to causal correctness. The runner-owned receipt hard-blocks "
+        "only a missing planned production target or a reviewed head that differs from the "
+        "verified implementation head; you may not waive those failures. Extra paths, "
+        "untouched non-production targets, and wider implementation breadth are advisory. "
+        "Judge them briefly as necessary propagation/support work or inappropriate scope, "
+        "without treating a narrow diff as evidence that the mechanism was addressed.\n\n"
+        "## Changed files\n\n"
+        f"{changed_file_lines}\n\n"
+        "## Runner receipt\n\n"
+        f"```json\n{scope_json}\n```\n"
     )
 
 
@@ -202,6 +271,15 @@ def _extract_agent_review_summary(report: dict[str, Any]) -> dict[str, Any]:
     for key, allowed in (
         ("review_decision", {"approved", "changes_requested", "blocked"}),
         ("approach_alignment", {"aligned", "diverged", "unclear"}),
+        (
+            "mechanism_assessment",
+            {"mechanism_addressed", "symptom_only", "unclear"},
+        ),
+        (
+            "original_scenario_oracle",
+            {"exercised", "not_exercised", "unclear"},
+        ),
+        ("causal_path_assessment", {"closed", "residual", "unclear"}),
         ("scope_assessment", {"appropriate", "excessive", "unclear"}),
     ):
         raw = review_summary.get(key)
@@ -209,6 +287,31 @@ def _extract_agent_review_summary(report: dict[str, Any]) -> dict[str, Any]:
         if value not in allowed:
             raise ValueError(f"extensions.review_summary.{key} must be one of {sorted(allowed)!r}")
         out[key] = value
+
+    remaining_raw = review_summary.get("remaining_causal_paths")
+    if not isinstance(remaining_raw, list):
+        raise ValueError(
+            "extensions.review_summary.remaining_causal_paths must be an array"
+        )
+    remaining_causal_paths: list[str] = []
+    for index, raw in enumerate(remaining_raw):
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(
+                "extensions.review_summary.remaining_causal_paths"
+                f"[{index}] must be a non-empty string"
+            )
+        remaining_causal_paths.append(raw.strip())
+    if out["causal_path_assessment"] == "closed" and remaining_causal_paths:
+        raise ValueError(
+            "extensions.review_summary.remaining_causal_paths must be empty when "
+            "causal_path_assessment is closed"
+        )
+    if out["causal_path_assessment"] == "residual" and not remaining_causal_paths:
+        raise ValueError(
+            "extensions.review_summary.remaining_causal_paths must name at least one "
+            "path when causal_path_assessment is residual"
+        )
+    out["remaining_causal_paths"] = remaining_causal_paths
 
     rationale_raw = review_summary.get("rationale")
     if not isinstance(rationale_raw, str) or not rationale_raw.strip():
@@ -256,9 +359,13 @@ def _stringify_review_detail(value: Any) -> str | None:
 def _build_pr_review_body(*, review_summary: dict[str, Any]) -> str:
     decision = str(review_summary.get("review_decision") or "").strip().lower()
     alignment = str(review_summary.get("approach_alignment") or "").strip().lower()
+    mechanism = str(review_summary.get("mechanism_assessment") or "").strip().lower()
+    oracle = str(review_summary.get("original_scenario_oracle") or "").strip().lower()
+    causal_paths = str(review_summary.get("causal_path_assessment") or "").strip().lower()
     scope = str(review_summary.get("scope_assessment") or "").strip().lower()
     rationale = str(review_summary.get("rationale") or "").strip()
     merge_ready = bool(review_summary.get("merge_ready") is True)
+    reviewed_head_oid = str(review_summary.get("reviewed_head_oid") or "").strip()
     findings_raw = review_summary.get("findings")
     findings = findings_raw if isinstance(findings_raw, list) else []
 
@@ -267,8 +374,12 @@ def _build_pr_review_body(*, review_summary: dict[str, Any]) -> str:
         "",
         f"- Decision: `{decision or 'unknown'}`",
         f"- Approach alignment: `{alignment or 'unknown'}`",
+        f"- Researched mechanism: `{mechanism or 'unknown'}`",
+        f"- Original-scenario oracle: `{oracle or 'unknown'}`",
+        f"- Causal paths: `{causal_paths or 'unknown'}`",
         f"- Scope assessment: `{scope or 'unknown'}`",
         f"- Merge ready: `{'yes' if merge_ready else 'no'}`",
+        f"- Reviewed commit: `{reviewed_head_oid or 'unknown'}`",
         "",
         "### Rationale",
         "",
@@ -365,6 +476,9 @@ def _build_final_review_summary(
     mergeable = str(mergeable_raw).strip().upper() == "MERGEABLE"
     is_draft = bool(pr_meta.get("isDraft") is True)
     pr_state = str(pr_meta.get("state") or "").strip().upper()
+    reviewed_head_oid = str(pr_meta.get("headRefOid") or "").strip()
+    if not reviewed_head_oid:
+        raise ValueError("PR context missing headRefOid; review cannot be bound to a commit")
     ci_status = str(pr_context.get("ci_status") or "pending")
     ci_conclusion_raw = pr_context.get("ci_conclusion")
     ci_conclusion = (
@@ -372,14 +486,35 @@ def _build_final_review_summary(
         if isinstance(ci_conclusion_raw, str) and str(ci_conclusion_raw).strip()
         else None
     )
+    implementation_scope_raw = pr_context.get("implementation_scope")
+    implementation_scope = (
+        implementation_scope_raw
+        if isinstance(implementation_scope_raw, dict)
+        else {}
+    )
+    deterministic_scope_verified = implementation_scope.get("status") in {
+        "verified",
+        "not_applicable_external",
+    }
+    findings = _review_findings_from_report(report)
+    blocking_findings = [
+        finding
+        for finding in findings
+        if str(finding.get("severity") or "").strip().casefold()
+        in {"error", "high", "critical", "blocker", "fatal"}
+    ]
     merge_ready = (
         agent_summary["review_decision"] == "approved"
         and agent_summary["approach_alignment"] == "aligned"
-        and agent_summary["scope_assessment"] == "appropriate"
+        and agent_summary["mechanism_assessment"] == "mechanism_addressed"
+        and agent_summary["original_scenario_oracle"] == "exercised"
+        and agent_summary["causal_path_assessment"] == "closed"
         and ci_conclusion == "success"
         and mergeable
         and not is_draft
         and pr_state == "OPEN"
+        and deterministic_scope_verified
+        and not blocking_findings
     )
     return {
         "schema_version": 1,
@@ -391,6 +526,7 @@ def _build_final_review_summary(
         "pr_state": pr_state.lower() if pr_state else None,
         "pr_title": pr_meta.get("title"),
         "head_ref_name": pr_meta.get("headRefName"),
+        "reviewed_head_oid": reviewed_head_oid,
         "base_ref_name": pr_meta.get("baseRefName"),
         "is_draft": is_draft,
         "mergeable": mergeable,
@@ -399,9 +535,16 @@ def _build_final_review_summary(
         "ci_conclusion": ci_conclusion,
         "review_decision": agent_summary["review_decision"],
         "approach_alignment": agent_summary["approach_alignment"],
+        "mechanism_assessment": agent_summary["mechanism_assessment"],
+        "original_scenario_oracle": agent_summary["original_scenario_oracle"],
+        "causal_path_assessment": agent_summary["causal_path_assessment"],
+        "remaining_causal_paths": agent_summary["remaining_causal_paths"],
         "scope_assessment": agent_summary["scope_assessment"],
+        "implementation_scope": implementation_scope,
+        "deterministic_scope_verified": deterministic_scope_verified,
         "rationale": agent_summary["rationale"],
-        "findings": _review_findings_from_report(report),
+        "findings": findings,
+        "blocking_finding_count": len(blocking_findings),
         "merge_ready": merge_ready,
         "review_source": "automated",
         "reviewed_at_utc": _utc_now_z(),
@@ -433,6 +576,33 @@ def _current_merge_gate_from_pr_context(pr_context: dict[str, Any]) -> tuple[boo
     }
     okay = pr_state == "OPEN" and not is_draft and mergeable and ci_conclusion == "success"
     return okay, gate
+
+
+def _attach_deterministic_plan_scope(
+    *,
+    pr_context: dict[str, Any],
+    target_contract: dict[str, Any],
+    verified_implementation_head: str,
+) -> dict[str, Any]:
+    """Attach and enforce the runner-owned PR/plan scope receipt before model review."""
+
+    changed_files_raw = pr_context.get("changed_files")
+    changed_files = (
+        [str(path) for path in changed_files_raw]
+        if isinstance(changed_files_raw, list)
+        else []
+    )
+    pr_meta_raw = pr_context.get("pr")
+    pr_meta = pr_meta_raw if isinstance(pr_meta_raw, dict) else {}
+    reviewed_head_oid = str(pr_meta.get("headRefOid") or "").strip()
+    receipt = assess_pr_plan_scope(
+        contract=target_contract,
+        changed_files=changed_files,
+        diff_text=str(pr_context.get("diff_full") or ""),
+        reviewed_head_oid=reviewed_head_oid,
+        verified_implementation_head=verified_implementation_head,
+    )
+    return {**pr_context, "implementation_scope": receipt}
 
 
 

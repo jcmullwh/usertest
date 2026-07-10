@@ -41,7 +41,7 @@ def test_normalize_codex_events_handles_non_json_lines(tmp_path: Path) -> None:
     assert any(e["type"] == "error" for e in events)
     assert any(e["type"] == "agent_message" for e in events)
     assert any(e["type"] == "run_command" for e in events)
-    assert any(e["type"] == "read_file" for e in events)
+    assert not any(e["type"] == "read_file" for e in events)
 
 
 def test_normalize_codex_events_joins_begin_end(tmp_path: Path) -> None:
@@ -222,7 +222,7 @@ def test_normalize_codex_events_handles_responses_style_items(tmp_path: Path) ->
     assert "USERS.md" in read_paths
 
 
-def test_normalize_codex_events_handles_cd_and_readlike_chain(tmp_path: Path) -> None:
+def test_normalize_codex_events_does_not_attest_chained_partial_read(tmp_path: Path) -> None:
     raw = tmp_path / "raw.jsonl"
     raw.write_text(
         json.dumps(
@@ -251,7 +251,92 @@ def test_normalize_codex_events_handles_cd_and_readlike_chain(tmp_path: Path) ->
 
     events = list(iter_events_jsonl(normalized))
     read_paths = [e.get("data", {}).get("path") for e in events if e["type"] == "read_file"]
-    assert "README.md" in read_paths
+    assert "README.md" not in read_paths
+
+
+def test_codex_search_and_empty_head_output_cannot_attest_source_reads(tmp_path: Path) -> None:
+    source = tmp_path / "src.py"
+    source.write_text("def mechanism():\n    return True\n", encoding="utf-8")
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "id": "rg",
+                        "msg": {
+                            "type": "exec_command_end",
+                            "command": ["rg", "-l", "mechanism", "src.py"],
+                            "exit_code": 0,
+                            "cwd": str(tmp_path),
+                            "stdout": "src.py\n",
+                        },
+                    }
+                ),
+                json.dumps(
+                    {
+                        "id": "head",
+                        "msg": {
+                            "type": "exec_command_end",
+                            "command": ["head", "-n", "0", "src.py"],
+                            "exit_code": 0,
+                            "cwd": str(tmp_path),
+                            "stdout": "unrelated output\n",
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    normalized = tmp_path / "normalized.jsonl"
+    normalize_codex_events(
+        raw_events_path=raw,
+        normalized_events_path=normalized,
+        workspace_root=tmp_path,
+    )
+
+    events = list(iter_events_jsonl(normalized))
+    assert not any(event["type"] == "read_file" for event in events)
+
+
+def test_codex_exact_cat_output_attests_whole_file(tmp_path: Path) -> None:
+    source = tmp_path / "src.py"
+    content = "def mechanism():\n    return True\n"
+    source.write_text(content, encoding="utf-8")
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        json.dumps(
+            {
+                "id": "cat",
+                "msg": {
+                    "type": "exec_command_end",
+                    "command": ["cat", "src.py"],
+                    "exit_code": 0,
+                    "cwd": str(tmp_path),
+                    "stdout": content,
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    normalized = tmp_path / "normalized.jsonl"
+
+    normalize_codex_events(
+        raw_events_path=raw,
+        normalized_events_path=normalized,
+        workspace_root=tmp_path,
+    )
+
+    read = next(
+        event for event in iter_events_jsonl(normalized) if event["type"] == "read_file"
+    )
+    assert read["data"]["content_observed"] is True
+    assert read["data"]["whole_file_observed"] is True
+    assert read["data"]["observed_content"] == content
 
 
 def test_map_sandbox_path_accepts_windows_posix_drive_form(tmp_path: Path) -> None:

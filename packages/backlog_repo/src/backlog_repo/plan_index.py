@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -9,6 +11,12 @@ from backlog_repo.actions import (
     promote_atom_status,
     sorted_unique_strings,
 )
+from backlog_repo.outcomes import (
+    extract_outcome_markdown,
+    upsert_outcome_markdown,
+    validate_outcome_record,
+)
+from backlog_repo.ticket_provenance import is_generated_backlog_ticket
 
 PLAN_BUCKET_TO_ATOM_STATUS: dict[str, str] = {
     "0.5 - to_triage": "queued",
@@ -72,8 +80,44 @@ def _strip_legacy_source_ticket_lines(markdown: str) -> str:
     )
 
 
+def _decode_plan_markdown(path: Path) -> str | None:
+    """Return readable Markdown, treating embedded NUL as integrity corruption."""
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return None
+    if b"\x00" in payload:
+        return None
+    try:
+        return payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+
+
+def _plan_integrity_reason(path: Path) -> str | None:
+    """Return a stable reason when a plan cannot be trusted as Markdown."""
+
+    try:
+        payload = path.read_bytes()
+    except OSError:
+        return "plan_copy_read_failed"
+    if b"\x00" in payload:
+        return "plan_copy_contains_nul_byte"
+    try:
+        payload.decode("utf-8")
+    except UnicodeDecodeError:
+        return "plan_copy_invalid_utf8"
+    return None
+
+
 def _normalize_plan_ticket_file(path: Path) -> Path:
     """Normalize legacy plan filenames/content to fingerprint-only form."""
+
+    original = _decode_plan_markdown(path)
+    if original is None:
+        # Integrity-unknown records are byte-preserved until an explicit
+        # archival operation can attach a sidecar disposition.
+        return path
 
     match = PLAN_TICKET_FILENAME_RE.match(path.name)
     if match is None:
@@ -89,14 +133,16 @@ def _normalize_plan_ticket_file(path: Path) -> Path:
         candidate = path.with_name(normalized_name)
         if candidate != path:
             if candidate.exists():
-                path.unlink(missing_ok=True)
+                # Preserve the legacy file. Destructive dedupe during a scan
+                # loses lifecycle evidence; explicit cleanup archives it with a
+                # relationship record instead.
                 normalized_path = candidate
             else:
                 normalized_path = path.replace(candidate)
 
-    try:
-        original = normalized_path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    if normalized_path != path:
+        original = _decode_plan_markdown(normalized_path)
+    if original is None:
         return normalized_path
     updated = _strip_legacy_source_ticket_lines(original)
     if updated != original:
@@ -105,6 +151,199 @@ def _normalize_plan_ticket_file(path: Path) -> Path:
         except OSError:
             return normalized_path
     return normalized_path
+
+
+def normalize_legacy_plan_ticket_files(
+    *, owner_root: Path, include_discarded: bool = True
+) -> dict[str, int]:
+    """Explicitly normalize legacy plan filenames and Markdown metadata.
+
+    Normalization is intentionally separate from plan indexing so callers can
+    perform read-only validation without surprising filesystem mutations.
+    """
+
+    plans_dir = owner_root / ".agents" / "plans"
+    if not plans_dir.is_dir():
+        return {"files_scanned": 0, "files_changed": 0}
+    files_scanned = 0
+    files_changed = 0
+    for bucket_dir in sorted(
+        [path for path in plans_dir.iterdir() if path.is_dir()], key=lambda path: path.name
+    ):
+        if not include_discarded and bucket_dir.name in DISCARDED_PLAN_BUCKETS:
+            continue
+        if bucket_dir.name not in PLAN_BUCKET_TO_TICKET_STATUS:
+            continue
+        for path in sorted(bucket_dir.glob("*.md"), key=lambda item: item.name):
+            files_scanned += 1
+            before_path = path
+            try:
+                before_bytes = path.read_bytes()
+            except OSError:
+                before_bytes = None
+            normalized_path = _normalize_plan_ticket_file(path)
+            try:
+                after_bytes = normalized_path.read_bytes()
+            except OSError:
+                after_bytes = None
+            if normalized_path != before_path or after_bytes != before_bytes:
+                files_changed += 1
+    return {"files_scanned": files_scanned, "files_changed": files_changed}
+
+
+def _markdown_metadata_value(markdown: str, label: str) -> str | None:
+    """Extract a backtick-wrapped generated-ticket metadata value."""
+
+    match = re.search(
+        rf"^-\s*{re.escape(label)}:\s*`([^`]+)`\s*$",
+        markdown,
+        flags=re.MULTILINE,
+    )
+    if match is None:
+        return None
+    value = match.group(1).strip()
+    return value or None
+
+
+def archive_plan_ticket_file(
+    *,
+    owner_root: Path,
+    path: Path,
+    disposition: str,
+    reason: str,
+    related_fingerprint: str | None = None,
+    related_case_id: str | None = None,
+    related_plan_revision_id: str | None = None,
+) -> Path:
+    """Archive a generated plan without discarding its contents or lineage.
+
+    The destination receives a validated embedded outcome record. The source is
+    removed only after the destination has been written and read back exactly,
+    so a partial failure can leave a harmless duplicate but cannot lose the only
+    copy of a plan.
+    """
+
+    if disposition not in {"duplicate", "superseded", "unverified"}:
+        raise ValueError(f"Unsupported archive disposition: {disposition!r}")
+    owner_root_resolved = owner_root.resolve()
+    plans_dir = (owner_root_resolved / ".agents" / "plans").resolve()
+    source = path.resolve()
+    if not source.is_relative_to(plans_dir):
+        raise ValueError(f"Refusing to archive path outside plan root: {source}")
+    if not source.exists() or not source.is_file():
+        raise FileNotFoundError(source)
+
+    original_bytes = source.read_bytes()
+    markdown = None if b"\x00" in original_bytes else _decode_plan_markdown(source)
+    fingerprint = _fingerprint_from_plan_path(source) or (
+        _markdown_metadata_value(markdown, "Fingerprint") if markdown is not None else None
+    )
+    if fingerprint is None:
+        raise ValueError(f"Cannot archive plan without fingerprint: {source}")
+    if disposition in {"duplicate", "superseded"} and not any(
+        (related_fingerprint, related_case_id, related_plan_revision_id)
+    ):
+        raise ValueError(f"{disposition} archive requires a related identity")
+
+    archive_dir = plans_dir / "6 - archived"
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    destination = archive_dir / source.name
+    if destination.resolve() != source and destination.exists():
+        suffix = f"__{disposition}_of_{(related_fingerprint or fingerprint)[:16]}"
+        destination = destination.with_name(f"{destination.stem}{suffix}{destination.suffix}")
+        counter = 2
+        while destination.exists():
+            destination = destination.with_name(
+                f"{destination.stem.rsplit('__copy_', 1)[0]}__copy_{counter}{destination.suffix}"
+            )
+            counter += 1
+
+    if markdown is None:
+        integrity_outcome: dict[str, Any] = {
+            "schema_version": 1,
+            "case_id": f"legacy-case:{fingerprint}",
+            "plan_revision_id": f"legacy-plan:{fingerprint}",
+            "state": "integrity_unknown",
+            "outcome_scope": "plan_copy",
+            "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "requires_live_verification": False,
+            "target_branch": None,
+            "merged_commit": None,
+            "test_evidence": [],
+            "original_scenario_evidence": [],
+            "live_evidence": [],
+            "remaining_risks": [
+                reason,
+                "Source was not valid UTF-8; original bytes were preserved unchanged",
+            ],
+            "recurrence_check": {"status": "not_run"},
+            "archive_reason": reason,
+            "intended_disposition": disposition,
+            "previous_path": str(source),
+            "legacy_identity": True,
+        }
+        if related_fingerprint is not None:
+            integrity_outcome["related_fingerprint"] = related_fingerprint
+        if related_case_id is not None:
+            integrity_outcome["related_case_id"] = related_case_id
+        if related_plan_revision_id is not None:
+            integrity_outcome["related_plan_revision_id"] = related_plan_revision_id
+        integrity_outcome = validate_outcome_record(integrity_outcome)
+        if destination.resolve() != source:
+            destination.write_bytes(original_bytes)
+            if destination.read_bytes() != original_bytes:
+                raise OSError(f"Archived byte verification failed: {destination}")
+        sidecar = destination.with_suffix(f"{destination.suffix}.outcome.json")
+        sidecar.write_text(
+            json.dumps(integrity_outcome, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        if destination.resolve() != source:
+            source.unlink()
+        return destination
+
+    case_id = _markdown_metadata_value(markdown, "Case ID") or f"legacy-case:{fingerprint}"
+    plan_revision_id = _markdown_metadata_value(
+        markdown, "Plan revision ID"
+    ) or f"legacy-plan:{fingerprint}"
+    recorded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    outcome: dict[str, Any] = {
+        "schema_version": 1,
+        "case_id": case_id,
+        "plan_revision_id": plan_revision_id,
+        "state": disposition,
+        "outcome_scope": "plan_copy",
+        "recorded_at": recorded_at,
+        "requires_live_verification": False,
+        "target_branch": None,
+        "merged_commit": None,
+        "test_evidence": [],
+        "original_scenario_evidence": [],
+        "live_evidence": [],
+        "remaining_risks": [reason],
+        "recurrence_check": {"status": "not_run"},
+        "archive_reason": reason,
+        "previous_path": str(source),
+        "legacy_identity": case_id.startswith("legacy-case:"),
+    }
+    if disposition in {"duplicate", "superseded"}:
+        outcome["related_case_id"] = related_case_id or case_id
+    if related_fingerprint is not None:
+        outcome["related_fingerprint"] = related_fingerprint
+    if related_plan_revision_id is not None:
+        outcome["related_plan_revision_id"] = related_plan_revision_id
+    updated = upsert_outcome_markdown(markdown, outcome)
+    updated_bytes = updated.encode("utf-8")
+
+    if destination.resolve() == source:
+        source.write_bytes(updated_bytes)
+        return source
+
+    destination.write_bytes(updated_bytes)
+    if destination.read_bytes() != updated_bytes:
+        raise OSError(f"Archived plan verification failed: {destination}")
+    source.unlink()
+    return destination
 
 
 def _extract_atom_ids_from_ticket_markdown(markdown: str) -> list[str]:
@@ -181,6 +420,7 @@ def sync_atom_actions_from_dequeued_plan_folders(
     roots_scanned = 0
     dequeued_dirs_scanned = 0
     ticket_files_scanned = 0
+    integrity_unknown_ticket_files = 0
     tickets_without_evidence = 0
     atom_ids_seen = 0
     atoms_missing = 0
@@ -209,11 +449,13 @@ def sync_atom_actions_from_dequeued_plan_folders(
                 if dequeued_dir.name in DISCARDED_PLAN_BUCKETS:
                     discarded_ticket_files_scanned += 1
 
-                try:
-                    markdown = md_path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
+                markdown = _decode_plan_markdown(md_path)
+                if markdown is None:
+                    # Corrupt historical records must not mutate case lifecycle
+                    # state. ``scan_plan_ticket_index`` exposes them as
+                    # ``integrity_unknown`` while retaining the original bytes.
+                    integrity_unknown_ticket_files += 1
                     continue
-
                 fingerprint = _fingerprint_from_plan_path(md_path)
                 atom_ids = _atom_ids_for_plan(
                     atom_actions=atom_actions,
@@ -307,6 +549,7 @@ def sync_atom_actions_from_dequeued_plan_folders(
         "roots_scanned": roots_scanned,
         "dequeued_dirs_scanned": dequeued_dirs_scanned,
         "ticket_files_scanned": ticket_files_scanned,
+        "integrity_unknown_ticket_files": integrity_unknown_ticket_files,
         "tickets_without_evidence": tickets_without_evidence,
         "atom_ids_seen": atom_ids_seen,
         "atoms_missing": atoms_missing,
@@ -321,7 +564,7 @@ def scan_plan_ticket_index(
     owner_root: Path,
     include_discarded: bool = True,
 ) -> dict[str, dict[str, Any]]:
-    """Build fingerprint-to-plan index from `.agents/plans` folders.
+    """Build a read-only fingerprint-to-plan index from `.agents/plans` folders.
 
     Parameters
     ----------
@@ -351,11 +594,111 @@ def scan_plan_ticket_index(
             continue
 
         for md_path in sorted(bucket_dir.glob("*.md"), key=lambda p: p.name):
-            md_path = _normalize_plan_ticket_file(md_path)
             match = PLAN_TICKET_FILENAME_RE.match(md_path.name)
             if match is None:
                 continue
             fingerprint = match.group("fingerprint")
+
+            try:
+                markdown = _decode_plan_markdown(md_path)
+                outcome = extract_outcome_markdown(markdown) if markdown is not None else None
+            except (OSError, ValueError):
+                markdown = None
+                outcome = None
+            integrity_reason = (
+                _plan_integrity_reason(md_path) if markdown is None else None
+            )
+            if markdown is None and integrity_reason is None:
+                integrity_reason = "plan_copy_outcome_metadata_invalid"
+            if outcome is None:
+                sidecar = md_path.with_suffix(f"{md_path.suffix}.outcome.json")
+                if sidecar.exists():
+                    try:
+                        sidecar_raw = json.loads(sidecar.read_text(encoding="utf-8"))
+                        outcome = (
+                            validate_outcome_record(sidecar_raw)
+                            if isinstance(sidecar_raw, dict)
+                            else None
+                        )
+                    except (OSError, ValueError, json.JSONDecodeError):
+                        outcome = None
+
+            if markdown is None:
+                meta = index.get(fingerprint)
+                if meta is None:
+                    meta = {"status": "integrity_unknown", "paths": [], "buckets": []}
+                integrity_paths = [
+                    item
+                    for item in meta.get("integrity_unknown_paths", [])
+                    if isinstance(item, str)
+                ]
+                integrity_paths.append(str(md_path))
+                meta["integrity_unknown_paths"] = sorted_unique_strings(integrity_paths)
+                integrity_buckets = [
+                    item
+                    for item in meta.get("integrity_unknown_buckets", [])
+                    if isinstance(item, str)
+                ]
+                integrity_buckets.append(bucket_dir.name)
+                meta["integrity_unknown_buckets"] = sorted_unique_strings(integrity_buckets)
+                integrity_reasons = [
+                    item
+                    for item in meta.get("integrity_unknown_reasons", [])
+                    if isinstance(item, str)
+                ]
+                assert integrity_reason is not None
+                integrity_reasons.append(integrity_reason)
+                meta["integrity_unknown_reasons"] = sorted_unique_strings(integrity_reasons)
+                integrity_records = [
+                    item
+                    for item in meta.get("integrity_unknown_records", [])
+                    if isinstance(item, dict)
+                ]
+                integrity_record: dict[str, Any] = {
+                    "path": str(md_path),
+                    "bucket": bucket_dir.name,
+                    "state": "integrity_unknown",
+                    "outcome_scope": "plan_copy",
+                    "reason": integrity_reason,
+                    "canonical": False,
+                }
+                if isinstance(outcome, dict):
+                    integrity_record["sidecar_state"] = str(outcome.get("state") or "")
+                integrity_records.append(integrity_record)
+                meta["integrity_unknown_records"] = integrity_records
+                index[fingerprint] = meta
+                continue
+
+            if outcome is not None and outcome.get("outcome_scope") == "plan_copy":
+                meta = index.get(fingerprint)
+                if meta is None:
+                    meta = {"status": "actioned", "paths": [], "buckets": []}
+                relationship_paths = [
+                    item
+                    for item in meta.get("relationship_paths", [])
+                    if isinstance(item, str)
+                ]
+                relationship_paths.append(str(md_path))
+                meta["relationship_paths"] = sorted_unique_strings(relationship_paths)
+                states = [
+                    item
+                    for item in meta.get("relationship_outcome_states", [])
+                    if isinstance(item, str)
+                ]
+                states.append(str(outcome["state"]))
+                meta["relationship_outcome_states"] = sorted_unique_strings(states)
+                case_ids = [
+                    item for item in meta.get("case_ids", []) if isinstance(item, str)
+                ]
+                case_ids.append(str(outcome["case_id"]))
+                meta["case_ids"] = sorted_unique_strings(case_ids)
+                revision_ids = [
+                    item for item in meta.get("plan_revision_ids", []) if isinstance(item, str)
+                ]
+                revision_ids.append(str(outcome["plan_revision_id"]))
+                meta["plan_revision_ids"] = sorted_unique_strings(revision_ids)
+                index[fingerprint] = meta
+                continue
 
             meta = index.get(fingerprint)
             if meta is None:
@@ -374,69 +717,256 @@ def scan_plan_ticket_index(
             buckets.append(bucket_dir.name)
             meta["buckets"] = sorted_unique_strings(buckets)
 
+            assert markdown is not None
+            case_id = _markdown_metadata_value(markdown, "Case ID")
+            if case_id is not None:
+                case_ids = [item for item in meta.get("case_ids", []) if isinstance(item, str)]
+                case_ids.append(case_id)
+                meta["case_ids"] = sorted_unique_strings(case_ids)
+
+            plan_revision_id = _markdown_metadata_value(markdown, "Plan revision ID")
+            if plan_revision_id is not None:
+                revision_ids = [
+                    item for item in meta.get("plan_revision_ids", []) if isinstance(item, str)
+                ]
+                revision_ids.append(plan_revision_id)
+                meta["plan_revision_ids"] = sorted_unique_strings(revision_ids)
+
+            if outcome is not None and desired_status == "actioned":
+                states = [item for item in meta.get("outcome_states", []) if isinstance(item, str)]
+                states.append(str(outcome["state"]))
+                meta["outcome_states"] = sorted_unique_strings(states)
+                active_outcomes = [
+                    item
+                    for item in meta.get("active_outcome_records", [])
+                    if isinstance(item, dict)
+                ]
+                active_outcomes.append(
+                    {
+                        "path": str(md_path),
+                        "bucket": bucket_dir.name,
+                        "state": str(outcome["state"]),
+                        "case_id": str(outcome["case_id"]),
+                        "plan_revision_id": str(outcome["plan_revision_id"]),
+                        "remaining_risks": list(outcome.get("remaining_risks", [])),
+                    }
+                )
+                meta["active_outcome_records"] = active_outcomes
+
             index[fingerprint] = meta
+
+    for fingerprint, meta in index.items():
+        if not isinstance(meta, dict) or meta.get("status") != "actioned":
+            continue
+        paths = [Path(item) for item in meta.get("paths", []) if isinstance(item, str)]
+        active_by_bucket: dict[str, list[str]] = {}
+        for path in paths:
+            if PLAN_BUCKET_TO_TICKET_STATUS.get(path.parent.name) != "actioned":
+                continue
+            active_by_bucket.setdefault(path.parent.name, []).append(str(path))
+        ambiguous_buckets = {
+            bucket: sorted(bucket_paths)
+            for bucket, bucket_paths in active_by_bucket.items()
+            if len(set(bucket_paths)) > 1
+        }
+        if ambiguous_buckets:
+            raise ValueError(
+                "plan_index_multiple_canonical_copies: "
+                f"fingerprint={fingerprint!r} buckets={ambiguous_buckets!r}"
+            )
+
+        active_outcomes = [
+            item
+            for item in meta.get("active_outcome_records", [])
+            if isinstance(item, dict)
+        ]
+        states = sorted(
+            {
+                str(item.get("state")).strip().lower()
+                for item in active_outcomes
+                if isinstance(item.get("state"), str) and str(item.get("state")).strip()
+            }
+        )
+        identities = sorted(
+            {
+                (str(item.get("case_id")), str(item.get("plan_revision_id")))
+                for item in active_outcomes
+            }
+        )
+        if len(states) > 1 or len(identities) > 1:
+            raise ValueError(
+                "plan_index_conflicting_active_outcomes: "
+                f"fingerprint={fingerprint!r} states={states!r} identities={identities!r}"
+            )
 
     return index
 
 
 def dedupe_actioned_plan_ticket_files(*, owner_root: Path) -> int:
-    """Remove stale duplicates across actioned plan buckets.
+    """Losslessly repair duplicate canonical copies before strict indexing.
 
-    When the same fingerprint exists in multiple actioned buckets (e.g.
-    `3 - in_progress` and `5 - complete`), keep only the most-advanced bucket's
-    files and delete the lower-bucket copies.
+    Historical corpora can contain two files with the same fingerprint in the
+    *same* actioned bucket.  A strict index correctly rejects that ambiguity, so
+    cleanup cannot depend on the strict index it is intended to repair.  This
+    pass groups raw filenames, retains a protected copy or one deterministic
+    generated copy, and archives only the remaining generated copies with
+    plan-copy lineage.  Corrupt/unknown bytes are never moved automatically.
+
+    Only records carrying the exact automated-export marker may be archived.
+    Manual, IDEA-originated, and unreadable records are protected.  When one
+    protected copy shares a fingerprint with generated copies, it is retained
+    and only the generated copies are archived.  More than one protected copy
+    is an ambiguity that requires manual handling.
 
     Returns
     -------
     int
-        Number of files removed.
+        Number of duplicate files archived or marked as relationship copies.
     """
 
     plans_dir = owner_root / ".agents" / "plans"
     if not plans_dir.exists() or not plans_dir.is_dir():
         return 0
 
-    removed = 0
-    index = scan_plan_ticket_index(owner_root=owner_root)
-    for meta in index.values():
-        if not isinstance(meta, dict):
-            continue
-        if meta.get("status") != "actioned":
-            continue
-        paths_raw = meta.get("paths", [])
-        paths = [Path(p) for p in paths_raw if isinstance(p, str) and p]
+    def _generated(markdown: str | None) -> bool:
+        return markdown is not None and is_generated_backlog_ticket(markdown)
 
-        actioned_buckets: set[str] = set()
-        by_bucket: dict[str, list[Path]] = {}
-        for path in paths:
-            bucket = path.parent.name
-            if bucket not in _ACTIONED_BUCKET_RANK:
+    def _plan_copy_relationship(path: Path, markdown: str | None) -> bool:
+        if markdown is not None:
+            try:
+                outcome = extract_outcome_markdown(markdown)
+            except ValueError:
+                outcome = None
+            if isinstance(outcome, dict) and outcome.get("outcome_scope") == "plan_copy":
+                return True
+        sidecar = path.with_suffix(f"{path.suffix}.outcome.json")
+        if not sidecar.is_file():
+            return False
+        try:
+            raw = json.loads(sidecar.read_text(encoding="utf-8"))
+            outcome = validate_outcome_record(raw) if isinstance(raw, dict) else None
+        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+            return False
+        return isinstance(outcome, dict) and outcome.get("outcome_scope") == "plan_copy"
+
+    def _candidate_score(path: Path, markdown: str | None) -> tuple[Any, ...]:
+        readable = markdown is not None
+        outcome_valid = False
+        case_aware = False
+        generated = False
+        if markdown is not None:
+            try:
+                outcome_valid = extract_outcome_markdown(markdown) is not None
+            except ValueError:
+                outcome_valid = False
+            case_aware = bool(
+                _markdown_metadata_value(markdown, "Case ID")
+                and _markdown_metadata_value(markdown, "Plan revision ID")
+            )
+            generated = (
+                "Generated by `python -m usertest_backlog.cli reports export-tickets`"
+                in markdown
+            )
+        match = PLAN_TICKET_FILENAME_RE.match(path.name)
+        date = int(match.group("date")) if match is not None else 0
+        return (
+            readable,
+            outcome_valid,
+            case_aware,
+            generated,
+            _ACTIONED_BUCKET_RANK.get(path.parent.name, 0),
+            date,
+            path.name.casefold(),
+            str(path).casefold(),
+        )
+
+    grouped: dict[str, list[tuple[Path, str | None]]] = {}
+    for bucket in ACTIONED_PLAN_BUCKET_PRIORITY:
+        bucket_dir = plans_dir / bucket
+        if not bucket_dir.is_dir():
+            continue
+        for path in sorted(bucket_dir.glob("*.md"), key=lambda item: item.name):
+            match = PLAN_TICKET_FILENAME_RE.match(path.name)
+            if match is None:
                 continue
-            actioned_buckets.add(bucket)
-            by_bucket.setdefault(bucket, []).append(path)
-
-        if len(actioned_buckets) <= 1:
-            continue
-
-        keep_bucket = max(actioned_buckets, key=lambda b: _ACTIONED_BUCKET_RANK.get(b, 0))
-        for bucket, bucket_paths in by_bucket.items():
-            if bucket == keep_bucket:
+            markdown = _decode_plan_markdown(path)
+            if _plan_copy_relationship(path, markdown):
                 continue
-            for path in bucket_paths:
-                try:
-                    path.unlink(missing_ok=True)
-                except OSError:
-                    continue
-                removed += 1
-    return removed
+            grouped.setdefault(match.group("fingerprint"), []).append((path, markdown))
+
+    repairs: list[
+        tuple[str, Path, str | None, list[tuple[Path, str | None]]]
+    ] = []
+    for fingerprint, candidates in sorted(grouped.items()):
+        if len(candidates) <= 1:
+            continue
+        protected = [item for item in candidates if not _generated(item[1])]
+        if len(protected) > 1:
+            raise ValueError(
+                "Refusing automated repair of duplicate non-generated or unknown plans: "
+                f"fingerprint={fingerprint!r}"
+            )
+        canonical_path, canonical_markdown = (
+            protected[0]
+            if protected
+            else max(
+                candidates,
+                key=lambda item: _candidate_score(item[0], item[1]),
+            )
+        )
+        generated_duplicates = [
+            item
+            for item in candidates
+            if item[0] != canonical_path and _generated(item[1])
+        ]
+        repairs.append(
+            (
+                fingerprint,
+                canonical_path,
+                canonical_markdown,
+                generated_duplicates,
+            )
+        )
+
+    # All ambiguity checks happen before the first write so a protected group can
+    # never be partially repaired because a later group is unsafe.
+    archived = 0
+    for fingerprint, canonical_path, canonical_markdown, duplicates in repairs:
+        related_case_id = (
+            _markdown_metadata_value(canonical_markdown, "Case ID")
+            if canonical_markdown is not None
+            else None
+        )
+        related_plan_revision_id = (
+            _markdown_metadata_value(canonical_markdown, "Plan revision ID")
+            if canonical_markdown is not None
+            else None
+        )
+        for path, _markdown in duplicates:
+            archive_plan_ticket_file(
+                owner_root=owner_root,
+                path=path,
+                disposition="duplicate",
+                related_fingerprint=fingerprint,
+                related_case_id=related_case_id,
+                related_plan_revision_id=related_plan_revision_id,
+                reason=f"Duplicate plan copy; canonical copy retained at {canonical_path}",
+            )
+            archived += 1
+
+    # Re-run the strict read-only index as the repair's postcondition.  A second
+    # invocation sees only canonical and relationship copies and is a no-op.
+    scan_plan_ticket_index(owner_root=owner_root)
+    return archived
 
 
 def dedupe_queued_plan_ticket_files_when_actioned_exists(*, owner_root: Path) -> int:
-    """Remove queued-bucket plan files for fingerprints already marked actioned.
+    """Archive queued plan files when the same fingerprint is already actioned.
 
-    This is a best-effort hygiene sweep to eliminate stale duplicates that can
-    linger across runs even when the current backlog no longer contains that
-    fingerprint.
+    This is a best-effort hygiene sweep to eliminate stale *generated*
+    duplicates that can linger across runs even when the current backlog no
+    longer contains that fingerprint. Manual, IDEA, corrupt, and otherwise
+    unclassified queue files are never archived by automated hygiene.
 
     Returns
     -------
@@ -469,8 +999,17 @@ def dedupe_queued_plan_ticket_files_when_actioned_exists(*, owner_root: Path) ->
         for path in paths:
             if path.parent.name not in queued_buckets:
                 continue
+            markdown = _decode_plan_markdown(path)
+            if markdown is None or not is_generated_backlog_ticket(markdown):
+                continue
             try:
-                path.unlink(missing_ok=True)
+                archive_plan_ticket_file(
+                    owner_root=owner_root,
+                    path=path,
+                    disposition="duplicate",
+                    related_fingerprint=_fingerprint_from_plan_path(path),
+                    reason="Same fingerprint already exists in an actioned plan bucket",
+                )
             except OSError:
                 continue
             removed += 1
@@ -503,6 +1042,7 @@ def sync_atom_actions_from_plan_folders(
     roots_scanned = 0
     buckets_scanned = 0
     ticket_files_scanned = 0
+    integrity_unknown_ticket_files = 0
     tickets_without_evidence = 0
     atom_ids_seen = 0
     atoms_created = 0
@@ -525,7 +1065,6 @@ def sync_atom_actions_from_plan_folders(
             buckets_scanned += 1
 
             for md_path in sorted(bucket_dir.glob("*.md"), key=lambda p: p.name):
-                md_path = _normalize_plan_ticket_file(md_path)
                 match = PLAN_TICKET_FILENAME_RE.match(md_path.name)
                 if match is None:
                     continue
@@ -533,10 +1072,27 @@ def sync_atom_actions_from_plan_folders(
                 ticket_files_scanned += 1
                 fingerprint = match.group("fingerprint")
 
-                try:
-                    markdown = md_path.read_text(encoding="utf-8", errors="replace")
-                except OSError:
+                markdown = _decode_plan_markdown(md_path)
+                if markdown is None:
+                    # Do not promote atoms from a plan whose bytes cannot be
+                    # trusted. The plan index preserves its identity with an
+                    # ``integrity_unknown`` projection instead.
+                    integrity_unknown_ticket_files += 1
                     continue
+                outcome = (
+                    extract_outcome_markdown(markdown)
+                    if "<!-- backlog-outcome:start -->" in markdown
+                    else None
+                )
+                plan_case_id = _markdown_metadata_value(markdown, "Case ID")
+                plan_revision_id = _markdown_metadata_value(
+                    markdown, "Plan revision ID"
+                )
+                if outcome is not None:
+                    plan_case_id = str(outcome["case_id"])
+                    plan_revision_id = str(outcome["plan_revision_id"])
+                if plan_revision_id is None:
+                    plan_revision_id = f"legacy-plan:{fingerprint}"
 
                 atom_ids = _atom_ids_for_plan(
                     atom_actions=atom_actions,
@@ -571,6 +1127,49 @@ def sync_atom_actions_from_plan_folders(
                     existing["last_seen_at"] = generated_at
                     existing["last_plan_bucket"] = bucket_dir.name
                     existing["last_plan_seen_at"] = generated_at
+                    if plan_case_id is not None:
+                        existing["case_id"] = plan_case_id
+                    if outcome is not None and outcome.get("outcome_scope") == "case":
+                        existing["last_outcome_state"] = outcome["state"]
+                        existing["last_outcome_recorded_at"] = outcome["recorded_at"]
+                        existing["last_outcome_path"] = str(md_path)
+                        existing["last_outcome_record"] = dict(outcome)
+                    elif outcome is not None:
+                        existing["last_plan_copy_disposition"] = outcome["state"]
+                        existing["last_plan_copy_disposition_at"] = outcome[
+                            "recorded_at"
+                        ]
+                        existing["last_plan_copy_path"] = str(md_path)
+
+                    if plan_case_id is not None:
+                        plan_outcomes_raw = existing.get("plan_outcomes")
+                        plan_outcomes = (
+                            dict(plan_outcomes_raw)
+                            if isinstance(plan_outcomes_raw, dict)
+                            else {}
+                        )
+                        plan_outcomes_changed = False
+                        if outcome is not None and outcome.get("outcome_scope") == "case":
+                            plan_outcomes[plan_revision_id] = {
+                                "state": outcome["state"],
+                                "recorded_at": outcome["recorded_at"],
+                                "path": str(md_path),
+                                "fingerprint": fingerprint,
+                                "required": True,
+                                "outcome_record": dict(outcome),
+                            }
+                            plan_outcomes_changed = True
+                        elif outcome is None and plan_revision_id not in plan_outcomes:
+                            plan_outcomes[plan_revision_id] = {
+                                "state": "planned",
+                                "recorded_at": generated_at,
+                                "path": str(md_path),
+                                "fingerprint": fingerprint,
+                                "required": True,
+                            }
+                            plan_outcomes_changed = True
+                        if plan_outcomes_changed:
+                            existing["plan_outcomes"] = plan_outcomes
 
                     queue_paths = [
                         item for item in existing.get("queue_paths", []) if isinstance(item, str)
@@ -607,6 +1206,7 @@ def sync_atom_actions_from_plan_folders(
         "roots_scanned": roots_scanned,
         "buckets_scanned": buckets_scanned,
         "ticket_files_scanned": ticket_files_scanned,
+        "integrity_unknown_ticket_files": integrity_unknown_ticket_files,
         "tickets_without_evidence": tickets_without_evidence,
         "atom_ids_seen": atom_ids_seen,
         "atoms_created": atoms_created,
@@ -628,6 +1228,8 @@ def _live_plan_fingerprints(*, owner_roots: list[Path]) -> set[str]:
             if PLAN_BUCKET_TO_TICKET_STATUS.get(bucket_dir.name) is None:
                 continue
             for md_path in sorted(bucket_dir.glob("*.md"), key=lambda p: p.name):
+                if _decode_plan_markdown(md_path) is None:
+                    continue
                 fingerprint = _fingerprint_from_plan_path(md_path)
                 if fingerprint is not None:
                     live.add(fingerprint)
@@ -667,7 +1269,11 @@ def reconcile_missing_plan_atoms(
         queue_paths = [
             item for item in existing.get("queue_paths", []) if isinstance(item, str) and item
         ]
-        existing_queue_paths = [item for item in queue_paths if Path(item).exists()]
+        existing_queue_paths = [
+            item
+            for item in queue_paths
+            if Path(item).is_file() and _decode_plan_markdown(Path(item)) is not None
+        ]
         if existing_queue_paths:
             atoms_with_existing_queue_path += 1
             continue

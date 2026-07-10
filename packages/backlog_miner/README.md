@@ -122,6 +122,23 @@ Key pieces:
 - `backlog_miner.research_runner.run_repro_research_stage(...)` runs stage 3 in an isolated writable
   workspace via `runner_core.run_once(...)` and extracts a strict `extensions.backlog_repro_research`
   dossier block from the run report
+- Stage 3 requires an explicit source ref, resolves local refs to a commit before acquisition, and
+  independently replays each claimed experiment from a clean checkout. Evidence receipts bind the
+  case and atom assignment, original artifacts, inspected baseline blobs and symbols, commands,
+  assertions, outputs, and retained clean planning workspace. Downstream consumers revalidate those
+  receipts before using the proof.
+- Model-authored replay commands never run through a command shell. Production callers must supply
+  an explicit replay executor; the backlog app selects a Docker image from
+  `configs/backlog_research.yaml`, disables container networking, forwards only `CI=1`, receipts the
+  actual sandbox metadata and image identity, and confirms container cleanup. Host execution is
+  denied by default and requires an explicitly approved local source identity.
+- Original and faithful research can replay a practical repository CLI or script, not only a test.
+  The runner accepts the shell-free argv only when it resolves to immutable repository-owned code
+  or config and either exactly matches the assigned source atom's retained command or names an
+  entrypoint whose file was actually inspected. Absolute/traversal paths, URLs, interpreter code
+  strings, PATH-only tools, and unbound model commands remain blocked. Runner-owned atom bindings
+  retain the exact snapshot field path and value hash, including short wrong values and honestly
+  contextual or corroborating atoms.
 
 ---
 

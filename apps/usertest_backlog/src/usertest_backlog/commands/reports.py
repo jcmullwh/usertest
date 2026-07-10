@@ -454,6 +454,7 @@ def _cmd_reports_intent_snapshot(args: argparse.Namespace) -> int:
         return 2
 
     from usertest_backlog.parser import build_parser
+
     commands = _extract_cli_commands(build_parser())
     docs_index = _index_docs(repo_root=repo_root, docs_dir=docs_dir, max_doc_bytes=max_doc_bytes)
 
@@ -610,8 +611,6 @@ def _cmd_reports_intent_snapshot(args: argparse.Namespace) -> int:
         status = meta.get("status") if isinstance(meta, dict) else None
         print(f"Summary status: {status}")
     return 0
-
-
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

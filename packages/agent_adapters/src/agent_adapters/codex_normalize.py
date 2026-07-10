@@ -16,6 +16,7 @@ from agent_adapters.delegation import (
 )
 from agent_adapters.events import make_event
 from agent_adapters.failure_artifacts import write_command_failure_artifacts
+from agent_adapters.read_attestation import observed_read_attestation
 
 READLIKE_COMMANDS = {
     "cat",
@@ -292,9 +293,26 @@ def _maybe_emit_read_events(
     workspace_root: Path | None,
     workspace_mount: str | None,
     ts_iter: Iterator[str] | None,
+    stdout_text: str,
+    source_exit_code: int,
     fallback_ts: str | None = None,
 ) -> Iterable[dict[str, Any]]:
     if workspace_root is None:
+        return []
+    if any(token in CHAIN_OPERATORS for token in argv):
+        return []
+    command = argv[0].casefold() if argv else ""
+    if command == "cat":
+        path_tokens = argv[1:]
+    elif command == "type" and os.name == "nt":
+        path_tokens = argv[1:]
+    elif command in {"get-content", "gc"} and os.name == "nt" and "-raw" in {
+        token.casefold() for token in argv[1:]
+    }:
+        path_tokens = [token for token in argv[1:] if not token.startswith("-")]
+    else:
+        return []
+    if len(path_tokens) != 1:
         return []
     out: list[dict[str, Any]] = []
 
@@ -306,20 +324,29 @@ def _maybe_emit_read_events(
                 return fallback_ts
         return fallback_ts
 
-    for candidate in _infer_read_candidate_paths(
-        argv=argv,
-        cwd=cwd,
+    effective_cwd = cwd if cwd is not None else workspace_root
+    candidate = _resolve_candidate_path(
+        path_tokens[0],
+        base_dir=effective_cwd,
         workspace_root=workspace_root,
         workspace_mount=workspace_mount,
-    ):
-        if not candidate.exists() or not candidate.is_file():
-            continue
+    )
+    if candidate is not None and candidate.exists() and candidate.is_file():
+        attestation = observed_read_attestation(
+            path=candidate,
+            observed_text=stdout_text,
+            source_exit_code=source_exit_code,
+            allow_partial=False,
+        )
         out.append(
             make_event(
                 "read_file",
                 {
                     "path": _safe_relpath(candidate, workspace_root),
-                    "bytes": candidate.stat().st_size,
+                    "bytes": attestation.get("file_size_bytes"),
+                    "read_source": "shell_command",
+                    "source_exit_code": source_exit_code,
+                    **attestation,
                 },
                 ts=_next_ts(),
             )
@@ -496,13 +523,13 @@ def normalize_codex_events(
                     "command": _format_argv(argv),
                     "exit_code": exit_code,
                 }
+                stdout_text = msg.get("stdout") if isinstance(msg.get("stdout"), str) else ""
 
                 if cwd is not None:
                     data["cwd"] = _render_path(cwd)
 
                 if exit_code != 0:
                     command_failure_idx += 1
-                    stdout_text = msg.get("stdout") if isinstance(msg.get("stdout"), str) else ""
                     stderr_text = msg.get("stderr") if isinstance(msg.get("stderr"), str) else ""
                     duration_raw = msg.get("duration")
                     duration = duration_raw if isinstance(duration_raw, dict) else None
@@ -537,6 +564,8 @@ def normalize_codex_events(
                     workspace_root=workspace_root,
                     workspace_mount=workspace_mount,
                     ts_iter=ts_iter,
+                    stdout_text=stdout_text,
+                    source_exit_code=exit_code,
                     fallback_ts=line_ts,
                 ):
                     out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")
@@ -679,13 +708,13 @@ def normalize_codex_events(
                 "command": _format_argv(argv),
                 "exit_code": exit_code,
             }
+            stdout_text = (
+                item.get("stdout")
+                if isinstance(item.get("stdout"), str)
+                else (item.get("output") if isinstance(item.get("output"), str) else "")
+            )
             if exit_code != 0:
                 command_failure_idx += 1
-                stdout_text = (
-                    item.get("stdout")
-                    if isinstance(item.get("stdout"), str)
-                    else (item.get("output") if isinstance(item.get("output"), str) else "")
-                )
                 stderr_text = item.get("stderr") if isinstance(item.get("stderr"), str) else ""
                 data["failure_artifacts"] = write_command_failure_artifacts(
                     run_dir=run_dir,
@@ -721,6 +750,8 @@ def normalize_codex_events(
                 workspace_root=workspace_root,
                 workspace_mount=workspace_mount,
                 ts_iter=ts_iter,
+                stdout_text=stdout_text,
+                source_exit_code=exit_code,
                 fallback_ts=line_ts,
             ):
                 out_f.write(json.dumps(read_event, ensure_ascii=False) + "\n")

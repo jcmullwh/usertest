@@ -2,21 +2,39 @@ from __future__ import annotations
 
 import argparse
 import json
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from backlog_repo import render_verification_contract_markdown
 from runner_core.runner import RunResult
 
 from usertest_implement.ci import _wait_for_ci_success
-from usertest_implement.commands.review import _cmd_review_merge, _cmd_review_run
+from usertest_implement.commands.review import (
+    _build_merge_outcome_record,
+    _cmd_review_merge,
+    _cmd_review_run,
+    _require_explicit_passing_ci,
+    _require_unchanged_reviewed_head,
+)
 from usertest_implement.commands.run import _run_selected_ticket
+from usertest_implement.outcome_evidence import build_verification_binding
 from usertest_implement.review_context import (
     _build_final_review_summary,
     _build_pr_review_body,
+    _build_review_append_prompt,
+    _classify_pr_checks,
+    _collect_merged_pr_provenance,
     _collect_pr_review_context,
+    _extract_agent_review_summary,
     _run_gh_json,
     _run_gh_text,
+)
+from usertest_implement.selection import (
+    _case_plan_fingerprint,
+    _select_ticket_from_path,
+    _selected_ticket_provenance,
 )
 from usertest_implement.shared import (
     SelectedTicket,
@@ -24,23 +42,367 @@ from usertest_implement.shared import (
 )
 
 
+def _approved_causal_fields() -> dict[str, object]:
+    return {
+        "mechanism_assessment": "mechanism_addressed",
+        "original_scenario_oracle": "exercised",
+        "causal_path_assessment": "closed",
+        "remaining_causal_paths": [],
+    }
+
+
+def test_merge_outcome_does_not_convert_skipped_check_to_pass(tmp_path: Path) -> None:
+    selected = SelectedTicket(
+        fingerprint="0123456789abcdef",
+        title="Test",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=tmp_path,
+        idea_path=None,
+        ticket_markdown=(
+            "# Test\n\n"
+            "- Case ID: `case:test`\n"
+            "- Plan revision ID: `planrev:case:test:abc:1`\n"
+            "- Requires live verification: `false`\n"
+        ),
+        tickets_export_path=None,
+        export_index=None,
+    )
+
+    with pytest.raises(ValueError, match="explicitly passing"):
+        _build_merge_outcome_record(
+            selected=selected,
+            pr_url="https://example.invalid/pr/1",
+            pr_context={
+                "ci_conclusion": "success",
+                "checks": [
+                    {
+                        "name": "optional",
+                        "state": "COMPLETED",
+                        "bucket": "skipping",
+                        "link": "https://example.invalid/check/optional",
+                    }
+                ],
+            },
+            merge_provenance={
+                "target_branch": "dev",
+                "merged_commit": "abc123",
+            },
+            review_run_dir=tmp_path / "review",
+        )
+
+
+def test_skipped_or_neutral_only_checks_are_rejected_before_merge() -> None:
+    context = {
+        "checks": [
+            {"name": "optional", "state": "SKIPPING", "bucket": "skipping"},
+            {"name": "advisory", "state": "NEUTRAL", "bucket": "skipping"},
+        ]
+    }
+
+    assert _classify_pr_checks(context["checks"]) == ("completed", "neutral")
+    with pytest.raises(SystemExit, match="no explicitly passing CI check"):
+        _require_explicit_passing_ci(context)
+
+
+def test_generic_passing_ci_records_implemented_not_tests_verified(
+    tmp_path: Path,
+) -> None:
+    selected = SelectedTicket(
+        fingerprint="0123456789abcdef",
+        title="Test",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=tmp_path,
+        idea_path=None,
+        ticket_markdown=(
+            "# Test\n\n"
+            "- Case ID: `case:test`\n"
+            "- Plan revision ID: `planrev:case:test:abc:1`\n"
+            "- Requires live verification: `false`\n"
+        ),
+        tickets_export_path=None,
+        export_index=None,
+    )
+
+    outcome = _build_merge_outcome_record(
+        selected=selected,
+        pr_url="https://example.invalid/pr/1",
+        pr_context={
+            "checks": [
+                {
+                    "name": "metadata lint",
+                    "state": "SUCCESS",
+                    "bucket": "pass",
+                    "link": "https://example.invalid/check/lint",
+                }
+            ]
+        },
+        merge_provenance={"target_branch": "dev", "merged_commit": "abc123"},
+        review_run_dir=tmp_path / "review",
+    )
+
+    assert outcome["state"] == "implemented"
+    assert outcome["test_evidence"] == []
+    assert outcome["ci_evidence"][0]["name"] == "metadata lint"
+
+
+def test_collect_merged_pr_provenance_uses_merge_commit_oid(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        "usertest_implement.review_context._run_gh_json",
+        lambda **_: {
+            "url": "https://example.invalid/pr/1",
+            "state": "MERGED",
+            "baseRefName": "dev",
+            "mergeCommit": {"oid": "merge123"},
+        },
+    )
+
+    provenance = _collect_merged_pr_provenance(
+        workspace_dir=tmp_path,
+        pr_url="https://example.invalid/pr/1",
+    )
+    assert provenance["merged_commit"] == "merge123"
+
+
 def _write_json(path: Path, obj: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
 
 
-def _make_ticket(owner_root: Path, *, bucket: str, fingerprint: str) -> Path:
+def _make_ticket(
+    owner_root: Path,
+    *,
+    bucket: str,
+    fingerprint: str,
+    verification_commands: list[str] | None = None,
+) -> Path:
     bucket_dir = owner_root / ".agents" / "plans" / bucket
     bucket_dir.mkdir(parents=True, exist_ok=True)
     ticket_path = bucket_dir / f"20260309_{fingerprint}_ticket.md"
+    verification_contract = (
+        "\n### Verification command contract\n\n"
+        + render_verification_contract_markdown(verification_commands)
+        + "\n"
+        if verification_commands
+        else ""
+    )
     ticket_path.write_text(
         "# Ticket\n\n"
         f"- Fingerprint: `{fingerprint}`\n"
         "- Export kind: `implementation`\n"
-        "- Stage: `ready_for_ticket`\n",
+        "- Stage: `ready_for_ticket`\n"
+        f"{verification_contract}",
         encoding="utf-8",
     )
     return ticket_path
+
+
+def _write_bound_ticket_ref(
+    run_dir: Path,
+    *,
+    fingerprint: str,
+    owner_root: Path,
+    ticket_path: Path,
+    verification_evidence_kind: str | None = None,
+    case_id: str | None = None,
+    plan_revision_id: str | None = None,
+    verification_commands: list[str] | None = None,
+    force_v2: bool = False,
+) -> None:
+    if force_v2 or verification_commands is not None:
+        selected = _select_ticket_from_path(ticket_path)
+        provenance = _selected_ticket_provenance(
+            selected,
+            require_local_plan=True,
+        )
+        binding = build_verification_binding(
+            ticket_provenance=provenance,
+            configured_commands=verification_commands or [],
+        )
+        stored_provenance = {
+            key: provenance[key]
+            for key in (
+                "schema_version",
+                "fingerprint",
+                "case_id",
+                "plan_revision_id",
+                "legacy_identity",
+                "ticket_body_sha256",
+                "local_plan_sha256",
+                "local_plan_path",
+                "local_plan_filename",
+                "verification_contract_sha256",
+                "generated_ticket",
+            )
+        }
+        _write_json(
+            run_dir / "ticket_ref.json",
+            {
+                "schema_version": 2,
+                "fingerprint": fingerprint,
+                "case_id": provenance["case_id"],
+                "plan_revision_id": provenance["plan_revision_id"],
+                "ticket_provenance": stored_provenance,
+                "verification_binding": binding,
+                "owner_repo": {
+                    "root": str(owner_root),
+                    "idea_path": str(ticket_path),
+                },
+            },
+        )
+        return
+    _write_json(
+        run_dir / "ticket_ref.json",
+        {
+            "schema_version": 1,
+            "fingerprint": fingerprint,
+            "case_id": case_id,
+            "plan_revision_id": plan_revision_id,
+            "verification_evidence_kind": verification_evidence_kind,
+            "owner_repo": {"root": str(owner_root), "idea_path": str(ticket_path)},
+        },
+    )
+
+
+def _review_ticket_provenance(ticket_path: Path) -> dict[str, object]:
+    provenance = _selected_ticket_provenance(
+        _select_ticket_from_path(ticket_path),
+        require_local_plan=True,
+    )
+    return {
+        key: provenance[key]
+        for key in (
+            "schema_version",
+            "fingerprint",
+            "case_id",
+            "plan_revision_id",
+            "ticket_body_sha256",
+            "local_plan_sha256",
+            "local_plan_filename",
+              "verification_contract_sha256",
+              "target_contract_sha256",
+          )
+    }
+
+
+def test_merge_outcome_rejects_empty_runner_command_coverage(tmp_path: Path) -> None:
+    case_id = "case:test"
+    plan_revision_id = "plan:test:v1"
+    fingerprint = _case_plan_fingerprint(
+        case_id=case_id,
+        plan_revision_id=plan_revision_id,
+    )
+    ticket_path = (
+        tmp_path
+        / ".agents"
+        / "plans"
+        / "4 - for_review"
+        / f"20260710_{fingerprint}_ticket.md"
+    )
+    ticket_path.parent.mkdir(parents=True)
+    verification_commands = ["pytest tests/test_real.py"]
+    ticket_markdown = (
+        "# Ticket\n"
+        f"- Fingerprint: `{fingerprint}`\n"
+        f"- Case ID: `{case_id}`\n"
+        f"- Plan revision ID: `{plan_revision_id}`\n"
+        "- Requires live verification: `false`\n\n"
+        "### Verification command contract\n\n"
+        f"{render_verification_contract_markdown(verification_commands)}\n"
+    )
+    ticket_path.write_text(ticket_markdown, encoding="utf-8")
+    run_dir = tmp_path / "runs" / "impl"
+    _write_bound_ticket_ref(
+        run_dir,
+        fingerprint=fingerprint,
+        owner_root=tmp_path,
+        ticket_path=ticket_path,
+        case_id=case_id,
+        plan_revision_id=plan_revision_id,
+        verification_commands=verification_commands,
+    )
+    _write_json(
+        run_dir / "verification.json",
+        {
+            "schema_version": 1,
+            "passed": True,
+            "status": "passed",
+            "terminal_reason": "passed",
+            "timed_out": False,
+            "cancelled": False,
+            "commands_configured": verification_commands,
+            "commands": [],
+        },
+    )
+    selected = SelectedTicket(
+        fingerprint=fingerprint,
+        title="Ticket",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=tmp_path,
+        idea_path=ticket_path,
+        ticket_markdown=ticket_markdown,
+        tickets_export_path=None,
+        export_index=None,
+    )
+
+    with pytest.raises(ValueError, match="coverage mismatch"):
+        _build_merge_outcome_record(
+            selected=selected,
+            pr_url="https://example.invalid/pr/1",
+            pr_context={
+                "checks": [
+                    {
+                        "name": "CI",
+                        "state": "SUCCESS",
+                        "link": "https://example.invalid/check",
+                    }
+                ]
+            },
+            merge_provenance={"target_branch": "dev", "merged_commit": "a" * 40},
+            review_run_dir=tmp_path / "review",
+            implementation_run_dir=run_dir,
+        )
+
+
+def test_merge_outcome_rejects_implementation_run_for_other_ticket(tmp_path: Path) -> None:
+    selected_path = tmp_path / ".agents" / "plans" / "4 - for_review" / "ticket.md"
+    selected_path.parent.mkdir(parents=True)
+    selected_markdown = (
+        "# Ticket\n"
+        "- Fingerprint: `0123456789abcdef`\n"
+        "- Requires live verification: `false`\n"
+    )
+    selected_path.write_text(selected_markdown, encoding="utf-8")
+    selected = SelectedTicket(
+        fingerprint="0123456789abcdef",
+        title="Ticket",
+        export_kind="implementation",
+        stage="ready_for_ticket",
+        owner_root=tmp_path,
+        idea_path=selected_path,
+        ticket_markdown=selected_markdown,
+        tickets_export_path=None,
+        export_index=None,
+    )
+    run_dir = tmp_path / "runs" / "other"
+    _write_bound_ticket_ref(
+        run_dir,
+        fingerprint="fedcba9876543210",
+        owner_root=tmp_path,
+        ticket_path=tmp_path / "other.md",
+    )
+
+    with pytest.raises(ValueError, match="fingerprint mismatch"):
+        _build_merge_outcome_record(
+            selected=selected,
+            pr_url="https://example.invalid/pr/1",
+            pr_context={"checks": [{"state": "SUCCESS"}]},
+            merge_provenance={"target_branch": "dev", "merged_commit": "a" * 40},
+            review_run_dir=tmp_path / "review",
+            implementation_run_dir=run_dir,
+        )
 
 
 def _review_run_args(
@@ -118,22 +480,126 @@ def test_build_final_review_summary_requires_green_ci_and_alignment(tmp_path: Pa
                 "state": "OPEN",
                 "isDraft": False,
                 "mergeable": "MERGEABLE",
-                "headRefName": "branch",
                 "baseRefName": "dev",
+                "headRefOid": "abc123def456",
+                "headRefName": "branch",
             },
             "ci_status": "completed",
             "ci_conclusion": "success",
+            "implementation_scope": {
+                "status": "verified",
+                "receipt_sha256": "a" * 64,
+            },
+            "checks": [
+                {
+                    "name": "tests",
+                    "state": "SUCCESS",
+                    "bucket": "pass",
+                    "link": "https://example.invalid/check/1",
+                }
+            ],
         },
         agent_summary={
             "review_decision": "approved",
             "approach_alignment": "aligned",
+            **_approved_causal_fields(),
             "scope_assessment": "appropriate",
             "rationale": "Looks good.",
         },
         report=report,
     )
     assert summary["merge_ready"] is True
+    assert summary["reviewed_head_oid"] == "abc123def456"
     assert len(summary["findings"]) == 1
+
+    critical = _build_final_review_summary(
+        selected=type(
+            "Selected",
+            (),
+            {"fingerprint": "abc123abc123abcd", "idea_path": ticket_path},
+        )(),
+        review_run_dir=tmp_path / "review_critical",
+        pr_url="https://example.invalid/pr/1",
+        pr_context={
+            **{
+                key: value
+                for key, value in {
+                    "pr": {
+                        "number": 1,
+                        "title": "PR",
+                        "state": "OPEN",
+                        "isDraft": False,
+                        "mergeable": "MERGEABLE",
+                        "baseRefName": "dev",
+                        "headRefOid": "abc123def456",
+                        "headRefName": "branch",
+                    },
+                    "ci_status": "completed",
+                    "ci_conclusion": "success",
+                    "implementation_scope": {
+                        "status": "verified",
+                        "receipt_sha256": "a" * 64,
+                    },
+                }.items()
+            }
+        },
+        agent_summary={
+            "review_decision": "approved",
+            "approach_alignment": "aligned",
+            **_approved_causal_fields(),
+            "scope_assessment": "appropriate",
+            "rationale": "Approved despite the finding.",
+        },
+        report={
+            "issues": [
+                {
+                    "severity": "critical",
+                    "title": "Data loss",
+                    "details": "The implementation deletes retained evidence.",
+                }
+            ]
+        },
+    )
+    assert critical["merge_ready"] is False
+    assert critical["blocking_finding_count"] == 1
+
+    scope_blocked = _build_final_review_summary(
+        selected=type(
+            "Selected",
+            (),
+            {"fingerprint": "abc123abc123abcd", "idea_path": ticket_path},
+        )(),
+        review_run_dir=tmp_path / "review_scope_failed",
+        pr_url="https://example.invalid/pr/1",
+        pr_context={
+            "pr": {
+                "number": 1,
+                "title": "PR",
+                "state": "OPEN",
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "baseRefName": "dev",
+                "headRefOid": "abc123def456",
+                "headRefName": "branch",
+            },
+            "ci_status": "completed",
+            "ci_conclusion": "success",
+            "implementation_scope": {
+                "status": "failed",
+                "errors": ["implementation_scope_unplanned_path:extra.py"],
+            },
+        },
+        agent_summary={
+            "review_decision": "approved",
+            "approach_alignment": "aligned",
+            **_approved_causal_fields(),
+            "scope_assessment": "appropriate",
+            "rationale": "Model says it is aligned.",
+        },
+        report=report,
+    )
+    assert scope_blocked["merge_ready"] is False
+    assert scope_blocked["deterministic_scope_verified"] is False
 
     blocked = _build_final_review_summary(
         selected=type("Selected", (), {
@@ -149,6 +615,7 @@ def test_build_final_review_summary_requires_green_ci_and_alignment(tmp_path: Pa
                 "state": "OPEN",
                 "isDraft": False,
                 "mergeable": "MERGEABLE",
+                "headRefOid": "abc123def456",
                 "headRefName": "branch",
                 "baseRefName": "dev",
             },
@@ -158,6 +625,7 @@ def test_build_final_review_summary_requires_green_ci_and_alignment(tmp_path: Pa
         agent_summary={
             "review_decision": "approved",
             "approach_alignment": "aligned",
+            **_approved_causal_fields(),
             "scope_assessment": "appropriate",
             "rationale": "Looks good.",
         },
@@ -166,11 +634,165 @@ def test_build_final_review_summary_requires_green_ci_and_alignment(tmp_path: Pa
     assert blocked["merge_ready"] is False
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("mechanism_assessment", "symptom_only"),
+        ("original_scenario_oracle", "not_exercised"),
+        ("causal_path_assessment", "unclear"),
+    ],
+)
+def test_build_final_review_summary_rejects_shallow_causal_acceptance(
+    tmp_path: Path,
+    field: str,
+    value: str,
+) -> None:
+    agent_summary: dict[str, object] = {
+        "review_decision": "approved",
+        "approach_alignment": "aligned",
+        **_approved_causal_fields(),
+        "scope_assessment": "appropriate",
+        "rationale": "The diff is narrow and CI is green.",
+    }
+    agent_summary[field] = value
+
+    summary = _build_final_review_summary(
+        selected=SimpleNamespace(
+            fingerprint="abc123abc123abcd",
+            idea_path=tmp_path / "ticket.md",
+        ),
+        review_run_dir=tmp_path / "review_run",
+        pr_url="https://example.invalid/pr/1",
+        pr_context={
+            "pr": {
+                "number": 1,
+                "title": "PR",
+                "state": "OPEN",
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "baseRefName": "dev",
+                "headRefOid": "abc123def456",
+                "headRefName": "branch",
+            },
+            "ci_status": "completed",
+            "ci_conclusion": "success",
+            "implementation_scope": {"status": "verified"},
+        },
+        agent_summary=agent_summary,
+        report={"issues": []},
+    )
+
+    assert summary["merge_ready"] is False
+    assert summary[field] == value
+
+
+def test_scope_label_is_advisory_without_a_concrete_blocking_finding(
+    tmp_path: Path,
+) -> None:
+    summary = _build_final_review_summary(
+        selected=SimpleNamespace(
+            fingerprint="abc123abc123abcd",
+            idea_path=tmp_path / "ticket.md",
+        ),
+        review_run_dir=tmp_path / "review_run",
+        pr_url="https://example.invalid/pr/1",
+        pr_context={
+            "pr": {
+                "number": 1,
+                "title": "PR",
+                "state": "OPEN",
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "baseRefName": "dev",
+                "headRefOid": "abc123def456",
+                "headRefName": "branch",
+            },
+            "ci_status": "completed",
+            "ci_conclusion": "success",
+            "implementation_scope": {
+                "status": "verified",
+                "advisories": ["implementation_scope_extra_path:extra_support.py"],
+            },
+        },
+        agent_summary={
+            "review_decision": "approved",
+            "approach_alignment": "aligned",
+            **_approved_causal_fields(),
+            "scope_assessment": "excessive",
+            "rationale": "The wider propagation is unnecessary but not harmful.",
+        },
+        report={"issues": []},
+    )
+
+    assert summary["scope_assessment"] == "excessive"
+    assert summary["merge_ready"] is True
+
+
+def test_review_prompt_centers_causal_acceptance_before_scope() -> None:
+    prompt = _build_review_append_prompt(
+        selected=SimpleNamespace(
+            ticket_markdown=(
+                "# Ticket\n\n"
+                "Researched mechanism: stale lifecycle classification.\n"
+                "Original-scenario oracle: replay incomplete run directory.\n"
+            )
+        ),
+        handoff_summary=None,
+        pr_ref=None,
+        ci_gate=None,
+        pr_context={
+            "pr": {},
+            "checks": [],
+            "changed_files": ["extra_support.py"],
+            "diff_excerpt": "diff --git a/core.py b/core.py",
+            "implementation_scope": {
+                "status": "verified_with_advisories",
+                "advisories": ["implementation_scope_extra_path:extra_support.py"],
+            },
+        },
+    )
+
+    causal_position = prompt.index("Start with the researched failure mechanism")
+    scope_position = prompt.index("# Scope advisory and immutable head/target gate")
+    assert causal_position < scope_position
+    assert "merely suppresses a visible symptom" in prompt
+    assert "bound original-scenario oracle" in prompt
+    assert "which causal paths, if any, can still reproduce the problem" in prompt
+    assert "Scope is secondary to causal correctness" in prompt
+    assert "hard-blocks only a missing planned production target" in prompt
+
+
+def test_extract_agent_review_summary_requires_explicit_causal_path_accounting() -> None:
+    review_summary = {
+        "review_decision": "approved",
+        "approach_alignment": "aligned",
+        **_approved_causal_fields(),
+        "scope_assessment": "appropriate",
+        "rationale": "The mechanism and original scenario are covered.",
+    }
+    parsed = _extract_agent_review_summary(
+        {"extensions": {"review_summary": review_summary}}
+    )
+    assert parsed["mechanism_assessment"] == "mechanism_addressed"
+    assert parsed["remaining_causal_paths"] == []
+
+    invalid = dict(review_summary)
+    invalid["causal_path_assessment"] = "residual"
+    with pytest.raises(ValueError, match="must name at least one path"):
+        _extract_agent_review_summary(
+            {"extensions": {"review_summary": invalid}}
+        )
+
+
 def test_build_pr_review_body_includes_findings_and_merge_state() -> None:
     body = _build_pr_review_body(
         review_summary={
             "review_decision": "changes_requested",
             "approach_alignment": "diverged",
+            "mechanism_assessment": "symptom_only",
+            "original_scenario_oracle": "not_exercised",
+            "causal_path_assessment": "residual",
+            "remaining_causal_paths": ["The alternate CLI bypass remains open."],
             "scope_assessment": "excessive",
             "rationale": "The implementation drifted from the selected approach.",
             "merge_ready": False,
@@ -188,10 +810,22 @@ def test_build_pr_review_body_includes_findings_and_merge_state() -> None:
 
     assert "## Automated implementation review" in body
     assert "- Decision: `changes_requested`" in body
+    assert "- Researched mechanism: `symptom_only`" in body
+    assert "- Original-scenario oracle: `not_exercised`" in body
+    assert "- Causal paths: `residual`" in body
     assert "- Merge ready: `no`" in body
     assert "1. [high] Behavior regression" in body
     assert "Evidence:" in body
     assert "Suggested fix: Restore the original CLI arguments." in body
+
+
+def test_merge_rejects_pr_head_changed_after_review() -> None:
+    with pytest.raises(SystemExit, match="head changed after automated review"):
+        _require_unchanged_reviewed_head(
+            fingerprint="deadbeefdeadbeef",
+            review_summary={"reviewed_head_oid": "reviewed123"},
+            pr_meta={"headRefOid": "new456"},
+        )
 
 
 def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_path: Path) -> None:
@@ -215,6 +849,12 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
         impl_run_dir / "pr_ref.json",
         {"created": True, "url": "https://example.invalid/pr/2"},
     )
+    _write_bound_ticket_ref(
+        impl_run_dir,
+        fingerprint="feedfacefeedface",
+        owner_root=owner_root,
+        ticket_path=ticket_path,
+    )
     _write_json(impl_run_dir / "ci_gate.json", {"passed": True})
     ledger_path.parent.mkdir(parents=True, exist_ok=True)
     ledger_path.write_text(
@@ -236,6 +876,7 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
                 "state": "OPEN",
                 "isDraft": False,
                 "mergeable": "MERGEABLE",
+                "headRefOid": "abc123def456",
                 "headRefName": "backlog/review",
                 "baseRefName": "dev",
             },
@@ -249,7 +890,7 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
 
     def _fake_run_once(_cfg, _request):
         assert _request.repo == "https://example.invalid/repo.git"
-        assert _request.ref == "backlog/review"
+        assert _request.ref == "abc123def456"
         assert _request.agent_append_system_prompt is None
         assert _request.agent_append_system_prompt_file is not None
         assert _request.agent_append_system_prompt_file.exists()
@@ -275,6 +916,7 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
                     "review_summary": {
                         "review_decision": "approved",
                         "approach_alignment": "aligned",
+                        **_approved_causal_fields(),
                         "scope_assessment": "appropriate",
                         "rationale": "Aligned and scoped correctly.",
                     }
@@ -329,6 +971,14 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
         return SimpleNamespace(returncode=0, stdout="review submitted", stderr="")
 
     monkeypatch.setattr("usertest_implement.commands.review.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._collect_merged_pr_provenance",
+        lambda **_: {
+            "pr_url": "https://example.invalid/pr/4",
+            "target_branch": "dev",
+            "merged_commit": "abc123def456",
+        },
+    )
 
     exit_code = _cmd_review_run(
         _review_run_args(
@@ -398,37 +1048,79 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
     repo_root = tmp_path / "repo_root"
     owner_root = repo_root
     owner_root.mkdir(parents=True)
-    ticket_path = _make_ticket(owner_root, bucket="4 - for_review", fingerprint="cafebabecafebabe")
+    verification_commands = ["pdm run pytest -q"]
+    ticket_path = _make_ticket(
+        owner_root,
+        bucket="4 - for_review",
+        fingerprint="cafebabecafebabe",
+        verification_commands=verification_commands,
+    )
     complete_path = owner_root / ".agents" / "plans" / "5 - complete" / ticket_path.name
     (owner_root / ".agents" / "plans" / "5 - complete").mkdir(parents=True, exist_ok=True)
     ledger_path = repo_root / ".agents" / "state" / "backlog_implement_actions.yaml"
     impl_run_dir = repo_root / "runs" / "impl" / "2"
     review_run_dir = repo_root / "runs" / "review" / "2"
+    _write_bound_ticket_ref(
+        impl_run_dir,
+        fingerprint="cafebabecafebabe",
+        owner_root=owner_root,
+        ticket_path=ticket_path,
+        verification_commands=verification_commands,
+    )
     _write_json(
-        impl_run_dir / "ticket_ref.json",
+        impl_run_dir / "verification.json",
         {
             "schema_version": 1,
-            "fingerprint": "cafebabecafebabe",
-            "owner_repo": {"root": str(owner_root), "idea_path": str(ticket_path)},
+            "passed": True,
+            "status": "passed",
+            "terminal_reason": "passed",
+            "timed_out": False,
+            "cancelled": False,
+            "commands_configured": verification_commands,
+            "commands": [
+                {
+                    "command": "pdm run pytest -q",
+                    "exit_code": 0,
+                    "timed_out": False,
+                    "cancelled": False,
+                    "dispatch_blocked": False,
+                    "rejected_sentinel": None,
+                }
+            ],
         },
     )
+    _write_json(
+        impl_run_dir / "pr_ref.json",
+        {"schema_version": 1, "created": True, "url": "https://example.invalid/pr/4"},
+    )
+    review_ticket_provenance = _review_ticket_provenance(ticket_path)
+    implementation_ticket_ref_sha256 = sha256(
+        (impl_run_dir / "ticket_ref.json").read_bytes()
+    ).hexdigest()
     _write_json(
         review_run_dir / "review_summary.json",
         {
             "schema_version": 1,
+            "ticket_fingerprint": "cafebabecafebabe",
+            "run_dir": str(review_run_dir),
             "pr_url": "https://example.invalid/pr/4",
             "review_decision": "approved",
             "merge_ready": True,
             "ci_conclusion": "success",
+            "reviewed_head_oid": "abc123def456",
+            "ticket_provenance": review_ticket_provenance,
+            "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
         },
     )
     _write_json(
         review_run_dir / "review_ref.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "ticket_fingerprint": "cafebabecafebabe",
             "ticket_path": str(ticket_path),
             "implementation_run_dir": str(impl_run_dir),
+            "ticket_provenance": review_ticket_provenance,
+            "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
             "pr_url": "https://example.invalid/pr/4",
         },
     )
@@ -437,6 +1129,7 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
         "schema_version: 1\nupdated_at: null\nactions:\n"
         "  cafebabecafebabe:\n"
         "    fingerprint: cafebabecafebabe\n"
+        f"    last_run_dir: {json.dumps(str(impl_run_dir))}\n"
         f"    last_review_run_dir: {json.dumps(str(review_run_dir))}\n",
         encoding="utf-8",
     )
@@ -450,14 +1143,25 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
                 "state": "OPEN",
                 "isDraft": False,
                 "mergeable": "MERGEABLE",
+                "baseRefName": "dev",
+                "headRefOid": "abc123def456",
             },
             "ci_status": "completed",
             "ci_conclusion": "success",
+            "checks": [
+                {
+                    "name": "tests",
+                    "state": "SUCCESS",
+                    "bucket": "pass",
+                    "link": "https://example.invalid/check/merge",
+                }
+            ],
         },
     )
 
     def _fake_subprocess_run(argv, cwd=None, capture_output=None, text=None, check=None):
         assert argv[:3] == ["gh", "pr", "merge"]
+        assert argv[-2:] == ["--match-head-commit", "abc123def456"]
 
         class _Proc:
             returncode = 0
@@ -467,6 +1171,14 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
         return _Proc()
 
     monkeypatch.setattr("usertest_implement.commands.review.subprocess.run", _fake_subprocess_run)
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._collect_merged_pr_provenance",
+        lambda **_: {
+            "pr_url": "https://example.invalid/pr/4",
+            "target_branch": "dev",
+            "merged_commit": "abc123def456",
+        },
+    )
 
     exit_code = _cmd_review_merge(
         _review_simple_args(
@@ -481,6 +1193,12 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
     merge_ref = _read_json(review_run_dir / "merge_ref.json")
     assert isinstance(merge_ref, dict)
     assert merge_ref["merged"] is True
+    assert merge_ref["target_branch"] == "dev"
+    assert merge_ref["merged_commit"] == "abc123def456"
+    assert merge_ref["outcome_state"] == "tests_verified"
+    completed_markdown = complete_path.read_text(encoding="utf-8")
+    assert '"state": "tests_verified"' in completed_markdown
+    assert '"original_scenario_evidence": []' in completed_markdown
     resume_state = _read_json(impl_run_dir / "ticket_resume_state.json")
     assert isinstance(resume_state, dict)
     assert resume_state["lifecycle_state"] == "complete"
@@ -488,6 +1206,129 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
     ledger_text = ledger_path.read_text(encoding="utf-8")
     assert "last_resume_state_path" in ledger_text
     assert "last_resume_lifecycle_state: complete" in ledger_text.lower()
+    assert "last_outcome_state: tests_verified" in ledger_text.lower()
+
+
+def test_review_merge_preflights_outcome_before_merge_subprocess(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo_root"
+    case_id = "case:preflight"
+    plan_revision_id = "plan:preflight:v1"
+    fingerprint = _case_plan_fingerprint(
+        case_id=case_id,
+        plan_revision_id=plan_revision_id,
+    )
+    ticket_path = (
+        repo_root
+        / ".agents"
+        / "plans"
+        / "4 - for_review"
+        / f"20260710_{fingerprint}_ticket.md"
+    )
+    ticket_path.parent.mkdir(parents=True)
+    ticket_path.write_text(
+        "# Ticket\n"
+        f"- Fingerprint: `{fingerprint}`\n"
+        f"- Case ID: `{case_id}`\n"
+        f"- Plan revision ID: `{plan_revision_id}`\n",
+        encoding="utf-8",
+    )
+    impl_run_dir = repo_root / "runs" / "impl" / "preflight"
+    review_run_dir = repo_root / "runs" / "review" / "preflight"
+    _write_bound_ticket_ref(
+        impl_run_dir,
+        fingerprint=fingerprint,
+        owner_root=repo_root,
+        ticket_path=ticket_path,
+        case_id=case_id,
+        plan_revision_id=plan_revision_id,
+        force_v2=True,
+    )
+    pr_url = "https://example.invalid/pr/preflight"
+    _write_json(
+        impl_run_dir / "pr_ref.json",
+        {"schema_version": 1, "created": True, "url": pr_url},
+    )
+    review_ticket_provenance = _review_ticket_provenance(ticket_path)
+    implementation_ticket_ref_sha256 = sha256(
+        (impl_run_dir / "ticket_ref.json").read_bytes()
+    ).hexdigest()
+    _write_json(
+        review_run_dir / "review_summary.json",
+        {
+            "schema_version": 1,
+            "ticket_fingerprint": fingerprint,
+            "run_dir": str(review_run_dir),
+            "pr_url": pr_url,
+            "review_decision": "approved",
+            "merge_ready": True,
+            "ci_conclusion": "success",
+            "reviewed_head_oid": "abc123def456",
+            "ticket_provenance": review_ticket_provenance,
+            "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
+        },
+    )
+    _write_json(
+        review_run_dir / "review_ref.json",
+        {
+            "schema_version": 2,
+            "ticket_fingerprint": fingerprint,
+            "ticket_path": str(ticket_path),
+            "implementation_run_dir": str(impl_run_dir),
+            "ticket_provenance": review_ticket_provenance,
+            "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
+            "pr_url": pr_url,
+        },
+    )
+    ledger_path = repo_root / ".agents" / "state" / "backlog_implement_actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        "schema_version: 1\nupdated_at: null\nactions:\n"
+        f"  {fingerprint}:\n"
+        f"    fingerprint: {fingerprint}\n"
+        f"    last_run_dir: {json.dumps(str(impl_run_dir))}\n"
+        f"    last_review_run_dir: {json.dumps(str(review_run_dir))}\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._collect_pr_review_context",
+        lambda **_: {
+            "pr": {
+                "url": pr_url,
+                "state": "OPEN",
+                "isDraft": False,
+                "mergeable": "MERGEABLE",
+                "baseRefName": "dev",
+                "headRefOid": "abc123def456",
+            },
+            "ci_status": "completed",
+            "ci_conclusion": "success",
+            "checks": [{"name": "tests", "state": "SUCCESS"}],
+        },
+    )
+    merge_calls: list[list[str]] = []
+
+    def _unexpected_merge(argv, **_kwargs):
+        merge_calls.append(list(argv))
+        raise AssertionError("merge subprocess must not run before outcome preflight")
+
+    monkeypatch.setattr(
+        "usertest_implement.commands.review.subprocess.run",
+        _unexpected_merge,
+    )
+
+    with pytest.raises(ValueError, match="missing Requires live verification"):
+        _cmd_review_merge(
+            _review_simple_args(
+                repo_root=repo_root,
+                owner_root=repo_root,
+                ticket_path=ticket_path,
+                ledger=ledger_path,
+            )
+        )
+    assert merge_calls == []
 
 
 def test_run_defers_review_until_for_review_and_green_ci(
@@ -834,6 +1675,12 @@ def test_review_run_refuses_when_pr_gate_not_green(monkeypatch, tmp_path: Path) 
     _write_json(
         impl_run_dir / "pr_ref.json",
         {"created": True, "url": "https://example.invalid/pr/57"},
+    )
+    _write_bound_ticket_ref(
+        impl_run_dir,
+        fingerprint="beadbeadbeadbead",
+        owner_root=owner_root,
+        ticket_path=ticket_path,
     )
     _write_json(impl_run_dir / "ci_gate.json", {"passed": True})
     ledger_path.parent.mkdir(parents=True, exist_ok=True)

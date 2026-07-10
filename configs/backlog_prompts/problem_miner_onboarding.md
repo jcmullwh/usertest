@@ -11,7 +11,14 @@ exists from a first-use perspective and what is the evidence?
 ## Rules
 
 - Every problem record MUST cite one or more evidence_atom_ids from the input.
+- `atoms.json` contains this miner's exact, bounded `assigned_atom_ids` partition. Read
+  every complete markdown chunk listed in `chunks[*].text_file`; together those chunks
+  contain every assigned atom. Emit exactly one decision for every assigned atom.
+- This workspace contains only this job's assigned evidence. Do not cite atom IDs from
+  memory or another job. The index preview alone is never evidence for a citation.
 - If you cannot cite evidence atoms, do not create the record.
+- There is no numeric problem-record target or cap. Do not merge unrelated problems or
+  discard a distinct observed problem merely to reduce the record count.
 - Focus on: missing documentation, confusing first steps, unclear commands, onboarding
   failures, or barriers that prevent a new user from completing a basic workflow.
 - State what was observed, not what should be done.
@@ -22,10 +29,10 @@ exists from a first-use perspective and what is the evidence?
 
 ## Output
 
-Return ONLY JSON:
+Return ONLY one JSON object. `atom_decisions` must contain each assigned atom exactly once:
 
-[
-  {
+{
+  "problem_records": [{
     "problem_id": "problem:<short-slug>",
     "title": "...",
     "problem": "what was observed to be broken or missing (not what should be done)",
@@ -35,8 +42,24 @@ Return ONLY JSON:
     "evidence_atom_ids": ["..."],
     "evidence_summary": "brief summary of evidence atoms",
     "problem_status": "identified"
-  }
-]
+  }],
+  "atom_decisions": [{
+    "atom_id": "an ID from assigned_atom_ids",
+    "disposition": "supports_case|duplicate|expected_noise|deferred|unresolved",
+    "problem_ids": ["problem IDs from this response when disposition is supports_case"],
+    "rationale": "evidence-specific reason for this decision",
+    "revisit_when": null
+  }]
+}
+
+For `supports_case`, the atom must be cited by every listed problem ID. For every other
+disposition, `problem_ids` must be empty. `unresolved` and `deferred` are valid when the
+evidence does not establish a case; they must still explain the material uncertainty.
+`deferred` also requires a specific `revisit_when` condition rather than an indefinite delay.
+Do not use `duplicate` to avoid emitting a case: support a problem record and let the
+canonical relation reviewer bind it to an exact existing case. `expected_noise` is only
+permanent when the runner can bind a versioned noise rule to exact atom fields; an observed
+failure without such a rule is coerced to reconsiderable `deferred`.
 
 ## Input atoms
 
@@ -47,18 +70,22 @@ Requirements:
 
 - Read `atoms.json` before producing any output. It is a small manifest JSON object with:
   - `index_file`: a compact markdown index of all atoms
-  - `chunks`: a list of chunk descriptors (each has `file`, `atom_count`, `bytes`, `sha256`)
+  - `chunks`: descriptors with `text_file`, `atom_ids`, byte counts, and content hashes
   - `total_atom_count`
-  - `max_records_per_miner`
-- Then read the markdown index listed by `index_file`.
-- Use the per-atom markdown files listed as `atom_file` in the index for full text when
-  the preview is not enough. These files are small enough to read whole.
-- When reading atom files on Windows, read one atom file per command, for example
-  `Get-Content -Raw -LiteralPath atoms_by_id/atom_0001.md`.
-- Do not pass multiple atom paths to one `Get-Content` command, and do not use
-  comma-separated file lists.
-- Use the chunk markdown files listed in `chunks[*].text_file` only when broader chunk
-  context is needed.
+  - `assigned_atom_ids` and `assigned_atom_count`
+  - `problem_record_limit` (`null`; distinct evidenced problems are not count-capped)
+- Read the markdown index listed by `index_file` for routing context.
+- Read every markdown file listed in `chunks[*].text_file` in full. A verified complete
+  chunk read covers every atom listed in that chunk's `atom_ids`; normally there are no
+  more than three bounded chunks in one job.
+- For every assigned `origin_attachment_evidence.materialized_refs` entry, open its artifact
+  manifest and read every bounded attachment chunk in full. Never rely on the host
+  `artifact_ref.path`. A materialization error requires an `unresolved` atom decision.
+- With PowerShell/Codex, read one chunk per command using, for example,
+  `Get-Content -Raw -LiteralPath atoms_text/atoms_001.md`; `-Raw` is required so the
+  runner can attest that the whole file was observed.
+- Per-atom files remain available for focused rereads, but are not required after the
+  complete containing chunk has been read.
 - Do not use PowerShell array slicing or line ranges to read markdown chunks.
 - Do not run JSON parser loops over the chunk files. The JSON files are retained as the
   canonical structured copy, but the markdown index and markdown chunks are the preferred

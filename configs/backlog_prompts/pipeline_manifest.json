@@ -10,6 +10,7 @@
   "prioritizer_template": "prioritizer.md",
   "solution_optioner_template": "solution_optioner.md",
   "solution_selector_template": "solution_selector.md",
+  "solution_falsifier_template": "solution_falsifier.md",
   "selected_solution_labeler_template": "selected_solution_labeler.md",
   "change_planner_template": "change_planner.md",
   "stage_guidance_manifest": "configs/backlog_stage_guidance/manifest.json",

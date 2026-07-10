@@ -109,7 +109,16 @@ Implementation review gate (before merge):
 - It does not mark the ticket complete and it does not merge the PR.
 - Use `usertest-implement review run` to review the PR against the ticket's selected approach.
 - Use `usertest-implement review merge` only after review approval and green CI.
-- `5 - complete` is reserved for merged tickets.
+- Review approval is bound to the exact PR head commit. A pushed commit invalidates the approval and
+  requires a new `review run` before merge.
+- `review merge` refreshes PR metadata after merge, records the actual merge commit and target
+  branch, embeds a validated outcome record, and then moves the ticket to `5 - complete`.
+- Merge records at least `implemented`. It records `tests_verified` only when the implementation
+  run retains a passing `verification.json` with configured commands and successful results. Green
+  PR checks remain CI evidence, not automatic test evidence. Neither state by itself claims that the
+  originating problem is resolved; original-scenario and live-runtime proof remain separate.
+- The generic `tickets move` command cannot move a ticket into `5 - complete`, because it has no
+  reviewed merge provenance or verification evidence.
 
 Quick checks:
 
@@ -200,6 +209,12 @@ usertest-implement run --settings-profile my_profile --ticket-path ".agents/plan
 
 `usertest-implement` only accepts stage-6 implementation tickets (`Export kind: implementation`, `Stage: ready_for_ticket`).
 
+Generated stage-6 tickets start from their exact researched repository revision. Before
+review, the runner requires all planned production target paths to be touched and binds
+the passing verification run to the exact PR head. Extra files and wider hunks are shown
+to the semantic reviewer instead of being rejected mechanically. A high or critical
+actionable review finding vetoes merge even if the model also emits an approval decision.
+
 Or from a tickets export JSON:
 
 ```bash
@@ -215,9 +230,36 @@ usertest-implement tickets run-next --backlog-target <target_slug>
 ```
 
 It runs the backlog refresh steps via `usertest-backlog` (backlog → intent-snapshot → review-ux → export-tickets),
-exports only `ready_for_ticket` items, then selects the next local plan ticket that is both
+The refresh is one exclusive, fail-closed transaction: preliminary shadow, fresh intent snapshot,
+UX review, two fresh stable qualifying shadows, and immediate export. Every step uses the same
+repository, research ref, breadth profile, agent/model, and action ledgers. The per-scope refresh
+lock prevents concurrent writers. Unrelated IDEA or release PRs do not impose a repository-wide
+refresh veto; active generated work is suppressed by canonical case instead. The export stays
+locked unless the last two fresh cycles pass all depth invariants with a stable projection.
+
+It exports only `ready_for_ticket` items, then selects the next local plan ticket that is both
 `Export kind: implementation` and `Stage: ready_for_ticket`. Use `--no-refresh-backlog` for a fast path
 that only selects from existing `.agents/plans/*` tickets that match the same stage-6 implementation gate.
+
+### Automated backlog batch
+
+`usertest-implement batch run` separates the clean code checkout (`--repo-root`) from the configured
+historical-data, implementation-artifact, ledger, and queue owner (`defaults.owner_root`). It fetches `defaults.wave_base_ref`, resolves
+one exact commit, pins every research source to that commit, and rejects any generated plan whose
+stage-6 target revision differs before claiming the ticket. The same exact revision is passed to
+implementation. The default batch intentionally has no per-ticket timeout; a timeout applies only
+when `ticket_timeout_seconds` is explicitly configured.
+
+The default phases drain blocker/high, medium, and low automated work. IDEA-originated tickets are
+not batch candidates and are not reviewed, merged, or finalized by the automated loop. A generated
+same-bucket historical duplicate is repaired before strict ticket indexing only when its generated
+provenance is explicit; manual, IDEA, and unreadable copies are protected.
+
+At the end of a pass, `terminal_proof.json` distinguishes successful queue movement from actual
+completion. It requires a fresh zero-export shadow result for every source, the exact wave revision,
+no nonterminal canonical cases, and no active generated plan files. A pass that created work for PR
+review records `awaiting_terminal_proof` and lets the outer review/outcome loop continue. Only a
+hash-verified passing terminal proof stops that loop as `completed`.
 
 ### Review stage
 
@@ -226,7 +268,7 @@ PR-backed implementation tickets do not go straight from implementation to compl
 - `usertest-implement run --commit --push --pr` stops at `4 - for_review`
 - `usertest-implement review run` checks the PR against the selected ticket approach and publishes the review comments directly onto the PR
 - `usertest-implement review merge` merges only when the review says the PR is merge-ready
-- `5 - complete` is reserved for merged tickets
+- `5 - complete` is reserved for merged tickets with a validated embedded outcome record
 
 Example review flow:
 
@@ -235,6 +277,104 @@ usertest-implement review run --ticket-path ".agents/plans/4 - for_review/<ticke
 usertest-implement review status --ticket-path ".agents/plans/4 - for_review/<ticket>.md"
 usertest-implement review merge --ticket-path ".agents/plans/4 - for_review/<ticket>.md"
 ```
+
+`review merge` records the PR's post-merge commit, base branch, reviewed head SHA, and explicit
+passing checks. It uses `gh pr merge --match-head-commit` so a commit pushed after review cannot be
+merged accidentally. The initial outcome is `tests_verified` only when the selected case-aware plan
+contains a hashed stage-6 verification-command contract and the retained runner artifact proves
+that every command in that exact contract passed. The export body hash, local plan hash, case/plan
+identity, command-contract hash, runner ticket reference, and review reference must all agree.
+Legacy plans can still be implemented, but generic verification cannot promote them to
+`tests_verified` unless they carry an explicit bound contract. Generic green CI, skipped checks,
+neutral checks, and caller-supplied evidence labels do not count as test evidence.
+
+For generated plans, merge finalization does not stop at `tests_verified`. It creates a temporary
+clean detached worktree at the exact merged commit and automatically runs the plan's hashed
+original-scenario role with no default timeout. For a post-research consolidated case that role is
+a signed multi-scenario oracle: every retained child replay and its stage-5-selected positive
+contract must pass, so proving only the canonical symptom cannot close absorbed cases. It runs the live role only when the researched
+case crosses a real runtime boundary, and it runs the mitigation-effect role only when
+`before_after_reproduction.expected_outcome_state` is `mitigated`. The durable result becomes
+`resolved` only after the original scenario (and required live boundary) demonstrates the planned
+correct behavior; a planned mitigation becomes `mitigated` and explicitly does not claim root
+resolution. Failed, timed-out, or false predicates retain their runner artifact and leave the case
+`unverified`. The already-merged finalizer and centralized backlog refresh retry that proof. While
+proof is operationally pending, export suppresses only that canonical case and continues unrelated
+backlog work. If the original-scenario predicates actually fail, that durable failure may return the
+case to research for a revised causal solution instead of silently retrying the same plan.
+
+Advance a merged ticket only when new proof exists. This command transitions the embedded ticket
+outcome and implementation ledger together; it refuses missing, conflicting, or illegal state
+transitions:
+
+```bash
+usertest-implement outcome advance \
+  --ticket-path ".agents/plans/5 - complete/<ticket>.md" \
+  --state tests_verified \
+  --evidence-json outcome-evidence.json
+```
+
+`outcome-evidence.json` is an object with newly established evidence plus explicit remaining risks
+and recurrence status. Evidence entries are appended without discarding prior proof:
+
+```json
+{
+  "test_evidence": [
+    {
+      "kind": "runner_verification",
+      "reference": "runs/implementation/verification.json",
+      "result": "passed",
+      "runner_receipt": {
+        "run_dir": "runs/implementation",
+        "verification_sha256": "<64-character sha256>",
+        "evidence_kind": "test"
+      }
+    }
+  ],
+  "remaining_risks": ["Original scenario replay remains pending"]
+}
+```
+
+Do not hand-author the receipt. The command re-opens the referenced implementation run and verifies
+its ticket reference, plan provenance, exact configured/executed command coverage, target-scope
+contract, terminal status, artifact hashes, and command safety.
+
+Stage 6 also carries dedicated original-scenario, live, mitigation-effect, and recurrence roles.
+Run one only from a checkout whose `HEAD` is the recorded merged commit; the default has no arbitrary
+timeout. The runner executes the exact role commands, evaluates the hashed machine predicates, and
+writes an advance-ready evidence JSON under the configured runs root:
+
+```bash
+usertest-implement outcome run-role \
+  --ticket-path ".agents/plans/5 - complete/<ticket>.md" \
+  --role original_scenario \
+  --workspace /path/to/checkout-at-merged-commit
+
+usertest-implement outcome advance \
+  --ticket-path ".agents/plans/5 - complete/<ticket>.md" \
+  --state original_scenario_verified \
+  --evidence-json <printed-outcome-evidence.json>
+
+# Recurrence is supplied by the centralized refresh, not a planner-invented test.
+usertest-implement outcome run-role \
+  --ticket-path ".agents/plans/5 - complete/<ticket>.md" \
+  --role recurrence \
+  --workspace /path/to/checkout-at-merged-commit \
+  --recurrence-refresh-receipt runs/<target>/_compiled/<target>.refresh_receipt.json
+```
+
+The same flow applies to `live`, `mitigation_effect`, and `recurrence`. Generic test receipts cannot
+be relabeled as these roles. A timeout, cancelled command, predicate mismatch, changed snapshot,
+wrong commit, wrong tested implementation head, wrong case/plan, or wrong target-scope hash remains
+blocked. Recurrence additionally requires two distinct shadow cycles generated after the prior
+outcome, the exact retained case and atom snapshots, at least one actual source-observation run
+after that outcome, and an unchanged plan-time case evidence baseline with no recurrence reopen.
+Two immediate refreshes over an unchanged corpus prove pipeline stability, not non-recurrence.
+When no later source window exists, a directly proven fix may record recurrence as
+`not_observed/no_new_source_window` with that limitation in `remaining_risks`; it must not attach a
+passing recurrence receipt. Runtime-bound resolution still requires live proof. `mitigated`
+requires both bound test evidence and a dedicated mitigation-effect receipt.
+Merge retries preserve an outcome that has already advanced beyond `tests_verified`.
 
 The review stage is intentionally narrow. It checks:
 

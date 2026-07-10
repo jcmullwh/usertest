@@ -64,7 +64,7 @@ def test_planned_backlog_module_boundaries_own_real_functions(
                 "review-ux",
                 "sync-atom-actions",
                 "export-tickets",
-                "Export staged backlog items as external ticket",
+                "Write staged ticket export artifacts and synchronize",
             ],
         ),
         (

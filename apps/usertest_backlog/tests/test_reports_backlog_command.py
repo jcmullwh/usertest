@@ -8,10 +8,16 @@ from typing import Any
 
 import pytest
 import yaml
-from backlog_repo.export import ticket_export_fingerprint
+from backlog_core.case_lineage import eligible_problem_mining_atoms
 from runner_core import find_repo_root
 
+import usertest_backlog.workflows.staged as staged_module
 from usertest_backlog.cli import _write_chunked_problem_mining_atoms_workspace, main
+from usertest_backlog.workflows.problem_mining import _validate_relation_decision_focuses
+from usertest_backlog.workflows.staged import (
+    _reset_stale_unproven_actioned_atoms,
+    _sync_case_registry_outcomes,
+)
 
 
 def _write_json(path: Path, obj: object) -> None:
@@ -24,12 +30,305 @@ def _write_yaml(path: Path, obj: object) -> None:
     path.write_text(yaml.safe_dump(obj, sort_keys=False), encoding="utf-8")
 
 
+def _stage1_assigned_atom(compiled_dir: Path, atom_id: str) -> dict[str, Any]:
+    """Read an atom from the exact workspace handed to the stage-1 miner."""
+
+    stage_doc = json.loads(
+        (compiled_dir / "target_a.problem_records.json").read_text(encoding="utf-8")
+    )
+    miners = stage_doc["input_meta"]["miner_results"]
+    miner = next(item for item in miners if atom_id in item["assigned_atom_ids"])
+    workspace = Path(miner["workspace_dir"])
+    manifest = json.loads((workspace / "atoms.json").read_text(encoding="utf-8"))
+    for chunk in manifest["chunks"]:
+        atoms = json.loads((workspace / chunk["file"]).read_text(encoding="utf-8"))
+        for atom in atoms:
+            if atom.get("atom_id") == atom_id:
+                return atom
+    raise AssertionError(f"assigned atom missing from stage-1 workspace: {atom_id}")
+
+
 def _ticket_labeler_fingerprint(ticket: dict[str, Any]) -> str:
     title_raw = ticket.get("title")
     title = str(title_raw).strip().lower() if isinstance(title_raw, str) else ""
     evidence = sorted(item for item in ticket.get("evidence_atom_ids", []) if isinstance(item, str))
     anchor = json.dumps({"title": title, "evidence": evidence}, ensure_ascii=False).encode("utf-8")
     return hashlib.sha256(anchor).hexdigest()[:16]
+
+
+def _runner_receipt(
+    *, case_id: str, plan_revision_id: str, evidence_kind: str
+) -> dict[str, object]:
+    return {
+        "receipt_schema_version": 2,
+        "producer": "usertest_implement",
+        "verification_producer": "runner_core",
+        "evidence_kind": evidence_kind,
+        "case_id": case_id,
+        "plan_revision_id": plan_revision_id,
+        "fingerprint": "1" * 16,
+        "run_dir": "runs/shadow",
+        "verification_path": "runs/shadow/verification.json",
+        "verification_sha256": "2" * 64,
+        "ticket_ref_path": "runs/shadow/ticket.json",
+        "ticket_ref_sha256": "3" * 64,
+        "ticket_body_sha256": "4" * 64,
+        "local_plan_sha256": "5" * 64,
+        "local_plan_filename": "ticket.md",
+        "verification_contract_sha256": "6" * 64,
+        "verification_binding_sha256": "7" * 64,
+        "commands": ["pytest -q tests/test_shadow.py"],
+    }
+
+
+def test_shadow_pipeline_rejects_invalid_export_gate_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    real_load_yaml = staged_module._load_yaml
+
+    def load_yaml(path: Path) -> dict[str, Any]:
+        if path.name == "backlog_export_gate.yaml":
+            return {
+                "backlog_export_gate": {
+                    "enabled": True,
+                    "required_consecutive_shadow_cycles": 0,
+                    "require_exact_export_projection": True,
+                }
+            }
+        return real_load_yaml(path)
+
+    monkeypatch.setattr(staged_module, "_load_yaml", load_yaml)
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(tmp_path / "runs"),
+                "--target",
+                "target_a",
+                "--shadow",
+            ]
+        )
+
+    assert exc.value.code == 2
+
+
+def test_case_outcome_sync_persists_a_validated_current_lifecycle_pointer() -> None:
+    case_registry = {
+        "schema_version": 1,
+        "cases": {
+            "case:one": {
+                "case_id": "case:one",
+                "canonical_problem_id": "problem:one",
+                "state": "active",
+            }
+        },
+        "problem_id_to_case_id": {"problem:one": "case:one"},
+        "atom_id_to_case_id": {"atom:one": "case:one"},
+        "ticket_fingerprint_to_case_id": {},
+    }
+    outcome = {
+        "schema_version": 1,
+        "case_id": "case:one",
+        "plan_revision_id": "planrev:case:one:abc123:1",
+        "state": "planned",
+        "recorded_at": "2026-07-09T12:00:00Z",
+        "requires_live_verification": False,
+        "target_branch": None,
+        "merged_commit": None,
+        "test_evidence": [],
+        "original_scenario_evidence": [],
+        "live_evidence": [],
+        "remaining_risks": [],
+        "recurrence_check": {"status": "not_run"},
+    }
+    atom_actions = {
+        "atom:one": {
+            "atom_id": "atom:one",
+            "case_id": "case:one",
+            "plan_outcomes": {
+                "planrev:case:one:abc123:1": {
+                    "state": "planned",
+                    "recorded_at": "2026-07-09T12:00:00Z",
+                    "path": "plans/one.md",
+                    "fingerprint": "0123456789abcdef",
+                    "outcome_record": outcome,
+                }
+            },
+        }
+    }
+
+    result = _sync_case_registry_outcomes(
+        case_registry=case_registry,
+        atom_actions=atom_actions,
+    )
+
+    assert result["invalid_outcome_records"] == 0
+    case = case_registry["cases"]["case:one"]
+    assert case["state"] == "planned"
+    assert case["current_lifecycle"] == {
+        "state": "planned",
+        "outcome_reference": {
+            "source": "structurally_valid_nonterminal_plan_outcome",
+            "validation_status": "not_required_nonterminal",
+            "plan_revision_id": "planrev:case:one:abc123:1",
+            "recorded_at": "2026-07-09T12:00:00Z",
+            "path": "plans/one.md",
+            "fingerprint": "0123456789abcdef",
+        },
+    }
+
+
+def test_stale_legacy_actioned_atom_without_plan_or_outcome_returns_to_new() -> None:
+    atom_actions = {
+        "atom:stale": {
+            "atom_id": "atom:stale",
+            "status": "actioned",
+            "case_id": "case:missing",
+            "disposition": "supports_case",
+            "disposition_rationale": "A deleted legacy plan once cited this atom.",
+            "last_plan_seen_at": "2026-07-01T00:00:00Z",
+        }
+    }
+
+    result = _reset_stale_unproven_actioned_atoms(
+        atom_actions=atom_actions,
+        case_registry={"cases": {}},
+        current_plan_sync_at="2026-07-10T00:00:00Z",
+        generated_at="2026-07-10T00:00:00Z",
+    )
+
+    entry = atom_actions["atom:stale"]
+    assert result == {"examined": 1, "reset_to_new": 1, "idea_excluded": 0}
+    assert entry["status"] == "new"
+    assert entry["stale_actioned_previous_case_id"] == "case:missing"
+    assert "case_id" not in entry
+    assert entry["stale_actioned_previous_disposition"] == "supports_case"
+    assert entry["disposition"] == "unresolved"
+    assert entry["disposition_status"] == "pending"
+
+
+def test_stale_actioned_reset_preserves_current_plan_verified_outcome_and_idea() -> None:
+    sync_at = "2026-07-10T00:00:00Z"
+    atom_actions = {
+        "atom:plan": {
+            "atom_id": "atom:plan",
+            "status": "actioned",
+            "last_plan_seen_at": sync_at,
+        },
+        "atom:resolved": {
+            "atom_id": "atom:resolved",
+            "status": "actioned",
+            "case_id": "case:resolved",
+        },
+        "atom:idea": {
+            "atom_id": "atom:idea",
+            "status": "actioned",
+            "category": "IDEA",
+        },
+    }
+    registry = {
+        "cases": {
+            "case:resolved": {
+                "state": "resolved",
+                "current_lifecycle": {
+                    "state": "resolved",
+                    "outcome_reference": {"validation_status": "verified"},
+                },
+            }
+        }
+    }
+
+    result = _reset_stale_unproven_actioned_atoms(
+        atom_actions=atom_actions,
+        case_registry=registry,
+        current_plan_sync_at=sync_at,
+        generated_at=sync_at,
+    )
+
+    assert result == {"examined": 3, "reset_to_new": 0, "idea_excluded": 1}
+    assert {entry["status"] for entry in atom_actions.values()} == {"actioned"}
+
+
+@pytest.mark.parametrize("unproven_state", ["implemented", "tests_verified", "live_verified"])
+def test_case_outcome_sync_downgrades_unproven_legacy_progress(
+    unproven_state: str,
+) -> None:
+    case_registry = {
+        "schema_version": 1,
+        "cases": {"case:one": {"case_id": "case:one", "state": "active"}},
+        "problem_id_to_case_id": {},
+        "atom_id_to_case_id": {"atom:one": "case:one"},
+        "ticket_fingerprint_to_case_id": {},
+    }
+    atom_actions = {
+        "atom:one": {
+            "atom_id": "atom:one",
+            "case_id": "case:one",
+            "last_outcome_state": unproven_state,
+            "last_outcome_recorded_at": "2026-07-09T12:00:00Z",
+        }
+    }
+
+    _sync_case_registry_outcomes(
+        case_registry=case_registry,
+        atom_actions=atom_actions,
+    )
+
+    case = case_registry["cases"]["case:one"]
+    assert case["state"] == "unverified"
+    assert case["current_lifecycle"] == {
+        "state": "unverified",
+        "outcome_reference": {
+            "source": "legacy_atom_action_projection",
+            "validation_status": "projected",
+            "recorded_at": "2026-07-09T12:00:00Z",
+        },
+    }
+
+
+@pytest.mark.parametrize("unproven_state", ["implemented", "tests_verified", "live_verified"])
+def test_case_outcome_sync_downgrades_unproven_plan_progress(
+    unproven_state: str,
+) -> None:
+    case_registry = {
+        "schema_version": 1,
+        "cases": {"case:one": {"case_id": "case:one", "state": "active"}},
+        "problem_id_to_case_id": {},
+        "atom_id_to_case_id": {"atom:one": "case:one"},
+        "ticket_fingerprint_to_case_id": {},
+    }
+    atom_actions = {
+        "atom:one": {
+            "atom_id": "atom:one",
+            "case_id": "case:one",
+            "plan_outcomes": {
+                "plan:one": {
+                    "state": unproven_state,
+                    "recorded_at": "2026-07-09T12:00:00Z",
+                    "required": True,
+                }
+            },
+        }
+    }
+
+    _sync_case_registry_outcomes(
+        case_registry=case_registry,
+        atom_actions=atom_actions,
+    )
+
+    case = case_registry["cases"]["case:one"]
+    assert case["state"] == "unverified"
+    assert case["plan_outcomes"]["plan:one"]["state"] == "unverified"
+    assert case["current_lifecycle"]["outcome_reference"]["validation_status"] == (
+        "fail_open_projection"
+    )
 
 
 def test_problem_mining_workspace_writes_agent_readable_atom_index(tmp_path: Path) -> None:
@@ -71,6 +370,39 @@ def test_problem_mining_workspace_writes_agent_readable_atom_index(tmp_path: Pat
     assert "The CLI quickstart has no obvious first command." in text_chunk
     assert "The CLI quickstart has no obvious first command." in atom_file
     assert "linked_atom_ids: run-a:confusion_point:1" in text_chunk
+
+
+def test_relation_review_rejects_candidate_only_historical_focus() -> None:
+    with pytest.raises(ValueError, match="candidate_only_focus"):
+        _validate_relation_decision_focuses(
+            [{"focus_id": "problem:historical", "action": "keep_separate"}],
+            work_unit_problem_ids={"problem:current"},
+        )
+
+
+def test_relation_review_requires_exactly_one_disposition_for_every_active_focus() -> None:
+    with pytest.raises(ValueError, match="missing_focus: problem:second"):
+        _validate_relation_decision_focuses(
+            [{"focus_id": "problem:first", "action": "keep_separate"}],
+            work_unit_problem_ids={"problem:first", "problem:second"},
+        )
+
+    with pytest.raises(ValueError, match="duplicate_focus: problem:first"):
+        _validate_relation_decision_focuses(
+            [
+                {"focus_id": "problem:first", "action": "keep_separate"},
+                {"focus_id": "problem:first", "action": "merge"},
+            ],
+            work_unit_problem_ids={"problem:first"},
+        )
+
+    _validate_relation_decision_focuses(
+        [
+            {"focus_id": "problem:first", "action": "keep_separate"},
+            {"focus_id": "problem:second", "action": "keep_separate"},
+        ],
+        work_unit_problem_ids={"problem:first", "problem:second"},
+    )
 
 
 def _seed_labeler_cache(artifacts_dir: Path, ticket: dict[str, Any], *, labelers: int = 3) -> None:
@@ -256,8 +588,8 @@ def test_reports_backlog_dry_run_writes_outputs(tmp_path: Path) -> None:
     assert summary["totals"]["source_counts"].get("command_failure", 0) == 1
 
     atom_lines = atoms_jsonl.read_text(encoding="utf-8").splitlines()
-    assert all(
-        json.loads(line).get("source") != "agent_last_message_artifact"
+    assert any(
+        json.loads(line).get("source") == "agent_last_message_artifact"
         for line in atom_lines
         if line
     )
@@ -273,6 +605,269 @@ def test_reports_backlog_dry_run_writes_outputs(tmp_path: Path) -> None:
 
     markdown = out_md.read_text(encoding="utf-8")
     assert "Untriaged Tail" in markdown
+
+
+def test_two_shadow_cycles_retain_open_cases_and_add_new_evidence_without_export(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    argv = [
+        "reports",
+        "backlog",
+        "--repo-root",
+        str(repo_root),
+        "--runs-dir",
+        str(runs_dir),
+        "--target",
+        "target_a",
+        "--dry-run",
+        "--miners",
+        "0",
+        "--sample-size",
+        "8",
+        "--atom-actions-yaml",
+        str(atom_actions_path),
+        "--skip-plan-folder-sync",
+    ]
+
+    snapshots: list[dict[str, Any]] = []
+    active_case_sets: list[set[str]] = []
+    first_evidence_by_case: dict[str, set[str]] = {}
+    nonterminal_case_id: str | None = None
+    terminal_case_id: str | None = None
+    for cycle in range(2):
+        if cycle == 1:
+            run_c = runs_dir / "target_a" / "20260103T000000Z" / "codex" / "0"
+            _write_json(
+                run_c / "target_ref.json",
+                {
+                    "repo_input": "pip:agent-adapters",
+                    "agent": "codex",
+                    "persona_id": "routine_operator",
+                    "mission_id": "complete_output_smoke",
+                },
+            )
+            _write_json(run_c / "effective_run_spec.json", {})
+            _write_json(
+                run_c / "metrics.json",
+                {
+                    "commands_executed": 1,
+                    "commands_failed": 0,
+                    "step_count": 1,
+                    "event_counts": {},
+                    "distinct_files_read": [],
+                    "distinct_docs_read": [],
+                    "distinct_files_written": [],
+                    "lines_added_total": 0,
+                    "lines_removed_total": 0,
+                },
+            )
+            _write_json(
+                run_c / "report.json",
+                {"confusion_points": [{"summary": "No quickstart section remains visible"}]},
+            )
+            _write_json(
+                run_c / "token_monitoring.json",
+                {
+                    "signals": [
+                        {
+                            "signal_id": "novel-read-loop",
+                            "causal_mechanism": "The same file is read repeatedly",
+                            "confidence": "high",
+                            "token_dimensions_affected": {"input_tokens": 25000},
+                            "confirmed_by_counters": True,
+                        }
+                    ]
+                },
+            )
+            (run_c / "agent_stderr.txt").write_text("", encoding="utf-8")
+            (run_c / "agent_last_message.txt").write_text("", encoding="utf-8")
+
+        with pytest.raises(SystemExit) as exc:
+            main(argv)
+        assert exc.value.code == 0
+
+        compiled = runs_dir / "target_a" / "_compiled"
+        case_registry = json.loads(
+            (compiled / "target_a.case_registry.json").read_text(encoding="utf-8")
+        )
+        backlog = json.loads((compiled / "target_a.backlog.json").read_text(encoding="utf-8"))
+        problem_doc = json.loads(
+            (compiled / "target_a.problem_records.json").read_text(encoding="utf-8")
+        )
+        snapshots.append(case_registry)
+        active_case_ids = {
+            str(item["case_id"])
+            for item in problem_doc.get("items", [])
+            if isinstance(item, dict) and isinstance(item.get("case_id"), str)
+        }
+        active_case_sets.append(active_case_ids)
+        assert active_case_ids, "nonterminal cases must remain active across shadow cycles"
+        for active_case_id in active_case_ids:
+            stage_refs = case_registry["cases"][active_case_id].get("stage_artifact_refs", {})
+            assert "problem_mining" in stage_refs
+            assert "problem_prioritization" in stage_refs
+            assert "ticket_assembly" in stage_refs
+        assert all(
+            ticket.get("stage") != "ready_for_ticket"
+            for ticket in backlog.get("tickets", [])
+            if isinstance(ticket, dict)
+        )
+        assert not list(tmp_path.rglob("*.idea.md"))
+
+        if cycle == 0:
+            first_evidence_by_case = {
+                str(case_id): {
+                    str(atom_id)
+                    for atom_id in entry.get("evidence_atom_ids", [])
+                    if isinstance(atom_id, str)
+                }
+                for case_id, entry in case_registry.get("cases", {}).items()
+                if isinstance(entry, dict) and entry.get("state") == "active"
+            }
+            atom_case_pairs = [
+                (str(atom_id), str(case_id))
+                for atom_id, case_id in case_registry.get("atom_id_to_case_id", {}).items()
+                if not str(atom_id).startswith("__aggregate__/")
+            ]
+            assert len({case_id for _, case_id in atom_case_pairs}) >= 2
+            nonterminal_case_id = atom_case_pairs[0][1]
+            terminal_case_id = next(
+                case_id for _, case_id in atom_case_pairs if case_id != nonterminal_case_id
+            )
+            ledger = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
+            assert isinstance(ledger, dict)
+            atom_entries = {
+                str(entry["atom_id"]): entry
+                for entry in ledger.get("atoms", [])
+                if isinstance(entry, dict) and isinstance(entry.get("atom_id"), str)
+            }
+            for atom_id, case_id in atom_case_pairs:
+                entry = atom_entries[atom_id]
+                if case_id == nonterminal_case_id:
+                    outcome_record = {
+                        "schema_version": 1,
+                        "case_id": case_id,
+                        "plan_revision_id": f"plan:{case_id}:tests",
+                        "state": "tests_verified",
+                        "outcome_scope": "case",
+                        "recorded_at": "2026-01-02T12:00:00Z",
+                        "requires_live_verification": False,
+                        "target_branch": "dev",
+                        "merged_commit": "abc123",
+                        "test_evidence": [
+                            {
+                                "kind": "pytest",
+                                "reference": "tests/test_shadow.py",
+                                "result": "passed",
+                                "runner_receipt": _runner_receipt(
+                                    case_id=case_id,
+                                    plan_revision_id=f"plan:{case_id}:tests",
+                                    evidence_kind="test",
+                                ),
+                            }
+                        ],
+                        "original_scenario_evidence": [],
+                        "live_evidence": [],
+                        "remaining_risks": ["Original scenario pending"],
+                        "recurrence_check": {"status": "not_run"},
+                    }
+                    entry.update(
+                        {
+                            "status": "actioned",
+                            "case_id": case_id,
+                            "last_outcome_state": "tests_verified",
+                            "last_outcome_recorded_at": "2026-01-02T12:00:00Z",
+                            "last_outcome_record": outcome_record,
+                        }
+                    )
+                elif case_id == terminal_case_id:
+                    outcome_record = {
+                        "schema_version": 1,
+                        "case_id": case_id,
+                        "plan_revision_id": f"plan:{case_id}:resolved",
+                        "state": "resolved",
+                        "outcome_scope": "case",
+                        "recorded_at": "2026-01-02T12:00:00Z",
+                        "requires_live_verification": False,
+                        "target_branch": "dev",
+                        "merged_commit": "def456",
+                        "test_evidence": [
+                            {
+                                "kind": "pytest",
+                                "reference": "tests/test_shadow.py",
+                                "result": "passed",
+                                "runner_receipt": _runner_receipt(
+                                    case_id=case_id,
+                                    plan_revision_id=f"plan:{case_id}:resolved",
+                                    evidence_kind="test",
+                                ),
+                            }
+                        ],
+                        "original_scenario_evidence": [
+                            {
+                                "kind": "replay",
+                                "reference": "runs/shadow/replay.json",
+                                "result": "passed",
+                                "runner_receipt": _runner_receipt(
+                                    case_id=case_id,
+                                    plan_revision_id=f"plan:{case_id}:resolved",
+                                    evidence_kind="original_scenario",
+                                ),
+                            }
+                        ],
+                        "live_evidence": [],
+                        "remaining_risks": [],
+                        "recurrence_check": {
+                            "status": "completed",
+                            "result": "passed",
+                            "evidence": [
+                                {
+                                    "kind": "replay",
+                                    "reference": "runs/shadow/recurrence.json",
+                                    "result": "passed",
+                                    "runner_receipt": _runner_receipt(
+                                        case_id=case_id,
+                                        plan_revision_id=(f"plan:{case_id}:resolved"),
+                                        evidence_kind="recurrence",
+                                    ),
+                                }
+                            ],
+                        },
+                    }
+                    entry.update(
+                        {
+                            "status": "actioned",
+                            "case_id": case_id,
+                            "last_outcome_state": "resolved",
+                            "last_outcome_recorded_at": "2026-01-02T12:00:00Z",
+                            "last_outcome_record": outcome_record,
+                        }
+                    )
+            ledger["atoms"] = [atom_entries[key] for key in sorted(atom_entries)]
+            _write_yaml(atom_actions_path, ledger)
+
+    assert nonterminal_case_id is not None
+    assert terminal_case_id is not None
+    # Structurally valid embedded records are not completion proof. These synthetic
+    # records have no retained runner artifacts, plan hashes, or merge provenance, so
+    # both cases must remain in the active work set instead of suppressing discovery.
+    expected_retained = active_case_sets[0]
+    assert expected_retained <= active_case_sets[1]
+    assert nonterminal_case_id in active_case_sets[1]
+    assert terminal_case_id in active_case_sets[1]
+    assert snapshots[1]["cases"][nonterminal_case_id]["state"] == "unverified"
+    assert snapshots[1]["cases"][terminal_case_id]["state"] == "unverified"
+    assert len(snapshots[1].get("cases", {})) > len(snapshots[0].get("cases", {}))
+    for case_id, first_evidence in first_evidence_by_case.items():
+        second_entry = snapshots[1]["cases"][case_id]
+        assert first_evidence <= set(second_entry.get("evidence_atom_ids", []))
+    assert any(
+        "20260103T000000Z" in atom_id for atom_id in snapshots[1].get("atom_id_to_case_id", {})
+    )
 
 
 def test_reports_backlog_prefers_error_json_over_duplicate_validation_error(
@@ -368,11 +963,19 @@ def test_reports_backlog_carryover_actioned_only_demotes_ticketed_and_queued_ato
         for line in atoms_jsonl.read_text(encoding="utf-8").splitlines()
         if line
     }
-    assert queued_atom_id not in atom_ids
+    assert queued_atom_id in atom_ids
 
     atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
     entry = next(item for item in atom_actions_doc["atoms"] if item["atom_id"] == queued_atom_id)
-    assert entry["status"] == "queued"
+    assert entry["status"] == "new"
+    assert entry["reopened_previous_status"] == "queued"
+
+    # Re-seed the historical row so the explicit carryover mode still exercises its
+    # own demotion behavior independently of the new default fail-open filter.
+    _write_yaml(
+        atom_actions_path,
+        {"version": 1, "atoms": [{"atom_id": queued_atom_id, "status": "queued"}]},
+    )
 
     with pytest.raises(SystemExit) as exc:
         main([*argv_base, "--carryover-actioned-only"])
@@ -434,48 +1037,14 @@ def test_reports_backlog_writes_stage_backed_tickets_and_updates_atom_actions(
     assert tickets, "dry-run backlog should produce at least one ticket"
 
     planned = [t for t in tickets if isinstance(t.get("change_plan"), dict)]
-    assert planned, "dry-run backlog should include at least one planned ticket"
+    assert planned == []
+    assert all(ticket.get("stage") != "ready_for_ticket" for ticket in tickets)
 
-    for ticket in planned:
-        assert isinstance(ticket.get("problem_record"), dict)
-        assert isinstance(ticket.get("priority"), dict)
-        assert isinstance(ticket.get("research"), dict)
-        assert isinstance(ticket.get("solution_options"), list)
-        assert ticket["solution_options"], "planned tickets should carry solution options"
-        assert isinstance(ticket.get("selected_solution"), dict)
-        assert isinstance(ticket.get("change_plan"), dict)
-
-    for ticket in tickets:
-        if ticket.get("stage") == "ready_for_ticket":
-            assert isinstance(ticket.get("selected_solution"), dict) or isinstance(
-                ticket.get("selected_option_id"), str
-            )
-            assert isinstance(ticket.get("change_plan"), dict) or isinstance(
-                ticket.get("change_plan_id"), str
-            )
-
-    # Atom actions: at least one cited atom should be marked ticketed with a recorded fingerprint.
+    # A dry-run research proof is explicitly blocked and must not mark atoms ticketed.
     atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
     assert atom_actions_doc["version"] == 1
     atoms = atom_actions_doc["atoms"]
-
-    evidence_atom_id: str | None = None
-    chosen_ticket: dict[str, Any] | None = None
-    for ticket in planned:
-        for atom_id in ticket.get("evidence_atom_ids", []):
-            if isinstance(atom_id, str) and atom_id and not atom_id.startswith("__aggregate__/"):
-                evidence_atom_id = atom_id
-                chosen_ticket = ticket
-                break
-        if evidence_atom_id is not None:
-            break
-    assert evidence_atom_id is not None
-    assert chosen_ticket is not None
-
-    entry = next(item for item in atoms if item["atom_id"] == evidence_atom_id)
-    assert entry["status"] == "ticketed"
-    assert ticket_export_fingerprint(chosen_ticket) in entry["fingerprints"]
-    assert "ticket_ids" not in entry
+    assert all(item.get("status") != "ticketed" for item in atoms)
 
 
 def test_update_atom_actions_from_backlog_skips_blocked_tickets(tmp_path: Path) -> None:
@@ -485,6 +1054,7 @@ def test_update_atom_actions_from_backlog_skips_blocked_tickets(tmp_path: Path) 
     atoms = [
         {"atom_id": "atom:1", "source": "confusion_point"},
         {"atom_id": "atom:2", "source": "confusion_point"},
+        {"atom_id": "atom:3", "source": "confusion_point"},
     ]
     tickets = [
         {
@@ -496,12 +1066,20 @@ def test_update_atom_actions_from_backlog_skips_blocked_tickets(tmp_path: Path) 
             "evidence_atom_ids": ["atom:1"],
         },
         {
-            "title": "Normal ticket",
+            "title": "Triage record",
             "problem": "P",
             "user_impact": "U",
             "proposed_fix": "F",
             "stage": "triage",
             "evidence_atom_ids": ["atom:2"],
+        },
+        {
+            "title": "Exportable research ticket",
+            "problem": "P",
+            "user_impact": "U",
+            "proposed_fix": "F",
+            "stage": "research_required",
+            "evidence_atom_ids": ["atom:3"],
         },
     ]
 
@@ -514,10 +1092,13 @@ def test_update_atom_actions_from_backlog_skips_blocked_tickets(tmp_path: Path) 
     )
 
     assert atom_actions["atom:1"]["status"] == "new"
-    assert atom_actions["atom:2"]["status"] == "ticketed"
+    assert atom_actions["atom:2"]["status"] == "new"
+    assert atom_actions["atom:3"]["status"] == "ticketed"
 
 
-def test_reports_backlog_syncs_atom_actions_from_plan_folders(tmp_path: Path) -> None:
+def test_reports_backlog_reopens_plan_action_without_verified_terminal_outcome(
+    tmp_path: Path,
+) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
     runs_dir = tmp_path / "runs" / "usertest"
     _seed_runs_fixture(runs_dir)
@@ -569,12 +1150,13 @@ def test_reports_backlog_syncs_atom_actions_from_plan_folders(tmp_path: Path) ->
     out_json = compiled / "target_a.backlog.json"
     summary = json.loads(out_json.read_text(encoding="utf-8"))
     atom_filter = summary["artifacts"]["atom_filter"]
-    assert atom_filter["excluded_status_counts"].get("actioned", 0) >= 1
-    assert atom_id in atom_filter["excluded_atom_ids_preview"]
+    assert atom_filter["reopened_status_counts"].get("actioned", 0) >= 1
+    assert atom_id in atom_filter["reopened_atom_ids_preview"]
 
     atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
     atom_entry = next(item for item in atom_actions_doc["atoms"] if item["atom_id"] == atom_id)
-    assert atom_entry["status"] == "actioned"
+    assert atom_entry["status"] == "new"
+    assert atom_entry["reopened_previous_status"] == "actioned"
 
 
 def test_reports_sync_atom_actions_dry_run_reports_without_writing(
@@ -634,7 +1216,7 @@ def test_reports_sync_atom_actions_dry_run_reports_without_writing(
     assert atom_actions_doc["atoms"][0]["status"] == "queued"
 
 
-def test_reports_backlog_excludes_queued_atoms_by_default(tmp_path: Path) -> None:
+def test_reports_backlog_reopens_unmapped_queued_atoms_by_default(tmp_path: Path) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
     runs_dir = tmp_path / "runs" / "usertest"
     _seed_runs_fixture(runs_dir)
@@ -683,23 +1265,27 @@ def test_reports_backlog_excludes_queued_atoms_by_default(tmp_path: Path) -> Non
     summary = json.loads(out_json.read_text(encoding="utf-8"))
     atom_filter = summary["artifacts"]["atom_filter"]
     assert "queued" in atom_filter["exclude_statuses"]
-    assert atom_filter["excluded_atoms"] >= 1
-    assert queued_atom_id in atom_filter["excluded_atom_ids_preview"]
+    assert atom_filter["reopened_status_counts"]["queued"] == 1
+    assert queued_atom_id in atom_filter["reopened_atom_ids_preview"]
     assert summary["totals"]["atoms"] == atom_filter["eligible_atoms"]
 
-    atom_lines = atoms_jsonl.read_text(encoding="utf-8").splitlines()
-    assert all(queued_atom_id not in line for line in atom_lines)
+    assert queued_atom_id in atoms_jsonl.read_text(encoding="utf-8")
+    queued_atom = _stage1_assigned_atom(compiled, queued_atom_id)
+    assert queued_atom["disposition"] == "unresolved"
+    assert [item["atom_id"] for item in eligible_problem_mining_atoms([queued_atom])] == [
+        queued_atom_id
+    ]
 
     atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
     atom_entry = next(
-        item
-        for item in atom_actions_doc["atoms"]
-        if item["atom_id"] == queued_atom_id
+        item for item in atom_actions_doc["atoms"] if item["atom_id"] == queued_atom_id
     )
-    assert atom_entry["status"] == "queued"
+    assert atom_entry["status"] == "new"
+    assert atom_entry["reopened_previous_status"] == "queued"
+    assert atom_entry["disposition"] == "unresolved"
 
 
-def test_reports_backlog_excludes_ticketed_atoms_by_default(tmp_path: Path) -> None:
+def test_reports_backlog_reopens_unmapped_ticketed_atoms_by_default(tmp_path: Path) -> None:
     repo_root = find_repo_root(Path(__file__).resolve())
     runs_dir = tmp_path / "runs" / "usertest"
     _seed_runs_fixture(runs_dir)
@@ -748,20 +1334,203 @@ def test_reports_backlog_excludes_ticketed_atoms_by_default(tmp_path: Path) -> N
     summary = json.loads(out_json.read_text(encoding="utf-8"))
     atom_filter = summary["artifacts"]["atom_filter"]
     assert "ticketed" in atom_filter["exclude_statuses"]
-    assert atom_filter["excluded_atoms"] >= 1
-    assert ticketed_atom_id in atom_filter["excluded_atom_ids_preview"]
+    assert atom_filter["reopened_status_counts"]["ticketed"] == 1
+    assert ticketed_atom_id in atom_filter["reopened_atom_ids_preview"]
     assert summary["totals"]["atoms"] == atom_filter["eligible_atoms"]
 
-    atom_lines = atoms_jsonl.read_text(encoding="utf-8").splitlines()
-    assert all(ticketed_atom_id not in line for line in atom_lines)
+    assert ticketed_atom_id in atoms_jsonl.read_text(encoding="utf-8")
+    ticketed_atom = _stage1_assigned_atom(compiled, ticketed_atom_id)
+    assert ticketed_atom["disposition"] == "unresolved"
+    assert [item["atom_id"] for item in eligible_problem_mining_atoms([ticketed_atom])] == [
+        ticketed_atom_id
+    ]
 
     atom_actions_doc = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))
     atom_entry = next(
-        item
-        for item in atom_actions_doc["atoms"]
-        if item["atom_id"] == ticketed_atom_id
+        item for item in atom_actions_doc["atoms"] if item["atom_id"] == ticketed_atom_id
     )
-    assert atom_entry["status"] == "ticketed"
+    assert atom_entry["status"] == "new"
+    assert atom_entry["reopened_previous_status"] == "ticketed"
+
+
+def test_actioned_unproven_terminal_case_is_reopened_at_mining_boundary(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_id = "target_a/20260101T000000Z/codex/0:confusion_point:1"
+    case_id = "case:unproven-terminal"
+    compiled = runs_dir / "target_a" / "_compiled"
+    _write_json(
+        compiled / "target_a.case_registry.json",
+        {
+            "schema_version": 1,
+            "cases": {
+                case_id: {
+                    "case_id": case_id,
+                    "canonical_problem_id": "problem:unproven-terminal",
+                    "state": "resolved",
+                    "current_lifecycle": {
+                        "state": "resolved",
+                        "outcome_reference": {"validation_status": "projected"},
+                    },
+                }
+            },
+            "problem_id_to_case_id": {"problem:unproven-terminal": case_id},
+            "atom_id_to_case_id": {atom_id: case_id},
+            "atom_id_to_case_ids": {atom_id: [case_id]},
+            "ticket_fingerprint_to_case_id": {},
+        },
+    )
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    _write_yaml(
+        atom_actions_path,
+        {
+            "version": 1,
+            "atoms": [
+                {
+                    "atom_id": atom_id,
+                    "status": "actioned",
+                    "case_id": case_id,
+                    "disposition": "supports_case",
+                    "disposition_rationale": "A historical plan attached this atom.",
+                }
+            ],
+        },
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--miners",
+                "0",
+                "--sample-size",
+                "0",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+            ]
+        )
+    assert exc.value.code == 0
+
+    assigned = _stage1_assigned_atom(compiled, atom_id)
+    assert assigned["disposition"] == "unresolved"
+    assert [item["atom_id"] for item in eligible_problem_mining_atoms([assigned])] == [
+        atom_id
+    ]
+    actions = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))["atoms"]
+    action = next(item for item in actions if item["atom_id"] == atom_id)
+    assert action["status"] == "new"
+    assert action["reopened_previous_status"] == "actioned"
+    assert action["reopened_previous_disposition"] == "supports_case"
+    assert action["stale_actioned_previous_disposition"] == "supports_case"
+    assert action["case_id"] == case_id
+    assert action["disposition_status"] == "pending"
+
+
+@pytest.mark.parametrize("preserved_kind", ["active_case", "verified_terminal", "idea"])
+def test_default_filter_preserves_live_terminal_or_idea_boundaries(
+    tmp_path: Path,
+    preserved_kind: str,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_id = "target_a/20260101T000000Z/codex/0:confusion_point:1"
+    compiled = runs_dir / "target_a" / "_compiled"
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    status = "queued" if preserved_kind != "verified_terminal" else "ticketed"
+    action: dict[str, Any] = {"atom_id": atom_id, "status": status}
+    if preserved_kind == "idea":
+        action["category"] = "IDEA"
+    else:
+        case_id = f"case:{preserved_kind}"
+        terminal = preserved_kind == "verified_terminal"
+        action.update(
+            {
+                "case_id": case_id,
+                "disposition": "supports_case",
+                "disposition_rationale": "The canonical registry owns this evidence.",
+            }
+        )
+        _write_json(
+            compiled / "target_a.case_registry.json",
+            {
+                "schema_version": 1,
+                "cases": {
+                    case_id: {
+                        "case_id": case_id,
+                        "canonical_problem_id": f"problem:{preserved_kind}",
+                        "state": "resolved" if terminal else "active",
+                        "current_lifecycle": (
+                            {
+                                "state": "resolved",
+                                "outcome_reference": {"validation_status": "verified"},
+                            }
+                            if terminal
+                            else {"state": "active"}
+                        ),
+                    }
+                },
+                "problem_id_to_case_id": {f"problem:{preserved_kind}": case_id},
+                "atom_id_to_case_id": {atom_id: case_id},
+                "atom_id_to_case_ids": {atom_id: [case_id]},
+                "ticket_fingerprint_to_case_id": {},
+            },
+        )
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": [action]})
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--miners",
+                "0",
+                "--sample-size",
+                "0",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+    assert exc.value.code == 0
+
+    summary = json.loads((compiled / "target_a.backlog.json").read_text(encoding="utf-8"))
+    atom_filter = summary["artifacts"]["atom_filter"]
+    assert atom_filter["reopened_unproven_atoms"] == 0
+    atom_ids = {
+        json.loads(line)["atom_id"]
+        for line in (compiled / "target_a.backlog.atoms.jsonl")
+        .read_text(encoding="utf-8")
+        .splitlines()
+    }
+    if preserved_kind == "active_case":
+        assert atom_id in atom_ids
+        assert atom_filter["preserved_open_case_status_counts"][status] == 1
+    else:
+        assert atom_id not in atom_ids
+        assert atom_id in atom_filter["excluded_atom_ids_preview"]
+    persisted_actions = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))["atoms"]
+    persisted_action = next(item for item in persisted_actions if item["atom_id"] == atom_id)
+    assert persisted_action["status"] == status
+    assert "reopened_previous_status" not in persisted_action
 
 
 def test_reports_backlog_missing_prompt_template_fails_loudly(tmp_path: Path) -> None:
@@ -918,7 +1687,8 @@ def test_reports_backlog_dry_run_writes_prioritized_problems(tmp_path: Path) -> 
     assert doc.get("input_meta", {}).get("dry_run") is True
     assert isinstance(doc.get("items"), list)
     assert len(doc["items"]) >= 1
-    assert any(item.get("selected_for_research") is True for item in doc["items"])
+    assert doc["items"]
+    assert all(item.get("selected_for_research") is True for item in doc["items"])
 
     forbidden = {
         "proposed_fix",
@@ -1037,17 +1807,11 @@ def test_reports_backlog_dry_run_writes_solution_options(tmp_path: Path) -> None
     assert doc.get("stage") == "solution_optioning"
     assert doc.get("input_meta", {}).get("dry_run") is True
     assert isinstance(doc.get("items"), list)
-    assert len(doc["items"]) >= 3, "dry-run should synthesize at least one full option set"
-
-    forbidden = {"selected_solution"}
-    families = set()
-    for item in doc["items"]:
-        for field in forbidden:
-            assert field not in item, f"stage-4 option must not contain forbidden field: {field}"
-        fid = item.get("family_id")
-        if isinstance(fid, str):
-            families.add(fid)
-    assert {"most_direct", "most_robust", "most_comprehensive"} <= families
+    assert doc["items"] == []
+    outcomes = doc.get("input_meta", {}).get("optioning_outcomes")
+    assert isinstance(outcomes, list) and outcomes
+    assert {item.get("optioning_status") for item in outcomes} == {"insufficient_evidence"}
+    assert all(item.get("research_readiness_blockers") for item in outcomes)
 
 
 def test_reports_backlog_dry_run_writes_solution_selection(tmp_path: Path) -> None:
@@ -1099,23 +1863,9 @@ def test_reports_backlog_dry_run_writes_solution_selection(tmp_path: Path) -> No
     assert doc.get("input_meta", {}).get("breadth_profile") == "external_generalization"
     assert isinstance(doc.get("input_meta", {}).get("batch_breadth"), dict)
     assert isinstance(doc.get("items"), list)
-    assert len(doc["items"]) >= 1
-
-    needs_ux_values: set[bool] = set()
-    for item in doc["items"]:
-        assert isinstance(item.get("problem_id"), str)
-        assert isinstance(item.get("selected_option_id"), str)
-        assert isinstance(item.get("selected_family_id"), str)
-        assert isinstance(item.get("needs_ux_review"), bool)
-        needs_ux_values.add(bool(item.get("needs_ux_review")))
-        cs = item.get("change_surface")
-        assert isinstance(cs, dict), "selected-solution labeler must attach change_surface"
-        assert isinstance(cs.get("kinds"), list)
-
-    # Fixtures should produce at least one high-surface and one low-surface selection
-    # when multiple problems are selected for research; at minimum ensure the flag exists.
-    if len(doc["items"]) > 1:
-        assert needs_ux_values == {False, True}
+    assert doc["items"] == []
+    assert doc.get("input_meta", {}).get("decision_count") == 0
+    assert doc.get("input_meta", {}).get("repo_access") == "read_only"
 
 
 def test_reports_backlog_internal_profile_injects_breadth_context_into_stage5_prompt(
@@ -1161,11 +1911,8 @@ def test_reports_backlog_internal_profile_injects_breadth_context_into_stage5_pr
     assert "missions" in doc.get("input_meta", {}).get("batch_breadth", {})
 
     prompt_paths = list(artifacts_dir.glob("solution_selection_*/*.prompt.txt"))
-    assert prompt_paths
-    prompt_text = prompt_paths[0].read_text(encoding="utf-8")
-    assert "Breadth profile: `internal_maintenance`" in prompt_text
-    assert '"runs"' in prompt_text
-    assert '"structurally_constant_dimensions"' in prompt_text
+    assert prompt_paths == []
+    assert doc.get("input_meta", {}).get("decision_count") == 0
 
 
 def test_reports_backlog_dry_run_writes_change_plans(tmp_path: Path) -> None:
@@ -1215,25 +1962,6 @@ def test_reports_backlog_dry_run_writes_change_plans(tmp_path: Path) -> None:
     assert doc.get("stage") == "implementation_planning"
     assert doc.get("input_meta", {}).get("dry_run") is True
     assert isinstance(doc.get("items"), list)
-    assert len(doc["items"]) >= 1
-
-    for plan in doc["items"]:
-        assert isinstance(plan.get("change_plan_id"), str)
-        assert isinstance(plan.get("problem_id"), str)
-        assert isinstance(plan.get("selected_option_id"), str)
-        assert plan.get("change_plan_status") == "planned"
-
-        implementation_steps = plan.get("implementation_steps")
-        assert isinstance(implementation_steps, list)
-        assert implementation_steps, "implementation_steps must be non-empty"
-
-        verification_steps = plan.get("verification_steps")
-        assert isinstance(verification_steps, list)
-        assert verification_steps, "verification_steps must be non-empty"
-
-        success_criteria = plan.get("success_criteria")
-        assert isinstance(success_criteria, list)
-        assert success_criteria, "success_criteria must be non-empty"
-
-        assert isinstance(plan.get("rollback_notes"), str)
-        assert isinstance(plan.get("related_change_plan_ids"), list)
+    assert doc["items"] == []
+    assert doc.get("input_meta", {}).get("decision_count") == 0
+    assert doc.get("input_meta", {}).get("change_plan_count") == 0

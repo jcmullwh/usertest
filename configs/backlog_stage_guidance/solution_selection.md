@@ -1,57 +1,24 @@
-# Stage 5 guidance: solution selection
+# Stage 5 guidance: neutral selection and falsification
 
-## Goal
+Select provisionally by causal fit, not by family label or breadth. Compare the supported
+mechanism, assumptions, residual recurrence paths, compatibility risk, and before/after
+testability. Words such as comprehensive, canonical, shared, and centralized carry no
+positive weight without evidence.
 
-Choose among the existing option set. Do not create new options. The selection must
-reference one of the configured family IDs and explain why the other options were not
-chosen.
+A class-level or shared option is eligible only when at least two independent consumers or
+failure paths have evidence references. Set `needs_ux_review` from the actual anticipated
+surface, not from the family ID.
 
-## Duration guardrail
-
-Stage artifacts and tool calls must not invent sleeps, polling delays, retry delays, or
-timeout values. If waiting behavior is part of the path being analyzed, use an existing
-repo-configured value or document the limitation instead of making up a duration. This
-also applies to tool calls: do not pass `timeout`, `timeout_ms`, or similar duration
-parameters to shell/tool invocations unless the assigned evidence includes that exact
-configured value.
-
-## What to favor for this repo
-
-- Incremental changes over new top-level commands unless evidence breadth is compelling.
-- Changes that are consistent with the existing composable-command philosophy described in
-  `configs/repo_intent.md`.
-- Options where the change surface is narrow and the test implications are manageable.
-- Options that fix the underlying mechanism rather than adding a narrow exception when
-  research points to a repeated or shared cause.
-- `most_robust` over `most_direct` when research showed recurrence risk.
-- `most_comprehensive` only when research strongly supports a class-level fix.
-
-## What to avoid
-
-- Do not create a new option not in the stage-4 option set.
-- Do not select an option based on convenience, ease, or speed. Select based on fit with
-  repo intent and evidence.
-- Do not use banned steering terms: fastest, quickest, easiest, simplest, lowest-effort.
-- Do not choose a hardcoded special-case fix unless the research dossier supports an
-  isolated instance or an intentional product boundary.
-- Do not skip `why_other_options_were_not_selected`. This field is required.
-
-## UX review trigger
-
-Set `needs_ux_review=true` when:
-- The selected option proposes a new user-visible command, flag, or mode.
-- The change surface includes `new_command`, `new_top_level_mode`, `new_config_schema`,
-  or `breaking_change`.
-- The selected option's breadth assessment is broader than the research supports.
-
-## Output contract
-
-A selection decision must include:
-- `problem_id`
-- `selected_option_id`
-- `selected_family_id`
-- `selection_rationale`
-- `repo_intent_alignment`
-- `why_other_options_were_not_selected`
-- `needs_ux_review` (boolean)
-- `selection_status` = `"selected"`
+The independent falsification pass must inspect the evidence and repository, articulate the
+strongest counterargument, and return `accept`, `reject`, or `insufficient_evidence`. It
+may cite only exact runner-owned `mechanism_evidence_id` values for the selected
+hypothesis/mechanism. Exception, observed-output, controlled, harness, static, and live
+evidence are eligible. The server content-addresses the review against the selected option
+and research receipt. A separately constructed complementary control is not mandatory when
+typed exception, harness, static, or other mechanism evidence is paired with an actual
+runner-replayed refuting counterexperiment already bound to the selected hypothesis. Do not
+manufacture a control for shape compliance. Accepting a critical root-cause, interface, or change-surface finding
+is forbidden. Residual compatibility risks may be accepted with bound evidence, rationale,
+and verification; critical gaps must be mitigated or block selection. Neither pass may modify
+the read-only workspace or invent
+duration values absent from repository evidence.

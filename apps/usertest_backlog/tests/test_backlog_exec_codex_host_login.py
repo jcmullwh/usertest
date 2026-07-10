@@ -76,8 +76,8 @@ def test_run_backlog_prompt_codex_failure_does_not_return_stale_last_message(
     out_dir.mkdir()
     stale_last_message = out_dir / "miner_001.last_message.txt"
     stale_response = out_dir / "miner_001.response.txt"
-    stale_last_message.write_text("[{\"problem_id\":\"stale\"}]", encoding="utf-8")
-    stale_response.write_text("[{\"problem_id\":\"stale-response\"}]", encoding="utf-8")
+    stale_last_message.write_text('[{"problem_id":"stale"}]', encoding="utf-8")
+    stale_response.write_text('[{"problem_id":"stale-response"}]', encoding="utf-8")
 
     cfg = RunnerConfig(
         repo_root=tmp_path,

@@ -37,6 +37,8 @@ def run_backlog_prompt(
         Optional model override.
     cfg:
         Runner configuration used to resolve agent binaries and policy.
+    workspace_dir:
+        Optional existing checkout used as the read-only agent working directory.
     allowed_tools:
         Optional list of tool names to allow for this prompt (agent-specific). When
         ``None``, the agent backend uses its default tool configuration.

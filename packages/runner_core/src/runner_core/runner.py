@@ -5984,11 +5984,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 finally:
                     if broker_session is not None:
                         broker_session.stop(
-                            join_timeout_seconds=(
-                                verification_broker_contract.client_wait_timeout_seconds
-                                if verification_broker_contract is not None
-                                else None
-                            ),
                             cancel_pending=False,
                         )
                         broker_request_ids = broker_session.request_ids()
@@ -6145,6 +6140,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         and broker_latest_result is None
                         and not attempt_broker_requested
                     ):
+                        assert broker_session is not None
                         runner_owned_broker = VerificationBrokerAttempt(
                             run_dir=broker_physical_root,
                             attempt_number=attempt_number,
@@ -6158,14 +6154,30 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             ),
                             utc_now_fn=_utc_now_z,
                             run_async_verifier=True,
+                            # The agent may already have launched the advertised client
+                            # while its process is returning. Reuse that client's immutable
+                            # token and scripts: rewriting them here can race a late
+                            # PowerShell/Python process and can turn a valid request into an
+                            # invalid-token result.
+                            request_token=broker_session.request_token,
+                            existing_client=broker_session.client,
                         )
                         runner_owned_broker.start()
+                        runner_fallback_result: VerificationBrokerRequestResult | None = None
                         try:
-                            broker_latest_result = runner_owned_broker.request_and_wait(
+                            runner_fallback_result = runner_owned_broker.request_and_wait(
                                 request_origin="runner_after_agent_ready",
                             )
                         finally:
-                            runner_owned_broker.stop(request_settle_seconds=0.0)
+                            # A client launched by the agent can finish writing its request
+                            # after the agent process itself returns.  The runner-owned
+                            # fallback shares the same request directory, so stopping it by
+                            # cancelling pending work can race that late client: the fallback
+                            # succeeds while the agent's equivalent request is killed.  Drain
+                            # both requests to terminal results instead.  The settle window is
+                            # for request discovery only; accepted verification still uses its
+                            # normal command deadline.
+                            runner_owned_broker.stop(cancel_pending=False)
                             if backend.run_dir_mount is None:
                                 try:
                                     shutil.copytree(
@@ -6178,6 +6190,26 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         broker_request_ids = runner_owned_broker.request_ids()
                         broker_results = runner_owned_broker.results()
                         broker_attempt_rows = runner_owned_broker.artifact_rows()
+                        valid_request_ids = set(broker_request_ids)
+                        runner_fallback_request_id = (
+                            runner_fallback_result.request_id
+                            if runner_fallback_result is not None
+                            else None
+                        )
+                        # Prefer a late request actually launched by the agent over the
+                        # redundant runner fallback.  Both are drained above, but only the
+                        # agent request proves the agent used the advertised broker path.
+                        late_agent_results = [
+                            result
+                            for result in broker_results
+                            if result.request_id in valid_request_ids
+                            and result.request_id != runner_fallback_request_id
+                        ]
+                        broker_latest_result = (
+                            late_agent_results[-1]
+                            if late_agent_results
+                            else runner_fallback_result
+                        )
                         for broker_result, broker_row in zip(
                             broker_results,
                             broker_attempt_rows,
@@ -6191,7 +6223,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                         0.0, float(wall_seconds)
                                     )
                             row = dict(broker_row)
-                            row["request_origin"] = "runner_after_agent_ready"
+                            if broker_result.request_id == runner_fallback_request_id:
+                                row["request_origin"] = "runner_after_agent_ready"
                             verification_reuse_requests.append(row)
                         attempt_broker_requested = bool(broker_attempt_rows or broker_request_ids)
                         if broker_latest_result is None and broker_results:
@@ -6884,6 +6917,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 elif status_s == "disabled":
                     verification_reuse_selected_source = "disabled"
                     verification_reuse_fallback_reason = skip_reason
+            if verification_reuse_selected_request_id is not None:
+                verification_reuse_requests.sort(
+                    key=lambda row: row.get("request_id")
+                    != verification_reuse_selected_request_id
+                )
             _write_json(run_dir / "verification.json", verification_output_payload)
             _write_json(
                 run_dir / "verification_reuse.json",

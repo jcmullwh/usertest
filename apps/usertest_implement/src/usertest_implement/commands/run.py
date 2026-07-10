@@ -1,8 +1,14 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from usertest_implement.backlog_refresh import (
+    BacklogRefreshRequest,
+    run_shadow_backlog_refresh,
+)
 from usertest_implement.ci import _ci_timeout_seconds_arg, _git_head_sha, _wait_for_ci_success
 from usertest_implement.commands.review import _run_review_for_selected_ticket
+from usertest_implement.implementation_provenance import record_verified_implementation_head
+from usertest_implement.outcome_evidence import build_verification_binding
 from usertest_implement.resume_state import (
     RESUME_STATE_ARTIFACT_NAME,
     write_ticket_resume_state,
@@ -17,6 +23,7 @@ from usertest_implement.selection import (
     _select_ticket_from_export,
     _select_ticket_from_owner_root,
     _select_ticket_from_path,
+    _selected_ticket_provenance,
     _should_move_ticket_to_review,
     _write_pr_manifest,
 )
@@ -86,42 +93,79 @@ def _refresh_backlog_for_ticket_implementation(
     )
     target = _resolve_backlog_target(runs_dir=runs_dir, target=args.backlog_target)
 
-    backlog_agent = str(args.backlog_agent) if args.backlog_agent else "claude"
+    backlog_agent = str(args.backlog_agent) if args.backlog_agent else "codex"
     backlog_model = (
         str(args.backlog_model).strip()
         if isinstance(args.backlog_model, str) and args.backlog_model.strip()
         else None
     )
-    review_agent = (
-        str(args.review_agent).strip()
-        if isinstance(args.review_agent, str) and args.review_agent.strip()
-        else backlog_agent
-    )
-    review_model = (
-        str(args.review_model).strip()
-        if isinstance(args.review_model, str) and args.review_model.strip()
+    requested_review_agent = getattr(args, "review_agent", None)
+    if (
+        isinstance(requested_review_agent, str)
+        and requested_review_agent.strip()
+        and requested_review_agent.strip() != backlog_agent
+    ):
+        raise SystemExit(
+            "Shadow-backed refresh requires one agent across backlog, intent, and UX review; "
+            "--review-agent must match --backlog-agent."
+        )
+    requested_review_model = getattr(args, "review_model", None)
+    normalized_review_model = (
+        requested_review_model.strip()
+        if isinstance(requested_review_model, str) and requested_review_model.strip()
         else None
     )
-
-    base = [sys.executable, "-m", "usertest_backlog.cli"]
-    common = ["--repo-root", str(repo_root), "--runs-dir", str(runs_dir), "--target", target]
-
-    backlog_cmd = base + ["reports", "backlog", *common, "--agent", backlog_agent]
-    if backlog_model is not None:
-        backlog_cmd.extend(["--model", backlog_model])
-    _run_workflow_step(backlog_cmd, cwd=repo_root, label="reports backlog")
-
-    intent_cmd = base + ["reports", "intent-snapshot", *common]
-    _run_workflow_step(intent_cmd, cwd=repo_root, label="reports intent-snapshot")
-
-    review_cmd = base + ["reports", "review-ux", *common, "--agent", review_agent]
-    if review_model is not None:
-        review_cmd.extend(["--model", review_model])
-    _run_workflow_step(review_cmd, cwd=repo_root, label="reports review-ux")
-
-    export_cmd = base + ["reports", "export-tickets", *common]
-    export_cmd.extend(["--stage", "ready_for_ticket"])
-    _run_workflow_step(export_cmd, cwd=repo_root, label="reports export-tickets")
+    if normalized_review_model is not None and normalized_review_model != backlog_model:
+        raise SystemExit(
+            "Shadow-backed refresh requires one model across backlog, intent, and UX review; "
+            "--review-model must match --backlog-model."
+        )
+    research_ref = (
+        str(args.backlog_research_ref).strip()
+        if isinstance(getattr(args, "backlog_research_ref", None), str)
+        and str(args.backlog_research_ref).strip()
+        else "origin/dev"
+    )
+    breadth_profile = (
+        str(args.backlog_breadth_profile).strip()
+        if isinstance(getattr(args, "backlog_breadth_profile", None), str)
+        and str(args.backlog_breadth_profile).strip()
+        else "internal_maintenance"
+    )
+    actions_yaml_raw = getattr(args, "backlog_actions_yaml", None)
+    atom_actions_yaml_raw = getattr(args, "backlog_atom_actions_yaml", None)
+    backlog_python_candidate = (
+        repo_root
+        / "apps"
+        / "usertest_backlog"
+        / ".venv"
+        / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+    )
+    run_shadow_backlog_refresh(
+        BacklogRefreshRequest(
+            repo_root=repo_root,
+            repo_input=str(repo_root),
+            runs_dir=runs_dir,
+            target=target,
+            backlog_python=(
+                backlog_python_candidate
+                if backlog_python_candidate.is_file()
+                else Path(sys.executable)
+            ),
+            research_ref=research_ref,
+            breadth_profile=breadth_profile,
+            agent=backlog_agent,
+            model=backlog_model,
+            actions_yaml=(
+                actions_yaml_raw.resolve() if isinstance(actions_yaml_raw, Path) else None
+            ),
+            atom_actions_yaml=(
+                atom_actions_yaml_raw.resolve()
+                if isinstance(atom_actions_yaml_raw, Path)
+                else None
+            ),
+        )
+    )
 
 
 
@@ -270,6 +314,60 @@ def _run_selected_ticket(
             f"--verify-reuse must be one of auto/off; got {getattr(args, 'verify_reuse', None)!r}."
         )
 
+    selected_provenance: dict[str, Any] | None = None
+    local_plan_available = bool(
+        selected.idea_path is not None and selected.idea_path.is_file()
+    )
+    if not bool(args.dry_run) or local_plan_available:
+        try:
+            selected_provenance = _selected_ticket_provenance(
+                selected,
+                require_local_plan=not bool(args.dry_run),
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
+
+    plan_verification_contract = (
+        selected_provenance.get("verification_contract")
+        if isinstance(selected_provenance, dict)
+        else None
+    )
+    if (
+        isinstance(selected_provenance, dict)
+        and selected_provenance.get("legacy_identity") is False
+        and not isinstance(plan_verification_contract, dict)
+    ):
+        raise SystemExit(
+            "Case-aware implementation plans require a hashed stage-6 verification "
+            "command contract."
+        )
+    if isinstance(plan_verification_contract, dict):
+        plan_commands_raw = plan_verification_contract.get("commands")
+        plan_commands = (
+            [str(command) for command in plan_commands_raw]
+            if isinstance(plan_commands_raw, list)
+            else []
+        )
+        if verification_commands and verification_commands != plan_commands:
+            raise SystemExit(
+                "Configured verification commands do not exactly match the selected "
+                "plan's stage-6 verification contract."
+            )
+        if (
+            not verification_commands
+            and verification_profile != "none"
+            and not bool(getattr(args, "skip_verify", False))
+        ):
+            verification_commands = plan_commands
+
+    for command in verification_commands:
+        safety_errors = verification_command_safety_errors(command)
+        if safety_errors:
+            raise SystemExit(
+                "Unsafe verification command in selected plan/configuration: "
+                f"{command!r}: {'; '.join(safety_errors)}"
+            )
+
     wants_handoff = bool(args.commit) or bool(args.push) or bool(args.pr)
 
     # For ticket implementation workflows that create branches/PRs, it's easy to accidentally run
@@ -277,6 +375,29 @@ def _run_selected_ticket(
     #
     # Default to the PR base branch (dev by default) unless the user explicitly provided --ref.
     effective_ref = args.ref
+    plan_target_contract = (
+        selected_provenance.get("target_contract")
+        if isinstance(selected_provenance, dict)
+        else None
+    )
+    if isinstance(plan_target_contract, dict):
+        planned_revision = str(plan_target_contract.get("repo_revision") or "").strip()
+        if not planned_revision:
+            raise SystemExit("Plan target contract is missing its repository revision.")
+        if effective_ref is not None and str(effective_ref).strip() not in {
+            "",
+            planned_revision,
+        }:
+            raise SystemExit(
+                "Case-aware implementation must start from the exact stage-6 repository "
+                f"revision: expected={planned_revision!r} requested={effective_ref!r}"
+            )
+        effective_ref = planned_revision
+        if wants_handoff and bool(getattr(args, "skip_verify", False)):
+            raise SystemExit(
+                "Case-aware implementation cannot commit, push, or open a PR with "
+                "--skip-verify."
+            )
     if wants_handoff and (effective_ref is None or not str(effective_ref).strip()):
         base = str(getattr(args, "base_branch", "") or "").strip()
         if base:
@@ -351,6 +472,16 @@ def _run_selected_ticket(
                 lint_gate,
                 test_gate,
             ]
+
+    verification_binding: dict[str, Any] | None = None
+    if selected_provenance is not None:
+        try:
+            verification_binding = build_verification_binding(
+                ticket_provenance=selected_provenance,
+                configured_commands=verification_commands,
+            )
+        except ValueError as exc:
+            raise SystemExit(str(exc)) from exc
 
     exec_cache = str(getattr(args, "exec_cache", "cold") or "cold")
     exec_cache_dir = getattr(args, "exec_cache_dir", None)
@@ -465,6 +596,19 @@ def _run_selected_ticket(
     duration_seconds = max(0.0, time.monotonic() - wall_start)
 
     run_dir = result.run_dir
+    if isinstance(plan_target_contract, dict):
+        target_ref = _read_json(run_dir / "target_ref.json")
+        planned_revision = str(plan_target_contract["repo_revision"])
+        observed_revision = (
+            str(target_ref.get("commit_sha") or "").strip()
+            if isinstance(target_ref, dict)
+            else ""
+        )
+        if observed_revision.casefold() != planned_revision.casefold():
+            raise SystemExit(
+                "Implementation workspace did not resolve to the stage-6 repository "
+                f"revision: expected={planned_revision!r} observed={observed_revision!r}"
+            )
     timing_payload = {
         "schema_version": 1,
         "started_at": started_at,
@@ -477,6 +621,8 @@ def _run_selected_ticket(
         if isinstance(phases, dict):
             timing_payload["phases"] = phases
     _write_json(run_dir / "timing.json", timing_payload)
+    if selected_provenance is None or verification_binding is None:
+        raise SystemExit("Selected ticket provenance was not established before execution")
     _write_json(
         run_dir / "settings_ref.json",
         {
@@ -487,7 +633,7 @@ def _run_selected_ticket(
     _write_json(
         run_dir / "ticket_ref.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "fingerprint": selected.fingerprint,
             "title": selected.title,
             "export_kind": selected.export_kind,
@@ -495,6 +641,27 @@ def _run_selected_ticket(
                 str(selected.tickets_export_path) if selected.tickets_export_path is not None else None
             ),
             "export_index": selected.export_index,
+            "case_id": selected_provenance["case_id"],
+            "plan_revision_id": selected_provenance["plan_revision_id"],
+            "ticket_provenance": {
+                key: selected_provenance[key]
+                for key in (
+                    "schema_version",
+                    "fingerprint",
+                    "case_id",
+                    "plan_revision_id",
+                    "legacy_identity",
+                    "ticket_body_sha256",
+                    "local_plan_sha256",
+                    "local_plan_path",
+                    "local_plan_filename",
+                    "verification_contract_sha256",
+                    "target_contract",
+                    "target_contract_sha256",
+                    "generated_ticket",
+                )
+            },
+            "verification_binding": verification_binding,
             "owner_repo": {
                 "root": str(selected.owner_root) if selected.owner_root is not None else None,
                 "idea_path": str(selected.idea_path) if selected.idea_path is not None else None,
@@ -585,6 +752,17 @@ def _run_selected_ticket(
             git_user_email=args.git_user_email,
         )
         commit_performed = bool(git_ref.get("commit_performed") is True)
+        if commit_performed and isinstance(plan_target_contract, dict):
+            try:
+                record_verified_implementation_head(
+                    run_dir=run_dir,
+                    require_exact_base=True,
+                )
+            except ValueError as exc:
+                raise SystemExit(
+                    "Unable to bind runner verification to the committed implementation: "
+                    f"{exc}"
+                ) from exc
 
     if args.push and not handoff_blocked:
         if not commit_performed:
@@ -959,7 +1137,15 @@ def _run_selected_ticket(
 
 def _cmd_run(args: argparse.Namespace) -> int:
     repo_root = _resolve_repo_root(args.repo_root)
-    cfg = _load_runner_config(repo_root)
+    configured_runs_dir = getattr(args, "runs_dir", None)
+    cfg = _load_runner_config(
+        repo_root,
+        runs_dir=(
+            configured_runs_dir.resolve()
+            if isinstance(configured_runs_dir, Path)
+            else None
+        ),
+    )
 
     selected: SelectedTicket
     if args.ticket_path is not None:

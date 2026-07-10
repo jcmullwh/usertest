@@ -2,6 +2,7 @@
 
 __all__ = [
     "maintenance_images",
+    "outcome",
     "reports",
     "review",
     "run",

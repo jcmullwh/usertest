@@ -36,6 +36,7 @@ _STAGE_TEMPLATE_KEYS: tuple[str, ...] = (
     "prioritizer_template",
     "solution_optioner_template",
     "solution_selector_template",
+    "solution_falsifier_template",
     "change_planner_template",
     "selected_solution_labeler_template",
     "ux_reviewer_template",
@@ -64,6 +65,8 @@ class PipelinePromptManifest:
         Stage-4 solution-optioner prompt path.
     solution_selector_template:
         Stage-5 solution-selector prompt path.
+    solution_falsifier_template:
+        Independent stage-5 falsification-review prompt path.
     change_planner_template:
         Stage-6 change-planner prompt path.
     selected_solution_labeler_template:
@@ -84,6 +87,7 @@ class PipelinePromptManifest:
     prioritizer_template: Path | None
     solution_optioner_template: Path | None
     solution_selector_template: Path | None
+    solution_falsifier_template: Path | None
     change_planner_template: Path | None
     selected_solution_labeler_template: Path | None
     ux_reviewer_template: Path | None
@@ -312,6 +316,9 @@ def load_pipeline_prompt_manifest(prompts_dir: Path) -> PipelinePromptManifest:
     prioritizer = _resolve_optional_template(prompts_dir, raw, "prioritizer_template")
     solution_optioner = _resolve_optional_template(prompts_dir, raw, "solution_optioner_template")
     solution_selector = _resolve_optional_template(prompts_dir, raw, "solution_selector_template")
+    solution_falsifier = _resolve_optional_template(
+        prompts_dir, raw, "solution_falsifier_template"
+    )
     change_planner = _resolve_optional_template(prompts_dir, raw, "change_planner_template")
     sel_labeler = _resolve_optional_template(prompts_dir, raw, "selected_solution_labeler_template")
     ux_reviewer = _resolve_optional_template(prompts_dir, raw, "ux_reviewer_template")
@@ -369,6 +376,7 @@ def load_pipeline_prompt_manifest(prompts_dir: Path) -> PipelinePromptManifest:
         prioritizer_template=prioritizer,
         solution_optioner_template=solution_optioner,
         solution_selector_template=solution_selector,
+        solution_falsifier_template=solution_falsifier,
         change_planner_template=change_planner,
         selected_solution_labeler_template=sel_labeler,
         ux_reviewer_template=ux_reviewer,
