@@ -152,19 +152,29 @@ def _maybe_unwrap_shell_command(argv: list[str]) -> list[str]:
     if len(argv) < 3:
         return argv
 
-    exe = argv[0].replace("\\", "/").lower()
+    def _strip_wrapper_quotes(value: str) -> str:
+        stripped = value.strip()
+        while (
+            len(stripped) >= 2
+            and stripped[0] == stripped[-1]
+            and stripped[0] in {"'", '"'}
+        ):
+            stripped = stripped[1:-1].strip()
+        return stripped
+
+    exe = _strip_wrapper_quotes(argv[0]).replace("\\", "/").lower()
     base = exe.rsplit("/", 1)[-1]
-    arg1 = argv[1].lower()
+    arg1 = _strip_wrapper_quotes(argv[1]).lower()
 
     if base in {"bash", "sh"} and arg1 in {"-lc", "-c"}:
-        inner = argv[2]
+        inner = _strip_wrapper_quotes(argv[2])
         if isinstance(inner, str) and inner.strip():
             inner_argv = _split_command(inner)
             return inner_argv or argv
         return argv
 
     if base in {"cmd", "cmd.exe"} and arg1 == "/c":
-        inner = argv[2]
+        inner = _strip_wrapper_quotes(argv[2])
         if isinstance(inner, str) and inner.strip():
             inner_argv = _split_command(inner)
             return inner_argv or argv
@@ -174,7 +184,7 @@ def _maybe_unwrap_shell_command(argv: list[str]) -> list[str]:
         "-command",
         "-c",
     }:
-        inner = argv[2]
+        inner = _strip_wrapper_quotes(argv[2])
         if isinstance(inner, str) and inner.strip():
             inner_argv = _split_command(inner)
             return inner_argv or argv
@@ -306,10 +316,34 @@ def _maybe_emit_read_events(
         path_tokens = argv[1:]
     elif command == "type" and os.name == "nt":
         path_tokens = argv[1:]
-    elif command in {"get-content", "gc"} and os.name == "nt" and "-raw" in {
-        token.casefold() for token in argv[1:]
-    }:
-        path_tokens = [token for token in argv[1:] if not token.startswith("-")]
+    elif command in {"get-content", "gc"}:
+        args = argv[1:]
+        if "-raw" not in {token.casefold() for token in args}:
+            return []
+        path_token: str | None = None
+        index = 0
+        while index < len(args):
+            token = args[index]
+            folded = token.casefold()
+            if folded == "-raw":
+                index += 1
+                continue
+            if folded == "-literalpath":
+                if path_token is not None or index + 1 >= len(args):
+                    return []
+                path_token = args[index + 1]
+                index += 2
+                continue
+            if folded == "-encoding":
+                if index + 1 >= len(args) or args[index + 1].casefold() != "utf8":
+                    return []
+                index += 2
+                continue
+            if token.startswith("-") or path_token is not None:
+                return []
+            path_token = token
+            index += 1
+        path_tokens = [path_token] if path_token is not None else []
     else:
         return []
     if len(path_tokens) != 1:
@@ -337,6 +371,7 @@ def _maybe_emit_read_events(
             observed_text=stdout_text,
             source_exit_code=source_exit_code,
             allow_partial=False,
+            allow_single_terminal_newline=command in {"get-content", "gc"},
         )
         out.append(
             make_event(
@@ -708,10 +743,13 @@ def normalize_codex_events(
                 "command": _format_argv(argv),
                 "exit_code": exit_code,
             }
-            stdout_text = (
-                item.get("stdout")
-                if isinstance(item.get("stdout"), str)
-                else (item.get("output") if isinstance(item.get("output"), str) else "")
+            stdout_text = next(
+                (
+                    value
+                    for key in ("stdout", "output", "aggregated_output")
+                    if isinstance((value := item.get(key)), str) and value
+                ),
+                "",
             )
             if exit_code != 0:
                 command_failure_idx += 1

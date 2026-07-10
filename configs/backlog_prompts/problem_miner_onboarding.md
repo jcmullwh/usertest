@@ -78,12 +78,12 @@ Requirements:
 - Read every markdown file listed in `chunks[*].text_file` in full. A verified complete
   chunk read covers every atom listed in that chunk's `atom_ids`; normally there are no
   more than three bounded chunks in one job.
-- For every assigned `origin_attachment_evidence.materialized_refs` entry, open its artifact
+- For every artifact referenced by an assigned `origin_attachment_evidence.atom_refs` entry, open its artifact
   manifest and read every bounded attachment chunk in full. Never rely on the host
   `artifact_ref.path`. A materialization error requires an `unresolved` atom decision.
 - With PowerShell/Codex, read one chunk per command using, for example,
-  `Get-Content -Raw -LiteralPath atoms_text/atoms_001.md`; `-Raw` is required so the
-  runner can attest that the whole file was observed.
+  `Get-Content -Raw -Encoding UTF8 -LiteralPath atoms_text/atoms_001.md`; `-Raw` and
+  explicit UTF-8 decoding are required so the runner can attest the exact whole file.
 - Per-atom files remain available for focused rereads, but are not required after the
   complete containing chunk has been read.
 - Do not use PowerShell array slicing or line ranges to read markdown chunks.

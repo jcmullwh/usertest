@@ -15,6 +15,7 @@ def observed_read_attestation(
     observed_text: str | None,
     source_exit_code: int,
     allow_partial: bool,
+    allow_single_terminal_newline: bool = False,
 ) -> dict[str, Any]:
     """Describe the exact file content proven visible to an agent.
 
@@ -45,6 +46,16 @@ def observed_read_attestation(
         return result
 
     observed = _normalized_text(observed_text)
+    transport_normalization: str | None = None
+    if (
+        allow_single_terminal_newline
+        and observed == file_text + "\n"
+    ):
+        # PowerShell's success stream appends one record-separator newline when
+        # Get-Content -Raw returns a file that has no terminal newline. This is
+        # an exact transport normalization, not whitespace stripping.
+        observed = file_text
+        transport_normalization = "single_terminal_newline"
     result["file_sha256"] = sha256(file_bytes).hexdigest()
     result["file_size_bytes"] = len(file_bytes)
     if observed == file_text:
@@ -61,6 +72,8 @@ def observed_read_attestation(
                 "observed_end_line": end_line,
             }
         )
+        if transport_normalization is not None:
+            result["transport_normalization"] = transport_normalization
         return result
 
     if not allow_partial or not observed:

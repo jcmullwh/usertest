@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from agent_adapters import normalize_codex_events
 from agent_adapters.codex_normalize import _map_sandbox_path_str, _resolve_candidate_path
 from agent_adapters.events import iter_events_jsonl
@@ -337,6 +339,108 @@ def test_codex_exact_cat_output_attests_whole_file(tmp_path: Path) -> None:
     assert read["data"]["content_observed"] is True
     assert read["data"]["whole_file_observed"] is True
     assert read["data"]["observed_content"] == content
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "# Atom Chunk 001\n\nObserved smart quote ’ and arrow → evidence.",
+        "# Atom Chunk 001\n\nObserved smart quote ’ and arrow → evidence.\n",
+    ],
+)
+def test_codex_current_windows_powershell_event_attests_aggregated_output(
+    tmp_path: Path,
+    content: str,
+) -> None:
+    source = tmp_path / "atoms_text" / "atoms_001.md"
+    source.parent.mkdir()
+    source.write_text(content, encoding="utf-8")
+    raw = tmp_path / "raw.jsonl"
+    command = (
+        '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
+        "-Command 'Get-Content -Raw -Encoding UTF8 -LiteralPath atoms_text/atoms_001.md'"
+    )
+    raw.write_text(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "command_execution",
+                    "command": command,
+                    "aggregated_output": content.replace("\n", "\r\n") + "\r\n",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    normalized = tmp_path / "normalized.jsonl"
+
+    normalize_codex_events(
+        raw_events_path=raw,
+        normalized_events_path=normalized,
+        workspace_root=tmp_path,
+    )
+
+    events = list(iter_events_jsonl(normalized))
+    command_event = next(event for event in events if event["type"] == "run_command")
+    assert command_event["data"]["argv"] == [
+        "Get-Content",
+        "-Raw",
+        "-Encoding",
+        "UTF8",
+        "-LiteralPath",
+        "atoms_text/atoms_001.md",
+    ]
+    read = next(event for event in events if event["type"] == "read_file")
+    assert read["data"]["path"] == "atoms_text/atoms_001.md"
+    assert read["data"]["content_observed"] is True
+    assert read["data"]["whole_file_observed"] is True
+    assert read["data"]["observed_content"] == content
+    assert read["data"]["transport_normalization"] == "single_terminal_newline"
+
+
+def test_codex_powershell_read_does_not_strip_additional_output(tmp_path: Path) -> None:
+    source = tmp_path / "evidence.txt"
+    content = "exact evidence without a terminal newline"
+    source.write_text(content, encoding="utf-8")
+    raw = tmp_path / "raw.jsonl"
+    raw.write_text(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "command_execution",
+                    "command": (
+                        '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
+                        "-Command 'Get-Content -Raw -LiteralPath evidence.txt'"
+                    ),
+                    "aggregated_output": content + "\r\nunrelated output\r\n",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    normalized = tmp_path / "normalized.jsonl"
+
+    normalize_codex_events(
+        raw_events_path=raw,
+        normalized_events_path=normalized,
+        workspace_root=tmp_path,
+    )
+
+    read = next(
+        event for event in iter_events_jsonl(normalized) if event["type"] == "read_file"
+    )
+    assert read["data"]["content_observed"] is False
+    assert read["data"]["whole_file_observed"] is False
 
 
 def test_map_sandbox_path_accepts_windows_posix_drive_form(tmp_path: Path) -> None:

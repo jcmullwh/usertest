@@ -84,6 +84,12 @@ missing, partial, preview-only, dry-run, or tampered receipt. It also rejects ev
 any severity without a decided receipt. An explicit unresolved or deferred decision is allowed,
 but never a default pending value.
 
+On Windows, the documented whole-file route uses direct, unchained
+`Get-Content -Raw -Encoding UTF8 -LiteralPath <file>`. Current Codex `aggregated_output` telemetry
+is normalized only when its reconstructed content, size, and SHA match the workspace file. The
+normalizer recognizes PowerShell's single terminal record-separator newline exactly; it never
+strips arbitrary whitespace, repairs guessed encodings, or treats extra output as a file read.
+
 A malformed mining job no longer discards successful disjoint jobs. Its assigned atoms receive a
 `failed_unresolved` receipt and remain eligible for the next cycle, while successful cases may
 continue into research. The cycle receipt is `partial_failed_jobs` and cannot pass shadow/export

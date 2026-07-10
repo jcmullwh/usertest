@@ -82,6 +82,9 @@ Notes:
   - `*.backlog.json` / `*.backlog.md`
 
   `review-ux` is driven by stage 5 (`*.solution_selection.json`) rather than early-stage tickets.
+  Windows evidence reads use direct `Get-Content -Raw -Encoding UTF8 -LiteralPath <file>` commands;
+  the receipt accepts current Codex `aggregated_output` only after exact content, size, and SHA
+  verification and rejects additional output or preview-only citations.
 - `reports backlog --dry-run` is offline: it does not invoke an agent. Stages 1-2 emit
   deterministic fixture artifacts, stage 3 records blocked research, and stages 4-6 remain empty.
   Its stage-1 receipt explicitly records that no model read attestation occurred and is never
