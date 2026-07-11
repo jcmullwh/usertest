@@ -17,6 +17,7 @@ from agent_adapters.codex_cli import (
 
 import runner_core.runner as runner_mod
 from runner_core import RunnerConfig, RunRequest, run_once
+from runner_core.codex_execpolicy import CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE
 
 
 def _write(path: Path, text: str) -> None:
@@ -359,6 +360,7 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    native_windows = os.name == "nt"
     runner_root = _setup_runner_root(tmp_path)
     mission_path = runner_root / "configs" / "missions" / "m.mission.md"
     mission_path.write_text(
@@ -403,6 +405,8 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
         'prefix_rule(pattern=["host-safe"], decision="allow")\n',
     )
     target = _setup_target_repo(tmp_path)
+    _write(target / "tools" / "scaffold" / "monorepo.toml", "[workspace]\n")
+    assert not (target / "runs").exists()
     target_rules = target / ".codex" / "rules"
     target_rules.mkdir(parents=True)
     _write(
@@ -462,9 +466,10 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
             }
         )
         controlled = workspace / ".codex" / "rules" / "usertest-controlled.rules"
-        assert controlled.is_file()
+        assert controlled.is_file() is (not native_windows)
         assert not (workspace / ".codex" / "rules" / "target.rules").exists()
         assert not (workspace / ".codex" / "config.toml").exists()
+        assert not (workspace / "runs").exists()
         raw_events_path = kwargs["raw_events_path"]
         last_message_path = kwargs["last_message_path"]
         stderr_path = kwargs["stderr_path"]
@@ -477,7 +482,11 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
                     "type": "item.completed",
                     "item": {
                         "type": "command_execution",
-                        "command": "powershell -Command 'git rev-parse --is-inside-work-tree'",
+                        "command": (
+                            '"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0'
+                            '\\\\powershell.exe" -Command '
+                            "'git rev-parse --is-inside-work-tree'"
+                        ),
                         "aggregated_output": "true\n",
                         "exit_code": 0,
                     },
@@ -486,7 +495,10 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
                     "type": "item.completed",
                     "item": {
                         "type": "command_execution",
-                        "command": "powershell -Command 'python --version'",
+                        "command": (
+                            '"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0'
+                            "\\\\powershell.exe\" -Command 'python --version'"
+                        ),
                         "aggregated_output": "Python 3.14\n",
                         "exit_code": 0,
                     },
@@ -495,7 +507,10 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
                     "type": "item.completed",
                     "item": {
                         "type": "command_execution",
-                        "command": "powershell -Command \"Write-Output 'shell_probe=ok'\"",
+                        "command": (
+                            '"C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0'
+                            '\\\\powershell.exe" -Command "Write-Output \'shell_probe=ok\'"'
+                        ),
                         "aggregated_output": "shell_probe=ok\n",
                         "exit_code": 0,
                     },
@@ -512,8 +527,14 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
             )
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
+        result_argv = ["codex", "exec"]
+        if kwargs.get("ignore_user_config") is True:
+            result_argv.append("--ignore-user-config")
+        if kwargs.get("ignore_rules") is True:
+            result_argv.append("--ignore-rules")
+        result_argv.extend(["--sandbox", str(kwargs.get("sandbox"))])
         return CodexExecResult(
-            argv=["codex"],
+            argv=result_argv,
             exit_code=0,
             raw_events_path=raw_events_path,
             last_message_path=last_message_path,
@@ -546,12 +567,15 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
 
     assert result.exit_code == 0
     assert captured["ignore_user_config"] is True
-    assert captured["ignore_rules"] is False
+    assert captured["ignore_rules"] is native_windows
     assert "sandbox_workspace_write.writable_roots=[]" in captured["config_overrides"]
     assert "notify=[]" in captured["config_overrides"]
     assert 'forced_login_method="chatgpt"' in captured["config_overrides"]
     assert 'model_provider="openai"' in captured["config_overrides"]
     assert any(str(value).startswith("projects.") for value in captured["config_overrides"])
+    assert (
+        CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE in captured["config_overrides"]
+    ) is native_windows
     assert captured["env_overrides"]["OPENAI_API_KEY"] == ""
     assert captured["env_overrides"]["CODEX_API_KEY"] == ""
     assert captured["env_overrides"]["CODEX_ACCESS_TOKEN"] == ""
@@ -564,6 +588,7 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
     assert (workspace / ".codex" / "rules" / "target.rules").is_file()
     assert not (workspace / ".codex" / "rules" / "usertest-controlled.rules").exists()
     assert (workspace / ".codex" / "config.toml").read_bytes() == target_config_bytes
+    assert not (workspace / "runs").exists()
     receipt_text = (result.run_dir / "codex_execpolicy_overlay.json").read_text(encoding="utf-8")
     assert "test-access" not in receipt_text
     assert "test-refresh" not in receipt_text
@@ -573,11 +598,22 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
     assert receipt["configuration_mode"] == "host_codex_home_with_isolated_config"
     assert receipt["host_user_config_ignored"] is True
     assert receipt["target_project_config_isolated"] is True
+    assert receipt["platform_os_name"] == os.name
+    assert receipt["native_windows_sandbox_mode"] == (
+        "unelevated" if native_windows else "not_applicable"
+    )
+    assert receipt["canonical_subscription_route_verified"] is True
+    assert receipt["controlled_rules_enforcement_mode"] == (
+        "ignored_native_windows_sandbox" if native_windows else "project_execpolicy"
+    )
+    assert receipt["controlled_rules_ignored"] is native_windows
+    assert receipt["controlled_rules_written"] is (not native_windows)
+    assert receipt["controlled_execution_mode_verified"] is True
     assert receipt["target_config_manifest_while_isolated"] == []
     assert (
         receipt["target_config_manifest_after_restore"] == receipt["target_config_manifest_before"]
     )
-    assert receipt["global_rules_loaded"] is True
+    assert receipt["global_rules_loaded"] is (not native_windows)
     assert receipt["host_global_rules_unchanged"] is True
     assert receipt["chatgpt_subscription_auth_verified"] is True
     assert receipt["chatgpt_subscription_login_status_verified"] is True
@@ -596,7 +632,7 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
     assert "agent_shell_probe" in Path(str(probe_call["raw_events_path"])).as_posix()
     for call in calls:
         assert call["ignore_user_config"] is True
-        assert call["ignore_rules"] is False
+        assert call["ignore_rules"] is native_windows
         assert call["env_overrides"]["OPENAI_API_KEY"] == ""
         assert call["env_overrides"]["CODEX_API_KEY"] == ""
         assert call["env_overrides"]["CODEX_ACCESS_TOKEN"] == ""
@@ -606,6 +642,9 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
         assert 'forced_login_method="chatgpt"' in call["config_overrides"]
         assert 'model_provider="openai"' in call["config_overrides"]
         assert any(str(value).startswith("projects.") for value in call["config_overrides"])
+        assert (
+            CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE in call["config_overrides"]
+        ) is native_windows
         assert call["config_overrides"][-len(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES) :] == list(
             CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES
         )

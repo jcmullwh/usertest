@@ -258,6 +258,101 @@ def test_generic_setup_runtime_error_prose_cannot_become_a_candidate() -> None:
     )
 
 
+def test_disk_full_runner_envelopes_share_one_causal_candidate() -> None:
+    runtime_run = "implementation/run/setup-runtime-disk-full"
+    agent_exec_run = "implementation/run/agent-exec-disk-full"
+    records = [
+        _record(
+            runtime_run,
+            mission_id="implement_maintenance_backlog_ticket_v1",
+            error={"type": "RuntimeError", "subtype": "disk_full", "phase": "setup"},
+            target_ref={
+                "mission_id": "implement_maintenance_backlog_ticket_v1",
+                "execution_backend": "local",
+            },
+        ),
+        _record(
+            agent_exec_run,
+            mission_id="implement_maintenance_backlog_ticket_v1",
+            error={
+                "type": "AgentExecFailed",
+                "code": "disk_full",
+                "failure_phase": "agent_execution",
+            },
+            target_ref={
+                "mission_id": "implement_maintenance_backlog_ticket_v1",
+                "execution_backend": "local",
+                "report_schema_path": "configs/report_schemas/task_run_v1.schema.json",
+            },
+        ),
+    ]
+    atoms = [
+        _atom(runtime_run, f"{runtime_run}:run_failure_event:1", role="implementation"),
+        _atom(agent_exec_run, f"{agent_exec_run}:run_failure_event:1", role="implementation"),
+    ]
+
+    candidates = build_operational_failure_candidates(records, atoms)
+
+    assert len(candidates) == 1
+    candidate = candidates[0]
+    receipt = candidate["operational_candidate_receipt"]
+    assert receipt["occurrence_count"] == 2
+    assert receipt["signature_fields"]["error_type"] == "storageexhausted"
+    assert receipt["signature_fields"]["error_subtype"] == "disk_full"
+    assert receipt["signature_fields"]["error_code"] is None
+    assert receipt["signature_fields"]["phase"] == "storage"
+    assert receipt["signature_fields"]["backend"] == "local"
+    assert receipt["signature_fields"]["report_schema"] is None
+    envelope_types = {
+        signal["failure_evidence_projection"]["error"]["type"]
+        for signal in receipt["typed_signal_receipts"]
+    }
+    assert envelope_types == {"AgentExecFailed", "RuntimeError"}
+    raw_phases = {
+        phase
+        for signal in receipt["typed_signal_receipts"]
+        for phase in (
+            signal["failure_evidence_projection"]["error"].get("phase"),
+            signal["failure_evidence_projection"]["error"].get("failure_phase"),
+        )
+        if phase is not None
+    }
+    assert raw_phases == {"agent_execution", "setup"}
+    assert operational_candidate_receipt_errors(candidate) == []
+
+
+def test_disk_full_known_backends_remain_distinct_storage_mechanisms() -> None:
+    records: list[dict[str, object]] = []
+    atoms: list[dict[str, object]] = []
+    for backend in ("docker", "local"):
+        run_id = f"implementation/run/{backend}-disk-full"
+        records.append(
+            _record(
+                run_id,
+                mission_id="implement_maintenance_backlog_ticket_v1",
+                error={"type": "AgentExecFailed", "subtype": "disk_full"},
+                target_ref={
+                    "mission_id": "implement_maintenance_backlog_ticket_v1",
+                    "execution_backend": backend,
+                },
+            )
+        )
+        atoms.append(_atom(run_id, f"{run_id}:run_failure_event:1", role="implementation"))
+
+    candidates = build_operational_failure_candidates(records, atoms)
+
+    assert len(candidates) == 2
+    assert {
+        candidate["operational_candidate_receipt"]["signature_fields"]["backend"]
+        for candidate in candidates
+    } == {"docker", "local"}
+    assert all(
+        candidate["operational_candidate_receipt"]["signature_fields"]["phase"] == "storage"
+        for candidate in candidates
+    )
+    assert all(operational_candidate_receipt_errors(candidate) == [] for candidate in candidates)
+
+
 def _problem_record(problem_id: str, atom_id: str) -> dict[str, object]:
     return {
         "problem_id": problem_id,

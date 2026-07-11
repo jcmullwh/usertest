@@ -47,6 +47,8 @@ CONTROLLED_CODEX_CONFIG_OVERRIDES: tuple[str, ...] = (
 )
 
 _ACTIVATION_SAFE_CONFIG_DELTA: tuple[str, ...] = ("model_reasoning_effort=low",)
+CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE = 'windows.sandbox="unelevated"'
+_CONTROLLED_CODEX_WINDOWS_SANDBOX_MODE = "unelevated"
 
 
 def _write_json(path: Path, value: dict[str, Any]) -> None:
@@ -90,6 +92,15 @@ def _write_config_contract(path: Path, contract: dict[str, Any]) -> None:
     _write_json(path, contract)
 
 
+def _effective_windows_sandbox_is_unelevated(overrides: Sequence[str]) -> bool:
+    for raw in reversed(overrides):
+        key, separator, _value = raw.partition("=")
+        normalized_key = key.strip().lower().replace("-", "_")
+        if separator and normalized_key == "windows.sandbox":
+            return raw.strip() == CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE
+    return False
+
+
 def _config_contract_errors(contract: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if contract.get("contract_sha256") != _config_contract_sha256(contract):
@@ -100,6 +111,7 @@ def _config_contract_errors(contract: dict[str, Any]) -> list[str]:
         "user_config_ignored": True,
         "target_project_config_isolated": True,
         "canonical_route_overrides": list(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES),
+        "canonical_subscription_route_verified": True,
         "activation_safe_delta": list(_ACTIVATION_SAFE_CONFIG_DELTA),
     }
     for field, expected in exact_fields.items():
@@ -123,6 +135,25 @@ def _config_contract_errors(contract: dict[str, Any]) -> list[str]:
         )
 
     mission = lists.get("mission", [])
+    platform_os_name = contract.get("platform_os_name")
+    if platform_os_name not in {"nt", "posix"}:
+        errors.append("codex_execpolicy_config_contract_platform_os_name_invalid")
+    expected_windows_sandbox_mode = (
+        _CONTROLLED_CODEX_WINDOWS_SANDBOX_MODE if platform_os_name == "nt" else "not_applicable"
+    )
+    if contract.get("native_windows_sandbox_mode") != expected_windows_sandbox_mode:
+        errors.append("codex_execpolicy_config_contract_native_windows_sandbox_mode_invalid")
+    expected_rules_mode = (
+        "ignored_native_windows_sandbox" if platform_os_name == "nt" else "project_execpolicy"
+    )
+    if contract.get("controlled_rules_enforcement_mode") != expected_rules_mode:
+        errors.append("codex_execpolicy_config_contract_rules_enforcement_mode_invalid")
+    if contract.get("controlled_rules_ignored") is not (platform_os_name == "nt"):
+        errors.append("codex_execpolicy_config_contract_rules_ignored_invalid")
+    if contract.get("controlled_rules_written") is not (platform_os_name != "nt"):
+        errors.append("codex_execpolicy_config_contract_rules_written_invalid")
+    if platform_os_name == "nt" and not _effective_windows_sandbox_is_unelevated(mission):
+        errors.append("codex_execpolicy_config_contract_windows_sandbox_not_unelevated")
     if lists.get("preflight") != mission:
         errors.append("codex_execpolicy_config_contract_preflight_mission_mismatch")
     if lists.get("postcheck") != mission:
@@ -181,10 +212,29 @@ def controlled_codex_execpolicy_receipt_errors(
         "host_auth_cache_preserved",
         "global_config_unchanged",
         "host_global_rules_unchanged",
+        "canonical_subscription_route_verified",
+        "controlled_execution_mode_verified",
     )
     for field in true_fields:
         if receipt.get(field) is not True:
             errors.append(f"codex_execpolicy_{field}_not_verified")
+    platform_os_name = receipt.get("platform_os_name")
+    if platform_os_name not in {"nt", "posix"}:
+        errors.append("codex_execpolicy_platform_os_name_invalid")
+    expected_windows_sandbox_mode = (
+        _CONTROLLED_CODEX_WINDOWS_SANDBOX_MODE if platform_os_name == "nt" else "not_applicable"
+    )
+    if receipt.get("native_windows_sandbox_mode") != expected_windows_sandbox_mode:
+        errors.append("codex_execpolicy_native_windows_sandbox_mode_invalid")
+    expected_rules_mode = (
+        "ignored_native_windows_sandbox" if platform_os_name == "nt" else "project_execpolicy"
+    )
+    if receipt.get("controlled_rules_enforcement_mode") != expected_rules_mode:
+        errors.append("codex_execpolicy_rules_enforcement_mode_invalid")
+    if receipt.get("controlled_rules_ignored") is not (platform_os_name == "nt"):
+        errors.append("codex_execpolicy_rules_ignored_invalid")
+    if receipt.get("controlled_rules_written") is not (platform_os_name != "nt"):
+        errors.append("codex_execpolicy_rules_written_invalid")
     false_fields = (
         "api_fallback_allowed",
         "auth_cache_copied",
@@ -213,8 +263,13 @@ def controlled_codex_execpolicy_receipt_errors(
         activation.get("ok") is not True
         or activation.get("marker_seen") is not True
         or activation.get("workspace_unchanged") is not True
+        or activation.get("controlled_execution_mode_verified") is not True
     ):
         errors.append("codex_execpolicy_activation_probe_invalid")
+    if activation.get("rules_ignored_observed") is not (platform_os_name == "nt"):
+        errors.append("codex_execpolicy_activation_rules_mode_invalid")
+    if platform_os_name == "nt" and activation.get("sandbox_mode_observed") != "workspace-write":
+        errors.append("codex_execpolicy_activation_windows_sandbox_mode_invalid")
 
     overrides_raw = receipt.get("controlled_config_overrides")
     overrides = overrides_raw if isinstance(overrides_raw, list) else []
@@ -222,6 +277,8 @@ def controlled_codex_execpolicy_receipt_errors(
         errors.append("codex_execpolicy_controlled_overrides_invalid")
     else:
         errors.extend(codex_subscription_config_errors(overrides))
+        if platform_os_name == "nt" and not _effective_windows_sandbox_is_unelevated(overrides):
+            errors.append("codex_execpolicy_windows_sandbox_not_unelevated")
 
     config_contract_raw = receipt.get("controlled_config_contract_path")
     config_contract_path = (
@@ -480,9 +537,19 @@ class ControlledCodexExecpolicyOverlay:
         contract: dict[str, Any] = {
             "schema_version": 2,
             "status": "bound",
+            "platform_os_name": os.name,
             "user_config_ignored": True,
             "target_project_config_isolated": True,
             "canonical_route_overrides": list(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES),
+            "canonical_subscription_route_verified": True,
+            "native_windows_sandbox_mode": (
+                _CONTROLLED_CODEX_WINDOWS_SANDBOX_MODE if os.name == "nt" else "not_applicable"
+            ),
+            "controlled_rules_enforcement_mode": (
+                "ignored_native_windows_sandbox" if os.name == "nt" else "project_execpolicy"
+            ),
+            "controlled_rules_ignored": os.name == "nt",
+            "controlled_rules_written": os.name != "nt",
             "activation_safe_delta": list(_ACTIVATION_SAFE_CONFIG_DELTA),
             "preflight_overrides": mission,
             "preflight_overrides_sha256": _canonical_json_sha256(mission),
@@ -507,6 +574,7 @@ class ControlledCodexExecpolicyOverlay:
                     self.config_contract_path.read_bytes()
                 ).hexdigest(),
                 "controlled_config_contract_status": "bound",
+                "canonical_subscription_route_verified": True,
             }
         )
         _write_execpolicy_receipt(self.receipt_path, self.receipt)
@@ -534,12 +602,24 @@ class ControlledCodexExecpolicyOverlay:
     def record_activation_probe(self, probe: dict[str, Any]) -> None:
         """Bind the mission-free model-backed command-policy probe into the receipt."""
 
+        argv_raw = probe.get("argv")
+        argv = list(argv_raw) if isinstance(argv_raw, list) else []
+        rules_ignored_observed = "--ignore-rules" in argv
+        sandbox_mode_observed: str | None = None
+        if "--sandbox" in argv:
+            sandbox_index = argv.index("--sandbox")
+            if sandbox_index + 1 < len(argv) and isinstance(argv[sandbox_index + 1], str):
+                sandbox_mode_observed = argv[sandbox_index + 1]
+        native_windows = self.receipt.get("platform_os_name") == "nt"
+        controlled_execution_mode_verified = rules_ignored_observed is native_windows and (
+            not native_windows or sandbox_mode_observed == "workspace-write"
+        )
         raw_path_value = probe.get("raw_events_path")
         raw_path = Path(raw_path_value) if isinstance(raw_path_value, str) else None
         raw_sha = None
         if raw_path is not None and raw_path.is_file():
             raw_sha = sha256(raw_path.read_bytes()).hexdigest()
-        activation_ok = probe.get("ok") is True
+        activation_ok = probe.get("ok") is True and controlled_execution_mode_verified
         self.receipt["activation_probe"] = {
             "ok": activation_ok,
             "marker_seen": probe.get("marker_seen") is True,
@@ -551,7 +631,11 @@ class ControlledCodexExecpolicyOverlay:
             "workspace_state_before": probe.get("workspace_state_before"),
             "workspace_state_after": probe.get("workspace_state_after"),
             "workspace_unchanged": probe.get("workspace_unchanged") is True,
+            "rules_ignored_observed": rules_ignored_observed,
+            "sandbox_mode_observed": sandbox_mode_observed,
+            "controlled_execution_mode_verified": controlled_execution_mode_verified,
         }
+        self.receipt["controlled_execution_mode_verified"] = controlled_execution_mode_verified
         self.receipt["chatgpt_subscription_activation_probe_verified"] = activation_ok
         ready_for_postcheck = (
             self.receipt.get("chatgpt_subscription_login_status_verified") is True and activation_ok
@@ -784,8 +868,18 @@ def install_controlled_codex_execpolicy(
         {
             "schema_version": 2,
             "status": "pending",
+            "platform_os_name": os.name,
             "user_config_ignored": True,
             "target_project_config_isolated": False,
+            "canonical_subscription_route_verified": False,
+            "native_windows_sandbox_mode": (
+                _CONTROLLED_CODEX_WINDOWS_SANDBOX_MODE if os.name == "nt" else "not_applicable"
+            ),
+            "controlled_rules_enforcement_mode": (
+                "ignored_native_windows_sandbox" if os.name == "nt" else "project_execpolicy"
+            ),
+            "controlled_rules_ignored": os.name == "nt",
+            "controlled_rules_written": os.name != "nt",
         },
     )
 
@@ -814,16 +908,17 @@ def install_controlled_codex_execpolicy(
             shutil.move(str(rules_dir), str(backup_candidate))
             backup_path = backup_candidate
 
-        rules_install_started = True
-        rules_dir.mkdir(parents=True, exist_ok=True)
-        rules_path = rules_dir / _CONTROLLED_RULES_NAME
         rules_text = "".join(
             "prefix_rule(pattern="
             + json.dumps(list(prefix), ensure_ascii=False)
             + ', decision="allow")\n'
             for prefix in normalized
         )
-        rules_path.write_text(rules_text, encoding="utf-8", newline="\n")
+        if os.name != "nt":
+            rules_install_started = True
+            rules_dir.mkdir(parents=True, exist_ok=True)
+            rules_path = rules_dir / _CONTROLLED_RULES_NAME
+            rules_path.write_text(rules_text, encoding="utf-8", newline="\n")
     except Exception:
         if rules_install_started:
             if rules_dir.is_symlink() or rules_dir.is_file():
@@ -858,10 +953,19 @@ def install_controlled_codex_execpolicy(
     receipt: dict[str, Any] = {
         "schema_version": 2,
         "mode": "runner_controlled_project_execpolicy",
+        "platform_os_name": os.name,
+        "native_windows_sandbox_mode": (
+            _CONTROLLED_CODEX_WINDOWS_SANDBOX_MODE if os.name == "nt" else "not_applicable"
+        ),
+        "controlled_rules_enforcement_mode": (
+            "ignored_native_windows_sandbox" if os.name == "nt" else "project_execpolicy"
+        ),
+        "controlled_rules_ignored": os.name == "nt",
         "workspace_dir": str(workspace),
         "agent_workspace_path": agent_workspace,
         "allow_prefixes": [list(prefix) for prefix in normalized],
-        "rules_sha256": sha256(rules_text.encode()).hexdigest(),
+        "rules_sha256": (sha256(rules_text.encode()).hexdigest() if os.name != "nt" else None),
+        "controlled_rules_written": os.name != "nt",
         "target_rules_manifest_before": target_manifest,
         "target_config_path": str(target_config_path.resolve()),
         "target_config_manifest_before": target_config_manifest,
@@ -873,13 +977,14 @@ def install_controlled_codex_execpolicy(
         "configuration_mode": "host_codex_home_with_isolated_config",
         "host_codex_home": str(host_codex_home),
         "host_user_config_ignored": True,
-        "global_rules_loaded": True,
+        "global_rules_loaded": os.name != "nt",
         "host_global_rules_manifest_before": host_rules_manifest_before,
         "controlled_config_overrides_path": str(config_receipt_path.resolve()),
         "controlled_config_overrides": [],
         "controlled_config_contract_path": str(config_receipt_path.resolve()),
         "controlled_config_contract_sha256": sha256(config_receipt_path.read_bytes()).hexdigest(),
         "controlled_config_contract_status": "pending",
+        "canonical_subscription_route_verified": False,
         "forced_login_method": "chatgpt",
         "model_provider": "openai",
         "chatgpt_base_url": CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
@@ -899,6 +1004,7 @@ def install_controlled_codex_execpolicy(
         "chatgpt_subscription_auth_verified": False,
         "auth_verification_status": "pending",
         "api_key_auth_environment_disabled": False,
+        "controlled_execution_mode_verified": False,
         "controlled_auth_env_vars": list(CONTROLLED_CODEX_AUTH_ENV_VARS),
         "global_config_path": str(global_config_path),
         "global_config_sha256_before": global_config_sha_before,

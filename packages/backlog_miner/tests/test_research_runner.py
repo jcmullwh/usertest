@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from hashlib import sha256
 from pathlib import Path
@@ -21,7 +22,10 @@ from backlog_core.stage_contracts import (
     evidence_verification_sha256,
 )
 from runner_core import RunnerConfig, RunRequest, RunResult
-from runner_core.codex_execpolicy import codex_execpolicy_receipt_sha256
+from runner_core.codex_execpolicy import (
+    CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE,
+    codex_execpolicy_receipt_sha256,
+)
 
 import backlog_miner.research_runner as mod
 from backlog_miner.research_evidence import (
@@ -47,8 +51,15 @@ def _cfg(tmp_path: Path) -> RunnerConfig:
 def _write_valid_codex_subscription_receipt(run_dir: Path) -> Path:
     host_home = run_dir / "host-codex-home"
     host_home.mkdir(exist_ok=True)
-    controlled_overrides = list(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES)
+    platform_overrides = (
+        [CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE] if os.name == "nt" else []
+    )
+    controlled_overrides = [
+        *platform_overrides,
+        *CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
+    ]
     activation_overrides = [
+        *platform_overrides,
         "model_reasoning_effort=low",
         *CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
     ]
@@ -66,9 +77,17 @@ def _write_valid_codex_subscription_receipt(run_dir: Path) -> Path:
     config_contract: dict[str, object] = {
         "schema_version": 2,
         "status": "bound",
+        "platform_os_name": os.name,
         "user_config_ignored": True,
         "target_project_config_isolated": True,
         "canonical_route_overrides": list(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES),
+        "canonical_subscription_route_verified": True,
+        "native_windows_sandbox_mode": ("unelevated" if os.name == "nt" else "not_applicable"),
+        "controlled_rules_enforcement_mode": (
+            "ignored_native_windows_sandbox" if os.name == "nt" else "project_execpolicy"
+        ),
+        "controlled_rules_ignored": os.name == "nt",
+        "controlled_rules_written": os.name != "nt",
         "activation_safe_delta": ["model_reasoning_effort=low"],
         "preflight_overrides": controlled_overrides,
         "preflight_overrides_sha256": _canonical_hash(controlled_overrides),
@@ -91,6 +110,13 @@ def _write_valid_codex_subscription_receipt(run_dir: Path) -> Path:
     receipt: dict[str, object] = {
         "schema_version": 2,
         "mode": "runner_controlled_project_execpolicy",
+        "platform_os_name": os.name,
+        "native_windows_sandbox_mode": ("unelevated" if os.name == "nt" else "not_applicable"),
+        "controlled_rules_enforcement_mode": (
+            "ignored_native_windows_sandbox" if os.name == "nt" else "project_execpolicy"
+        ),
+        "controlled_rules_ignored": os.name == "nt",
+        "controlled_rules_written": os.name != "nt",
         "configuration_mode": "host_codex_home_with_isolated_config",
         "host_user_config_ignored": True,
         "target_project_config_isolated": True,
@@ -108,6 +134,8 @@ def _write_valid_codex_subscription_receipt(run_dir: Path) -> Path:
         "chatgpt_subscription_post_login_status_verified": True,
         "chatgpt_subscription_auth_verified": True,
         "api_key_auth_environment_disabled": True,
+        "canonical_subscription_route_verified": True,
+        "controlled_execution_mode_verified": True,
         "controlled_auth_env_vars": list(CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS),
         "login_status": status,
         "post_login_status": status,
@@ -115,6 +143,9 @@ def _write_valid_codex_subscription_receipt(run_dir: Path) -> Path:
             "ok": True,
             "marker_seen": True,
             "workspace_unchanged": True,
+            "rules_ignored_observed": os.name == "nt",
+            "sandbox_mode_observed": "workspace-write",
+            "controlled_execution_mode_verified": True,
         },
         "controlled_config_overrides": controlled_overrides,
         "controlled_config_contract_path": str(config_contract_path),
@@ -124,6 +155,7 @@ def _write_valid_codex_subscription_receipt(run_dir: Path) -> Path:
         "host_auth_path": str(host_home / "auth.json"),
         "host_auth_cache_preserved": True,
         "global_config_unchanged": True,
+        "global_rules_loaded": os.name != "nt",
         "host_global_rules_unchanged": True,
         "restore_status": "restored",
         "restore_errors": [],

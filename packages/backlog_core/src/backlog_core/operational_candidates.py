@@ -72,6 +72,7 @@ _AGENT_EXEC_SIGNAL_CLASSIFICATION: Mapping[str, tuple[str, str]] = {
     "tool_use_id_collision": ("transport", "agent_execution"),
     "transient_network": ("transport", "agent_execution"),
 }
+_CANONICAL_DISK_FULL_ERROR_TYPE = "StorageExhausted"
 _CODE_PREFIX_CLASSIFICATION: tuple[tuple[str, str, str], ...] = (
     ("agent_config_", "agent_config", "agent_start"),
     ("backend_", "backend", "preflight"),
@@ -812,6 +813,9 @@ def _typed_error_signal(record: Mapping[str, Any]) -> dict[str, Any] | None:
     error_code = _clean_string(error.get("code"))
     normalized_type = _identifier(error_type) or ""
     classification: tuple[str, str] | None = None
+    canonical_error_type = error_type
+    canonical_error_subtype = error_subtype
+    canonical_error_code = error_code
     if normalized_type == "agentexecfailed":
         # AgentExecFailed is only a process-envelope error.  Ordinary implementation
         # mistakes, warning-only stderr, timeouts, and plugin notices all use it.  A
@@ -850,19 +854,35 @@ def _typed_error_signal(record: Mapping[str, Any]) -> dict[str, Any] | None:
     if classification is None:
         return None
     failure_class, phase = classification
+    canonical_disk_full = classification == _AGENT_EXEC_SIGNAL_CLASSIFICATION["disk_full"] and any(
+        (value or "").casefold() == "disk_full" for value in (error_subtype, error_code)
+    )
+    if canonical_disk_full:
+        # ``AgentExecFailed`` and pre-target ``RuntimeError`` are runner envelopes,
+        # not distinct storage mechanisms.  Canonicalize the exact machine signal so
+        # a setup-time recurrence extends the existing disk-full case instead of
+        # minting a second identity.  The original envelope fields remain available
+        # in the bounded ``error`` evidence projection.
+        canonical_error_type = _CANONICAL_DISK_FULL_ERROR_TYPE
+        canonical_error_subtype = "disk_full"
+        canonical_error_code = None
     details_raw = error.get("details")
     details = details_raw if isinstance(details_raw, Mapping) else {}
     return {
         "failure_class": failure_class,
         "phase": (
-            _clean_string(error.get("failure_phase"))
-            or _clean_string(error.get("phase"))
-            or _clean_string(details.get("phase"))
-            or phase
+            phase
+            if canonical_disk_full
+            else (
+                _clean_string(error.get("failure_phase"))
+                or _clean_string(error.get("phase"))
+                or _clean_string(details.get("phase"))
+                or phase
+            )
         ),
-        "error_type": error_type,
-        "error_subtype": error_subtype,
-        "error_code": error_code,
+        "error_type": canonical_error_type,
+        "error_subtype": canonical_error_subtype,
+        "error_code": canonical_error_code,
         "backend": None,
         "report_schema": None,
         "artifact_sha256": None,
@@ -1010,8 +1030,21 @@ def _signal_receipt(
     run_atoms: Sequence[Mapping[str, Any]],
     parent_binding: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    canonical_disk_full = (
+        _identifier(_clean_string(signal.get("error_type")))
+        == _identifier(_CANONICAL_DISK_FULL_ERROR_TYPE)
+        and (_clean_string(signal.get("error_subtype")) or "").casefold() == "disk_full"
+    )
+    # A report schema describes the interrupted workload, not why storage was
+    # exhausted. Pre-target setup failures cannot have that field, so retaining it
+    # in the stable mechanism signature would split one recurrence by lifecycle
+    # timing. A known execution backend remains a meaningful storage boundary.
     backend = _clean_string(signal.get("backend")) or _backend(record)
-    report_schema = _clean_string(signal.get("report_schema")) or _report_schema(record)
+    report_schema = (
+        None
+        if canonical_disk_full
+        else (_clean_string(signal.get("report_schema")) or _report_schema(record))
+    )
     evidence_projection = _failure_evidence_projection(signal=signal, record=record)
     failure_evidence_sha256 = _canonical_sha256(evidence_projection)
     signature_fields = {

@@ -60,6 +60,7 @@ from runner_core.catalog import load_catalog_config
 from runner_core.codex_execpolicy import (
     CONTROLLED_CODEX_AUTH_ENV_VARS,
     CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+    CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE,
     ControlledCodexExecpolicyOverlay,
     capture_probe_workspace_state,
     controlled_codex_execpolicy_receipt_errors,
@@ -4366,6 +4367,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     workspace_dir=acquired.workspace_dir,
                     env_overrides=agent_env_overrides,
                 )
+            controlled_codex_probe_commands: list[str] = []
             if request.agent == "codex" and request.codex_execpolicy_allow_prefixes:
                 if sandbox is not None:
                     raise ValueError("codex_execpolicy_requires_local_execution_backend")
@@ -4374,6 +4376,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     source="controlled_stage3",
                 )
                 controlled_allow_prefixes = list(request.codex_execpolicy_allow_prefixes)
+                controlled_prefixes = set(request.codex_execpolicy_allow_prefixes)
+                if ("git", "rev-parse") in controlled_prefixes:
+                    controlled_codex_probe_commands.append("git rev-parse --is-inside-work-tree")
+                if ("python",) in controlled_prefixes:
+                    controlled_codex_probe_commands.append("python --version")
                 if ("python",) in set(request.codex_execpolicy_allow_prefixes):
                     python_candidates = [
                         (agent_env_overrides or {}).get("USERTEST_PYTHON"),
@@ -4394,9 +4401,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         candidate_path = Path(candidate).resolve()
                         if candidate_path.is_file():
                             controlled_allow_prefixes.append((str(candidate_path),))
-                controlled_allow_prefixes.append(
-                    ("Write-Output",) if os.name == "nt" else ("printf",)
-                )
+                if os.name == "nt":
+                    controlled_allow_prefixes.append(("Write-Output",))
+                else:
+                    controlled_allow_prefixes.append(("printf",))
                 codex_execpolicy_overlay = install_controlled_codex_execpolicy(
                     workspace_dir=acquired.workspace_dir,
                     run_dir=run_dir,
@@ -4475,6 +4483,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     source="controlled_stage3_mission",
                     internal_safe_overrides=[
                         *CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+                        *(
+                            [CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE]
+                            if os.name == "nt"
+                            else []
+                        ),
                         codex_execpolicy_overlay.project_trust_override,
                     ],
                 )
@@ -4667,13 +4680,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     and controlled_codex_activation_overrides is not None
                     else codex_overrides
                 )
-                codex_probe_commands: list[str] = []
-                if request.agent == "codex" and codex_execpolicy_overlay is not None:
-                    controlled_prefixes = set(request.codex_execpolicy_allow_prefixes)
-                    if ("git", "rev-parse") in controlled_prefixes:
-                        codex_probe_commands.append("git rev-parse --is-inside-work-tree")
-                    if ("python",) in controlled_prefixes:
-                        codex_probe_commands.append("python --version")
+                codex_probe_commands = (
+                    list(controlled_codex_probe_commands)
+                    if request.agent == "codex" and codex_execpolicy_overlay is not None
+                    else []
+                )
                 probe_workspace_before = (
                     capture_probe_workspace_state(acquired.workspace_dir)
                     if request.agent == "codex" and codex_execpolicy_overlay is not None
@@ -4700,7 +4711,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     codex_subcommand=str(codex_subcommand),
                     codex_config_overrides=codex_probe_overrides,
                     codex_ignore_user_config=True,
-                    codex_ignore_rules=codex_execpolicy_overlay is None,
+                    codex_ignore_rules=(codex_execpolicy_overlay is None or os.name == "nt"),
                     codex_agent_last_message_path=codex_probe_last_message_for_agent,
                     codex_required_commands=codex_probe_commands,
                     codex_required_command_outputs={
@@ -4714,8 +4725,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     gemini_sandbox=gemini_sandbox_enabled,
                     gemini_approval_mode=gemini_approval_mode,
                     gemini_allowed_tools=gemini_allowed_tools,
-                    gemini_include_directories=_gemini_include_directories_for_workspace(
-                        workspace_dir=acquired.workspace_dir
+                    gemini_include_directories=(
+                        _gemini_include_directories_for_workspace(
+                            workspace_dir=acquired.workspace_dir
+                        )
+                        if request.agent == "gemini"
+                        else []
                     ),
                 )
                 agent_shell_probe_payload = agent_shell_probe.to_dict()
@@ -5974,7 +5989,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         model=effective_model,
                         config_overrides=codex_overrides,
                         ignore_user_config=True,
-                        ignore_rules=codex_execpolicy_overlay is None,
+                        ignore_rules=(codex_execpolicy_overlay is None or os.name == "nt"),
                         command_prefix=command_prefix,
                         env_overrides=agent_env_overrides,
                         agent_last_message_path=codex_last_message_for_attempt,

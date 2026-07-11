@@ -16,6 +16,7 @@ from agent_adapters import (
 import runner_core.codex_execpolicy as execpolicy_mod
 from runner_core.codex_execpolicy import (
     CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+    CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE,
     ControlledCodexExecpolicyOverlay,
     capture_probe_workspace_state,
     codex_execpolicy_receipt_sha256,
@@ -29,6 +30,20 @@ def _blank_subscription_environment() -> dict[str, bool]:
     return {name: True for name in CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS}
 
 
+def _activation_probe(**overrides: object) -> dict[str, object]:
+    argv = ["codex", "exec", "--sandbox", "workspace-write"]
+    if os.name == "nt":
+        argv.append("--ignore-rules")
+    payload: dict[str, object] = {
+        "ok": True,
+        "marker_seen": True,
+        "workspace_unchanged": True,
+        "argv": argv,
+    }
+    payload.update(overrides)
+    return payload
+
+
 def _bind_default_config(
     overlay: ControlledCodexExecpolicyOverlay,
 ) -> tuple[list[str], list[str]]:
@@ -37,6 +52,7 @@ def _bind_default_config(
         source="test_controlled",
         internal_safe_overrides=[
             *CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+            *([CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE] if os.name == "nt" else []),
             overlay.project_trust_override,
         ],
     )
@@ -91,10 +107,13 @@ def test_controlled_execpolicy_replaces_and_restores_target_rules(tmp_path: Path
 
     assert not original.exists()
     controlled = target_rules / "usertest-controlled.rules"
-    assert controlled.read_text(encoding="utf-8") == (
-        'prefix_rule(pattern=["git", "rev-parse"], decision="allow")\n'
-        'prefix_rule(pattern=["python", "-m", "pytest"], decision="allow")\n'
-    )
+    if os.name == "nt":
+        assert not controlled.exists()
+    else:
+        assert controlled.read_text(encoding="utf-8") == (
+            'prefix_rule(pattern=["git", "rev-parse"], decision="allow")\n'
+            'prefix_rule(pattern=["python", "-m", "pytest"], decision="allow")\n'
+        )
     receipt = json.loads(overlay.receipt_path.read_text(encoding="utf-8"))
     assert receipt["restore_status"] == "pending"
     assert receipt["target_rules_manifest_before"][0]["path"] == "target.rules"
@@ -107,12 +126,24 @@ def test_controlled_execpolicy_replaces_and_restores_target_rules(tmp_path: Path
     assert receipt["auth_cache_deleted"] is False
     assert receipt["chatgpt_subscription_auth_verified"] is False
     assert receipt["auth_verification_status"] == "pending"
-    assert receipt["global_rules_loaded"] is True
+    assert receipt["global_rules_loaded"] is (os.name != "nt")
+    assert receipt["controlled_rules_ignored"] is (os.name == "nt")
+    assert receipt["controlled_rules_written"] is (os.name != "nt")
+    assert receipt["controlled_rules_enforcement_mode"] == (
+        "ignored_native_windows_sandbox" if os.name == "nt" else "project_execpolicy"
+    )
     assert receipt["host_global_rules_manifest_before"][0]["path"] == "default.rules"
     config_receipt = json.loads(
         Path(receipt["controlled_config_overrides_path"]).read_text(encoding="utf-8")
     )
     assert config_receipt["status"] == "bound"
+    assert config_receipt["platform_os_name"] == os.name
+    assert config_receipt["canonical_subscription_route_verified"] is True
+    assert config_receipt["native_windows_sandbox_mode"] == (
+        "unelevated" if os.name == "nt" else "not_applicable"
+    )
+    assert config_receipt["controlled_rules_ignored"] is (os.name == "nt")
+    assert config_receipt["controlled_rules_written"] is (os.name != "nt")
     assert config_receipt["user_config_ignored"] is True
     assert config_receipt["target_project_config_isolated"] is True
     assert config_receipt["mission_overrides"] == mission_overrides
@@ -139,6 +170,10 @@ def test_controlled_execpolicy_replaces_and_restores_target_rules(tmp_path: Path
     assert restored["host_auth_file_after"]["state"] == "present"
     assert restored["host_auth_identity_unchanged"] is True
     assert restored["host_global_rules_unchanged"] is True
+    assert restored["canonical_subscription_route_verified"] is True
+    assert restored["native_windows_sandbox_mode"] == (
+        "unelevated" if os.name == "nt" else "not_applicable"
+    )
     assert auth_path.read_bytes() == auth_before
 
 
@@ -154,7 +189,9 @@ def test_controlled_execpolicy_removes_runner_only_directories(tmp_path: Path) -
         allow_prefixes=(("pytest",),),
     )
 
-    assert (workspace / ".codex" / "rules" / "usertest-controlled.rules").is_file()
+    assert (workspace / ".codex" / "rules" / "usertest-controlled.rules").is_file() is (
+        os.name != "nt"
+    )
     assert overlay.restore() == []
     assert not (workspace / ".codex").exists()
 
@@ -174,6 +211,7 @@ def test_controlled_execpolicy_detects_agent_tampering_and_still_restores(
         allow_prefixes=(("python",),),
     )
     _bind_default_config(overlay)
+    overlay.rules_dir.mkdir(parents=True, exist_ok=True)
     (overlay.rules_dir / "unexpected.rules").write_text("unexpected\n", encoding="utf-8")
 
     assert overlay.restore() == ["codex_execpolicy_overlay_changed_during_agent_run"]
@@ -371,13 +409,10 @@ def test_subscription_verification_requires_login_status_and_activation_probe(
     assert after_status["auth_verification_status"] == "pending"
 
     overlay.record_activation_probe(
-        {
-            "ok": True,
-            "marker_seen": True,
-            "required_commands": ["python --version"],
-            "required_commands_seen": ["python --version"],
-            "workspace_unchanged": True,
-        }
+        _activation_probe(
+            required_commands=["python --version"],
+            required_commands_seen=["python --version"],
+        )
     )
     verified = json.loads(overlay.receipt_path.read_text(encoding="utf-8"))
     assert verified["chatgpt_subscription_activation_probe_verified"] is True
@@ -416,14 +451,13 @@ def test_failed_activation_probe_never_verifies_subscription(tmp_path: Path) -> 
         }
     )
     overlay.record_activation_probe(
-        {
-            "ok": False,
-            "marker_seen": False,
-            "required_commands": ["python --version"],
-            "required_commands_seen": [],
-            "workspace_unchanged": True,
-            "reason": "probe failed",
-        }
+        _activation_probe(
+            ok=False,
+            marker_seen=False,
+            required_commands=["python --version"],
+            required_commands_seen=[],
+            reason="probe failed",
+        )
     )
     overlay.record_post_login_status(
         {
@@ -461,7 +495,7 @@ def test_keyring_login_can_be_verified_without_auth_json(tmp_path: Path) -> None
         "auth_env_vars_blank": _blank_subscription_environment(),
     }
     overlay.record_login_status(status)
-    overlay.record_activation_probe({"ok": True, "marker_seen": True, "workspace_unchanged": True})
+    overlay.record_activation_probe(_activation_probe())
     overlay.record_post_login_status(status)
     assert overlay.restore() == []
     final = json.loads(overlay.receipt_path.read_text(encoding="utf-8"))
@@ -491,7 +525,7 @@ def test_subscription_receipt_allows_canonical_oauth_refresh(tmp_path: Path) -> 
         "auth_env_vars_blank": _blank_subscription_environment(),
     }
     overlay.record_login_status(status)
-    overlay.record_activation_probe({"ok": True, "marker_seen": True, "workspace_unchanged": True})
+    overlay.record_activation_probe(_activation_probe())
     refreshed = json.dumps(
         {
             "auth_mode": "chatgpt",
@@ -541,7 +575,7 @@ def test_subscription_receipt_rejects_semantically_mismatched_config_contract(
         "auth_env_vars_blank": _blank_subscription_environment(),
     }
     overlay.record_login_status(status)
-    overlay.record_activation_probe({"ok": True, "marker_seen": True, "workspace_unchanged": True})
+    overlay.record_activation_probe(_activation_probe())
     overlay.record_post_login_status(status)
     assert overlay.restore() == []
     assert verify_controlled_codex_execpolicy_receipt(overlay.receipt_path) == []
