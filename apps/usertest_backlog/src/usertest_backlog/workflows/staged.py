@@ -1,7 +1,7 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
-from backlog_core import assess_research_readiness
+from backlog_core import assess_research_readiness, build_operational_failure_candidates
 from backlog_miner.research_evidence import BlockedReplayExecutor
 from backlog_repo import verify_outcome_record_provenance
 
@@ -15,7 +15,18 @@ from usertest_backlog.commands.export_tickets import (
     _ux_review_path_for_backlog,
 )
 from usertest_backlog.shared import *
+from usertest_backlog.workflows.derived_evidence import (
+    annotate_operational_failure_candidates,
+    annotate_primary_derived_evidence,
+    filter_derived_history_records,
+    inferred_implementation_runs_root,
+    ingest_derived_evidence_records,
+    with_operational_candidate_metadata,
+)
 from usertest_backlog.workflows.implementation_planning import _run_implementation_planning_stage
+from usertest_backlog.workflows.orphan_implementation_history import (
+    recover_orphan_implementation_history,
+)
 from usertest_backlog.workflows.post_research_relations import (
     collapse_post_research_verified_mechanisms,
 )
@@ -37,6 +48,17 @@ from usertest_backlog.workflows.shadow_validation import (
 )
 from usertest_backlog.workflows.solution_options import _run_solution_optioning_stage
 from usertest_backlog.workflows.solution_selection import _run_solution_selection_stage
+
+
+def _require_stage_model_invocation_provenance(stage_doc: dict[str, Any]) -> None:
+    errors = verify_stage_model_invocation_contract(stage_doc)
+    if errors:
+        raise ValueError(
+            "stage_model_invocation_provenance_invalid:"
+            + str(stage_doc.get("stage") or "unknown")
+            + ":"
+            + ",".join(errors)
+        )
 
 
 def _persist_downstream_case_lineage(
@@ -362,16 +384,13 @@ def _sync_case_registry_outcomes(
         selected_recorded_state = outcome_state
         recurrence_reopen_raw = case.get("recurrence_reopen")
         recurrence_reopen = (
-            recurrence_reopen_raw
-            if isinstance(recurrence_reopen_raw, dict)
-            else None
+            recurrence_reopen_raw if isinstance(recurrence_reopen_raw, dict) else None
         )
         recurrence_reopened = bool(
             recurrence_reopen is not None
             and selected_revision_id is not None
             and outcome_state in TERMINAL_CASE_STATES
-            and recurrence_reopen.get("against_plan_revision_id")
-            == selected_revision_id
+            and recurrence_reopen.get("against_plan_revision_id") == selected_revision_id
         )
         if recurrence_reopened:
             # A previously terminal outcome cannot suppress newer evidence that relation
@@ -383,8 +402,7 @@ def _sync_case_registry_outcomes(
             recurrence_reopen is not None
             and selected_revision_id is not None
             and outcome_state in TERMINAL_CASE_STATES
-            and recurrence_reopen.get("against_plan_revision_id")
-            != selected_revision_id
+            and recurrence_reopen.get("against_plan_revision_id") != selected_revision_id
         ):
             case.pop("recurrence_reopen", None)
         if _coerce_string(case.get("state")) != outcome_state:
@@ -407,10 +425,7 @@ def _sync_case_registry_outcomes(
                     if provenance_status == "verified"
                     else "structurally_valid_nonterminal_plan_outcome"
                 )
-            elif (
-                verification is not None
-                and verification.get("structural_status") == "valid"
-            ):
+            elif verification is not None and verification.get("structural_status") == "valid":
                 outcome_source = "structurally_valid_unverified_plan_outcome"
             else:
                 outcome_source = "atom_action_projection"
@@ -452,6 +467,26 @@ def _sync_case_registry_outcomes(
         "invalid_outcome_records": invalid_outcome_records,
         "provenance_failed_outcome_records": provenance_failed_outcome_records,
     }
+
+
+def _outcome_trusted_runs_roots(
+    *,
+    primary_runs_dir: Path,
+    configured_runs_dir: Path,
+    implementation_runs_root: Path,
+) -> tuple[Path, ...]:
+    """Return the complete retained-evidence boundary for outcome verification."""
+
+    return tuple(
+        sorted(
+            {
+                primary_runs_dir.resolve(),
+                configured_runs_dir.resolve(),
+                implementation_runs_root.resolve(),
+            },
+            key=lambda path: str(path),
+        )
+    )
 
 
 def _case_state_from_registry(case_registry: dict[str, Any], case_id: str | None) -> str | None:
@@ -556,9 +591,7 @@ def _reset_stale_unproven_actioned_atoms(
 
         entry["stale_actioned_previous_status"] = "actioned"
         entry["stale_actioned_previous_case_id"] = case_id
-        entry["stale_actioned_previous_disposition"] = _coerce_string(
-            entry.get("disposition")
-        )
+        entry["stale_actioned_previous_disposition"] = _coerce_string(entry.get("disposition"))
         entry["stale_actioned_previous_supporting_case_ids"] = (
             list(entry.get("supporting_case_ids"))
             if isinstance(entry.get("supporting_case_ids"), list)
@@ -649,6 +682,16 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             return 2
 
     runs_dir = args.runs_dir.resolve() if args.runs_dir is not None else cfg.runs_dir
+    # The CLI-selected history root is also the append-only destination for stage
+    # runners.  Without this replacement, an isolated checkout writes new research
+    # beside itself while the next backlog cycle scans the owner's explicit root.
+    cfg = replace(cfg, runs_dir=runs_dir)
+    implementation_runs_root = inferred_implementation_runs_root(runs_dir)
+    outcome_trusted_runs_roots = _outcome_trusted_runs_roots(
+        primary_runs_dir=runs_dir,
+        configured_runs_dir=cfg.runs_dir,
+        implementation_runs_root=implementation_runs_root,
+    )
     target_slug: str | None = None
     if isinstance(args.target, str) and args.target.strip():
         target_slug = str(args.target).strip()
@@ -719,11 +762,24 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         if isinstance(atoms_raw, list)
         else []
     )
-    raw_atoms = normalize_atom_lineage(
+    primary_raw_atoms = normalize_atom_lineage(
         extracted_atoms,
         case_registry=case_registry,
         strict_new_output=True,
     )
+    primary_derived_evidence = annotate_primary_derived_evidence(
+        records,
+        primary_raw_atoms,
+        source_root=runs_dir,
+        case_registry=case_registry,
+    )
+    primary_raw_atoms = primary_derived_evidence.atoms
+    primary_atom_ids = {
+        atom_id
+        for atom in primary_raw_atoms
+        for atom_id in [_coerce_string(atom.get("atom_id"))]
+        if atom_id is not None
+    }
 
     try:
         atom_actions = _load_atom_actions_yaml(atom_actions_path)
@@ -787,12 +843,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     case_outcome_sync = _sync_case_registry_outcomes(
         case_registry=case_registry,
         atom_actions=atom_actions,
-        trusted_runs_roots=tuple(
-            sorted(
-                {runs_dir.resolve(), cfg.runs_dir.resolve()},
-                key=lambda path: str(path),
-            )
-        ),
+        trusted_runs_roots=outcome_trusted_runs_roots,
         owner_roots=tuple(owner_roots),
     )
     stale_actioned_reset = _reset_stale_unproven_actioned_atoms(
@@ -810,6 +861,75 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     except (OSError, ValueError) as exc:
         print(f"[backlog] ERROR: failed to persist case outcomes: {exc}", file=sys.stderr)
         return 2
+
+    derived_scope_repo_root = repo_root
+    if repo_input is not None and _looks_like_local_repo_input(repo_input):
+        resolved_scope_repo_root = _resolve_local_repo_root(repo_root, repo_input)
+        if resolved_scope_repo_root is not None:
+            derived_scope_repo_root = resolved_scope_repo_root
+    orphan_history_records, orphan_history_recovery_meta = recover_orphan_implementation_history(
+        runs_dir,
+        target_slug=target_slug,
+        scoped_repo_root=derived_scope_repo_root,
+    )
+    derived_history_records_unfiltered = [
+        *iter_report_history(
+            implementation_runs_root,
+            target_slug=target_slug,
+            repo_input=None,
+            embed="none",
+        ),
+        *orphan_history_records,
+    ]
+    derived_history_records, derived_scope_filter_meta = filter_derived_history_records(
+        derived_history_records_unfiltered,
+        target_slug=target_slug,
+        repo_input=repo_input,
+        repo_root=derived_scope_repo_root,
+        git_remote_urls=sorted(_git_remote_urls(derived_scope_repo_root)),
+    )
+    derived_ingestion = ingest_derived_evidence_records(
+        derived_history_records,
+        source_root=implementation_runs_root,
+        repo_root=repo_root,
+        atom_actions=atom_actions,
+        case_registry=case_registry,
+    )
+    operational_failure_candidates = build_operational_failure_candidates(
+        [*records, *derived_ingestion.records],
+        [*primary_raw_atoms, *derived_ingestion.atoms],
+        parent_bindings_by_run={
+            **primary_derived_evidence.parent_bindings_by_run,
+            **derived_ingestion.parent_bindings_by_run,
+        },
+    )
+    operational_failure_candidates = annotate_operational_failure_candidates(
+        operational_failure_candidates,
+        records=[*records, *derived_ingestion.records],
+        source_atoms=[*primary_raw_atoms, *derived_ingestion.atoms],
+        primary_source_root=runs_dir,
+    )
+    derived_evidence_meta = with_operational_candidate_metadata(
+        derived_ingestion.metadata,
+        operational_failure_candidates,
+    )
+    derived_evidence_meta["scope_filter"] = derived_scope_filter_meta
+    derived_evidence_meta["orphan_history_recovery"] = orphan_history_recovery_meta
+    derived_evidence_meta["primary_derived_evidence"] = primary_derived_evidence.metadata
+    derived_evidence_meta["source_roots"] = [
+        {
+            "kind": "usertest",
+            "path": str(runs_dir.resolve()),
+            "records_seen": len(records),
+            "derived_records": primary_derived_evidence.metadata["derived_records"],
+        },
+        *derived_evidence_meta["source_roots"],
+    ]
+    raw_atoms = [
+        *primary_raw_atoms,
+        *derived_ingestion.atoms,
+        *operational_failure_candidates,
+    ]
 
     carryover_meta: dict[str, Any] | None = None
     if bool(getattr(args, "carryover_actioned_only", False)):
@@ -876,9 +996,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         )
         historical_status = stale_reset_status or atom_status
         action_case_id = (
-            _coerce_string(action_entry.get("case_id"))
-            if isinstance(action_entry, dict)
-            else None
+            _coerce_string(action_entry.get("case_id")) if isinstance(action_entry, dict) else None
         )
         if isinstance(action_entry, dict):
             explicit_disposition = _coerce_string(action_entry.get("disposition"))
@@ -896,9 +1014,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                         "verification",
                     }:
                         atom["parent_case_id"] = action_case_id
-                decision_rationale = _coerce_string(
-                    action_entry.get("disposition_rationale")
-                ) or (novel_rationale if explicit_disposition == "novel_case" else None)
+                decision_rationale = _coerce_string(action_entry.get("disposition_rationale")) or (
+                    novel_rationale if explicit_disposition == "novel_case" else None
+                )
                 if (
                     decision_rationale is None
                     and explicit_disposition == "supports_case"
@@ -934,11 +1052,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 else:
                     atom["disposition_decision_error"] = decision_error
         registry_case_id = _registry_case_id_for_atom(case_registry, atom_id)
-        atom_case_id = (
-            _coerce_string(atom.get("case_id"))
-            or action_case_id
-            or registry_case_id
-        )
+        atom_case_id = _coerce_string(atom.get("case_id")) or action_case_id or registry_case_id
         case_state = _case_state_from_registry(case_registry, atom_case_id)
         keep_for_open_case = case_state is not None and case_state not in TERMINAL_CASE_STATES
         proven_terminal_outcome = _case_has_proven_terminal_outcome(
@@ -961,9 +1075,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             )
         if reopen_unproven:
             reason = (
-                "canonical_case_missing"
-                if case_state is None
-                else "terminal_outcome_not_proven"
+                "canonical_case_missing" if case_state is None else "terminal_outcome_not_proven"
             )
             stale_previous_disposition = (
                 _coerce_string(action_entry.get("stale_actioned_previous_disposition"))
@@ -1003,12 +1115,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 action_entry["reopened_previous_status"] = historical_status
                 action_entry["reopened_previous_case_id"] = atom_case_id
                 action_entry["reopened_previous_disposition"] = (
-                    stale_previous_disposition
-                    or _coerce_string(action_entry.get("disposition"))
+                    stale_previous_disposition or _coerce_string(action_entry.get("disposition"))
                 )
-                action_entry["reopened_previous_supporting_case_ids"] = list(
-                    prior_supporting
-                )
+                action_entry["reopened_previous_supporting_case_ids"] = list(prior_supporting)
                 action_entry["reopened_at"] = backfill_at
                 action_entry["reopened_reason"] = reason
                 action_entry["status"] = "new"
@@ -1060,8 +1169,10 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     eligible_run_rels = {
         run_rel
         for atom in atoms
+        for atom_id in [_coerce_string(atom.get("atom_id"))]
         for run_rel in [_coerce_string(atom.get("run_rel"))]
-        if run_rel is not None
+        if atom_id in primary_atom_ids
+        and run_rel is not None
         and _coerce_string(atom.get("evidence_role")) == "observation"
         and _coerce_string(atom.get("lineage_mining_blocker")) is None
     }
@@ -1109,6 +1220,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     atom_totals = _summarize_atoms_for_totals(atoms)
     atoms_doc = dict(atoms_doc_raw)
     atoms_doc["atoms"] = atoms
+    atoms_doc["derived_evidence_ingestion"] = derived_evidence_meta
     totals_raw = atoms_doc_raw.get("totals")
     totals_dict = dict(totals_raw) if isinstance(totals_raw, dict) else {}
     totals_dict.update(atom_totals)
@@ -1120,10 +1232,17 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         "eligible_atoms_trackable": eligible_atoms_trackable,
         "excluded_sources": [],
         "excluded_source_counts": {},
-        "mirrored_diagnostic_sources": ["agent_last_message_artifact"],
-        "mirrored_source_counts": {
-            "agent_last_message_artifact": len(agent_last_message_atoms)
+        "source_roots": {
+            "primary": str(runs_dir.resolve()),
+            "derived": [str(implementation_runs_root.resolve())],
         },
+        "primary_records": len(records),
+        "derived_records": derived_evidence_meta["records_ingested"],
+        "derived_atoms": derived_evidence_meta["atoms_ingested"],
+        "derived_binding_status_counts": derived_evidence_meta["binding_atom_status_counts"],
+        "operational_failure_candidates": derived_evidence_meta["operational_failure_candidates"],
+        "mirrored_diagnostic_sources": ["agent_last_message_artifact"],
+        "mirrored_source_counts": {"agent_last_message_artifact": len(agent_last_message_atoms)},
         "mirrored_source_atoms_jsonl": str(agent_last_message_atoms_jsonl),
         "synthetic_atoms_added": len(aggregate_atoms),
         "excluded_atoms": len(excluded_atoms),
@@ -1324,6 +1443,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             dry_run=dry_run,
             stage_guidance_text=stage1_guidance,
         )
+        _require_stage_model_invocation_provenance(stage1_doc)
         atoms_doc["atoms"] = atoms
         atoms_doc["atom_dispositions"] = atom_disposition_summary(atoms)
         write_backlog_atoms(atoms_doc, atoms_jsonl)
@@ -1347,6 +1467,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             dry_run=dry_run,
             stage_guidance_text=stage2_guidance,
         )
+        _require_stage_model_invocation_provenance(stage2_doc)
 
         items2_raw = stage2_doc.get("items") if isinstance(stage2_doc, dict) else None
         priority_decisions = (
@@ -1434,21 +1555,17 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             # Do not reject those useful mining runs merely because a
             # repository-backed replay boundary is not needed yet.  A real
             # selected research case still fails above without a repository.
-            replay_executor = BlockedReplayExecutor(
-                reason="stage3_repository_not_required"
-            )
+            replay_executor = BlockedReplayExecutor(reason="stage3_repository_not_required")
             replay_executor_metadata = {
                 "executor": "blocked",
                 "reason": "stage3_repository_not_required",
             }
         else:
             try:
-                replay_executor, replay_executor_metadata = (
-                    _configured_replay_executor(
-                        research_config=research_config,
-                        repo_root=repo_root,
-                        repo_input=resolved_repo_input,
-                    )
+                replay_executor, replay_executor_metadata = _configured_replay_executor(
+                    research_config=research_config,
+                    repo_root=repo_root,
+                    repo_input=resolved_repo_input,
                 )
             except ValueError as exc:
                 print(
@@ -1511,9 +1628,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 supporting_atoms=atoms,
             )
             relation_dir = (
-                artifacts_dir
-                / "repro_research"
-                / "post_research_verified_mechanism_relations_001"
+                artifacts_dir / "repro_research" / "post_research_verified_mechanism_relations_001"
             )
             relation_dir.mkdir(parents=True, exist_ok=True)
             response_path = relation_dir / (
@@ -1544,30 +1659,20 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             stage3_doc = dict(stage3_doc)
             stage3_doc["items"] = research_dossiers
             stage3_meta_raw = stage3_doc.get("input_meta")
-            stage3_meta = (
-                dict(stage3_meta_raw) if isinstance(stage3_meta_raw, dict) else {}
-            )
+            stage3_meta = dict(stage3_meta_raw) if isinstance(stage3_meta_raw, dict) else {}
             stage3_meta.update(
                 {
-                    "post_research_relation_review": (
-                        "runner_verified_mechanism_identity_v2"
-                    ),
+                    "post_research_relation_review": ("runner_verified_mechanism_identity_v2"),
                     "post_research_relation_groups": post_research_groups,
-                    "post_research_case_aliases": post_research_relations[
-                        "case_aliases"
-                    ],
+                    "post_research_case_aliases": post_research_relations["case_aliases"],
                     "post_research_canonical_case_count": len(problem_records),
-                    "post_research_canonical_research_count": len(
-                        research_dossiers
-                    ),
+                    "post_research_canonical_research_count": len(research_dossiers),
                 }
             )
             stage3_doc["input_meta"] = stage3_meta
             stage3_artifacts_raw = stage3_doc.get("artifacts")
             stage3_artifacts = (
-                dict(stage3_artifacts_raw)
-                if isinstance(stage3_artifacts_raw, dict)
-                else {}
+                dict(stage3_artifacts_raw) if isinstance(stage3_artifacts_raw, dict) else {}
             )
             stage3_artifacts.update(
                 {
@@ -1646,6 +1751,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             breadth_profile=breadth_profile,
             stage_guidance_text=stage4_guidance,
         )
+        _require_stage_model_invocation_provenance(stage4_doc)
 
         items4_raw = stage4_doc.get("items") if isinstance(stage4_doc, dict) else None
         solution_options = (
@@ -1683,6 +1789,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             breadth_profile=breadth_profile,
             stage_guidance_text=stage5_guidance,
         )
+        _require_stage_model_invocation_provenance(stage5_doc)
 
         items5_raw = stage5_doc.get("items") if isinstance(stage5_doc, dict) else None
         selection_decisions = (
@@ -1719,6 +1826,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             dry_run=dry_run,
             stage_guidance_text=stage6_guidance,
         )
+        _require_stage_model_invocation_provenance(stage6_doc)
 
         items6_raw = stage6_doc.get("items") if isinstance(stage6_doc, dict) else None
         change_plans = (
@@ -1777,6 +1885,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         tickets=tickets,
         input_meta={
             "runs_dir": str(runs_dir),
+            "implementation_runs_root": str(implementation_runs_root),
+            "primary_record_count": len(records),
+            "derived_record_count": derived_evidence_meta["records_ingested"],
             "target": target_slug,
             "repo_input": repo_input,
             "agent": agent,
@@ -1790,6 +1901,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             "sample_size_semantics": sample_size_semantics,
             "exclude_atom_statuses": sorted(exclude_atom_status_set),
             "batch_breadth": pipeline_batch_breadth,
+            "derived_evidence_ingestion": derived_evidence_meta,
             "pipeline_manifest_path": str(pipeline_manifest_path),
             "pipeline_manifest_version": int(getattr(pipeline_manifest, "version", 2)),
             "breadth_profile_warnings": breadth_profile_warnings,
@@ -1940,13 +2052,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             stage5=stage5_doc,
             stage6=stage6_doc,
             case_registry=case_registry,
-            trusted_runs_roots=tuple(
-                sorted(
-                    {runs_dir.resolve(), cfg.runs_dir.resolve()},
-                    key=lambda path: str(path),
-                )
-            ),
+            trusted_runs_roots=outcome_trusted_runs_roots,
             owner_roots=tuple(owner_roots),
+            qualification_contract=shadow_gate_config,
         )
         assert export_projection is not None
         assert policy_config_path is not None

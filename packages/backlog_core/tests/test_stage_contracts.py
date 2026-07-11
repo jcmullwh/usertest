@@ -164,8 +164,7 @@ def test_parse_problem_record_list_rejects_empty_claim_text(field: str) -> None:
     result, warnings = parse_problem_record_list(json.dumps(records))
 
     assert any(
-        warning.endswith(f": {field}")
-        and "problem_record_empty_required_text" in warning
+        warning.endswith(f": {field}") and "problem_record_empty_required_text" in warning
         for warning in warnings
     )
     assert "_parse_warning" in result[0]
@@ -263,9 +262,7 @@ def test_parse_priority_decision_list_warns_non_bool_selected_for_research() -> 
 
 
 def _fixture_control_links(dossier: dict, hypothesis: dict) -> list[dict]:
-    experiments = {
-        experiment["experiment_id"]: experiment for experiment in dossier["experiments"]
-    }
+    experiments = {experiment["experiment_id"]: experiment for experiment in dossier["experiments"]}
     links: list[dict] = []
     for control_id in hypothesis["counterevidence"]:
         control = experiments.get(control_id)
@@ -280,8 +277,7 @@ def _fixture_control_links(dossier: dict, hypothesis: dict) -> list[dict]:
                 "supports_experiment_id": support_id,
                 "mechanism_symbols": hypothesis["mechanism_symbols"],
                 "shared_atom_ids": sorted(
-                    set(control["addresses_atom_ids"])
-                    & set(support["addresses_atom_ids"])
+                    set(control["addresses_atom_ids"]) & set(support["addresses_atom_ids"])
                 ),
                 "shared_artifact_refs": sorted(
                     set(control["artifact_refs"]) & set(support["artifact_refs"])
@@ -301,9 +297,7 @@ def _fixture_json_sha256(value: object) -> str:
 def _fixture_causal_control_receipts(
     dossier: dict,
 ) -> tuple[list[dict], list[dict], list[dict]]:
-    experiments = {
-        experiment["experiment_id"]: experiment for experiment in dossier["experiments"]
-    }
+    experiments = {experiment["experiment_id"]: experiment for experiment in dossier["experiments"]}
     selections: dict[str, dict] = {}
     controls: list[dict] = []
     failure_paths: list[dict] = []
@@ -327,9 +321,7 @@ def _fixture_causal_control_receipts(
                         {
                             "slot": "keyword:guarded",
                             "expression": "True",
-                            "ast_sha256": sha256(
-                                b"Constant(value=True)"
-                            ).hexdigest(),
+                            "ast_sha256": sha256(b"Constant(value=True)").hexdigest(),
                         }
                     ]
                     if experiment_id == control_id
@@ -370,85 +362,80 @@ def _fixture_causal_control_receipts(
                     ],
                 }
             control_receipt = {
-                    "verification_method": "pytest_ast_controlled_difference_v2",
-                    "hypothesis_id": hypothesis_id,
-                    "support_experiment_id": support_id,
-                    "control_experiment_id": control_id,
-                    "support_selection_id": f"{hypothesis_id}:{support_id}",
-                    "control_selection_id": f"{hypothesis_id}:{control_id}",
-                    "mechanism_symbols": mechanism_symbols,
-                    "shared_verified_mechanism_symbols": mechanism_symbols,
-                    "same_test_file": (
-                        selections[f"{hypothesis_id}:{support_id}"]["test_path"]
-                        == selections[f"{hypothesis_id}:{control_id}"]["test_path"]
-                    ),
-                    "controlled_input_difference": {
-                        "verification_method": "python_ast_explicit_argument_delta_v1",
-                        "difference_count": 1,
-                        "difference": {
-                            "mechanism_symbol": mechanism_symbols[0],
-                            "slot": "keyword:guarded",
-                            "difference_kind": "added_in_control",
-                            "support_argument": None,
-                            "control_argument": arguments[0],
-                        },
+                "verification_method": "pytest_ast_controlled_difference_v2",
+                "hypothesis_id": hypothesis_id,
+                "support_experiment_id": support_id,
+                "control_experiment_id": control_id,
+                "support_selection_id": f"{hypothesis_id}:{support_id}",
+                "control_selection_id": f"{hypothesis_id}:{control_id}",
+                "mechanism_symbols": mechanism_symbols,
+                "shared_verified_mechanism_symbols": mechanism_symbols,
+                "same_test_file": (
+                    selections[f"{hypothesis_id}:{support_id}"]["test_path"]
+                    == selections[f"{hypothesis_id}:{control_id}"]["test_path"]
+                ),
+                "controlled_input_difference": {
+                    "verification_method": "python_ast_explicit_argument_delta_v1",
+                    "difference_count": 1,
+                    "difference": {
+                        "mechanism_symbol": mechanism_symbols[0],
+                        "slot": "keyword:guarded",
+                        "difference_kind": "added_in_control",
+                        "support_argument": None,
+                        "control_argument": arguments[0],
                     },
-                    "observable_difference": {
-                        "verification_method": "runner_replay_complement_v1",
-                        "source": "exit_code",
-                        "difference_kind": "failing_exit_to_zero",
-                        "expected_sha256": None,
-                        "support": {
-                            "exit_code": experiments[support_id]["exit_code"],
-                            "observed_sha256": _fixture_json_sha256(
-                                experiments[support_id]["exit_code"]
-                            ),
-                            "stdout_sha256": "f" * 64,
-                            "stderr_sha256": "1" * 64,
-                        },
-                        "control": {
-                            "exit_code": experiments[control_id]["exit_code"],
-                            "observed_sha256": _fixture_json_sha256(
-                                experiments[control_id]["exit_code"]
-                            ),
-                            "stdout_sha256": "f" * 64,
-                            "stderr_sha256": "1" * 64,
-                        },
+                },
+                "observable_difference": {
+                    "verification_method": "runner_replay_complement_v1",
+                    "source": "exit_code",
+                    "difference_kind": "failing_exit_to_zero",
+                    "expected_sha256": None,
+                    "support": {
+                        "exit_code": experiments[support_id]["exit_code"],
+                        "observed_sha256": _fixture_json_sha256(
+                            experiments[support_id]["exit_code"]
+                        ),
+                        "stdout_sha256": "f" * 64,
+                        "stderr_sha256": "1" * 64,
                     },
-                    "adversarial_effect": "limits_scope",
-                    "relationship_sha256": _fixture_json_sha256(
-                        {
-                            "controlled_variable": relationship["controlled_variable"],
-                            "expected_difference": relationship["expected_difference"],
-                            "mechanism_symbols": relationship["mechanism_symbols"],
-                        }
-                    ),
-                }
+                    "control": {
+                        "exit_code": experiments[control_id]["exit_code"],
+                        "observed_sha256": _fixture_json_sha256(
+                            experiments[control_id]["exit_code"]
+                        ),
+                        "stdout_sha256": "f" * 64,
+                        "stderr_sha256": "1" * 64,
+                    },
+                },
+                "adversarial_effect": "limits_scope",
+                "relationship_sha256": _fixture_json_sha256(
+                    {
+                        "controlled_variable": relationship["controlled_variable"],
+                        "expected_difference": relationship["expected_difference"],
+                        "mechanism_symbols": relationship["mechanism_symbols"],
+                    }
+                ),
+            }
             control_receipt["control_verification_id"] = (
-                "control_verification:"
-                + _fixture_json_sha256(control_receipt)
+                "control_verification:" + _fixture_json_sha256(control_receipt)
             )
             controls.append(control_receipt)
             support_selection = selections[f"{hypothesis_id}:{support_id}"]
             observable = control_receipt["observable_difference"]
             failure_path = {
                 "verification_method": "runner_controlled_failure_path_v1",
-                "path_name": (
-                    f"{support_selection['test_path']}::{support_selection['selector']}"
-                ),
+                "path_name": (f"{support_selection['test_path']}::{support_selection['selector']}"),
                 "consumer_identity": {
                     "kind": "evidence_selector",
                     "entrypoint": (
-                        f"{support_selection['test_path']}::"
-                        f"{support_selection['selector']}"
+                        f"{support_selection['test_path']}::{support_selection['selector']}"
                     ),
                 },
                 "independence_key": _fixture_json_sha256(
                     {
                         "kind": "evidence_selector",
                         "entrypoint": (
-                            f"{support_selection['test_path']}::"
-                            f"{support_selection['selector']}"
+                            f"{support_selection['test_path']}::{support_selection['selector']}"
                         ),
                     }
                 ),
@@ -464,9 +451,7 @@ def _fixture_causal_control_receipts(
                     **observable["support"],
                 },
             }
-            failure_path["failure_path_id"] = (
-                "failure_path:" + _fixture_json_sha256(failure_path)
-            )
+            failure_path["failure_path_id"] = "failure_path:" + _fixture_json_sha256(failure_path)
             failure_paths.append(failure_path)
     return list(selections.values()), controls, failure_paths
 
@@ -550,8 +535,8 @@ def _fixture_mechanism_evidence(dossier: dict, controls: list[dict]) -> list[dic
             "mechanism_link": mechanism_link,
             "adversarial_effect": "limits_scope",
         }
-        controlled["mechanism_evidence_id"] = (
-            "mechanism_evidence:" + _fixture_json_sha256(controlled)
+        controlled["mechanism_evidence_id"] = "mechanism_evidence:" + _fixture_json_sha256(
+            controlled
         )
         evidence.append(controlled)
     return evidence
@@ -561,12 +546,8 @@ def _fixture_falsification_interventions(
     dossier: dict,
     experiment_receipts: list[dict],
 ) -> list[dict]:
-    replay_by_id = {
-        receipt["experiment_id"]: receipt for receipt in experiment_receipts
-    }
-    experiments = {
-        experiment["experiment_id"]: experiment for experiment in dossier["experiments"]
-    }
+    replay_by_id = {receipt["experiment_id"]: receipt for receipt in experiment_receipts}
+    experiments = {experiment["experiment_id"]: experiment for experiment in dossier["experiments"]}
     interventions: list[dict] = []
     for hypothesis in dossier["root_cause_hypotheses"]:
         hypothesis_id = hypothesis["hypothesis_id"]
@@ -579,11 +560,7 @@ def _fixture_falsification_interventions(
             relationship = challenge["control_relationship"]
             baseline_replay = replay_by_id[baseline_id]
             challenge_replay = replay_by_id[challenge_id]
-            keyword = (
-                "alternative_removed"
-                if attempt["outcome"] == "survived"
-                else "well_formed"
-            )
+            keyword = "alternative_removed" if attempt["outcome"] == "survived" else "well_formed"
             argument = {
                 "slot": f"keyword:{keyword}",
                 "expression": "True",
@@ -654,8 +631,8 @@ def _verified_receipt(dossier: dict) -> dict:
         "source_workspace": "C:/runs/research-workspace",
         "sanitized_environment_keys": ["CI"],
     }
-    test_selections, control_verifications, failure_paths = (
-        _fixture_causal_control_receipts(dossier)
+    test_selections, control_verifications, failure_paths = _fixture_causal_control_receipts(
+        dossier
     )
     receipt = {
         "verification_method": "runner_artifact_binding_v1",
@@ -773,9 +750,7 @@ def _verified_receipt(dossier: dict) -> dict:
                 "counterevidence_refs": hypothesis["counterevidence"],
                 "mechanism_symbols": hypothesis.get("mechanism_symbols", []),
                 "disposition": hypothesis.get("disposition"),
-                "disposition_evidence_refs": hypothesis.get(
-                    "disposition_evidence", []
-                ),
+                "disposition_evidence_refs": hypothesis.get("disposition_evidence", []),
                 "control_links": _fixture_control_links(dossier, hypothesis),
             }
             for hypothesis in dossier["root_cause_hypotheses"]
@@ -792,9 +767,7 @@ def _verified_receipt(dossier: dict) -> dict:
                 "stream_sha256": "1" * 64,
             }
         ],
-        "mechanism_evidence": _fixture_mechanism_evidence(
-            dossier, control_verifications
-        ),
+        "mechanism_evidence": _fixture_mechanism_evidence(dossier, control_verifications),
         "outcome_oracles": [],
         "verified_mechanism": None,
         "verified_mechanism_sha256": None,
@@ -822,12 +795,9 @@ def _verified_receipt(dossier: dict) -> dict:
         (item["hypothesis_id"], item["attempt_id"]): item
         for item in receipt["falsification_interventions"]
     }
-    experiments = {
-        experiment["experiment_id"]: experiment for experiment in dossier["experiments"]
-    }
+    experiments = {experiment["experiment_id"]: experiment for experiment in dossier["experiments"]}
     replay_by_id = {
-        experiment["experiment_id"]: experiment
-        for experiment in receipt["experiments"]
+        experiment["experiment_id"]: experiment for experiment in receipt["experiments"]
     }
     mechanism_by_experiment: dict[str, list[str]] = {}
     for evidence in receipt["mechanism_evidence"]:
@@ -849,29 +819,17 @@ def _verified_receipt(dossier: dict) -> dict:
                 "challenge_experiment_id": attempt["challenge_experiment_id"],
                 "disproof_condition": attempt["disproof_condition"],
                 "outcome": attempt["outcome"],
-                "scenario_kind": experiments[attempt["challenge_experiment_id"]][
-                    "scenario_kind"
-                ],
+                "scenario_kind": experiments[attempt["challenge_experiment_id"]]["scenario_kind"],
                 "command": experiments[attempt["challenge_experiment_id"]]["command"],
-                "declared_result": experiments[attempt["challenge_experiment_id"]][
-                    "result"
+                "declared_result": experiments[attempt["challenge_experiment_id"]]["result"],
+                "observable_assertion": experiments[attempt["challenge_experiment_id"]][
+                    "observable_assertion"
                 ],
-                "observable_assertion": experiments[
-                    attempt["challenge_experiment_id"]
-                ]["observable_assertion"],
-                "exit_code": replay_by_id[attempt["challenge_experiment_id"]][
-                    "exit_code"
-                ],
-                "stdout_sha256": replay_by_id[attempt["challenge_experiment_id"]][
-                    "stdout_sha256"
-                ],
-                "stderr_sha256": replay_by_id[attempt["challenge_experiment_id"]][
-                    "stderr_sha256"
-                ],
+                "exit_code": replay_by_id[attempt["challenge_experiment_id"]]["exit_code"],
+                "stdout_sha256": replay_by_id[attempt["challenge_experiment_id"]]["stdout_sha256"],
+                "stderr_sha256": replay_by_id[attempt["challenge_experiment_id"]]["stderr_sha256"],
                 "mechanism_evidence_ids": sorted(
-                    mechanism_by_experiment.get(
-                        attempt["challenge_experiment_id"], []
-                    )
+                    mechanism_by_experiment.get(attempt["challenge_experiment_id"], [])
                 ),
                 "intervention_receipt_id": interventions_by_attempt[
                     (hypothesis["hypothesis_id"], attempt["attempt_id"])
@@ -921,14 +879,12 @@ def _verified_receipt(dossier: dict) -> dict:
                             "verification_method"
                         ],
                         "mechanism_symbols": sorted(value["mechanism_symbols"]),
-                        "slot": value["controlled_input_difference"]["difference"][
-                            "slot"
-                        ],
+                        "slot": value["controlled_input_difference"]["difference"]["slot"],
                         **(
                             {
-                                "mechanism_symbol": value[
-                                    "controlled_input_difference"
-                                ]["difference"]["mechanism_symbol"]
+                                "mechanism_symbol": value["controlled_input_difference"][
+                                    "difference"
+                                ]["mechanism_symbol"]
                             }
                             if "mechanism_symbol"
                             in value["controlled_input_difference"]["difference"]
@@ -940,17 +896,14 @@ def _verified_receipt(dossier: dict) -> dict:
                         "verification_method"
                     ],
                     "mechanism_symbols": sorted(value["mechanism_symbols"]),
-                    "slot": value["controlled_input_difference"]["difference"][
-                        "slot"
-                    ],
+                    "slot": value["controlled_input_difference"]["difference"]["slot"],
                     **(
                         {
-                            "mechanism_symbol": value[
-                                "controlled_input_difference"
-                            ]["difference"]["mechanism_symbol"]
+                            "mechanism_symbol": value["controlled_input_difference"]["difference"][
+                                "mechanism_symbol"
+                            ]
                         }
-                        if "mechanism_symbol"
-                        in value["controlled_input_difference"]["difference"]
+                        if "mechanism_symbol" in value["controlled_input_difference"]["difference"]
                         else {}
                     ),
                 }
@@ -971,9 +924,7 @@ def _verified_receipt(dossier: dict) -> dict:
         {"symbol": symbol, "path": path}
         for symbol, path in receipt["verified_mechanism"]["code_paths"]
     ]
-    receipt["verified_mechanism_sha256"] = _fixture_json_sha256(
-        receipt["verified_mechanism"]
-    )
+    receipt["verified_mechanism_sha256"] = _fixture_json_sha256(receipt["verified_mechanism"])
     receipt["verified_mechanism_provenance_sha256"] = _fixture_json_sha256(
         receipt["verified_mechanism_provenance"]
     )
@@ -1004,9 +955,7 @@ def _verified_receipt(dossier: dict) -> dict:
             "argv": support_replay["executed_argv"],
             "command_authorization": {
                 "authorization_kind": "standard_test_or_research_harness",
-                "executed_argv_sha256": _fixture_json_sha256(
-                    support_replay["executed_argv"]
-                ),
+                "executed_argv_sha256": _fixture_json_sha256(support_replay["executed_argv"]),
                 "shell": False,
                 "workspace_confined": True,
             },
@@ -1060,17 +1009,13 @@ def _verified_receipt(dossier: dict) -> dict:
             "failure_kind": "bound_semantic_assertion_failed",
             "matched_assertion_ast_sha256": ["d" * 64],
         },
-        "postconditions": [
-            {"type": "command_exit_code", "command_index": 0, "equals": 0}
-        ],
+        "postconditions": [{"type": "command_exit_code", "command_index": 0, "equals": 0}],
     }
     positive_contract["positive_outcome_contract_id"] = (
         "positive_outcome_contract:" + _fixture_json_sha256(positive_contract)
     )
     oracle["positive_outcome_contracts"] = [positive_contract]
-    oracle["outcome_oracle_id"] = "outcome_oracle:" + _fixture_json_sha256(
-        oracle
-    )
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _fixture_json_sha256(oracle)
     receipt["outcome_oracles"] = [oracle]
     receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
     return receipt
@@ -1108,10 +1053,7 @@ def _valid_dossier(**overrides: object) -> dict:
                 "experiment_id": "exp-support",
                 "scenario_kind": "original_replay",
                 "addresses_atom_ids": ["atom:test"],
-                "command": (
-                    "pdm run pytest -q "
-                    "tests/test_parser.py::test_reported_failure"
-                ),
+                "command": ("pdm run pytest -q tests/test_parser.py::test_reported_failure"),
                 "result": "Failed with the reported validation error",
                 "outcome": "supports",
                 "exit_code": 1,
@@ -1132,9 +1074,7 @@ def _valid_dossier(**overrides: object) -> dict:
                     "expected_difference": "The guarded control succeeds without the symptom.",
                 },
                 "addresses_atom_ids": ["atom:test"],
-                "command": (
-                    "pdm run pytest -q tests/test_parser.py::test_valid_control"
-                ),
+                "command": ("pdm run pytest -q tests/test_parser.py::test_valid_control"),
                 "result": "The guarded control path succeeds",
                 "outcome": "refutes",
                 "exit_code": 0,
@@ -1158,8 +1098,7 @@ def _valid_dossier(**overrides: object) -> dict:
                 },
                 "addresses_atom_ids": ["atom:test"],
                 "command": (
-                    "pdm run pytest -q "
-                    "tests/test_parser.py::test_failure_with_alternative_removed"
+                    "pdm run pytest -q tests/test_parser.py::test_failure_with_alternative_removed"
                 ),
                 "result": "The reported validation failure remains",
                 "outcome": "supports",
@@ -1182,8 +1121,7 @@ def _valid_dossier(**overrides: object) -> dict:
                 },
                 "addresses_atom_ids": ["atom:test"],
                 "command": (
-                    "pdm run pytest -q "
-                    "tests/test_parser.py::test_input_is_well_formed_before_parse"
+                    "pdm run pytest -q tests/test_parser.py::test_input_is_well_formed_before_parse"
                 ),
                 "result": "The retained input is well formed before parser validation",
                 "outcome": "refutes",
@@ -1270,8 +1208,7 @@ def _valid_dossier(**overrides: object) -> dict:
                             "atom_id": "atom:test",
                             "text": "failure",
                             "command": (
-                                "pdm run pytest -q "
-                                "tests/test_parser.py::test_reported_failure"
+                                "pdm run pytest -q tests/test_parser.py::test_reported_failure"
                             ),
                             "exit_code": 1,
                             "evidence_role": "observation",
@@ -1284,10 +1221,7 @@ def _valid_dossier(**overrides: object) -> dict:
                 "atom_snapshot": {
                     "atom_id": "atom:test",
                     "text": "failure",
-                    "command": (
-                        "pdm run pytest -q "
-                        "tests/test_parser.py::test_reported_failure"
-                    ),
+                    "command": ("pdm run pytest -q tests/test_parser.py::test_reported_failure"),
                     "exit_code": 1,
                     "evidence_role": "observation",
                     "origin_stage": "runtime",
@@ -1328,8 +1262,7 @@ def _refresh_receipt_hashes(dossier: dict) -> None:
                 contract["source_case_bindings"] = [
                     binding
                     for binding in receipt.get("atom_bindings", [])
-                    if binding.get("experiment_id")
-                    == contract.get("research_experiment_id")
+                    if binding.get("experiment_id") == contract.get("research_experiment_id")
                 ]
             contract["positive_outcome_contract_id"] = (
                 "positive_outcome_contract:"
@@ -1342,11 +1275,7 @@ def _refresh_receipt_hashes(dossier: dict) -> None:
                 )
             )
         oracle["outcome_oracle_id"] = "outcome_oracle:" + _fixture_json_sha256(
-            {
-                key: value
-                for key, value in oracle.items()
-                if key != "outcome_oracle_id"
-            }
+            {key: value for key, value in oracle.items() if key != "outcome_oracle_id"}
         )
     assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
     receipt["assignment_sha256"] = assignment["assignment_sha256"]
@@ -1357,31 +1286,19 @@ def _refresh_receipt_hashes(dossier: dict) -> None:
 def _wrong_value_control_dossier() -> dict:
     dossier = _valid_dossier()
     dossier["root_cause_hypotheses"] = dossier["root_cause_hypotheses"][:1]
-    declared = {
-        experiment["experiment_id"]: experiment
-        for experiment in dossier["experiments"]
-    }
+    declared = {experiment["experiment_id"]: experiment for experiment in dossier["experiments"]}
     receipt = dossier["evidence_verification"]
     receipt["hypothesis_refs"] = receipt["hypothesis_refs"][:1]
     receipt["test_selections"] = [
-        value
-        for value in receipt["test_selections"]
-        if value.get("hypothesis_id") == "h1"
+        value for value in receipt["test_selections"] if value.get("hypothesis_id") == "h1"
     ]
     receipt["control_verifications"] = [
-        value
-        for value in receipt["control_verifications"]
-        if value.get("hypothesis_id") == "h1"
+        value for value in receipt["control_verifications"] if value.get("hypothesis_id") == "h1"
     ]
     receipt["failure_paths"] = [
-        value
-        for value in receipt["failure_paths"]
-        if value.get("hypothesis_id") == "h1"
+        value for value in receipt["failure_paths"] if value.get("hypothesis_id") == "h1"
     ]
-    replay = {
-        experiment["experiment_id"]: experiment
-        for experiment in receipt["experiments"]
-    }
+    replay = {experiment["experiment_id"]: experiment for experiment in receipt["experiments"]}
     for experiment_id, expected, stdout_hash in (
         ("exp-support", "bad", "2" * 64),
         ("exp-refute", "correct", "3" * 64),
@@ -1419,15 +1336,8 @@ def _wrong_value_control_dossier() -> dict:
             "stderr_sha256": replay["exp-refute"]["stderr_sha256"],
         },
     }
-    control["control_verification_id"] = (
-        "control_verification:"
-        + _fixture_json_sha256(
-            {
-                key: value
-                for key, value in control.items()
-                if key != "control_verification_id"
-            }
-        )
+    control["control_verification_id"] = "control_verification:" + _fixture_json_sha256(
+        {key: value for key, value in control.items() if key != "control_verification_id"}
     )
     failure_path = receipt["failure_paths"][0]
     failure_path["control_verification_id"] = control["control_verification_id"]
@@ -1436,15 +1346,8 @@ def _wrong_value_control_dossier() -> dict:
         "difference_kind": "wrong_value_corrected",
         **control["observable_difference"]["support"],
     }
-    failure_path["failure_path_id"] = (
-        "failure_path:"
-        + _fixture_json_sha256(
-            {
-                key: value
-                for key, value in failure_path.items()
-                if key != "failure_path_id"
-            }
-        )
+    failure_path["failure_path_id"] = "failure_path:" + _fixture_json_sha256(
+        {key: value for key, value in failure_path.items() if key != "failure_path_id"}
     )
     return dossier
 
@@ -1452,11 +1355,14 @@ def _wrong_value_control_dossier() -> dict:
 def test_stage_contract_accepts_runner_bound_wrong_value_correction() -> None:
     dossier = _wrong_value_control_dossier()
 
-    assert contracts._validate_causal_control_verification(
-        dossier,
-        dossier["evidence_verification"],
-        pid=dossier["problem_id"],
-    ) == []
+    assert (
+        contracts._validate_causal_control_verification(
+            dossier,
+            dossier["evidence_verification"],
+            pid=dossier["problem_id"],
+        )
+        == []
+    )
 
 
 @pytest.mark.parametrize(
@@ -1475,15 +1381,8 @@ def test_stage_contract_rejects_unbound_wrong_value_correction(tamper: str) -> N
         control["observable_difference"]["control_expected_sha256"] = "4" * 64
     else:
         receipt["experiments"][1]["assertion_passed"] = False
-    control["control_verification_id"] = (
-        "control_verification:"
-        + _fixture_json_sha256(
-            {
-                key: value
-                for key, value in control.items()
-                if key != "control_verification_id"
-            }
-        )
+    control["control_verification_id"] = "control_verification:" + _fixture_json_sha256(
+        {key: value for key, value in control.items() if key != "control_verification_id"}
     )
 
     errors = contracts._validate_causal_control_verification(
@@ -1655,9 +1554,7 @@ def test_research_proof_rejects_missing_receipt_self_hash() -> None:
 
 def test_research_proof_rejects_incomplete_workspace_overlay() -> None:
     dossier = _valid_dossier()
-    del dossier["evidence_verification"]["workspace_overlay"][
-        "baseline_manifest_sha256"
-    ]
+    del dossier["evidence_verification"]["workspace_overlay"]["baseline_manifest_sha256"]
     _refresh_receipt_hashes(dossier)
 
     with pytest.raises(ValueError, match="workspace_overlay_baseline_manifest"):
@@ -1693,9 +1590,7 @@ def test_research_proof_rejects_incomplete_experiment_receipt() -> None:
 
 def test_research_proof_rejects_model_overlay_as_verified_causal_trace() -> None:
     dossier = _valid_dossier()
-    dossier["experiments"][0]["command"] = (
-        "pytest -q .usertest_research/test_fake_trace.py"
-    )
+    dossier["experiments"][0]["command"] = "pytest -q .usertest_research/test_fake_trace.py"
     receipt = dossier["evidence_verification"]
     receipt["experiments"][0]["command"] = dossier["experiments"][0]["command"]
     receipt["experiments"][0]["executed_argv"] = [
@@ -1947,6 +1842,243 @@ def test_research_readiness_allows_sufficient_static_trace_with_exact_symbols() 
     assert reasons == []
 
 
+def test_static_trace_output_contract_accepts_honest_fidelity_mapping() -> None:
+    dossier = _valid_dossier(
+        research_method="static_trace",
+        reproduction_status="reproduction_failed",
+        research_status="insufficient_evidence",
+        root_cause_confidence=0.7,
+    )
+    support = dossier["experiments"][0]
+    support["scenario_kind"] = "static_trace"
+    support["platform_requirement"] = "windows"
+    support["static_trace"] = {
+        "deterministic": True,
+        "environment_dependencies": [],
+        "code_path": [
+            {
+                "path": "src/parser.py",
+                "symbol": "parser.parse_record",
+                "observation": "The inspected parser branch deterministically omits validation.",
+            }
+        ],
+    }
+    support["fidelity_mapping"] = {
+        "original_condition": "The originating Windows run parsed the retained record.",
+        "retained_differences": "The static trace evaluates the exact branch without the runtime.",
+        "why_mechanism_equivalent": (
+            "The same inspected symbol and input branch determine the result."
+        ),
+    }
+
+    assert contracts.research_dossier_output_contract_errors(dossier) == []
+
+
+def _historical_rich_partial_output_dossier() -> dict:
+    """Model output that investigated one facet but cannot yet explain the whole case."""
+
+    dossier = _valid_dossier(
+        reproduction_status="partial",
+        research_status="insufficient_evidence",
+        root_cause_confidence=0.45,
+        broader_class_assessment="unknown",
+        material_unknowns=[
+            {
+                "unknown": "The second source observation has not been reproduced",
+                "affects": ["root_cause", "change_surface"],
+                "evidence_needed": "Recover and replay the missing runtime artifact",
+            }
+        ],
+        evidence_boundaries=[
+            "The retained experiment bounds one observed facet but does not establish a cause"
+        ],
+    )
+    dossier["evidence_assignment"]["expected_atom_ids"] = [
+        "atom:test",
+        "atom:unexamined",
+    ]
+    experiment = dict(dossier["experiments"][0])
+    experiment["outcome"] = "inconclusive"
+    dossier["experiments"] = [experiment]
+    dossier["root_cause_hypotheses"] = [
+        {
+            "hypothesis_id": "h-provisional",
+            "statement": "The inspected parser branch may contribute to the observed facet",
+            "supporting_evidence": ["artifact:source"],
+            "counterevidence": [],
+            "falsification_attempts": [],
+            "mechanism_symbols": ["parser.parse_record"],
+            "disposition": "primary",
+            "disposition_evidence": ["artifact:source"],
+        }
+    ]
+    return dossier
+
+
+def test_historical_rich_partial_output_preserves_verified_subset_without_false_coverage() -> None:
+    dossier = _historical_rich_partial_output_dossier()
+
+    errors = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+
+    assert errors == []
+    assert dossier["experiments"][0]["addresses_atom_ids"] == ["atom:test"]
+    assert dossier["evidence_assignment"]["expected_atom_ids"] == [
+        "atom:test",
+        "atom:unexamined",
+    ]
+
+
+def test_advancing_research_still_requires_complete_atom_coverage_and_support() -> None:
+    dossier = _historical_rich_partial_output_dossier()
+    dossier["research_status"] = "evidence_sufficient"
+    dossier["reproduction_status"] = "reproduced"
+
+    errors = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+
+    assert any("experiment_atom_coverage_mismatch" in error for error in errors)
+    assert any("primary_hypothesis_missing_supporting_experiment" in error for error in errors)
+
+
+def test_partial_research_relaxation_keeps_claim_integrity_checks() -> None:
+    dossier = _historical_rich_partial_output_dossier()
+    dossier["experiments"][0]["artifact_refs"].append("artifact:missing")
+    dossier["root_cause_hypotheses"][0]["mechanism_symbols"] = ["parser.not_inspected"]
+
+    errors = contracts.research_dossier_output_contract_errors(
+        dossier,
+        evidence_assignment=dossier["evidence_assignment"],
+    )
+
+    assert any("unresolved_experiment_artifact_ref" in error for error in errors)
+    assert any("hypothesis_symbol_uninspected" in error for error in errors)
+
+
+def test_historical_static_trace_shape_reports_exact_retryable_contract_errors() -> None:
+    dossier = _valid_dossier(
+        research_method="static_trace",
+        reproduction_status="partial",
+        research_status="insufficient_evidence",
+        root_cause_confidence=0.7,
+    )
+    support = dossier["experiments"][0]
+    support["scenario_kind"] = "static_trace"
+    support["platform_requirement"] = "Windows retained origin artifact"
+    support["fidelity_mapping"] = {
+        "original_condition": "The originating Windows run used the retained artifact.",
+        "retained_differences": "The command reads the retained artifact instead.",
+        "why_mechanism_equivalent": "The exact inspected producer emitted that artifact.",
+    }
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert any("invalid_experiment_platform_requirement" in error for error in errors)
+    assert any("static_trace_contract_missing" in error for error in errors)
+    assert not any("unexpected_fidelity_mapping" in error for error in errors)
+
+
+def test_model_output_contract_does_not_require_runner_owned_fields() -> None:
+    dossier = _valid_dossier()
+    for field in (
+        "research_schema_version",
+        "repo_revision",
+        "diff_classification",
+        "evidence_assignment",
+        "evidence_verification",
+    ):
+        dossier.pop(field)
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert errors == []
+
+
+def test_model_output_contract_still_requires_exact_model_owned_identity() -> None:
+    dossier = _valid_dossier()
+    dossier.pop("case_id")
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert any("missing_required_field" in error and "case_id" in error for error in errors)
+    assert any("invalid_case_id" in error for error in errors)
+
+
+def test_disproved_falsification_can_refute_alternative_without_relabeling_experiment() -> None:
+    dossier = _valid_dossier()
+    alternative_challenge = next(
+        experiment
+        for experiment in dossier["experiments"]
+        if experiment["experiment_id"] == "exp-alt-refute"
+    )
+    alternative_challenge["outcome"] = "supports"
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert not any("refuted_hypothesis_missing_falsification" in error for error in errors)
+
+
+def _research_attempt_fixture(attempt_number: int) -> dict[str, object]:
+    attempted_dossier: dict[str, object] = {"attempt": attempt_number}
+    attempt: dict[str, object] = {
+        "attempt_number": attempt_number,
+        "outcome": "output_contract_invalid",
+        "run_dir": f"C:/retained/run-{attempt_number}",
+        "report_path": f"C:/retained/run-{attempt_number}/report.json",
+        "validation_errors": ["missing field"],
+        "attempted_dossier": attempted_dossier,
+        "attempted_dossier_sha256": _fixture_json_sha256(attempted_dossier),
+        "attempt_artifacts": [
+            {
+                "kind": kind,
+                "path": f"C:/retained/run-{attempt_number}/{filename}",
+                "exists": False,
+                "sha256": None,
+                "size_bytes": None,
+            }
+            for kind, filename in (
+                ("report", "report.json"),
+                ("workspace_ref", "workspace_ref.json"),
+                ("target_ref", "target_ref.json"),
+                ("normalized_events", "normalized_events.jsonl"),
+            )
+        ],
+    }
+    attempt["attempt_sha256"] = contracts.research_attempt_sha256(attempt)
+    return attempt
+
+
+def test_research_attempt_history_is_bounded_and_content_addressed() -> None:
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = [
+        _research_attempt_fixture(1),
+        _research_attempt_fixture(2),
+        _research_attempt_fixture(3),
+    ]
+    _refresh_receipt_hashes(dossier)
+
+    with pytest.raises(ValueError, match="too_many_research_attempts"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+    dossier["research_attempts"] = [
+        _research_attempt_fixture(1),
+        _research_attempt_fixture(3),
+    ]
+    _refresh_receipt_hashes(dossier)
+    with pytest.raises(ValueError, match="nonsequential_research_attempts"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+    dossier["research_attempts"] = [_research_attempt_fixture(1)]
+    dossier["research_attempts"][0]["validation_errors"] = ["rewritten diagnostic"]
+    _refresh_receipt_hashes(dossier)
+    with pytest.raises(ValueError, match="research_attempt_hash_mismatch"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
 def test_source_only_static_trace_without_post_change_oracle_stays_insufficient() -> None:
     dossier = _valid_dossier(
         research_method="static_trace",
@@ -2097,27 +2229,21 @@ def _valid_change_plan(**overrides: object) -> dict:
         "change_plan_status": "planned",
         "related_change_plan_ids": [],
         "repo_revision": "abc123",
-        "change_targets": [
-            {"path": "README.md", "symbols": ["Quickstart"], "change": "Add steps"}
-        ],
+        "change_targets": [{"path": "README.md", "symbols": ["Quickstart"], "change": "Add steps"}],
         "verification_commands": ["pdm run pytest -q"],
         "outcome_verification_roles": {
             "original_scenario": {
                 "description": "Replay the exact scenario.",
                 "research_experiment_id": "exp-1",
                 "commands": ["check README"],
-                "predicates": [
-                    {"type": "command_exit_code", "command_index": 0, "equals": 0}
-                ],
+                "predicates": [{"type": "command_exit_code", "command_index": 0, "equals": 0}],
             },
             "live": None,
             "mitigation_effect": None,
             "recurrence": {
                 "description": "Check fresh recurrence evidence.",
                 "commands": ["check README recurrence"],
-                "predicates": [
-                    {"type": "command_exit_code", "command_index": 0, "equals": 0}
-                ],
+                "predicates": [{"type": "command_exit_code", "command_index": 0, "equals": 0}],
             },
         },
         "before_after_reproduction": {

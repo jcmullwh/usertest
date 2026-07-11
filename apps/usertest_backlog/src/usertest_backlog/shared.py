@@ -182,9 +182,13 @@ try:
         run_repro_research_stage,
     )
     from backlog_miner.pipeline import (
+        ModelInvocationTracker,
         PipelinePromptManifest,
+        attach_stage_model_invocation_contract,
         load_pipeline_prompt_manifest,
+        merge_stage_model_invocation_contract,
         run_stage_prompt_json,
+        verify_stage_model_invocation_contract,
     )
     from backlog_miner.research_evidence import verify_persisted_research_evidence
 except ModuleNotFoundError as exc:

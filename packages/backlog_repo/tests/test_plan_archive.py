@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
 from backlog_repo.outcomes import extract_outcome_markdown, upsert_outcome_markdown
 from backlog_repo.plan_index import (
+    archive_integrity_unknown_plan_ticket_file,
+    archive_plan_ticket_file,
     dedupe_actioned_plan_ticket_files,
     dedupe_queued_plan_ticket_files_when_actioned_exists,
     reconcile_missing_plan_atoms,
@@ -185,9 +189,7 @@ def test_actioned_dedupe_preserves_unknown_nul_copy_and_archives_only_generated(
     assert not readable.exists()
     assert corrupt.read_bytes() == original_corrupt_bytes
     archived_matches = list(
-        (owner_root / ".agents" / "plans" / "6 - archived").glob(
-            f"*_{fingerprint}_readable*.md"
-        )
+        (owner_root / ".agents" / "plans" / "6 - archived").glob(f"*_{fingerprint}_readable*.md")
     )
     assert len(archived_matches) == 1
     archived = archived_matches[0]
@@ -243,9 +245,7 @@ def test_actioned_dedupe_refuses_ambiguous_idea_duplicates(tmp_path: Path) -> No
     owner_root = tmp_path / "repo"
     fingerprint = "4444444444444444"
     complete = owner_root / ".agents" / "plans" / "5 - complete"
-    paths = [
-        complete / f"2026070{day}_{fingerprint}_idea-{day}.md" for day in (8, 9)
-    ]
+    paths = [complete / f"2026070{day}_{fingerprint}_idea-{day}.md" for day in (8, 9)]
     for path in paths:
         _write_plan(path, fingerprint, "IDEA-005 Preserve this plan")
         path.write_text(
@@ -271,8 +271,7 @@ def test_actioned_dedupe_preflights_unknown_ambiguity_before_any_write(
 
     repairable_fingerprint = "5555555555555555"
     generated_paths = [
-        complete / f"2026070{day}_{repairable_fingerprint}_generated-{day}.md"
-        for day in (8, 9)
+        complete / f"2026070{day}_{repairable_fingerprint}_generated-{day}.md" for day in (8, 9)
     ]
     for path in generated_paths:
         _write_generated_plan(path, repairable_fingerprint, "Generated duplicate")
@@ -294,16 +293,251 @@ def test_actioned_dedupe_preflights_unknown_ambiguity_before_any_write(
     assert not (owner_root / ".agents" / "plans" / "6 - archived").exists()
 
 
-def test_archive_preserves_undecodable_historical_bytes(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'"""Identity AST transform test cases"""\n\nfrom mypy import build\n',
+        b'{"batch_id":"unrelated"}\n{"status":"failed"}\n',
+        b"# plausible prefix\n\x00unrelated batch output\n",
+        b"# invalid utf8\n\xff\xfe historical bytes\n",
+    ],
+    ids=["unrelated-mypy-python", "json-prefix", "nul", "invalid-utf8"],
+)
+def test_explicit_integrity_archive_preserves_untrusted_bytes(
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
     owner_root = tmp_path / "repo"
-    fingerprint = "fedcba9876543210"
+    fingerprint = "1010101010101010"
     source = (
         owner_root
         / ".agents"
         / "plans"
-        / "2 - ready"
-        / f"20260709_{fingerprint}_corrupt.md"
+        / "5 - complete"
+        / f"20260210_{fingerprint}_semantic-corruption.md"
     )
+    source.parent.mkdir(parents=True)
+    source.write_bytes(payload)
+    source_sha256 = hashlib.sha256(payload).hexdigest()
+
+    archived = archive_integrity_unknown_plan_ticket_file(
+        owner_root=owner_root,
+        path=source,
+        reason="Historical plan path contains unrelated content",
+        expected_source_sha256=source_sha256,
+    )
+
+    assert not source.exists()
+    assert archived.read_bytes() == payload
+    sidecar = archived.with_suffix(f"{archived.suffix}.outcome.json")
+    outcome = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert outcome["state"] == "integrity_unknown"
+    assert outcome["outcome_scope"] == "plan_copy"
+    assert outcome["intended_disposition"] == "unverified"
+    assert outcome["integrity_reason"] == "Historical plan path contains unrelated content"
+    assert outcome["previous_path"] == str(source.resolve())
+    assert outcome["original_sha256"] == source_sha256
+    assert outcome["archive_sha256"] == source_sha256
+
+    index = scan_plan_ticket_index(owner_root=owner_root)
+    assert index[fingerprint]["status"] == "integrity_unknown"
+    assert index[fingerprint]["paths"] == []
+    assert index[fingerprint]["integrity_unknown_paths"] == [str(archived)]
+
+
+def test_semantic_integrity_archive_cannot_promote_atom_or_displace_canonical_plan(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / "repo"
+    fingerprint = "2020202020202020"
+    atom_id = "usertest/20260709T000000Z/codex/0:suggested_change:9"
+    canonical = (
+        owner_root / ".agents" / "plans" / "5 - complete" / f"20260211_{fingerprint}_canonical.md"
+    )
+    corrupt = canonical.with_name(f"20260210_{fingerprint}_corrupt.md")
+    _write_plan(canonical, fingerprint, "Readable canonical plan")
+    corrupt.write_text(
+        f"from __future__ import annotations\n# unrelated `{atom_id}`\n",
+        encoding="utf-8",
+    )
+    corrupt_bytes = corrupt.read_bytes()
+
+    archived = archive_integrity_unknown_plan_ticket_file(
+        owner_root=owner_root,
+        path=corrupt,
+        reason="Valid UTF-8 contains unrelated Python source",
+        expected_source_sha256=hashlib.sha256(corrupt_bytes).hexdigest(),
+        archive_reason="Corrupt duplicate of the retained canonical plan",
+        related_fingerprint=fingerprint,
+        related_case_id="case:archive-test",
+        related_plan_revision_id="plan:archive-test:v1",
+    )
+    assert (
+        archive_integrity_unknown_plan_ticket_file(
+            owner_root=owner_root,
+            path=archived,
+            reason="Valid UTF-8 contains unrelated Python source",
+            expected_source_sha256=hashlib.sha256(corrupt_bytes).hexdigest(),
+            archive_reason="Corrupt duplicate of the retained canonical plan",
+            related_fingerprint=fingerprint,
+            related_case_id="case:archive-test",
+            related_plan_revision_id="plan:archive-test:v1",
+        )
+        == archived
+    )
+    sidecar = archived.with_suffix(f"{archived.suffix}.outcome.json")
+    sidecar_bytes = sidecar.read_bytes()
+    with pytest.raises(ValueError, match="Conflicting integrity archive sidecar"):
+        archive_integrity_unknown_plan_ticket_file(
+            owner_root=owner_root,
+            path=archived,
+            reason="Valid UTF-8 contains unrelated Python source",
+            expected_source_sha256=hashlib.sha256(corrupt_bytes).hexdigest(),
+            archive_reason="Corrupt duplicate of the retained canonical plan",
+            related_fingerprint="2121212121212121",
+            related_case_id="case:archive-test",
+            related_plan_revision_id="plan:archive-test:v1",
+        )
+    assert archived.read_bytes() == corrupt_bytes
+    assert sidecar.read_bytes() == sidecar_bytes
+
+    assert dedupe_actioned_plan_ticket_files(owner_root=owner_root) == 0
+    assert dedupe_actioned_plan_ticket_files(owner_root=owner_root) == 0
+    index = scan_plan_ticket_index(owner_root=owner_root)
+    assert index[fingerprint]["status"] == "actioned"
+    assert index[fingerprint]["paths"] == [str(canonical)]
+    assert index[fingerprint]["integrity_unknown_paths"] == [str(archived)]
+    integrity_record = index[fingerprint]["integrity_unknown_records"][0]
+    assert integrity_record["related_fingerprint"] == fingerprint
+    assert integrity_record["related_case_id"] == "case:archive-test"
+    assert integrity_record["related_plan_revision_id"] == "plan:archive-test:v1"
+
+    atom_actions = {atom_id: {"atom_id": atom_id, "status": "new"}}
+    result = sync_atom_actions_from_plan_folders(
+        atom_actions=atom_actions,
+        owner_roots=[owner_root],
+        generated_at="2026-07-10T00:00:00Z",
+    )
+    assert result["integrity_unknown_ticket_files"] == 1
+    assert atom_actions[atom_id]["status"] == "new"
+    assert "last_plan_seen_at" not in atom_actions[atom_id]
+
+
+def test_integrity_archive_is_idempotent_for_already_archived_copy(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    fingerprint = "3030303030303030"
+    archived = (
+        owner_root / ".agents" / "plans" / "6 - archived" / f"20260210_{fingerprint}_corrupt.md"
+    )
+    archived.parent.mkdir(parents=True)
+    payload = b"from mypy import build\n"
+    archived.write_bytes(payload)
+    payload_sha256 = hashlib.sha256(payload).hexdigest()
+
+    first = archive_integrity_unknown_plan_ticket_file(
+        owner_root=owner_root,
+        path=archived,
+        reason="Unrelated Python source",
+        expected_source_sha256=payload_sha256,
+    )
+    sidecar = first.with_suffix(f"{first.suffix}.outcome.json")
+    first_sidecar_bytes = sidecar.read_bytes()
+
+    second = archive_integrity_unknown_plan_ticket_file(
+        owner_root=owner_root,
+        path=first,
+        reason="Unrelated Python source",
+        expected_source_sha256=payload_sha256,
+    )
+
+    assert first == archived
+    assert second == archived
+    assert archived.read_bytes() == payload
+    assert sidecar.read_bytes() == first_sidecar_bytes
+
+
+def test_integrity_archive_rejects_sha_mismatch_before_mutation(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    fingerprint = "4040404040404040"
+    source = (
+        owner_root / ".agents" / "plans" / "5 - complete" / f"20260210_{fingerprint}_corrupt.md"
+    )
+    source.parent.mkdir(parents=True)
+    source.write_bytes(b"untrusted bytes")
+
+    with pytest.raises(ValueError, match="integrity_archive_source_sha256_mismatch"):
+        archive_integrity_unknown_plan_ticket_file(
+            owner_root=owner_root,
+            path=source,
+            reason="Unrelated content",
+            expected_source_sha256="0" * 64,
+        )
+
+    assert source.read_bytes() == b"untrusted bytes"
+    assert not (owner_root / ".agents" / "plans" / "6 - archived").exists()
+
+
+def test_integrity_archive_rejects_path_outside_plan_root(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    fingerprint = "5050505050505050"
+    outside = tmp_path / f"20260210_{fingerprint}_outside.md"
+    outside.write_bytes(b"outside")
+
+    with pytest.raises(ValueError, match="outside plan root"):
+        archive_integrity_unknown_plan_ticket_file(
+            owner_root=owner_root,
+            path=outside,
+            reason="Unrelated content",
+            expected_source_sha256=hashlib.sha256(b"outside").hexdigest(),
+        )
+
+    assert outside.read_bytes() == b"outside"
+    assert not (owner_root / ".agents").exists()
+
+
+@pytest.mark.parametrize("legacy", [False, True], ids=["current", "legacy"])
+def test_normal_archive_keeps_valid_plan_on_markdown_outcome_path(
+    tmp_path: Path,
+    legacy: bool,
+) -> None:
+    owner_root = tmp_path / "repo"
+    fingerprint = "6060606060606060"
+    source = (
+        owner_root
+        / ".agents"
+        / "plans"
+        / "5 - complete"
+        / f"20260211_{fingerprint}_{'legacy' if legacy else 'current'}.md"
+    )
+    if legacy:
+        source.parent.mkdir(parents=True)
+        source.write_text(
+            f"# Valid legacy plan\n\n- Fingerprint: `{fingerprint}`\n",
+            encoding="utf-8",
+        )
+    else:
+        _write_plan(source, fingerprint, "Valid current plan")
+    before = source.read_bytes()
+
+    archived = archive_plan_ticket_file(
+        owner_root=owner_root,
+        path=source,
+        disposition="duplicate",
+        related_fingerprint=fingerprint,
+        reason="Duplicate valid plan",
+    )
+
+    assert archived.read_bytes() != before
+    assert not archived.with_suffix(f"{archived.suffix}.outcome.json").exists()
+    outcome = extract_outcome_markdown(archived.read_text(encoding="utf-8"))
+    assert outcome is not None
+    assert outcome["state"] == "duplicate"
+
+
+def test_archive_preserves_undecodable_historical_bytes(tmp_path: Path) -> None:
+    owner_root = tmp_path / "repo"
+    fingerprint = "fedcba9876543210"
+    source = owner_root / ".agents" / "plans" / "2 - ready" / f"20260709_{fingerprint}_corrupt.md"
     source.parent.mkdir(parents=True)
     original = b"# corrupt\n\xff\xfe historical"
     source.write_bytes(original)
@@ -320,7 +554,12 @@ def test_archive_preserves_undecodable_historical_bytes(tmp_path: Path) -> None:
 
     assert archived.read_bytes() == original
     sidecar = archived.with_suffix(f"{archived.suffix}.outcome.json")
-    assert '"state": "integrity_unknown"' in sidecar.read_text(encoding="utf-8")
+    outcome = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert outcome["state"] == "integrity_unknown"
+    assert outcome["integrity_reason"] == "plan_copy_invalid_utf8"
+    assert outcome["archive_reason"] == "Historical replacement"
+    assert outcome["intended_disposition"] == "unverified"
+    assert outcome["related_fingerprint"] == "0123456789abcdef"
     index = scan_plan_ticket_index(owner_root=owner_root)
     assert index[fingerprint]["status"] == "integrity_unknown"
     assert index[fingerprint]["paths"] == []
@@ -333,11 +572,7 @@ def test_archive_marks_utf8_nul_corruption_integrity_unknown(tmp_path: Path) -> 
     owner_root = tmp_path / "repo"
     fingerprint = "0badc0de0badc0de"
     source = (
-        owner_root
-        / ".agents"
-        / "plans"
-        / "2 - ready"
-        / f"20260709_{fingerprint}_nul-corrupt.md"
+        owner_root / ".agents" / "plans" / "2 - ready" / f"20260709_{fingerprint}_nul-corrupt.md"
     )
     source.parent.mkdir(parents=True)
     original = b"# valid utf8 prefix\n\x00{unrelated batch json}\n"
@@ -355,16 +590,18 @@ def test_archive_marks_utf8_nul_corruption_integrity_unknown(tmp_path: Path) -> 
 
     assert archived.read_bytes() == original
     sidecar = archived.with_suffix(f"{archived.suffix}.outcome.json")
-    assert '"state": "integrity_unknown"' in sidecar.read_text(encoding="utf-8")
+    outcome = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert outcome["state"] == "integrity_unknown"
+    assert outcome["integrity_reason"] == "plan_copy_contains_nul_byte"
+    assert outcome["archive_reason"] == "Historical replacement"
+    assert outcome["intended_disposition"] == "unverified"
     index = scan_plan_ticket_index(owner_root=owner_root)
     assert index[fingerprint]["status"] == "integrity_unknown"
     assert index[fingerprint]["paths"] == []
     assert index[fingerprint]["buckets"] == []
     assert index[fingerprint]["integrity_unknown_paths"] == [str(archived)]
     assert index[fingerprint]["integrity_unknown_buckets"] == ["6 - archived"]
-    assert index[fingerprint]["integrity_unknown_reasons"] == [
-        "plan_copy_contains_nul_byte"
-    ]
+    assert index[fingerprint]["integrity_unknown_reasons"] == ["plan_copy_contains_nul_byte"]
     assert index[fingerprint]["integrity_unknown_records"] == [
         {
             "path": str(archived),
@@ -374,6 +611,7 @@ def test_archive_marks_utf8_nul_corruption_integrity_unknown(tmp_path: Path) -> 
             "reason": "plan_copy_contains_nul_byte",
             "canonical": False,
             "sidecar_state": "integrity_unknown",
+            "related_fingerprint": "0123456789abcdef",
         }
     ]
     assert "case_ids" not in index[fingerprint]
@@ -417,11 +655,7 @@ def test_active_nul_corrupt_plan_cannot_promote_atom_lifecycle(tmp_path: Path) -
     fingerprint = "0123456789abcdef"
     atom_id = "usertest/20260709T000000Z/codex/0:suggested_change:3"
     corrupt = (
-        owner_root
-        / ".agents"
-        / "plans"
-        / "2 - ready"
-        / f"20260709_{fingerprint}_nul-corrupt.md"
+        owner_root / ".agents" / "plans" / "2 - ready" / f"20260709_{fingerprint}_nul-corrupt.md"
     )
     corrupt.parent.mkdir(parents=True)
     corrupt.write_bytes(f"Evidence: `{atom_id}`\n".encode() + b"\x00corrupt")
@@ -449,11 +683,7 @@ def test_nul_corrupt_plan_cannot_keep_stale_atom_queued(tmp_path: Path) -> None:
     fingerprint = "fedcba9876543210"
     atom_id = "usertest/20260709T000000Z/codex/0:suggested_change:4"
     corrupt = (
-        owner_root
-        / ".agents"
-        / "plans"
-        / "2 - ready"
-        / f"20260709_{fingerprint}_nul-corrupt.md"
+        owner_root / ".agents" / "plans" / "2 - ready" / f"20260709_{fingerprint}_nul-corrupt.md"
     )
     corrupt.parent.mkdir(parents=True)
     corrupt.write_bytes(b"# queued\x00corrupt")

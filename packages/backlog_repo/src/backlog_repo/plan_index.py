@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from datetime import datetime, timezone
@@ -110,6 +111,25 @@ def _plan_integrity_reason(path: Path) -> str | None:
     return None
 
 
+def _outcome_sidecar_path(path: Path) -> Path:
+    """Return the durable outcome sidecar path for a plan copy."""
+
+    return path.with_suffix(f"{path.suffix}.outcome.json")
+
+
+def _read_outcome_sidecar(path: Path) -> dict[str, Any] | None:
+    """Return a validated plan outcome sidecar without trusting plan contents."""
+
+    sidecar = _outcome_sidecar_path(path)
+    if not sidecar.is_file():
+        return None
+    try:
+        raw = json.loads(sidecar.read_text(encoding="utf-8"))
+        return validate_outcome_record(raw) if isinstance(raw, dict) else None
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def _normalize_plan_ticket_file(path: Path) -> Path:
     """Normalize legacy plan filenames/content to fingerprint-only form."""
 
@@ -205,6 +225,246 @@ def _markdown_metadata_value(markdown: str, label: str) -> str | None:
     return value or None
 
 
+def _integrity_sidecar_matches(
+    outcome: dict[str, Any] | None,
+    *,
+    reason: str,
+    archive_reason: str,
+    content_sha256: str,
+    related_fingerprint: str | None,
+    related_case_id: str | None,
+    related_plan_revision_id: str | None,
+) -> bool:
+    """Return whether an existing sidecar is the requested integrity receipt."""
+
+    return bool(
+        isinstance(outcome, dict)
+        and outcome.get("state") == "integrity_unknown"
+        and outcome.get("outcome_scope") == "plan_copy"
+        and outcome.get("intended_disposition") == "unverified"
+        and outcome.get("integrity_reason") == reason
+        and outcome.get("archive_reason") == archive_reason
+        and outcome.get("original_sha256") == content_sha256
+        and outcome.get("archive_sha256") == content_sha256
+        and outcome.get("related_fingerprint") == related_fingerprint
+        and outcome.get("related_case_id") == related_case_id
+        and outcome.get("related_plan_revision_id") == related_plan_revision_id
+    )
+
+
+def archive_integrity_unknown_plan_ticket_file(
+    *,
+    owner_root: Path,
+    path: Path,
+    reason: str,
+    expected_source_sha256: str,
+    archive_reason: str | None = None,
+    related_fingerprint: str | None = None,
+    related_case_id: str | None = None,
+    related_plan_revision_id: str | None = None,
+) -> Path:
+    """Archive an explicitly untrusted plan copy without parsing or rewriting it.
+
+    This is the opt-in path for both byte-level corruption and valid UTF-8 that
+    is known not to be plan Markdown. The caller must bind the operation to the
+    bytes it inspected. The source is removed only after the archive copy and
+    its sidecar have both been written, read back, hashed, and validated.
+    """
+
+    normalized_reason = reason.strip() if isinstance(reason, str) else ""
+    if not normalized_reason:
+        raise ValueError("integrity_archive_reason_required")
+    normalized_archive_reason = (
+        archive_reason.strip()
+        if isinstance(archive_reason, str) and archive_reason.strip()
+        else normalized_reason
+    )
+    normalized_expected_sha = (
+        expected_source_sha256.strip().lower() if isinstance(expected_source_sha256, str) else ""
+    )
+    if re.fullmatch(r"[0-9a-f]{64}", normalized_expected_sha) is None:
+        raise ValueError("integrity_archive_expected_source_sha256_invalid")
+    normalized_related_fingerprint = (
+        related_fingerprint.strip().lower()
+        if isinstance(related_fingerprint, str) and related_fingerprint.strip()
+        else None
+    )
+    if (
+        normalized_related_fingerprint is not None
+        and re.fullmatch(r"[0-9a-f]{16}", normalized_related_fingerprint) is None
+    ):
+        raise ValueError("integrity_archive_related_fingerprint_invalid")
+    normalized_related_case_id = (
+        related_case_id.strip()
+        if isinstance(related_case_id, str) and related_case_id.strip()
+        else None
+    )
+    normalized_related_plan_revision_id = (
+        related_plan_revision_id.strip()
+        if isinstance(related_plan_revision_id, str) and related_plan_revision_id.strip()
+        else None
+    )
+
+    owner_root_resolved = owner_root.resolve()
+    plans_dir = (owner_root_resolved / ".agents" / "plans").resolve()
+    source_input = path.expanduser()
+    if source_input.is_symlink():
+        raise ValueError(f"Refusing to archive a symlinked plan path: {source_input}")
+    source = source_input.resolve()
+    if not source.is_relative_to(plans_dir):
+        raise ValueError(f"Refusing to archive path outside plan root: {source}")
+    if not source.exists() or not source.is_file():
+        raise FileNotFoundError(source)
+
+    fingerprint = _fingerprint_from_plan_path(source)
+    if fingerprint is None:
+        raise ValueError(f"Cannot archive plan without fingerprint: {source}")
+    original_bytes = source.read_bytes()
+    original_sha256 = hashlib.sha256(original_bytes).hexdigest()
+    if original_sha256 != normalized_expected_sha:
+        raise ValueError(
+            "integrity_archive_source_sha256_mismatch: "
+            f"expected={normalized_expected_sha} actual={original_sha256}"
+        )
+
+    archive_dir = plans_dir / "6 - archived"
+    if archive_dir.exists() and not archive_dir.resolve().is_relative_to(plans_dir):
+        raise ValueError(f"Refusing to archive outside plan root: {archive_dir.resolve()}")
+    archive_dir.mkdir(parents=True, exist_ok=True)
+    archive_dir = archive_dir.resolve()
+    if not archive_dir.is_relative_to(plans_dir):
+        raise ValueError(f"Refusing to archive outside plan root: {archive_dir}")
+
+    def reusable(candidate: Path) -> bool:
+        if not candidate.exists():
+            return True
+        if not candidate.is_file() or candidate.is_symlink():
+            return False
+        try:
+            candidate_bytes = candidate.read_bytes()
+        except OSError:
+            return False
+        if candidate_bytes != original_bytes:
+            return False
+        existing_outcome = _read_outcome_sidecar(candidate)
+        return existing_outcome is None or _integrity_sidecar_matches(
+            existing_outcome,
+            reason=normalized_reason,
+            archive_reason=normalized_archive_reason,
+            content_sha256=original_sha256,
+            related_fingerprint=normalized_related_fingerprint,
+            related_case_id=normalized_related_case_id,
+            related_plan_revision_id=normalized_related_plan_revision_id,
+        )
+
+    destination = archive_dir / source.name
+    if destination.resolve() != source and not reusable(destination):
+        destination = archive_dir / (
+            f"{source.stem}__integrity_unknown_{original_sha256[:16]}{source.suffix}"
+        )
+        counter = 2
+        while not reusable(destination):
+            destination = archive_dir / (
+                f"{source.stem}__integrity_unknown_{original_sha256}_{counter}{source.suffix}"
+            )
+            counter += 1
+    if destination.parent.resolve() != archive_dir:
+        raise ValueError(f"Refusing to archive outside archive directory: {destination}")
+
+    if destination.resolve() != source and not destination.exists():
+        destination.write_bytes(original_bytes)
+    archived_bytes = destination.read_bytes()
+    archive_sha256 = hashlib.sha256(archived_bytes).hexdigest()
+    if archived_bytes != original_bytes or archive_sha256 != original_sha256:
+        raise OSError(f"Archived byte verification failed: {destination}")
+
+    sidecar = _outcome_sidecar_path(destination)
+    existing_outcome = _read_outcome_sidecar(destination)
+    if sidecar.exists():
+        if not _integrity_sidecar_matches(
+            existing_outcome,
+            reason=normalized_reason,
+            archive_reason=normalized_archive_reason,
+            content_sha256=original_sha256,
+            related_fingerprint=normalized_related_fingerprint,
+            related_case_id=normalized_related_case_id,
+            related_plan_revision_id=normalized_related_plan_revision_id,
+        ):
+            raise ValueError(f"Conflicting integrity archive sidecar: {sidecar}")
+    else:
+        integrity_outcome = validate_outcome_record(
+            {
+                "schema_version": 1,
+                "case_id": f"legacy-case:{fingerprint}",
+                "plan_revision_id": f"legacy-plan:{fingerprint}",
+                "state": "integrity_unknown",
+                "outcome_scope": "plan_copy",
+                "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "requires_live_verification": False,
+                "target_branch": None,
+                "merged_commit": None,
+                "test_evidence": [],
+                "original_scenario_evidence": [],
+                "live_evidence": [],
+                "remaining_risks": [
+                    *dict.fromkeys(
+                        [
+                            normalized_reason,
+                            normalized_archive_reason,
+                            "Plan contents were not parsed or rewritten; "
+                            "original bytes were preserved unchanged",
+                        ]
+                    ),
+                ],
+                "recurrence_check": {"status": "not_run"},
+                "archive_reason": normalized_archive_reason,
+                "integrity_reason": normalized_reason,
+                "intended_disposition": "unverified",
+                "previous_path": str(source),
+                "archive_path": str(destination),
+                "original_sha256": original_sha256,
+                "archive_sha256": archive_sha256,
+                "legacy_identity": True,
+                **(
+                    {"related_fingerprint": normalized_related_fingerprint}
+                    if normalized_related_fingerprint is not None
+                    else {}
+                ),
+                **(
+                    {"related_case_id": normalized_related_case_id}
+                    if normalized_related_case_id is not None
+                    else {}
+                ),
+                **(
+                    {"related_plan_revision_id": normalized_related_plan_revision_id}
+                    if normalized_related_plan_revision_id is not None
+                    else {}
+                ),
+            }
+        )
+        sidecar_payload = (
+            json.dumps(integrity_outcome, indent=2, ensure_ascii=False, sort_keys=True) + "\n"
+        )
+        temporary_sidecar = sidecar.with_name(f"{sidecar.name}.tmp")
+        temporary_sidecar.write_text(sidecar_payload, encoding="utf-8")
+        temporary_sidecar.replace(sidecar)
+        persisted_outcome = _read_outcome_sidecar(destination)
+        if not _integrity_sidecar_matches(
+            persisted_outcome,
+            reason=normalized_reason,
+            archive_reason=normalized_archive_reason,
+            content_sha256=original_sha256,
+            related_fingerprint=normalized_related_fingerprint,
+            related_case_id=normalized_related_case_id,
+            related_plan_revision_id=normalized_related_plan_revision_id,
+        ):
+            raise OSError(f"Archived integrity sidecar verification failed: {sidecar}")
+
+    if destination.resolve() != source:
+        source.unlink()
+    return destination
+
+
 def archive_plan_ticket_file(
     *,
     owner_root: Path,
@@ -259,53 +519,22 @@ def archive_plan_ticket_file(
             counter += 1
 
     if markdown is None:
-        integrity_outcome: dict[str, Any] = {
-            "schema_version": 1,
-            "case_id": f"legacy-case:{fingerprint}",
-            "plan_revision_id": f"legacy-plan:{fingerprint}",
-            "state": "integrity_unknown",
-            "outcome_scope": "plan_copy",
-            "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "requires_live_verification": False,
-            "target_branch": None,
-            "merged_commit": None,
-            "test_evidence": [],
-            "original_scenario_evidence": [],
-            "live_evidence": [],
-            "remaining_risks": [
-                reason,
-                "Source was not valid UTF-8; original bytes were preserved unchanged",
-            ],
-            "recurrence_check": {"status": "not_run"},
-            "archive_reason": reason,
-            "intended_disposition": disposition,
-            "previous_path": str(source),
-            "legacy_identity": True,
-        }
-        if related_fingerprint is not None:
-            integrity_outcome["related_fingerprint"] = related_fingerprint
-        if related_case_id is not None:
-            integrity_outcome["related_case_id"] = related_case_id
-        if related_plan_revision_id is not None:
-            integrity_outcome["related_plan_revision_id"] = related_plan_revision_id
-        integrity_outcome = validate_outcome_record(integrity_outcome)
-        if destination.resolve() != source:
-            destination.write_bytes(original_bytes)
-            if destination.read_bytes() != original_bytes:
-                raise OSError(f"Archived byte verification failed: {destination}")
-        sidecar = destination.with_suffix(f"{destination.suffix}.outcome.json")
-        sidecar.write_text(
-            json.dumps(integrity_outcome, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
-            encoding="utf-8",
+        integrity_reason = _plan_integrity_reason(source) or "plan_copy_integrity_unknown"
+        return archive_integrity_unknown_plan_ticket_file(
+            owner_root=owner_root,
+            path=source,
+            reason=integrity_reason,
+            expected_source_sha256=hashlib.sha256(original_bytes).hexdigest(),
+            archive_reason=reason,
+            related_fingerprint=related_fingerprint,
+            related_case_id=related_case_id,
+            related_plan_revision_id=related_plan_revision_id,
         )
-        if destination.resolve() != source:
-            source.unlink()
-        return destination
 
     case_id = _markdown_metadata_value(markdown, "Case ID") or f"legacy-case:{fingerprint}"
-    plan_revision_id = _markdown_metadata_value(
-        markdown, "Plan revision ID"
-    ) or f"legacy-plan:{fingerprint}"
+    plan_revision_id = (
+        _markdown_metadata_value(markdown, "Plan revision ID") or f"legacy-plan:{fingerprint}"
+    )
     recorded_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     outcome: dict[str, Any] = {
         "schema_version": 1,
@@ -605,25 +834,26 @@ def scan_plan_ticket_index(
             except (OSError, ValueError):
                 markdown = None
                 outcome = None
-            integrity_reason = (
-                _plan_integrity_reason(md_path) if markdown is None else None
-            )
+            integrity_reason = _plan_integrity_reason(md_path) if markdown is None else None
             if markdown is None and integrity_reason is None:
                 integrity_reason = "plan_copy_outcome_metadata_invalid"
             if outcome is None:
-                sidecar = md_path.with_suffix(f"{md_path.suffix}.outcome.json")
-                if sidecar.exists():
-                    try:
-                        sidecar_raw = json.loads(sidecar.read_text(encoding="utf-8"))
-                        outcome = (
-                            validate_outcome_record(sidecar_raw)
-                            if isinstance(sidecar_raw, dict)
-                            else None
-                        )
-                    except (OSError, ValueError, json.JSONDecodeError):
-                        outcome = None
+                outcome = _read_outcome_sidecar(md_path)
 
-            if markdown is None:
+            semantic_integrity_unknown = bool(
+                isinstance(outcome, dict)
+                and outcome.get("outcome_scope") == "plan_copy"
+                and outcome.get("state") == "integrity_unknown"
+            )
+            if semantic_integrity_unknown and integrity_reason is None:
+                outcome_reason = outcome.get("integrity_reason")
+                integrity_reason = (
+                    outcome_reason.strip()
+                    if isinstance(outcome_reason, str) and outcome_reason.strip()
+                    else "plan_copy_integrity_unknown"
+                )
+
+            if markdown is None or semantic_integrity_unknown:
                 meta = index.get(fingerprint)
                 if meta is None:
                     meta = {"status": "integrity_unknown", "paths": [], "buckets": []}
@@ -664,6 +894,14 @@ def scan_plan_ticket_index(
                 }
                 if isinstance(outcome, dict):
                     integrity_record["sidecar_state"] = str(outcome.get("state") or "")
+                    for relation_field in (
+                        "related_fingerprint",
+                        "related_case_id",
+                        "related_plan_revision_id",
+                    ):
+                        relation_value = outcome.get(relation_field)
+                        if isinstance(relation_value, str) and relation_value:
+                            integrity_record[relation_field] = relation_value
                 integrity_records.append(integrity_record)
                 meta["integrity_unknown_records"] = integrity_records
                 index[fingerprint] = meta
@@ -674,9 +912,7 @@ def scan_plan_ticket_index(
                 if meta is None:
                     meta = {"status": "actioned", "paths": [], "buckets": []}
                 relationship_paths = [
-                    item
-                    for item in meta.get("relationship_paths", [])
-                    if isinstance(item, str)
+                    item for item in meta.get("relationship_paths", []) if isinstance(item, str)
                 ]
                 relationship_paths.append(str(md_path))
                 meta["relationship_paths"] = sorted_unique_strings(relationship_paths)
@@ -687,9 +923,7 @@ def scan_plan_ticket_index(
                 ]
                 states.append(str(outcome["state"]))
                 meta["relationship_outcome_states"] = sorted_unique_strings(states)
-                case_ids = [
-                    item for item in meta.get("case_ids", []) if isinstance(item, str)
-                ]
+                case_ids = [item for item in meta.get("case_ids", []) if isinstance(item, str)]
                 case_ids.append(str(outcome["case_id"]))
                 meta["case_ids"] = sorted_unique_strings(case_ids)
                 revision_ids = [
@@ -776,9 +1010,7 @@ def scan_plan_ticket_index(
             )
 
         active_outcomes = [
-            item
-            for item in meta.get("active_outcome_records", [])
-            if isinstance(item, dict)
+            item for item in meta.get("active_outcome_records", []) if isinstance(item, dict)
         ]
         states = sorted(
             {
@@ -839,14 +1071,7 @@ def dedupe_actioned_plan_ticket_files(*, owner_root: Path) -> int:
                 outcome = None
             if isinstance(outcome, dict) and outcome.get("outcome_scope") == "plan_copy":
                 return True
-        sidecar = path.with_suffix(f"{path.suffix}.outcome.json")
-        if not sidecar.is_file():
-            return False
-        try:
-            raw = json.loads(sidecar.read_text(encoding="utf-8"))
-            outcome = validate_outcome_record(raw) if isinstance(raw, dict) else None
-        except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-            return False
+        outcome = _read_outcome_sidecar(path)
         return isinstance(outcome, dict) and outcome.get("outcome_scope") == "plan_copy"
 
     def _candidate_score(path: Path, markdown: str | None) -> tuple[Any, ...]:
@@ -864,8 +1089,7 @@ def dedupe_actioned_plan_ticket_files(*, owner_root: Path) -> int:
                 and _markdown_metadata_value(markdown, "Plan revision ID")
             )
             generated = (
-                "Generated by `python -m usertest_backlog.cli reports export-tickets`"
-                in markdown
+                "Generated by `python -m usertest_backlog.cli reports export-tickets`" in markdown
             )
         match = PLAN_TICKET_FILENAME_RE.match(path.name)
         date = int(match.group("date")) if match is not None else 0
@@ -894,9 +1118,7 @@ def dedupe_actioned_plan_ticket_files(*, owner_root: Path) -> int:
                 continue
             grouped.setdefault(match.group("fingerprint"), []).append((path, markdown))
 
-    repairs: list[
-        tuple[str, Path, str | None, list[tuple[Path, str | None]]]
-    ] = []
+    repairs: list[tuple[str, Path, str | None, list[tuple[Path, str | None]]]] = []
     for fingerprint, candidates in sorted(grouped.items()):
         if len(candidates) <= 1:
             continue
@@ -915,9 +1137,7 @@ def dedupe_actioned_plan_ticket_files(*, owner_root: Path) -> int:
             )
         )
         generated_duplicates = [
-            item
-            for item in candidates
-            if item[0] != canonical_path and _generated(item[1])
+            item for item in candidates if item[0] != canonical_path and _generated(item[1])
         ]
         repairs.append(
             (
@@ -1084,10 +1304,19 @@ def sync_atom_actions_from_plan_folders(
                     if "<!-- backlog-outcome:start -->" in markdown
                     else None
                 )
+                if outcome is None:
+                    outcome = _read_outcome_sidecar(md_path)
+                if (
+                    isinstance(outcome, dict)
+                    and outcome.get("outcome_scope") == "plan_copy"
+                    and outcome.get("state") == "integrity_unknown"
+                ):
+                    # Explicit semantic-integrity receipts are authoritative even
+                    # when the untrusted bytes happen to decode as UTF-8.
+                    integrity_unknown_ticket_files += 1
+                    continue
                 plan_case_id = _markdown_metadata_value(markdown, "Case ID")
-                plan_revision_id = _markdown_metadata_value(
-                    markdown, "Plan revision ID"
-                )
+                plan_revision_id = _markdown_metadata_value(markdown, "Plan revision ID")
                 if outcome is not None:
                     plan_case_id = str(outcome["case_id"])
                     plan_revision_id = str(outcome["plan_revision_id"])
@@ -1136,17 +1365,13 @@ def sync_atom_actions_from_plan_folders(
                         existing["last_outcome_record"] = dict(outcome)
                     elif outcome is not None:
                         existing["last_plan_copy_disposition"] = outcome["state"]
-                        existing["last_plan_copy_disposition_at"] = outcome[
-                            "recorded_at"
-                        ]
+                        existing["last_plan_copy_disposition_at"] = outcome["recorded_at"]
                         existing["last_plan_copy_path"] = str(md_path)
 
                     if plan_case_id is not None:
                         plan_outcomes_raw = existing.get("plan_outcomes")
                         plan_outcomes = (
-                            dict(plan_outcomes_raw)
-                            if isinstance(plan_outcomes_raw, dict)
-                            else {}
+                            dict(plan_outcomes_raw) if isinstance(plan_outcomes_raw, dict) else {}
                         )
                         plan_outcomes_changed = False
                         if outcome is not None and outcome.get("outcome_scope") == "case":

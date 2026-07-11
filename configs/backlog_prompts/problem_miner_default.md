@@ -32,6 +32,10 @@ Stage 1 only asks: what problem exists and what is the evidence?
 
 Return ONLY one JSON object. `atom_decisions` must contain each assigned atom exactly once:
 
+The response must be complete, valid JSON with no prose or markdown outside the object.
+Escape every JSON string correctly; in particular, encode each literal Windows path
+backslash as `\\` in the JSON source.
+
 {
   "problem_records": [{
     "problem_id": "problem:<short-slug>",

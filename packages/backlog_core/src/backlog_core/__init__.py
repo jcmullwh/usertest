@@ -32,6 +32,10 @@ from backlog_core.case_lineage import (
     verified_mechanism_identities_from_case_registry,
     write_case_registry,
 )
+from backlog_core.operational_candidates import (
+    build_operational_failure_candidates,
+    operational_candidate_receipt_errors,
+)
 from backlog_core.prioritization import compute_problem_priority_signals
 from backlog_core.relation_review import (
     apply_relation_decisions,
@@ -52,6 +56,7 @@ from backlog_core.stage_contracts import (
     parse_selection_decisions,
     parse_solution_option_sets,
     research_claims_sha256,
+    research_dossier_output_contract_errors,
     research_prompt_projection,
 )
 from backlog_core.ticket_readiness import (
@@ -96,6 +101,7 @@ __all__ = [
     "atom_disposition_receipt_errors",
     "build_backlog_document",
     "build_merge_candidates",
+    "build_operational_failure_candidates",
     "build_case_registry",
     "build_stage_document",
     "evidence_assignment_sha256",
@@ -113,6 +119,7 @@ __all__ = [
     "infer_live_verification_requirement",
     "plan_revision_id_for",
     "normalize_atom_lineage",
+    "operational_candidate_receipt_errors",
     "problem_case_records_from_registry",
     "parse_change_plan_list",
     "parse_priority_decision_list",
@@ -126,6 +133,7 @@ __all__ = [
     "verified_mechanism_evidence",
     "verified_outcome_oracles",
     "research_claims_sha256",
+    "research_dossier_output_contract_errors",
     "research_prompt_projection",
     "research_limitation_references",
     "propagate_case_lineage",

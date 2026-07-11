@@ -6,6 +6,7 @@ from hashlib import sha256
 from pathlib import Path
 
 import pytest
+from backlog_core import assign_plan_revision_id
 from backlog_core.case_lineage import apply_atom_disposition_decision
 from backlog_repo import write_case_relation_receipt
 
@@ -142,6 +143,24 @@ def _proof_basis_dossier() -> dict[str, object]:
         "source_workspace": "C:/volatile/research-workspace",
         "sanitized_environment_keys": ["CI"],
     }
+    verified_mechanism = {
+        "schema_version": 2,
+        "mechanism_symbols": ["core.run"],
+        "code_paths": [{"symbol": "core.run", "path": "src/core.py"}],
+    }
+    verified_mechanism_sha256 = shadow_mod._canonical_hash(verified_mechanism)
+    verified_mechanism_provenance = {
+        "schema_version": 1,
+        "primary_hypothesis_id": "h1",
+        "research_probe_control_points": [
+            {
+                "verification_method": "python_ast_explicit_argument_delta_v1",
+                "mechanism_symbols": ["core.run"],
+                "mechanism_symbol": "core.run",
+                "slot": "keyword:guard",
+            }
+        ],
+    }
     return {
         "case_id": "case:proof",
         "problem_id": "problem:proof",
@@ -202,6 +221,12 @@ def _proof_basis_dossier() -> dict[str, object]:
             "replay_isolation": isolation,
             "origin_atom_ids": ["atom:proof"],
             "assignment_sha256": "2" * 64,
+            "verified_mechanism": verified_mechanism,
+            "verified_mechanism_sha256": verified_mechanism_sha256,
+            "verified_mechanism_provenance": verified_mechanism_provenance,
+            "verified_mechanism_provenance_sha256": shadow_mod._canonical_hash(
+                verified_mechanism_provenance
+            ),
             "artifacts": [
                 {
                     "artifact_id": "artifact:repro",
@@ -210,7 +235,15 @@ def _proof_basis_dossier() -> dict[str, object]:
                     "path": "C:/volatile/run/artifacts/repro.txt",
                     "sha256": "d" * 64,
                     "size_bytes": 20,
-                }
+                },
+                {
+                    "artifact_id": "runner:codex_subscription_auth",
+                    "kind": "codex_subscription_auth",
+                    "declared_path": "C:/volatile/run/codex_subscription_auth.json",
+                    "path": "C:/volatile/run/codex_subscription_auth.json",
+                    "sha256": "e" * 64,
+                    "size_bytes": 128,
+                },
             ],
             "experiments": [
                 {
@@ -304,6 +337,49 @@ def _proof_basis_dossier() -> dict[str, object]:
                     "stream_sha256": "2" * 64,
                 }
             ],
+            "control_verifications": [
+                {
+                    "hypothesis_id": "h1",
+                    "control_verification_id": "control:case-local-id",
+                    "verification_method": "pytest_ast_controlled_difference_v2",
+                    "mechanism_symbols": ["core.run"],
+                    "controlled_input_difference": {
+                        "verification_method": "python_ast_explicit_argument_delta_v1",
+                        "difference_count": 1,
+                        "difference": {
+                            "mechanism_symbol": "core.run",
+                            "slot": "keyword:guard",
+                            "difference_kind": "changed",
+                            "support_argument": {
+                                "slot": "keyword:guard",
+                                "expression": "False",
+                                "ast_sha256": "6" * 64,
+                            },
+                            "control_argument": {
+                                "slot": "keyword:guard",
+                                "expression": "True",
+                                "ast_sha256": "7" * 64,
+                            },
+                        },
+                    },
+                    "observable_difference": {
+                        "verification_method": "runner_replay_complement_v1",
+                        "source": "exit_code",
+                        "difference_kind": "failing_exit_to_zero",
+                        "support": {
+                            "exit_code": 1,
+                            "observed_sha256": "8" * 64,
+                        },
+                        "control": {
+                            "exit_code": 0,
+                            "observed_sha256": "9" * 64,
+                        },
+                    },
+                    "relationship_sha256": "a" * 64,
+                }
+            ],
+            "falsification_interventions": [],
+            "deterministic_mechanism_closures": [],
             "atom_bindings": [
                 {
                     "experiment_id": "exp-support",
@@ -351,6 +427,12 @@ def _passing_inputs(tmp_path: Path) -> dict[str, object]:
         receipt_path=evidence_receipt_path,
     )
     return {
+        # Most tests below isolate an existing invariant. Throughput-specific tests
+        # override this fixture setting and exercise the repository default contract.
+        "qualification_contract": {
+            "require_nonempty_throughput": False,
+            "fail_on_systemic_research_blockers": False,
+        },
         "backlog": {
             "tickets": [
                 {
@@ -646,20 +728,337 @@ def _applied_merge_inputs(
     return inputs
 
 
-def test_shadow_invariants_qualify_observed_case_with_durable_blocked_research(
+def _mixed_productive_inputs(tmp_path: Path) -> dict[str, object]:
+    inputs = _passing_inputs(tmp_path)
+    inputs["qualification_contract"] = {}
+    positive_atom = _decided_atom(
+        {
+            "atom_id": "atom:positive",
+            "severity_hint": "medium",
+            "evidence_role": "observation",
+            "evidence_class": "observed_failure",
+            "source": "run_failure",
+            "text": "A second automated failure has a reproducible causal mechanism.",
+            "disposition": "supports_case",
+            "case_id": "case:positive",
+        },
+        rationale="The observed failure supports the separately researched positive case.",
+    )
+    inputs["atoms"].append(positive_atom)
+    evidence_draft = build_problem_mining_evidence_draft(
+        atoms=inputs["atoms"],
+        eligible_atoms=[],
+        mode="live",
+    )
+    evidence_receipt_path = tmp_path / "productive_problem_mining_evidence.json"
+    evidence_receipt = finalize_problem_mining_evidence_receipt(
+        draft=evidence_draft,
+        atoms=inputs["atoms"],
+        receipt_path=evidence_receipt_path,
+    )
+    inputs["stage1"]["input_meta"]["problem_mining_evidence_receipt"] = (
+        problem_mining_evidence_receipt_ref(
+            receipt=evidence_receipt,
+            receipt_path=evidence_receipt_path,
+        )
+    )
+    inputs["stage1"]["artifacts"]["problem_mining_evidence_receipt"] = str(evidence_receipt_path)
+    inputs["stage1"]["items"].append(
+        {
+            "case_id": "case:positive",
+            "problem_id": "problem:positive",
+            "case_member_problem_ids": ["problem:positive"],
+            "evidence_atom_ids": ["atom:positive"],
+        }
+    )
+    inputs["stage2"]["items"].append(
+        {
+            "case_id": "case:positive",
+            "problem_id": "problem:positive",
+            "priority_bucket": "p1",
+            "selected_for_research": True,
+            "priority_rationale": "The reproduced failure is actionable.",
+        }
+    )
+    positive_dossier = _proof_basis_dossier()
+    positive_dossier.update(
+        {
+            "case_id": "case:positive",
+            "problem_id": "problem:positive",
+            "research_status": "evidence_sufficient",
+            "research_attempts": [
+                {
+                    "attempt_number": 1,
+                    "outcome": "output_contract_valid",
+                    "attempted_dossier": {
+                        "research_status": "evidence_sufficient",
+                    },
+                }
+            ],
+        }
+    )
+    inputs["stage3"]["items"].append(positive_dossier)
+    inputs["stage4"]["items"].append(
+        {
+            "case_id": "case:positive",
+            "problem_id": "problem:positive",
+            "option_id": "option:positive",
+        }
+    )
+    inputs["stage5"]["items"].append(
+        {
+            "case_id": "case:positive",
+            "problem_id": "problem:positive",
+            "selected_option_id": "option:positive",
+        }
+    )
+    plan = assign_plan_revision_id(
+        {
+            "case_id": "case:positive",
+            "problem_id": "problem:positive",
+            "repo_revision": "a" * 40,
+            "change_targets": [
+                {
+                    "action": "modify",
+                    "path": "src/core.py",
+                    "symbols": ["core.run"],
+                    "change": "Correct the verified failure mechanism at core.run.",
+                }
+            ],
+            "verification_commands": ["pdm run pytest tests/test_core.py -q"],
+        }
+    )
+    inputs["stage6"]["items"].append(plan)
+    inputs["backlog"]["tickets"].append(
+        {
+            "case_id": "case:positive",
+            "problem_id": "problem:positive",
+            "plan_revision_id": plan["plan_revision_id"],
+            "change_plan": plan,
+            "stage": "ready_for_ticket",
+        }
+    )
+    inputs["case_registry"]["cases"]["case:positive"] = {
+        "state": "active",
+        "canonical_problem_id": "problem:positive",
+        "problem_ids": ["problem:positive"],
+        "evidence_atom_ids": ["atom:positive"],
+    }
+    inputs["case_registry"]["problem_id_to_case_id"]["problem:positive"] = "case:positive"
+    inputs["case_registry"]["atom_id_to_case_id"]["atom:positive"] = "case:positive"
+    return inputs
+
+
+def _accept_productive_fixture_contracts(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        shadow_mod,
+        "assess_research_readiness",
+        lambda item: (item.get("research_status") == "evidence_sufficient", []),
+    )
+    monkeypatch.setattr(
+        shadow_mod,
+        "verify_persisted_research_evidence",
+        lambda item: (item.get("research_status") == "evidence_sufficient", []),
+    )
+    monkeypatch.setattr(shadow_mod, "assess_ticket_readiness", lambda _item: (True, []))
+
+
+def test_shadow_invariants_reject_all_blocked_nonempty_cycle(
     tmp_path: Path,
 ) -> None:
     inputs = _passing_inputs(tmp_path)
+    inputs["qualification_contract"] = {}
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is False
+    assert set(report["failures"]) == {
+        "shadow_qualification_evidence_sufficient_research_throughput_"
+        "below_minimum:observed=0:required=1",
+        "shadow_qualification_authoritative_ready_ticket_throughput_"
+        "below_minimum:observed=0:required=1",
+    }
+    assert report["counts"]["qualifying_observed_atoms"] == 1
+    assert report["counts"]["actionable_nonterminal_cases"] == 1
+    assert report["counts"]["cases"] == 1
+    assert report["counts"]["research_proofs"] == 1
+    assert report["counts"]["honest_case_specific_blocked_research"] == 1
+    assert report["counts"]["systemic_research_blockers"] == 0
+    assert inputs["stage3"]["items"][0]["research_status"] == "blocked"
+    assert inputs["backlog"]["tickets"][0]["stage"] == "research_required"
+
+
+def test_shadow_rejects_missing_codex_stage_invocation_provenance(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    inputs["backlog"]["input_meta"] = {"agent": "codex", "dry_run": False}
+    for key, stage in (
+        ("stage1", "problem_mining"),
+        ("stage2", "problem_prioritization"),
+        ("stage4", "solution_optioning"),
+        ("stage5", "solution_selection"),
+        ("stage6", "implementation_planning"),
+    ):
+        inputs[key]["stage"] = stage
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    provenance_failures = [
+        failure
+        for failure in report["failures"]
+        if failure.startswith("stage_model_invocation_provenance_invalid:")
+    ]
+    assert len(provenance_failures) == 5
+    assert all(
+        failure.endswith("stage_model_invocation_contract_missing")
+        for failure in provenance_failures
+    )
+
+
+def test_shadow_invariants_accept_mixed_honest_block_and_productive_case(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _mixed_productive_inputs(tmp_path)
+    _accept_productive_fixture_contracts(monkeypatch)
 
     report = evaluate_shadow_invariants(**inputs)
 
     assert report["passed"] is True
     assert report["failures"] == []
-    assert report["counts"]["qualifying_observed_atoms"] == 1
-    assert report["counts"]["cases"] == 1
-    assert report["counts"]["research_proofs"] == 1
-    assert inputs["stage3"]["items"][0]["research_status"] == "blocked"
-    assert inputs["backlog"]["tickets"][0]["stage"] == "research_required"
+    assert report["counts"]["honest_case_specific_blocked_research"] == 1
+    assert report["counts"]["systemic_research_blockers"] == 0
+    assert report["counts"]["model_produced_evidence_sufficient_research_proofs"] == 1
+    assert report["counts"]["code_grounded_plans"] == 1
+    assert report["counts"]["authoritative_ready_tickets"] == 1
+
+
+def test_shadow_invariants_reject_systemic_research_blocker_despite_throughput(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _mixed_productive_inputs(tmp_path)
+    blocked = inputs["stage3"]["items"][0]
+    blocked["blocking_reasons"] = [
+        "research_runner_exception:RuntimeError:"
+        "codex_execpolicy_chatgpt_login_status_failed:not_logged_in"
+    ]
+    blocked["research_attempts"] = [
+        {
+            "attempt_number": 1,
+            "outcome": "invocation_failed",
+            "attempted_dossier": {},
+        }
+    ]
+    _accept_productive_fixture_contracts(monkeypatch)
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is False
+    assert "shadow_qualification_systemic_research_blocker:case:one:auth" in report["failures"]
+    assert report["counts"]["systemic_research_blockers"] == 1
+    assert report["counts"]["authoritative_ready_tickets"] == 1
+
+
+@pytest.mark.parametrize(
+    ("record", "retained_errors", "expected"),
+    [
+        (
+            {
+                "research_status": "blocked",
+                "blocking_reasons": ["codex_execpolicy_chatgpt_login_status_failed:not_logged_in"],
+            },
+            [],
+            "auth",
+        ),
+        (
+            {
+                "research_status": "blocked",
+                "blocking_reasons": ["research_runner_exception:RuntimeError:boom"],
+            },
+            [],
+            "invocation",
+        ),
+        (
+            {
+                "research_status": "blocked",
+                "blocking_reasons": ["research_dossier_output_contract_invalid"],
+            },
+            [],
+            "runner_contract",
+        ),
+        (
+            {
+                "research_status": "blocked",
+                "blocking_reasons": ["research_output_contract_retry_result_missing"],
+            },
+            [],
+            "produced_artifact_loss",
+        ),
+        (
+            {"research_status": "evidence_sufficient"},
+            ["research_artifact_changed:artifact:repro"],
+            "produced_artifact_loss",
+        ),
+    ],
+)
+def test_systemic_research_blocker_failure_codes(
+    record: dict[str, object],
+    retained_errors: list[str],
+    expected: str,
+) -> None:
+    assert (
+        shadow_mod._systemic_research_blocker_code(
+            record,
+            retained_validation_errors=retained_errors,
+        )
+        == expected
+    )
+
+
+def test_shadow_invariants_require_code_grounded_persisted_ready_plan(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _mixed_productive_inputs(tmp_path)
+    del inputs["stage6"]["items"][0]["change_targets"][0]["symbols"]
+    _accept_productive_fixture_contracts(monkeypatch)
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is False
+    assert any(
+        failure.startswith("ready_ticket_persisted_plan_not_code_grounded:")
+        and "change_target_symbols_missing:0" in failure
+        for failure in report["failures"]
+    )
+    assert (
+        "shadow_qualification_authoritative_ready_ticket_throughput_"
+        "below_minimum:observed=0:required=1" in report["failures"]
+    )
+    assert report["counts"]["code_grounded_plans"] == 0
+    assert report["counts"]["authoritative_ready_tickets"] == 0
+
+
+def test_honest_missing_origin_evidence_is_not_a_systemic_blocker(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _mixed_productive_inputs(tmp_path)
+    blocked = inputs["stage3"]["items"][0]
+    blocked["blocking_reasons"] = [
+        "origin_evidence_atoms_unresolved:atom:historical-missing",
+        "origin_attachment_materialization_failed",
+    ]
+    _accept_productive_fixture_contracts(monkeypatch)
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is True
+    assert report["failures"] == []
+    assert report["counts"]["honest_case_specific_blocked_research"] == 1
+    assert report["counts"]["systemic_research_blockers"] == 0
 
 
 @pytest.mark.parametrize("corpus_kind", ["empty", "proposal_only"])
@@ -668,6 +1067,7 @@ def test_empty_or_proposal_only_cycles_are_recorded_but_never_qualify(
     corpus_kind: str,
 ) -> None:
     inputs = _passing_inputs(tmp_path)
+    inputs["qualification_contract"] = {}
     inputs["atoms"] = (
         []
         if corpus_kind == "empty"
@@ -705,6 +1105,8 @@ def test_empty_or_proposal_only_cycles_are_recorded_but_never_qualify(
 
     assert report["passed"] is False
     assert report["failures"] == ["shadow_qualification_no_observed_automated_evidence"]
+    assert not any("throughput_below_minimum" in failure for failure in report["failures"])
+    assert report["counts"]["actionable_nonterminal_cases"] == 0
 
     backlog_path = tmp_path / f"{corpus_kind}.backlog.json"
     _write_json(backlog_path, inputs["backlog"])
@@ -721,6 +1123,28 @@ def test_empty_or_proposal_only_cycles_are_recorded_but_never_qualify(
     assert len(state["cycles"]) == 2
     assert state["consecutive_stable_passes"] == 0
     assert state["ready_for_export"] is False
+
+
+def test_exhausted_terminal_corpus_does_not_require_fabricated_throughput(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    inputs["qualification_contract"] = {}
+    inputs["backlog"] = {"tickets": []}
+    inputs["stage2"] = {"items": []}
+    inputs["stage3"] = {"items": []}
+    inputs["case_registry"]["cases"]["case:one"]["state"] = "resolved"
+    monkeypatch.setattr(shadow_mod, "_terminal_outcome_errors", lambda *_args, **_kwargs: [])
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is True
+    assert report["failures"] == []
+    assert report["counts"]["qualifying_observed_atoms"] == 1
+    assert report["counts"]["actionable_nonterminal_cases"] == 0
+    assert report["counts"]["model_produced_evidence_sufficient_research_proofs"] == 0
+    assert report["counts"]["authoritative_ready_tickets"] == 0
 
 
 def test_two_stable_shadow_cycles_unlock_only_the_exact_backlog(tmp_path: Path) -> None:
@@ -1195,8 +1619,11 @@ def test_ticket_stability_resets_for_material_plan_intent_change(
     [
         "origin_artifact_hash",
         "experiment_receipt",
-        "control_receipt",
+        "controlled_delta",
         "causal_receipt",
+        "mechanism_identity",
+        "closure_receipt",
+        "auth_receipt",
         "repo_revision",
         "image_id",
     ],
@@ -1216,12 +1643,42 @@ def test_research_proof_basis_change_resets_stability_streak(
         assignment["atom_receipts"][0]["artifact_receipts"][0]["sha256"] = "6" * 64
     elif changed_evidence == "experiment_receipt":
         verification["experiments"][0]["stdout_sha256"] = "6" * 64
-    elif changed_evidence == "control_receipt":
-        verification["hypothesis_refs"][0]["control_links"][0]["expected_difference"] = (
-            "control now fails"
-        )
+    elif changed_evidence == "controlled_delta":
+        verification["control_verifications"][0]["controlled_input_difference"]["difference"][
+            "support_argument"
+        ]["ast_sha256"] = "b" * 64
     elif changed_evidence == "causal_receipt":
         verification["causal_links"][0]["trace_excerpt_sha256"] = "6" * 64
+    elif changed_evidence == "mechanism_identity":
+        verification["verified_mechanism"]["code_paths"][0]["path"] = "src/other.py"
+        verification["verified_mechanism_sha256"] = shadow_mod._canonical_hash(
+            verification["verified_mechanism"]
+        )
+    elif changed_evidence == "closure_receipt":
+        verification["deterministic_mechanism_closures"] = [
+            {
+                "hypothesis_id": "h1",
+                "closure_receipt_id": "closure:case-local-id",
+                "verification_method": "runner_deterministic_mechanism_closure_v1",
+                "scenario_kind": "static_trace",
+                "closure_basis": "deterministic_static_trace",
+                "mechanism_symbols": ["core.run"],
+                "code_path": [
+                    {
+                        "symbol": "core.run",
+                        "path": "src/core.py",
+                        "trace_excerpt_sha256": "c" * 64,
+                    }
+                ],
+                "observed_result": {
+                    "exit_code": 1,
+                    "stdout_sha256": "d" * 64,
+                    "stderr_sha256": "e" * 64,
+                },
+            }
+        ]
+    elif changed_evidence == "auth_receipt":
+        verification["artifacts"][1]["sha256"] = "f" * 64
     elif changed_evidence == "repo_revision":
         changed["repo_revision"] = "b" * 40
         verification["repo_revision"] = "b" * 40
@@ -1260,6 +1717,68 @@ def test_research_proof_basis_change_resets_stability_streak(
 
     assert state["ready_for_export"] is False
     assert state["consecutive_stable_passes"] == 1
+
+
+def test_two_cycle_shadow_stability_ignores_rephrased_causal_narration(
+    tmp_path: Path,
+) -> None:
+    dossier = _proof_basis_dossier()
+    dossier["root_cause_hypotheses"] = [
+        {
+            "hypothesis_id": "h1",
+            "falsification_attempts": [
+                {
+                    "attempt_id": "attempt:one",
+                    "claim": "The guard controls whether the failure appears.",
+                    "baseline_experiment_id": "exp-support",
+                    "challenge_experiment_id": "exp-control",
+                    "outcome": "survived",
+                }
+            ],
+        }
+    ]
+    first_basis = _proof_basis_sha256(dossier)
+    changed = deepcopy(dossier)
+    changed["root_cause_hypotheses"][0]["falsification_attempts"][0]["claim"] = (
+        "Whether the failure appears is controlled by the guard."
+    )
+    verification = changed["evidence_verification"]
+    verification["hypothesis_refs"][0]["control_links"][0]["controlled_variable"] = (
+        "the guard input"
+    )
+    verification["hypothesis_refs"][0]["control_links"][0]["expected_difference"] = (
+        "the control run succeeds"
+    )
+    verification["control_verifications"][0]["relationship_sha256"] = "f" * 64
+
+    second_basis = _proof_basis_sha256(changed)
+    assert second_basis == first_basis
+
+    inputs = _passing_inputs(tmp_path)
+    first_report = evaluate_shadow_invariants(**inputs)
+    first_report["research_proof_basis_sha256"] = first_basis
+    second_report = dict(first_report)
+    second_report["research_proof_basis_sha256"] = second_basis
+    backlog_path = tmp_path / "target.backlog.json"
+    _write_json(backlog_path, inputs["backlog"])
+    state_path = shadow_state_path(backlog_path)
+    _record_cycle(
+        tmp_path,
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=first_report,
+        generated_at="2026-07-09T00:00:00Z",
+    )
+    state = _record_cycle(
+        tmp_path,
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=second_report,
+        generated_at="2026-07-09T01:00:00Z",
+    )
+
+    assert state["consecutive_stable_passes"] == 2
+    assert state["ready_for_export"] is True
 
 
 def test_proof_basis_uses_image_id_not_mutable_tag_or_run_paths() -> None:
@@ -1432,11 +1951,26 @@ def test_generated_stage_byte_drift_does_not_make_stability_impossible(
         {"required_consecutive_shadow_cycles": 0},
         {"required_consecutive_shadow_cycles": True},
         {"require_exact_export_projection": "yes"},
+        {"require_nonempty_throughput": "yes"},
+        {"minimum_evidence_sufficient_research_proofs": 0},
+        {"minimum_evidence_sufficient_research_proofs": True},
+        {"minimum_authoritative_ready_tickets": 0},
+        {"minimum_authoritative_ready_tickets": True},
+        {"fail_on_systemic_research_blockers": "yes"},
     ],
 )
 def test_shadow_gate_rejects_invalid_config(config: object) -> None:
     with pytest.raises(ValueError):
         normalize_shadow_gate_config(config)
+
+
+def test_shadow_gate_defaults_require_productive_depth() -> None:
+    config = normalize_shadow_gate_config({"enabled": True})
+
+    assert config["require_nonempty_throughput"] is True
+    assert config["minimum_evidence_sufficient_research_proofs"] == 1
+    assert config["minimum_authoritative_ready_tickets"] == 1
+    assert config["fail_on_systemic_research_blockers"] is True
 
 
 @pytest.mark.parametrize(

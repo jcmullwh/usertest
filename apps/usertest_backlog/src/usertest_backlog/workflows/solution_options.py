@@ -135,6 +135,8 @@ def _run_solution_optioning_stage(
     stage = "solution_optioning"
     stage_artifacts_dir = artifacts_dir / "solution_optioning"
     stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
+    invocation_tracker = ModelInvocationTracker(stage_artifacts_dir)
+    live_prompt_expected_count = 0
 
     taxonomy = pipeline_manifest.load_taxonomy()
     families_raw = taxonomy.get("solution_families")
@@ -365,6 +367,7 @@ def _run_solution_optioning_stage(
             optioning_outcomes.append(outcome)
             warnings_list.extend(parse_warnings)
         else:
+            live_prompt_expected_count += 1
             try:
                 response = run_stage_prompt_json(
                     stage=stage,
@@ -448,6 +451,13 @@ def _run_solution_optioning_stage(
             "solution_options_json": str(out_json),
             "solution_options_md": str(out_md),
         },
+    )
+    stage_doc = attach_stage_model_invocation_contract(
+        stage_doc,
+        agent=agent,
+        dry_run=dry_run,
+        manifest_refs=invocation_tracker.collect(),
+        invocation_expected=live_prompt_expected_count > 0,
     )
 
     out_json.parent.mkdir(parents=True, exist_ok=True)

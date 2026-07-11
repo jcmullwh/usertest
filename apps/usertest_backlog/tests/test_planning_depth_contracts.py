@@ -11,7 +11,10 @@ from backlog_core import (
     assign_plan_revision_id,
     bind_falsification_review,
 )
-from backlog_miner.pipeline import load_pipeline_prompt_manifest
+from backlog_miner.pipeline import (
+    _write_model_invocation_manifest,
+    load_pipeline_prompt_manifest,
+)
 
 import usertest_backlog.workflows.depth_contracts as depth_contracts
 from usertest_backlog.workflows.depth_contracts import (
@@ -271,9 +274,7 @@ def _valid_option_research() -> dict[str, object]:
         "challenge_experiment_id": "exp-challenge",
         "mechanism_symbols": ["runner.build_report"],
         "controlled_input_difference": {"difference_count": 1},
-        "observed_polarity": {
-            "polarity": "failure_persists_after_intervention"
-        },
+        "observed_polarity": {"polarity": "failure_persists_after_intervention"},
     }
     intervention["intervention_receipt_id"] = _test_content_id(
         "falsification_intervention",
@@ -319,9 +320,7 @@ def _valid_option_research() -> dict[str, object]:
         "root_cause_hypotheses": [
             {
                 "hypothesis_id": "h1",
-                "statement": (
-                    "The runner result reaches report assembly without normalization."
-                ),
+                "statement": ("The runner result reaches report assembly without normalization."),
                 "mechanism_symbols": ["runner.build_report"],
                 "supporting_evidence": ["exp-1", "exp-challenge"],
                 "counterevidence": ["exp-control"],
@@ -377,9 +376,7 @@ def _valid_option_research() -> dict[str, object]:
                 },
                 {
                     "experiment_id": "exp-challenge",
-                    "command": (
-                        "pytest tests/test_report.py::test_alternative_removed -q"
-                    ),
+                    "command": ("pytest tests/test_report.py::test_alternative_removed -q"),
                     "declared_result": (
                         "The malformed report remains after removing the alternative"
                     ),
@@ -426,9 +423,7 @@ def _add_positive_outcome_contract(research: dict[str, object]) -> str:
         "kind": "repository_test_assertion",
         "research_experiment_id": "exp-1",
         "mechanism_evidence_ids": [evidence_id],
-        "postconditions": [
-            {"type": "command_exit_code", "command_index": 0, "equals": 0}
-        ],
+        "postconditions": [{"type": "command_exit_code", "command_index": 0, "equals": 0}],
     }
     contract["positive_outcome_contract_id"] = _test_content_id(
         "positive_outcome_contract",
@@ -471,9 +466,7 @@ def _add_positive_outcome_contract(research: dict[str, object]) -> str:
         "asset": None,
         "positive_outcome_contracts": [contract],
     }
-    oracle["outcome_oracle_id"] = _test_content_id(
-        "outcome_oracle", oracle, "outcome_oracle_id"
-    )
+    oracle["outcome_oracle_id"] = _test_content_id("outcome_oracle", oracle, "outcome_oracle_id")
     verification["outcome_oracles"] = [oracle]
     return str(contract["positive_outcome_contract_id"])
 
@@ -958,19 +951,13 @@ def _valid_change_plan() -> dict[str, object]:
             "original_scenario": {
                 "description": "Replay the original malformed result.",
                 "research_experiment_id": "exp-1",
-                "commands": [
-                    "pdm -p packages/runner_core run pytest tests/test_lifecycle.py -q"
-                ],
-                "predicates": [
-                    {"type": "command_exit_code", "command_index": 0, "equals": 0}
-                ],
+                "commands": ["pdm -p packages/runner_core run pytest tests/test_lifecycle.py -q"],
+                "predicates": [{"type": "command_exit_code", "command_index": 0, "equals": 0}],
             },
             "live": {
                 "description": "Exercise the runtime report path.",
                 "commands": ["python scripts/live_check.py"],
-                "predicates": [
-                    {"type": "command_exit_code", "command_index": 0, "equals": 0}
-                ],
+                "predicates": [{"type": "command_exit_code", "command_index": 0, "equals": 0}],
             },
             "mitigation_effect": None,
             "recurrence": None,
@@ -1248,7 +1235,7 @@ def test_optioning_uses_orchestrator_prompts_but_inspects_exact_target_workspace
 
     def _fake_stage_prompt(**kwargs: Any) -> str:
         captured.update(kwargs)
-        return json.dumps(
+        response = json.dumps(
             {
                 "optioning_status": "options_produced",
                 "decision_rationale": "The traced target path supports one mechanism.",
@@ -1257,6 +1244,45 @@ def test_optioning_uses_orchestrator_prompts_but_inspects_exact_target_workspace
                 ],
             }
         )
+        out_dir = Path(kwargs["out_dir"])
+        tag = str(kwargs["tag"])
+        prompt = str(kwargs["prompt"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / f"{tag}.prompt.txt").write_text(
+            prompt,
+            encoding="utf-8",
+            newline="\n",
+        )
+        (out_dir / f"{tag}.response.txt").write_text(
+            response,
+            encoding="utf-8",
+            newline="\n",
+        )
+        (out_dir / f"{tag}.raw_events.jsonl").write_text(
+            "{}\n",
+            encoding="utf-8",
+            newline="\n",
+        )
+        (out_dir / f"{tag}.last_message.txt").write_text(
+            response,
+            encoding="utf-8",
+            newline="\n",
+        )
+        (out_dir / f"{tag}.stderr.txt").write_text(
+            "",
+            encoding="utf-8",
+            newline="\n",
+        )
+        _write_model_invocation_manifest(
+            stage=str(kwargs["stage"]),
+            tag=tag,
+            agent=str(kwargs["agent"]),
+            out_dir=out_dir,
+            prompt=prompt,
+            response=response,
+            error_kind=None,
+        )
+        return response
 
     monkeypatch.setattr(
         "usertest_backlog.workflows.solution_options.assess_research_readiness",
@@ -1317,7 +1343,7 @@ def test_optioning_uses_orchestrator_prompts_but_inspects_exact_target_workspace
         "artifacts_dir": tmp_path / "artifacts",
         "out_json": tmp_path / "options.json",
         "out_md": tmp_path / "options.md",
-        "agent": "codex",
+        "agent": "claude",
         "model": None,
         "cfg": object(),
         "dry_run": False,

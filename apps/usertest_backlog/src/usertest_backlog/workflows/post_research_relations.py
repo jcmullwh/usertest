@@ -33,27 +33,142 @@ def _canonical_sha256(value: Any) -> str:
     ).hexdigest()
 
 
-def _verified_causal_signature(
+def _unique_sorted_records(value: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    by_json = {json.dumps(item, sort_keys=True, separators=(",", ":")): item for item in value}
+    return [by_json[key] for key in sorted(by_json)]
+
+
+def _argument_identity(value: Any) -> dict[str, Any] | None:
+    argument = value if isinstance(value, dict) else None
+    if argument is None:
+        return None
+    return {
+        key: argument.get(key) for key in ("slot", "ast_sha256") if argument.get(key) is not None
+    }
+
+
+def _controlled_input_identity(value: Any) -> dict[str, Any] | None:
+    controlled = value if isinstance(value, dict) else None
+    if controlled is None:
+        return None
+    difference_raw = controlled.get("difference")
+    difference = difference_raw if isinstance(difference_raw, dict) else None
+    if difference is None:
+        return None
+    projected_difference = {
+        key: difference.get(key)
+        for key in (
+            "mechanism_symbol",
+            "slot",
+            "difference_kind",
+            "baseline_argument",
+            "challenge_argument",
+            "baseline_file_sha256",
+            "challenge_file_sha256",
+            "content_relation",
+        )
+        if difference.get(key) is not None
+    }
+    for field in ("support_argument", "control_argument"):
+        argument = _argument_identity(difference.get(field))
+        if argument is not None:
+            projected_difference[field] = argument
+    if not projected_difference.get("slot"):
+        return None
+    return {
+        "difference_count": controlled.get("difference_count"),
+        "difference": projected_difference,
+    }
+
+
+def _observation_identity(value: Any) -> dict[str, Any] | None:
+    observation = value if isinstance(value, dict) else None
+    if observation is None:
+        return None
+    projection: dict[str, Any] = {
+        key: observation.get(key)
+        for key in (
+            "polarity",
+            "source",
+            "difference_kind",
+            "exit_code",
+        )
+        if observation.get(key) is not None
+    }
+    for field in ("baseline", "challenge", "support", "control"):
+        raw_side = observation.get(field)
+        if not isinstance(raw_side, dict):
+            continue
+        projection[field] = {
+            key: raw_side.get(key) for key in ("exit_code",) if raw_side.get(key) is not None
+        }
+    assertion = observation.get("assertion")
+    if isinstance(assertion, dict):
+        projection["assertion"] = {
+            key: assertion.get(key)
+            for key in ("source", "operator", "expected")
+            if assertion.get(key) is not None
+        }
+    return projection or None
+
+
+def _control_point_identity(value: Any) -> dict[str, Any] | None:
+    point = value if isinstance(value, dict) else None
+    if point is None:
+        return None
+    projection = {
+        key: point.get(key)
+        for key in (
+            "mechanism_symbol",
+            "slot",
+            "path",
+            "code_path",
+        )
+        if point.get(key) is not None
+    }
+    symbols = sorted(_strings(point.get("mechanism_symbols")))
+    if symbols:
+        projection["mechanism_symbols"] = symbols
+    return projection or None
+
+
+def _code_path_identity(value: Any) -> list[dict[str, Any]]:
+    paths: list[dict[str, Any]] = []
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, dict):
+            continue
+        path = {
+            key: raw.get(key)
+            for key in (
+                "symbol",
+                "path",
+            )
+            if raw.get(key) is not None
+        }
+        if path:
+            paths.append(path)
+    return sorted(paths, key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")))
+
+
+def verified_causal_evidence_projection(
     dossier: dict[str, Any],
     *,
     verified_mechanism_sha256: str,
-) -> str | None:
-    """Bind consolidation to the verified intervention/closure, not a code location.
+) -> dict[str, Any] | None:
+    """Return cross-case identity from runner-attested causal facts.
 
-    ``verified_mechanism_sha256`` intentionally identifies the stable code surface.  Two
-    independent decisions can live in the same symbol, so same-cause consolidation also
-    needs the runner-attested controlled slot/intervention or deterministic closure.
+    Model relationship wording and case-local hypothesis/experiment IDs remain in the
+    retained research receipt for audit, but do not make two independent proofs of the
+    same mechanism look different.
     """
 
     verification_raw = dossier.get("evidence_verification")
     verification = verification_raw if isinstance(verification_raw, dict) else {}
     provenance_raw = verification.get("verified_mechanism_provenance")
     provenance = provenance_raw if isinstance(provenance_raw, dict) else None
-    if (
-        provenance is None
-        or verification.get("verified_mechanism_provenance_sha256")
-        != _canonical_sha256(provenance)
-    ):
+    if provenance is None or verification.get(
+        "verified_mechanism_provenance_sha256"
+    ) != _canonical_sha256(provenance):
         return None
     hypothesis_id = _text(provenance.get("primary_hypothesis_id"))
     if hypothesis_id is None:
@@ -70,10 +185,12 @@ def _verified_causal_signature(
                 continue
             interventions.append(
                 {
-                    "verification_method": receipt.get("verification_method"),
-                    "mechanism_symbols": receipt.get("mechanism_symbols"),
-                    "controlled_input_difference": controlled,
-                    "relationship_sha256": receipt.get("relationship_sha256"),
+                    "mechanism_symbols": sorted(_strings(receipt.get("mechanism_symbols"))),
+                    "controlled_input_difference": _controlled_input_identity(controlled),
+                    "observed_polarity": _observation_identity(receipt.get("observed_polarity")),
+                    "observable_difference": _observation_identity(
+                        receipt.get("observable_difference")
+                    ),
                 }
             )
 
@@ -84,34 +201,52 @@ def _verified_causal_signature(
             continue
         closures.append(
             {
-                "verification_method": closure.get("verification_method"),
                 "scenario_kind": closure.get("scenario_kind"),
                 "closure_basis": closure.get("closure_basis"),
-                "mechanism_symbols": closure.get("mechanism_symbols"),
-                "code_path": closure.get("code_path"),
+                "mechanism_symbols": sorted(_strings(closure.get("mechanism_symbols"))),
+                "code_path": _code_path_identity(closure.get("code_path")),
+                "observed_result": _observation_identity(closure.get("observed_result")),
             }
         )
     control_points = provenance.get("research_probe_control_points")
     control_points = control_points if isinstance(control_points, list) else []
-    if not interventions and not closures and not control_points:
+    projected_control_points = [
+        projected
+        for value in control_points
+        for projected in [_control_point_identity(value)]
+        if projected is not None
+    ]
+    if not interventions and not closures and not projected_control_points:
         return None
-    projection = {
-        "schema_version": 1,
+    return {
+        "schema_version": 2,
+        "repo_revision": _text(dossier.get("repo_revision")),
         "verified_mechanism_sha256": verified_mechanism_sha256,
         "research_probe_control_points": sorted(
-            (dict(value) for value in control_points if isinstance(value, dict)),
+            _unique_sorted_records(projected_control_points),
             key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
         ),
         "interventions": sorted(
-            interventions,
+            _unique_sorted_records(interventions),
             key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
         ),
         "deterministic_closures": sorted(
-            closures,
+            _unique_sorted_records(closures),
             key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
         ),
     }
-    return _canonical_sha256(projection)
+
+
+def _verified_causal_signature(
+    dossier: dict[str, Any],
+    *,
+    verified_mechanism_sha256: str,
+) -> str | None:
+    projection = verified_causal_evidence_projection(
+        dossier,
+        verified_mechanism_sha256=verified_mechanism_sha256,
+    )
+    return _canonical_sha256(projection) if projection is not None else None
 
 
 def collapse_post_research_verified_mechanisms(
@@ -304,9 +439,7 @@ def collapse_post_research_verified_mechanisms(
         canonical_problem_overrides[canonical_case_id] = canonical
 
         priority_group = [
-            priorities_by_case[case_id]
-            for case_id in case_ids
-            if case_id in priorities_by_case
+            priorities_by_case[case_id] for case_id in case_ids if case_id in priorities_by_case
         ]
         if priority_group:
             priority = deepcopy(priorities_by_case.get(canonical_case_id, priority_group[0]))
@@ -394,4 +527,7 @@ def collapse_post_research_verified_mechanisms(
     }
 
 
-__all__ = ["collapse_post_research_verified_mechanisms"]
+__all__ = [
+    "collapse_post_research_verified_mechanisms",
+    "verified_causal_evidence_projection",
+]

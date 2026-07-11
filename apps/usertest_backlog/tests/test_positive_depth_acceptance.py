@@ -1150,9 +1150,7 @@ def _run_production_research_acceptance(
         encoding="utf-8",
     )
     (workspace / "tests").mkdir()
-    original_test_body = (
-        "    assert run() is True\n\n" if repository_assertion else "    run()\n\n"
-    )
+    original_test_body = "    assert run() is True\n\n" if repository_assertion else "    run()\n\n"
     (workspace / "tests" / "test_core.py").write_text(
         "from src.core import run\n\n"
         f"def test_reported_failure():\n{original_test_body}"
@@ -1358,7 +1356,11 @@ def _run_production_research_acceptance(
         write_json(run_dir / "diff_numstat.json", [])
         write_json(
             run_dir / "target_ref.json",
-            {"commit_sha": revision, "ref": request.ref},
+            {
+                "commit_sha": revision,
+                "ref": request.ref,
+                "agent": request.agent,
+            },
         )
         write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
         events = [
@@ -1445,7 +1447,7 @@ def _run_production_research_acceptance(
         target_slug="production_research_acceptance",
         selected_problems=[selected_problem],
         artifacts_dir=tmp_path / "compiled" / "backlog_artifacts",
-        agent="codex",
+        agent="claude",
         model=None,
         cfg=config,
         dry_run=False,
@@ -1522,9 +1524,9 @@ def test_production_research_without_positive_contract_stays_research_required(
     assert verify_persisted_research_evidence(persisted) == (True, [])
     assert persisted["evidence_verification"]["status"] == "verified"
     assert persisted["evidence_verification"]["outcome_oracles"]
-    assert persisted["evidence_verification"]["outcome_oracles"][0][
-        "positive_outcome_contracts"
-    ] == []
+    assert (
+        persisted["evidence_verification"]["outcome_oracles"][0]["positive_outcome_contracts"] == []
+    )
     ready, reasons = assess_research_readiness(persisted)
     assert ready is False
     assert "research_proof_invalid" not in reasons
@@ -1941,12 +1943,8 @@ def test_consolidated_research_remains_ready_and_retains_every_outcome_oracle() 
             "case_id": proof["case_id"],
             "root_cause_status": "established",
             "verified_mechanism": verification["verified_mechanism"],
-            "verified_mechanism_sha256": verification[
-                "verified_mechanism_sha256"
-            ],
-            "verified_mechanism_provenance": verification[
-                "verified_mechanism_provenance"
-            ],
+            "verified_mechanism_sha256": verification["verified_mechanism_sha256"],
+            "verified_mechanism_provenance": verification["verified_mechanism_provenance"],
             "verified_mechanism_provenance_sha256": verification[
                 "verified_mechanism_provenance_sha256"
             ],
@@ -1961,9 +1959,7 @@ def test_consolidated_research_remains_ready_and_retains_every_outcome_oracle() 
             "problem": "The same verified lifecycle branch emits the wrong result.",
             "user_impact": "The workflow cannot recover correctly.",
             "evidence_atom_ids": [proof["evidence_assignment"]["expected_atom_ids"][0]],
-            "source_evidence_atom_ids": [
-                proof["evidence_assignment"]["expected_atom_ids"][0]
-            ],
+            "source_evidence_atom_ids": [proof["evidence_assignment"]["expected_atom_ids"][0]],
             "canonical_symptoms": [f"symptom:{proof['case_id']}"],
         }
         for proof in proofs
@@ -1993,13 +1989,11 @@ def test_consolidated_research_remains_ready_and_retains_every_outcome_oracle() 
     ready, reasons = assess_research_readiness(canonical)
     assert ready is True, reasons
     assert len(verified_outcome_oracles(canonical)) == 2
-    assert len(
-        canonical["post_research_same_mechanism_bundle"]["member_research_dossiers"]
-    ) == 2
+    assert len(canonical["post_research_same_mechanism_bundle"]["member_research_dossiers"]) == 2
     tampered = json.loads(json.dumps(canonical))
-    tampered["post_research_same_mechanism_bundle"]["member_research_dossiers"][1][
-        "problem_id"
-    ] = "problem:tampered"
+    tampered["post_research_same_mechanism_bundle"]["member_research_dossiers"][1]["problem_id"] = (
+        "problem:tampered"
+    )
     tampered_ready, tampered_reasons = assess_research_readiness(tampered)
     assert tampered_ready is False
     assert any("research_post_relation_bundle_hash_invalid" in value for value in tampered_reasons)

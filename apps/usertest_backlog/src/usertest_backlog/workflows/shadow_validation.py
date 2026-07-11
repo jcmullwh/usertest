@@ -20,15 +20,23 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from backlog_core import assess_research_readiness, assess_ticket_readiness
+from backlog_core import (
+    assess_research_readiness,
+    assess_ticket_readiness,
+    plan_revision_id_for,
+)
 from backlog_core.case_lineage import (
     ATOM_DISPOSITIONS,
     atom_disposition_receipt_errors,
     atom_is_idea_originated,
 )
+from backlog_miner.pipeline import verify_stage_model_invocation_contract
 from backlog_miner.research_evidence import verify_persisted_research_evidence
 from backlog_repo import validate_case_relation_receipt, verify_outcome_record_provenance
 
+from usertest_backlog.workflows.post_research_relations import (
+    verified_causal_evidence_projection,
+)
 from usertest_backlog.workflows.problem_mining_evidence import (
     verify_problem_mining_evidence_receipt,
 )
@@ -40,6 +48,10 @@ _SHADOW_STATE_SCHEMA_VERSION = 7
 _SHADOW_CYCLE_SCHEMA_VERSION = 5
 _DEFAULT_REQUIRED_CONSECUTIVE_CYCLES = 2
 _DEFAULT_REQUIRE_EXACT_EXPORT_PROJECTION = True
+_DEFAULT_REQUIRE_NONEMPTY_THROUGHPUT = True
+_DEFAULT_MINIMUM_EVIDENCE_SUFFICIENT_RESEARCH_PROOFS = 1
+_DEFAULT_MINIMUM_AUTHORITATIVE_READY_TICKETS = 1
+_DEFAULT_FAIL_ON_SYSTEMIC_RESEARCH_BLOCKERS = True
 _REQUIRED_SHADOW_ARTIFACTS = frozenset(
     {
         "atoms",
@@ -171,6 +183,10 @@ def normalize_shadow_gate_config(raw: object) -> dict[str, Any]:
         "enabled",
         "required_consecutive_shadow_cycles",
         "require_exact_export_projection",
+        "require_nonempty_throughput",
+        "minimum_evidence_sufficient_research_proofs",
+        "minimum_authoritative_ready_tickets",
+        "fail_on_systemic_research_blockers",
     }
     unknown_fields = sorted(set(raw) - allowed_fields)
     if unknown_fields:
@@ -198,10 +214,55 @@ def normalize_shadow_gate_config(raw: object) -> dict[str, Any]:
     if not isinstance(exact_raw, bool):
         raise ValueError("backlog_export_gate.require_exact_export_projection must be a boolean")
 
+    throughput_raw = raw.get(
+        "require_nonempty_throughput",
+        _DEFAULT_REQUIRE_NONEMPTY_THROUGHPUT,
+    )
+    if not isinstance(throughput_raw, bool):
+        raise ValueError("backlog_export_gate.require_nonempty_throughput must be a boolean")
+
+    minimum_research_raw = raw.get(
+        "minimum_evidence_sufficient_research_proofs",
+        _DEFAULT_MINIMUM_EVIDENCE_SUFFICIENT_RESEARCH_PROOFS,
+    )
+    if (
+        isinstance(minimum_research_raw, bool)
+        or not isinstance(minimum_research_raw, int)
+        or minimum_research_raw < 1
+    ):
+        raise ValueError(
+            "backlog_export_gate.minimum_evidence_sufficient_research_proofs "
+            "must be a positive integer"
+        )
+
+    minimum_tickets_raw = raw.get(
+        "minimum_authoritative_ready_tickets",
+        _DEFAULT_MINIMUM_AUTHORITATIVE_READY_TICKETS,
+    )
+    if (
+        isinstance(minimum_tickets_raw, bool)
+        or not isinstance(minimum_tickets_raw, int)
+        or minimum_tickets_raw < 1
+    ):
+        raise ValueError(
+            "backlog_export_gate.minimum_authoritative_ready_tickets must be a positive integer"
+        )
+
+    systemic_blockers_raw = raw.get(
+        "fail_on_systemic_research_blockers",
+        _DEFAULT_FAIL_ON_SYSTEMIC_RESEARCH_BLOCKERS,
+    )
+    if not isinstance(systemic_blockers_raw, bool):
+        raise ValueError("backlog_export_gate.fail_on_systemic_research_blockers must be a boolean")
+
     return {
         "enabled": enabled_raw,
         "required_consecutive_shadow_cycles": required_raw,
         "require_exact_export_projection": exact_raw,
+        "require_nonempty_throughput": throughput_raw,
+        "minimum_evidence_sufficient_research_proofs": minimum_research_raw,
+        "minimum_authoritative_ready_tickets": minimum_tickets_raw,
+        "fail_on_systemic_research_blockers": systemic_blockers_raw,
     }
 
 
@@ -755,6 +816,222 @@ def _has_explicit_research_block(record: dict[str, Any]) -> bool:
     )
 
 
+def _shadow_qualification_contract(raw: Mapping[str, Any] | None) -> dict[str, Any]:
+    """Return only the throughput settings consumed by invariant evaluation."""
+
+    settings = normalize_shadow_gate_config(dict(raw) if raw is not None else None)
+    return {
+        "require_nonempty_throughput": settings["require_nonempty_throughput"],
+        "minimum_evidence_sufficient_research_proofs": settings[
+            "minimum_evidence_sufficient_research_proofs"
+        ],
+        "minimum_authoritative_ready_tickets": settings["minimum_authoritative_ready_tickets"],
+        "fail_on_systemic_research_blockers": settings["fail_on_systemic_research_blockers"],
+    }
+
+
+def _model_produced_evidence_sufficient_proof(record: Mapping[str, Any]) -> bool:
+    """Require a retained valid model attempt, not a runner-synthesized success."""
+
+    if _text(record.get("research_status")) != "evidence_sufficient":
+        return False
+    attempts_raw = record.get("research_attempts")
+    attempts = attempts_raw if isinstance(attempts_raw, list) else []
+    return any(
+        isinstance(attempt, Mapping)
+        and _text(attempt.get("outcome")) == "output_contract_valid"
+        and isinstance(attempt.get("attempted_dossier"), Mapping)
+        and _text(attempt["attempted_dossier"].get("research_status")) == "evidence_sufficient"
+        for attempt in attempts
+    )
+
+
+def _research_blocker_signals(record: Mapping[str, Any]) -> list[str]:
+    """Collect machine-authored research failure signals without mining case prose."""
+
+    signals: list[str] = []
+
+    def add_list(value: Any) -> None:
+        if isinstance(value, list):
+            signals.extend(text for item in value if (text := _text(item)) is not None)
+
+    add_list(record.get("blocking_reasons"))
+    add_list(record.get("runner_report_validation_errors"))
+    for field in ("evidence_assignment", "evidence_verification"):
+        value = record.get(field)
+        if isinstance(value, Mapping):
+            add_list(value.get("errors"))
+    attempts_raw = record.get("research_attempts")
+    attempts = attempts_raw if isinstance(attempts_raw, list) else []
+    for attempt in attempts:
+        if not isinstance(attempt, Mapping):
+            continue
+        outcome = _text(attempt.get("outcome"))
+        if outcome is not None:
+            signals.append(f"attempt_outcome:{outcome}")
+        add_list(attempt.get("validation_errors"))
+    return list(dict.fromkeys(signals))
+
+
+def _systemic_research_blocker_code(
+    record: Mapping[str, Any],
+    *,
+    retained_validation_errors: list[str] | None = None,
+) -> str | None:
+    """Classify internal research infrastructure failures, never evidence scarcity."""
+
+    retained_errors = retained_validation_errors or []
+    if not isinstance(record, dict) or (
+        not _has_explicit_research_block(record) and not retained_errors
+    ):
+        return None
+    normalized = [
+        signal.casefold() for signal in [*_research_blocker_signals(record), *retained_errors]
+    ]
+    if any(
+        fragment in signal
+        for signal in normalized
+        for fragment in (
+            "codex_execpolicy_chatgpt_login_status_failed",
+            "codex_execpolicy_post_chatgpt_login_status_failed",
+            "chatgpt_subscription_auth",
+            "authentication_failed",
+            "login_status_failed",
+            "not_logged_in",
+            "refresh_token",
+        )
+    ):
+        return "auth"
+    if any(
+        signal.startswith(prefix)
+        for signal in normalized
+        for prefix in (
+            "research_attempt_artifact_missing:",
+            "research_attempt_artifact_changed:",
+            "research_artifact_changed:",
+            "research_output_contract_retry_result_missing",
+            "research_report_missing",
+            "research_runner_artifact_changed:",
+            "research_target_ref_artifact_missing",
+            "runner_repo_revision_unavailable",
+        )
+    ):
+        return "produced_artifact_loss"
+    if any(
+        signal.startswith(prefix)
+        for signal in normalized
+        for prefix in (
+            "attempt_outcome:invocation_failed",
+            "research_runner_exception:",
+            "runner_exit_code:",
+        )
+    ):
+        return "invocation"
+    if any(
+        signal.startswith(prefix)
+        for signal in normalized
+        for prefix in (
+            "attempt_outcome:runner_contract_invalid",
+            "attempt_outcome:output_contract_invalid",
+            "research_dossier_output_contract_invalid",
+            "research_dossier_malformed:",
+            "research_extension_missing:",
+            "research_report_malformed:",
+            "research_report_schema_invalid:",
+            "research_output_contract_retry_failed",
+            "research_output_contract_retry_not_fresh",
+            "research_output_contract_retry_revision_changed",
+            "research_output_contract_retry_freshness_unverifiable",
+            "research_implementation_performed_forbidden",
+            "runner_report_validation_errors",
+            "suspicious_implementation_diff",
+        )
+    ):
+        return "runner_contract"
+    return None
+
+
+def _persisted_plan_grounding_errors(plan: Mapping[str, Any]) -> list[str]:
+    """Check the exact code touchpoints needed to call a persisted plan grounded."""
+
+    errors: list[str] = []
+    revision_id = _text(plan.get("plan_revision_id"))
+    if revision_id is None:
+        errors.append("plan_revision_id_missing")
+    elif revision_id != plan_revision_id_for(plan):
+        errors.append("plan_revision_id_content_mismatch")
+    if plan.get("plan_revision_source") != "server_content_addressed_v1":
+        errors.append("plan_revision_source_invalid")
+    if _text(plan.get("repo_revision")) is None:
+        errors.append("repo_revision_missing")
+    targets_raw = plan.get("change_targets")
+    targets = targets_raw if isinstance(targets_raw, list) else []
+    if not targets:
+        errors.append("change_targets_missing")
+    else:
+        for index, target in enumerate(targets):
+            if not isinstance(target, Mapping):
+                errors.append(f"change_target_invalid:{index}")
+                continue
+            if _text(target.get("path")) is None:
+                errors.append(f"change_target_path_missing:{index}")
+            symbols_raw = target.get("symbols")
+            symbols = symbols_raw if isinstance(symbols_raw, list) else []
+            if not symbols or any(_text(symbol) is None for symbol in symbols):
+                errors.append(f"change_target_symbols_missing:{index}")
+            if _text(target.get("change")) is None:
+                errors.append(f"change_target_change_missing:{index}")
+            if _text(target.get("action")) not in {"modify", "create"}:
+                errors.append(f"change_target_action_invalid:{index}")
+    commands_raw = plan.get("verification_commands")
+    commands = commands_raw if isinstance(commands_raw, list) else []
+    if not commands or any(_text(command) is None for command in commands):
+        errors.append("verification_commands_missing")
+    return errors
+
+
+def _actionable_nonterminal_case_ids(
+    stage2: Mapping[str, Any],
+    case_registry: Mapping[str, Any],
+) -> set[str]:
+    """Return selected active cases; exhausted terminal corpora need no new output."""
+
+    cases_raw = case_registry.get("cases")
+    cases = cases_raw if isinstance(cases_raw, Mapping) else {}
+    problem_map_raw = case_registry.get("problem_id_to_case_id")
+    problem_map = problem_map_raw if isinstance(problem_map_raw, Mapping) else {}
+
+    def canonical(case_id: str) -> str:
+        seen: set[str] = set()
+        while case_id not in seen:
+            seen.add(case_id)
+            record = cases.get(case_id)
+            if not isinstance(record, Mapping) or _text(record.get("state")) != "alias":
+                break
+            target = _text(record.get("alias_of"))
+            if target is None:
+                break
+            case_id = target
+        return case_id
+
+    result: set[str] = set()
+    for priority in _items(dict(stage2)):
+        if priority.get("selected_for_research") is not True:
+            continue
+        case_id = _text(priority.get("case_id"))
+        if case_id is None:
+            problem_id = _text(priority.get("problem_id"))
+            case_id = _text(problem_map.get(problem_id or ""))
+        if case_id is None:
+            continue
+        case_id = canonical(case_id)
+        case = cases.get(case_id)
+        state = _text(case.get("state")) or "active" if isinstance(case, Mapping) else "active"
+        if state not in _CASE_TERMINAL_OUTCOMES and state != "alias":
+            result.add(case_id)
+    return result
+
+
 def _is_meaningful_automated_observation(atom: Mapping[str, Any]) -> bool:
     """Exclude external ideas, derived commentary, and proposal-only evidence."""
 
@@ -1064,11 +1341,91 @@ def _sorted_strings(value: Any) -> list[str]:
     return sorted({item.strip() for item in value if isinstance(item, str) and item.strip()})
 
 
-def _sorted_records(value: Any) -> list[dict[str, Any]]:
+_CASE_LOCAL_CAUSAL_FIELDS = frozenset(
+    {
+        "attempt_id",
+        "baseline_experiment_id",
+        "baseline_selection_id",
+        "causal_control_ids",
+        "challenge_experiment_id",
+        "challenge_selection_id",
+        "claim",
+        "closure_receipt_id",
+        "control_experiment_id",
+        "control_selection_id",
+        "control_verification_id",
+        "controlled_variable",
+        "deterministic_closure_ids",
+        "expected_difference",
+        "experiment_id",
+        "failure_path_id",
+        "falsification_intervention_ids",
+        "hypothesis_id",
+        "intervention_receipt_id",
+        "mechanism_evidence_id",
+        "mechanism_evidence_ids",
+        "primary_hypothesis_id",
+        "relationship_sha256",
+        "selection_id",
+        "support_experiment_id",
+        "support_selection_id",
+        "supports_experiment_id",
+    }
+)
+
+
+def _runner_causal_value(value: Any) -> Any:
+    """Remove model labels while retaining runner-observed causal content."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _runner_causal_value(item)
+            for key, item in value.items()
+            if str(key) not in _CASE_LOCAL_CAUSAL_FIELDS
+        }
+    if isinstance(value, list):
+        projected = [_runner_causal_value(item) for item in value]
+        if all(isinstance(item, Mapping) for item in projected):
+            return sorted(projected, key=_canonical_hash)
+        return projected
+    return value
+
+
+def _runner_causal_records(value: Any) -> list[dict[str, Any]]:
     if not isinstance(value, list):
         return []
-    records = [dict(item) for item in value if isinstance(item, Mapping)]
+    records = [
+        projected
+        for item in value
+        if isinstance(item, Mapping)
+        for projected in [_runner_causal_value(item)]
+        if isinstance(projected, dict)
+    ]
     return sorted(records, key=_canonical_hash)
+
+
+def _atom_binding_proof_basis(value: Any, *, receipt: Mapping[str, Any]) -> list[dict[str, Any]]:
+    projected: list[dict[str, Any]] = []
+    for raw in value if isinstance(value, list) else []:
+        if not isinstance(raw, Mapping):
+            continue
+        binding = {
+            key: raw.get(key)
+            for key in (
+                "atom_id",
+                "match_kind",
+                "origin_atom_field_path",
+                "origin_atom_value_sha256",
+                "origin_atom_sha256",
+                "origin_artifact_sha256",
+            )
+            if raw.get(key) is not None
+        }
+        artifact_path = _stable_research_path(raw.get("origin_artifact_path"), receipt=receipt)
+        if artifact_path is not None and raw.get("origin_artifact_sha256") is None:
+            binding["origin_artifact_path"] = artifact_path
+        projected.append(binding)
+    return sorted(projected, key=_canonical_hash)
 
 
 def _origin_assignment_proof_basis(value: Any) -> dict[str, Any]:
@@ -1101,9 +1458,7 @@ def _origin_assignment_proof_basis(value: Any) -> dict[str, Any]:
     return {
         "status": assignment.get("status"),
         "case_id": _text(assignment.get("case_id")),
-        "problem_id": _text(assignment.get("problem_id")),
         "expected_atom_ids": _sorted_strings(assignment.get("expected_atom_ids")),
-        "assignment_sha256": assignment.get("assignment_sha256"),
         "atom_receipts": sorted(atom_receipts, key=_canonical_hash),
     }
 
@@ -1126,23 +1481,13 @@ def _workspace_overlay_proof_basis(value: Any) -> dict[str, Any]:
         field: overlay.get(field)
         for field in (
             "baseline_manifest_sha256",
-            "research_manifest_sha256",
             "baseline_state_sha256",
-            "research_state_sha256",
             "baseline_git_index_sha256",
-            "research_git_index_sha256",
-            "research_overlay_manifest_sha256",
             "git_index_changed",
         )
     } | {
         "changed_baseline_paths": _sorted_strings(overlay.get("changed_baseline_paths")),
-        "research_overlay_paths": _sorted_strings(overlay.get("research_overlay_paths")),
         "suspicious_extra_paths": _sorted_strings(overlay.get("suspicious_extra_paths")),
-        "research_overlay_manifest": (
-            dict(overlay["research_overlay_manifest"])
-            if isinstance(overlay.get("research_overlay_manifest"), Mapping)
-            else {}
-        ),
     }
 
 
@@ -1214,11 +1559,14 @@ def _experiment_proof_basis(
         "cleanup_confirmed": metadata.get("cleanup_confirmed"),
     }
     projection = {
-        "experiment_id": _text(experiment.get("experiment_id")),
-        "command": _text(experiment.get("command")),
-        "executed_argv": list(experiment.get("executed_argv", []))
-        if isinstance(experiment.get("executed_argv"), list)
-        else [],
+        "executed_argv": [
+            _artifact_reference_proof_basis(item, aliases=artifact_aliases) or item
+            for item in (
+                experiment.get("executed_argv", [])
+                if isinstance(experiment.get("executed_argv"), list)
+                else []
+            )
+        ],
         "exit_code": experiment.get("exit_code"),
         "scenario_kind": _text(experiment.get("scenario_kind")),
         "addresses_atom_ids": _sorted_strings(experiment.get("addresses_atom_ids")),
@@ -1255,53 +1603,6 @@ def _experiment_proof_basis(
     return projection, errors
 
 
-def _hypothesis_receipt_proof_basis(
-    value: Mapping[str, Any],
-    *,
-    artifact_aliases: Mapping[str, str],
-) -> dict[str, Any]:
-    hypothesis = dict(value)
-    controls: list[dict[str, Any]] = []
-    for raw_control in hypothesis.get("control_links", []):
-        if not isinstance(raw_control, Mapping):
-            continue
-        control = dict(raw_control)
-        controls.append(
-            {
-                "control_experiment_id": _text(control.get("control_experiment_id")),
-                "supports_experiment_id": _text(control.get("supports_experiment_id")),
-                "mechanism_symbols": _sorted_strings(control.get("mechanism_symbols")),
-                "shared_atom_ids": _sorted_strings(control.get("shared_atom_ids")),
-                "shared_artifact_refs": sorted(
-                    {
-                        reference
-                        for item in (
-                            control.get("shared_artifact_refs", [])
-                            if isinstance(control.get("shared_artifact_refs"), list)
-                            else []
-                        )
-                        for reference in [
-                            _artifact_reference_proof_basis(
-                                item,
-                                aliases=artifact_aliases,
-                            )
-                        ]
-                        if reference is not None
-                    }
-                ),
-                "controlled_variable": _text(control.get("controlled_variable")),
-                "expected_difference": _text(control.get("expected_difference")),
-            }
-        )
-    return {
-        "hypothesis_id": _text(hypothesis.get("hypothesis_id")),
-        "supporting_refs": _sorted_strings(hypothesis.get("supporting_refs")),
-        "counterevidence_refs": _sorted_strings(hypothesis.get("counterevidence_refs")),
-        "mechanism_symbols": _sorted_strings(hypothesis.get("mechanism_symbols")),
-        "control_links": sorted(controls, key=_canonical_hash),
-    }
-
-
 def _research_proof_basis_projection(
     dossiers: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[str]]:
@@ -1322,27 +1623,36 @@ def _research_proof_basis_projection(
         replay_executor = _text(replay_isolation.get("executor"))
         artifacts: list[dict[str, Any]] = []
         artifact_aliases: dict[str, str] = {}
+        overlay_raw = receipt.get("workspace_overlay")
+        overlay = overlay_raw if isinstance(overlay_raw, Mapping) else {}
+        overlay_manifest_raw = overlay.get("research_overlay_manifest")
+        overlay_manifest = overlay_manifest_raw if isinstance(overlay_manifest_raw, Mapping) else {}
+        for path, raw_entry in overlay_manifest.items():
+            entry = raw_entry if isinstance(raw_entry, Mapping) else {}
+            digest = _text(entry.get("sha256"))
+            if isinstance(path, str) and digest is not None:
+                artifact_aliases[path.replace("\\", "/").casefold()] = f"overlay_sha256:{digest}"
         for raw_artifact in receipt.get("artifacts", []):
             if not isinstance(raw_artifact, Mapping):
                 continue
             artifact = dict(raw_artifact)
             artifact_id = _text(artifact.get("artifact_id"))
+            artifact_sha256 = _text(artifact.get("sha256"))
+            stable_artifact_id = (
+                f"artifact_sha256:{artifact_sha256}" if artifact_sha256 is not None else artifact_id
+            )
             for alias in (
                 artifact_id,
                 _text(artifact.get("declared_path")),
                 _text(artifact.get("path")),
             ):
-                if alias is not None and artifact_id is not None:
-                    artifact_aliases[alias.replace("\\", "/").casefold()] = artifact_id
+                if alias is not None and stable_artifact_id is not None:
+                    artifact_aliases[alias.replace("\\", "/").casefold()] = stable_artifact_id
             artifacts.append(
                 {
-                    "artifact_id": artifact_id,
+                    "artifact_identity": stable_artifact_id,
                     "kind": _text(artifact.get("kind")),
-                    "declared_path": _stable_research_path(
-                        artifact.get("declared_path", artifact.get("path")),
-                        receipt=receipt,
-                    ),
-                    "sha256": artifact.get("sha256"),
+                    "sha256": artifact_sha256,
                     "size_bytes": artifact.get("size_bytes"),
                 }
             )
@@ -1358,39 +1668,14 @@ def _research_proof_basis_projection(
             )
             experiments.append(experiment)
             errors.extend(experiment_errors)
-        hypotheses = [
-            _hypothesis_receipt_proof_basis(
-                item,
-                artifact_aliases=artifact_aliases,
+        verified_mechanism_sha256 = _text(receipt.get("verified_mechanism_sha256"))
+        causal_evidence = (
+            verified_causal_evidence_projection(
+                dossier,
+                verified_mechanism_sha256=verified_mechanism_sha256,
             )
-            for item in receipt.get("hypothesis_refs", [])
-            if isinstance(item, Mapping)
-        ]
-        falsification_attempts = sorted(
-            [
-                {
-                    "hypothesis_id": _text(hypothesis.get("hypothesis_id")),
-                    "attempt_id": _text(attempt.get("attempt_id")),
-                    "claim": _text(attempt.get("claim")),
-                    "baseline_experiment_id": _text(attempt.get("baseline_experiment_id")),
-                    "challenge_experiment_id": _text(attempt.get("challenge_experiment_id")),
-                    "disproof_condition": attempt.get("disproof_condition"),
-                    "outcome": _text(attempt.get("outcome")),
-                }
-                for hypothesis in (
-                    dossier.get("root_cause_hypotheses", [])
-                    if isinstance(dossier.get("root_cause_hypotheses"), list)
-                    else []
-                )
-                if isinstance(hypothesis, Mapping)
-                for attempt in (
-                    hypothesis.get("falsification_attempts", [])
-                    if isinstance(hypothesis.get("falsification_attempts"), list)
-                    else []
-                )
-                if isinstance(attempt, Mapping)
-            ],
-            key=_canonical_hash,
+            if verified_mechanism_sha256 is not None
+            else None
         )
         inspected_files: list[dict[str, Any]] = []
         for raw_file in receipt.get("inspected_files", []):
@@ -1424,7 +1709,6 @@ def _research_proof_basis_projection(
         projected.append(
             {
                 "case_id": _text(dossier.get("case_id")),
-                "problem_id": _text(dossier.get("problem_id")),
                 "repo_revision": _text(dossier.get("repo_revision")),
                 "evidence_assignment": _origin_assignment_proof_basis(
                     dossier.get("evidence_assignment")
@@ -1443,18 +1727,30 @@ def _research_proof_basis_projection(
                     ),
                     "replay_isolation": replay_isolation,
                     "origin_atom_ids": _sorted_strings(receipt.get("origin_atom_ids")),
-                    "assignment_sha256": receipt.get("assignment_sha256"),
                     "artifacts": sorted(artifacts, key=_canonical_hash),
                     "experiments": sorted(experiments, key=_canonical_hash),
                     "inspected_files": sorted(inspected_files, key=_canonical_hash),
                     "inspected_symbols": sorted(inspected_symbols, key=_canonical_hash),
-                    "hypothesis_refs": sorted(hypotheses, key=_canonical_hash),
-                    "falsification_attempts": falsification_attempts,
-                    "causal_links": _sorted_records(receipt.get("causal_links")),
-                    "test_selections": _sorted_records(receipt.get("test_selections")),
-                    "control_verifications": _sorted_records(receipt.get("control_verifications")),
-                    "failure_paths": _sorted_records(receipt.get("failure_paths")),
-                    "atom_bindings": _sorted_records(receipt.get("atom_bindings")),
+                    "verified_mechanism_sha256": verified_mechanism_sha256,
+                    "verified_mechanism": _runner_causal_value(receipt.get("verified_mechanism")),
+                    "verified_causal_evidence": causal_evidence,
+                    "causal_links": _runner_causal_records(receipt.get("causal_links")),
+                    "test_selections": _runner_causal_records(receipt.get("test_selections")),
+                    "control_verifications": _runner_causal_records(
+                        receipt.get("control_verifications")
+                    ),
+                    "falsification_interventions": _runner_causal_records(
+                        receipt.get("falsification_interventions")
+                    ),
+                    "deterministic_mechanism_closures": _runner_causal_records(
+                        receipt.get("deterministic_mechanism_closures")
+                    ),
+                    "failure_paths": _runner_causal_records(receipt.get("failure_paths")),
+                    "atom_bindings": _atom_binding_proof_basis(
+                        receipt.get("atom_bindings"),
+                        receipt=receipt,
+                    ),
+                    "outcome_oracles": _runner_causal_records(receipt.get("outcome_oracles")),
                 },
             }
         )
@@ -1474,9 +1770,29 @@ def evaluate_shadow_invariants(
     case_registry: dict[str, Any],
     trusted_runs_roots: tuple[Path, ...] = (),
     owner_roots: tuple[Path, ...] = (),
+    qualification_contract: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Evaluate depth invariants for one complete non-exporting cycle."""
+    qualification = _shadow_qualification_contract(qualification_contract)
     failures: list[str] = []
+    backlog_meta_raw = backlog.get("input_meta")
+    backlog_meta = backlog_meta_raw if isinstance(backlog_meta_raw, Mapping) else {}
+    codex_invocation_provenance_required = bool(
+        _text(backlog_meta.get("agent")) == "codex" and backlog_meta.get("dry_run") is not True
+    )
+    for stage_doc in (stage1, stage2, stage4, stage5, stage6):
+        stage_meta_raw = stage_doc.get("input_meta")
+        stage_meta = stage_meta_raw if isinstance(stage_meta_raw, Mapping) else {}
+        has_contract = isinstance(stage_meta.get("model_invocation_contract"), Mapping)
+        if not codex_invocation_provenance_required and not has_contract:
+            continue
+        failures.extend(
+            "stage_model_invocation_provenance_invalid:"
+            + (_text(stage_doc.get("stage")) or "unknown")
+            + ":"
+            + error
+            for error in verify_stage_model_invocation_contract(stage_doc)
+        )
     failures.extend(
         verify_problem_mining_evidence_receipt(
             stage1=stage1,
@@ -1506,6 +1822,7 @@ def evaluate_shadow_invariants(
                 failures.append(f"derived_atom_novel_without_decision:{atom_id}")
 
     meaningful_observations = [atom for atom in atoms if _is_meaningful_automated_observation(atom)]
+    actionable_nonterminal_cases = _actionable_nonterminal_case_ids(stage2, case_registry)
     if not meaningful_observations:
         failures.append("shadow_qualification_no_observed_automated_evidence")
     unresolved_work_errors = _unresolved_high_severity_work_errors(
@@ -1520,9 +1837,28 @@ def evaluate_shadow_invariants(
 
     research_by_identity: dict[str, tuple[bool, list[str]]] = {}
     ready_research_proofs: list[dict[str, Any]] = []
+    model_produced_ready_research_proofs: list[dict[str, Any]] = []
+    model_produced_ready_research_identities: set[str] = set()
+    honest_case_specific_blocked_research: list[dict[str, Any]] = []
+    systemic_research_blockers: list[tuple[str, str]] = []
     for dossier in _items(stage3):
         ready, reasons = assess_research_readiness(dossier)
         retained_ready, retained_reasons = verify_persisted_research_evidence(dossier)
+        verification = dossier.get("evidence_verification")
+        claimed_retained_proof = _text(dossier.get("research_status")) == "evidence_sufficient" or (
+            isinstance(verification, Mapping) and _text(verification.get("status")) == "verified"
+        )
+        blocker_code = _systemic_research_blocker_code(
+            dossier,
+            retained_validation_errors=(
+                retained_reasons if claimed_retained_proof and not retained_ready else []
+            ),
+        )
+        if blocker_code is not None:
+            identity = _text(dossier.get("case_id")) or _text(dossier.get("problem_id"))
+            systemic_research_blockers.append((identity or "(missing)", blocker_code))
+        elif _has_explicit_research_block(dossier):
+            honest_case_specific_blocked_research.append(dossier)
         if not retained_ready:
             ready = False
             reasons = [
@@ -1532,9 +1868,38 @@ def evaluate_shadow_invariants(
             ]
         if ready:
             ready_research_proofs.append(dossier)
+            if _model_produced_evidence_sufficient_proof(dossier):
+                model_produced_ready_research_proofs.append(dossier)
+                model_produced_ready_research_identities.update(
+                    identity
+                    for identity in (
+                        _text(dossier.get("case_id")),
+                        _text(dossier.get("problem_id")),
+                    )
+                    if identity is not None
+                )
+            elif _text(dossier.get("research_status")) == "evidence_sufficient":
+                failures.append(
+                    "evidence_sufficient_research_not_model_produced:"
+                    f"{_text(dossier.get('case_id')) or _text(dossier.get('problem_id'))}"
+                )
         for identity in (_text(dossier.get("case_id")), _text(dossier.get("problem_id"))):
             if identity is not None:
-                research_by_identity[identity] = (ready, reasons)
+                previous = research_by_identity.get(identity)
+                research_by_identity[identity] = (
+                    ready or bool(previous and previous[0]),
+                    list(dict.fromkeys([*(previous[1] if previous else []), *reasons])),
+                )
+
+    plans_by_revision: dict[str, dict[str, Any]] = {}
+    code_grounded_plan_revisions: set[str] = set()
+    for plan in _items(stage6):
+        revision_id = _text(plan.get("plan_revision_id"))
+        if revision_id is None:
+            continue
+        plans_by_revision[revision_id] = plan
+        if not _persisted_plan_grounding_errors(plan):
+            code_grounded_plan_revisions.add(revision_id)
 
     tickets_raw = backlog.get("tickets")
     tickets = (
@@ -1542,6 +1907,7 @@ def evaluate_shadow_invariants(
         if isinstance(tickets_raw, list)
         else []
     )
+    authoritative_ready_tickets: list[dict[str, Any]] = []
     for ticket in tickets:
         if _text(ticket.get("stage")) != "ready_for_ticket":
             continue
@@ -1556,18 +1922,64 @@ def evaluate_shadow_invariants(
         research = research_by_identity.get(identity or "")
         if research is None or not research[0]:
             failures.append(f"ready_ticket_without_ready_research:{identity}")
-
-    plan_ids = {
-        _text(plan.get("plan_revision_id"))
-        for plan in _items(stage6)
-        if _text(plan.get("plan_revision_id")) is not None
-    }
-    for ticket in tickets:
-        if _text(ticket.get("stage")) != "ready_for_ticket":
-            continue
+        if identity not in model_produced_ready_research_identities:
+            failures.append(f"ready_ticket_without_model_produced_research:{identity}")
         revision_id = _text(ticket.get("plan_revision_id"))
-        if revision_id is None or revision_id not in plan_ids:
+        embedded_plan = ticket.get("change_plan")
+        embedded_revision_id = (
+            _text(embedded_plan.get("plan_revision_id"))
+            if isinstance(embedded_plan, Mapping)
+            else None
+        )
+        plan_revision_linked = revision_id is not None and revision_id == embedded_revision_id
+        if not plan_revision_linked:
+            failures.append(
+                "ready_ticket_plan_revision_linkage_mismatch:"
+                f"ticket={revision_id}:embedded={embedded_revision_id}"
+            )
+        persisted_plan = plans_by_revision.get(revision_id or "")
+        if persisted_plan is None:
             failures.append(f"ready_ticket_missing_persisted_plan:{revision_id}")
+            grounding_errors = ["persisted_plan_missing"]
+        else:
+            grounding_errors = _persisted_plan_grounding_errors(persisted_plan)
+            if grounding_errors:
+                failures.append(
+                    "ready_ticket_persisted_plan_not_code_grounded:"
+                    f"{revision_id}:" + ",".join(grounding_errors)
+                )
+        if (
+            ready
+            and research is not None
+            and research[0]
+            and identity in model_produced_ready_research_identities
+            and plan_revision_linked
+            and persisted_plan is not None
+            and not grounding_errors
+        ):
+            authoritative_ready_tickets.append(ticket)
+
+    if actionable_nonterminal_cases and qualification["fail_on_systemic_research_blockers"]:
+        failures.extend(
+            f"shadow_qualification_systemic_research_blocker:{identity}:{code}"
+            for identity, code in systemic_research_blockers
+        )
+    if actionable_nonterminal_cases and qualification["require_nonempty_throughput"]:
+        required_research = qualification["minimum_evidence_sufficient_research_proofs"]
+        if len(model_produced_ready_research_proofs) < required_research:
+            failures.append(
+                "shadow_qualification_evidence_sufficient_research_throughput_"
+                "below_minimum:"
+                f"observed={len(model_produced_ready_research_proofs)}:"
+                f"required={required_research}"
+            )
+        required_tickets = qualification["minimum_authoritative_ready_tickets"]
+        if len(authoritative_ready_tickets) < required_tickets:
+            failures.append(
+                "shadow_qualification_authoritative_ready_ticket_throughput_"
+                "below_minimum:"
+                f"observed={len(authoritative_ready_tickets)}:required={required_tickets}"
+            )
 
     failures.extend(_relation_application_errors(stage1))
     failures.extend(
@@ -1625,6 +2037,8 @@ def evaluate_shadow_invariants(
             "terminal_outcome_provenance": True,
             "cross_stage_case_conservation": True,
             "research_proof_basis": True,
+            "productive_nonempty_cycle_contract": True,
+            "systemic_research_blocker_contract": True,
         },
         "atom_corpus_sha256": _canonical_hash(atom_projection),
         "source_atom_corpus_sha256": _canonical_hash(source_atom_projection),
@@ -1642,7 +2056,31 @@ def evaluate_shadow_invariants(
             "ready_tickets": sum(
                 1 for ticket in tickets if _text(ticket.get("stage")) == "ready_for_ticket"
             ),
+            "evidence_sufficient_research_proofs": sum(
+                1
+                for dossier in _items(stage3)
+                if _text(dossier.get("research_status")) == "evidence_sufficient"
+            ),
+            "retained_ready_research_proofs": len(ready_research_proofs),
+            "model_produced_evidence_sufficient_research_proofs": len(
+                model_produced_ready_research_proofs
+            ),
+            "honest_case_specific_blocked_research": len(honest_case_specific_blocked_research),
+            "systemic_research_blockers": len(systemic_research_blockers),
+            "code_grounded_plans": len(code_grounded_plan_revisions),
+            "authoritative_ready_tickets": len(authoritative_ready_tickets),
+            "required_evidence_sufficient_research_proofs": qualification[
+                "minimum_evidence_sufficient_research_proofs"
+            ],
+            "required_authoritative_ready_tickets": qualification[
+                "minimum_authoritative_ready_tickets"
+            ],
+            "nonempty_throughput_enforced": int(qualification["require_nonempty_throughput"]),
+            "systemic_research_blockers_enforced": int(
+                qualification["fail_on_systemic_research_blockers"]
+            ),
             "qualifying_observed_atoms": len(meaningful_observations),
+            "actionable_nonterminal_cases": len(actionable_nonterminal_cases),
             "unresolved_high_severity_without_active_work": len(unresolved_work_errors),
         },
     }

@@ -51,9 +51,7 @@ from backlog_miner.research_evidence import (
     verify_persisted_research_evidence,
 )
 
-ORIGINAL_COMMAND = (
-    "python -m pytest -q --tb=native tests/test_core.py::test_reported_failure"
-)
+ORIGINAL_COMMAND = "python -m pytest -q --tb=native tests/test_core.py::test_reported_failure"
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -187,8 +185,7 @@ def _research_claims(revision: str) -> dict[str, object]:
             {
                 "hypothesis_id": "hypothesis:missing-default-path",
                 "statement": (
-                    "core.run raises instead of returning its required value on the "
-                    "default path."
+                    "core.run raises instead of returning its required value on the default path."
                 ),
                 "supporting_evidence": ["experiment:original", "experiment:challenge"],
                 "counterevidence": ["experiment:control"],
@@ -296,7 +293,14 @@ def _run_stage_three(
             },
         )
         _write_json(run_dir / "diff_numstat.json", [])
-        _write_json(run_dir / "target_ref.json", {"commit_sha": revision, "ref": request.ref})
+        _write_json(
+            run_dir / "target_ref.json",
+            {
+                "commit_sha": revision,
+                "ref": request.ref,
+                "agent": request.agent,
+            },
+        )
         _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
         events = [
             {
@@ -326,9 +330,7 @@ def _run_stage_three(
                     "source_exit_code": 0,
                     **observed_read_attestation(
                         path=workspace / "src" / "core.py",
-                        observed_text=(workspace / "src" / "core.py").read_text(
-                            encoding="utf-8"
-                        ),
+                        observed_text=(workspace / "src" / "core.py").read_text(encoding="utf-8"),
                         source_exit_code=0,
                         allow_partial=True,
                     ),
@@ -355,7 +357,7 @@ def _run_stage_three(
         target_slug="causal_acceptance",
         selected_problems=[_problem_payload(tmp_path)],
         artifacts_dir=tmp_path / "compiled" / "backlog_artifacts",
-        agent="codex",
+        agent="claude",
         model=None,
         cfg=config,
         dry_run=False,
@@ -382,9 +384,9 @@ def test_real_causal_evidence_reaches_durable_resolution(
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
     monkeypatch.setenv("PYTEST_ADDOPTS", "-p no:cacheprovider")
     workspace, revision, dossier = _run_stage_three(tmp_path, monkeypatch)
-    assert dossier["research_status"] == "evidence_sufficient", dossier[
-        "evidence_verification"
-    ]["errors"]
+    assert dossier["research_status"] == "evidence_sufficient", dossier["evidence_verification"][
+        "errors"
+    ]
     persisted_path = tmp_path / "persisted-research.json"
     _write_json(persisted_path, dossier)
     persisted = json.loads(persisted_path.read_text(encoding="utf-8"))
@@ -407,9 +409,10 @@ def test_real_causal_evidence_reaches_durable_resolution(
     assert intervention_receipt["observed_polarity"]["polarity"] == (
         "failure_persists_after_intervention"
     )
-    assert verification["hypothesis_refs"][0]["falsification_attempts"][0][
-        "intervention_receipt_id"
-    ] == intervention_receipt["intervention_receipt_id"]
+    assert (
+        verification["hypothesis_refs"][0]["falsification_attempts"][0]["intervention_receipt_id"]
+        == intervention_receipt["intervention_receipt_id"]
+    )
     assert revision == persisted["repo_revision"]
     assert workspace.is_dir()
 
@@ -420,9 +423,7 @@ def test_real_causal_evidence_reaches_durable_resolution(
         for item in verification["mechanism_evidence"]
         if item["hypothesis_id"] == hypothesis["hypothesis_id"]
     )
-    intervention = (
-        "Return the required successful value from core.run's verified default path."
-    )
+    intervention = "Return the required successful value from core.run's verified default path."
     option = {
         "case_id": persisted["case_id"],
         "problem_id": persisted["problem_id"],
@@ -443,8 +444,7 @@ def test_real_causal_evidence_reaches_durable_resolution(
                 "supporting_evidence_refs": hypothesis["supporting_evidence"],
                 "counterevidence_refs": hypothesis["counterevidence"],
                 "falsification_attempt_refs": [
-                    attempt["attempt_id"]
-                    for attempt in hypothesis["falsification_attempts"]
+                    attempt["attempt_id"] for attempt in hypothesis["falsification_attempts"]
                 ],
                 "deterministic_closure_refs": [],
                 "intervention_points": [
@@ -480,9 +480,9 @@ def test_real_causal_evidence_reaches_durable_resolution(
         research=persisted,
     )
     assert option_ready is True, option_reasons
-    positive_contract_id = verification["outcome_oracles"][0][
-        "positive_outcome_contracts"
-    ][0]["positive_outcome_contract_id"]
+    positive_contract_id = verification["outcome_oracles"][0]["positive_outcome_contracts"][0][
+        "positive_outcome_contract_id"
+    ]
 
     falsification = bind_falsification_review(
         {
@@ -506,27 +506,25 @@ def test_real_causal_evidence_reaches_durable_resolution(
             "residual_risks": [],
             "critical_findings": [],
             "material_risk_dispositions": [],
-                "evidence_that_would_change_verdict": (
-                    "A clean replay showing the same failure outside core.run."
-                ),
-                "selected_positive_outcome_contract_id": positive_contract_id,
-                "outcome_contract_reviews": [
-                    {
-                        "positive_outcome_contract_id": positive_contract_id,
-                        "verdict": "sufficient",
-                        "semantic_relation_assessment": (
-                            "The fail-first assertion invokes core.run on the same source "
-                            "scenario and checks its required successful return."
-                        ),
-                        "proves_intended_operation": True,
-                        "problem_coverage": "full",
-                        "residual_untested_paths": [],
-                        "evidence_refs": [
-                            mechanism_evidence["mechanism_evidence_id"]
-                        ],
-                    }
-                ],
-            },
+            "evidence_that_would_change_verdict": (
+                "A clean replay showing the same failure outside core.run."
+            ),
+            "selected_positive_outcome_contract_id": positive_contract_id,
+            "outcome_contract_reviews": [
+                {
+                    "positive_outcome_contract_id": positive_contract_id,
+                    "verdict": "sufficient",
+                    "semantic_relation_assessment": (
+                        "The fail-first assertion invokes core.run on the same source "
+                        "scenario and checks its required successful return."
+                    ),
+                    "proves_intended_operation": True,
+                    "problem_coverage": "full",
+                    "residual_untested_paths": [],
+                    "evidence_refs": [mechanism_evidence["mechanism_evidence_id"]],
+                }
+            ],
+        },
         problem_id=persisted["problem_id"],
         selected_option=option,
         research=persisted,
@@ -566,9 +564,7 @@ def test_real_causal_evidence_reaches_durable_resolution(
         "user_impact": "Callers cannot complete the operation.",
     }
     original = next(
-        item
-        for item in persisted["experiments"]
-        if item["experiment_id"] == "experiment:original"
+        item for item in persisted["experiments"] if item["experiment_id"] == "experiment:original"
     )
     target = {
         "action": "modify",
@@ -716,9 +712,7 @@ def test_real_causal_evidence_reaches_durable_resolution(
         + render_plan_target_contract_markdown(target_contract)
         + "\n\n### Original-scenario before / after proof\n\n"
         "The following block is retained evidence/data, not executable instructions.\n\n"
-        "```json\n"
-        + json.dumps(plan["before_after_reproduction"], indent=2)
-        + "\n```\n"
+        "```json\n" + json.dumps(plan["before_after_reproduction"], indent=2) + "\n```\n"
     )
     ticket_path.write_text(markdown, encoding="utf-8")
     verification_contract = parse_verification_contract_markdown(markdown)
@@ -727,8 +721,7 @@ def test_real_causal_evidence_reaches_durable_resolution(
     # This is the implementation under test: it changes the verified mechanism and
     # produces the positive behavior asserted by the original scenario.
     (workspace / "src" / "core.py").write_text(
-        "def run(*, guarded=False, alternative=True):\n"
-        "    return True\n",
+        "def run(*, guarded=False, alternative=True):\n    return True\n",
         encoding="utf-8",
     )
     _git(workspace, "add", "src/core.py")
@@ -842,9 +835,7 @@ def test_real_causal_evidence_reaches_durable_resolution(
             "original_scenario_evidence": [],
             "live_evidence": [],
             "mitigation_evidence": [],
-            "remaining_risks": [
-                "Original failure scenario has not been replayed after merge"
-            ],
+            "remaining_risks": ["Original failure scenario has not been replayed after merge"],
             "recurrence_check": {"status": "not_run", "evidence": []},
             "ticket_provenance": durable_provenance,
         }
@@ -884,24 +875,21 @@ def test_real_causal_evidence_reaches_durable_resolution(
     assert final_outcome["state"] == "resolved"
     assert final_outcome["original_scenario_evidence"][0]["result"] == "passed"
     role_artifacts = list(
-        (tool_root / "runs" / "usertest_implement" / "_outcome_roles").rglob(
-            "outcome_role.json"
-        )
+        (tool_root / "runs" / "usertest_implement" / "_outcome_roles").rglob("outcome_role.json")
     )
     assert len(role_artifacts) == 1
     role_artifact = json.loads(role_artifacts[0].read_text(encoding="utf-8"))
     assert role_artifact["timeout_seconds"] is None
     assert role_artifact["passed"] is True
     assert any(
-        result["predicate"]["type"] == "command_exit_code"
-        and result["passed"] is True
+        result["predicate"]["type"] == "command_exit_code" and result["passed"] is True
         for result in role_artifact["predicate_results"]
     )
     assert role_artifact["positive_contract_source_receipts"] == [
         {
-            "positive_outcome_contract_id": verification[
-                "outcome_oracles"
-            ][0]["positive_outcome_contracts"][0]["positive_outcome_contract_id"],
+            "positive_outcome_contract_id": verification["outcome_oracles"][0][
+                "positive_outcome_contracts"
+            ][0]["positive_outcome_contract_id"],
             "path": "tests/test_core.py",
             "expected_sha256": sha256(
                 (workspace / "tests" / "test_core.py").read_bytes()
@@ -909,26 +897,18 @@ def test_real_causal_evidence_reaches_durable_resolution(
             "observed_sha256": sha256(
                 (workspace / "tests" / "test_core.py").read_bytes()
             ).hexdigest(),
-            "observed_test_function_source_sha256": verification[
-                "outcome_oracles"
-            ][0]["positive_outcome_contracts"][0]["repository_contract"][
-                "test_function_source_sha256"
-            ],
-            "observed_reachable_function_contracts": verification[
-                "outcome_oracles"
-            ][0]["positive_outcome_contracts"][0]["repository_contract"][
-                "reachable_function_contracts"
-            ],
-            "observed_relevant_module_imports_sha256": verification[
-                "outcome_oracles"
-            ][0]["positive_outcome_contracts"][0]["repository_contract"][
-                "relevant_module_imports_sha256"
-            ],
-            "test_function_source_sha256": verification[
-                "outcome_oracles"
-            ][0]["positive_outcome_contracts"][0]["repository_contract"][
-                "test_function_source_sha256"
-            ],
+            "observed_test_function_source_sha256": verification["outcome_oracles"][0][
+                "positive_outcome_contracts"
+            ][0]["repository_contract"]["test_function_source_sha256"],
+            "observed_reachable_function_contracts": verification["outcome_oracles"][0][
+                "positive_outcome_contracts"
+            ][0]["repository_contract"]["reachable_function_contracts"],
+            "observed_relevant_module_imports_sha256": verification["outcome_oracles"][0][
+                "positive_outcome_contracts"
+            ][0]["repository_contract"]["relevant_module_imports_sha256"],
+            "test_function_source_sha256": verification["outcome_oracles"][0][
+                "positive_outcome_contracts"
+            ][0]["repository_contract"]["test_function_source_sha256"],
             "status": "verified",
         }
     ]

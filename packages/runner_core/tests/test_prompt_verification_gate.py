@@ -8,7 +8,12 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from agent_adapters.codex_cli import CodexExecResult
+from agent_adapters.codex_cli import (
+    CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS,
+    CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
+    CodexExecResult,
+    CodexLoginStatusResult,
+)
 
 import runner_core.runner as runner_mod
 from runner_core import RunnerConfig, RunRequest, run_once
@@ -33,6 +38,9 @@ def _make_dummy_codex_binary(tmp_path: Path) -> str:
                 "",
                 "def main() -> int:",
                 "    argv = sys.argv[1:]",
+                "    if argv[-2:] == ['login', 'status']:",
+                "        print('Logged in using ChatGPT')",
+                "        return 0",
                 "    out_path: str | None = None",
                 "    if '--output-last-message' in argv:",
                 "        idx = argv.index('--output-last-message')",
@@ -41,10 +49,7 @@ def _make_dummy_codex_binary(tmp_path: Path) -> str:
                 "    report = {'ok': 'yes'}",
                 "    if out_path is not None:",
                 "        Path(out_path).write_text(json.dumps(report) + '\\n', encoding='utf-8')",
-                (
-                    "    payload = {'id': '1', 'msg': {'type': 'agent_message', "
-                    "'message': 'hi'}}"
-                ),
+                ("    payload = {'id': '1', 'msg': {'type': 'agent_message', 'message': 'hi'}}"),
                 "    print(json.dumps(payload))",
                 "    return 0",
                 "",
@@ -64,7 +69,7 @@ def _make_dummy_codex_binary(tmp_path: Path) -> str:
             "\n".join(
                 [
                     "@echo off",
-                    f"\"{sys.executable}\" \"{script}\" %*",
+                    f'"{sys.executable}" "{script}" %*',
                     "exit /b %ERRORLEVEL%",
                     "",
                 ]
@@ -75,7 +80,7 @@ def _make_dummy_codex_binary(tmp_path: Path) -> str:
 
     wrapper = tmp_path / "dummy_codex_prompt.sh"
     wrapper.write_text(
-        f"#!/bin/sh\nexec \"{sys.executable}\" \"{script}\" \"$@\"\n",
+        f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
         encoding="utf-8",
     )
     wrapper.chmod(wrapper.stat().st_mode | stat.S_IEXEC)
@@ -246,8 +251,7 @@ def test_prompt_includes_final_handoff_verification_and_codex_workspace_sandbox_
     assert "re-enter the agent with one compact fix prompt" in prompt_text
     assert "timing guidance" in prompt_text
     assert (
-        "expected duration range: p05=62s (~1.0 min), "
-        "median=510s (~8.5 min), p95=1330s"
+        "expected duration range: p05=62s (~1.0 min), median=510s (~8.5 min), p95=1330s"
     ) in prompt_text
     assert "runner expected blocking wait" in prompt_text
     assert "the runner owns the wait and will only re-enter you if a fix is needed" in prompt_text
@@ -349,6 +353,518 @@ def test_codex_uses_model_instructions_file_for_large_append_prompt(
     overrides = [str(item) for item in captured["config_overrides"]]
     assert any(item.startswith("model_instructions_file=") for item in overrides)
     assert not any(item.startswith("developer_instructions=") for item in overrides)
+
+
+def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    mission_path = runner_root / "configs" / "missions" / "m.mission.md"
+    mission_path.write_text(
+        mission_path.read_text(encoding="utf-8").replace(
+            "execution_mode: single_pass_inline_report",
+            "execution_mode: single_pass_inline_report\nrequires_shell: true",
+        ),
+        encoding="utf-8",
+    )
+    source_codex_home = tmp_path / "source-codex-home"
+    source_codex_home.mkdir()
+    (source_codex_home / "auth.json").write_text(
+        json.dumps(
+            {
+                "auth_mode": "chatgpt",
+                "OPENAI_API_KEY": None,
+                "tokens": {
+                    "access_token": "test-access",
+                    "refresh_token": "test-refresh",
+                    "account_id": "test-account",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("CODEX_HOME", str(source_codex_home))
+    monkeypatch.setenv("OPENAI_API_KEY", "must-be-removed")
+    monkeypatch.setenv("CODEX_API_KEY", "must-also-be-removed")
+    monkeypatch.setenv("CODEX_ACCESS_TOKEN", "must-also-be-removed")
+    provider_parent_values = {
+        "OPENAI_BASE_URL": "https://provider.invalid/v1",
+        "OPENAI_API_BASE": "https://legacy-provider.invalid/v1",
+        "OPENAI_ORG_ID": "org-id",
+        "OPENAI_ORGANIZATION": "organization-id",
+    }
+    for name, value in provider_parent_values.items():
+        monkeypatch.setenv(name, value)
+    source_auth_before = (source_codex_home / "auth.json").read_bytes()
+    _write(source_codex_home / "config.toml", 'model="host-user-config-sentinel"\n')
+    _write(
+        source_codex_home / "rules" / "default.rules",
+        'prefix_rule(pattern=["host-safe"], decision="allow")\n',
+    )
+    target = _setup_target_repo(tmp_path)
+    target_rules = target / ".codex" / "rules"
+    target_rules.mkdir(parents=True)
+    _write(
+        target_rules / "target.rules",
+        'prefix_rule(pattern=["target"], decision="forbidden")\n',
+    )
+    target_config = target / ".codex" / "config.toml"
+    target_config_bytes = (
+        b'model_provider="alternate"\r\n'
+        b'chatgpt_base_url="https://alternate.invalid/backend-api"\r\n'
+    )
+    target_config.write_bytes(target_config_bytes)
+    dummy_binary = _make_dummy_codex_binary(tmp_path)
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_commands_local",
+        lambda commands, **kwargs: (
+            {cmd: True for cmd in commands},
+            {"command_probe_details": {cmd: {"present": True} for cmd in commands}},
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_agent_cli_version",
+        lambda **kwargs: {
+            "ok": True,
+            "argv": [str(kwargs.get("binary", "codex")), "--version"],
+            "returncode": 0,
+            "stdout": "codex test stub\n",
+            "stderr": "",
+        },
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_agent_auth_present_local",
+        lambda **kwargs: (True, "test_stub"),
+    )
+    captured: dict[str, object] = {}
+    calls: list[dict[str, object]] = []
+
+    def _fake_run_codex_exec(**kwargs: object) -> CodexExecResult:
+        workspace = Path(str(kwargs["workspace_dir"]))
+        captured["workspace"] = workspace
+        captured["ignore_user_config"] = kwargs.get("ignore_user_config")
+        captured["ignore_rules"] = kwargs.get("ignore_rules")
+        captured["config_overrides"] = list(kwargs.get("config_overrides", ()))
+        env_overrides = kwargs.get("env_overrides")
+        captured["env_overrides"] = dict(env_overrides) if isinstance(env_overrides, dict) else {}
+        calls.append(
+            {
+                "prompt": kwargs.get("prompt"),
+                "config_overrides": list(kwargs.get("config_overrides", ())),
+                "raw_events_path": kwargs.get("raw_events_path"),
+                "ignore_user_config": kwargs.get("ignore_user_config"),
+                "ignore_rules": kwargs.get("ignore_rules"),
+                "env_overrides": dict(env_overrides) if isinstance(env_overrides, dict) else {},
+            }
+        )
+        controlled = workspace / ".codex" / "rules" / "usertest-controlled.rules"
+        assert controlled.is_file()
+        assert not (workspace / ".codex" / "rules" / "target.rules").exists()
+        assert not (workspace / ".codex" / "config.toml").exists()
+        raw_events_path = kwargs["raw_events_path"]
+        last_message_path = kwargs["last_message_path"]
+        stderr_path = kwargs["stderr_path"]
+        assert isinstance(raw_events_path, Path)
+        assert isinstance(last_message_path, Path)
+        assert isinstance(stderr_path, Path)
+        if "agent_shell_probe" in raw_events_path.as_posix():
+            command_events = [
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "powershell -Command 'git rev-parse --is-inside-work-tree'",
+                        "aggregated_output": "true\n",
+                        "exit_code": 0,
+                    },
+                },
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "powershell -Command 'python --version'",
+                        "aggregated_output": "Python 3.14\n",
+                        "exit_code": 0,
+                    },
+                },
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "powershell -Command \"Write-Output 'shell_probe=ok'\"",
+                        "aggregated_output": "shell_probe=ok\n",
+                        "exit_code": 0,
+                    },
+                },
+            ]
+            raw_events_path.write_text(
+                "".join(json.dumps(event) + "\n" for event in command_events),
+                encoding="utf-8",
+            )
+        else:
+            raw_events_path.write_text(
+                json.dumps({"id": "1", "msg": {"type": "agent_message", "message": "ok"}}) + "\n",
+                encoding="utf-8",
+            )
+        last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        return CodexExecResult(
+            argv=["codex"],
+            exit_code=0,
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+        )
+
+    monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
+    monkeypatch.setattr(
+        "agent_adapters.shell_probe.run_codex_exec",
+        _fake_run_codex_exec,
+    )
+    result = run_once(
+        RunnerConfig(
+            repo_root=runner_root,
+            runs_dir=tmp_path / "runs",
+            agents={"codex": {"binary": dummy_binary}},
+            policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+        ),
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+            agent_append_system_prompt="RESEARCH MISSION SENTINEL",
+            codex_execpolicy_allow_prefixes=(("git", "rev-parse"), ("python",)),
+            keep_workspace=True,
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert captured["ignore_user_config"] is True
+    assert captured["ignore_rules"] is False
+    assert "sandbox_workspace_write.writable_roots=[]" in captured["config_overrides"]
+    assert "notify=[]" in captured["config_overrides"]
+    assert 'forced_login_method="chatgpt"' in captured["config_overrides"]
+    assert 'model_provider="openai"' in captured["config_overrides"]
+    assert any(str(value).startswith("projects.") for value in captured["config_overrides"])
+    assert captured["env_overrides"]["OPENAI_API_KEY"] == ""
+    assert captured["env_overrides"]["CODEX_API_KEY"] == ""
+    assert captured["env_overrides"]["CODEX_ACCESS_TOKEN"] == ""
+    for name, value in provider_parent_values.items():
+        assert captured["env_overrides"][name] == ""
+        assert os.environ[name] == value
+    assert Path(captured["env_overrides"]["CODEX_HOME"]).resolve() == source_codex_home.resolve()
+    workspace = captured["workspace"]
+    assert isinstance(workspace, Path)
+    assert (workspace / ".codex" / "rules" / "target.rules").is_file()
+    assert not (workspace / ".codex" / "rules" / "usertest-controlled.rules").exists()
+    assert (workspace / ".codex" / "config.toml").read_bytes() == target_config_bytes
+    receipt_text = (result.run_dir / "codex_execpolicy_overlay.json").read_text(encoding="utf-8")
+    assert "test-access" not in receipt_text
+    assert "test-refresh" not in receipt_text
+    receipt = json.loads(receipt_text)
+    assert receipt["restore_status"] == "restored"
+    assert receipt["restore_errors"] == []
+    assert receipt["configuration_mode"] == "host_codex_home_with_isolated_config"
+    assert receipt["host_user_config_ignored"] is True
+    assert receipt["target_project_config_isolated"] is True
+    assert receipt["target_config_manifest_while_isolated"] == []
+    assert (
+        receipt["target_config_manifest_after_restore"] == receipt["target_config_manifest_before"]
+    )
+    assert receipt["global_rules_loaded"] is True
+    assert receipt["host_global_rules_unchanged"] is True
+    assert receipt["chatgpt_subscription_auth_verified"] is True
+    assert receipt["chatgpt_subscription_login_status_verified"] is True
+    assert receipt["chatgpt_subscription_activation_probe_verified"] is True
+    assert receipt["chatgpt_subscription_post_login_status_verified"] is True
+    assert receipt["post_login_status"]["status_kind"] == "chatgpt"
+    assert receipt["api_key_auth_environment_disabled"] is True
+    assert receipt["auth_mode"] == "shared_host_chatgpt_subscription_cache"
+    assert receipt["auth_cache_copied"] is False
+    assert receipt["auth_cache_deleted"] is False
+    assert receipt["host_auth_identity_unchanged"] is True
+    assert (source_codex_home / "auth.json").read_bytes() == source_auth_before
+    assert not (source_codex_home / ".tmp").exists()
+    assert len(calls) == 2
+    probe_call, mission_call = calls
+    assert "agent_shell_probe" in Path(str(probe_call["raw_events_path"])).as_posix()
+    for call in calls:
+        assert call["ignore_user_config"] is True
+        assert call["ignore_rules"] is False
+        assert call["env_overrides"]["OPENAI_API_KEY"] == ""
+        assert call["env_overrides"]["CODEX_API_KEY"] == ""
+        assert call["env_overrides"]["CODEX_ACCESS_TOKEN"] == ""
+        assert all(
+            call["env_overrides"][name] == "" for name in CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS
+        )
+        assert 'forced_login_method="chatgpt"' in call["config_overrides"]
+        assert 'model_provider="openai"' in call["config_overrides"]
+        assert any(str(value).startswith("projects.") for value in call["config_overrides"])
+        assert call["config_overrides"][-len(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES) :] == list(
+            CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES
+        )
+        assert not any("alternate.invalid" in str(value) for value in call["config_overrides"])
+    assert any(
+        str(value).startswith("model_instructions_file=")
+        for value in probe_call["config_overrides"]
+    )
+    assert any(
+        str(value).startswith("model_instructions_file=")
+        for value in mission_call["config_overrides"]
+    )
+    assert "model_reasoning_effort=low" in probe_call["config_overrides"]
+    assert "model_reasoning_effort=low" not in mission_call["config_overrides"]
+    assert "RESEARCH MISSION SENTINEL" not in str(probe_call["prompt"])
+    assert receipt["activation_probe"]["ok"] is True
+    assert receipt["activation_probe"]["workspace_unchanged"] is True
+    assert receipt["activation_probe"]["required_commands_seen"] == [
+        "git rev-parse --is-inside-work-tree",
+        "python --version",
+    ]
+    assert not any(
+        row.get("path", "").startswith(".codex/rules")
+        for row in json.loads((result.run_dir / "diff_numstat.json").read_text(encoding="utf-8"))
+    )
+
+
+@pytest.mark.parametrize(
+    ("stdout", "exit_code"),
+    [
+        ("Logged in using an API key\n", 0),
+        ("malformed login status\n", 0),
+        ("", 9),
+    ],
+)
+def test_controlled_codex_login_status_failure_prevents_probe_and_mission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stdout: str,
+    exit_code: int,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    source_codex_home = tmp_path / "source-codex-home"
+    source_codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(source_codex_home))
+    monkeypatch.setenv("OPENAI_API_KEY", "must-be-removed")
+    monkeypatch.setenv("CODEX_API_KEY", "must-be-removed")
+    monkeypatch.setenv("CODEX_ACCESS_TOKEN", "must-be-removed")
+    target = _setup_target_repo(tmp_path)
+    target_rules = target / ".codex" / "rules"
+    target_rules.mkdir(parents=True)
+    original_rules = target_rules / "target.rules"
+    _write(original_rules, 'prefix_rule(pattern=["target"], decision="forbidden")\n')
+    dummy_binary = _make_dummy_codex_binary(tmp_path)
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_commands_local",
+        lambda commands, **kwargs: (
+            {cmd: True for cmd in commands},
+            {"command_probe_details": {cmd: {"present": True} for cmd in commands}},
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_agent_cli_version",
+        lambda **kwargs: {
+            "ok": True,
+            "argv": [str(kwargs.get("binary", "codex")), "--version"],
+            "returncode": 0,
+            "stdout": "codex test stub\n",
+            "stderr": "",
+        },
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_agent_auth_present_local",
+        lambda **kwargs: (True, "test_stub"),
+    )
+    status_calls: list[dict[str, object]] = []
+
+    def _fake_login_status(**kwargs: object) -> CodexLoginStatusResult:
+        env_overrides = kwargs.get("env_overrides")
+        env = dict(env_overrides) if isinstance(env_overrides, dict) else {}
+        status_calls.append({"env": env, "codex_home": kwargs.get("codex_home")})
+        return CodexLoginStatusResult(
+            argv=[str(kwargs.get("binary", "codex")), "login", "status"],
+            exit_code=exit_code,
+            stdout=stdout,
+            stderr="",
+            codex_home=str(kwargs.get("codex_home")),
+            auth_env_vars_blank={
+                name: env.get(name) == "" for name in CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS
+            },
+        )
+
+    monkeypatch.setattr(runner_mod, "probe_codex_login_status", _fake_login_status)
+    agent_calls: list[dict[str, object]] = []
+
+    def _unexpected_agent_call(**kwargs: object) -> CodexExecResult:
+        agent_calls.append(dict(kwargs))
+        raise AssertionError("agent probe or mission must not start after login-status failure")
+
+    monkeypatch.setattr(runner_mod, "run_codex_exec", _unexpected_agent_call)
+    monkeypatch.setattr(
+        "agent_adapters.shell_probe.run_codex_exec",
+        _unexpected_agent_call,
+    )
+
+    result = run_once(
+        RunnerConfig(
+            repo_root=runner_root,
+            runs_dir=tmp_path / "runs",
+            agents={"codex": {"binary": dummy_binary}},
+            policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+        ),
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+            codex_execpolicy_allow_prefixes=(("git", "rev-parse"), ("python",)),
+            keep_workspace=True,
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert agent_calls == []
+    assert len(status_calls) == 2
+    for call in status_calls:
+        assert Path(str(call["codex_home"])).resolve() == source_codex_home.resolve()
+        assert call["env"]["OPENAI_API_KEY"] == ""
+        assert call["env"]["CODEX_API_KEY"] == ""
+        assert call["env"]["CODEX_ACCESS_TOKEN"] == ""
+    receipt = json.loads(
+        (result.run_dir / "codex_execpolicy_overlay.json").read_text(encoding="utf-8")
+    )
+    assert receipt["host_auth_file_before"]["state"] == "absent"
+    assert receipt["chatgpt_subscription_login_status_verified"] is False
+    assert receipt["chatgpt_subscription_activation_probe_verified"] is False
+    assert receipt["chatgpt_subscription_post_login_status_verified"] is False
+    assert receipt["chatgpt_subscription_auth_verified"] is False
+    assert receipt["auth_verification_status"] == "failed"
+    assert original_rules.is_file()
+    assert not (target_rules / "usertest-controlled.rules").exists()
+
+
+def test_controlled_codex_activation_probe_failure_prevents_mission_and_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    mission_path = runner_root / "configs" / "missions" / "m.mission.md"
+    mission_path.write_text(
+        mission_path.read_text(encoding="utf-8").replace(
+            "execution_mode: single_pass_inline_report",
+            "execution_mode: single_pass_inline_report\nrequires_shell: true",
+        ),
+        encoding="utf-8",
+    )
+    source_codex_home = tmp_path / "source-codex-home"
+    source_codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(source_codex_home))
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_binary(tmp_path)
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_commands_local",
+        lambda commands, **kwargs: (
+            {cmd: True for cmd in commands},
+            {"command_probe_details": {cmd: {"present": True} for cmd in commands}},
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_agent_cli_version",
+        lambda **kwargs: {
+            "ok": True,
+            "argv": [str(kwargs.get("binary", "codex")), "--version"],
+            "returncode": 0,
+            "stdout": "codex test stub\n",
+            "stderr": "",
+        },
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_agent_auth_present_local",
+        lambda **kwargs: (True, "test_stub"),
+    )
+    agent_calls: list[dict[str, object]] = []
+
+    def _probe_only_codex_exec(**kwargs: object) -> CodexExecResult:
+        agent_calls.append(dict(kwargs))
+        raw_events_path = kwargs["raw_events_path"]
+        last_message_path = kwargs["last_message_path"]
+        stderr_path = kwargs["stderr_path"]
+        assert isinstance(raw_events_path, Path)
+        assert isinstance(last_message_path, Path)
+        assert isinstance(stderr_path, Path)
+        assert "agent_shell_probe" in raw_events_path.as_posix()
+        raw_events_path.write_text(
+            json.dumps(
+                {
+                    "type": "item.completed",
+                    "item": {
+                        "type": "command_execution",
+                        "command": "powershell -Command \"Write-Output 'shell_probe=ok'\"",
+                        "aggregated_output": "shell_probe=ok\n",
+                        "exit_code": 0,
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        last_message_path.write_text("probe only\n", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        return CodexExecResult(
+            argv=["codex"],
+            exit_code=0,
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+        )
+
+    monkeypatch.setattr(runner_mod, "run_codex_exec", _probe_only_codex_exec)
+    monkeypatch.setattr(
+        "agent_adapters.shell_probe.run_codex_exec",
+        _probe_only_codex_exec,
+    )
+    result = run_once(
+        RunnerConfig(
+            repo_root=runner_root,
+            runs_dir=tmp_path / "runs",
+            agents={"codex": {"binary": dummy_binary}},
+            policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+        ),
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+            codex_execpolicy_allow_prefixes=(("git", "rev-parse"), ("python",)),
+            keep_workspace=True,
+        ),
+    )
+
+    assert result.exit_code == 1
+    assert len(agent_calls) == 1
+    assert "agent_shell_probe" in Path(str(agent_calls[0]["raw_events_path"])).as_posix()
+    receipt = json.loads(
+        (result.run_dir / "codex_execpolicy_overlay.json").read_text(encoding="utf-8")
+    )
+    assert receipt["chatgpt_subscription_login_status_verified"] is True
+    assert receipt["chatgpt_subscription_activation_probe_verified"] is False
+    assert receipt["chatgpt_subscription_post_login_status_verified"] is True
+    assert receipt["chatgpt_subscription_auth_verified"] is False
+    assert receipt["auth_verification_status"] == "failed"
 
 
 def test_run_once_uses_agent_default_model_when_request_model_is_omitted(

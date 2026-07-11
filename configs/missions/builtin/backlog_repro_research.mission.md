@@ -44,17 +44,14 @@ In your final JSON report, include this required extension block:
 {
   "extensions": {
     "backlog_repro_research": {
-      "research_schema_version": 3,
       "case_id": "case:... exactly as assigned",
       "problem_id": "problem:...",
-      "repo_revision": "exact git commit inspected",
       "research_method": "reproduction|static_trace",
       "reproduction_status": "reproduced|reproduction_failed|partial|blocked",
       "research_status": "evidence_sufficient|insufficient_evidence|blocked",
       "writes_used": false,
       "writes_purpose": ["none"],
       "implementation_performed": false,
-      "diff_classification": "no_changes",
       "artifact_refs": [
         {
           "artifact_id": "artifact:repro-output",
@@ -237,7 +234,45 @@ In your final JSON report, include this required extension block:
 ```
 
 Notes:
+- `scenario_kind` is exactly one of `original_replay`, `faithful_replay`, `control`,
+  `static_trace`, or `live_runtime`. Do not emit variants such as
+  `deterministic_static_trace`, `retained_artifact_inspection`, or explanatory prose.
+  `platform_requirement` is exactly one of lowercase `any`, `windows`, `linux`, or
+  `darwin`; put platform detail in the experiment result or evidence boundary, not this enum.
+- Every `scenario_kind="static_trace"` experiment includes this exact contract shape:
+
+  ```json
+  {
+    "scenario_kind": "static_trace",
+    "platform_requirement": "any",
+    "static_trace": {
+      "deterministic": true,
+      "environment_dependencies": [],
+      "code_path": [
+        {
+          "path": "exact/repository/path.py",
+          "symbol": "module.exact_symbol",
+          "observation": "The inspected deterministic transition established at this step."
+        }
+      ]
+    },
+    "fidelity_mapping": {
+      "original_condition": "Optional for static_trace: the originating runtime condition.",
+      "retained_differences": "Optional for static_trace: what the static evaluation cannot replay.",
+      "why_mechanism_equivalent": "Optional for static_trace: why the exact path still evaluates the same mechanism."
+    }
+  }
+  ```
+
+  `static_trace.deterministic` is a JSON boolean, `environment_dependencies` is a list
+  of strings and must be empty for an advancing deterministic trace, and every `code_path`
+  entry has exactly the shown path/symbol/observation meaning. `fidelity_mapping` is required
+  for `faithful_replay` and `live_runtime`, optional but encouraged for `static_trace`, and
+  omitted for `original_replay` and `control`.
 - `implementation_performed` must be `false` even if you made writes. This stage is research-only.
+- `case_id` and `problem_id` are model-owned identity fields: copy them exactly from the
+  assignment. The runner supplies `research_schema_version`, the acquired `repo_revision`, and
+  the observed `diff_classification`; omit those runner-owned fields rather than guessing them.
 - `writes_used` must match the observed research overlay. Keep it `false` with
   `writes_purpose=["none"]` when no `.usertest_research/` files were created. Set it
   `true` only when research-only overlay writes actually exist, and then replace `"none"`
@@ -279,6 +314,9 @@ Notes:
 - The runner adds `evidence_verification` and a clean revision-pinned planning workspace after
   checking normalized events, file contents, artifact hashes, problem identity, and git HEAD.
   Do not invent or include that runner-owned receipt yourself.
+- The outer troubleshoot `status` describes report completeness, not whether the bug reproduced.
+  `partial` or `failure` never upgrades or downgrades an honest `insufficient_evidence` or
+  `blocked` extension. A claim of `evidence_sufficient` requires outer `status="success"`.
 - Each experiment must name every assigned **source** atom it addresses. Prior research,
   implementation, and verification atoms are supplied as history/counterevidence context;
   do not reproduce that derived commentary as if it were the original symptom. Together the

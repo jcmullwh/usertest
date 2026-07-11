@@ -56,6 +56,7 @@ def _evidence_assignment(*, case_id: str = "case:parent") -> dict[str, object]:
                 "atom_id": "atom:origin",
                 "atom_sha256": evidence_assignment_sha256(snapshot),
                 "atom_snapshot": snapshot,
+                "source_projection_version": 1,
                 "artifact_receipts": [
                     {
                         "path": "runs/origin/report.json",
@@ -63,6 +64,7 @@ def _evidence_assignment(*, case_id: str = "case:parent") -> dict[str, object]:
                         "size_bytes": 123,
                     }
                 ],
+                "origin_evidence_mode": "snapshot_and_artifacts",
             }
         ],
     }
@@ -132,9 +134,7 @@ def test_observation_mission_containing_verification_is_not_derived() -> None:
     )[0]
 
     assert atom["evidence_role"] == "observation"
-    assert [item["atom_id"] for item in eligible_problem_mining_atoms([atom])] == [
-        atom["atom_id"]
-    ]
+    assert [item["atom_id"] for item in eligible_problem_mining_atoms([atom])] == [atom["atom_id"]]
 
 
 @pytest.mark.parametrize(
@@ -176,9 +176,7 @@ def test_unproved_permanent_disposition_is_reopened_for_mining(disposition: str)
         atom,
         require_decided=True,
     )
-    assert [item["atom_id"] for item in eligible_problem_mining_atoms([atom])] == [
-        atom["atom_id"]
-    ]
+    assert [item["atom_id"] for item in eligible_problem_mining_atoms([atom])] == [atom["atom_id"]]
 
 
 def test_record_lineage_context_rejects_model_authored_novel_case_promotion() -> None:
@@ -297,6 +295,88 @@ def test_record_lineage_context_binds_validated_runner_evidence_assignment() -> 
     assert context["disposition"] == "supports_case"
     assert "novel_case_rationale" not in context
     assert "runner_evidence_assignment" in context["lineage_authorities"]
+
+
+def test_record_lineage_context_accepts_mixed_artifact_and_signed_snapshot_receipts() -> None:
+    assignment = _evidence_assignment()
+    aggregate_snapshot = {
+        "atom_id": "__aggregate__/target:aggregate_metrics:1",
+        "source": "aggregate_metrics",
+        "text": "Failure rate is elevated across the assigned source runs.",
+    }
+    assignment["expected_atom_ids"] = [
+        "atom:origin",
+        "__aggregate__/target:aggregate_metrics:1",
+    ]
+    assignment["atom_receipts"].append(
+        {
+            "atom_id": "__aggregate__/target:aggregate_metrics:1",
+            "atom_sha256": evidence_assignment_sha256(aggregate_snapshot),
+            "atom_snapshot": aggregate_snapshot,
+            "source_projection_version": 1,
+            "artifact_receipts": [],
+            "origin_evidence_mode": "signed_snapshot",
+        }
+    )
+    assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
+
+    context = record_lineage_context(
+        {
+            "target_ref": {"mission_id": "backlog_repro_research"},
+            "evidence_assignment": assignment,
+        },
+        run_id="target/run/agent/1",
+    )
+    atoms = normalize_atom_lineage(
+        [
+            _atom("target/run/agent/1:command_failure:1", **context),
+            _atom("target/run/agent/1:report_outcome:1", **context),
+            _atom("target/run/agent/1:agent_stderr_artifact:1", **context),
+        ],
+        strict_new_output=True,
+    )
+
+    assert context.get("lineage_validation_errors") is None
+    assert context["derived_from_atom_ids"] == assignment["expected_atom_ids"]
+    assert {atom["parent_case_id"] for atom in atoms} == {"case:parent"}
+    assert {atom["case_id"] for atom in atoms} == {"case:parent"}
+    assert {atom["disposition"] for atom in atoms} == {"supports_case"}
+    assert {atom["disposition_status"] for atom in atoms} == {"decided"}
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_error"),
+    [
+        (
+            {"source_projection_version": 2},
+            "runner_evidence_assignment_source_projection_version_invalid:0",
+        ),
+        (
+            {
+                "origin_evidence_mode": "signed_snapshot",
+            },
+            "runner_evidence_assignment_signed_snapshot_has_artifacts:0:atom:origin",
+        ),
+    ],
+)
+def test_record_lineage_context_rejects_invalid_evidence_receipt_mode_or_projection(
+    mutation: dict[str, object],
+    expected_error: str,
+) -> None:
+    assignment = _evidence_assignment()
+    assignment["atom_receipts"][0].update(mutation)
+    assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
+
+    context = record_lineage_context(
+        {
+            "target_ref": {"mission_id": "backlog_repro_research"},
+            "evidence_assignment": assignment,
+        },
+        run_id="target/run/agent/1",
+    )
+
+    assert context["parent_case_id"] is None
+    assert expected_error in context["lineage_validation_errors"]
 
 
 def test_record_lineage_context_rejects_tampered_runner_evidence_assignment() -> None:
@@ -872,9 +952,7 @@ def test_source_atom_can_support_distinct_canonical_facets_without_losing_eviden
     assert dispositioned[0]["supporting_case_ids"] == ["case:shell", "case:smoke"]
     assert eligible_problem_mining_atoms(dispositioned) == []
 
-    attached = attach_supporting_atoms_to_problem_cases(
-        [shell_case, smoke_case], dispositioned
-    )
+    attached = attach_supporting_atoms_to_problem_cases([shell_case, smoke_case], dispositioned)
     assert all(case["evidence_atom_ids"] == [atom_id] for case in attached)
 
     registry = build_case_registry(attached, supporting_atoms=dispositioned)
@@ -1149,9 +1227,10 @@ def test_stage_lineage_is_cumulative_and_carried_cases_reuse_proof_context() -> 
     assert entry["plan_revisions"][plan_revision_id]["evidence_atom_ids_at_plan"] == (
         original_evidence
     )
-    assert entry["plan_revisions"][plan_revision_id][
-        "source_evidence_atom_ids_at_plan"
-    ] == original_evidence
+    assert (
+        entry["plan_revisions"][plan_revision_id]["source_evidence_atom_ids_at_plan"]
+        == original_evidence
+    )
     baseline_revision = entry["plan_revisions"][plan_revision_id]["case_revision_at_plan"]
     assert entry["state"] == "planned"
     assert entry["current_lifecycle"]["outcome_reference"]["source"] == (

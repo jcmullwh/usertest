@@ -19,9 +19,7 @@ from backlog_core.stage_contracts import (
     verified_hypothesis_falsification_attempts,
 )
 
-_SCOPE_LEVELS = frozenset(
-    {"single_path", "multiple_independent_paths", "shared_abstraction"}
-)
+_SCOPE_LEVELS = frozenset({"single_path", "multiple_independent_paths", "shared_abstraction"})
 _BREADTH_CONSUMER_KINDS = frozenset(
     {"production_entrypoint", "config_consumer", "live_failure_surface"}
 )
@@ -45,7 +43,6 @@ _RUNTIME_MARKERS = (
     "shell unavailable",
     "shell probe",
     "docker daemon",
-    "agent stderr",
     "delivery failed",
     "cli execution",
 )
@@ -66,18 +63,14 @@ _RUNTIME_ARTIFACT_KINDS = frozenset(
     {
         "agent_stderr",
         "command_failure",
-        "log",
         "runtime",
-        "trace",
     }
 )
 _FALSIFICATION_EVIDENCE_EFFECTS = frozenset(
     {"supports_selection", "challenges_selection", "limits_scope"}
 )
 _MATERIAL_RISK_DISPOSITIONS = frozenset({"accepted", "mitigated", "blocks_selection"})
-_OUTCOME_ROLES = frozenset(
-    {"original_scenario", "live", "mitigation_effect", "recurrence"}
-)
+_OUTCOME_ROLES = frozenset({"original_scenario", "live", "mitigation_effect", "recurrence"})
 _COMMAND_STREAMS = frozenset({"stdout", "stderr", "combined"})
 _COMMAND_STREAM_OPERATORS = frozenset({"contains", "not_contains", "equals"})
 _GENERIC_TEST_COMMAND_RE = re.compile(
@@ -223,9 +216,7 @@ def verified_outcome_oracles(
             if not isinstance(item, Mapping):
                 continue
             oracle_id = _string(item.get("outcome_oracle_id"))
-            projection = {
-                key: value for key, value in item.items() if key != "outcome_oracle_id"
-            }
+            projection = {key: value for key, value in item.items() if key != "outcome_oracle_id"}
             if oracle_id != f"outcome_oracle:{_canonical_sha256(projection)}":
                 continue
             experiment_id = _string(item.get("research_experiment_id"))
@@ -250,14 +241,11 @@ def _verified_positive_outcome_contracts(
             continue
         contract_id = _string(contract.get("positive_outcome_contract_id"))
         projection = {
-            key: value
-            for key, value in contract.items()
-            if key != "positive_outcome_contract_id"
+            key: value for key, value in contract.items() if key != "positive_outcome_contract_id"
         }
         postconditions = contract.get("postconditions")
         if (
-            contract_id
-            != f"positive_outcome_contract:{_canonical_sha256(projection)}"
+            contract_id != f"positive_outcome_contract:{_canonical_sha256(projection)}"
             or contract.get("kind")
             not in {
                 "repository_test_assertion",
@@ -327,9 +315,7 @@ def _runner_correct_value_assertions(
     controls = _verified_control_receipts(research)
     experiments = {
         str(item.get("experiment_id")): item
-        for item in (
-            research.get("experiments", []) if isinstance(research, Mapping) else []
-        )
+        for item in (research.get("experiments", []) if isinstance(research, Mapping) else [])
         if isinstance(item, Mapping) and _string(item.get("experiment_id")) is not None
     }
     assertions: list[dict[str, Any]] = []
@@ -341,11 +327,7 @@ def _runner_correct_value_assertions(
             else None
         )
         control = controls.get(control_id or "")
-        observable = (
-            control.get("observable_difference")
-            if isinstance(control, Mapping)
-            else None
-        )
+        observable = control.get("observable_difference") if isinstance(control, Mapping) else None
         if (
             not isinstance(observable, Mapping)
             or observable.get("difference_kind") != "wrong_value_corrected"
@@ -356,9 +338,7 @@ def _runner_correct_value_assertions(
         control_experiment_id = _string(control.get("control_experiment_id"))
         experiment = experiments.get(control_experiment_id or "")
         declared = (
-            experiment.get("observable_assertion")
-            if isinstance(experiment, Mapping)
-            else None
+            experiment.get("observable_assertion") if isinstance(experiment, Mapping) else None
         )
         expected = declared.get("expected") if isinstance(declared, Mapping) else None
         if (
@@ -565,9 +545,7 @@ def bind_plan_outcome_oracle(
             "positive_outcome_contracts": selected_contracts,
             "scenarios": scenarios,
         }
-        bound_oracle["outcome_oracle_id"] = (
-            "outcome_oracle:" + _canonical_sha256(bound_oracle)
-        )
+        bound_oracle["outcome_oracle_id"] = "outcome_oracle:" + _canonical_sha256(bound_oracle)
         role_predicates = [
             {
                 "type": "oracle_scenario_passed",
@@ -580,17 +558,14 @@ def bind_plan_outcome_oracle(
             "scenario_expectations": [
                 {
                     "scenario_id": scenario["scenario_id"],
-                    "positive_outcome_contract_id": scenario[
-                        "positive_outcome_contract_id"
-                    ],
+                    "positive_outcome_contract_id": scenario["positive_outcome_contract_id"],
                     "after_change": scenario["after_change"],
                 }
                 for scenario in scenarios
             ]
         }
         experiment_ids = [
-            _string(scenario["oracle"].get("research_experiment_id"))
-            for scenario in scenarios
+            _string(scenario["oracle"].get("research_experiment_id")) for scenario in scenarios
         ]
     if any(value is None for value in experiment_ids):
         raise ValueError("change_plan_outcome_oracle_experiment_identity_missing")
@@ -720,9 +695,7 @@ def _outcome_role_contract_errors(
             if any(_GENERIC_TEST_COMMAND_RE.search(command) for command in commands):
                 reasons.append(f"change_plan_outcome_role_generic_test_forbidden:{role}")
         predicates = value.get("predicates")
-        if not isinstance(predicates, list) or (
-            not predicates and role != "recurrence"
-        ):
+        if not isinstance(predicates, list) or (not predicates and role != "recurrence"):
             reasons.append(f"change_plan_outcome_role_predicates_invalid:{role}")
             predicates = []
         exit_coverage: set[int] = set()
@@ -792,8 +765,7 @@ def _outcome_role_contract_errors(
                 scenario_index = predicate.get("scenario_index")
                 scenarios = (
                     oracle.get("scenarios")
-                    if isinstance(oracle, Mapping)
-                    and isinstance(oracle.get("scenarios"), list)
+                    if isinstance(oracle, Mapping) and isinstance(oracle.get("scenarios"), list)
                     else []
                 )
                 if (
@@ -810,9 +782,7 @@ def _outcome_role_contract_errors(
                         f"change_plan_outcome_role_scenario_predicate_invalid:{role}:{index}"
                     )
             else:
-                reasons.append(
-                    f"change_plan_outcome_role_predicate_type_invalid:{role}:{index}"
-                )
+                reasons.append(f"change_plan_outcome_role_predicate_type_invalid:{role}:{index}")
         expected_exit_coverage = (
             {0} if oracle_kind == "staged_replay" else set(range(len(commands)))
         )
@@ -820,24 +790,16 @@ def _outcome_role_contract_errors(
             reasons.append(f"change_plan_outcome_role_exit_coverage_invalid:{role}")
         if oracle_mode:
             oracle_id = _string(oracle.get("outcome_oracle_id"))
-            projection = {
-                key: item for key, item in oracle.items() if key != "outcome_oracle_id"
-            }
+            projection = {key: item for key, item in oracle.items() if key != "outcome_oracle_id"}
             if oracle_id != f"outcome_oracle:{_canonical_sha256(projection)}":
                 reasons.append("change_plan_outcome_oracle_hash_invalid")
             if value.get("required_proof_scope") != oracle.get("proof_scope"):
                 reasons.append("change_plan_outcome_oracle_scope_mismatch")
             if oracle_kind == "staged_replay" and oracle.get("proof_scope") != "behavioral":
                 reasons.append("change_plan_outcome_replay_scope_invalid")
-            if (
-                oracle_kind == "config_state"
-                and oracle.get("proof_scope") != "configuration_state"
-            ):
+            if oracle_kind == "config_state" and oracle.get("proof_scope") != "configuration_state":
                 reasons.append("change_plan_outcome_config_scope_invalid")
-            if (
-                oracle_kind == "multi_scenario"
-                and oracle.get("proof_scope") != "multi_scenario"
-            ):
+            if oracle_kind == "multi_scenario" and oracle.get("proof_scope") != "multi_scenario":
                 reasons.append("change_plan_outcome_multi_scenario_scope_invalid")
 
     original = normalized_roles.get("original_scenario")
@@ -847,14 +809,8 @@ def _outcome_role_contract_errors(
         after = reproduction.get("after_change")
         after = after if isinstance(after, Mapping) else {}
         original_oracle = original.get("oracle")
-        oracle_kind = (
-            original_oracle.get("kind")
-            if isinstance(original_oracle, Mapping)
-            else None
-        )
-        role_commands = _string_list(
-            original.get("commands"), nonempty=oracle_kind is None
-        ) or []
+        oracle_kind = original_oracle.get("kind") if isinstance(original_oracle, Mapping) else None
+        role_commands = _string_list(original.get("commands"), nonempty=oracle_kind is None) or []
         after_command = _string(after.get("command"))
         if oracle_kind is None:
             if len(role_commands) != 1 or (
@@ -873,9 +829,7 @@ def _outcome_role_contract_errors(
                 reproduction.get("outcome_oracle_id")
             ):
                 reasons.append("change_plan_outcome_original_oracle_mismatch")
-            if original.get("required_proof_scope") != reproduction.get(
-                "required_proof_scope"
-            ):
+            if original.get("required_proof_scope") != reproduction.get("required_proof_scope"):
                 reasons.append("change_plan_outcome_original_scope_mismatch")
         expected_exit = after.get("expected_exit_code")
         original_predicates = original.get("predicates")
@@ -884,16 +838,12 @@ def _outcome_role_contract_errors(
             and predicate.get("type") == "command_exit_code"
             and predicate.get("command_index") == 0
             and predicate.get("equals") == expected_exit
-            for predicate in (
-                original_predicates if isinstance(original_predicates, list) else []
-            )
+            for predicate in (original_predicates if isinstance(original_predicates, list) else [])
         )
         if oracle_kind not in {"config_state", "multi_scenario"} and not original_exit_matches:
             reasons.append("change_plan_outcome_original_predicate_mismatch")
         after_assertions_raw = after.get("observable_assertions")
-        after_assertions = (
-            after_assertions_raw if isinstance(after_assertions_raw, list) else []
-        )
+        after_assertions = after_assertions_raw if isinstance(after_assertions_raw, list) else []
         expected_predicates = [
             predicate
             for assertion in after_assertions
@@ -905,9 +855,7 @@ def _outcome_role_contract_errors(
         expected_predicates.extend(
             predicate
             for expectation in (
-                artifact_expectations
-                if isinstance(artifact_expectations, list)
-                else []
+                artifact_expectations if isinstance(artifact_expectations, list) else []
             )
             if isinstance(expectation, Mapping)
             for predicate in [_artifact_expectation_predicate(expectation)]
@@ -922,14 +870,12 @@ def _outcome_role_contract_errors(
             targets = {
                 str(target.get("target_id")): target
                 for target in original_oracle.get("state_targets", [])
-                if isinstance(target, Mapping)
-                and _string(target.get("target_id")) is not None
+                if isinstance(target, Mapping) and _string(target.get("target_id")) is not None
             }
             state_predicates = [
                 predicate
                 for predicate in original_predicate_list
-                if isinstance(predicate, Mapping)
-                and predicate.get("type") == "oracle_state_equals"
+                if isinstance(predicate, Mapping) and predicate.get("type") == "oracle_state_equals"
             ]
             if not state_predicates or {
                 str(predicate.get("target_id")) for predicate in state_predicates
@@ -969,20 +915,15 @@ def _outcome_role_contract_errors(
     if requires_live is False and normalized_roles.get("live") is not None:
         reasons.append("change_plan_outcome_live_role_unjustified")
     expected_outcome_state = (
-        reproduction.get("expected_outcome_state")
-        if isinstance(reproduction, Mapping)
-        else None
+        reproduction.get("expected_outcome_state") if isinstance(reproduction, Mapping) else None
     )
     if expected_outcome_state == "resolved":
         original_predicates = (
             original.get("predicates")
-            if isinstance(original, Mapping)
-            and isinstance(original.get("predicates"), list)
+            if isinstance(original, Mapping) and isinstance(original.get("predicates"), list)
             else []
         )
-        original_oracle = (
-            original.get("oracle") if isinstance(original, Mapping) else None
-        )
+        original_oracle = original.get("oracle") if isinstance(original, Mapping) else None
         grounded_predicates = (
             _grounded_positive_predicates(original_oracle)
             if isinstance(original_oracle, Mapping)
@@ -1008,8 +949,7 @@ def _outcome_role_contract_errors(
             and all(
                 isinstance(scenario, Mapping)
                 and any(
-                    isinstance(predicate, Mapping)
-                    and _positive_outcome_predicate(predicate)
+                    isinstance(predicate, Mapping) and _positive_outcome_predicate(predicate)
                     for predicate in (
                         scenario.get("predicates")
                         if isinstance(scenario.get("predicates"), list)
@@ -1033,12 +973,8 @@ def _outcome_role_contract_errors(
             )
             for predicate in original_predicates
         ):
-            reasons.append(
-                "change_plan_positive_outcome_contract_missing_research_required"
-            )
-    if expected_outcome_state == "mitigated" and normalized_roles.get(
-        "mitigation_effect"
-    ) is None:
+            reasons.append("change_plan_positive_outcome_contract_missing_research_required")
+    if expected_outcome_state == "mitigated" and normalized_roles.get("mitigation_effect") is None:
         reasons.append("change_plan_outcome_mitigation_role_required")
     return reasons
 
@@ -1072,8 +1008,7 @@ def _verified_control_receipts(
     for control in controls:
         if (
             not isinstance(control, Mapping)
-            or control.get("verification_method")
-            != "pytest_ast_controlled_difference_v2"
+            or control.get("verification_method") != "pytest_ast_controlled_difference_v2"
             or control.get("adversarial_effect") != "limits_scope"
             or not isinstance(control.get("controlled_input_difference"), Mapping)
             or not isinstance(control.get("observable_difference"), Mapping)
@@ -1152,9 +1087,7 @@ def _verified_selected_falsification_attempts(
         return []
     hypothesis = _research_hypotheses(research).get(hypothesis_id)
     attempts_raw = (
-        hypothesis.get("falsification_attempts")
-        if isinstance(hypothesis, Mapping)
-        else None
+        hypothesis.get("falsification_attempts") if isinstance(hypothesis, Mapping) else None
     )
     declared_refs = [
         attempt_id
@@ -1196,8 +1129,7 @@ def _verified_selected_deterministic_closures(
     verified_by_id = {
         str(closure.get("closure_receipt_id")): closure
         for closure in verified
-        if isinstance(closure, Mapping)
-        and _string(closure.get("closure_receipt_id")) is not None
+        if isinstance(closure, Mapping) and _string(closure.get("closure_receipt_id")) is not None
     }
     expected_refs = sorted(verified_by_id)
     if list(closure_refs) != expected_refs:
@@ -1211,23 +1143,18 @@ def falsification_acceptance_has_adversarial_basis(
     """Return whether runner proof supports a challenge or deterministic closure."""
 
     receipt = review.get("adversarial_evidence_receipt")
-    attempts = (
-        receipt.get("falsification_attempts") if isinstance(receipt, Mapping) else None
-    )
+    attempts = receipt.get("falsification_attempts") if isinstance(receipt, Mapping) else None
     if any(
         isinstance(attempt, Mapping) and attempt.get("outcome") == "survived"
         for attempt in (attempts if isinstance(attempts, list) else [])
     ):
         return True
     closures = (
-        receipt.get("deterministic_mechanism_closures")
-        if isinstance(receipt, Mapping)
-        else None
+        receipt.get("deterministic_mechanism_closures") if isinstance(receipt, Mapping) else None
     )
     return bool(closures) and all(
         isinstance(closure, Mapping)
-        and closure.get("verification_method")
-        == "runner_deterministic_mechanism_closure_v1"
+        and closure.get("verification_method") == "runner_deterministic_mechanism_closure_v1"
         for closure in (closures if isinstance(closures, list) else [])
     )
 
@@ -1259,10 +1186,8 @@ def _verified_failure_paths(
             or path.get("verification_method") != "runner_controlled_failure_path_v1"
             or _string(path.get("path_name")) is None
             or not isinstance(consumer_identity, Mapping)
-            or _string(consumer_identity.get("entrypoint"))
-            != _string(path.get("path_name"))
-            or _string(path.get("independence_key"))
-            != _canonical_sha256(consumer_identity)
+            or _string(consumer_identity.get("entrypoint")) != _string(path.get("path_name"))
+            or _string(path.get("independence_key")) != _canonical_sha256(consumer_identity)
             or _string(path.get("control_verification_id")) not in controls
             or _string(path.get("hypothesis_id")) is None
             or _string_list(path.get("mechanism_symbols"), nonempty=True) is None
@@ -1287,10 +1212,8 @@ def _verified_failure_paths(
             _string(evidence.get("path_name")) is not None
             and isinstance(consumer_identity, Mapping)
             and _string(consumer_identity.get("kind")) is not None
-            and _string(consumer_identity.get("entrypoint"))
-            == _string(evidence.get("path_name"))
-            and _string(evidence.get("independence_key"))
-            == _canonical_sha256(consumer_identity)
+            and _string(consumer_identity.get("entrypoint")) == _string(evidence.get("path_name"))
+            and _string(evidence.get("independence_key")) == _canonical_sha256(consumer_identity)
             and _string(evidence.get("hypothesis_id")) is not None
             and _string_list(evidence.get("mechanism_symbols"), nonempty=True) is not None
             and _string_list(evidence.get("origin_atom_ids"), nonempty=True) is not None
@@ -1353,8 +1276,7 @@ def _verified_intervention_path_keys(
     for evidence in _verified_mechanism_evidence(research).values():
         if (
             _string(evidence.get("hypothesis_id")) != hypothesis_id
-            or _string_list(evidence.get("mechanism_symbols"), nonempty=True)
-            != expected_symbols
+            or _string_list(evidence.get("mechanism_symbols"), nonempty=True) != expected_symbols
         ):
             continue
         code_paths = evidence.get("code_paths")
@@ -1380,9 +1302,7 @@ def _verified_intervention_path_keys(
         strong_control_covers = (
             isinstance(strong_control, Mapping)
             and _string(strong_control.get("hypothesis_id")) == hypothesis_id
-            and _string_list(
-                strong_control.get("mechanism_symbols"), nonempty=True
-            )
+            and _string_list(strong_control.get("mechanism_symbols"), nonempty=True)
             == expected_symbols
             and strong_symbols == expected_symbols
             and controlled.issubset(set(strong_symbols or []))
@@ -1424,9 +1344,7 @@ def _intervention_sufficiency_reasons(
             "sufficient_control_point"
         ):
             continue
-        controlled_symbols = _string_list(
-            point.get("controls_mechanism_symbols"), nonempty=True
-        )
+        controlled_symbols = _string_list(point.get("controls_mechanism_symbols"), nonempty=True)
         target_path = _string(point.get("target_path"))
         target_symbol = _string(point.get("target_symbol"))
         if (
@@ -1445,9 +1363,7 @@ def _intervention_sufficiency_reasons(
             controlled_symbols=controlled_symbols,
         )
         if not required_path_keys.issubset(verified_path_keys):
-            reasons.append(
-                f"solution_option_intervention_sufficiency_unverified:{index}"
-            )
+            reasons.append(f"solution_option_intervention_sufficiency_unverified:{index}")
     return reasons
 
 
@@ -1485,9 +1401,7 @@ def _broad_scope_outcome_coverage_reasons(
             continue
         receipt = verified_paths.get(refs[0])
         independence_key = (
-            _string(receipt.get("independence_key"))
-            if isinstance(receipt, Mapping)
-            else None
+            _string(receipt.get("independence_key")) if isinstance(receipt, Mapping) else None
         )
         if independence_key is not None:
             required_keys.add(independence_key)
@@ -1538,9 +1452,7 @@ def bind_falsification_review(
         raise ValueError("falsification_option_id_mismatch")
     coverage = selected_option.get("causal_coverage")
     binding = coverage.get("research_binding") if isinstance(coverage, Mapping) else None
-    hypothesis_id = (
-        _string(binding.get("hypothesis_id")) if isinstance(binding, Mapping) else None
-    )
+    hypothesis_id = _string(binding.get("hypothesis_id")) if isinstance(binding, Mapping) else None
     mechanism_symbols = (
         _string_list(binding.get("mechanism_symbols"), nonempty=True)
         if isinstance(binding, Mapping)
@@ -1552,8 +1464,7 @@ def bind_falsification_review(
         evidence_id: evidence
         for evidence_id, evidence in _verified_mechanism_evidence(research).items()
         if _string(evidence.get("hypothesis_id")) == hypothesis_id
-        and _string_list(evidence.get("mechanism_symbols"), nonempty=True)
-        == mechanism_symbols
+        and _string_list(evidence.get("mechanism_symbols"), nonempty=True) == mechanism_symbols
     }
     if not evidence_pool:
         raise ValueError("falsification_verified_mechanism_evidence_missing")
@@ -1581,9 +1492,7 @@ def bind_falsification_review(
         raise ValueError("falsification_research_proof_route_invalid")
     verification = research.get("evidence_verification") if isinstance(research, Mapping) else None
     research_receipt_sha256 = (
-        _string(verification.get("receipt_sha256"))
-        if isinstance(verification, Mapping)
-        else None
+        _string(verification.get("receipt_sha256")) if isinstance(verification, Mapping) else None
     )
     if research_receipt_sha256 is None:
         raise ValueError("falsification_research_receipt_hash_missing")
@@ -1691,9 +1600,7 @@ def bind_falsification_review(
             for selected_review in selected_reviews
         ):
             raise ValueError("falsification_accepts_insufficient_outcome_semantics")
-        selected_contract_id = (
-            selected_contract_ids[0] if len(selected_contract_ids) == 1 else None
-        )
+        selected_contract_id = selected_contract_ids[0] if len(selected_contract_ids) == 1 else None
 
     bound = dict(review)
     bound.pop("adversarial_evidence_receipt", None)
@@ -1804,9 +1711,7 @@ def falsification_review_receipt_errors(
         return [f"selection_falsification_server_binding_invalid:{exc}"]
     errors: list[str] = []
     if claims != {
-        key: value
-        for key, value in rebound.items()
-        if key != "adversarial_evidence_receipt"
+        key: value for key, value in rebound.items() if key != "adversarial_evidence_receipt"
     }:
         errors.append("selection_falsification_server_derived_claims_changed")
     if dict(receipt) != rebound.get("adversarial_evidence_receipt"):
@@ -1925,9 +1830,7 @@ def _research_evidence_reference_identities(
         # Current proof records use ``path:symbol`` when a symbol carries a file
         # qualifier.  Prefer the longest exact file prefix and leave unqualified
         # names independent rather than guessing module-to-path resolution.
-        matching_files = [
-            path for path in inspected_files if symbol.startswith(f"{path}:")
-        ]
+        matching_files = [path for path in inspected_files if symbol.startswith(f"{path}:")]
         if matching_files:
             union(symbol, max(matching_files, key=len))
 
@@ -2032,16 +1935,18 @@ def _create_target_integration_reasons(
     for ref in refs:
         evidence = verified_evidence.get(ref)
         if evidence is None:
-            reasons.append(
-                f"change_plan_create_target_integration_evidence_unbound:{index}:{ref}"
-            )
+            reasons.append(f"change_plan_create_target_integration_evidence_unbound:{index}:{ref}")
             continue
         code_paths = evidence.get("code_paths")
-        if path is not None and symbol is not None and not any(
-            isinstance(point, Mapping)
-            and _string(point.get("path")) == path
-            and _string(point.get("symbol")) == symbol
-            for point in (code_paths if isinstance(code_paths, list) else [])
+        if (
+            path is not None
+            and symbol is not None
+            and not any(
+                isinstance(point, Mapping)
+                and _string(point.get("path")) == path
+                and _string(point.get("symbol")) == symbol
+                for point in (code_paths if isinstance(code_paths, list) else [])
+            )
         ):
             reasons.append(
                 f"change_plan_create_target_integration_evidence_not_on_path:{index}:{ref}"
@@ -2064,9 +1969,7 @@ def _research_binding_reasons(
     hypothesis_id = _string(binding.get("hypothesis_id"))
     hypothesis_statement = _string(binding.get("hypothesis_statement"))
     mechanism_symbols = _string_list(binding.get("mechanism_symbols"), nonempty=True)
-    supporting_refs = _string_list(
-        binding.get("supporting_evidence_refs"), nonempty=True
-    )
+    supporting_refs = _string_list(binding.get("supporting_evidence_refs"), nonempty=True)
     counter_refs = _string_list(binding.get("counterevidence_refs"))
     attempt_refs = _string_list(binding.get("falsification_attempt_refs"))
     closure_refs = _string_list(binding.get("deterministic_closure_refs"))
@@ -2140,9 +2043,7 @@ def _research_binding_reasons(
         )
         if len(verified_attempts) != len(expected_attempt_refs):
             reasons.append("solution_option_research_falsification_attempts_unverified")
-        if not any(
-            attempt.get("outcome") == "survived" for attempt in verified_attempts
-        ):
+        if not any(attempt.get("outcome") == "survived" for attempt in verified_attempts):
             reasons.append("solution_option_research_hypothesis_not_falsification_survived")
         if any(attempt.get("outcome") == "disproved" for attempt in verified_attempts):
             reasons.append("solution_option_research_hypothesis_falsification_disproved")
@@ -2167,9 +2068,7 @@ def _research_binding_reasons(
         target_path = _string(point.get("target_path"))
         intervention = _string(point.get("intervention"))
         if mechanism_symbol is None or mechanism_symbol not in (expected_symbols or []):
-            reasons.append(
-                f"solution_option_intervention_mechanism_symbol_unbound:{index}"
-            )
+            reasons.append(f"solution_option_intervention_mechanism_symbol_unbound:{index}")
         controlled_symbols = _string_list(
             point.get("controls_mechanism_symbols"),
             nonempty=True,
@@ -2184,9 +2083,7 @@ def _research_binding_reasons(
             or any(symbol not in (expected_symbols or []) for symbol in controlled_symbols)
             or mechanism_symbol not in controlled_symbols
         ):
-            reasons.append(
-                f"solution_option_intervention_controlled_symbols_invalid:{index}"
-            )
+            reasons.append(f"solution_option_intervention_controlled_symbols_invalid:{index}")
         causal_role = _string(point.get("causal_role"))
         if causal_role is None and len(expected_symbols or []) == 1:
             causal_role = "sufficient_control_point"
@@ -2194,12 +2091,11 @@ def _research_binding_reasons(
             reasons.append(f"solution_option_intervention_causal_role_invalid:{index}")
         elif causal_role == "sufficient_control_point":
             if set(controlled_symbols) != set(expected_symbols or []):
-                reasons.append(
-                    f"solution_option_intervention_control_point_not_sufficient:{index}"
-                )
-            elif _string(point.get("sufficiency_rationale")) is None and len(
-                expected_symbols or []
-            ) > 1:
+                reasons.append(f"solution_option_intervention_control_point_not_sufficient:{index}")
+            elif (
+                _string(point.get("sufficiency_rationale")) is None
+                and len(expected_symbols or []) > 1
+            ):
                 reasons.append(
                     f"solution_option_intervention_sufficiency_rationale_missing:{index}"
                 )
@@ -2210,22 +2106,16 @@ def _research_binding_reasons(
         elif verified_symbol_paths.get(target_symbol) != target_path:
             reasons.append(f"solution_option_intervention_target_unverified:{index}")
         elif target_symbol != mechanism_symbol:
-            reasons.append(
-                f"solution_option_intervention_target_mechanism_mismatch:{index}"
-            )
+            reasons.append(f"solution_option_intervention_target_mechanism_mismatch:{index}")
         if intervention is None:
             reasons.append(f"solution_option_intervention_effect_missing:{index}")
         if target_path is not None and target_symbol is not None and intervention is not None:
             target_key = (target_path, target_symbol)
             previous = intervention_targets.get(target_key)
             if previous is not None:
-                reasons.append(
-                    f"solution_option_intervention_target_duplicate:{index}"
-                )
+                reasons.append(f"solution_option_intervention_target_duplicate:{index}")
                 if previous != intervention:
-                    reasons.append(
-                        f"solution_option_intervention_target_conflict:{index}"
-                    )
+                    reasons.append(f"solution_option_intervention_target_conflict:{index}")
             else:
                 intervention_targets[target_key] = intervention
     if expected_symbols is not None and sufficient_control_points == 0:
@@ -2272,23 +2162,54 @@ def infer_live_verification_requirement(
     research_map = research if isinstance(research, Mapping) else {}
     problem_map = problem if isinstance(problem, Mapping) else {}
     research_members = _research_dossier_members(research_map)
-    for experiment in (
+    verified_mechanism_evidence = list(_verified_mechanism_evidence(research_map).values())
+    verified_experiments = [
+        experiment
+        for member in research_members
+        for verification in [member.get("evidence_verification")]
+        if isinstance(verification, Mapping) and verification.get("status") == "verified"
+        for experiment in (
+            verification.get("experiments")
+            if isinstance(verification.get("experiments"), list)
+            else []
+        )
+        if isinstance(experiment, Mapping)
+    ]
+    verified_experiment_ids = {
+        experiment_id
+        for evidence in verified_mechanism_evidence
+        for experiment_id in (_string_list(evidence.get("experiment_ids")) or [])
+    }
+    verified_experiment_ids.update(
+        experiment_id
+        for experiment in verified_experiments
+        for experiment_id in [_string(experiment.get("experiment_id"))]
+        if experiment_id is not None
+    )
+    declared_verified_experiments = [
         experiment
         for member in research_members
         for experiment in (
             member.get("experiments") if isinstance(member.get("experiments"), list) else []
         )
-    ):
-        if not isinstance(experiment, Mapping):
+        if isinstance(experiment, Mapping)
+        and _string(experiment.get("experiment_id")) in verified_experiment_ids
+    ]
+    for experiment in [*verified_experiments, *declared_verified_experiments]:
+        experiment_id = _string(experiment.get("experiment_id"))
+        if experiment_id is None or experiment_id not in verified_experiment_ids:
             continue
         if experiment.get("scenario_kind") == "live_runtime":
             reasons.append("research_verified_live_runtime_boundary")
         platform = _string(experiment.get("platform_requirement"))
         if platform is not None and platform != "any":
             reasons.append(f"research_requires_platform:{platform}")
-    for evidence in _verified_mechanism_evidence(research_map).values():
+    for evidence in verified_mechanism_evidence:
         if evidence.get("evidence_type") == "live_runtime":
             reasons.append("research_mechanism_evidence_live_runtime")
+        platform = _string(evidence.get("platform_requirement"))
+        if platform is not None and platform != "any":
+            reasons.append(f"research_mechanism_evidence_requires_platform:{platform}")
     # A runner directory, exit code, normalized-event stream, or report is evidence
     # transport for every research method. It is not by itself provenance that the
     # originating problem crosses a runtime boundary.
@@ -2296,12 +2217,13 @@ def infer_live_verification_requirement(
         artifact
         for member in research_members
         for artifact in (
-            member.get("artifact_refs")
-            if isinstance(member.get("artifact_refs"), list)
-            else []
+            member.get("artifact_refs") if isinstance(member.get("artifact_refs"), list) else []
         )
     ):
         if not isinstance(artifact, Mapping):
+            continue
+        artifact_id = (_string(artifact.get("artifact_id")) or "").casefold()
+        if artifact_id.startswith("runner:"):
             continue
         kind = (_string(artifact.get("kind")) or "").casefold()
         if kind in _RUNTIME_ARTIFACT_KINDS:
@@ -2441,26 +2363,15 @@ def assess_solution_option_readiness(
                     for path in bound_path_receipts
                     if isinstance(path.get("consumer_identity"), Mapping)
                 ]
-                if (
-                    len(consumer_kinds) != len(bound_path_receipts)
-                    or any(
-                        kind not in _BREADTH_CONSUMER_KINDS
-                        for kind in consumer_kinds
-                    )
+                if len(consumer_kinds) != len(bound_path_receipts) or any(
+                    kind not in _BREADTH_CONSUMER_KINDS for kind in consumer_kinds
                 ):
-                    reasons.append(
-                        "solution_option_broad_scope_requires_production_consumers"
-                    )
+                    reasons.append("solution_option_broad_scope_requires_production_consumers")
                 independence_keys = {
-                    _string(path.get("independence_key"))
-                    for path in bound_path_receipts
+                    _string(path.get("independence_key")) for path in bound_path_receipts
                 }
-                if None in independence_keys or len(independence_keys) != len(
-                    bound_path_receipts
-                ):
-                    reasons.append(
-                        "solution_option_broad_scope_requires_independent_failure_paths"
-                    )
+                if None in independence_keys or len(independence_keys) != len(bound_path_receipts):
+                    reasons.append("solution_option_broad_scope_requires_independent_failure_paths")
                 # One originating run can expose multiple independent consumers
                 # or paths. Independence is established by the runner's path key,
                 # not by forcing artificially disjoint atom sets.
@@ -2503,11 +2414,7 @@ def assess_selection_readiness(
     selected_option_id = _string(selection.get("selected_option_id"))
     selected_family_id = _string(selection.get("selected_family_id"))
     selected_option = next(
-        (
-            option
-            for option in options
-            if _string(option.get("option_id")) == selected_option_id
-        ),
+        (option for option in options if _string(option.get("option_id")) == selected_option_id),
         None,
     )
     option_ready, option_reasons = assess_solution_option_readiness(
@@ -2520,8 +2427,7 @@ def assess_selection_readiness(
     ):
         reasons.append("selection_family_mismatch")
     if isinstance(selected_option, Mapping) and (
-        _string(selected_option.get("problem_id"))
-        != _string(selection.get("problem_id"))
+        _string(selected_option.get("problem_id")) != _string(selection.get("problem_id"))
     ):
         reasons.append("selection_problem_mismatch")
 
@@ -2538,13 +2444,9 @@ def assess_selection_readiness(
         if not isinstance(class_level_sufficient, bool):
             reasons.append("selection_class_level_evidence_decision_missing")
         selected_scope_raw = (
-            selected_option.get("scope_evidence")
-            if isinstance(selected_option, Mapping)
-            else None
+            selected_option.get("scope_evidence") if isinstance(selected_option, Mapping) else None
         )
-        selected_scope = (
-            selected_scope_raw if isinstance(selected_scope_raw, Mapping) else {}
-        )
+        selected_scope = selected_scope_raw if isinstance(selected_scope_raw, Mapping) else {}
         if (
             _string(selected_scope.get("scope_level"))
             in {"multiple_independent_paths", "shared_abstraction"}
@@ -2593,21 +2495,19 @@ def assess_selection_readiness(
                         f"selection_falsification_evidence_ref_unbound:{index}:{ref or ''}"
                     )
                 if _string(evidence_ref.get("finding")) is None:
-                    reasons.append(
-                        f"selection_falsification_evidence_finding_missing:{index}"
-                    )
+                    reasons.append(f"selection_falsification_evidence_finding_missing:{index}")
                 if evidence_ref.get("effect") not in _FALSIFICATION_EVIDENCE_EFFECTS:
-                    reasons.append(
-                        f"selection_falsification_evidence_effect_invalid:{index}"
-                    )
-                elif evidence_ref.get("effect") in {
-                    "challenges_selection",
-                    "limits_scope",
-                } and ref is not None:
+                    reasons.append(f"selection_falsification_evidence_effect_invalid:{index}")
+                elif (
+                    evidence_ref.get("effect")
+                    in {
+                        "challenges_selection",
+                        "limits_scope",
+                    }
+                    and ref is not None
+                ):
                     adversarial_refs.add(ref)
-        has_adversarial_basis = falsification_acceptance_has_adversarial_basis(
-            falsification
-        )
+        has_adversarial_basis = falsification_acceptance_has_adversarial_basis(falsification)
         if falsification.get("verdict") == "accept" and not has_adversarial_basis:
             reasons.append("selection_falsification_accept_without_adversarial_evidence")
         critical_findings = falsification.get("critical_findings")
@@ -2618,20 +2518,14 @@ def assess_selection_readiness(
                 if (
                     not isinstance(finding, Mapping)
                     or _string(finding.get("finding")) is None
-                    or finding.get("affects")
-                    not in {"root_cause", "interface", "change_surface"}
+                    or finding.get("affects") not in {"root_cause", "interface", "change_surface"}
                     or _string_list(finding.get("evidence_refs"), nonempty=True) is None
                     or any(
                         ref not in allowed_evidence
-                        for ref in (
-                            _string_list(finding.get("evidence_refs"), nonempty=True)
-                            or []
-                        )
+                        for ref in (_string_list(finding.get("evidence_refs"), nonempty=True) or [])
                     )
                 ):
-                    reasons.append(
-                        f"selection_falsification_critical_finding_invalid:{index}"
-                    )
+                    reasons.append(f"selection_falsification_critical_finding_invalid:{index}")
             if falsification.get("verdict") == "accept" and critical_findings:
                 reasons.append("selection_falsification_accepts_critical_finding")
 
@@ -2654,16 +2548,12 @@ def assess_selection_readiness(
             disposed_risks: set[str] = set()
             for index, disposition in enumerate(dispositions):
                 if not isinstance(disposition, Mapping):
-                    reasons.append(
-                        f"selection_falsification_risk_disposition_invalid:{index}"
-                    )
+                    reasons.append(f"selection_falsification_risk_disposition_invalid:{index}")
                     continue
                 risk = _string(disposition.get("risk"))
                 decision = disposition.get("disposition")
                 if risk is None or risk not in material_risks:
-                    reasons.append(
-                        f"selection_falsification_risk_unbound:{index}:{risk or ''}"
-                    )
+                    reasons.append(f"selection_falsification_risk_unbound:{index}:{risk or ''}")
                 else:
                     if risk in disposed_risks:
                         reasons.append(
@@ -2671,32 +2561,24 @@ def assess_selection_readiness(
                         )
                     disposed_risks.add(risk)
                 if decision not in _MATERIAL_RISK_DISPOSITIONS:
-                    reasons.append(
-                        f"selection_falsification_risk_disposition_unknown:{index}"
-                    )
+                    reasons.append(f"selection_falsification_risk_disposition_unknown:{index}")
                 if decision == "blocks_selection" and falsification.get("verdict") == "accept":
                     reasons.append("selection_falsification_blocking_risk_accepted")
                 refs = _string_list(disposition.get("evidence_refs"), nonempty=True)
                 if refs is None or any(ref not in allowed_evidence for ref in refs):
-                    reasons.append(
-                        f"selection_falsification_risk_evidence_unbound:{index}"
-                    )
+                    reasons.append(f"selection_falsification_risk_evidence_unbound:{index}")
                 elif decision == "mitigated" and not (
                     adversarial_refs.intersection(refs) or has_adversarial_basis
                 ):
                     reasons.append(
-                        "selection_falsification_mitigation_lacks_adversarial_evidence:"
-                        f"{index}"
+                        f"selection_falsification_mitigation_lacks_adversarial_evidence:{index}"
                     )
                 if _string(disposition.get("rationale")) is None:
-                    reasons.append(
-                        f"selection_falsification_risk_rationale_missing:{index}"
-                    )
+                    reasons.append(f"selection_falsification_risk_rationale_missing:{index}")
             missing_risks = sorted(material_risks - disposed_risks)
             if missing_risks:
                 reasons.append(
-                    "selection_falsification_material_risks_undisposed:"
-                    + ",".join(missing_risks)
+                    "selection_falsification_material_risks_undisposed:" + ",".join(missing_risks)
                 )
 
     change_surface = selection.get("change_surface")
@@ -2765,9 +2647,7 @@ def assess_change_plan_readiness(
                 else None
             )
             actual_original = (
-                actual_roles.get("original_scenario")
-                if isinstance(actual_roles, Mapping)
-                else None
+                actual_roles.get("original_scenario") if isinstance(actual_roles, Mapping) else None
             )
             rebound_reproduction = rebound_plan.get("before_after_reproduction")
             actual_reproduction = plan.get("before_after_reproduction")
@@ -2786,9 +2666,7 @@ def assess_change_plan_readiness(
             ):
                 reasons.append("change_plan_outcome_oracle_binding_changed")
     falsification = (
-        selection.get("falsification_review")
-        if isinstance(selection, Mapping)
-        else None
+        selection.get("falsification_review") if isinstance(selection, Mapping) else None
     )
     selected_positive_contract_ids = (
         _string_list(
@@ -2803,20 +2681,14 @@ def assess_change_plan_readiness(
             falsification.get("selected_positive_outcome_contract_id")
         )
         selected_positive_contract_ids = (
-            [selected_positive_contract_id]
-            if selected_positive_contract_id is not None
-            else None
+            [selected_positive_contract_id] if selected_positive_contract_id is not None else None
         )
     planned_roles = plan.get("outcome_verification_roles")
     planned_original = (
-        planned_roles.get("original_scenario")
-        if isinstance(planned_roles, Mapping)
-        else None
+        planned_roles.get("original_scenario") if isinstance(planned_roles, Mapping) else None
     )
     planned_oracle = (
-        planned_original.get("oracle")
-        if isinstance(planned_original, Mapping)
-        else None
+        planned_original.get("oracle") if isinstance(planned_original, Mapping) else None
     )
     planned_contract_ids = {
         _string(contract.get("positive_outcome_contract_id"))
@@ -2884,21 +2756,15 @@ def assess_change_plan_readiness(
             if _string(reproduction.get("alternate_verification")) is None:
                 reasons.append("change_plan_alternate_verification_missing")
             else:
-                alternate = " ".join(
-                    str(reproduction.get("alternate_verification") or "").split()
-                )
-                verification_commands = _string_list(
-                    plan.get("verification_commands")
-                ) or []
+                alternate = " ".join(str(reproduction.get("alternate_verification") or "").split())
+                verification_commands = _string_list(plan.get("verification_commands")) or []
                 if alternate not in {
                     " ".join(command.split()) for command in verification_commands
                 }:
                     reasons.append(
                         "change_plan_alternate_verification_not_in_verification_commands"
                     )
-            limitation_refs = _string_list(
-                reproduction.get("proof_limitation_refs"), nonempty=True
-            )
+            limitation_refs = _string_list(reproduction.get("proof_limitation_refs"), nonempty=True)
             allowed_limitations = research_limitation_references(research)
             if limitation_refs is None:
                 reasons.append("change_plan_proof_limitation_refs_missing")
@@ -2908,16 +2774,12 @@ def assess_change_plan_readiness(
             limitation_refs = reproduction.get("proof_limitation_refs")
             if limitation_refs not in (None, []):
                 reasons.append("change_plan_proof_limitation_refs_without_limitation")
-            research_experiment_id = _string(
-                reproduction.get("research_experiment_id")
-            )
+            research_experiment_id = _string(reproduction.get("research_experiment_id"))
             research_experiments_raw = (
                 research.get("experiments") if isinstance(research, Mapping) else None
             )
             research_experiments = (
-                research_experiments_raw
-                if isinstance(research_experiments_raw, list)
-                else []
+                research_experiments_raw if isinstance(research_experiments_raw, list) else []
             )
             research_experiment = next(
                 (
@@ -2943,8 +2805,7 @@ def assess_change_plan_readiness(
                 isinstance(bound_oracle, Mapping)
                 and bound_oracle.get("kind") == "config_state"
                 and bound_oracle.get("proof_scope") == "configuration_state"
-                and _string(bound_oracle.get("research_experiment_id"))
-                == research_experiment_id
+                and _string(bound_oracle.get("research_experiment_id")) == research_experiment_id
             )
             multi_scenario_oracle = (
                 isinstance(bound_oracle, Mapping)
@@ -2955,9 +2816,7 @@ def assess_change_plan_readiness(
                 reasons.append("change_plan_research_experiment_unbound")
             elif research_experiment.get("scenario_kind") == "static_trace":
                 if not config_oracle or research_experiment.get("outcome") != "supports":
-                    reasons.append(
-                        "change_plan_static_trace_cannot_prove_behavioral_outcome"
-                    )
+                    reasons.append("change_plan_static_trace_cannot_prove_behavioral_outcome")
             elif (
                 research_experiment.get("scenario_kind")
                 not in {"original_replay", "faithful_replay", "live_runtime"}
@@ -2978,12 +2837,11 @@ def assess_change_plan_readiness(
                         or len(scenario_expectations) != len(scenarios)
                         or len(scenarios) < 2
                     ):
-                        reasons.append(
-                            "change_plan_after_multi_scenario_expectations_invalid"
-                        )
-                elif _string(value.get("command")) is None or _string(
-                    value.get("expected_result")
-                ) is None:
+                        reasons.append("change_plan_after_multi_scenario_expectations_invalid")
+                elif (
+                    _string(value.get("command")) is None
+                    or _string(value.get("expected_result")) is None
+                ):
                     reasons.append(f"change_plan_{phase}_incomplete")
                 else:
                     phase_mappings[phase] = value
@@ -2991,12 +2849,11 @@ def assess_change_plan_readiness(
                     if isinstance(expected_exit_code, bool) or not isinstance(
                         expected_exit_code, int
                     ):
-                        reasons.append(
-                            f"change_plan_{phase}_expected_exit_code_missing"
-                        )
-            if multi_scenario_oracle and reproduction.get(
-                "expected_outcome_state"
-            ) not in {"resolved", "mitigated"}:
+                        reasons.append(f"change_plan_{phase}_expected_exit_code_missing")
+            if multi_scenario_oracle and reproduction.get("expected_outcome_state") not in {
+                "resolved",
+                "mitigated",
+            }:
                 reasons.append("change_plan_expected_outcome_state_invalid")
             before = phase_mappings.get("before_change")
             after = phase_mappings.get("after_change")
@@ -3005,16 +2862,12 @@ def assess_change_plan_readiness(
                     str(research_experiment.get("command") or "").split()
                 ):
                     reasons.append("change_plan_before_command_not_research_replay")
-                if before.get("expected_exit_code") != research_experiment.get(
-                    "exit_code"
-                ):
+                if before.get("expected_exit_code") != research_experiment.get("exit_code"):
                     reasons.append("change_plan_before_exit_not_research_replay")
                 if before.get("observable_assertion") != research_experiment.get(
                     "observable_assertion"
                 ):
-                    reasons.append(
-                        "change_plan_before_observable_not_research_replay"
-                    )
+                    reasons.append("change_plan_before_observable_not_research_replay")
             if before is not None and after is not None:
                 if " ".join(str(before.get("command") or "").split()) != " ".join(
                     str(after.get("command") or "").split()
@@ -3028,18 +2881,11 @@ def assess_change_plan_readiness(
                 expected_outcome_state = reproduction.get("expected_outcome_state")
                 if expected_outcome_state not in {"resolved", "mitigated"}:
                     reasons.append("change_plan_expected_outcome_state_invalid")
-                if (
-                    after.get("expected_exit_code") != 0
-                    and expected_outcome_state != "mitigated"
-                ):
-                    reasons.append(
-                        "change_plan_nonzero_after_requires_mitigated_outcome"
-                    )
+                if after.get("expected_exit_code") != 0 and expected_outcome_state != "mitigated":
+                    reasons.append("change_plan_nonzero_after_requires_mitigated_outcome")
                 after_assertions_raw = after.get("observable_assertions")
                 after_assertions = (
-                    after_assertions_raw
-                    if isinstance(after_assertions_raw, list)
-                    else []
+                    after_assertions_raw if isinstance(after_assertions_raw, list) else []
                 )
                 if config_oracle:
                     state_expectations = after.get("state_expectations")
@@ -3054,9 +2900,7 @@ def assess_change_plan_readiness(
                 baseline_assertion = (
                     research_experiment.get("observable_assertion")
                     if isinstance(research_experiment, Mapping)
-                    and isinstance(
-                        research_experiment.get("observable_assertion"), Mapping
-                    )
+                    and isinstance(research_experiment.get("observable_assertion"), Mapping)
                     else {}
                 )
                 if not config_oracle and not any(
@@ -3067,17 +2911,13 @@ def assess_change_plan_readiness(
                     )
                     for assertion in after_assertions
                 ):
-                    reasons.append(
-                        "change_plan_after_oracle_does_not_reverse_original_symptom"
-                    )
+                    reasons.append("change_plan_after_oracle_does_not_reverse_original_symptom")
                 if (
                     expected_outcome_state == "mitigated"
                     and baseline_assertion.get("source") == "exit_code"
                     and after.get("expected_exit_code") != 0
                 ):
-                    reasons.append(
-                        "change_plan_mitigation_requires_non_exit_problem_oracle"
-                    )
+                    reasons.append("change_plan_mitigation_requires_non_exit_problem_oracle")
 
     verification_commands_for_roles = _string_list(plan.get("verification_commands")) or []
     reasons.extend(
@@ -3115,9 +2955,7 @@ def assess_change_plan_readiness(
         _string(problem.get("problem_id")) if isinstance(problem, Mapping) else None
     )
     expected_option_id = (
-        _string(selection.get("selected_option_id"))
-        if isinstance(selection, Mapping)
-        else None
+        _string(selection.get("selected_option_id")) if isinstance(selection, Mapping) else None
     )
     expected_revision = (
         _string(research.get("repo_revision")) if isinstance(research, Mapping) else None
@@ -3144,9 +2982,7 @@ def assess_change_plan_readiness(
             if _string(target_contract.get(field)) != expected:
                 reasons.append(f"change_plan_target_contract_{field}_mismatch")
         contract_targets_raw = target_contract.get("targets")
-        contract_targets = (
-            contract_targets_raw if isinstance(contract_targets_raw, list) else []
-        )
+        contract_targets = contract_targets_raw if isinstance(contract_targets_raw, list) else []
         projected_contract_targets = [
             {
                 "action": target.get("action"),
@@ -3194,9 +3030,7 @@ def assess_change_plan_readiness(
     )
     if selected_option is not None:
         option_coverage = selected_option.get("causal_coverage")
-        option_coverage = (
-            option_coverage if isinstance(option_coverage, Mapping) else {}
-        )
+        option_coverage = option_coverage if isinstance(option_coverage, Mapping) else {}
         binding_raw = option_coverage.get("research_binding")
         binding = binding_raw if isinstance(binding_raw, Mapping) else {}
         points_raw = binding.get("intervention_points")
@@ -3261,9 +3095,7 @@ def assess_change_plan_readiness(
                 or evidence_refs is None
                 or any(ref not in verified_evidence_ids for ref in evidence_refs)
             ):
-                reasons.append(
-                    f"change_plan_additional_target_causal_binding_missing:{index}"
-                )
+                reasons.append(f"change_plan_additional_target_causal_binding_missing:{index}")
         for index, target in enumerate(targets if isinstance(targets, list) else []):
             if not isinstance(target, Mapping):
                 continue
@@ -3378,11 +3210,7 @@ def assess_ticket_readiness(ticket: Mapping[str, Any] | None) -> tuple[bool, lis
         selection_copy = dict(selection)
         selected_id = _string(selection.get("selected_option_id"))
         selected_option = next(
-            (
-                option
-                for option in options
-                if _string(option.get("option_id")) == selected_id
-            ),
+            (option for option in options if _string(option.get("option_id")) == selected_id),
             None,
         )
         if selected_option is not None:

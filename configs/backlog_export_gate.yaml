@@ -6,3 +6,12 @@ backlog_export_gate:
   # Compatibility name: exactness applies to canonical case/plan intent across
   # cycles. The latest complete rendered projection is still bound at export.
   require_exact_export_projection: true
+  # A shadow cycle with selected active cases proves productive depth, not merely
+  # that every case acquired a syntactically valid blocked dossier. Exhausted
+  # corpora whose cases are terminal do not have to fabricate new work.
+  require_nonempty_throughput: true
+  minimum_evidence_sufficient_research_proofs: 1
+  minimum_authoritative_ready_tickets: 1
+  # Case-specific insufficient evidence remains a valid disposition. Internal
+  # auth, invocation, runner-contract, or produced-artifact failures do not.
+  fail_on_systemic_research_blockers: true

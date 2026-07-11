@@ -127,6 +127,20 @@ def _inputs(*, revisions: tuple[str, str] = ("abc", "abc")) -> dict[str, object]
                                 "difference_kind": "changed_value",
                             },
                         },
+                        "observed_polarity": {
+                            "verification_method": "runner_replay_falsification_polarity_v1",
+                            "polarity": "failure_persists_after_intervention",
+                            "baseline": {
+                                "exit_code": 1,
+                                "stdout_sha256": "1" * 64,
+                                "stderr_sha256": "2" * 64,
+                            },
+                            "challenge": {
+                                "exit_code": 1,
+                                "stdout_sha256": "3" * 64,
+                                "stderr_sha256": "4" * 64,
+                            },
+                        },
                         "relationship_sha256": "b" * 64,
                     }
                 ],
@@ -166,8 +180,7 @@ def test_same_verified_mechanism_becomes_one_optioning_unit_without_losing_facet
         "case:b",
     }
     outcome_ids = {
-        oracle["outcome_oracle_id"]
-        for oracle in problem["same_mechanism_outcome_oracles"]
+        oracle["outcome_oracle_id"] for oracle in problem["same_mechanism_outcome_oracles"]
     }
     assert outcome_ids == {
         "outcome:case:a",
@@ -188,12 +201,68 @@ def test_same_symbol_with_different_controlled_branch_does_not_collapse() -> Non
     second = inputs["research_dossiers"][1]
     provenance = _provenance(slot="keyword:fixture")
     second["evidence_verification"]["verified_mechanism_provenance"] = provenance
-    second["evidence_verification"]["verified_mechanism_provenance_sha256"] = _digest(
-        provenance
+    second["evidence_verification"]["verified_mechanism_provenance_sha256"] = _digest(provenance)
+    second["evidence_verification"]["control_verifications"][0]["controlled_input_difference"][
+        "difference"
+    ]["slot"] = "keyword:fixture"
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
     )
-    second["evidence_verification"]["control_verifications"][0][
-        "controlled_input_difference"
-    ]["difference"]["slot"] = "keyword:fixture"
+
+    assert result["groups"] == []
+    assert len(result["research_dossiers"]) == 2
+
+
+def test_relationship_rephrasing_does_not_split_runner_identical_cause() -> None:
+    inputs = _inputs()
+    first_control = inputs["research_dossiers"][0]["evidence_verification"][
+        "control_verifications"
+    ][0]
+    second_control = inputs["research_dossiers"][1]["evidence_verification"][
+        "control_verifications"
+    ][0]
+    first_control["controlled_variable"] = "request routing mode"
+    first_control["expected_difference"] = "the control preserves the request"
+    first_control["relationship_sha256"] = "1" * 64
+    second_control["controlled_variable"] = "mode used by request routing"
+    second_control["expected_difference"] = "the request remains present under control"
+    second_control["relationship_sha256"] = "2" * 64
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {"case:b": "case:a"}
+    assert len(result["research_dossiers"]) == 1
+
+
+def test_same_polarity_with_different_symptom_output_hashes_still_collapses() -> None:
+    inputs = _inputs()
+    second_polarity = inputs["research_dossiers"][1]["evidence_verification"][
+        "control_verifications"
+    ][0]["observed_polarity"]
+    second_polarity["baseline"]["stdout_sha256"] = "6" * 64
+    second_polarity["baseline"]["stderr_sha256"] = "7" * 64
+    second_polarity["challenge"]["stdout_sha256"] = "8" * 64
+    second_polarity["challenge"]["stderr_sha256"] = "9" * 64
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {"case:b": "case:a"}
+    assert len(result["research_dossiers"]) == 1
+
+
+def test_different_runner_observed_polarity_stays_separate() -> None:
+    inputs = _inputs()
+    second = inputs["research_dossiers"][1]["evidence_verification"]["control_verifications"][0]
+    second["observed_polarity"]["challenge"]["exit_code"] = 0
+    second["observed_polarity"]["challenge"]["stderr_sha256"] = "5" * 64
 
     result = collapse_post_research_verified_mechanisms(
         **inputs,

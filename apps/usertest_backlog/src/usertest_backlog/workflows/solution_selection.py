@@ -148,6 +148,8 @@ def _run_solution_selection_stage(
     stage = "solution_selection"
     stage_artifacts_dir = artifacts_dir / "solution_selection"
     stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
+    invocation_tracker = ModelInvocationTracker(stage_artifacts_dir)
+    live_prompt_expected_count = 0
 
     taxonomy = pipeline_manifest.load_taxonomy()
     families_raw = taxonomy.get("solution_families")
@@ -365,6 +367,7 @@ def _run_solution_selection_stage(
             selected_dec = parsed[0] if parsed else None
             warnings_list.extend(parse_warnings)
         else:
+            live_prompt_expected_count += 1
             try:
                 response = run_stage_prompt_json(
                     stage=stage,
@@ -486,9 +489,7 @@ def _run_solution_selection_stage(
                         contract
                         for contract in oracle.get("positive_outcome_contracts", [])
                         if isinstance(contract, dict)
-                        and isinstance(
-                            contract.get("positive_outcome_contract_id"), str
-                        )
+                        and isinstance(contract.get("positive_outcome_contract_id"), str)
                     ]
                 ]
                 if contracts
@@ -521,16 +522,12 @@ def _run_solution_selection_stage(
                     for risk in dry_material_risks
                 ],
                 "selected_positive_outcome_contract_id": (
-                    dry_selected_contract_ids[0]
-                    if len(dry_selected_contract_ids) == 1
-                    else None
+                    dry_selected_contract_ids[0] if len(dry_selected_contract_ids) == 1 else None
                 ),
                 "selected_positive_outcome_contract_ids": dry_selected_contract_ids,
                 "outcome_contract_reviews": [
                     {
-                        "positive_outcome_contract_id": contract[
-                            "positive_outcome_contract_id"
-                        ],
+                        "positive_outcome_contract_id": contract["positive_outcome_contract_id"],
                         "verdict": "sufficient",
                         "semantic_relation_assessment": (
                             "dry_run placeholder; no independent semantic review ran"
@@ -544,6 +541,7 @@ def _run_solution_selection_stage(
                 ],
             }
         else:
+            live_prompt_expected_count += 1
             try:
                 falsifier_response = run_stage_prompt_json(
                     stage="solution_falsification",
@@ -701,6 +699,7 @@ def _run_solution_selection_stage(
                     "evidence_atom_ids_used": evidence_ids_s[:1],
                 }
         else:
+            live_prompt_expected_count += 1
             try:
                 response = run_stage_prompt_json(
                     stage="selected_solution_labeler",
@@ -840,6 +839,13 @@ def _run_solution_selection_stage(
             "solution_selection_json": str(out_json),
             "solution_selection_md": str(out_md),
         },
+    )
+    stage_doc = attach_stage_model_invocation_contract(
+        stage_doc,
+        agent=agent,
+        dry_run=dry_run,
+        manifest_refs=invocation_tracker.collect(),
+        invocation_expected=live_prompt_expected_count > 0,
     )
 
     out_json.parent.mkdir(parents=True, exist_ok=True)

@@ -8,9 +8,7 @@ def _enforce_full_drain_research_policy(decisions: list[dict[str, Any]]) -> None
     """Make urgency a research-order decision, never a permanent case filter."""
 
     for decision in decisions:
-        if isinstance(decision.get("problem_id"), str) and not decision.get(
-            "_parse_warning"
-        ):
+        if isinstance(decision.get("problem_id"), str) and not decision.get("_parse_warning"):
             # Eligibility is runner-owned. ``priority_status`` is model output and
             # therefore cannot be allowed to turn a real canonical case into a
             # permanent watch/defer bucket.
@@ -44,9 +42,7 @@ def _server_normalize_priority_decisions(
     for decision in decisions:
         problem_id = _coerce_string(decision.get("problem_id"))
         if problem_id is None or problem_id not in expected_records:
-            warnings.append(
-                "prioritizer_unknown_problem_id:" + (problem_id or "(missing)")
-            )
+            warnings.append("prioritizer_unknown_problem_id:" + (problem_id or "(missing)"))
             continue
         candidates.setdefault(problem_id, []).append(dict(decision))
 
@@ -178,6 +174,7 @@ def _run_problem_prioritization_stage(
     stage = "problem_prioritization"
     stage_artifacts_dir = artifacts_dir / "problem_prioritization"
     stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
+    invocation_tracker = ModelInvocationTracker(stage_artifacts_dir)
 
     relation_config_raw = yaml.safe_load(
         pipeline_manifest.relation_review_config_path.read_text(encoding="utf-8")
@@ -347,6 +344,13 @@ def _run_problem_prioritization_stage(
             "prioritizer_prompt": str(run_out_dir / f"{tag}.prompt.txt"),
             "prioritizer_response": str(run_out_dir / f"{tag}.response.txt"),
         },
+    )
+    stage_doc = attach_stage_model_invocation_contract(
+        stage_doc,
+        agent=agent,
+        dry_run=dry_run,
+        manifest_refs=invocation_tracker.collect(),
+        invocation_expected=bool(problem_records),
     )
 
     out_json.parent.mkdir(parents=True, exist_ok=True)

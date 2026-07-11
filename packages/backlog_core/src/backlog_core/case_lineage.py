@@ -401,10 +401,24 @@ def _validated_runner_evidence_assignment(
         ):
             errors.append(f"runner_evidence_assignment_receipt_snapshot_invalid:{index}")
 
-        artifact_receipts = receipt.get("artifact_receipts")
-        if not isinstance(artifact_receipts, list) or not artifact_receipts:
-            errors.append(f"runner_evidence_assignment_artifacts_missing:{index}")
-            continue
+        if receipt.get("source_projection_version") != 1:
+            errors.append(f"runner_evidence_assignment_source_projection_version_invalid:{index}")
+
+        artifact_receipts_raw = receipt.get("artifact_receipts")
+        artifact_receipts = artifact_receipts_raw if isinstance(artifact_receipts_raw, list) else []
+        origin_evidence_mode = _clean_string(receipt.get("origin_evidence_mode"))
+        if origin_evidence_mode is None and artifact_receipts:
+            # Compatibility for retained v1 receipts written before the mode was
+            # explicit. Their artifact list proves the stronger legacy shape.
+            origin_evidence_mode = "snapshot_and_artifacts"
+        if origin_evidence_mode not in {"signed_snapshot", "snapshot_and_artifacts"}:
+            errors.append(f"runner_evidence_assignment_origin_mode_invalid:{index}:{atom_id}")
+        if origin_evidence_mode == "snapshot_and_artifacts" and not artifact_receipts:
+            errors.append(f"runner_evidence_assignment_origin_artifacts_missing:{index}:{atom_id}")
+        if origin_evidence_mode == "signed_snapshot" and artifact_receipts:
+            errors.append(
+                f"runner_evidence_assignment_signed_snapshot_has_artifacts:{index}:{atom_id}"
+            )
         for artifact_index, artifact in enumerate(artifact_receipts):
             if (
                 not isinstance(artifact, Mapping)
@@ -415,8 +429,7 @@ def _validated_runner_evidence_assignment(
                 or artifact.get("size_bytes", -1) < 0
             ):
                 errors.append(
-                    "runner_evidence_assignment_artifact_invalid:"
-                    f"{index}:{artifact_index}"
+                    f"runner_evidence_assignment_artifact_invalid:{index}:{artifact_index}"
                 )
 
     if sorted(receipt_ids) != sorted(expected_atom_ids):
@@ -605,6 +618,10 @@ def empty_case_registry() -> dict[str, Any]:
         # problem facet, so the complete evidence membership is persisted here.
         "atom_id_to_case_ids": {},
         "ticket_fingerprint_to_case_id": {},
+        # Operational observations are immutable occurrence-set snapshots.  Their
+        # atom IDs change when a new occurrence arrives, while this stable runner
+        # signature keeps every recurrence on the same canonical case.
+        "operational_signature_to_case_id": {},
     }
 
 
@@ -675,11 +692,7 @@ def _registry_atom_case_memberships(
                     memberships.setdefault(atom_id.strip(), set()).update(case_ids)
     for atom_id, case_id in _registry_mapping(registry, "atom_id_to_case_id").items():
         memberships.setdefault(atom_id, set()).add(case_id)
-    return {
-        atom_id: sorted(case_ids)
-        for atom_id, case_ids in memberships.items()
-        if case_ids
-    }
+    return {atom_id: sorted(case_ids) for atom_id, case_ids in memberships.items() if case_ids}
 
 
 def _atom_supporting_case_ids(atom: Mapping[str, Any]) -> list[str]:
@@ -690,6 +703,26 @@ def _atom_supporting_case_ids(atom: Mapping[str, Any]) -> list[str]:
     if case_id is not None:
         case_ids.add(case_id)
     return sorted(case_ids)
+
+
+def _operational_candidate_integrity_errors(atom: Mapping[str, Any]) -> list[str]:
+    """Validate the narrow runner-owned observation exception without an import cycle."""
+
+    if _clean_string(atom.get("source")) != "operational_failure_candidate":
+        return []
+    # ``operational_candidates`` uses this module to normalize its final synthetic
+    # atom, so importing the validator at module import time would create a cycle.
+    # Calls occur only after both modules are initialized.
+    from backlog_core.operational_candidates import operational_candidate_receipt_errors
+
+    return operational_candidate_receipt_errors(atom)
+
+
+def _operational_candidate_signature(atom: Mapping[str, Any]) -> str | None:
+    if _clean_string(atom.get("source")) != "operational_failure_candidate":
+        return None
+    signature = _clean_string(atom.get("operational_candidate_signature"))
+    return signature if _valid_sha256(signature) else None
 
 
 def normalize_atom_lineage(
@@ -717,10 +750,9 @@ def normalize_atom_lineage(
         original_receipt = (
             dict(original_receipt_raw) if isinstance(original_receipt_raw, Mapping) else None
         )
-        original_receipt_valid = (
-            _clean_string(atom.get("disposition_status")) == "decided"
-            and not atom_disposition_receipt_errors(atom)
-        )
+        original_receipt_valid = _clean_string(
+            atom.get("disposition_status")
+        ) == "decided" and not atom_disposition_receipt_errors(atom)
         atom_id = _clean_string(atom.get("atom_id"))
         run_id = _clean_string(atom.get("origin_run_id")) or _clean_string(atom.get("run_id"))
         mission_id = _clean_string(atom.get("mission_id"))
@@ -742,9 +774,7 @@ def normalize_atom_lineage(
 
         case_id = _clean_string(atom.get("case_id"))
         persisted_atom_case_id = by_atom.get(atom_id) if atom_id is not None else None
-        persisted_memberships = (
-            atom_memberships.get(atom_id, []) if atom_id is not None else []
-        )
+        persisted_memberships = atom_memberships.get(atom_id, []) if atom_id is not None else []
         if (
             evidence_role in _DERIVED_EVIDENCE_ROLES
             and parent_case_id is None
@@ -775,8 +805,7 @@ def normalize_atom_lineage(
                     + ", ".join(persisted_memberships)
                 )
             persisted_distinct_case = (
-                persisted_atom_case_id is not None
-                and persisted_atom_case_id != parent_case_id
+                persisted_atom_case_id is not None and persisted_atom_case_id != parent_case_id
             )
             if persisted_distinct_case:
                 case_id = persisted_atom_case_id
@@ -855,9 +884,10 @@ def normalize_atom_lineage(
                 source=decision_source,
                 rationale=decision_rationale,
             )
-        elif disposition == "novel_case" and _clean_string(
-            atom.get("novel_case_rationale")
-        ) is not None:
+        elif (
+            disposition == "novel_case"
+            and _clean_string(atom.get("novel_case_rationale")) is not None
+        ):
             atom = apply_atom_disposition_decision(
                 atom,
                 disposition=disposition,
@@ -867,6 +897,30 @@ def normalize_atom_lineage(
         else:
             atom["disposition_status"] = "pending"
             atom["disposition_receipt"] = None
+
+        operational_errors = _operational_candidate_integrity_errors(atom)
+        if operational_errors:
+            prior_case_id = _clean_string(atom.get("case_id"))
+            if prior_case_id is not None:
+                atom["invalid_operational_candidate_prior_case_id"] = prior_case_id
+            atom["case_id"] = None
+            atom["supporting_case_ids"] = []
+            atom["disposition"] = "unresolved"
+            atom["disposition_status"] = "pending"
+            atom["disposition_receipt"] = None
+            existing_errors = _clean_string_list(atom.get("lineage_validation_errors"))
+            atom["lineage_validation_errors"] = list(
+                dict.fromkeys(
+                    [
+                        *existing_errors,
+                        *[
+                            f"operational_candidate_integrity:{error}"
+                            for error in operational_errors
+                        ],
+                    ]
+                )
+            )
+            atom["lineage_mining_blocker"] = "invalid_operational_candidate_receipt"
 
         if strict_new_output:
             validate_atom_lineage(atom, context=f"atoms[{index}]")
@@ -910,16 +964,13 @@ def validate_atom_lineage(atom: Mapping[str, Any], *, context: str = "atom") -> 
     disposition_receipt_errors = atom_disposition_receipt_errors(atom)
     if disposition_receipt_errors:
         raise ValueError(
-            f"{context}: invalid disposition provenance: "
-            + ", ".join(disposition_receipt_errors)
+            f"{context}: invalid disposition provenance: " + ", ".join(disposition_receipt_errors)
         )
     if disposition == "supports_case":
         if case_id is None:
             raise ValueError(f"{context}: supports_case disposition requires case_id")
         if case_id not in supporting_case_ids:
-            raise ValueError(
-                f"{context}: primary case_id must be included in supporting_case_ids"
-            )
+            raise ValueError(f"{context}: primary case_id must be included in supporting_case_ids")
     if role in _DERIVED_EVIDENCE_ROLES and disposition == "supports_case":
         parent_case_id = _clean_string(atom.get("parent_case_id"))
         if parent_case_id is None:
@@ -927,23 +978,15 @@ def validate_atom_lineage(atom: Mapping[str, Any], *, context: str = "atom") -> 
                 f"{context}: derived evidence supporting a case requires parent_case_id"
             )
         if supporting_case_ids != [parent_case_id] or case_id != parent_case_id:
-            raise ValueError(
-                f"{context}: derived evidence must support exactly its parent case"
-            )
+            raise ValueError(f"{context}: derived evidence must support exactly its parent case")
     if role in _DERIVED_EVIDENCE_ROLES and disposition == "novel_case":
         parent_case_id = _clean_string(atom.get("parent_case_id"))
         if parent_case_id is None:
-            raise ValueError(
-                f"{context}: distinct derived failure requires parent_case_id lineage"
-            )
+            raise ValueError(f"{context}: distinct derived failure requires parent_case_id lineage")
         if _clean_string(atom.get("novel_case_rationale")) is None:
-            raise ValueError(
-                f"{context}: distinct derived failure requires novel_case_rationale"
-            )
+            raise ValueError(f"{context}: distinct derived failure requires novel_case_rationale")
         if case_id == parent_case_id:
-            raise ValueError(
-                f"{context}: distinct derived failure cannot reuse its parent case_id"
-            )
+            raise ValueError(f"{context}: distinct derived failure cannot reuse its parent case_id")
         if len(supporting_case_ids) > 1:
             raise ValueError(f"{context}: distinct derived failure must remain single-case")
 
@@ -962,6 +1005,10 @@ def eligible_problem_mining_atoms(atoms: Sequence[dict[str, Any]]) -> list[dict[
     eligible: list[dict[str, Any]] = []
     for atom in atoms:
         if atom_is_idea_originated(atom):
+            continue
+        if _operational_candidate_integrity_errors(atom):
+            # Defense in depth for callers that supply an unnormalized atom. Full
+            # normalization also retains the exact validation errors and blocker.
             continue
         role = _clean_string(atom.get("evidence_role")) or "observation"
         disposition = _clean_string(atom.get("disposition")) or "unresolved"
@@ -1042,6 +1089,10 @@ def assign_problem_case_ids(
     }
     by_problem = _registry_mapping(case_registry, "problem_id_to_case_id")
     by_atom = _registry_mapping(case_registry, "atom_id_to_case_id")
+    by_operational_signature = _registry_mapping(
+        case_registry,
+        "operational_signature_to_case_id",
+    )
 
     assigned: list[dict[str, Any]] = []
     seen_problem_ids: set[str] = set()
@@ -1092,11 +1143,18 @@ def assign_problem_case_ids(
 
         candidates: set[str] = set()
         related_parent_cases: set[str] = set()
+        operational_signatures: set[str] = set()
         persisted_problem_case = by_problem.get(problem_id)
         if persisted_problem_case is not None:
             candidates.add(persisted_problem_case)
         for atom_id in evidence_ids:
             atom = atoms_by_id.get(atom_id) or {}
+            operational_signature = _operational_candidate_signature(atom)
+            if operational_signature is not None:
+                operational_signatures.add(operational_signature)
+                persisted_operational_case = by_operational_signature.get(operational_signature)
+                if persisted_operational_case is not None:
+                    candidates.add(persisted_operational_case)
             is_novel = _clean_string(atom.get("disposition")) == "novel_case"
             parent_case_id = _clean_string(atom.get("parent_case_id"))
             atom_candidates = (
@@ -1112,6 +1170,12 @@ def assign_problem_case_ids(
 
         if len(candidates) == 1:
             case_id = next(iter(candidates))
+        elif not candidates and operational_signatures:
+            # The first occurrence set mints identity from the stable failure
+            # signature, never from its mutable set of occurrence atom IDs.
+            case_id = mint_case_id(
+                [f"operational_signature:{value}" for value in sorted(operational_signatures)]
+            )
         else:
             seeds = _evidence_seed_ids(evidence_ids, atoms_by_id)
             case_id = mint_case_id(seeds or evidence_ids)
@@ -1238,21 +1302,17 @@ def apply_atom_dispositions(
             # before validating the newly dispositioned record.
             atom["evidence_class"] = _atom_evidence_class(atom)
         prior_receipt_raw = atom.get("disposition_receipt")
-        prior_receipt = (
-            dict(prior_receipt_raw) if isinstance(prior_receipt_raw, Mapping) else None
-        )
-        prior_receipt_valid = (
-            _clean_string(atom.get("disposition_status")) == "decided"
-            and not atom_disposition_receipt_errors(atom)
-        )
+        prior_receipt = dict(prior_receipt_raw) if isinstance(prior_receipt_raw, Mapping) else None
+        prior_receipt_valid = _clean_string(
+            atom.get("disposition_status")
+        ) == "decided" and not atom_disposition_receipt_errors(atom)
         current_atom_id = _clean_string(atom.get("atom_id"))
         cited_cases = cited_by.get(current_atom_id or "", set())
         parent_case = _clean_string(atom.get("parent_case_id"))
         role = _clean_string(atom.get("evidence_role")) or "observation"
         existing_primary = _clean_string(atom.get("case_id"))
         supporting_case_ids = {
-            canonicalize_membership(case_id)
-            for case_id in _atom_supporting_case_ids(atom)
+            canonicalize_membership(case_id) for case_id in _atom_supporting_case_ids(atom)
         }
         if cited_cases:
             # A split partitions the old parent evidence.  Current child citations are
@@ -1262,14 +1322,10 @@ def apply_atom_dispositions(
             if role in _DERIVED_EVIDENCE_ROLES and len(supporting_case_ids) != 1:
                 raise ValueError(
                     f"apply_atom_dispositions: derived atom {current_atom_id!r} supports "
-                    "multiple canonical cases ("
-                    + ", ".join(sorted(supporting_case_ids))
-                    + ")"
+                    "multiple canonical cases (" + ", ".join(sorted(supporting_case_ids)) + ")"
                 )
             canonical_existing = (
-                canonicalize_membership(existing_primary)
-                if existing_primary is not None
-                else None
+                canonicalize_membership(existing_primary) if existing_primary is not None else None
             )
             primary_case_id = (
                 canonical_existing
@@ -1296,11 +1352,7 @@ def apply_atom_dispositions(
             atom = apply_atom_disposition_decision(
                 atom,
                 disposition=final_disposition,
-                source=(
-                    "canonical_problem_evidence"
-                    if cited_cases
-                    else "runner_parent_lineage"
-                ),
+                source=("canonical_problem_evidence" if cited_cases else "runner_parent_lineage"),
                 rationale=(
                     "Canonical problem mining cited this atom for case membership."
                     if cited_cases
@@ -1315,9 +1367,10 @@ def apply_atom_dispositions(
                 source=str(prior_receipt["source"]),
                 rationale=str(prior_receipt["rationale"]),
             )
-        elif final_disposition == "novel_case" and _clean_string(
-            atom.get("novel_case_rationale")
-        ) is not None:
+        elif (
+            final_disposition == "novel_case"
+            and _clean_string(atom.get("novel_case_rationale")) is not None
+        ):
             atom = apply_atom_disposition_decision(
                 atom,
                 disposition=final_disposition,
@@ -1414,9 +1467,7 @@ def attach_supporting_atoms_to_problem_cases(
             if atom_id is not None
         )
         source_ids.extend(
-            atom_id
-            for atom_id in case["evidence_atom_ids"]
-            if atom_id not in set(derived_ids)
+            atom_id for atom_id in case["evidence_atom_ids"] if atom_id not in set(derived_ids)
         )
         case["source_evidence_atom_ids"] = list(dict.fromkeys(source_ids))
         attached.append(case)
@@ -1445,13 +1496,22 @@ def build_case_registry(
     atom_map = registry["atom_id_to_case_id"]
     atom_membership_map = registry["atom_id_to_case_ids"]
     fingerprint_map = registry["ticket_fingerprint_to_case_id"]
+    operational_signature_map = registry["operational_signature_to_case_id"]
     assert isinstance(cases, dict)
     assert isinstance(problem_map, dict)
     assert isinstance(atom_map, dict)
     assert isinstance(atom_membership_map, dict)
     assert isinstance(fingerprint_map, dict)
+    assert isinstance(operational_signature_map, dict)
     current_atom_memberships: dict[str, set[str]] = {}
     current_atom_primary: dict[str, str] = {}
+    current_operational_signature_cases: dict[str, set[str]] = {}
+    supporting_atoms_by_id = {
+        atom_id: atom
+        for atom in supporting_atoms
+        for atom_id in [_clean_string(atom.get("atom_id"))]
+        if atom_id is not None
+    }
 
     for record in problem_cases:
         case_id = _clean_string(record.get("case_id"))
@@ -1482,11 +1542,7 @@ def build_case_registry(
             dict.fromkeys(
                 _clean_string_list(previous_entry.get("source_evidence_atom_ids"))
                 + _clean_string_list(record.get("source_evidence_atom_ids"))
-                + [
-                    atom_id
-                    for atom_id in evidence_ids
-                    if atom_id not in set(derived_evidence_ids)
-                ]
+                + [atom_id for atom_id in evidence_ids if atom_id not in set(derived_evidence_ids)]
             )
         )
         requested_revision = max(1, int(record.get("case_revision") or 1))
@@ -1562,13 +1618,9 @@ def build_case_registry(
             lifecycle = lifecycle_raw if isinstance(lifecycle_raw, Mapping) else {}
             outcome_reference_raw = lifecycle.get("outcome_reference")
             outcome_reference = (
-                outcome_reference_raw
-                if isinstance(outcome_reference_raw, Mapping)
-                else {}
+                outcome_reference_raw if isinstance(outcome_reference_raw, Mapping) else {}
             )
-            against_plan_revision_id = _clean_string(
-                outcome_reference.get("plan_revision_id")
-            )
+            against_plan_revision_id = _clean_string(outcome_reference.get("plan_revision_id"))
             if against_plan_revision_id is not None:
                 entry["recurrence_reopen"] = {
                     "from_state": reopened_from_state,
@@ -1584,6 +1636,14 @@ def build_case_registry(
             problem_map[problem_id] = case_id
         for atom_id in evidence_ids:
             current_atom_memberships.setdefault(atom_id, set()).add(case_id)
+            operational_signature = _operational_candidate_signature(
+                supporting_atoms_by_id.get(atom_id) or {}
+            )
+            if operational_signature is not None:
+                current_operational_signature_cases.setdefault(
+                    operational_signature,
+                    set(),
+                ).add(case_id)
         for fingerprint in _clean_string_list(record.get("ticket_fingerprints")):
             fingerprint_map[fingerprint] = case_id
         for absorbed_case_id in _clean_string_list(record.get("absorbed_case_ids")):
@@ -1694,6 +1754,12 @@ def build_case_registry(
         else:
             raw_case_ids = _atom_supporting_case_ids(atom)
         case_ids = sorted({_canonical_registry_case_id(value) for value in raw_case_ids})
+        operational_signature = _operational_candidate_signature(atom)
+        if operational_signature is not None:
+            current_operational_signature_cases.setdefault(
+                operational_signature,
+                set(),
+            ).update(case_ids)
         primary = _clean_string(atom.get("case_id"))
         if primary is not None:
             current_atom_primary[supporting_atom_id] = _canonical_registry_case_id(primary)
@@ -1765,6 +1831,34 @@ def build_case_registry(
     atom_map.update(rebuilt_primary)
     atom_membership_map.clear()
     atom_membership_map.update(rebuilt_memberships)
+
+    # Preserve one durable case identity for each exact operational failure
+    # signature.  New occurrence-set atoms may extend/reopen that case, but may not
+    # silently redirect the signature to an unrelated case.  Explicit relation merges
+    # are safe because aliases canonicalize to the same node here.
+    combined_operational_signature_cases: dict[str, set[str]] = {
+        signature: {_canonical_registry_case_id(case_id)}
+        for signature, case_id in _registry_mapping(
+            registry,
+            "operational_signature_to_case_id",
+        ).items()
+        if _valid_sha256(signature)
+    }
+    for signature, case_ids in current_operational_signature_cases.items():
+        combined_operational_signature_cases.setdefault(signature, set()).update(
+            _canonical_registry_case_id(case_id) for case_id in case_ids
+        )
+    rebuilt_operational_signature_map: dict[str, str] = {}
+    for signature, case_ids in sorted(combined_operational_signature_cases.items()):
+        canonical_case_ids = sorted({_canonical_registry_case_id(case_id) for case_id in case_ids})
+        if len(canonical_case_ids) != 1:
+            raise ValueError(
+                "build_case_registry: operational signature maps to multiple canonical cases: "
+                f"{signature}: " + ", ".join(canonical_case_ids)
+            )
+        rebuilt_operational_signature_map[signature] = canonical_case_ids[0]
+    operational_signature_map.clear()
+    operational_signature_map.update(rebuilt_operational_signature_map)
 
     return registry
 
@@ -2035,9 +2129,7 @@ def _verified_research_mechanism_summary(
     projection = verification.get("verified_mechanism")
     digest = _clean_string(verification.get("verified_mechanism_sha256"))
     provenance = verification.get("verified_mechanism_provenance")
-    provenance_digest = _clean_string(
-        verification.get("verified_mechanism_provenance_sha256")
-    )
+    provenance_digest = _clean_string(verification.get("verified_mechanism_provenance_sha256"))
     receipt_digest = _clean_string(verification.get("receipt_sha256"))
     errors = verification.get("errors")
     if (
@@ -2456,13 +2548,9 @@ def _update_planning_stage_summary(
             )
         current_revision_ids.append(revision_id)
         prior_revision_raw = revisions.get(revision_id)
-        prior_revision = (
-            prior_revision_raw if isinstance(prior_revision_raw, Mapping) else {}
-        )
+        prior_revision = prior_revision_raw if isinstance(prior_revision_raw, Mapping) else {}
         evidence_at_plan = _clean_string_list(entry.get("evidence_atom_ids"))
-        derived_at_plan = set(
-            _clean_string_list(entry.get("derived_evidence_atom_ids"))
-        )
+        derived_at_plan = set(_clean_string_list(entry.get("derived_evidence_atom_ids")))
         revision: dict[str, Any] = {
             "plan_revision_id": revision_id,
             "plan_revision_source": revision_source,
@@ -2478,11 +2566,7 @@ def _update_planning_stage_summary(
             # evidence discovered after this exact plan was authored.
             "case_revision_at_plan": max(
                 1,
-                int(
-                    prior_revision.get("case_revision_at_plan")
-                    or entry.get("case_revision")
-                    or 1
-                ),
+                int(prior_revision.get("case_revision_at_plan") or entry.get("case_revision") or 1),
             ),
             "evidence_atom_ids_at_plan": _clean_string_list(
                 prior_revision.get("evidence_atom_ids_at_plan")
@@ -2690,12 +2774,8 @@ def verified_mechanism_identities_from_case_registry(
         projection = raw_entry.get("verified_mechanism")
         digest = _clean_string(raw_entry.get("verified_mechanism_sha256"))
         provenance = raw_entry.get("verified_mechanism_provenance")
-        provenance_digest = _clean_string(
-            raw_entry.get("verified_mechanism_provenance_sha256")
-        )
-        receipt_digest = _clean_string(
-            raw_entry.get("verified_mechanism_receipt_sha256")
-        )
+        provenance_digest = _clean_string(raw_entry.get("verified_mechanism_provenance_sha256"))
+        receipt_digest = _clean_string(raw_entry.get("verified_mechanism_receipt_sha256"))
         if (
             case_id is None
             or raw_entry.get("verified_mechanism_source")
@@ -2709,10 +2789,7 @@ def verified_mechanism_identities_from_case_registry(
             or provenance_digest != _canonical_content_sha256(provenance)
             or receipt_digest is None
             or len(receipt_digest) != 64
-            or any(
-                character not in "0123456789abcdef"
-                for character in receipt_digest.casefold()
-            )
+            or any(character not in "0123456789abcdef" for character in receipt_digest.casefold())
         ):
             continue
         identities[case_id] = digest.casefold()
@@ -2749,9 +2826,7 @@ def problem_case_records_from_registry(
         if state in {"alias", "split"} or _clean_string(raw_entry.get("alias_of")) is not None:
             continue
         evidence_atom_ids = _clean_string_list(raw_entry.get("evidence_atom_ids"))
-        derived_evidence_atom_ids = _clean_string_list(
-            raw_entry.get("derived_evidence_atom_ids")
-        )
+        derived_evidence_atom_ids = _clean_string_list(raw_entry.get("derived_evidence_atom_ids"))
         source_evidence_atom_ids = _clean_string_list(
             raw_entry.get("source_evidence_atom_ids")
         ) or [
@@ -2791,9 +2866,7 @@ def problem_case_records_from_registry(
         )
         if case_id in verified_mechanisms:
             record["verified_mechanism_sha256"] = verified_mechanisms[case_id]
-            record["verified_mechanism_source"] = (
-                "runner_research_evidence_verification_v1"
-            )
+            record["verified_mechanism_source"] = "runner_research_evidence_verification_v1"
         prior_stage_context: dict[str, Any] = {}
         current_research = raw_entry.get("current_research_proof")
         best_research = raw_entry.get("best_research_proof")

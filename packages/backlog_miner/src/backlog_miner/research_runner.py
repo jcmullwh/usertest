@@ -32,9 +32,12 @@ from backlog_core.stage_contracts import (
     evidence_assignment_sha256,
     evidence_verification_sha256,
     parse_research_dossier_list,
+    research_attempt_sha256,
     research_claims_sha256,
+    research_dossier_output_contract_errors,
 )
 from runner_core import RunnerConfig, RunRequest, run_once
+from runner_core.runner import validate_report
 from runner_core.target_acquire import acquire_target
 
 from backlog_miner.origin_evidence import (
@@ -59,6 +62,60 @@ _GUIDANCE_PATH = Path("configs") / "backlog_stage_guidance" / "repro_research.md
 _REPO_INTENT_PATH = Path("configs") / "repo_intent.md"
 
 _EXTENSION_KEY = "backlog_repro_research"
+
+_RUNNER_OWNED_DOSSIER_FIELDS: frozenset[str] = frozenset(
+    {
+        "research_schema_version",
+        "repo_revision",
+        "diff_classification",
+        "evidence_assignment",
+        "evidence_verification",
+        "repo_workspace",
+        "run_dir",
+        "runner_exit_code",
+        "runner_report_validation_errors",
+        "diff_suspicious_reasons",
+        "artifacts",
+        "post_research_same_mechanism_bundle",
+        "research_attempts",
+    }
+)
+
+# Stage-3 Codex may inspect repository state and execute bounded, repository-local
+# research replays. This augments Codex's built-in safe reads; it does not widen
+# the filesystem/network sandbox or authorize implementation writes.
+_CODEX_RESEARCH_EXEC_ALLOW_PREFIXES: tuple[tuple[str, ...], ...] = (
+    ("git", "status"),
+    ("git", "diff"),
+    ("git", "show"),
+    ("git", "log"),
+    ("git", "rev-parse"),
+    ("git", "branch"),
+    ("git", "blame"),
+    ("git", "ls-files"),
+    ("git", "ls-tree"),
+    ("git", "cat-file"),
+    ("git", "grep"),
+    ("pytest",),
+    ("python", "-m", "pytest"),
+    ("python",),
+    ("pdm", "run", "pytest"),
+    ("pdm", "run", "python", "-m", "pytest"),
+    ("npm", "test"),
+    ("npm", "run", "test"),
+    ("pnpm", "test"),
+    ("pnpm", "run", "test"),
+    ("yarn", "test"),
+    ("yarn", "run", "test"),
+    ("cargo", "test"),
+    ("go", "test"),
+    ("dotnet", "test"),
+    ("docker", "version"),
+    ("docker", "info"),
+    ("Get-FileHash",),
+    ("Get-Command",),
+    ("Test-Path",),
+)
 
 
 def _has_origin_attachment_refs(atoms: Sequence[dict[str, Any]]) -> bool:
@@ -181,6 +238,16 @@ def _coerce_str(value: Any) -> str | None:
     return cleaned if cleaned else None
 
 
+def _report_status_blocking_reason(
+    report_status: str | None,
+    research_status: str | None,
+) -> str | None:
+    """Treat the extension as outcome authority while rejecting contradictory success."""
+    if report_status in {"partial", "failure"} and research_status == "evidence_sufficient":
+        return f"runner_report_status:{report_status}"
+    return None
+
+
 def _stable_seed(problem_id: str) -> int:
     """Derive a stable integer seed for a problem ID."""
     digest = sha256(problem_id.encode("utf-8")).hexdigest()
@@ -193,6 +260,22 @@ def _load_json_object(path: Path) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError(f"Expected JSON object in {path}, got {type(raw).__name__}")
     return raw
+
+
+def _model_report_schema_errors(
+    *,
+    run_dir: Path,
+    report: dict[str, Any],
+) -> list[str]:
+    """Recompute only model-authored JSON-schema errors from runner artifacts."""
+    schema_path = run_dir / "report.schema.json"
+    if not schema_path.is_file():
+        return []
+    try:
+        schema = _load_json_object(schema_path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return []
+    return validate_report(report, schema)
 
 
 def _canonical_json_sha256(value: Any) -> str:
@@ -214,9 +297,7 @@ def _write_evidence_assignment_sidecar(
     """Persist runner-owned parent lineage before downstream report processing."""
 
     target_ref_path = run_dir / "target_ref.json"
-    target_ref = (
-        _load_json_object(target_ref_path) if target_ref_path.is_file() else {}
-    )
+    target_ref = _load_json_object(target_ref_path) if target_ref_path.is_file() else {}
     payload: dict[str, Any] = {
         "schema_version": 1,
         "producer": "backlog_miner.research_runner",
@@ -264,10 +345,21 @@ def _runner_artifact_refs(run_dir: Path) -> list[dict[str, str]]:
         ("normalized_events", "normalized_events.jsonl", "Normalized command and tool events"),
         ("target_ref", "target_ref.json", "Runner-owned acquired revision record"),
         ("workspace_ref", "workspace_ref.json", "Runner-owned workspace record"),
+        (
+            "codex_subscription_auth",
+            "codex_execpolicy_overlay.json",
+            "Verified host ChatGPT subscription and controlled-policy receipt",
+        ),
         ("agent_stderr", "agent_stderr.txt", "Agent stderr captured by the runner"),
     ):
         path = run_dir / filename
         if path.exists():
+            if kind == "agent_stderr":
+                try:
+                    if path.stat().st_size == 0:
+                        continue
+                except OSError:
+                    continue
             refs.append(
                 {
                     "artifact_id": f"runner:{kind}",
@@ -481,9 +573,164 @@ def _blocked_research_after_run_failure(
         verification = dossier["evidence_verification"]
         verification["run_dir"] = str(run_dir.resolve())
         verification["artifacts"] = list(dossier["artifact_refs"])
+        repo_revision = _canonical_repo_revision(run_dir)
+        if repo_revision is not None:
+            dossier["repo_revision"] = repo_revision
+            verification["repo_revision"] = repo_revision
         verification["claims_sha256"] = research_claims_sha256(dossier)
         verification["receipt_sha256"] = evidence_verification_sha256(verification)
     return dossier
+
+
+def _research_attempt_record(
+    *,
+    attempt_number: int,
+    outcome: str,
+    run_dir: Path,
+    report_path: Path,
+    validation_errors: Sequence[str],
+    attempted_dossier: dict[str, Any],
+) -> dict[str, Any]:
+    """Retain one immutable model-output attempt for later audit."""
+    attempted_dossier_copy = json.loads(json.dumps(attempted_dossier, ensure_ascii=False))
+
+    def artifact_receipt(kind: str, path: Path) -> dict[str, Any]:
+        exists = path.is_file()
+        return {
+            "kind": kind,
+            "path": str(path.resolve()),
+            "exists": exists,
+            "sha256": sha256(path.read_bytes()).hexdigest() if exists else None,
+            "size_bytes": path.stat().st_size if exists else None,
+        }
+
+    attempt = {
+        "attempt_number": attempt_number,
+        "outcome": outcome,
+        "run_dir": str(run_dir.resolve()),
+        "report_path": str(report_path.resolve()),
+        "validation_errors": list(validation_errors),
+        # A JSON round-trip prevents later runner augmentation from mutating the
+        # exact extension object the model originally emitted.
+        "attempted_dossier": attempted_dossier_copy,
+        "attempted_dossier_sha256": _canonical_json_sha256(attempted_dossier_copy),
+        "attempt_artifacts": [
+            artifact_receipt("report", report_path),
+            artifact_receipt("workspace_ref", run_dir / "workspace_ref.json"),
+            artifact_receipt("target_ref", run_dir / "target_ref.json"),
+            artifact_receipt("normalized_events", run_dir / "normalized_events.jsonl"),
+            artifact_receipt(
+                "codex_subscription_auth",
+                run_dir / "codex_execpolicy_overlay.json",
+            ),
+        ],
+    }
+    attempt["attempt_sha256"] = research_attempt_sha256(attempt)
+    return attempt
+
+
+def _research_invocation_failure_record(
+    *,
+    attempt_number: int,
+    validation_errors: Sequence[str],
+) -> dict[str, Any]:
+    """Record a retry invocation that never produced a run without inventing paths."""
+    attempted_dossier: dict[str, Any] = {}
+    attempt = {
+        "attempt_number": attempt_number,
+        "outcome": "invocation_failed",
+        "run_dir": None,
+        "report_path": None,
+        "validation_errors": list(validation_errors),
+        "attempted_dossier": attempted_dossier,
+        "attempted_dossier_sha256": _canonical_json_sha256(attempted_dossier),
+        "attempt_artifacts": [],
+    }
+    attempt["attempt_sha256"] = research_attempt_sha256(attempt)
+    return attempt
+
+
+def _set_research_attempts(
+    dossier: dict[str, Any],
+    attempts: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Attach content-bound attempt history and refresh runner receipt hashes."""
+    dossier["research_attempts"] = [dict(attempt) for attempt in attempts]
+    verification_raw = dossier.get("evidence_verification")
+    if isinstance(verification_raw, dict):
+        verification_raw["claims_sha256"] = research_claims_sha256(dossier)
+        verification_raw["receipt_sha256"] = evidence_verification_sha256(verification_raw)
+    return dossier
+
+
+def _research_attempt_request_summary(attempt: dict[str, Any]) -> dict[str, Any]:
+    """Project attempt provenance into the compact request ledger."""
+    return {
+        key: attempt.get(key)
+        for key in (
+            "attempt_number",
+            "outcome",
+            "run_dir",
+            "report_path",
+            "validation_errors",
+        )
+    }
+
+
+def _research_attempt_workspace(attempt: dict[str, Any]) -> str | None:
+    """Return the hash-recorded workspace path for a retained attempt, if available."""
+    artifacts_raw = attempt.get("attempt_artifacts")
+    artifacts = artifacts_raw if isinstance(artifacts_raw, list) else []
+    workspace_ref = next(
+        (
+            artifact
+            for artifact in artifacts
+            if isinstance(artifact, dict)
+            and artifact.get("kind") == "workspace_ref"
+            and artifact.get("exists") is True
+        ),
+        None,
+    )
+    if not isinstance(workspace_ref, dict):
+        return None
+    path_raw = _coerce_str(workspace_ref.get("path"))
+    if path_raw is None:
+        return None
+    try:
+        obj = _load_json_object(Path(path_raw))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return None
+    workspace_raw = _coerce_str(obj.get("workspace_dir"))
+    if workspace_raw is None:
+        return None
+    return str(Path(workspace_raw).resolve()).replace("\\", "/").casefold()
+
+
+def _research_attempt_revision(attempt: dict[str, Any]) -> str | None:
+    """Return the commit recorded by the hash-bound target-ref receipt."""
+    artifacts_raw = attempt.get("attempt_artifacts")
+    artifacts = artifacts_raw if isinstance(artifacts_raw, list) else []
+    target_ref = next(
+        (
+            artifact
+            for artifact in artifacts
+            if isinstance(artifact, dict)
+            and artifact.get("kind") == "target_ref"
+            and artifact.get("exists") is True
+        ),
+        None,
+    )
+    if not isinstance(target_ref, dict):
+        return None
+    path_raw = _coerce_str(target_ref.get("path"))
+    if path_raw is None:
+        return None
+    try:
+        obj = _load_json_object(Path(path_raw))
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return None
+    revision = _coerce_str(obj.get("commit_sha"))
+    return revision.casefold() if revision is not None else None
 
 
 def _append_prompt_for_problem(
@@ -583,6 +830,8 @@ def run_repro_research_stage(
     replay_timeout_seconds: float | None = 300.0,
     replay_executor: ReplayExecutor | None = None,
     replay_executor_metadata: dict[str, Any] | None = None,
+    _output_contract_retry_remaining: int = 1,
+    _attempt_number: int = 1,
 ) -> dict[str, Any]:
     """Run stage 3 repro-plus-research for selected problems.
 
@@ -615,10 +864,16 @@ def run_repro_research_stage(
         Stage document dict (see ``backlog_core.stage_contracts.build_stage_document``).
 
     Case-local runner, report, extension, and dossier failures are returned as explicit
-    blocked research proofs so unrelated cases continue. Global configuration failures
-    (for example a missing repo reference or stage guidance) still raise because no case
-    can be researched correctly under that configuration.
+    blocked research proofs so unrelated cases continue. A model-output contract failure
+    receives at most one complete case-local research retry in a fresh acquired workspace;
+    evidence-assignment and verification failures never use that retry. Global configuration
+    failures (for example a missing repo reference or stage guidance) still raise because no
+    case can be researched correctly under that configuration.
     """
+    if _output_contract_retry_remaining not in {0, 1}:
+        raise ValueError("_output_contract_retry_remaining must be 0 or 1")
+    if _attempt_number < 1:
+        raise ValueError("_attempt_number must be positive")
     stage_artifacts_dir = artifacts_dir / _STAGE
     stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
 
@@ -626,11 +881,7 @@ def run_repro_research_stage(
     dossiers: list[dict[str, Any]] = []
     replay_metadata = dict(replay_executor_metadata or {"executor": "blocked"})
 
-    if (
-        not dry_run
-        and selected_problems
-        and (repo_input is None or not str(repo_input).strip())
-    ):
+    if not dry_run and selected_problems and (repo_input is None or not str(repo_input).strip()):
         raise ValueError(
             "run_repro_research_stage: repo_input is required when dry_run=false. "
             "Provide --repo-input or ensure the caller inferred a single repo_input."
@@ -659,7 +910,9 @@ def run_repro_research_stage(
         case_id = _coerce_str(problem.get("case_id")) or "case:unassigned"
         assignment_raw = problem.get("evidence_assignment")
         evidence_assignment = (
-            dict(assignment_raw) if isinstance(assignment_raw, dict) else {
+            dict(assignment_raw)
+            if isinstance(assignment_raw, dict)
+            else {
                 "status": "incomplete",
                 "errors": ["origin_evidence_assignment_missing"],
                 "case_id": case_id,
@@ -669,7 +922,11 @@ def run_repro_research_stage(
             }
         )
 
-        seed = _stable_seed(pid)
+        seed = (
+            _stable_seed(pid)
+            if _attempt_number == 1
+            else _stable_seed(f"{pid}:research_attempt:{_attempt_number}")
+        )
         evidence_atoms_raw = problem.get("evidence_atoms")
         evidence_atoms = evidence_atoms_raw if isinstance(evidence_atoms_raw, list) else []
         evidence_atom_ids = [
@@ -747,25 +1004,19 @@ def run_repro_research_stage(
             assert repo_input is not None
             assert resolved_repo_ref is not None
             preferred_workspace = (
-                stage_artifacts_dir
-                / "research_workspaces"
-                / f"{idx:03d}_{seed}_{uuid4().hex[:12]}"
+                stage_artifacts_dir / "research_workspaces" / f"{idx:03d}_{seed}_{uuid4().hex[:12]}"
             )
-            prepared_workspace, origin_attachment_evidence = (
-                _prepare_origin_evidence_workspace(
-                    repo_input=str(repo_input),
-                    repo_ref=resolved_repo_ref,
-                    preferred_workspace_dir=preferred_workspace,
-                    evidence_atoms=[atom for atom in evidence_atoms if isinstance(atom, dict)],
-                    source_root=repo_root,
-                )
+            prepared_workspace, origin_attachment_evidence = _prepare_origin_evidence_workspace(
+                repo_input=str(repo_input),
+                repo_ref=resolved_repo_ref,
+                preferred_workspace_dir=preferred_workspace,
+                evidence_atoms=[atom for atom in evidence_atoms if isinstance(atom, dict)],
+                source_root=repo_root,
             )
             evidence_assignment["origin_attachment_evidence"] = origin_attachment_evidence
             materialization_errors_raw = origin_attachment_evidence.get("errors")
             materialization_errors = (
-                materialization_errors_raw
-                if isinstance(materialization_errors_raw, list)
-                else []
+                materialization_errors_raw if isinstance(materialization_errors_raw, list) else []
             )
             if materialization_errors:
                 evidence_assignment["status"] = "incomplete"
@@ -791,9 +1042,7 @@ def run_repro_research_stage(
             problem_for_agent["evidence_assignment"] = evidence_assignment
             problem_for_agent["origin_attachment_evidence"] = origin_attachment_evidence
             req_meta["origin_attachment_evidence"] = {
-                "materialization_sha256": origin_attachment_evidence.get(
-                    "materialization_sha256"
-                ),
+                "materialization_sha256": origin_attachment_evidence.get("materialization_sha256"),
                 "artifact_count": len(origin_attachment_evidence.get("artifacts", [])),
                 "error_count": len(materialization_errors),
                 "workspace_dir": str(prepared_workspace),
@@ -836,6 +1085,9 @@ def run_repro_research_stage(
             agent_append_system_prompt=append_prompt,
             keep_workspace=True,
             resume_workspace_dir=prepared_workspace,
+            codex_execpolicy_allow_prefixes=(
+                _CODEX_RESEARCH_EXEC_ALLOW_PREFIXES if agent == "codex" else ()
+            ),
         )
 
         _LOG.info(
@@ -873,79 +1125,84 @@ def run_repro_research_stage(
         )
 
         report_path = run_dir / "report.json"
-        if not report_path.exists():
-            blocked = _blocked_research_after_run_failure(
-                case_id=case_id,
-                problem_id=pid,
-                evidence_assignment=evidence_assignment,
-                evidence_atom_ids=evidence_atom_ids,
-                requested_repo_ref=requested_repo_ref,
-                resolved_repo_ref=resolved_repo_ref,
-                run_dir=run_dir,
-                reason="research_report_missing",
-                unknown="The case-local research run did not produce report.json",
-                evidence_needed="Retry only this case and retain a valid report.json",
-            )
-            validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-            dossiers.append(validated[0])
-            continue
+        report_obj: dict[str, Any] = {}
+        report_loaded = False
+        ext_block_raw: dict[str, Any] = {}
+        output_contract_errors: list[str] = []
+        if not report_path.is_file():
+            output_contract_errors.append("research_report_missing")
+        else:
+            try:
+                report_obj = _load_json_object(report_path)
+                report_loaded = True
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+                output_contract_errors.append(
+                    f"research_report_malformed:{type(exc).__name__}:{exc}"
+                )
 
-        try:
-            report_obj = _load_json_object(report_path)
-        except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
-            blocked = _blocked_research_after_run_failure(
-                case_id=case_id,
-                problem_id=pid,
-                evidence_assignment=evidence_assignment,
-                evidence_atom_ids=evidence_atom_ids,
-                requested_repo_ref=requested_repo_ref,
-                resolved_repo_ref=resolved_repo_ref,
-                run_dir=run_dir,
-                reason=f"research_report_malformed:{type(exc).__name__}",
-                unknown="The case-local research report is malformed or unreadable",
-                evidence_needed="Retry only this case and retain schema-valid JSON",
+        if report_loaded:
+            output_contract_errors.extend(
+                f"research_report_schema_invalid:{error}"
+                for error in _model_report_schema_errors(
+                    run_dir=run_dir,
+                    report=report_obj,
+                )
             )
-            validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-            dossiers.append(validated[0])
-            continue
-        ext_raw = report_obj.get("extensions")
-        ext_map = ext_raw if isinstance(ext_raw, dict) else {}
-        ext_block_raw = ext_map.get(_EXTENSION_KEY)
-        if not isinstance(ext_block_raw, dict):
-            blocked = _blocked_research_after_run_failure(
-                case_id=case_id,
-                problem_id=pid,
-                evidence_assignment=evidence_assignment,
-                evidence_atom_ids=evidence_atom_ids,
-                requested_repo_ref=requested_repo_ref,
-                resolved_repo_ref=resolved_repo_ref,
-                run_dir=run_dir,
-                reason=f"research_extension_missing:{_EXTENSION_KEY}",
-                unknown="The case-local report omitted the required research proof extension",
-                evidence_needed="Retry only this case and emit the required extension",
-            )
-            validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-            dossiers.append(validated[0])
-            continue
+            ext_raw = report_obj.get("extensions")
+            ext_map = ext_raw if isinstance(ext_raw, dict) else {}
+            ext_candidate = ext_map.get(_EXTENSION_KEY)
+            if isinstance(ext_candidate, dict):
+                ext_block_raw = dict(ext_candidate)
+            else:
+                output_contract_errors.append(f"research_extension_missing:{_EXTENSION_KEY}")
 
         ext_pid = _coerce_str(ext_block_raw.get("problem_id"))
         ext_case_id = _coerce_str(ext_block_raw.get("case_id"))
-        problem_id_mismatch = ext_pid != pid
-        case_id_mismatch = ext_case_id != case_id
-        if problem_id_mismatch:
-            _LOG.warning(
-                "stage3: extension problem_id mismatch expected=%s got=%s (blocking proof)",
-                pid,
-                ext_pid,
-            )
-        if case_id_mismatch:
-            _LOG.warning(
-                "stage3: extension case_id mismatch expected=%s got=%s (blocking proof)",
-                case_id,
-                ext_case_id,
-            )
+        if ext_block_raw:
+            if ext_pid != pid:
+                output_contract_errors.append(
+                    f"research_dossier_problem_id_mismatch:expected={pid}:actual={ext_pid}"
+                )
+            if ext_case_id != case_id:
+                output_contract_errors.append(
+                    f"research_dossier_case_id_mismatch:expected={case_id}:actual={ext_case_id}"
+                )
+            if ext_block_raw.get("implementation_performed") is not True:
+                output_contract_errors.extend(
+                    research_dossier_output_contract_errors(
+                        {
+                            key: value
+                            for key, value in ext_block_raw.items()
+                            if key not in _RUNNER_OWNED_DOSSIER_FIELDS
+                        },
+                        evidence_assignment=evidence_assignment,
+                    )
+                )
+
+        writes_purpose = _string_list(ext_block_raw.get("writes_purpose"))
+        diff_numstat_path = run_dir / "diff_numstat.json"
+        diff_numstat = _load_diff_numstat(diff_numstat_path)
+        modified_paths = [
+            path
+            for entry in diff_numstat
+            for path in [_coerce_str(entry.get("path"))]
+            if path is not None
+        ]
+        diff_class, diff_reasons = _classify_diff(
+            modified_paths,
+            writes_purpose=writes_purpose,
+        )
 
         if ext_block_raw.get("implementation_performed") is True:
+            implementation_error = "research_implementation_performed_forbidden"
+            implementation_attempt = _research_attempt_record(
+                attempt_number=_attempt_number,
+                outcome="runner_contract_invalid",
+                run_dir=run_dir,
+                report_path=report_path,
+                validation_errors=[implementation_error, *output_contract_errors],
+                attempted_dossier=ext_block_raw,
+            )
             blocked = _blocked_research_after_run_failure(
                 case_id=case_id,
                 problem_id=pid,
@@ -954,35 +1211,235 @@ def run_repro_research_stage(
                 requested_repo_ref=requested_repo_ref,
                 resolved_repo_ref=resolved_repo_ref,
                 run_dir=run_dir,
-                reason="research_implementation_performed_forbidden",
+                reason=implementation_error,
                 unknown="The case-local run changed production code instead of researching",
                 evidence_needed="Retry only this case in research-only mode",
             )
+            _set_research_attempts(blocked, [implementation_attempt])
             validated, _ = parse_research_dossier_list(json.dumps([blocked]))
             dossiers.append(validated[0])
+            req_meta["attempts"] = [_research_attempt_request_summary(implementation_attempt)]
             continue
 
-        writes_purpose = _string_list(ext_block_raw.get("writes_purpose"))
+        nonretry_reason: str | None = None
+        if result.exit_code != 0:
+            nonretry_reason = f"runner_exit_code:{result.exit_code}"
+        elif diff_class == "suspicious_implementation":
+            nonretry_reason = "suspicious_implementation_diff"
+        if nonretry_reason is not None:
+            nonretry_attempt = _research_attempt_record(
+                attempt_number=_attempt_number,
+                outcome="runner_contract_invalid",
+                run_dir=run_dir,
+                report_path=report_path,
+                validation_errors=[nonretry_reason, *output_contract_errors],
+                attempted_dossier=ext_block_raw,
+            )
+            blocked = _blocked_research_after_run_failure(
+                case_id=case_id,
+                problem_id=pid,
+                evidence_assignment=evidence_assignment,
+                evidence_atom_ids=evidence_atom_ids,
+                requested_repo_ref=requested_repo_ref,
+                resolved_repo_ref=resolved_repo_ref,
+                run_dir=run_dir,
+                reason=nonretry_reason,
+                unknown="The research run failed a non-retryable execution integrity gate",
+                evidence_needed=(
+                    "Inspect the retained run and start a new research cycle only after "
+                    "the execution or prohibited-diff failure is resolved"
+                ),
+            )
+            blocked["diff_classification"] = diff_class
+            if diff_reasons:
+                blocked["diff_suspicious_reasons"] = diff_reasons
+            _set_research_attempts(blocked, [nonretry_attempt])
+            validated, _ = parse_research_dossier_list(json.dumps([blocked]))
+            dossiers.append(validated[0])
+            req_meta["attempts"] = [_research_attempt_request_summary(nonretry_attempt)]
+            continue
+        current_attempt = _research_attempt_record(
+            attempt_number=_attempt_number,
+            outcome=(
+                "output_contract_invalid" if output_contract_errors else "output_contract_valid"
+            ),
+            run_dir=run_dir,
+            report_path=report_path,
+            validation_errors=output_contract_errors,
+            attempted_dossier=ext_block_raw,
+        )
+        if output_contract_errors:
+            if _output_contract_retry_remaining:
+                retry_problem = dict(problem)
+                retry_problem["research_output_contract_retry"] = {
+                    "attempt_number": _attempt_number + 1,
+                    "prior_run_dir": str(run_dir.resolve()),
+                    "validation_errors": list(output_contract_errors),
+                    "instruction": (
+                        "Rerun the complete research assignment in the newly acquired "
+                        "workspace. Re-read the assigned evidence and repository files, "
+                        "re-execute every claimed experiment, and emit a fresh complete "
+                        "dossier that satisfies these exact output-contract errors. Do not "
+                        "mechanically rewrite the prior JSON or weaken an evidence status."
+                    ),
+                }
+                retry_artifacts_root = (
+                    stage_artifacts_dir
+                    / "output_contract_retries"
+                    / f"{idx:03d}_{seed}_{uuid4().hex[:12]}"
+                )
+                retry_doc = run_repro_research_stage(
+                    repo_root=repo_root,
+                    repo_input=repo_input,
+                    repo_ref=resolved_repo_ref,
+                    target_slug=target_slug,
+                    selected_problems=[retry_problem],
+                    artifacts_dir=retry_artifacts_root,
+                    agent=agent,
+                    model=model,
+                    cfg=cfg,
+                    dry_run=False,
+                    replay_timeout_seconds=replay_timeout_seconds,
+                    replay_executor=replay_executor,
+                    replay_executor_metadata=replay_metadata,
+                    _output_contract_retry_remaining=0,
+                    _attempt_number=_attempt_number + 1,
+                )
+                retry_items_raw = retry_doc.get("items")
+                retry_items = retry_items_raw if isinstance(retry_items_raw, list) else []
+                if retry_items and isinstance(retry_items[0], dict):
+                    retried = dict(retry_items[0])
+                else:
+                    retried = _blocked_research_after_run_failure(
+                        case_id=case_id,
+                        problem_id=pid,
+                        evidence_assignment=evidence_assignment,
+                        evidence_atom_ids=evidence_atom_ids,
+                        requested_repo_ref=requested_repo_ref,
+                        resolved_repo_ref=resolved_repo_ref,
+                        run_dir=None,
+                        reason="research_output_contract_retry_result_missing",
+                        unknown="The bounded output-contract retry returned no dossier",
+                        evidence_needed="Retain and inspect the case-local retry artifacts",
+                    )
+                retry_attempts_raw = retried.get("research_attempts")
+                retry_attempts = (
+                    [attempt for attempt in retry_attempts_raw if isinstance(attempt, dict)]
+                    if isinstance(retry_attempts_raw, list)
+                    else []
+                )
+                if not retry_attempts:
+                    retry_attempts = [
+                        _research_invocation_failure_record(
+                            attempt_number=_attempt_number + 1,
+                            validation_errors=_string_list(retried.get("blocking_reasons"))
+                            or ["research_output_contract_retry_failed"],
+                        )
+                    ]
+                current_workspace = _research_attempt_workspace(current_attempt)
+                retry_workspaces = {
+                    workspace
+                    for attempt in retry_attempts
+                    for workspace in [_research_attempt_workspace(attempt)]
+                    if workspace is not None
+                }
+                current_run_dir = str(run_dir.resolve())
+                retry_run_dirs = {
+                    str(attempt.get("run_dir"))
+                    for attempt in retry_attempts
+                    if _coerce_str(attempt.get("run_dir")) is not None
+                }
+                current_revision = _research_attempt_revision(current_attempt)
+                retry_revisions = {
+                    revision
+                    for attempt in retry_attempts
+                    for revision in [_research_attempt_revision(attempt)]
+                    if revision is not None
+                }
+                successful_retry = retried.get("research_status") != "blocked"
+                freshness_unverifiable = successful_retry and (
+                    current_workspace is None
+                    or not retry_workspaces
+                    or current_revision is None
+                    or not retry_revisions
+                )
+                freshness_reused = current_run_dir in retry_run_dirs or (
+                    current_workspace is not None and current_workspace in retry_workspaces
+                )
+                revision_changed = (
+                    current_revision is not None
+                    and bool(retry_revisions)
+                    and retry_revisions != {current_revision}
+                )
+                if freshness_unverifiable or freshness_reused or revision_changed:
+                    freshness_reason = (
+                        "research_output_contract_retry_freshness_unverifiable"
+                        if freshness_unverifiable
+                        else "research_output_contract_retry_not_fresh"
+                        if freshness_reused
+                        else "research_output_contract_retry_revision_changed"
+                    )
+                    retry_run_dir_raw = _coerce_str(retry_attempts[0].get("run_dir"))
+                    retried = _blocked_research_after_run_failure(
+                        case_id=case_id,
+                        problem_id=pid,
+                        evidence_assignment=evidence_assignment,
+                        evidence_atom_ids=evidence_atom_ids,
+                        requested_repo_ref=requested_repo_ref,
+                        resolved_repo_ref=resolved_repo_ref,
+                        run_dir=(
+                            Path(retry_run_dir_raw) if retry_run_dir_raw is not None else None
+                        ),
+                        reason=freshness_reason,
+                        unknown=(
+                            "The bounded output-contract retry reused the prior run or workspace"
+                        ),
+                        evidence_needed=(
+                            "Acquire a distinct workspace and rerun the full case from "
+                            "assigned evidence"
+                        ),
+                    )
+                combined_attempts = [current_attempt, *retry_attempts]
+                _set_research_attempts(retried, combined_attempts)
+                retried_validated, _ = parse_research_dossier_list(json.dumps([retried]))
+                dossiers.append(retried_validated[0])
+                req_meta["attempts"] = [
+                    _research_attempt_request_summary(attempt) for attempt in combined_attempts
+                ]
+                req_meta["output_contract_retry_artifacts"] = retry_doc.get("artifacts", {})
+                continue
 
-        diff_numstat_path = run_dir / "diff_numstat.json"
-        diff_numstat = _load_diff_numstat(diff_numstat_path)
-        modified_paths: list[str] = []
-        for entry in diff_numstat:
-            p = _coerce_str(entry.get("path"))
-            if p is not None:
-                modified_paths.append(p)
+            blocked = _blocked_research_after_run_failure(
+                case_id=case_id,
+                problem_id=pid,
+                evidence_assignment=evidence_assignment,
+                evidence_atom_ids=evidence_atom_ids,
+                requested_repo_ref=requested_repo_ref,
+                resolved_repo_ref=resolved_repo_ref,
+                run_dir=run_dir,
+                reason="research_dossier_output_contract_invalid",
+                unknown="The case-local dossier failed the model-output contract",
+                evidence_needed=(
+                    "Inspect the retained validation errors and raw attempted dossier"
+                ),
+            )
+            _set_research_attempts(blocked, [current_attempt])
+            validated, _ = parse_research_dossier_list(json.dumps([blocked]))
+            dossiers.append(validated[0])
+            req_meta["attempts"] = [_research_attempt_request_summary(current_attempt)]
+            continue
 
-        diff_class, diff_reasons = _classify_diff(modified_paths, writes_purpose=writes_purpose)
-
-        dossier: dict[str, Any] = dict(ext_block_raw)
+        dossier: dict[str, Any] = {
+            key: value
+            for key, value in ext_block_raw.items()
+            if key not in _RUNNER_OWNED_DOSSIER_FIELDS
+        }
         dossier["research_schema_version"] = RESEARCH_PROOF_SCHEMA_VERSION
-        dossier["case_id"] = case_id
-        dossier["problem_id"] = pid
         dossier["evidence_assignment"] = evidence_assignment
         repo_revision = _canonical_repo_revision(run_dir)
         blocking_reasons = _string_list(dossier.get("blocking_reasons"))
         if repo_revision is None:
-            repo_revision = _coerce_str(dossier.get("repo_revision")) or "unavailable"
+            repo_revision = "unavailable"
             blocking_reasons.append("runner_repo_revision_unavailable")
         dossier["repo_revision"] = repo_revision
         dossier["diff_classification"] = diff_class
@@ -991,7 +1448,7 @@ def run_repro_research_stage(
         dossier["run_dir"] = str(run_dir)
         dossier["runner_exit_code"] = int(result.exit_code)
         dossier["runner_report_validation_errors"] = list(result.report_validation_errors)
-        artifacts = {
+        dossier["artifacts"] = {
             "report_json": str(report_path),
             "report_md": str(run_dir / "report.md"),
             "patch_diff": str(run_dir / "patch.diff"),
@@ -999,7 +1456,6 @@ def run_repro_research_stage(
             "normalized_events_jsonl": str(run_dir / "normalized_events.jsonl"),
             "agent_stderr_txt": str(run_dir / "agent_stderr.txt"),
         }
-        dossier["artifacts"] = artifacts
 
         artifact_refs_raw = dossier.get("artifact_refs")
         artifact_refs = list(artifact_refs_raw) if isinstance(artifact_refs_raw, list) else []
@@ -1012,6 +1468,8 @@ def run_repro_research_stage(
             if ref["path"] not in seen_artifact_paths:
                 artifact_refs.append(ref)
         dossier["artifact_refs"] = artifact_refs
+        dossier["research_attempts"] = [current_attempt]
+        req_meta["attempts"] = [_research_attempt_request_summary(current_attempt)]
 
         evidence_verification = verify_research_evidence(
             dossier,
@@ -1044,9 +1502,7 @@ def run_repro_research_stage(
             if attachment_errors:
                 verification_errors_raw = evidence_verification.get("errors")
                 verification_errors = (
-                    verification_errors_raw
-                    if isinstance(verification_errors_raw, list)
-                    else []
+                    verification_errors_raw if isinstance(verification_errors_raw, list) else []
                 )
                 evidence_verification["errors"] = list(
                     dict.fromkeys([*verification_errors, *attachment_errors])
@@ -1063,12 +1519,12 @@ def run_repro_research_stage(
         if dossier.get("diff_classification") == "suspicious_implementation":
             blocking_reasons.append("suspicious_implementation_diff")
         report_status = _coerce_str(report_obj.get("status"))
-        if report_status in {"partial", "failure"}:
-            blocking_reasons.append(f"runner_report_status:{report_status}")
-        if problem_id_mismatch:
-            blocking_reasons.append("research_problem_id_mismatch")
-        if case_id_mismatch:
-            blocking_reasons.append("research_case_id_mismatch")
+        report_status_reason = _report_status_blocking_reason(
+            report_status,
+            _coerce_str(dossier.get("research_status")),
+        )
+        if report_status_reason is not None:
+            blocking_reasons.append(report_status_reason)
         if evidence_verification.get("status") != "verified":
             blocking_reasons.append("research_evidence_verification_failed")
         if blocking_reasons:
@@ -1083,6 +1539,10 @@ def run_repro_research_stage(
         try:
             validated, warnings = parse_research_dossier_list(json.dumps([dossier]))
         except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            failed_attempt = dict(current_attempt)
+            failed_attempt["outcome"] = "runner_contract_invalid"
+            failed_attempt["validation_errors"] = [str(exc)]
+            failed_attempt["attempt_sha256"] = research_attempt_sha256(failed_attempt)
             blocked = _blocked_research_after_run_failure(
                 case_id=case_id,
                 problem_id=pid,
@@ -1095,8 +1555,10 @@ def run_repro_research_stage(
                 unknown="The case-local dossier failed the research proof contract",
                 evidence_needed="Retry only this case and emit a schema-valid proof",
             )
+            _set_research_attempts(blocked, [failed_attempt])
             validated, _ = parse_research_dossier_list(json.dumps([blocked]))
             dossiers.append(validated[0])
+            req_meta["attempts"] = [_research_attempt_request_summary(failed_attempt)]
             continue
         normalized = validated[0]
         if warnings:
@@ -1141,6 +1603,24 @@ def run_repro_research_stage(
                 1
                 for dossier in dossiers
                 if dossier.get("research_status") == "insufficient_evidence"
+            ),
+            "output_contract_retry_count": sum(
+                max(
+                    0,
+                    len(dossier.get("research_attempts", [])) - 1,
+                )
+                for dossier in dossiers
+                if isinstance(dossier.get("research_attempts"), list)
+            ),
+            "output_contract_invalid_attempt_count": sum(
+                1
+                for dossier in dossiers
+                for attempt in (
+                    dossier.get("research_attempts")
+                    if isinstance(dossier.get("research_attempts"), list)
+                    else []
+                )
+                if isinstance(attempt, dict) and attempt.get("outcome") == "output_contract_invalid"
             ),
             "dry_run": bool(dry_run),
             "repo_input": repo_input,

@@ -155,6 +155,8 @@ def _run_implementation_planning_stage(
     stage = "implementation_planning"
     stage_artifacts_dir = artifacts_dir / stage
     stage_artifacts_dir.mkdir(parents=True, exist_ok=True)
+    invocation_tracker = ModelInvocationTracker(stage_artifacts_dir)
+    live_prompt_expected_count = 0
 
     template_path = pipeline_manifest.change_planner_template
     if template_path is None:
@@ -435,6 +437,7 @@ def _run_implementation_planning_stage(
             )
             warnings_list.extend(parse_warnings)
         else:
+            live_prompt_expected_count += 1
             try:
                 response = run_stage_prompt_json(
                     stage=stage,
@@ -568,6 +571,13 @@ def _run_implementation_planning_stage(
             "change_plans_json": str(out_json),
             "change_plans_md": str(out_md),
         },
+    )
+    stage_doc = attach_stage_model_invocation_contract(
+        stage_doc,
+        agent=agent,
+        dry_run=dry_run,
+        manifest_refs=invocation_tracker.collect(),
+        invocation_expected=live_prompt_expected_count > 0,
     )
 
     out_json.parent.mkdir(parents=True, exist_ok=True)

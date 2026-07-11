@@ -33,6 +33,7 @@ from backlog_repo.outcomes import (
 from backlog_repo.plan_index import (
     DISCARDED_PLAN_BUCKET,
     PLAN_BUCKET_TO_ATOM_STATUS,
+    archive_integrity_unknown_plan_ticket_file,
     archive_plan_ticket_file,
     dedupe_actioned_plan_ticket_files,
     dedupe_queued_plan_ticket_files_when_actioned_exists,
@@ -68,6 +69,7 @@ __all__ = [
     "canonical_plan_sha256",
     "canonical_ticket_body",
     "canonical_ticket_body_sha256",
+    "archive_integrity_unknown_plan_ticket_file",
     "archive_plan_ticket_file",
     "dedupe_actioned_plan_ticket_files",
     "dedupe_queued_plan_ticket_files_when_actioned_exists",

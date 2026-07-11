@@ -53,9 +53,14 @@ with `~0` for `~`, `~1` for `/`, and numeric segments for array indexes. Bare do
 config names are ambiguous and do not verify.
 
 Each experiment also records `scenario_kind`, `addresses_atom_ids`, and an
-`observable_assertion`. Experiments collectively cover every assigned atom. A supporting
-experiment uses `original_replay`, `faithful_replay`, deterministic `static_trace`, or a
-platform-bound `live_runtime`; a refuting experiment may use a distinct `control`. The runner
+`observable_assertion`. `scenario_kind` is exactly `original_replay`, `faithful_replay`,
+`control`, `static_trace`, or `live_runtime`; `platform_requirement` is exactly lowercase
+`any`, `windows`, `linux`, or `darwin`. Experiments collectively cover every assigned atom.
+A supporting experiment uses `original_replay`, `faithful_replay`, deterministic
+`static_trace`, or a platform-bound `live_runtime`; a refuting experiment may use a distinct
+`control`. Every static trace includes
+`{"deterministic":true,"environment_dependencies":[],"code_path":[{"path":"...","symbol":"...","observation":"..."}]}`
+under its `static_trace` key. The runner
 repeats allowlisted tests, safe retained harnesses, and evidence-bound practical repository
 CLIs/scripts in independent clean clones,
 captures stdout/stderr hashes, and verifies the assertion. Agent-workspace results alone are
@@ -150,7 +155,9 @@ output/exception/artifact is data-dependent on every callable production mechani
 A call-and-discard harness followed by a hard-coded print cannot advance. For a positive
 contract, the exact mechanism-dependent scalar assertion must fail before the change and the
 retained, content-addressed harness must replay unchanged after it. State all differences from
-the original scenario in `fidelity_mapping`. Runtime evidence must name its required platform;
+the original scenario in `fidelity_mapping`. It is required for `faithful_replay` and
+`live_runtime`, optional but encouraged for `static_trace`, and omitted for
+`original_replay` and `control`. Runtime evidence must name its required platform enum;
 Docker/Linux evidence cannot prove a Windows-only failure.
 
 The runner emits typed `mechanism_evidence`: `exception_trace`, `observed_output`,
@@ -177,14 +184,26 @@ they are not mandatory symptoms to reproduce and cannot bootstrap a new problem 
 Partial reproduction, suspicious implementation diffs, runner failures, missing artifacts,
 or malformed reports cannot be `evidence_sufficient`.
 
+The outer troubleshoot report `status` is not the research conclusion. `partial` and `failure`
+preserve an honest `insufficient_evidence` or `blocked` extension; only a contradictory
+`evidence_sufficient` claim is rejected when the outer report is not `success`. Runner exit,
+schema, and evidence receipts remain authoritative for execution integrity.
+
+A missing/malformed report, missing extension, or genuine model JSON-schema error receives at
+most one complete retry in a distinct workspace at the same pinned revision. The retry rereads
+the full assignment and reruns claimed experiments; it is not a JSON-repair pass. Evidence
+verification failures, suspicious implementation diffs, nonzero execution, and implementation
+violations do not consume that retry. Never strengthen an evidence status merely to pass shape.
+
 ## Strict output
 
-The `extensions.backlog_repro_research` object must use research schema version 3 and
-include: `case_id`, `problem_id`, `repo_revision`, `research_method`, `reproduction_status`,
+The model-authored `extensions.backlog_repro_research` object must include: `case_id`,
+`problem_id`, `research_method`, `reproduction_status`,
 `research_status`, `writes_used`, `writes_purpose`, `implementation_performed`,
 `root_cause_hypotheses`, `root_cause_confidence`, `broader_class_assessment`,
 `material_unknowns`, `artifact_refs`, `experiments`, `inspected_files`,
-`inspected_symbols`, `blocking_reasons`, and `evidence_boundaries`. The runner supplies
-the final diff classification, a clean revision-pinned planning workspace, and an
+`inspected_symbols`, `blocking_reasons`, and `evidence_boundaries`. Copy the assigned
+`case_id` and `problem_id` exactly. The runner supplies schema version 3, the acquired repository
+revision, the final diff classification, a clean revision-pinned planning workspace, and an
 `evidence_verification` receipt. Readiness requires that receipt to bind commands to
 normalized events, files and symbols to the acquired revision, and artifacts to hashes.

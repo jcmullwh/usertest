@@ -8,6 +8,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 import time
 import traceback
@@ -18,15 +19,18 @@ from pathlib import Path
 from typing import Any
 
 from agent_adapters import (
+    build_codex_subscription_config_overrides,
     normalize_claude_events,
     normalize_codex_events,
     normalize_gemini_events,
     probe_agent_shell_launch,
+    probe_codex_login_status,
     run_claude_print,
     run_codex_exec,
     run_gemini,
     validate_codex_personality_config_overrides,
     validate_codex_reasoning_effort_config_overrides,
+    validate_codex_subscription_config_overrides,
 )
 from agent_adapters.codex_config import toml_basic_string
 from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
@@ -53,6 +57,14 @@ from runner_core.artifacts import (
     _read_tail_text as _read_tail_text,
 )
 from runner_core.catalog import load_catalog_config
+from runner_core.codex_execpolicy import (
+    CONTROLLED_CODEX_AUTH_ENV_VARS,
+    CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+    ControlledCodexExecpolicyOverlay,
+    capture_probe_workspace_state,
+    controlled_codex_execpolicy_receipt_errors,
+    install_controlled_codex_execpolicy,
+)
 from runner_core.execution_backend import prepare_execution_backend
 from runner_core.git_helpers import (
     _ensure_git_user_config as _ensure_git_user_config,
@@ -101,6 +113,7 @@ from runner_core.prompt_staging import (
     _stage_agent_prompt_file,
     _stage_agent_prompt_text,
 )
+from runner_core.provenance import capture_runner_implementation_provenance
 from runner_core.python_capability import (
     _PYTHON_COMMAND_PROBE_BUDGET_SECONDS,
     _PYTHON_CONTEXT_PROBE_BUDGET_SECONDS,
@@ -215,6 +228,7 @@ class RunRequest:
     seed: int = 0
     model: str | None = None
     agent_config_overrides: tuple[str, ...] = ()
+    codex_execpolicy_allow_prefixes: tuple[tuple[str, ...], ...] = ()
     agent_system_prompt_file: Path | None = None
     agent_append_system_prompt: str | None = None
     agent_append_system_prompt_file: Path | None = None
@@ -808,9 +822,7 @@ def _format_preflight_summary_md(
         )
         policy_status = delegation_capability.get("policy_status")
         policy_status_s = (
-            policy_status
-            if isinstance(policy_status, str) and policy_status.strip()
-            else "unknown"
+            policy_status if isinstance(policy_status, str) and policy_status.strip() else "unknown"
         )
         cli_status = delegation_capability.get("cli_support_status")
         cli_status_s = (
@@ -1254,9 +1266,7 @@ def _delegation_contract_from_adapter_config(
         delegation = raw_delegation if isinstance(raw_delegation, dict) else {}
         raw_tools = delegation.get("tools")
         source = "agent_config.delegation.tools"
-        confirmed_cli_versions = _coerce_unique_str_list(
-            delegation.get("confirmed_cli_versions")
-        )
+        confirmed_cli_versions = _coerce_unique_str_list(delegation.get("confirmed_cli_versions"))
 
     tools = _coerce_unique_str_list(raw_tools)
     if not tools:
@@ -1304,9 +1314,7 @@ def _resolve_delegation_capability(
     agent_norm = agent.strip().lower()
     allowed_tools = _configured_allowed_tools_for_agent(agent=agent_norm, policy_cfg=policy_cfg)
     delegation_tool_names, evidence_source, confirmed_cli_versions = (
-        _delegation_contract_from_adapter_config(
-            agent_cfg=agent_cfg
-        )
+        _delegation_contract_from_adapter_config(agent_cfg=agent_cfg)
     )
     cli_version = _agent_cli_version_from_probe(cli_version_probe)
     version_probe_copy = dict(cli_version_probe) if isinstance(cli_version_probe, dict) else None
@@ -3398,6 +3406,58 @@ def _maybe_codex_login_in_sandbox(
         )
 
 
+def _finalize_controlled_codex_execpolicy(
+    *,
+    overlay: ControlledCodexExecpolicyOverlay,
+    binary: str | None,
+    env_overrides: dict[str, str] | None,
+    config_overrides: Sequence[str] | None,
+    run_dir: Path,
+) -> list[str]:
+    """Run the post-agent host-login proof exactly once, then restore target rules."""
+
+    if "post_login_status" not in overlay.receipt:
+        if binary is None or config_overrides is None:
+            overlay.record_post_login_status(
+                {
+                    "ok": False,
+                    "exit_code": 1,
+                    "expected_status": "Logged in using ChatGPT",
+                    "status_kind": "missing",
+                    "chatgpt_status_exact": False,
+                    "auth_env_vars_blank": {name: False for name in CONTROLLED_CODEX_AUTH_ENV_VARS},
+                    "error_kind": "CodexBinaryUnavailable",
+                }
+            )
+        else:
+            try:
+                status = probe_codex_login_status(
+                    binary=binary,
+                    codex_home=overlay.host_codex_home,
+                    cwd=run_dir,
+                    config_overrides=config_overrides,
+                    env_overrides=env_overrides,
+                )
+                overlay.record_post_login_status(status.to_redacted_dict())
+            except Exception as exc:  # noqa: BLE001
+                overlay.record_post_login_status(
+                    {
+                        "ok": False,
+                        "exit_code": 1,
+                        "expected_status": "Logged in using ChatGPT",
+                        "status_kind": "missing",
+                        "chatgpt_status_exact": False,
+                        "auth_env_vars_blank": {
+                            name: False for name in CONTROLLED_CODEX_AUTH_ENV_VARS
+                        },
+                        "error_kind": type(exc).__name__,
+                    }
+                )
+    errors = overlay.restore()
+    errors.extend(controlled_codex_execpolicy_receipt_errors(overlay.receipt))
+    return list(dict.fromkeys(errors))
+
+
 def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
     policy_cfg = config.policies.get(request.policy, {})
     if not isinstance(policy_cfg, dict):
@@ -3425,6 +3485,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         )
 
     acquired = None
+    codex_execpolicy_overlay: ControlledCodexExecpolicyOverlay | None = None
+    controlled_codex_binary: str | None = None
+    controlled_codex_env_overrides: dict[str, str] | None = None
+    controlled_codex_config_overrides: list[str] | None = None
 
     target_slug = slugify(request.repo)
     timestamp = utc_timestamp_compact()
@@ -3436,6 +3500,18 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         "schema_version": 1,
         "run_started_utc": _utc_now_z(),
         "phases": {},
+    }
+    runner_implementation = capture_runner_implementation_provenance(config.repo_root)
+    runner_implementation_path = run_dir / "runner_implementation.json"
+    _write_json(runner_implementation_path, runner_implementation)
+    run_meta["runner_implementation"] = {
+        "artifact_path": str(runner_implementation_path),
+        "available": runner_implementation.get("available") is True,
+        "head_commit": runner_implementation.get("head_commit"),
+        "dirty": runner_implementation.get("dirty"),
+        "implementation_identity_sha256": runner_implementation.get(
+            "implementation_identity_sha256"
+        ),
     }
     shell_capability_summary: dict[str, Any] | None = None
     codex_metadata_capture_summary: dict[str, Any] | None = None
@@ -4127,7 +4203,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             workspace_dir_for_agent = normalize_agent_path(workspace_mount)
         else:
             workspace_dir_for_agent = acquired.workspace_dir
-
         staged_system_prompt: Path | None = None
         system_prompt_path_for_agent: str | None = None
         if request.agent_system_prompt_file is not None:
@@ -4291,6 +4366,52 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     workspace_dir=acquired.workspace_dir,
                     env_overrides=agent_env_overrides,
                 )
+            if request.agent == "codex" and request.codex_execpolicy_allow_prefixes:
+                if sandbox is not None:
+                    raise ValueError("codex_execpolicy_requires_local_execution_backend")
+                validate_codex_subscription_config_overrides(
+                    combined_overrides,
+                    source="controlled_stage3",
+                )
+                controlled_allow_prefixes = list(request.codex_execpolicy_allow_prefixes)
+                if ("python",) in set(request.codex_execpolicy_allow_prefixes):
+                    python_candidates = [
+                        (agent_env_overrides or {}).get("USERTEST_PYTHON"),
+                        shutil.which(
+                            "python",
+                            path=(agent_env_overrides or {}).get("PATH"),
+                        ),
+                        sys.executable,
+                        str(
+                            acquired.workspace_dir
+                            / ".venv"
+                            / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
+                        ),
+                    ]
+                    for candidate in python_candidates:
+                        if not isinstance(candidate, str) or not candidate.strip():
+                            continue
+                        candidate_path = Path(candidate).resolve()
+                        if candidate_path.is_file():
+                            controlled_allow_prefixes.append((str(candidate_path),))
+                controlled_allow_prefixes.append(
+                    ("Write-Output",) if os.name == "nt" else ("printf",)
+                )
+                codex_execpolicy_overlay = install_controlled_codex_execpolicy(
+                    workspace_dir=acquired.workspace_dir,
+                    run_dir=run_dir,
+                    allow_prefixes=controlled_allow_prefixes,
+                    agent_workspace_path=workspace_dir_for_agent,
+                )
+            if codex_execpolicy_overlay is not None:
+                agent_env_overrides = dict(agent_env_overrides or {})
+                agent_env_overrides["CODEX_HOME"] = str(codex_execpolicy_overlay.host_codex_home)
+                # The controlled backlog-research path intentionally reuses the host's
+                # ChatGPT subscription login and must never fall back to per-token API billing.
+                for auth_env_var in CONTROLLED_CODEX_AUTH_ENV_VARS:
+                    agent_env_overrides[auth_env_var] = ""
+                controlled_codex_binary = str(codex_binary)
+                controlled_codex_env_overrides = dict(agent_env_overrides)
 
             codex_sandbox_mode: str | None = None
             codex_ask_for_approval: str | None = None
@@ -4309,6 +4430,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
 
             codex_overrides = list(combined_overrides)
+            controlled_codex_activation_overrides: list[str] | None = None
             codex_instructions_path_for_agent: str | None = system_prompt_path_for_agent
             if staged_append_system_prompt is not None:
                 if staged_system_prompt is not None:
@@ -4347,6 +4469,34 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "model_instructions_file="
                     + toml_basic_string(codex_instructions_path_for_agent)
                 )
+            if codex_execpolicy_overlay is not None:
+                codex_overrides = build_codex_subscription_config_overrides(
+                    codex_overrides,
+                    source="controlled_stage3_mission",
+                    internal_safe_overrides=[
+                        *CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+                        codex_execpolicy_overlay.project_trust_override,
+                    ],
+                )
+                (
+                    controlled_codex_config_overrides,
+                    controlled_codex_activation_overrides,
+                ) = codex_execpolicy_overlay.bind_effective_config(codex_overrides)
+                codex_overrides = list(controlled_codex_config_overrides)
+                login_status = probe_codex_login_status(
+                    binary=str(codex_binary),
+                    codex_home=codex_execpolicy_overlay.host_codex_home,
+                    cwd=run_dir,
+                    config_overrides=controlled_codex_config_overrides,
+                    env_overrides=agent_env_overrides,
+                )
+                login_status_receipt = login_status.to_redacted_dict()
+                codex_execpolicy_overlay.record_login_status(login_status_receipt)
+                if not login_status.ok:
+                    raise ValueError(
+                        "codex_execpolicy_chatgpt_login_status_failed:"
+                        + str(login_status_receipt.get("status_kind") or "unknown")
+                    )
 
             claude_cfg = config.agents.get("claude", {}) if isinstance(config.agents, dict) else {}
             claude_binary = (
@@ -4510,6 +4660,25 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     if request.agent == "codex" and backend.run_dir_mount
                     else None
                 )
+                codex_probe_overrides = (
+                    controlled_codex_activation_overrides
+                    if request.agent == "codex"
+                    and codex_execpolicy_overlay is not None
+                    and controlled_codex_activation_overrides is not None
+                    else codex_overrides
+                )
+                codex_probe_commands: list[str] = []
+                if request.agent == "codex" and codex_execpolicy_overlay is not None:
+                    controlled_prefixes = set(request.codex_execpolicy_allow_prefixes)
+                    if ("git", "rev-parse") in controlled_prefixes:
+                        codex_probe_commands.append("git rev-parse --is-inside-work-tree")
+                    if ("python",) in controlled_prefixes:
+                        codex_probe_commands.append("python --version")
+                probe_workspace_before = (
+                    capture_probe_workspace_state(acquired.workspace_dir)
+                    if request.agent == "codex" and codex_execpolicy_overlay is not None
+                    else None
+                )
                 agent_shell_probe = probe_agent_shell_launch(
                     agent=request.agent,
                     workspace_dir=workspace_dir_for_agent,
@@ -4529,8 +4698,15 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     codex_sandbox=codex_sandbox_mode,
                     codex_ask_for_approval=codex_ask_for_approval,
                     codex_subcommand=str(codex_subcommand),
-                    codex_config_overrides=codex_overrides,
+                    codex_config_overrides=codex_probe_overrides,
+                    codex_ignore_user_config=True,
+                    codex_ignore_rules=codex_execpolicy_overlay is None,
                     codex_agent_last_message_path=codex_probe_last_message_for_agent,
+                    codex_required_commands=codex_probe_commands,
+                    codex_required_command_outputs={
+                        "git rev-parse --is-inside-work-tree": "true",
+                        "python --version": "Python ",
+                    },
                     claude_output_format=str(claude_output_format),
                     claude_allowed_tools=claude_allowed_tools,
                     claude_permission_mode=claude_permission_mode,
@@ -4542,7 +4718,22 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         workspace_dir=acquired.workspace_dir
                     ),
                 )
-                preflight_meta["agent_shell_probe"] = agent_shell_probe.to_dict()
+                agent_shell_probe_payload = agent_shell_probe.to_dict()
+                if probe_workspace_before is not None:
+                    probe_workspace_after = capture_probe_workspace_state(acquired.workspace_dir)
+                    workspace_unchanged = probe_workspace_after == probe_workspace_before
+                    agent_shell_probe_payload["workspace_state_before"] = probe_workspace_before
+                    agent_shell_probe_payload["workspace_state_after"] = probe_workspace_after
+                    agent_shell_probe_payload["workspace_unchanged"] = workspace_unchanged
+                    if not workspace_unchanged:
+                        agent_shell_probe_payload["ok"] = False
+                        agent_shell_probe_payload["reason"] = (
+                            "Agent shell probe changed the acquired workspace before "
+                            "mission execution."
+                        )
+                preflight_meta["agent_shell_probe"] = agent_shell_probe_payload
+                if codex_execpolicy_overlay is not None:
+                    codex_execpolicy_overlay.record_activation_probe(agent_shell_probe_payload)
 
             host_os = _runner_host_os()
             shell_probe_result = _shell_probe_result_from_preflight_meta(preflight_meta)
@@ -5782,7 +5973,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         subcommand=str(codex_subcommand),
                         model=effective_model,
                         config_overrides=codex_overrides,
-                        ignore_rules=True,
+                        ignore_user_config=True,
+                        ignore_rules=codex_execpolicy_overlay is None,
                         command_prefix=command_prefix,
                         env_overrides=agent_env_overrides,
                         agent_last_message_path=codex_last_message_for_attempt,
@@ -6206,9 +6398,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             and result.request_id != runner_fallback_request_id
                         ]
                         broker_latest_result = (
-                            late_agent_results[-1]
-                            if late_agent_results
-                            else runner_fallback_result
+                            late_agent_results[-1] if late_agent_results else runner_fallback_result
                         )
                         for broker_result, broker_row in zip(
                             broker_results,
@@ -6247,9 +6437,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                                     latest_failure_reason.strip()
                                 )
                             attempt_broker_missing_required_artifacts = list(
-                                verification_broker_missing_result_artifacts(
-                                    broker_latest_result
-                                )
+                                verification_broker_missing_result_artifacts(broker_latest_result)
                             )
                             _broker_payload, broker_payload_error = (
                                 validate_verification_broker_response_payload(
@@ -6919,8 +7107,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     verification_reuse_fallback_reason = skip_reason
             if verification_reuse_selected_request_id is not None:
                 verification_reuse_requests.sort(
-                    key=lambda row: row.get("request_id")
-                    != verification_reuse_selected_request_id
+                    key=lambda row: row.get("request_id") != verification_reuse_selected_request_id
                 )
             _write_json(run_dir / "verification.json", verification_output_payload)
             _write_json(
@@ -6974,6 +7161,20 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 sandbox.close()
 
         agent_phase_end_monotonic = time.monotonic()
+        if codex_execpolicy_overlay is not None:
+            overlay_errors = _finalize_controlled_codex_execpolicy(
+                overlay=codex_execpolicy_overlay,
+                binary=controlled_codex_binary,
+                env_overrides=controlled_codex_env_overrides,
+                config_overrides=controlled_codex_config_overrides,
+                run_dir=run_dir,
+            )
+            if overlay_errors:
+                report_validation_errors = list(
+                    dict.fromkeys([*report_validation_errors, *overlay_errors])
+                )
+                if agent_exit_code == 0:
+                    agent_exit_code = 1
         if agent_phase_start_monotonic is not None:
             phases = run_meta.get("phases")
             if isinstance(phases, dict):
@@ -7390,6 +7591,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         )
         return RunResult(run_dir=run_dir, exit_code=1, report_validation_errors=user_errors)
     finally:
+        if codex_execpolicy_overlay is not None and not codex_execpolicy_overlay.restored:
+            try:
+                _finalize_controlled_codex_execpolicy(
+                    overlay=codex_execpolicy_overlay,
+                    binary=controlled_codex_binary,
+                    env_overrides=controlled_codex_env_overrides,
+                    config_overrides=controlled_codex_config_overrides,
+                    run_dir=run_dir,
+                )
+            except Exception:
+                pass
         cleanup_start_monotonic = time.monotonic()
         try:
             phases = run_meta.get("phases")

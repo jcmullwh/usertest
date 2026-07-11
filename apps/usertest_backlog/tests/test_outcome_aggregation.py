@@ -1,15 +1,28 @@
 from __future__ import annotations
 
+import hashlib
+import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
-from backlog_repo import write_case_relation_receipt
+from backlog_repo import (
+    canonical_plan_sha256,
+    canonical_ticket_body_sha256,
+    parse_verification_contract_markdown,
+    render_verification_contract_markdown,
+    write_case_relation_receipt,
+)
 
+from usertest_backlog.workflows.derived_evidence import inferred_implementation_runs_root
 from usertest_backlog.workflows.problem_mining import (
     _persist_canonical_relation_receipts,
 )
 from usertest_backlog.workflows.shadow_validation import _terminal_outcome_errors
-from usertest_backlog.workflows.staged import _sync_case_registry_outcomes
+from usertest_backlog.workflows.staged import (
+    _outcome_trusted_runs_roots,
+    _sync_case_registry_outcomes,
+)
 
 
 def _runner_receipt(plan_revision_id: str, evidence_kind: str) -> dict[str, object]:
@@ -110,6 +123,247 @@ def _registry() -> dict[str, object]:
             }
         },
     }
+
+
+def _git(repo: Path, *args: str) -> str:
+    completed = subprocess.run(
+        ["git", *args],
+        cwd=repo,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return completed.stdout.strip()
+
+
+def _write_json(path: Path, value: object) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sha256_json(value: object) -> str:
+    rendered = json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()
+
+
+def _retained_implemented_outcome(
+    tmp_path: Path,
+    *,
+    implementation_runs_root: Path,
+) -> tuple[Path, dict[str, object]]:
+    owner_root = tmp_path / "owner"
+    owner_root.mkdir()
+    _git(owner_root, "init", "-b", "dev")
+    _git(owner_root, "config", "user.email", "tests@example.com")
+    _git(owner_root, "config", "user.name", "Tests")
+    (owner_root / "implemented.txt").write_text("implemented\n", encoding="utf-8")
+    _git(owner_root, "add", "implemented.txt")
+    _git(owner_root, "commit", "-m", "implemented")
+    merged_commit = _git(owner_root, "rev-parse", "HEAD")
+
+    case_id = "case:aggregate"
+    plan_revision_id = "plan:aggregate:implemented:v1"
+    fingerprint = "0123456789abcdef"
+    verification_markdown = render_verification_contract_markdown(["pytest -q"])
+    plan_markdown = (
+        "# Retained implementation plan\n\n"
+        f"- Fingerprint: `{fingerprint}`\n"
+        f"- Case ID: `{case_id}`\n"
+        f"- Plan revision ID: `{plan_revision_id}`\n\n"
+        "### Verification command contract\n\n"
+        f"{verification_markdown}\n"
+    )
+    plan_path = (
+        owner_root
+        / ".agents"
+        / "plans"
+        / "5 - complete"
+        / f"20260711_{fingerprint}_retained-plan.md"
+    )
+    plan_path.parent.mkdir(parents=True)
+    plan_path.write_text(plan_markdown, encoding="utf-8")
+    verification_contract = parse_verification_contract_markdown(plan_markdown)
+    assert verification_contract is not None
+    ticket_provenance = {
+        "schema_version": 1,
+        "fingerprint": fingerprint,
+        "case_id": case_id,
+        "plan_revision_id": plan_revision_id,
+        "ticket_body_sha256": canonical_ticket_body_sha256(plan_markdown),
+        "local_plan_sha256": canonical_plan_sha256(plan_markdown),
+        "local_plan_filename": plan_path.name,
+        "verification_contract_sha256": verification_contract["contract_sha256"],
+        "target_contract_sha256": None,
+        "verified_implementation_head": merged_commit,
+    }
+
+    binding = {
+        "schema_version": 1,
+        "fingerprint": fingerprint,
+        "case_id": case_id,
+        "plan_revision_id": plan_revision_id,
+        "ticket_body_sha256": ticket_provenance["ticket_body_sha256"],
+        "local_plan_sha256": ticket_provenance["local_plan_sha256"],
+        "plan_verification_contract_sha256": verification_contract["contract_sha256"],
+        "plan_target_contract_sha256": None,
+        "configured_commands": ["pytest -q"],
+    }
+    binding["binding_sha256"] = _sha256_json(binding)
+    implementation_run_dir = (
+        implementation_runs_root / "target_a" / "20260711T120000Z" / "codex" / "0"
+    )
+    ticket_ref_path = implementation_run_dir / "ticket_ref.json"
+    _write_json(
+        ticket_ref_path,
+        {
+            "schema_version": 2,
+            "fingerprint": fingerprint,
+            "case_id": case_id,
+            "plan_revision_id": plan_revision_id,
+            "ticket_provenance": ticket_provenance,
+            "verification_binding": binding,
+        },
+    )
+
+    review_run_dir = (
+        implementation_runs_root / "target_a" / "20260711T130000Z" / "codex_review" / "0"
+    )
+    implementation_ticket_ref_sha256 = _sha256_file(ticket_ref_path)
+    _write_json(
+        review_run_dir / "review_ref.json",
+        {
+            "schema_version": 2,
+            "implementation_run_dir": str(implementation_run_dir),
+            "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
+            "ticket_provenance": ticket_provenance,
+        },
+    )
+    _write_json(
+        review_run_dir / "review_summary.json",
+        {
+            "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
+            "ticket_provenance": ticket_provenance,
+        },
+    )
+    _write_json(
+        review_run_dir / "merge_ref.json",
+        {
+            "merged": True,
+            "target_branch": "dev",
+            "merged_commit": merged_commit,
+        },
+    )
+    outcome = {
+        "schema_version": 1,
+        "case_id": case_id,
+        "plan_revision_id": plan_revision_id,
+        "state": "implemented",
+        "outcome_scope": "case",
+        "recorded_at": "2026-07-11T13:00:00Z",
+        "requires_live_verification": False,
+        "target_branch": "dev",
+        "merged_commit": merged_commit,
+        "review_run_dir": str(review_run_dir),
+        "ticket_provenance": ticket_provenance,
+        "test_evidence": [],
+        "original_scenario_evidence": [],
+        "live_evidence": [],
+        "mitigation_evidence": [],
+        "remaining_risks": ["Original scenario verification remains pending."],
+        "recurrence_check": {"status": "not_run"},
+    }
+    return owner_root, outcome
+
+
+def test_sibling_implementation_outcome_uses_same_trust_boundary_for_sync_and_shadow(
+    tmp_path: Path,
+) -> None:
+    primary_runs_root = tmp_path / "runs" / "usertest"
+    implementation_runs_root = inferred_implementation_runs_root(primary_runs_root)
+    trusted_roots = _outcome_trusted_runs_roots(
+        primary_runs_dir=primary_runs_root,
+        configured_runs_dir=primary_runs_root,
+        implementation_runs_root=implementation_runs_root,
+    )
+    assert set(trusted_roots) == {
+        primary_runs_root.resolve(),
+        implementation_runs_root.resolve(),
+    }
+    owner_root, outcome = _retained_implemented_outcome(
+        tmp_path,
+        implementation_runs_root=implementation_runs_root,
+    )
+    plan_revision_id = str(outcome["plan_revision_id"])
+    atom_actions = {
+        "atom:implementation": {
+            "case_id": "case:aggregate",
+            "plan_outcomes": {
+                plan_revision_id: {
+                    "state": "implemented",
+                    "recorded_at": outcome["recorded_at"],
+                    "required": True,
+                    "outcome_record": outcome,
+                }
+            },
+        }
+    }
+
+    trusted_registry = _registry()
+    trusted_summary = _sync_case_registry_outcomes(
+        case_registry=trusted_registry,
+        atom_actions=atom_actions,
+        trusted_runs_roots=trusted_roots,
+        owner_roots=(owner_root,),
+    )
+
+    assert trusted_summary["provenance_failed_outcome_records"] == 0
+    assert trusted_registry["cases"]["case:aggregate"]["state"] == "implemented"
+    assert (
+        trusted_registry["cases"]["case:aggregate"]["plan_outcomes"][plan_revision_id][
+            "outcome_verification"
+        ]["verified"]
+        is True
+    )
+    assert (
+        _terminal_outcome_errors(
+            trusted_registry,
+            trusted_runs_roots=trusted_roots,
+            owner_roots=(owner_root,),
+        )
+        == []
+    )
+
+    primary_only_roots = (primary_runs_root.resolve(),)
+    untrusted_registry = _registry()
+    untrusted_summary = _sync_case_registry_outcomes(
+        case_registry=untrusted_registry,
+        atom_actions=atom_actions,
+        trusted_runs_roots=primary_only_roots,
+        owner_roots=(owner_root,),
+    )
+    assert untrusted_summary["provenance_failed_outcome_records"] == 1
+    assert untrusted_registry["cases"]["case:aggregate"]["state"] == "unverified"
+    shadow_errors = _terminal_outcome_errors(
+        trusted_registry,
+        trusted_runs_roots=primary_only_roots,
+        owner_roots=(owner_root,),
+    )
+    assert any(
+        error.startswith(
+            f"outcome_provenance_revalidation_failed:case:aggregate:{plan_revision_id}:"
+        )
+        and "outcome_review_run_dir_outside_trusted_roots" in error
+        for error in shadow_errors
+    )
 
 
 def test_required_planned_revision_keeps_case_open_when_another_is_resolved() -> None:
@@ -429,9 +683,7 @@ def test_problem_mining_persists_runner_relation_receipt_on_exact_registry_edge(
             {
                 "case_id": target_case_id,
                 "absorbed_case_ids": [source_case_id],
-                "case_relation_actions": [
-                    {"action": "merge", "target_case_id": source_case_id}
-                ],
+                "case_relation_actions": [{"action": "merge", "target_case_id": source_case_id}],
             }
         ],
         registry=registry,
@@ -443,9 +695,7 @@ def test_problem_mining_persists_runner_relation_receipt_on_exact_registry_edge(
     assert immutable_receipt_path != receipt_path
     assert references[source_case_id]["source_case_id"] == source_case_id
     assert references[source_case_id]["target_case_id"] == target_case_id
-    assert registry["cases"][source_case_id]["relation_receipt"] == references[
-        source_case_id
-    ]
+    assert registry["cases"][source_case_id]["relation_receipt"] == references[source_case_id]
     assert registry["cases"][target_case_id]["incoming_relation_receipts"] == [
         references[source_case_id]
     ]

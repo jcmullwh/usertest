@@ -4,15 +4,24 @@ import json
 import subprocess
 from hashlib import sha256
 from pathlib import Path
+from typing import Any
 
 import pytest
+from agent_adapters import (
+    CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
+    CODEX_OPENAI_SUBSCRIPTION_BASE_URL,
+    CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS,
+    CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
+)
 from agent_adapters.read_attestation import observed_read_attestation
+from backlog_core import infer_live_verification_requirement
 from backlog_core.stage_contracts import (
     assess_research_readiness,
     evidence_assignment_sha256,
     evidence_verification_sha256,
 )
 from runner_core import RunnerConfig, RunRequest, RunResult
+from runner_core.codex_execpolicy import codex_execpolicy_receipt_sha256
 
 import backlog_miner.research_runner as mod
 from backlog_miner.research_evidence import (
@@ -33,6 +42,212 @@ def _cfg(tmp_path: Path) -> RunnerConfig:
         agents={},
         policies={},
     )
+
+
+def _write_valid_codex_subscription_receipt(run_dir: Path) -> Path:
+    host_home = run_dir / "host-codex-home"
+    host_home.mkdir(exist_ok=True)
+    controlled_overrides = list(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES)
+    activation_overrides = [
+        "model_reasoning_effort=low",
+        *CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
+    ]
+
+    def _canonical_hash(value: object) -> str:
+        return sha256(
+            json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+
+    config_contract: dict[str, object] = {
+        "schema_version": 2,
+        "status": "bound",
+        "user_config_ignored": True,
+        "target_project_config_isolated": True,
+        "canonical_route_overrides": list(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES),
+        "activation_safe_delta": ["model_reasoning_effort=low"],
+        "preflight_overrides": controlled_overrides,
+        "preflight_overrides_sha256": _canonical_hash(controlled_overrides),
+        "activation_overrides": activation_overrides,
+        "activation_overrides_sha256": _canonical_hash(activation_overrides),
+        "mission_overrides": controlled_overrides,
+        "mission_overrides_sha256": _canonical_hash(controlled_overrides),
+        "postcheck_overrides": controlled_overrides,
+        "postcheck_overrides_sha256": _canonical_hash(controlled_overrides),
+    }
+    config_contract["contract_sha256"] = _canonical_hash(config_contract)
+    config_contract_path = run_dir / "codex_execpolicy_config_overrides.json"
+    _write_json(config_contract_path, config_contract)
+    status = {
+        "ok": True,
+        "chatgpt_status_exact": True,
+        "status_kind": "chatgpt",
+        "auth_env_vars_blank": {name: True for name in CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS},
+    }
+    receipt: dict[str, object] = {
+        "schema_version": 2,
+        "mode": "runner_controlled_project_execpolicy",
+        "configuration_mode": "host_codex_home_with_isolated_config",
+        "host_user_config_ignored": True,
+        "target_project_config_isolated": True,
+        "forced_login_method": "chatgpt",
+        "model_provider": "openai",
+        "chatgpt_base_url": CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
+        "openai_base_url": CODEX_OPENAI_SUBSCRIPTION_BASE_URL,
+        "auth_mode": "shared_host_chatgpt_subscription_cache",
+        "api_fallback_allowed": False,
+        "auth_cache_copied": False,
+        "auth_cache_deleted": False,
+        "auth_verification_status": "verified",
+        "chatgpt_subscription_login_status_verified": True,
+        "chatgpt_subscription_activation_probe_verified": True,
+        "chatgpt_subscription_post_login_status_verified": True,
+        "chatgpt_subscription_auth_verified": True,
+        "api_key_auth_environment_disabled": True,
+        "controlled_auth_env_vars": list(CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS),
+        "login_status": status,
+        "post_login_status": status,
+        "activation_probe": {
+            "ok": True,
+            "marker_seen": True,
+            "workspace_unchanged": True,
+        },
+        "controlled_config_overrides": controlled_overrides,
+        "controlled_config_contract_path": str(config_contract_path),
+        "controlled_config_contract_sha256": sha256(config_contract_path.read_bytes()).hexdigest(),
+        "controlled_config_contract_status": "bound",
+        "host_codex_home": str(host_home),
+        "host_auth_path": str(host_home / "auth.json"),
+        "host_auth_cache_preserved": True,
+        "global_config_unchanged": True,
+        "host_global_rules_unchanged": True,
+        "restore_status": "restored",
+        "restore_errors": [],
+        "target_rules_manifest_before": [],
+        "target_rules_manifest_after_restore": [],
+        "target_config_manifest_before": [],
+        "target_config_manifest_after_restore": [],
+    }
+    receipt["receipt_sha256"] = codex_execpolicy_receipt_sha256(receipt)
+    path = run_dir / "codex_execpolicy_overlay.json"
+    _write_json(path, receipt)
+    return path
+
+
+def test_runner_transport_artifacts_do_not_invent_live_verification(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "successful-static-research"
+    run_dir.mkdir(parents=True)
+    _write_json(run_dir / "report.json", {"status": "complete"})
+    (run_dir / "report.md").write_text("Static parser research\n", encoding="utf-8")
+    (run_dir / "normalized_events.jsonl").write_text('{"type":"run_completed"}\n', encoding="utf-8")
+    (run_dir / "target_ref.json").write_text("{}\n", encoding="utf-8")
+    (run_dir / "agent_stderr.txt").write_text("", encoding="utf-8")
+
+    empty_stderr_refs = mod._runner_artifact_refs(run_dir)
+    assert all(ref["artifact_id"] != "runner:agent_stderr" for ref in empty_stderr_refs)
+    required, reasons = infer_live_verification_requirement(
+        {
+            "title": "Static parser chooses the wrong default",
+            "problem": "A local AST branch returns the wrong value.",
+        },
+        {
+            "research_method": "static_trace",
+            "artifact_refs": [
+                *empty_stderr_refs,
+                {"artifact_id": "origin:log", "kind": "log", "path": "parser.log"},
+                {"artifact_id": "origin:trace", "kind": "trace", "path": "parser.trace"},
+            ],
+        },
+    )
+    assert required is False
+    assert reasons == []
+
+    (run_dir / "agent_stderr.txt").write_text("runner diagnostic retained\n", encoding="utf-8")
+    nonempty_stderr_refs = mod._runner_artifact_refs(run_dir)
+    assert any(ref["artifact_id"] == "runner:agent_stderr" for ref in nonempty_stderr_refs)
+    required, reasons = infer_live_verification_requirement(
+        {"title": "Static parser defect", "problem": "The parser branch is local."},
+        {"research_method": "static_trace", "artifact_refs": nonempty_stderr_refs},
+    )
+    assert required is False
+    assert reasons == []
+
+    required, reasons = infer_live_verification_requirement(
+        {"title": "Originating command failed", "problem": "Captured origin evidence."},
+        {
+            "research_method": "reproduction",
+            "artifact_refs": [
+                {
+                    "artifact_id": "origin:agent-stderr",
+                    "kind": "agent_stderr",
+                    "path": "origin/agent_stderr.txt",
+                }
+            ],
+        },
+    )
+    assert required is True
+    assert reasons == ["runtime_artifact:agent_stderr"]
+
+    verified_live_experiment = {
+        "experiment_id": "experiment:receipt-live",
+        "scenario_kind": "live_runtime",
+        "platform_requirement": "windows",
+    }
+    required, reasons = infer_live_verification_requirement(
+        {"title": "Live receipt boundary", "problem": "A neutral summary."},
+        {
+            "experiments": [verified_live_experiment],
+            "evidence_verification": {
+                "status": "verified",
+                "experiments": [verified_live_experiment],
+            },
+        },
+    )
+    assert required is True
+    assert "research_verified_live_runtime_boundary" in reasons
+    assert "research_requires_platform:windows" in reasons
+
+    mechanism_evidence: dict[str, Any] = {
+        "evidence_type": "live_runtime",
+        "experiment_ids": ["experiment:live"],
+        "platform_requirement": "windows",
+    }
+    mechanism_projection = json.dumps(
+        mechanism_evidence,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    mechanism_evidence["mechanism_evidence_id"] = (
+        "mechanism_evidence:" + sha256(mechanism_projection).hexdigest()
+    )
+    required, reasons = infer_live_verification_requirement(
+        {"title": "Live boundary", "problem": "A neutral summary."},
+        {
+            "experiments": [
+                {
+                    "experiment_id": "experiment:live",
+                    "scenario_kind": "live_runtime",
+                    "platform_requirement": "windows",
+                }
+            ],
+            "evidence_verification": {
+                "status": "verified",
+                "mechanism_evidence": [mechanism_evidence],
+            },
+        },
+    )
+    assert required is True
+    assert "research_verified_live_runtime_boundary" in reasons
+    assert "research_requires_platform:windows" in reasons
+    assert "research_mechanism_evidence_live_runtime" in reasons
+    assert "research_mechanism_evidence_requires_platform:windows" in reasons
 
 
 def _init_workspace(path: Path) -> str:
@@ -91,17 +306,14 @@ def _commit_existing_workspace(path: Path, message: str) -> str:
 
 def _research_extension(**overrides: object) -> dict[str, object]:
     extension: dict[str, object] = {
-        "research_schema_version": 3,
         "case_id": "case:test-1",
         "problem_id": "problem:test-1",
-        "repo_revision": "agent-observed-sha",
         "research_method": "reproduction",
         "reproduction_status": "reproduced",
         "research_status": "evidence_sufficient",
         "writes_used": False,
         "writes_purpose": ["none"],
         "implementation_performed": False,
-        "diff_classification": "allowed_research_edits",
         "artifact_refs": [
             {"artifact_id": "artifact:repro", "kind": "repro", "path": "repro.txt"},
             {"artifact_id": "artifact:source", "kind": "source", "path": "src/core.py"},
@@ -157,9 +369,7 @@ def _research_extension(**overrides: object) -> dict[str, object]:
                     ),
                 },
                 "addresses_atom_ids": ["atom:origin"],
-                "command": (
-                    "python -m pytest -q tests/test_core.py::test_alternative_removed"
-                ),
+                "command": ("python -m pytest -q tests/test_core.py::test_alternative_removed"),
                 "result": "The original failure remains",
                 "outcome": "supports",
                 "exit_code": 1,
@@ -222,6 +432,42 @@ def test_diff_classification_only_allows_dedicated_research_overlay() -> None:
         assert reasons == [f"suspicious_path: {path}"]
 
 
+def test_partial_wrapper_preserves_honest_insufficient_research_status() -> None:
+    assert mod._report_status_blocking_reason("partial", "insufficient_evidence") is None
+    assert mod._report_status_blocking_reason("partial", "blocked") is None
+    assert mod._report_status_blocking_reason("partial", "evidence_sufficient") == (
+        "runner_report_status:partial"
+    )
+    assert mod._report_status_blocking_reason("failure", "insufficient_evidence") is None
+    assert mod._report_status_blocking_reason("failure", "blocked") is None
+    assert mod._report_status_blocking_reason("failure", "evidence_sufficient") == (
+        "runner_report_status:failure"
+    )
+
+
+def test_codex_research_execpolicy_covers_bounded_inspection_and_replay_tools() -> None:
+    prefixes = set(mod._CODEX_RESEARCH_EXEC_ALLOW_PREFIXES)
+    assert {
+        ("git", "rev-parse"),
+        ("git", "diff"),
+        ("pytest",),
+        ("python", "-m", "pytest"),
+        ("python",),
+        ("pdm", "run", "pytest"),
+        ("npm", "test"),
+        ("pnpm", "test"),
+        ("yarn", "test"),
+        ("cargo", "test"),
+        ("go", "test"),
+        ("dotnet", "test"),
+        ("docker", "version"),
+        ("docker", "info"),
+        ("Get-FileHash",),
+        ("Get-Command",),
+        ("Test-Path",),
+    }.issubset(prefixes)
+
+
 def _problem_payload(tmp_path: Path) -> dict[str, object]:
     origin_path = tmp_path / "origin.json"
     origin_path.write_text('{"failure": true}\n', encoding="utf-8")
@@ -275,6 +521,290 @@ def _problem_payload(tmp_path: Path) -> dict[str, object]:
         "evidence_atoms": [{"atom_id": "atom:origin"}],
         "evidence_assignment": assignment,
     }
+
+
+def _insufficient_extension() -> dict[str, object]:
+    return _research_extension(
+        reproduction_status="partial",
+        research_status="insufficient_evidence",
+        artifact_refs=[],
+        experiments=[],
+        inspected_files=[],
+        inspected_symbols=[],
+        root_cause_hypotheses=[],
+        root_cause_confidence=0.25,
+        material_unknowns=[
+            {
+                "unknown": "The exact mechanism is not established",
+                "affects": ["root_cause", "change_surface"],
+                "evidence_needed": "Capture a faithful runtime reproduction",
+            }
+        ],
+        evidence_boundaries=["The retained evidence verifies the investigation, not a cause"],
+    )
+
+
+def _write_run_provenance(
+    *,
+    run_dir: Path,
+    workspace: Path,
+    revision: str,
+    ref: str | None,
+    events: list[dict[str, object]] | None = None,
+) -> None:
+    _write_json(run_dir / "diff_numstat.json", [])
+    _write_json(
+        run_dir / "target_ref.json",
+        {"commit_sha": revision, "ref": ref, "agent": "codex"},
+    )
+    _write_valid_codex_subscription_receipt(run_dir)
+    _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+    (run_dir / "normalized_events.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in (events or [])),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("outer_status", ["partial", "failure"])
+def test_full_runner_preserves_verified_insufficient_research(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outer_status: str,
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    workspace = tmp_path / "insufficient_workspace"
+    revision = _init_workspace(workspace)
+    extension = _insufficient_extension()
+    calls = 0
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        nonlocal calls
+        calls += 1
+        run_dir = tmp_path / "run_insufficient"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            run_dir / "report.json",
+            {
+                "schema_version": 1,
+                "kind": "troubleshoot_v1",
+                "status": outer_status,
+                "goal": "Bound the assigned failure",
+                "failure_point": "The exact mechanism remains unknown",
+                "evidence": {"what_happened": "The investigation was inconclusive"},
+                "attempted_fixes": [],
+                "recommended_fix_path": ["Gather the named missing evidence"],
+                "extensions": {"backlog_repro_research": extension},
+            },
+        )
+        _write_run_provenance(
+            run_dir=run_dir,
+            workspace=workspace,
+            revision=revision,
+            ref=request.ref,
+        )
+        return RunResult(run_dir=run_dir, exit_code=0, report_validation_errors=[])
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=str(workspace),
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=[_problem_payload(tmp_path)],
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+        replay_executor=TrustedHostReplayExecutor(
+            approved_source_roots=[workspace],
+            source_identity=workspace,
+        ),
+        replay_executor_metadata={"executor": "trusted_host"},
+    )
+
+    dossier = document["items"][0]
+    assert calls == 1
+    assert dossier["research_status"] == "insufficient_evidence", (
+        dossier["blocking_reasons"],
+        dossier["evidence_verification"]["errors"],
+        [attempt["validation_errors"] for attempt in dossier.get("research_attempts", [])],
+    )
+    assert dossier["reproduction_status"] == "partial"
+    assert dossier["evidence_verification"]["status"] == "verified", dossier[
+        "evidence_verification"
+    ]["errors"]
+    assert dossier["evidence_verification"]["atom_bindings"] == []
+    ready, reasons = assess_research_readiness(dossier)
+    assert ready is False
+    assert "research_status_insufficient_evidence" in reasons
+
+
+def test_output_retry_is_fresh_full_case_and_invalid_then_valid(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    first_workspace = tmp_path / "retry_workspace_1"
+    revision = _init_workspace(first_workspace)
+    second_workspace = tmp_path / "retry_workspace_2"
+    subprocess.run(
+        ["git", "clone", "--quiet", str(first_workspace), str(second_workspace)],
+        check=True,
+        capture_output=True,
+    )
+    prompts: list[str] = []
+    calls = 0
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        nonlocal calls
+        calls += 1
+        prompts.append(request.agent_append_system_prompt or "")
+        workspace = first_workspace if calls == 1 else second_workspace
+        run_dir = tmp_path / f"retry_run_{calls}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        extension = None if calls == 1 else _insufficient_extension()
+        report: dict[str, object] = {
+            "schema_version": 1,
+            "kind": "troubleshoot_v1",
+            "status": "failure" if calls == 1 else "partial",
+            "goal": "Research the assigned case",
+            "failure_point": "The exact mechanism remains unknown",
+            "evidence": {"what_happened": "The first report omitted its proof"},
+            "attempted_fixes": [],
+            "recommended_fix_path": ["Retain the honest unknown"],
+        }
+        if extension is not None:
+            report["extensions"] = {"backlog_repro_research": extension}
+        _write_json(run_dir / "report.json", report)
+        _write_run_provenance(
+            run_dir=run_dir,
+            workspace=workspace,
+            revision=revision,
+            ref=request.ref,
+        )
+        return RunResult(run_dir=run_dir, exit_code=0, report_validation_errors=[])
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=str(first_workspace),
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=[_problem_payload(tmp_path)],
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+        replay_executor=TrustedHostReplayExecutor(
+            approved_source_roots=[first_workspace],
+            source_identity=first_workspace,
+        ),
+        replay_executor_metadata={"executor": "trusted_host"},
+    )
+
+    dossier = document["items"][0]
+    assert calls == 2
+    assert dossier["research_status"] == "insufficient_evidence", (
+        dossier.get("blocking_reasons"),
+        dossier["evidence_verification"]["errors"],
+    )
+    assert dossier["evidence_verification"]["status"] == "verified"
+    attempts = dossier["research_attempts"]
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert [attempt["outcome"] for attempt in attempts] == [
+        "output_contract_invalid",
+        "output_contract_valid",
+    ]
+    assert attempts[0]["validation_errors"] == ["research_extension_missing:backlog_repro_research"]
+    assert attempts[1]["validation_errors"] == []
+    assert attempts[0]["run_dir"] != attempts[1]["run_dir"]
+    assert mod._research_attempt_workspace(attempts[0]) != mod._research_attempt_workspace(
+        attempts[1]
+    )
+    assert mod._research_attempt_revision(attempts[0]) == revision.casefold()
+    assert mod._research_attempt_revision(attempts[1]) == revision.casefold()
+    assert all(
+        artifact["exists"] is True
+        for attempt in attempts
+        for artifact in attempt["attempt_artifacts"]
+    )
+    assert all('"atom_id": "atom:origin"' in prompt for prompt in prompts)
+    assert "Rerun the complete research assignment" in prompts[1]
+    persisted, persisted_errors = verify_persisted_research_evidence(dossier)
+    assert persisted is True, persisted_errors
+    Path(attempts[0]["report_path"]).write_text("{}\n", encoding="utf-8")
+    persisted, persisted_errors = verify_persisted_research_evidence(dossier)
+    assert persisted is False
+    assert "research_attempt_artifact_changed:0:report" in persisted_errors
+
+
+def test_successful_output_retry_rejects_reused_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    workspace = tmp_path / "reused_workspace"
+    revision = _init_workspace(workspace)
+    calls = 0
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        nonlocal calls
+        calls += 1
+        run_dir = tmp_path / f"reused_workspace_run_{calls}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        report: dict[str, object] = {
+            "schema_version": 1,
+            "kind": "troubleshoot_v1",
+            "status": "failure" if calls == 1 else "partial",
+            "goal": "Research the assigned case",
+            "failure_point": "The exact mechanism remains unknown",
+            "evidence": {"what_happened": "The first proof was omitted"},
+            "attempted_fixes": [],
+            "recommended_fix_path": ["retain the unknown"],
+        }
+        if calls == 2:
+            report["extensions"] = {"backlog_repro_research": _insufficient_extension()}
+        _write_json(run_dir / "report.json", report)
+        _write_run_provenance(
+            run_dir=run_dir,
+            workspace=workspace,
+            revision=revision,
+            ref=request.ref,
+        )
+        return RunResult(run_dir=run_dir, exit_code=0, report_validation_errors=[])
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=str(workspace),
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=[_problem_payload(tmp_path)],
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+        replay_executor=TrustedHostReplayExecutor(
+            approved_source_roots=[workspace],
+            source_identity=workspace,
+        ),
+        replay_executor_metadata={"executor": "trusted_host"},
+    )
+
+    assert calls == 2
+    dossier = document["items"][0]
+    assert dossier["research_status"] == "blocked"
+    assert dossier["blocking_reasons"] == ["research_output_contract_retry_not_fresh"]
+    assert len(dossier["research_attempts"]) == 2
 
 
 def test_research_workspace_materializes_and_attests_large_origin_attachment(
@@ -411,15 +941,19 @@ def test_run_repro_research_stage_dry_run_writes_requests_and_placeholders(tmp_p
     assert requests["replay_executor"]["executor"] == "docker"
 
 
-def test_run_repro_research_stage_blocks_missing_extension_case_locally(
+def test_run_repro_research_stage_retries_missing_extension_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
     guidance_path.parent.mkdir(parents=True, exist_ok=True)
     guidance_path.write_text("# guidance\n", encoding="utf-8")
 
+    calls = 0
+
     def fake_run_once(*, config: RunnerConfig, request: object) -> RunResult:
-        run_dir = tmp_path / "run_missing_ext"
+        nonlocal calls
+        calls += 1
+        run_dir = tmp_path / f"run_missing_ext_{calls}"
         run_dir.mkdir(parents=True, exist_ok=True)
         _write_json(
             run_dir / "report.json",
@@ -453,9 +987,206 @@ def test_run_repro_research_stage_blocks_missing_extension_case_locally(
     )
 
     assert document["items"][0]["research_status"] == "blocked"
-    assert document["items"][0]["blocking_reasons"] == [
-        "research_extension_missing:backlog_repro_research"
-    ]
+    assert document["items"][0]["blocking_reasons"] == ["research_dossier_output_contract_invalid"]
+    assert calls == 2
+    attempts = document["items"][0]["research_attempts"]
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert all(
+        attempt["validation_errors"] == ["research_extension_missing:backlog_repro_research"]
+        for attempt in attempts
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure_kind", "expected_error"),
+    [
+        ("missing_report", "research_report_missing"),
+        ("malformed_json", "research_report_malformed:JSONDecodeError:"),
+        ("top_level_list", "research_report_malformed:ValueError:"),
+        ("empty_object", "research_extension_missing:backlog_repro_research"),
+        ("schema_invalid", "research_report_schema_invalid:"),
+    ],
+)
+def test_recoverable_report_contract_failures_retry_exactly_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+    expected_error: str,
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    calls = 0
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[3]
+            / "configs"
+            / "report_schemas"
+            / "troubleshoot_v1.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        nonlocal calls
+        calls += 1
+        run_dir = tmp_path / f"report_failure_{failure_kind}_{calls}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(run_dir / "diff_numstat.json", [])
+        if failure_kind == "malformed_json":
+            (run_dir / "report.json").write_text("{", encoding="utf-8")
+        elif failure_kind == "top_level_list":
+            _write_json(run_dir / "report.json", [])
+        elif failure_kind == "empty_object":
+            _write_json(run_dir / "report.json", {})
+        elif failure_kind == "schema_invalid":
+            _write_json(run_dir / "report.schema.json", schema)
+            _write_json(
+                run_dir / "report.json",
+                {
+                    "schema_version": 1,
+                    "kind": "troubleshoot_v1",
+                    "status": "partial",
+                    "failure_point": "missing required goal",
+                    "evidence": {"what_happened": "schema-invalid report"},
+                    "attempted_fixes": [],
+                    "recommended_fix_path": ["emit the required report fields"],
+                    "extensions": {"backlog_repro_research": _insufficient_extension()},
+                },
+            )
+        elif failure_kind != "missing_report":
+            raise AssertionError(f"unexpected failure kind: {failure_kind}")
+        return RunResult(run_dir=run_dir, exit_code=0, report_validation_errors=[])
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input="pip:agent-adapters",
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=[_problem_payload(tmp_path)],
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+    )
+
+    assert calls == 2
+    attempts = document["items"][0]["research_attempts"]
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert all(attempt["outcome"] == "output_contract_invalid" for attempt in attempts)
+    assert all(
+        any(error.startswith(expected_error) for error in attempt["validation_errors"])
+        for attempt in attempts
+    )
+
+
+@pytest.mark.parametrize(
+    "failure_kind",
+    [
+        "evidence_verification",
+        "runner_report_verification",
+        "suspicious_diff_with_missing_report",
+        "implementation_with_schema_error",
+        "nonzero_exit_with_missing_report",
+    ],
+)
+def test_substantive_failures_never_consume_output_retry(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure_kind: str,
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    schema = json.loads(
+        (
+            Path(__file__).resolve().parents[3]
+            / "configs"
+            / "report_schemas"
+            / "troubleshoot_v1.schema.json"
+        ).read_text(encoding="utf-8")
+    )
+    calls = 0
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        nonlocal calls
+        calls += 1
+        run_dir = tmp_path / f"nonretry_{failure_kind}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        suspicious = failure_kind == "suspicious_diff_with_missing_report"
+        _write_json(
+            run_dir / "diff_numstat.json",
+            (
+                [{"path": "src/production.py", "lines_added": 1, "lines_removed": 0}]
+                if suspicious
+                else []
+            ),
+        )
+        if failure_kind not in {
+            "suspicious_diff_with_missing_report",
+            "nonzero_exit_with_missing_report",
+        }:
+            extension = _insufficient_extension()
+            if failure_kind == "implementation_with_schema_error":
+                extension["implementation_performed"] = True
+            report: dict[str, object] = {
+                "schema_version": 1,
+                "kind": "troubleshoot_v1",
+                "status": "partial",
+                "failure_point": "bounded failure",
+                "evidence": {"what_happened": "retained evidence"},
+                "attempted_fixes": [],
+                "recommended_fix_path": ["continue research"],
+                "extensions": {"backlog_repro_research": extension},
+            }
+            if failure_kind != "implementation_with_schema_error":
+                report["goal"] = "Research the assigned case"
+            _write_json(run_dir / "report.json", report)
+            _write_json(run_dir / "report.schema.json", schema)
+        report_errors = (
+            ["codex_execpolicy_overlay_restore_failed"]
+            if failure_kind == "runner_report_verification"
+            else []
+        )
+        exit_code = 1 if failure_kind == "nonzero_exit_with_missing_report" else 0
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=exit_code,
+            report_validation_errors=report_errors,
+        )
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input="pip:agent-adapters",
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=[_problem_payload(tmp_path)],
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+    )
+
+    dossier = document["items"][0]
+    assert calls == 1
+    assert dossier["research_status"] == "blocked"
+    assert len(dossier["research_attempts"]) == 1
+    if failure_kind == "evidence_verification":
+        assert dossier["research_attempts"][0]["outcome"] == "output_contract_valid"
+        assert "research_evidence_verification_failed" in dossier["blocking_reasons"]
+    elif failure_kind == "runner_report_verification":
+        assert dossier["research_attempts"][0]["outcome"] == "output_contract_valid"
+        assert "runner_report_validation_errors" in dossier["blocking_reasons"]
+    elif failure_kind == "suspicious_diff_with_missing_report":
+        assert dossier["diff_classification"] == "suspicious_implementation"
+        assert dossier["blocking_reasons"] == ["suspicious_implementation_diff"]
+    elif failure_kind == "implementation_with_schema_error":
+        assert dossier["blocking_reasons"] == ["research_implementation_performed_forbidden"]
+    else:
+        assert dossier["blocking_reasons"] == ["runner_exit_code:1"]
 
 
 def test_run_repro_research_stage_classifies_suspicious_diff(
@@ -466,8 +1197,11 @@ def test_run_repro_research_stage_classifies_suspicious_diff(
     guidance_path.write_text("# guidance\n", encoding="utf-8")
 
     ext = _research_extension(writes_purpose=["temporary_instrumentation"])
+    calls = 0
 
     def fake_run_once(*, config: RunnerConfig, request: object) -> RunResult:
+        nonlocal calls
+        calls += 1
         run_dir = tmp_path / "run_suspicious"
         run_dir.mkdir(parents=True, exist_ok=True)
         _write_json(
@@ -519,9 +1253,13 @@ def test_run_repro_research_stage_classifies_suspicious_diff(
     assert items[0]["research_status"] == "blocked"
     assert "suspicious_implementation_diff" in items[0]["blocking_reasons"]
     assert items[0]["repo_revision"] == "canonical-sha"
+    assert calls == 1
+    assert [attempt["outcome"] for attempt in items[0]["research_attempts"]] == [
+        "runner_contract_invalid"
+    ]
 
 
-def test_run_repro_research_stage_blocks_incomplete_new_proof(
+def test_run_repro_research_stage_retries_and_retains_incomplete_output_proof(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
@@ -529,9 +1267,19 @@ def test_run_repro_research_stage_blocks_incomplete_new_proof(
     guidance_path.write_text("# guidance\n", encoding="utf-8")
     incomplete = _research_extension()
     del incomplete["experiments"]
+    calls = 0
 
-    def fake_run_once(*, config: RunnerConfig, request: object) -> RunResult:
-        run_dir = tmp_path / "run_incomplete"
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        nonlocal calls
+        calls += 1
+        assert ("git", "rev-parse") in request.codex_execpolicy_allow_prefixes
+        assert ("python",) in request.codex_execpolicy_allow_prefixes
+        if calls == 2:
+            retry_prompt = request.agent_append_system_prompt or ""
+            assert '"research_output_contract_retry"' in retry_prompt
+            assert "research_dossier_missing_required_field" in retry_prompt
+            assert "Rerun the complete research assignment" in retry_prompt
+        run_dir = tmp_path / f"run_incomplete_{calls}"
         run_dir.mkdir(parents=True, exist_ok=True)
         _write_json(
             run_dir / "report.json",
@@ -567,7 +1315,84 @@ def test_run_repro_research_stage_blocks_incomplete_new_proof(
     )
 
     assert document["items"][0]["research_status"] == "blocked"
-    assert document["items"][0]["blocking_reasons"] == ["research_dossier_malformed:ValueError"]
+    assert document["items"][0]["blocking_reasons"] == ["research_dossier_output_contract_invalid"]
+    assert calls == 2
+    attempts = document["items"][0]["research_attempts"]
+    assert [attempt["attempt_number"] for attempt in attempts] == [1, 2]
+    assert [attempt["outcome"] for attempt in attempts] == [
+        "output_contract_invalid",
+        "output_contract_invalid",
+    ]
+    assert all(
+        any("missing_required_field" in error for error in attempt["validation_errors"])
+        for attempt in attempts
+    )
+    assert all("experiments" not in attempt["attempted_dossier"] for attempt in attempts)
+    requests = json.loads(Path(document["artifacts"]["requests_json"]).read_text(encoding="utf-8"))
+    assert [attempt["attempt_number"] for attempt in requests["requests"][0]["attempts"]] == [
+        1,
+        2,
+    ]
+
+
+def test_model_owned_identity_mismatch_retries_without_silent_repair(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    calls = 0
+    wrong = _insufficient_extension()
+    wrong["problem_id"] = "problem:wrong"
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        nonlocal calls
+        calls += 1
+        run_dir = tmp_path / f"wrong_identity_{calls}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_json(
+            run_dir / "report.json",
+            {
+                "schema_version": 1,
+                "kind": "troubleshoot_v1",
+                "status": "partial",
+                "goal": "research",
+                "failure_point": "identity mismatch",
+                "evidence": {"what_happened": "wrong identity emitted"},
+                "attempted_fixes": [],
+                "recommended_fix_path": ["copy assigned identity"],
+                "extensions": {"backlog_repro_research": wrong},
+            },
+        )
+        _write_json(run_dir / "diff_numstat.json", [])
+        return RunResult(run_dir=run_dir, exit_code=0, report_validation_errors=[])
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input="pip:agent-adapters",
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=[_problem_payload(tmp_path)],
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+    )
+
+    assert calls == 2
+    dossier = document["items"][0]
+    assert dossier["problem_id"] == "problem:test-1"
+    attempts = dossier["research_attempts"]
+    assert all(
+        attempt["attempted_dossier"]["problem_id"] == "problem:wrong" for attempt in attempts
+    )
+    assert all(
+        any("problem_id_mismatch" in error for error in attempt["validation_errors"])
+        for attempt in attempts
+    )
 
 
 def test_one_malformed_case_does_not_abort_later_research_cases(
@@ -611,7 +1436,7 @@ def test_one_malformed_case_does_not_abort_later_research_cases(
         dry_run=False,
     )
 
-    assert calls == 2
+    assert calls == 4
     assert [item["problem_id"] for item in document["items"]] == [
         "problem:test-1",
         "problem:test-2",
@@ -627,7 +1452,7 @@ def _run_verified_research_stage(
     guidance_path.write_text("# guidance\n", encoding="utf-8")
     workspace = tmp_path / "research_workspace"
     revision = _init_workspace(workspace)
-    extension = _research_extension(repo_revision=revision)
+    extension = _research_extension()
 
     def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
         assert request.keep_workspace is True
@@ -650,32 +1475,30 @@ def _run_verified_research_stage(
         _write_json(run_dir / "diff_numstat.json", [])
         _write_json(
             run_dir / "target_ref.json",
-            {"commit_sha": revision, "ref": request.ref},
+            {"commit_sha": revision, "ref": request.ref, "agent": "codex"},
         )
+        _write_valid_codex_subscription_receipt(run_dir)
         _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
         events = [
-                {
-                    "type": "run_command",
+            {
+                "type": "run_command",
                 "data": {
                     "command": (
                         "python -m pytest -q --tb=native tests/test_core.py::test_reported_failure"
                     ),
                     "exit_code": 1,
                     "output_excerpt": "failure reproduced",
-                    },
                 },
-                {
-                    "type": "run_command",
-                    "data": {
-                        "command": (
-                            "python -m pytest -q "
-                            "tests/test_core.py::test_alternative_removed"
-                        ),
-                        "exit_code": 1,
-                        "output_excerpt": "failure remains after alternative removal",
-                    },
+            },
+            {
+                "type": "run_command",
+                "data": {
+                    "command": ("python -m pytest -q tests/test_core.py::test_alternative_removed"),
+                    "exit_code": 1,
+                    "output_excerpt": "failure remains after alternative removal",
                 },
-                {
+            },
+            {
                 "type": "run_command",
                 "data": {
                     "command": ("python -m pytest -q tests/test_core.py::test_guarded_control"),
@@ -776,6 +1599,19 @@ def test_run_repro_research_stage_binds_claims_to_runner_evidence(
     assert persisted_ready is True
     assert persisted_reasons == []
 
+    auth_ref = next(
+        ref
+        for ref in dossier["artifact_refs"]
+        if ref.get("artifact_id") == "runner:codex_subscription_auth"
+    )
+    auth_path = Path(auth_ref["path"])
+    auth_bytes = auth_path.read_bytes()
+    auth_path.unlink()
+    persisted_ready, persisted_reasons = verify_persisted_research_evidence(dossier)
+    assert persisted_ready is False
+    assert "research_codex_subscription_receipt_missing" in persisted_reasons
+    auth_path.write_bytes(auth_bytes)
+
     replay_workspace = Path(next(iter(replay_workspaces)))
     replay_source = replay_workspace / "src" / "core.py"
     original_replay_source = replay_source.read_text(encoding="utf-8")
@@ -861,7 +1697,6 @@ def test_practical_cli_authorization_survives_persistence_and_readiness(
         ],
     }
     extension = _research_extension(
-        repo_revision=revision,
         artifact_refs=[
             {"artifact_id": "artifact:repro", "kind": "repro", "path": "repro.txt"},
             {
@@ -887,29 +1722,29 @@ def test_practical_cli_authorization_survives_persistence_and_readiness(
                         "field_path": "$.command",
                         "value": support_command,
                     },
-                        {
-                            "atom_id": "atom:origin",
-                            "role": "symptom",
-                            "field_path": "$.output_excerpt",
-                            "value": "bad",
-                        },
-                        {
-                            "atom_id": "atom:origin",
-                            "role": "expected_behavior",
-                            "field_path": "$.expected_output",
-                            "value": "correct",
-                        },
-                    ],
-                    "positive_outcome_contract": {
-                        "contract_kind": "origin_atom_exact_value",
+                    {
                         "atom_id": "atom:origin",
-                        "field_path": "$.expected_output",
-                        "postcondition": {
-                            "type": "command_stdout_contains",
-                            "value": "correct",
-                        },
+                        "role": "symptom",
+                        "field_path": "$.output_excerpt",
+                        "value": "bad",
                     },
-                    "command": support_command,
+                    {
+                        "atom_id": "atom:origin",
+                        "role": "expected_behavior",
+                        "field_path": "$.expected_output",
+                        "value": "correct",
+                    },
+                ],
+                "positive_outcome_contract": {
+                    "contract_kind": "origin_atom_exact_value",
+                    "atom_id": "atom:origin",
+                    "field_path": "$.expected_output",
+                    "postcondition": {
+                        "type": "command_stdout_contains",
+                        "value": "correct",
+                    },
+                },
+                "command": support_command,
                 "result": "The repository CLI prints the wrong retained mode.",
                 "outcome": "supports",
                 "exit_code": 0,
@@ -1122,8 +1957,9 @@ def test_practical_cli_authorization_survives_persistence_and_readiness(
         _write_json(run_dir / "diff_numstat.json", [])
         _write_json(
             run_dir / "target_ref.json",
-            {"commit_sha": revision, "ref": request.ref},
+            {"commit_sha": revision, "ref": request.ref, "agent": "codex"},
         )
+        _write_valid_codex_subscription_receipt(run_dir)
         _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
         events: list[dict[str, object]] = [
             {
@@ -1209,9 +2045,9 @@ def test_practical_cli_authorization_survives_persistence_and_readiness(
     )
 
     dossier = json.loads(json.dumps(document["items"][0]))
-    assert dossier["research_status"] == "evidence_sufficient", dossier[
-        "evidence_verification"
-    ]["errors"]
+    assert dossier["research_status"] == "evidence_sufficient", dossier["evidence_verification"][
+        "errors"
+    ]
     authorizations = {
         receipt["experiment_id"]: receipt["command_authorization"]
         for receipt in dossier["evidence_verification"]["experiments"]
