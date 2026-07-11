@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import sys
+import tomllib
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -399,7 +400,9 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
     for name, value in provider_parent_values.items():
         monkeypatch.setenv(name, value)
     source_auth_before = (source_codex_home / "auth.json").read_bytes()
-    _write(source_codex_home / "config.toml", 'model="host-user-config-sentinel"\n')
+    source_config_path = source_codex_home / "config.toml"
+    _write(source_config_path, 'model="host-user-config-sentinel"\n')
+    source_config_before = source_config_path.read_bytes()
     _write(
         source_codex_home / "rules" / "default.rules",
         'prefix_rule(pattern=["host-safe"], decision="allow")\n',
@@ -453,6 +456,28 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
         captured["ignore_user_config"] = kwargs.get("ignore_user_config")
         captured["ignore_rules"] = kwargs.get("ignore_rules")
         captured["config_overrides"] = list(kwargs.get("config_overrides", ()))
+        project_overrides = [
+            str(value)
+            for value in captured["config_overrides"]
+            if str(value).startswith("projects.")
+        ]
+        assert len(project_overrides) == 1
+        project_document = tomllib.loads(project_overrides[0])
+        project_key = next(iter(project_document["projects"]))
+        captured["project_trust_key"] = project_key
+        host_config_document = tomllib.loads(source_config_path.read_text(encoding="utf-8"))
+        host_projects = host_config_document.get("projects", {})
+        if project_key not in host_projects:
+            with source_config_path.open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write(
+                    "\n" + f"[projects.{json.dumps(project_key)}]\n" + 'trust_level = "trusted"\n'
+                )
+        assert (
+            tomllib.loads(source_config_path.read_text(encoding="utf-8"))["projects"][project_key][
+                "trust_level"
+            ]
+            == "trusted"
+        )
         env_overrides = kwargs.get("env_overrides")
         captured["env_overrides"] = dict(env_overrides) if isinstance(env_overrides, dict) else {}
         calls.append(
@@ -583,6 +608,12 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
         assert captured["env_overrides"][name] == ""
         assert os.environ[name] == value
     assert Path(captured["env_overrides"]["CODEX_HOME"]).resolve() == source_codex_home.resolve()
+    expected_project_key = (
+        os.path.normcase(str(captured["workspace"].resolve()))
+        if native_windows
+        else str(captured["workspace"])
+    )
+    assert captured["project_trust_key"] == expected_project_key
     workspace = captured["workspace"]
     assert isinstance(workspace, Path)
     assert (workspace / ".codex" / "rules" / "target.rules").is_file()
@@ -595,6 +626,10 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
     receipt = json.loads(receipt_text)
     assert receipt["restore_status"] == "restored"
     assert receipt["restore_errors"] == []
+    assert receipt["schema_version"] == 3
+    assert receipt["runner_induced_project_trust_cleanup_verified"] is True
+    assert receipt["runner_induced_project_trust_cleanup"]["status"] == "removed"
+    assert receipt["runner_induced_project_trust_cleanup"]["entry_removed"] is True
     assert receipt["configuration_mode"] == "host_codex_home_with_isolated_config"
     assert receipt["host_user_config_ignored"] is True
     assert receipt["target_project_config_isolated"] is True
@@ -626,6 +661,7 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
     assert receipt["auth_cache_deleted"] is False
     assert receipt["host_auth_identity_unchanged"] is True
     assert (source_codex_home / "auth.json").read_bytes() == source_auth_before
+    assert source_config_path.read_bytes() == source_config_before
     assert not (source_codex_home / ".tmp").exists()
     assert len(calls) == 2
     probe_call, mission_call = calls

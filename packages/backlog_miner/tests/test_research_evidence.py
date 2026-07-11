@@ -301,8 +301,7 @@ def test_post_merge_replays_hash_attested_research_harness_in_clean_commit(
     }
     stderr_path = tmp_path / "baseline-stderr.txt"
     stderr_path.write_text(
-        f'Traceback (most recent call last):\n  File "{harness}", line 5\n'
-        "AssertionError\n",
+        f'Traceback (most recent call last):\n  File "{harness}", line 5\nAssertionError\n',
         encoding="utf-8",
     )
     replay = {
@@ -378,21 +377,24 @@ def test_post_merge_replays_hash_attested_research_harness_in_clean_commit(
     oracle = oracles[0]
     assert oracle["kind"] == "staged_replay"
     assert oracle["proof_scope"] == "behavioral"
-    assert stage_contracts._validate_outcome_oracles(
-        {
-            "case_id": "case:harness",
-            "repo_revision": researched,
-            "evidence_assignment": assignment,
-        },
-        {
-            "outcome_oracles": [oracle],
-            "experiments": [experiment],
-            "mechanism_evidence": [mechanism],
-            "control_verifications": [],
-            "atom_bindings": [],
-        },
-        pid="problem:harness",
-    ) == []
+    assert (
+        stage_contracts._validate_outcome_oracles(
+            {
+                "case_id": "case:harness",
+                "repo_revision": researched,
+                "evidence_assignment": assignment,
+            },
+            {
+                "outcome_oracles": [oracle],
+                "experiments": [experiment],
+                "mechanism_evidence": [mechanism],
+                "control_verifications": [],
+                "atom_bindings": [],
+            },
+            pid="problem:harness",
+        )
+        == []
+    )
 
     (source / "src" / "core.py").write_text(
         "def run():\n    return 'fixed'\n",
@@ -538,9 +540,7 @@ def test_config_oracle_closes_config_state_without_claiming_behavior(
         "experiment_ids": ["exp-config"],
         "origin_atom_ids": ["atom:config"],
         "mechanism_symbols": ["config:/tool/mode"],
-        "code_paths": [
-            {"symbol": "config:/tool/mode", "path": "configs/app.yaml"}
-        ],
+        "code_paths": [{"symbol": "config:/tool/mode", "path": "configs/app.yaml"}],
         "adversarial_effect": "supports_selection",
     }
     dossier = {
@@ -565,17 +565,13 @@ def test_config_oracle_closes_config_state_without_claiming_behavior(
     closure = mod._deterministic_mechanism_closure_receipts(
         dossier,
         clean_replays={"exp-config": replay},
-        symbol_receipts=[
-            {"symbol": "config:/tool/mode", "path": "configs/app.yaml"}
-        ],
+        symbol_receipts=[{"symbol": "config:/tool/mode", "path": "configs/app.yaml"}],
         causal_links=[],
         planning_workspace=planning,
     )
     assert len(closure) == 1
     assert closure[0]["closure_basis"] == "deterministic_static_trace"
-    assert closure[0]["verification_method"] == (
-        "runner_deterministic_mechanism_closure_v1"
-    )
+    assert closure[0]["verification_method"] == ("runner_deterministic_mechanism_closure_v1")
     assert dossier["writes_used"] is False
     assert dossier["writes_purpose"] == ["none"]
     assert _git(["status", "--porcelain"], cwd=source) == ""
@@ -619,21 +615,24 @@ def test_config_oracle_closes_config_state_without_claiming_behavior(
     target = oracle["state_targets"][0]
     assert target["baseline_value"] == "legacy"
     assert oracle["proof_scope"] == "configuration_state"
-    assert stage_contracts._validate_outcome_oracles(
-        {
-            "case_id": "case:config",
-            "repo_revision": researched,
-            "evidence_assignment": assignment,
-        },
-        {
-            "outcome_oracles": [oracle],
-            "experiments": [experiment],
-            "mechanism_evidence": [mechanism],
-            "control_verifications": [],
-            "atom_bindings": [atom_binding],
-        },
-        pid="problem:config",
-    ) == []
+    assert (
+        stage_contracts._validate_outcome_oracles(
+            {
+                "case_id": "case:config",
+                "repo_revision": researched,
+                "evidence_assignment": assignment,
+            },
+            {
+                "outcome_oracles": [oracle],
+                "experiments": [experiment],
+                "mechanism_evidence": [mechanism],
+                "control_verifications": [],
+                "atom_bindings": [atom_binding],
+            },
+            pid="problem:config",
+        )
+        == []
+    )
     research = {
         "evidence_verification": {
             "status": "verified",
@@ -688,9 +687,7 @@ def test_config_oracle_closes_config_state_without_claiming_behavior(
     assert artifact["oracle_states"][0]["value"] == "safe"
     assert _git(["status", "--porcelain"], cwd=source) == ""
 
-    forged_payload = {
-        key: value for key, value in role.items() if key != "role_contract_sha256"
-    }
+    forged_payload = {key: value for key, value in role.items() if key != "role_contract_sha256"}
     forged_payload["required_proof_scope"] = "behavioral"
     forged = _role_contract(forged_payload)
     with pytest.raises(ValueError, match="outcome_role_oracle_scope_mismatch"):
@@ -732,9 +729,7 @@ def test_verified_mechanism_identity_is_stable_across_case_provenance() -> None:
                     "hypothesis_id": hypothesis_id,
                     "mechanism_symbols": ["router.route"],
                     "mechanism_evidence_id": evidence_id,
-                    "code_paths": [
-                        {"symbol": "router.route", "path": "src/router.py"}
-                    ],
+                    "code_paths": [{"symbol": "router.route", "path": "src/router.py"}],
                 }
             ],
             control_verifications=[
@@ -743,9 +738,7 @@ def test_verified_mechanism_identity_is_stable_across_case_provenance() -> None:
                     "mechanism_symbols": ["router.route"],
                     "control_verification_id": control_id,
                     "controlled_input_difference": {
-                        "verification_method": (
-                            "python_ast_explicit_argument_delta_v1"
-                        ),
+                        "verification_method": ("python_ast_explicit_argument_delta_v1"),
                         "difference": {
                             "mechanism_symbol": "router.route",
                             "slot": probe_slot,
@@ -770,11 +763,15 @@ def test_verified_mechanism_identity_is_stable_across_case_provenance() -> None:
         probe_slot="keyword:fixture",
     )
 
-    assert first[0] == second[0] == {
-        "schema_version": 2,
-        "mechanism_symbols": ["router.route"],
-        "code_paths": [{"symbol": "router.route", "path": "src/router.py"}],
-    }
+    assert (
+        first[0]
+        == second[0]
+        == {
+            "schema_version": 2,
+            "mechanism_symbols": ["router.route"],
+            "code_paths": [{"symbol": "router.route", "path": "src/router.py"}],
+        }
+    )
     assert first[1] == second[1]
     assert first[2] != second[2]
     assert first[3] != second[3]
@@ -846,18 +843,20 @@ def test_persisted_origin_attachment_receipt_revalidates_chunks_and_reads(
         "origin_attachment_read_attestations": attestations,
     }
 
-    assert mod._persisted_origin_attachment_errors(
-        assignment=assignment,
-        receipt=receipt,
-        research_workspace=workspace,
-        persisted_events=events,
-    ) == []
+    assert (
+        mod._persisted_origin_attachment_errors(
+            assignment=assignment,
+            receipt=receipt,
+            research_workspace=workspace,
+            persisted_events=events,
+        )
+        == []
+    )
 
     middle_requirement = next(
         requirement
         for requirement in requirements
-        if signature
-        in (workspace / str(requirement["file"])).read_text(encoding="utf-8")
+        if signature in (workspace / str(requirement["file"])).read_text(encoding="utf-8")
     )
     (workspace / str(middle_requirement["file"])).write_text("tampered\n")
     errors = mod._persisted_origin_attachment_errors(
@@ -956,8 +955,7 @@ def _causal_control_repo(path: Path) -> None:
         encoding="utf-8",
     )
     (path / "tests" / "test_other.py").write_text(
-        "def test_unrelated_other_file():\n"
-        "    assert 'ready'.upper() == 'READY'\n",
+        "def test_unrelated_other_file():\n    assert 'ready'.upper() == 'READY'\n",
         encoding="utf-8",
     )
     _git(["init"], cwd=path)
@@ -1275,9 +1273,7 @@ def test_clean_replay_copies_hash_attested_overlay_harness(tmp_path: Path) -> No
     receipt = receipts["overlay-repro"]
     replay_harness = Path(receipt["workspace_dir"]) / ".usertest_research/test_repro.py"
     assert replay_harness.is_file()
-    assert receipt["overlay_manifest_sha256"] == overlay[
-        "research_overlay_manifest_sha256"
-    ]
+    assert receipt["overlay_manifest_sha256"] == overlay["research_overlay_manifest_sha256"]
     assert receipt["post_replay_mutations"] is False
     assert errors == []
 
@@ -1383,11 +1379,7 @@ def test_partial_read_cannot_attest_unobserved_symbol(tmp_path: Path) -> None:
 
 
 def test_unrelated_assertion_failure_has_no_mechanism_causal_link(tmp_path: Path) -> None:
-    output = (
-        "tests/test_repro.py:4: in test_repro\n"
-        "    assert False\n"
-        "E   assert False\n"
-    )
+    output = "tests/test_repro.py:4: in test_repro\n    assert False\nE   assert False\n"
 
     assert (
         mod._causal_trace_match(
@@ -1597,6 +1589,49 @@ def test_replay_command_parser_rejects_shell_and_control_injection() -> None:
         "pytest",
         "-q",
     ]
+    assert mod._parse_replay_argv(r"python .usertest_research\route_contract_probe.py") == [
+        "python",
+        ".usertest_research/route_contract_probe.py",
+    ]
+    assert mod._parse_replay_argv(
+        r'pdm run python ".usertest_research\route contract probe.py"'
+    ) == [
+        "pdm",
+        "run",
+        "python",
+        ".usertest_research/route contract probe.py",
+    ]
+    assert mod._parse_replay_argv(
+        r"pytest packages\runner_core\tests\test_codex_execpolicy.py"
+    ) == [
+        "pytest",
+        "packages/runner_core/tests/test_codex_execpolicy.py",
+    ]
+    assert mod._parse_replay_argv(
+        r"python -m pytest packages\runner_core\tests\test_codex_execpolicy.py"
+    ) == [
+        "python",
+        "-m",
+        "pytest",
+        "packages/runner_core/tests/test_codex_execpolicy.py",
+    ]
+    assert mod._parse_replay_argv(
+        r"pytest packages\runner_core\tests\test_x.py::test_path[param\value]"
+    ) == [
+        "pytest",
+        r"packages/runner_core/tests/test_x.py::test_path[param\value]",
+    ]
+    assert mod._parse_replay_argv('pytest -q -k="foo or bar"') == [
+        "pytest",
+        "-q",
+        "-k=foo or bar",
+    ]
+    assert mod._parse_replay_argv('python -m pytest --override-ini="addopts=-ra -q"') == [
+        "python",
+        "-m",
+        "pytest",
+        "--override-ini=addopts=-ra -q",
+    ]
     for command in (
         "pytest -q\nWrite-Output forged",
         "pytest -q\r\nwhoami",
@@ -1605,17 +1640,25 @@ def test_replay_command_parser_rejects_shell_and_control_injection() -> None:
         "pytest -q && whoami",
         "pytest -q > forged.txt",
         "pytest -q `whoami`",
+        r"pytest tests/foo\ bar.py",
     ):
         assert mod._parse_replay_argv(command) is None
-    assert mod._replay_argv_is_workspace_confined(
-        ["pytest", "-q", "tests/test_core.py"]
-    )
+    assert mod._replay_argv_is_workspace_confined(["pytest", "-q", "tests/test_core.py"])
     assert not mod._replay_argv_is_workspace_confined(
         ["pytest", "-q", "../../outside/test_payload.py"]
     )
-    assert not mod._replay_argv_is_workspace_confined(
-        ["pytest", "--rootdir=C:\\outside"]
-    )
+    assert not mod._replay_argv_is_workspace_confined(["pytest", "--rootdir=C:\\outside"])
+    for command in (
+        r"python .usertest_research\..\outside.py",
+        r"python C:\outside\probe.py",
+        r"pytest ..\outside\test_probe.py",
+        r"pytest C:\outside\test_probe.py",
+        r"pytest C:outside\test_probe.py",
+        r"pytest --rootdir=C:outside tests\test_probe.py",
+        r"pytest --basetemp=\outside tests\test_probe.py",
+    ):
+        argv = mod._parse_replay_argv(command)
+        assert argv is None or not mod._replay_argv_is_workspace_confined(argv)
 
 
 def test_practical_config_cli_replay_proves_wrong_value_to_correct_value(
@@ -1633,9 +1676,7 @@ def test_practical_config_cli_replay_proves_wrong_value_to_correct_value(
         encoding="utf-8",
     )
     (baseline / "bad.json").write_text('{"mode":"bad"}\n', encoding="utf-8")
-    (baseline / "correct.json").write_text(
-        '{"mode":"correct"}\n', encoding="utf-8"
-    )
+    (baseline / "correct.json").write_text('{"mode":"correct"}\n', encoding="utf-8")
     revision = _baseline_repo_commit_existing(baseline, "practical config cli")
     dossier = {
         "inspected_files": ["tools/show_mode.py"],
@@ -1703,9 +1744,7 @@ def test_practical_config_cli_replay_proves_wrong_value_to_correct_value(
     assert receipts["support"]["command_authorization"]["authorization_kind"] == (
         "immutable_source_command"
     )
-    assert receipts["support"]["command_authorization"]["origin_atom_field_path"] == (
-        "$.command"
-    )
+    assert receipts["support"]["command_authorization"]["origin_atom_field_path"] == ("$.command")
     assert receipts["control"]["command_authorization"]["authorization_kind"] == (
         "declared_inspected_repository_entrypoint"
     )
@@ -1723,9 +1762,7 @@ def test_practical_config_cli_replay_proves_wrong_value_to_correct_value(
     assert difference is not None
     assert difference["difference_kind"] == "wrong_value_corrected"
     assert difference["support_expected_sha256"] == mod._canonical_json_sha256("bad")
-    assert difference["control_expected_sha256"] == mod._canonical_json_sha256(
-        "correct"
-    )
+    assert difference["control_expected_sha256"] == mod._canonical_json_sha256("correct")
 
 
 def test_practical_repo_cli_is_rejected_without_source_or_inspection_binding(
@@ -1834,9 +1871,7 @@ def test_focused_guarded_control_calling_same_mechanism_is_verified(
 ) -> None:
     workspace = tmp_path / "workspace"
     _causal_control_repo(workspace)
-    dossier, replays = _control_dossier(
-        "tests/test_core.py::test_guarded_control"
-    )
+    dossier, replays = _control_dossier("tests/test_core.py::test_guarded_control")
     errors: list[str] = []
 
     selections, controls = mod._causal_control_receipts(
@@ -1853,8 +1888,7 @@ def test_focused_guarded_control_calling_same_mechanism_is_verified(
         "control",
     }
     assert all(
-        selection["mechanism_touches"][0]["symbol"] == "core.run"
-        for selection in selections
+        selection["mechanism_touches"][0]["symbol"] == "core.run" for selection in selections
     )
     assert len(controls) == 1
     control = controls[0]
@@ -1870,9 +1904,7 @@ def test_focused_guarded_control_calling_same_mechanism_is_verified(
             "control_argument": {
                 "slot": "keyword:guarded",
                 "expression": "True",
-                "ast_sha256": mod.sha256(
-                    b"Constant(value=True)"
-                ).hexdigest(),
+                "ast_sha256": mod.sha256(b"Constant(value=True)").hexdigest(),
             },
         },
     }
@@ -1894,9 +1926,7 @@ def test_focused_guarded_control_calling_same_mechanism_is_verified(
     )
     assert errors == []
     assert len(failure_paths) == 1
-    assert failure_paths[0]["path_name"] == (
-        "tests/test_core.py::test_reported_failure"
-    )
+    assert failure_paths[0]["path_name"] == ("tests/test_core.py::test_reported_failure")
     assert failure_paths[0]["origin_atom_ids"] == ["atom:support"]
     assert failure_paths[0]["failure_path_id"] == mod._content_addressed_receipt_id(
         "failure_path",
@@ -1945,9 +1975,7 @@ def test_falsification_challenge_requires_runner_observed_causal_input_delta(
 ) -> None:
     workspace = tmp_path / "workspace"
     _causal_control_repo(workspace)
-    dossier, replays = _control_dossier(
-        "tests/test_core.py::test_same_input_control"
-    )
+    dossier, replays = _control_dossier("tests/test_core.py::test_same_input_control")
     hypothesis = dossier["root_cause_hypotheses"][0]
     assert isinstance(hypothesis, dict)
     hypothesis["statement"] = "The default core.run input causes the failure."
@@ -2000,9 +2028,7 @@ def test_model_control_prose_cannot_turn_an_invalid_pair_into_causal_proof(
 ) -> None:
     workspace = tmp_path / "workspace"
     _causal_control_repo(workspace)
-    dossier, replays = _control_dossier(
-        "tests/test_core.py::test_same_input_control"
-    )
+    dossier, replays = _control_dossier("tests/test_core.py::test_same_input_control")
     control = dossier["experiments"][1]
     assert isinstance(control, dict)
     relationship = control["control_relationship"]
@@ -2020,18 +2046,13 @@ def test_model_control_prose_cannot_turn_an_invalid_pair_into_causal_proof(
     )
 
     assert controls == []
-    assert (
-        "causal_control_requires_exactly_one_structural_difference:h1:control:0"
-        in errors
-    )
+    assert "causal_control_requires_exactly_one_structural_difference:h1:control:0" in errors
 
 
 def test_control_requires_complementary_runner_observation(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     _causal_control_repo(workspace)
-    dossier, replays = _control_dossier(
-        "tests/test_core.py::test_guarded_control"
-    )
+    dossier, replays = _control_dossier("tests/test_core.py::test_guarded_control")
     control = dossier["experiments"][1]
     assert isinstance(control, dict)
     control["exit_code"] = 2
@@ -2289,9 +2310,7 @@ def test_explicit_field_bindings_accept_short_symptom_and_context_atoms() -> Non
         "context",
     ]
     assert bindings[0]["origin_atom_field_path"] == "$.output_excerpt"
-    assert bindings[0]["origin_atom_value_sha256"] == mod._canonical_json_sha256(
-        "bad"
-    )
+    assert bindings[0]["origin_atom_value_sha256"] == mod._canonical_json_sha256("bad")
     assert bindings[1]["origin_atom_sha256"] == "2" * 64
 
 
@@ -2388,12 +2407,15 @@ def test_declared_mechanism_link_requires_runner_observed_python_call_chain(
         "def execute():\n    return 'invented nearby explanation'\n",
         encoding="utf-8",
     )
-    assert mod._verified_declared_mechanism_link(
-        experiment=experiment,
-        mechanism_symbols=["core.run"],
-        symbol_paths={
-            "api.execute": "src/api.py",
-            "core.run": "src/core.py",
-        },
-        workspace=workspace,
-    ) is None
+    assert (
+        mod._verified_declared_mechanism_link(
+            experiment=experiment,
+            mechanism_symbols=["core.run"],
+            symbol_paths={
+                "api.execute": "src/api.py",
+                "core.run": "src/core.py",
+            },
+            workspace=workspace,
+        )
+        is None
+    )

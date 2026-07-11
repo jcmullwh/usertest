@@ -536,18 +536,69 @@ def _parse_argv_without_shell(command: str) -> list[str] | None:
         return None
     if any(character in _REPLAY_FORBIDDEN_CHARACTERS for character in command):
         return None
+    if re.search(r"\\\s", command):
+        # Backslash-escaped whitespace is shell syntax, but replay executes with
+        # shell=False. Require a quoted argument instead of silently changing argv.
+        return None
     try:
-        argv = shlex.split(command, posix=os.name != "nt")
+        lexer = shlex.shlex(command, posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        # Preserve Windows path separators. Quotes still group/strip normally,
+        # while backslash never becomes an implicit POSIX shell escape.
+        lexer.escape = ""
+        argv = list(lexer)
     except ValueError:
         return None
-    if os.name == "nt":
-        argv = [
-            token[1:-1]
-            if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
-            else token
-            for token in argv
-        ]
     return argv if argv and all(argv) else None
+
+
+def _portable_replay_path_argv(argv: list[str]) -> tuple[list[str], bool]:
+    """Normalize only positional Python-harness and pytest path arguments."""
+
+    portable = list(argv)
+    normalized = tuple(token.casefold() for token in portable)
+    path_indexes: list[int] = []
+    pytest_paths = False
+    if normalized[:3] == ("pdm", "run", "python") and normalized[3:5] != (
+        "-m",
+        "pytest",
+    ):
+        if len(portable) > 3:
+            path_indexes = [3]
+    elif normalized[:1] == ("python",) and normalized[1:3] != ("-m", "pytest"):
+        if len(portable) > 1:
+            path_indexes = [1]
+    else:
+        for prefix in _PYTEST_ARGV_PREFIXES:
+            if normalized[: len(prefix)] == prefix:
+                pytest_paths = True
+                path_indexes = [
+                    index
+                    for index in range(len(prefix), len(portable))
+                    if not portable[index].startswith("-")
+                ]
+                break
+
+    changed = False
+    for index in path_indexes:
+        token = portable[index]
+        if "\\" not in token:
+            continue
+        if pytest_paths:
+            path_token, selector_separator, selector = token.partition("::")
+            normalized_path = path_token.replace("\\", "/")
+            path_part = normalized_path.casefold()
+            if not (
+                path_part.endswith(".py")
+                or path_part.startswith((".usertest_research/", "apps/", "packages/", "tests/"))
+            ):
+                continue
+            portable[index] = normalized_path + selector_separator + selector
+        else:
+            portable[index] = token.replace("\\", "/")
+        changed = True
+    return portable, changed
 
 
 def _parse_replay_argv(command: str) -> list[str] | None:
@@ -561,6 +612,7 @@ def _parse_replay_argv(command: str) -> list[str] | None:
     argv = _parse_argv_without_shell(command)
     if argv is None:
         return None
+    argv, _portable_path_changed = _portable_replay_path_argv(argv)
     normalized = tuple(token.casefold() for token in argv)
     if not any(normalized[: len(prefix)] == prefix for prefix in _REPLAY_ARGV_PREFIXES):
         return None
@@ -588,6 +640,7 @@ def _parse_replay_argv(command: str) -> list[str] | None:
             or harness_path.suffix.casefold() != ".py"
         ):
             return None
+        argv[harness_index] = harness_path.as_posix()
     return argv
 
 
@@ -807,7 +860,7 @@ def _replay_argv_is_workspace_confined(argv: list[str]) -> bool:
             return False
         posix = PurePosixPath(candidate)
         windows = PureWindowsPath(candidate)
-        if posix.is_absolute() or windows.is_absolute():
+        if posix.is_absolute() or windows.anchor:
             return False
         if ".." in posix.parts or ".." in windows.parts:
             return False

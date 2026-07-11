@@ -56,6 +56,8 @@ Each experiment also records `scenario_kind`, `addresses_atom_ids`, and an
 `observable_assertion`. `scenario_kind` is exactly `original_replay`, `faithful_replay`,
 `control`, `static_trace`, or `live_runtime`; `platform_requirement` is exactly lowercase
 `any`, `windows`, `linux`, or `darwin`. Experiments collectively cover every assigned atom.
+Commands with `platform_requirement="any"` must use portable forward-slash relative paths;
+commands that require platform-specific path syntax must name that platform instead.
 A supporting experiment uses `original_replay`, `faithful_replay`, deterministic
 `static_trace`, or a platform-bound `live_runtime`; a refuting experiment may use a distinct
 `control`. Every static trace includes

@@ -432,6 +432,30 @@ def test_subscription_verification_requires_login_status_and_activation_probe(
     assert overlay.restore() == []
     assert verify_controlled_codex_execpolicy_receipt(overlay.receipt_path) == []
 
+    current_receipt = json.loads(overlay.receipt_path.read_text(encoding="utf-8"))
+    unrelated_change_receipt = json.loads(json.dumps(current_receipt))
+    unrelated_change_receipt["global_config_unchanged"] = False
+    unrelated_change_receipt["global_config_sha256_after"] = "f" * 64
+    unrelated_change_receipt["runner_induced_project_trust_cleanup"].update(
+        {
+            "status": "not_present",
+            "entry_removed": False,
+            "unrelated_change_preserved": True,
+        }
+    )
+    unrelated_change_receipt["receipt_sha256"] = codex_execpolicy_receipt_sha256(
+        unrelated_change_receipt
+    )
+    assert execpolicy_mod.controlled_codex_execpolicy_receipt_errors(unrelated_change_receipt) == []
+
+    legacy_receipt = json.loads(json.dumps(current_receipt))
+    legacy_receipt["schema_version"] = 2
+    legacy_receipt.pop("canonical_project_trust_path")
+    legacy_receipt.pop("runner_induced_project_trust_cleanup")
+    legacy_receipt.pop("runner_induced_project_trust_cleanup_verified")
+    legacy_receipt["receipt_sha256"] = codex_execpolicy_receipt_sha256(legacy_receipt)
+    assert execpolicy_mod.controlled_codex_execpolicy_receipt_errors(legacy_receipt) == []
+
 
 def test_failed_activation_probe_never_verifies_subscription(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
@@ -625,7 +649,209 @@ def test_probe_workspace_state_detects_ignored_or_untracked_writes(tmp_path: Pat
 
 
 def test_codex_project_trust_override_is_toml_safe_for_windows_path() -> None:
-    override = codex_project_trust_override(Path(r"I:\code\workspace"))
+    workspace = Path(r"I:\code\workspace")
+    override = codex_project_trust_override(workspace)
     parsed = tomllib.loads(override)
 
-    assert parsed["projects"][r"I:\code\workspace"]["trust_level"] == "trusted"
+    expected = os.path.normcase(str(workspace.resolve())) if os.name == "nt" else str(workspace)
+    assert parsed["projects"][expected]["trust_level"] == "trusted"
+    if os.name == "nt":
+        assert expected == expected.casefold()
+
+
+def _persisted_project_trust_table(canonical_path: str, *, newline: str = "\n") -> bytes:
+    return (
+        newline
+        + f"[projects.{json.dumps(canonical_path)}]"
+        + newline
+        + 'trust_level = "trusted"'
+        + newline
+    ).encode()
+
+
+def test_runner_induced_project_trust_is_removed_byte_exactly(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    original = (
+        b'model = "sentinel"\r\n\r\n[projects.\'c:\\existing\']\r\ntrust_level = "trusted"\r\n'
+    )
+    config.write_bytes(original)
+    workspace = tmp_path / "Disposable Workspace"
+    workspace.mkdir()
+    canonical = execpolicy_mod._canonical_codex_project_trust_path(workspace)
+    config.write_bytes(original + _persisted_project_trust_table(canonical, newline="\r\n"))
+
+    receipt, errors = execpolicy_mod._restore_runner_induced_project_trust(
+        path=config,
+        original=original,
+        canonical_path=canonical,
+    )
+
+    assert errors == []
+    assert receipt["status"] == "removed"
+    assert receipt["entry_removed"] is True
+    assert receipt["verified"] is True
+    assert config.read_bytes() == original
+
+
+def test_project_trust_cleanup_never_overwrites_unrelated_host_change(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    original = b'model = "sentinel"\n'
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    canonical = execpolicy_mod._canonical_codex_project_trust_path(workspace)
+    current = original + _persisted_project_trust_table(canonical) + b"\n[concurrent]\nvalue = 1\n"
+    config.write_bytes(current)
+
+    receipt, errors = execpolicy_mod._restore_runner_induced_project_trust(
+        path=config,
+        original=original,
+        canonical_path=canonical,
+    )
+
+    assert errors == []
+    assert receipt["verified"] is True
+    assert receipt["entry_removed"] is True
+    assert receipt["unrelated_change_preserved"] is True
+    cleaned = config.read_bytes()
+    assert b"[concurrent]" in cleaned
+    assert canonical.encode() not in cleaned
+
+
+def test_unrelated_host_change_without_runner_trust_is_nonblocking(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    original = b'model = "sentinel"\n'
+    current = original + b"\n[unrelated]\nvalue = 1\n"
+    config.write_bytes(current)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    canonical = execpolicy_mod._canonical_codex_project_trust_path(workspace)
+
+    receipt, errors = execpolicy_mod._restore_runner_induced_project_trust(
+        path=config,
+        original=original,
+        canonical_path=canonical,
+    )
+
+    assert errors == []
+    assert receipt["status"] == "not_present"
+    assert receipt["entry_removed"] is False
+    assert receipt["unrelated_change_preserved"] is True
+    assert receipt["verified"] is True
+    assert config.read_bytes() == current
+
+
+def test_preexisting_project_trust_is_reported_and_preserved(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    canonical = execpolicy_mod._canonical_codex_project_trust_path(workspace)
+    original = _persisted_project_trust_table(canonical).lstrip(b"\n")
+    config.write_bytes(original)
+
+    receipt, errors = execpolicy_mod._restore_runner_induced_project_trust(
+        path=config,
+        original=original,
+        canonical_path=canonical,
+    )
+
+    assert errors == []
+    assert receipt["status"] == "preexisting_preserved"
+    assert receipt["entry_preexisting"] is True
+    assert receipt["entry_removed"] is False
+    assert receipt["verified"] is True
+    assert config.read_bytes() == original
+
+
+def test_project_trust_cleanup_preserves_concurrent_comment(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    original = b'model = "sentinel"\n'
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    canonical = execpolicy_mod._canonical_codex_project_trust_path(workspace)
+    current = (
+        original
+        + b"\n# concurrent user comment\n"
+        + _persisted_project_trust_table(canonical).lstrip(b"\n")
+    )
+    config.write_bytes(current)
+
+    receipt, errors = execpolicy_mod._restore_runner_induced_project_trust(
+        path=config,
+        original=original,
+        canonical_path=canonical,
+    )
+
+    assert errors == []
+    assert receipt["verified"] is True
+    assert receipt["unrelated_change_preserved"] is True
+    cleaned = config.read_bytes()
+    assert b"# concurrent user comment" in cleaned
+    assert canonical.encode() not in cleaned
+
+
+def test_project_trust_cleanup_removes_trust_from_runner_created_config(tmp_path: Path) -> None:
+    config = tmp_path / "config.toml"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    canonical = execpolicy_mod._canonical_codex_project_trust_path(workspace)
+    config.write_bytes(_persisted_project_trust_table(canonical).lstrip(b"\n"))
+
+    receipt, errors = execpolicy_mod._restore_runner_induced_project_trust(
+        path=config,
+        original=None,
+        canonical_path=canonical,
+    )
+
+    assert errors == []
+    assert receipt["status"] == "removed"
+    if os.name == "nt":
+        assert not config.exists()
+    else:
+        # POSIX has no portable unlink-by-handle primitive. Retaining an empty
+        # file avoids a compare/unlink race while still proving no trust residue.
+        assert config.read_bytes() == b""
+
+
+def test_windows_extended_project_prefix_matches_codex_dunce_spelling() -> None:
+    assert (
+        execpolicy_mod._strip_windows_extended_path_prefix(r"\\?\C:\Users\jason\workspace")
+        == r"C:\Users\jason\workspace"
+    )
+    assert (
+        execpolicy_mod._strip_windows_extended_path_prefix(r"\\?\UNC\server\share\workspace")
+        == r"\\server\share\workspace"
+    )
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows sharing modes are the production path")
+def test_project_trust_cleanup_excludes_a_racing_windows_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = tmp_path / "config.toml"
+    original = b'model = "sentinel"\n'
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    canonical = execpolicy_mod._canonical_codex_project_trust_path(workspace)
+    config.write_bytes(original + _persisted_project_trust_table(canonical))
+    real_fsync = execpolicy_mod.os.fsync
+    racing_write_errors: list[OSError] = []
+
+    def _attempt_racing_write(descriptor: int) -> None:
+        try:
+            config.write_bytes(b'[concurrent]\nvalue = "must-not-be-overwritten"\n')
+        except OSError as exc:
+            racing_write_errors.append(exc)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr(execpolicy_mod.os, "fsync", _attempt_racing_write)
+    receipt, errors = execpolicy_mod._restore_runner_induced_project_trust(
+        path=config,
+        original=original,
+        canonical_path=canonical,
+    )
+
+    assert errors == []
+    assert receipt["verified"] is True
+    assert racing_write_errors
+    assert config.read_bytes() == original

@@ -3,8 +3,11 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tomllib
 from collections.abc import Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -186,8 +189,10 @@ def controlled_codex_execpolicy_receipt_errors(
     errors: list[str] = []
     if receipt.get("receipt_sha256") != codex_execpolicy_receipt_sha256(receipt):
         errors.append("codex_execpolicy_receipt_hash_changed")
+    schema_version = receipt.get("schema_version")
+    if schema_version not in {2, 3}:
+        errors.append("codex_execpolicy_schema_version_invalid")
     exact_fields = {
-        "schema_version": 2,
         "mode": "runner_controlled_project_execpolicy",
         "configuration_mode": "host_codex_home_with_isolated_config",
         "forced_login_method": "chatgpt",
@@ -201,7 +206,7 @@ def controlled_codex_execpolicy_receipt_errors(
     for field, expected in exact_fields.items():
         if receipt.get(field) != expected:
             errors.append(f"codex_execpolicy_{field}_invalid")
-    true_fields = (
+    true_fields = [
         "host_user_config_ignored",
         "target_project_config_isolated",
         "chatgpt_subscription_login_status_verified",
@@ -210,14 +215,41 @@ def controlled_codex_execpolicy_receipt_errors(
         "chatgpt_subscription_auth_verified",
         "api_key_auth_environment_disabled",
         "host_auth_cache_preserved",
-        "global_config_unchanged",
         "host_global_rules_unchanged",
         "canonical_subscription_route_verified",
         "controlled_execution_mode_verified",
-    )
+    ]
+    if schema_version == 2:
+        true_fields.append("global_config_unchanged")
     for field in true_fields:
         if receipt.get(field) is not True:
             errors.append(f"codex_execpolicy_{field}_not_verified")
+    if schema_version == 3:
+        if receipt.get("runner_induced_project_trust_cleanup_verified") is not True:
+            errors.append("codex_execpolicy_project_trust_cleanup_not_verified")
+        canonical_project_path = receipt.get("canonical_project_trust_path")
+        if not isinstance(canonical_project_path, str) or not canonical_project_path:
+            errors.append("codex_execpolicy_canonical_project_trust_path_invalid")
+        cleanup_raw = receipt.get("runner_induced_project_trust_cleanup")
+        cleanup = cleanup_raw if isinstance(cleanup_raw, dict) else {}
+        cleanup_status = cleanup.get("status")
+        if cleanup.get("verified") is not True or cleanup_status not in {
+            "not_present",
+            "preexisting_preserved",
+            "removed",
+            "unchanged",
+        }:
+            errors.append("codex_execpolicy_project_trust_cleanup_invalid")
+        if cleanup.get("canonical_project_path") != canonical_project_path:
+            errors.append("codex_execpolicy_project_trust_cleanup_path_mismatch")
+        if not isinstance(cleanup.get("entry_preexisting"), bool) or not isinstance(
+            cleanup.get("unrelated_change_preserved"), bool
+        ):
+            errors.append("codex_execpolicy_project_trust_cleanup_disposition_invalid")
+        if cleanup.get("entry_removed") is not (cleanup_status == "removed"):
+            errors.append("codex_execpolicy_project_trust_cleanup_removed_invalid")
+        if not isinstance(receipt.get("global_config_unchanged"), bool):
+            errors.append("codex_execpolicy_global_config_change_attestation_invalid")
     platform_os_name = receipt.get("platform_os_name")
     if platform_os_name not in {"nt", "posix"}:
         errors.append("codex_execpolicy_platform_os_name_invalid")
@@ -279,6 +311,15 @@ def controlled_codex_execpolicy_receipt_errors(
         errors.extend(codex_subscription_config_errors(overrides))
         if platform_os_name == "nt" and not _effective_windows_sandbox_is_unelevated(overrides):
             errors.append("codex_execpolicy_windows_sandbox_not_unelevated")
+        if schema_version == 3:
+            canonical_path = receipt.get("canonical_project_trust_path")
+            expected_trust_override = (
+                f'projects.{json.dumps(canonical_path, ensure_ascii=False)}.trust_level="trusted"'
+                if isinstance(canonical_path, str) and canonical_path
+                else None
+            )
+            if expected_trust_override not in overrides:
+                errors.append("codex_execpolicy_canonical_project_trust_override_missing")
 
     config_contract_raw = receipt.get("controlled_config_contract_path")
     config_contract_path = (
@@ -435,11 +476,347 @@ def capture_probe_workspace_state(workspace_dir: Path) -> dict[str, Any]:
     }
 
 
+def _strip_windows_extended_path_prefix(path: str) -> str:
+    """Match ``dunce::canonicalize`` spelling for Windows extended paths."""
+
+    if path.casefold().startswith("\\\\?\\unc\\"):
+        return "\\\\" + path[8:]
+    if path.startswith("\\\\?\\"):
+        return path[4:]
+    return path
+
+
+def _canonical_codex_project_trust_path(workspace_path: str | Path) -> str:
+    raw_path = str(workspace_path)
+    # Codex canonicalizes the active project path with native Windows path
+    # semantics before looking up its trust entry.  A case-preserving override
+    # therefore misses the active-project key on Windows and Codex persists a
+    # second, lower-cased trust entry in the host config even though the runner
+    # supplied an explicit session override.  Match that lookup key so the
+    # disposable research workspace is trusted for this invocation without
+    # modifying the signed-in host CODEX_HOME.
+    if os.name != "nt":
+        return raw_path
+    resolved = _strip_windows_extended_path_prefix(str(Path(raw_path).resolve()))
+    return os.path.normcase(resolved)
+
+
 def codex_project_trust_override(workspace_path: str | Path) -> str:
     """Return one TOML-safe Codex config override for the exact acquired workspace."""
 
-    encoded = json.dumps(str(workspace_path), ensure_ascii=False)
+    trust_path = _canonical_codex_project_trust_path(workspace_path)
+    encoded = json.dumps(trust_path, ensure_ascii=False)
     return f'projects.{encoded}.trust_level="trusted"'
+
+
+def _optional_file_bytes(path: Path) -> bytes | None:
+    if path.is_symlink():
+        raise ValueError("codex_execpolicy_global_config_symlink_forbidden")
+    if not path.exists():
+        return None
+    if not path.is_file():
+        raise ValueError("codex_execpolicy_global_config_not_file")
+    return path.read_bytes()
+
+
+def _toml_document(payload: bytes | None) -> dict[str, Any]:
+    if payload is None or not payload:
+        return {}
+    parsed = tomllib.loads(payload.decode("utf-8"))
+    if not isinstance(parsed, dict):
+        raise ValueError("codex_execpolicy_global_config_not_mapping")
+    return parsed
+
+
+def _matching_project_trust_key(document: dict[str, Any], canonical_path: str) -> str | None:
+    projects_raw = document.get("projects")
+    if not isinstance(projects_raw, dict):
+        return None
+    if canonical_path in projects_raw:
+        return canonical_path
+    if os.name != "nt":
+        return None
+    for raw_key in projects_raw:
+        if not isinstance(raw_key, str):
+            continue
+        normalized = os.path.normcase(_strip_windows_extended_path_prefix(raw_key))
+        if normalized == canonical_path:
+            return raw_key
+    return None
+
+
+@contextmanager
+def _exclusive_config_stream(path: Path, *, allow_delete: bool) -> Any:
+    """Open a config file so another writer cannot race the cleanup write."""
+
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_file = kernel32.CreateFileW
+        create_file.argtypes = (
+            wintypes.LPCWSTR,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.LPVOID,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.HANDLE,
+        )
+        create_file.restype = wintypes.HANDLE
+        desired_access = 0x80000000 | 0x40000000
+        if allow_delete:
+            desired_access |= 0x00010000
+        handle = create_file(
+            str(path),
+            desired_access,
+            0,
+            None,
+            3,
+            0x00000080,
+            None,
+        )
+        invalid_handle = ctypes.c_void_p(-1).value
+        if handle == invalid_handle:
+            raise ctypes.WinError(ctypes.get_last_error())
+        try:
+            descriptor = msvcrt.open_osfhandle(handle, os.O_RDWR)
+        except Exception:
+            kernel32.CloseHandle(handle)
+            raise
+        with os.fdopen(descriptor, "r+b", buffering=0) as stream:
+            yield stream
+        return
+
+    import fcntl
+
+    descriptor = os.open(path, os.O_RDWR)
+    try:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        with os.fdopen(descriptor, "r+b", buffering=0, closefd=False) as stream:
+            yield stream
+    finally:
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_UN)
+        finally:
+            os.close(descriptor)
+
+
+def _mark_windows_file_for_delete(stream: Any) -> None:
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class FileDispositionInfo(ctypes.Structure):
+        _fields_ = [("delete_file", wintypes.BOOL)]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_information = kernel32.SetFileInformationByHandle
+    set_information.argtypes = (
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    )
+    set_information.restype = wintypes.BOOL
+    disposition = FileDispositionInfo(True)
+    handle = msvcrt.get_osfhandle(stream.fileno())
+    if not set_information(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
+        raise ctypes.WinError(ctypes.get_last_error())
+
+
+def _atomic_restore_optional_file(
+    path: Path,
+    *,
+    expected_current: bytes,
+    replacement: bytes | None,
+) -> None:
+    """Rewrite only while holding an OS-level writer-exclusive file handle."""
+
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("codex_execpolicy_global_config_not_lockable")
+    with _exclusive_config_stream(path, allow_delete=replacement is None) as stream:
+        stream.seek(0)
+        if stream.read() != expected_current:
+            raise RuntimeError("codex_execpolicy_global_config_changed_before_restore")
+        stream.seek(0)
+        if replacement is None and os.name == "nt":
+            _mark_windows_file_for_delete(stream)
+        else:
+            payload = replacement if replacement is not None else b""
+            stream.write(payload)
+            stream.truncate()
+            stream.flush()
+            os.fsync(stream.fileno())
+            stream.seek(0)
+            if stream.read() != payload:
+                raise RuntimeError("codex_execpolicy_global_config_restore_mismatch")
+    if replacement is None and os.name == "nt":
+        if path.exists() or path.is_symlink():
+            raise RuntimeError("codex_execpolicy_global_config_remove_failed")
+    elif replacement is not None and path.read_bytes() != replacement:
+        raise RuntimeError("codex_execpolicy_global_config_restore_mismatch")
+
+
+def _plain_project_trust_line_range(payload: bytes, canonical_path: str) -> tuple[int, int]:
+    """Locate the exact two Codex-authored lines for one plain trust table."""
+
+    lines = payload.splitlines(keepends=True)
+    matches: list[tuple[int, int]] = []
+    for index in range(len(lines) - 1):
+        try:
+            header = lines[index].decode("utf-8").strip()
+            trust_line = lines[index + 1].decode("utf-8").strip()
+        except UnicodeDecodeError:
+            continue
+        if (
+            not header.startswith("[projects.")
+            or not header.endswith("]")
+            or trust_line != 'trust_level = "trusted"'
+        ):
+            continue
+        try:
+            candidate_document = _toml_document(b"".join(lines[index : index + 2]))
+        except (UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError):
+            continue
+        candidate_key = _matching_project_trust_key(candidate_document, canonical_path)
+        candidate_projects = candidate_document.get("projects")
+        if (
+            candidate_key is not None
+            and isinstance(candidate_projects, dict)
+            and candidate_projects == {candidate_key: {"trust_level": "trusted"}}
+        ):
+            matches.append((index, index + 2))
+    if len(matches) != 1:
+        raise RuntimeError("codex_execpolicy_project_trust_text_not_unique")
+    return matches[0]
+
+
+def _restore_runner_induced_project_trust(
+    *,
+    path: Path,
+    original: bytes | None,
+    canonical_path: str,
+) -> tuple[dict[str, Any], list[str]]:
+    """Remove only Codex's exact auto-persisted trust table for this workspace."""
+
+    receipt: dict[str, Any] = {
+        "status": "failed",
+        "canonical_project_path": canonical_path,
+        "entry_preexisting": False,
+        "entry_removed": False,
+        "unrelated_change_preserved": False,
+        "original_size_bytes": len(original) if original is not None else None,
+        "observed_size_bytes": None,
+    }
+    try:
+        original_document = _toml_document(original)
+        original_key = _matching_project_trust_key(original_document, canonical_path)
+        receipt["entry_preexisting"] = original_key is not None
+        current = _optional_file_bytes(path)
+        receipt["observed_size_bytes"] = len(current) if current is not None else None
+        if current == original:
+            receipt.update(
+                {
+                    "status": (
+                        "preexisting_preserved" if original_key is not None else "unchanged"
+                    ),
+                    "verified": True,
+                }
+            )
+            return receipt, []
+        if current is None:
+            receipt.update(
+                {
+                    "status": "not_present",
+                    "unrelated_change_preserved": original is not None,
+                    "verified": True,
+                }
+            )
+            return receipt, []
+        current_document = _toml_document(current)
+        current_key = _matching_project_trust_key(current_document, canonical_path)
+        if current_key is None:
+            receipt.update(
+                {
+                    "status": "not_present",
+                    "unrelated_change_preserved": current != original,
+                    "verified": True,
+                }
+            )
+            return receipt, []
+        if original_key is not None:
+            receipt.update(
+                {
+                    "status": "preexisting_preserved",
+                    "unrelated_change_preserved": current != original,
+                    "verified": True,
+                }
+            )
+            return receipt, []
+        projects_raw = current_document.get("projects")
+        assert isinstance(projects_raw, dict)
+        if projects_raw.get(current_key) != {"trust_level": "trusted"}:
+            raise RuntimeError("codex_execpolicy_runner_project_trust_not_plain")
+
+        current_lines = current.splitlines(keepends=True)
+        trust_start, trust_end = _plain_project_trust_line_range(current, canonical_path)
+        replacement = b"".join(current_lines[:trust_start] + current_lines[trust_end:])
+        if original is None and not replacement.strip():
+            replacement = None
+        elif original is not None:
+            changes = [
+                opcode
+                for opcode in SequenceMatcher(
+                    None,
+                    original.splitlines(keepends=True),
+                    current_lines,
+                    autojunk=False,
+                ).get_opcodes()
+                if opcode[0] != "equal"
+            ]
+            if len(changes) == 1 and changes[0][0] == "insert":
+                _tag, _before_start, _before_end, inserted_start, inserted_end = changes[0]
+                inserted_bytes = b"".join(current_lines[inserted_start:inserted_end])
+                exact_candidate = b"".join(
+                    current_lines[:inserted_start] + current_lines[inserted_end:]
+                )
+                inserted_material_lines = [
+                    line.strip()
+                    for line in inserted_bytes.decode("utf-8").splitlines()
+                    if line.strip()
+                ]
+                if (
+                    exact_candidate == original
+                    and len(inserted_material_lines) == 2
+                    and _matching_project_trust_key(_toml_document(inserted_bytes), canonical_path)
+                    is not None
+                ):
+                    replacement = original
+
+        _atomic_restore_optional_file(
+            path,
+            expected_current=current,
+            replacement=replacement,
+        )
+        post_cleanup = _optional_file_bytes(path)
+        post_cleanup_document = _toml_document(post_cleanup)
+        if _matching_project_trust_key(post_cleanup_document, canonical_path) is not None:
+            raise RuntimeError("codex_execpolicy_runner_project_trust_cleanup_mismatch")
+        receipt.update(
+            {
+                "status": "removed",
+                "entry_removed": True,
+                "unrelated_change_preserved": post_cleanup != original,
+                "verified": True,
+            }
+        )
+        return receipt, []
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError, ValueError, RuntimeError) as exc:
+        receipt.update({"verified": False, "error_kind": type(exc).__name__})
+        return receipt, [str(exc)]
 
 
 def _chatgpt_auth_shape(payload: Any) -> dict[str, Any]:
@@ -513,6 +890,9 @@ class ControlledCodexExecpolicyOverlay:
     host_codex_home: Path
     host_auth_path: Path
     host_rules_dir: Path
+    global_config_path: Path
+    global_config_bytes_before: bytes | None
+    canonical_project_trust_path: str
     project_trust_override: str
     codex_dir_existed: bool
     expected_manifest: list[dict[str, Any]]
@@ -759,11 +1139,22 @@ class ControlledCodexExecpolicyOverlay:
 
         host_auth_file_after = _host_auth_file_attestation(self.host_auth_path)
 
-        global_config_raw = self.receipt.get("global_config_path")
-        global_config_path = Path(global_config_raw) if isinstance(global_config_raw, str) else None
+        project_trust_cleanup, project_trust_cleanup_errors = _restore_runner_induced_project_trust(
+            path=self.global_config_path,
+            original=self.global_config_bytes_before,
+            canonical_path=self.canonical_project_trust_path,
+        )
+        errors.extend(project_trust_cleanup_errors)
+        try:
+            global_config_bytes_after = _optional_file_bytes(self.global_config_path)
+        except (OSError, ValueError) as exc:
+            errors.append(
+                f"codex_execpolicy_global_config_post_restore_unreadable:{type(exc).__name__}"
+            )
+            global_config_bytes_after = None
         global_config_sha_after = (
-            sha256(global_config_path.read_bytes()).hexdigest()
-            if global_config_path is not None and global_config_path.is_file()
+            sha256(global_config_bytes_after).hexdigest()
+            if global_config_bytes_after is not None
             else None
         )
         host_rules_manifest_after: list[dict[str, Any]] = []
@@ -796,6 +1187,10 @@ class ControlledCodexExecpolicyOverlay:
                     "chatgpt_subscription_post_login_status_verified"
                 )
                 is True,
+                "runner_induced_project_trust_cleanup": project_trust_cleanup,
+                "runner_induced_project_trust_cleanup_verified": (
+                    project_trust_cleanup.get("verified") is True
+                ),
                 "global_config_sha256_after": global_config_sha_after,
                 "global_config_unchanged": (
                     global_config_sha_after == self.receipt.get("global_config_sha256_before")
@@ -854,13 +1249,15 @@ def install_controlled_codex_execpolicy(
     host_auth_shape = host_auth_file_before.get("shape")
 
     global_config_path = host_codex_home / "config.toml"
+    global_config_bytes_before = _optional_file_bytes(global_config_path)
     global_config_sha_before = (
-        sha256(global_config_path.read_bytes()).hexdigest()
-        if global_config_path.is_file()
+        sha256(global_config_bytes_before).hexdigest()
+        if global_config_bytes_before is not None
         else None
     )
     host_rules_dir = host_codex_home / "rules"
     host_rules_manifest_before = _tree_manifest(host_rules_dir)
+    canonical_project_trust_path = _canonical_codex_project_trust_path(agent_workspace)
     project_trust_override = codex_project_trust_override(agent_workspace)
     config_receipt_path = run_dir / "codex_execpolicy_config_overrides.json"
     _write_config_contract(
@@ -951,7 +1348,7 @@ def install_controlled_codex_execpolicy(
             shutil.move(str(target_config_backup_path), str(target_config_path))
         raise ValueError("codex_execpolicy_target_config_isolation_failed")
     receipt: dict[str, Any] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "mode": "runner_controlled_project_execpolicy",
         "platform_os_name": os.name,
         "native_windows_sandbox_mode": (
@@ -1008,6 +1405,8 @@ def install_controlled_codex_execpolicy(
         "controlled_auth_env_vars": list(CONTROLLED_CODEX_AUTH_ENV_VARS),
         "global_config_path": str(global_config_path),
         "global_config_sha256_before": global_config_sha_before,
+        "canonical_project_trust_path": canonical_project_trust_path,
+        "runner_induced_project_trust_cleanup_verified": False,
     }
     _write_execpolicy_receipt(receipt_path, receipt)
     return ControlledCodexExecpolicyOverlay(
@@ -1021,6 +1420,9 @@ def install_controlled_codex_execpolicy(
         host_codex_home=host_codex_home,
         host_auth_path=host_auth_path,
         host_rules_dir=host_rules_dir,
+        global_config_path=global_config_path,
+        global_config_bytes_before=global_config_bytes_before,
+        canonical_project_trust_path=canonical_project_trust_path,
         project_trust_override=project_trust_override,
         codex_dir_existed=codex_dir_existed,
         expected_manifest=expected_manifest,
