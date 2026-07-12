@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import time as _time
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from copy import deepcopy
 from uuid import uuid4
 
@@ -976,6 +976,74 @@ def _build_composite_miner_receipt(
     return composite, final_records, final_decisions
 
 
+_PROBLEM_ID_CANONICAL_FIELDS = ("title", "problem", "user_impact", "severity")
+
+
+def _problem_id_conflicts(
+    canonical_records: Sequence[Mapping[str, Any]],
+    candidate_records: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Describe divergent causal fields emitted under an existing problem ID."""
+
+    canonical_by_id = {
+        problem_id: dict(record)
+        for record in canonical_records
+        for problem_id in [_coerce_string(record.get("problem_id"))]
+        if problem_id is not None
+    }
+    conflicts: list[dict[str, Any]] = []
+    for candidate in candidate_records:
+        problem_id = _coerce_string(candidate.get("problem_id"))
+        canonical = canonical_by_id.get(problem_id or "")
+        if problem_id is None or canonical is None:
+            continue
+        divergent_fields = [
+            field
+            for field in _PROBLEM_ID_CANONICAL_FIELDS
+            if canonical.get(field) != candidate.get(field)
+        ]
+        if divergent_fields:
+            conflicts.append(
+                {
+                    "problem_id": problem_id,
+                    "divergent_fields": divergent_fields,
+                    "canonical_record": canonical,
+                    "candidate_record": dict(candidate),
+                }
+            )
+    return sorted(
+        conflicts,
+        key=lambda item: (str(item["problem_id"]), tuple(item["divergent_fields"])),
+    )
+
+
+def _problem_id_conflict_validation_errors(
+    canonical_records: Sequence[Mapping[str, Any]],
+    candidate_records: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Return actionable same-author feedback for conflicting generated IDs."""
+
+    references = [dict(record) for record in canonical_records]
+    errors: list[str] = []
+    for candidate in candidate_records:
+        for conflict in _problem_id_conflicts(references, [candidate]):
+            canonical = conflict["canonical_record"]
+            problem_id = str(conflict["problem_id"])
+            for field in conflict["divergent_fields"]:
+                expected = json.dumps(
+                    canonical.get(field),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+                errors.append(
+                    "problem_mining_conflicting_problem_id:"
+                    f"{problem_id}:{field}:expected={expected}:"
+                    "same-mechanism-align-or-distinct-mechanism-rename-or-retract"
+                )
+        references.append(dict(candidate))
+    return errors
+
+
 def _preserve_primary_after_coverage_review_failure(
     *,
     primary_receipt: dict[str, Any],
@@ -1343,6 +1411,15 @@ def _problem_mining_correction_prompt(
         if isinstance(progress_feedback, dict)
         else "null"
     )
+    conflict_guidance = (
+        "\nProblem-ID conflict guidance: preserve valid evidence. If your assigned "
+        "evidence establishes the same mechanism, align the listed causal field to "
+        "the supplied canonical value while keeping only your own citations. If it "
+        "establishes a distinct mechanism, use a distinct stable ID. If it establishes "
+        "neither, retract that record and correct its atom decisions.\n"
+        if any(error.startswith("problem_mining_conflicting_problem_id:") for error in validation_errors)
+        else ""
+    )
     return (
         "SAME-AUTHOR RESPONSE CORRECTION\n\n"
         "Continue this exact mining session in the same evidence workspace. Do not restart the "
@@ -1355,7 +1432,8 @@ def _problem_mining_correction_prompt(
         f"Original assignment prompt SHA-256: {original_prompt_sha256}\n"
         f"Immediately prior response SHA-256: {prior_response_sha256}\n\n"
         "Deterministic validation errors:\n"
-        f"{error_text}\n\n"
+        f"{error_text}\n"
+        f"{conflict_guidance}\n"
         "Correction progress feedback from the immediately prior turn:\n"
         f"{progress_text}\n\n"
         "Currently valid keyed items (preserve unless a correlated correction requires change):\n"
@@ -1370,6 +1448,7 @@ def _problem_mining_valid_item_keys(
     *,
     assigned_atom_ids: list[str],
     routing_keys_required: bool = False,
+    proposal_atom_ids: set[str] | None = None,
 ) -> list[str]:
     """Return independently parse-valid stable keys without treating them as a full envelope."""
 
@@ -1406,6 +1485,7 @@ def _problem_mining_valid_item_keys(
             and problem_id is not None
             and evidence_ids
             and evidence_ids <= assigned
+            and not evidence_ids <= (proposal_atom_ids or set())
         ):
             keys.append("problem_record:" + problem_id)
     expected_decision_fields = {
@@ -1444,6 +1524,37 @@ def _problem_mining_valid_item_keys(
         ):
             keys.append("atom_decision:" + str(atom_id))
     return sorted(set(keys))
+
+
+def _problem_mining_proposal_only_record_errors(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    prompt_atoms: Sequence[Mapping[str, Any]],
+) -> list[str]:
+    """Reject proposed answers that have no independent observed evidence.
+
+    Suggested changes are useful clues and may support an observed problem.  They
+    cannot establish that problem by themselves; accepting them as observations is
+    the exact feedback loop that turns earlier model prose into fresh backlog work.
+    """
+
+    proposal_atom_ids = {
+        atom_id
+        for atom in prompt_atoms
+        for atom_id in [_coerce_string(atom.get("atom_id"))]
+        if atom_id is not None
+        and (
+            _coerce_string(atom.get("evidence_class")) == "proposal"
+            or _coerce_string(atom.get("source")) == "suggested_change"
+        )
+    }
+    errors: list[str] = []
+    for index, record in enumerate(records):
+        evidence_ids = set(_coerce_string_list(record.get("evidence_atom_ids")))
+        if evidence_ids and evidence_ids <= proposal_atom_ids:
+            problem_id = _coerce_string(record.get("problem_id")) or f"index-{index}"
+            errors.append(f"problem_mining_proposal_only_record:{problem_id}")
+    return errors
 
 
 def _problem_mining_routing_decision_errors(
@@ -1560,6 +1671,10 @@ def _run_problem_mining_attempt(
     expected_manifest_sha256: str | None = None,
     resume_session_id: str | None = None,
     prior_normalized_events_paths: tuple[Path, ...] = (),
+    additional_record_validation: Callable[
+        [Sequence[Mapping[str, Any]]], list[str]
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     # Attempt tags are stable logical identities, but a forced regeneration may reuse
     # the same artifacts root.  Put every execution in a fresh content-addressed
@@ -1650,6 +1765,16 @@ def _run_problem_mining_attempt(
             response,
             assigned_atom_ids=assigned_atom_ids,
             routing_keys_required=template_name.endswith("cross_job_routing"),
+            proposal_atom_ids={
+                atom_id
+                for atom in prompt_atoms
+                for atom_id in [_coerce_string(atom.get("atom_id"))]
+                if atom_id is not None
+                and (
+                    _coerce_string(atom.get("evidence_class")) == "proposal"
+                    or _coerce_string(atom.get("source")) == "suggested_change"
+                )
+            },
         )
         normalize_problem_mining_events(
             agent=agent,
@@ -1676,6 +1801,16 @@ def _run_problem_mining_attempt(
                 record_contract_error_prefix + ":" + str(warning) for warning in warnings
             ]
             raise ProblemMiningResponseContractError(";".join(validation_errors))
+        validation_errors = _problem_mining_proposal_only_record_errors(
+            records,
+            prompt_atoms=prompt_atoms,
+        )
+        if validation_errors:
+            raise ProblemMiningResponseContractError(";".join(validation_errors))
+        if additional_record_validation is not None:
+            validation_errors = additional_record_validation(records)
+            if validation_errors:
+                raise ProblemMiningResponseContractError(";".join(validation_errors))
         with cumulative_normalized_events_path.open("wb") as cumulative_stream:
             for event_path in (*prior_normalized_events_paths, normalized_events_path):
                 if event_path.is_file():
@@ -1779,6 +1914,10 @@ def _run_problem_mining_job_with_response_retry(
     resume_session_id: str | None = None,
     attempt_number_base: int = 0,
     prior_normalized_events_paths: tuple[Path, ...] = (),
+    additional_record_validation: Callable[
+        [Sequence[Mapping[str, Any]]], list[str]
+    ]
+    | None = None,
 ) -> dict[str, Any]:
     expected_manifest_sha256 = _problem_mining_attempt_manifest_sha256(initial_manifest)
     def observation(result: dict[str, Any]) -> CorrectionObservation[dict[str, Any]]:
@@ -1850,6 +1989,7 @@ def _run_problem_mining_job_with_response_retry(
         expected_manifest_sha256=expected_manifest_sha256,
         resume_session_id=resume_session_id,
         prior_normalized_events_paths=prior_normalized_events_paths,
+        additional_record_validation=additional_record_validation,
     )
     initial = observation(initial_result)
     acquisition_attempts: tuple[CorrectionObservation[dict[str, Any]], ...] = ()
@@ -1883,6 +2023,7 @@ def _run_problem_mining_job_with_response_retry(
                     initial_workspace_dir=initial_workspace_dir,
                     initial_manifest=initial_manifest,
                     expected_manifest_sha256=expected_manifest_sha256,
+                    additional_record_validation=additional_record_validation,
                 )
             ),
         )
@@ -1952,6 +2093,7 @@ def _run_problem_mining_job_with_response_retry(
             expected_manifest_sha256=expected_manifest_sha256,
             resume_session_id=resume_session_id or initial.agent_session_id,
             prior_normalized_events_paths=tuple(normalized_event_paths),
+            additional_record_validation=additional_record_validation,
         )
         correction_failure = corrected.get("failure")
         if (
@@ -2406,6 +2548,32 @@ def _render_problem_mining_contract_prompt(
     )
 
 
+def _cross_job_review_prompt(
+    *,
+    primary_records: Sequence[Mapping[str, Any]],
+    primary_decisions: Sequence[Mapping[str, Any]],
+    original_prompt: str,
+) -> str:
+    return (
+        "INDEPENDENT CROSS-JOB REVIEW\n\n"
+        "Read the complete fresh evidence workspace. Audit every proposed grouping. "
+        "To confirm a claim, reproduce its complete problem record verbatim and support "
+        "the same ID. Recover any missed evidence-grounded grouping. Return the same strict "
+        "one-decision-per-atom contract. The earlier output is a claim, not evidence."
+        "\n\nEARLIER CLAIMS:\n"
+        + json.dumps(
+            {
+                "problem_records": [dict(item) for item in primary_records],
+                "atom_decisions": [dict(item) for item in primary_decisions],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n\n"
+        + original_prompt
+    )
+
+
 def _run_independently_reviewed_problem_pass(
     *,
     repo_root: Path,
@@ -2417,10 +2585,9 @@ def _run_independently_reviewed_problem_pass(
     model: str | None,
     cfg: RunnerConfig,
     template_name: str = "cross_job_synthesis",
+    canonical_records: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Run one full-read pass and a fresh independent review over the same assignment."""
-
-    import json as _json
 
     assigned_atom_ids = sorted(
         atom_id
@@ -2428,6 +2595,11 @@ def _run_independently_reviewed_problem_pass(
         for atom_id in [_coerce_string(atom.get("atom_id"))]
         if atom_id is not None
     )
+    canonical_snapshot = [dict(record) for record in canonical_records]
+
+    def _validate_problem_ids(records: Sequence[Mapping[str, Any]]) -> list[str]:
+        return _problem_id_conflict_validation_errors(canonical_snapshot, records)
+
     first_workspace = stage_artifacts_dir / base_tag / f"workspace_{uuid4().hex}"
     first_manifest = _write_chunked_problem_mining_atoms_workspace(
         workspace_dir=first_workspace,
@@ -2452,6 +2624,7 @@ def _run_independently_reviewed_problem_pass(
         cfg=cfg,
         initial_workspace_dir=first_workspace,
         initial_manifest=first_manifest,
+        additional_record_validation=_validate_problem_ids,
     )
     failure = first.get("failure")
     if isinstance(failure, Exception):
@@ -2467,20 +2640,10 @@ def _run_independently_reviewed_problem_pass(
         assigned_atom_ids=assigned_atom_ids,
         source_root=repo_root,
     )
-    review_prompt = (
-        "INDEPENDENT CROSS-JOB REVIEW\n\n"
-        "Read the complete fresh evidence workspace. Audit every proposed grouping. "
-        "To confirm a claim, reproduce its complete problem record verbatim and support "
-        "the same ID. Recover any missed evidence-grounded grouping. Return the same strict "
-        "one-decision-per-atom contract. The earlier output is a claim, not evidence.\n\n"
-        "EARLIER CLAIMS:\n"
-        + _json.dumps(
-            {"problem_records": first_records, "atom_decisions": first_decisions},
-            ensure_ascii=False,
-            indent=2,
-        )
-        + "\n\n"
-        + prompt
+    review_prompt = _cross_job_review_prompt(
+        primary_records=first_records,
+        primary_decisions=first_decisions,
+        original_prompt=prompt,
     )
     review = _run_problem_mining_job_with_response_retry(
         repo_root=repo_root,
@@ -2498,37 +2661,35 @@ def _run_independently_reviewed_problem_pass(
         cfg=cfg,
         initial_workspace_dir=review_workspace,
         initial_manifest=review_manifest,
+        additional_record_validation=_validate_problem_ids,
     )
     review_failure = review.get("failure")
     if isinstance(review_failure, Exception):
         raise review_failure
+    review_records = list(review["records"])
+    review_decisions = [dict(item) for item in review["envelope"]["atom_decisions"]]
     final_records, final_decisions = _reconcile_problem_mining_reviews(
         primary_records=first_records,
         primary_decisions=first_decisions,
-        review_records=list(review["records"]),
-        review_decisions=[dict(item) for item in review["envelope"]["atom_decisions"]],
+        review_records=review_records,
+        review_decisions=review_decisions,
     )
-    combined = build_live_miner_receipt(
+    combined, final_records, final_decisions = _build_composite_miner_receipt(
         tag=base_tag,
         template_name=template_name,
         assigned_atom_ids=assigned_atom_ids,
         eligible_atom_ids=assigned_atom_ids,
-        records=final_records,
-        decisions=final_decisions,
-        response_text=_json.dumps(
-            {"first": first["response"], "review": review["response"]},
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-        normalized_events_path=Path(first["normalized_events_path"]),
-        workspace_dir=Path(first["workspace_dir"]),
-        workspace_manifest=dict(first["manifest"]),
+        primary_records=first_records,
+        primary_decisions=first_decisions,
+        primary_receipt=dict(first["receipt"]),
+        review_records=review_records,
+        review_decisions=review_decisions,
+        review_receipt=dict(review["receipt"]),
+        primary_normalized_events_path=Path(first["normalized_events_path"]),
+        primary_workspace_dir=Path(first["workspace_dir"]),
+        primary_workspace_manifest=dict(first["manifest"]),
     )
-    combined["primary_pass"] = dict(first["receipt"])
-    combined["non_support_review"] = dict(review["receipt"])
     combined["review_scope"] = "all_assigned_cross_job_themes"
-    combined["attempt_history"] = list(first["receipt"].get("attempt_history", []))
-    combined["successful_attempt_tag"] = first["receipt"].get("successful_attempt_tag")
     return {
         "records": final_records,
         "decisions": final_decisions,
@@ -2650,6 +2811,58 @@ def _independent_bounded_cross_job_groups(
     return [list(group) for group in sorted(groups)]
 
 
+def _recall_bearing_cross_job_groups(
+    *,
+    routing_signals: list[dict[str, Any]],
+    original_disposition_by_atom: Mapping[str, str],
+    exact_atoms_by_id: Mapping[str, dict[str, Any]],
+) -> tuple[list[list[str]], list[list[str]]]:
+    """Return recall candidates and bounded jobs that cover them losslessly.
+
+    Cross-job synthesis exists to recover observations a fixed miner partition did
+    not support.  Re-synthesizing a group made entirely of supported leaves cannot
+    improve recall; those records already meet in canonical relation review.  Keep
+    supported leaves as anchors only when a group contains a non-support leaf, then
+    pack overlapping groups into bounded jobs so each comparison is retained without
+    repeatedly rereading the same atoms.
+    """
+
+    signal_groups = _independent_bounded_cross_job_groups(routing_signals)
+    recall_groups = [
+        group
+        for group in signal_groups
+        if any(original_disposition_by_atom.get(atom_id) != "supports_case" for atom_id in group)
+    ]
+    bins: list[set[str]] = []
+    for group in sorted(recall_groups, key=lambda item: (-len(item), tuple(item))):
+        group_ids = set(group)
+        choices: list[tuple[int, int, set[str]]] = []
+        for index, current in enumerate(bins):
+            combined = current | group_ids
+            combined_atoms = [
+                exact_atoms_by_id[atom_id]
+                for atom_id in sorted(combined)
+                if atom_id in exact_atoms_by_id
+            ]
+            if len(combined_atoms) != len(combined):
+                continue
+            if len(
+                _problem_mining_job_batches(
+                    combined_atoms,
+                    max_atoms=_PROBLEM_MINING_JOB_MAX_ATOMS,
+                    max_bytes=_PROBLEM_MINING_JOB_MAX_BYTES,
+                )
+            ) == 1:
+                choices.append((len(combined) - len(current), index, combined))
+        if choices:
+            _, selected_index, selected = min(choices, key=lambda item: (item[0], item[1]))
+            bins[selected_index] = selected
+        else:
+            bins.append(group_ids)
+    packed_groups = [sorted(group) for group in bins]
+    return sorted(recall_groups), sorted(packed_groups)
+
+
 def _run_cross_job_problem_synthesis(
     *,
     repo_root: Path,
@@ -2662,6 +2875,7 @@ def _run_cross_job_problem_synthesis(
     agent: str,
     model: str | None,
     cfg: RunnerConfig,
+    canonical_records: Sequence[Mapping[str, Any]] = (),
 ) -> dict[str, Any]:
     """Route uncapped leaf themes hierarchically, then reopen exact atoms before promotion."""
 
@@ -2677,7 +2891,7 @@ def _run_cross_job_problem_synthesis(
     }
     if len(leaf_nodes) < 2 or len(leaf_job_tags) < 2:
         return {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "not_required",
             "leaf_theme_count": len(leaf_nodes),
             "leaf_job_count": len(leaf_job_tags),
@@ -2892,8 +3106,18 @@ def _run_cross_job_problem_synthesis(
     exact_syntheses: list[dict[str, Any]] = []
     override_state_by_atom: dict[str, dict[str, Any]] = {}
     final_records: list[dict[str, Any]] = []
-    bounded_candidate_groups = _independent_bounded_cross_job_groups(routing_signals)
+    signal_candidate_groups = _independent_bounded_cross_job_groups(routing_signals)
+    recall_candidate_groups, bounded_candidate_groups = _recall_bearing_cross_job_groups(
+        routing_signals=routing_signals,
+        original_disposition_by_atom=original_disposition_by_atom,
+        exact_atoms_by_id=exact_atoms_by_id,
+    )
     for synthesis_index, group in enumerate(bounded_candidate_groups, start=1):
+        source_candidate_groups = [
+            candidate
+            for candidate in recall_candidate_groups
+            if set(candidate) <= set(group)
+        ]
         exact_atoms = [
             exact_atoms_by_id[atom_id] for atom_id in group if atom_id in exact_atoms_by_id
         ]
@@ -2919,6 +3143,10 @@ def _run_cross_job_problem_synthesis(
                 "only when the exact observations establish it. Distinguish shared causal "
                 "mechanism from similar wording, expected experimental failures, and unrelated "
                 "symptoms. Every assigned atom must receive one final synthesis decision."
+                " The following atom-ID memberships are routing hints, not evidence; "
+                "evaluate each comparison against the full atoms and do not infer a "
+                "shared cause merely because a membership was routed here:\n"
+                + _json.dumps(source_candidate_groups, ensure_ascii=False)
             ),
         )
         exact = _run_independently_reviewed_problem_pass(
@@ -2930,6 +3158,7 @@ def _run_cross_job_problem_synthesis(
             agent=agent,
             model=model,
             cfg=cfg,
+            canonical_records=[*canonical_records, *final_records],
         )
         cross_records = []
         for record in exact["records"]:
@@ -2980,6 +3209,7 @@ def _run_cross_job_problem_synthesis(
             {
                 "tag": exact_tag,
                 "candidate_atom_ids": group,
+                "source_candidate_groups": source_candidate_groups,
                 "candidate_membership_sha256": _routing_membership_sha256(
                     group,
                     {
@@ -3011,7 +3241,7 @@ def _run_cross_job_problem_synthesis(
     ]
 
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "verified",
         "leaf_theme_count": len(leaf_nodes),
         "leaf_job_count": len(leaf_job_tags),
@@ -3033,6 +3263,11 @@ def _run_cross_job_problem_synthesis(
         "nondiscriminative_routing_signal_count": sum(
             signal.get("disposition") == "nondiscriminative" for signal in routing_signals
         ),
+        "routing_candidate_groups": signal_candidate_groups,
+        "recall_candidate_groups": recall_candidate_groups,
+        "supported_only_candidate_group_count": (
+            len(signal_candidate_groups) - len(recall_candidate_groups)
+        ),
         "candidate_groups": bounded_candidate_groups,
         "exact_syntheses": exact_syntheses,
         "decision_overrides": decision_overrides,
@@ -3041,6 +3276,8 @@ def _run_cross_job_problem_synthesis(
             _json.dumps(
                 {
                     "leaf": [node["membership_sha256"] for node in leaf_nodes],
+                    "routing_groups": signal_candidate_groups,
+                    "recall_groups": recall_candidate_groups,
                     "groups": bounded_candidate_groups,
                     "signals": [signal["signal_sha256"] for signal in routing_signals],
                 },
@@ -3222,6 +3459,17 @@ def _run_problem_mining_stage(
         primary_attempt_history: list[dict[str, Any]] = []
         try:
             meta["prompt_chars"] = len(prompt)
+            canonical_records_for_job = tuple(dict(record) for record in all_records)
+
+            def _validate_job_problem_ids(
+                candidate_records: Sequence[Mapping[str, Any]],
+                canonical_records: Sequence[Mapping[str, Any]] = canonical_records_for_job,
+            ) -> list[str]:
+                return _problem_id_conflict_validation_errors(
+                    canonical_records,
+                    candidate_records,
+                )
+
             primary_run = _run_problem_mining_job_with_response_retry(
                 repo_root=repo_root,
                 stage_artifacts_dir=stage_artifacts_dir,
@@ -3238,6 +3486,7 @@ def _run_problem_mining_stage(
                 cfg=cfg,
                 initial_workspace_dir=workspace_dir,
                 initial_manifest=manifest,
+                additional_record_validation=_validate_job_problem_ids,
             )
             primary_attempt_history = list(primary_run["attempt_history"])
             workspace_dir = Path(primary_run["workspace_dir"])
@@ -3262,11 +3511,12 @@ def _run_problem_mining_stage(
             meta["atoms_chunk_count"] = int(manifest.get("chunk_count") or 0)
             meta["atoms_total_chunk_bytes"] = int(manifest.get("total_chunk_bytes") or 0)
             final_records = records
-            final_decisions = [
+            primary_decisions = [
                 dict(decision)
                 for decision in envelope["atom_decisions"]
                 if isinstance(decision, dict)
             ]
+            final_decisions = list(primary_decisions)
             support_ids = {
                 str(decision["atom_id"])
                 for decision in primary_receipt["atom_decisions"]
@@ -3318,6 +3568,7 @@ def _run_problem_mining_stage(
                     cfg=cfg,
                     initial_workspace_dir=review_workspace,
                     initial_manifest=review_manifest,
+                    additional_record_validation=_validate_job_problem_ids,
                 )
                 review_attempt_history = list(review_run["attempt_history"])
                 review_workspace = Path(review_run["workspace_dir"])
@@ -3328,6 +3579,11 @@ def _run_problem_mining_stage(
                 review_records = list(review_run["records"])
                 review_warnings = list(review_run["warnings"])
                 review_receipt = dict(review_run["receipt"])
+                review_decisions = [
+                    dict(decision)
+                    for decision in review_receipt["atom_decisions"]
+                    if isinstance(decision, dict)
+                ]
                 miner_receipt, final_records, final_decisions = (
                     _build_composite_miner_receipt(
                         tag=tag,
@@ -3335,18 +3591,10 @@ def _run_problem_mining_stage(
                         assigned_atom_ids=assigned_atom_ids,
                         eligible_atom_ids=evidence_draft["eligible_atom_ids"],
                         primary_records=records,
-                        primary_decisions=[
-                            dict(decision)
-                            for decision in primary_receipt["atom_decisions"]
-                            if isinstance(decision, dict)
-                        ],
+                        primary_decisions=primary_decisions,
                         primary_receipt=primary_receipt,
                         review_records=review_records,
-                        review_decisions=[
-                            dict(decision)
-                            for decision in review_receipt["atom_decisions"]
-                            if isinstance(decision, dict)
-                        ],
+                        review_decisions=review_decisions,
                         review_receipt=review_receipt,
                         primary_normalized_events_path=normalized_events_path,
                         primary_workspace_dir=workspace_dir,
@@ -3378,6 +3626,19 @@ def _run_problem_mining_stage(
                     review_failure=review_failure,
                 )
                 live_failures.append(f"{review_tag}:{review_failure}")
+            support_ids = {
+                str(decision["atom_id"])
+                for decision in miner_receipt.get("atom_decisions", [])
+                if isinstance(decision, Mapping)
+                and decision.get("disposition") == "supports_case"
+            }
+            non_support_ids = set(assigned_atom_ids) - support_ids
+            meta["attempt_history"] = primary_attempt_history
+            meta["successful_attempt_tag"] = primary_run.get("successful_attempt_tag")
+            meta["format_retry_count"] = max(0, len(primary_attempt_history) - 1)
+            meta["same_session_correction_count"] = max(
+                0, len(primary_attempt_history) - 1
+            )
             meta["coverage_depth_review_attempt_history"] = review_attempt_history
             meta["coverage_depth_review_format_retry_count"] = max(
                 0, len(review_attempt_history) - 1
@@ -3453,7 +3714,7 @@ def _run_problem_mining_stage(
             file=sys.stderr,
         )
     cross_job_synthesis: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "not_required" if dry_run else "pending",
         "leaf_theme_count": 0,
         "leaf_job_count": 0,
@@ -3483,6 +3744,7 @@ def _run_problem_mining_stage(
                 agent=agent,
                 model=model,
                 cfg=cfg,
+                canonical_records=all_records,
             )
             all_records.extend(
                 dict(record)

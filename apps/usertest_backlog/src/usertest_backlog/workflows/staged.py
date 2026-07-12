@@ -90,6 +90,20 @@ from usertest_backlog.workflows.solution_selection import _run_solution_selectio
 _EXACT_SESSION_CORRECTION_AGENTS = frozenset({"codex"})
 
 
+def _restore_sealed_qualification_lineage(
+    bundled_atoms: Sequence[Mapping[str, Any]],
+    *,
+    case_registry: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Reapply sealed durable case membership to decision-free bundle evidence."""
+
+    return normalize_atom_lineage(
+        [dict(atom) for atom in bundled_atoms],
+        case_registry=case_registry,
+        strict_new_output=True,
+    )
+
+
 def _qualification_correction_identity(
     *,
     source_pending_run_sha256: str,
@@ -6152,13 +6166,22 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         if registry_seed_path is None:
             print("Qualification input bundle is missing its registry seed.", file=sys.stderr)
             return 2
-        atoms = bundled_atoms
         try:
             case_registry = load_case_registry(Path(registry_seed_path))
             write_case_registry(case_registry_json, case_registry)
         except (OSError, ValueError) as exc:
             print(f"[backlog] ERROR: qualification registry seed invalid: {exc}", file=sys.stderr)
             return 2
+        # The qualification bundle deliberately stores decision-free evidence so its
+        # identity cannot be changed by a prior nondeterministic mining turn.  The
+        # copied case registry is a separately sealed input, however, and must be
+        # applied again at execution time.  Otherwise observations already attached
+        # to canonical cases are presented to Stage 1 as novel evidence and duplicate
+        # cases are mined from historical prose.
+        atoms = _restore_sealed_qualification_lineage(
+            bundled_atoms,
+            case_registry=case_registry,
+        )
         agent_last_message_atoms = [
             atom
             for atom in atoms

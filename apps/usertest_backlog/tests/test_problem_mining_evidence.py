@@ -35,6 +35,7 @@ from usertest_backlog.workflows.problem_mining import (
     _problem_mining_attempt_manifest_sha256,
     _problem_mining_job_batches,
     _problem_mining_routing_decision_errors,
+    _recall_bearing_cross_job_groups,
     _reconcile_problem_mining_reviews,
     _relation_decision_item_errors,
     _relation_review_payload,
@@ -988,6 +989,192 @@ def test_cross_job_routing_repairs_same_author_without_promoting_carriers(
     )
 
 
+def test_proposal_only_problem_returns_to_same_author_for_correction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    proposal = _atom("proposal:one")
+    proposal["source"] = "suggested_change"
+    proposal["evidence_class"] = "proposal"
+    prompt_atoms = _atoms_for_problem_mining_prompt([proposal])
+    workspace = tmp_path / "artifacts" / "problem_mining" / "proposal" / "workspace"
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=workspace,
+        prompt_atoms=prompt_atoms,
+        max_records_per_miner=0,
+        assigned_atom_ids=["proposal:one"],
+        source_root=tmp_path,
+    )
+    proposed_record = _problem("proposal:one")
+    proposed_record.pop("case_id", None)
+    initial_response = json.dumps(
+        {
+            "problem_records": [proposed_record],
+            "atom_decisions": [
+                {
+                    "atom_id": "proposal:one",
+                    "disposition": "supports_case",
+                    "problem_ids": ["problem:one"],
+                    "rationale": "The requested change implies a problem.",
+                    "revisit_when": None,
+                }
+            ],
+        }
+    )
+    corrected_response = json.dumps(
+        {
+            "problem_records": [],
+            "atom_decisions": [
+                {
+                    "atom_id": "proposal:one",
+                    "disposition": "unresolved",
+                    "problem_ids": [],
+                    "rationale": "A proposal alone does not establish observed harm.",
+                    "revisit_when": None,
+                }
+            ],
+        }
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> str | StagePromptRun:
+        calls.append(dict(kwargs))
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=dict(kwargs),
+            response=initial_response if len(calls) == 1 else corrected_response,
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+    result = _run_problem_mining_job_with_response_retry(
+        repo_root=tmp_path,
+        stage_artifacts_dir=tmp_path / "artifacts" / "problem_mining",
+        base_tag="problem_mining_001",
+        prompt="Mine observed problems from the assigned evidence.",
+        prompt_atoms=prompt_atoms,
+        assigned_atom_ids=["proposal:one"],
+        max_records_per_miner=0,
+        eligible_atom_ids=["proposal:one"],
+        template_name="problem_miner_default.md",
+        record_contract_error_prefix="problem_record_invalid",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        initial_workspace_dir=workspace,
+        initial_manifest=manifest,
+    )
+
+    assert result["failure"] is None
+    assert result["correction_status"] == "corrected"
+    assert len(calls) == 2
+    assert calls[1]["resume_session_id"] == "019f2cca-9011-7e32-88ae-6c25af578b49"
+    assert "problem_mining_proposal_only_record:problem:one" in str(calls[1]["prompt"])
+    assert "problem_record:problem:one" not in result["attempt_history"][0][
+        "valid_item_keys"
+    ]
+    assert result["records"] == []
+
+
+def test_cross_partition_problem_id_conflict_repairs_author_then_reviewer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prompt_atoms = _atoms_for_problem_mining_prompt([_atom("atom:one")])
+    canonical = _problem("atom:other")
+    canonical.pop("case_id", None)
+    canonical.update(
+        {
+            "title": "Canonical command execution failure",
+            "problem": "The command executor aborts before the requested workflow starts.",
+            "user_impact": "Users cannot begin the requested workflow.",
+            "severity": "high",
+        }
+    )
+    candidate = _problem("atom:one")
+    candidate.pop("case_id", None)
+    candidate.update(
+        {
+            "title": "Command startup is confusing",
+            "problem": "The startup path appears unclear.",
+            "user_impact": "Users may hesitate before starting.",
+            "severity": "low",
+        }
+    )
+    corrected = dict(candidate)
+    for field in ("title", "problem", "user_impact", "severity"):
+        corrected[field] = canonical[field]
+    partially_corrected = dict(corrected)
+    partially_corrected["severity"] = candidate["severity"]
+
+    def response(record: dict[str, object]) -> str:
+        return json.dumps(
+            {
+                "problem_records": [record],
+                "atom_decisions": [
+                    {
+                        "atom_id": "atom:one",
+                        "disposition": "supports_case",
+                        "problem_ids": ["problem:one"],
+                        "rationale": "The exact assigned atom establishes this problem.",
+                        "revisit_when": None,
+                    }
+                ],
+            }
+        )
+
+    calls: list[dict[str, object]] = []
+    correction_round = 0
+    current_author_record = candidate
+
+    def fake_run(**kwargs: object) -> str | StagePromptRun:
+        nonlocal correction_round, current_author_record
+        calls.append(dict(kwargs))
+        prompt = str(kwargs["prompt"])
+        if "SAME-AUTHOR RESPONSE CORRECTION" in prompt:
+            correction_round += 1
+            current_author_record = (
+                partially_corrected if correction_round == 1 else corrected
+            )
+        elif "INDEPENDENT CROSS-JOB REVIEW" not in prompt:
+            current_author_record = candidate
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=dict(kwargs),
+            response=response(current_author_record),
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+    result = _run_independently_reviewed_problem_pass(
+        repo_root=tmp_path,
+        stage_artifacts_dir=tmp_path / "artifacts" / "problem_mining",
+        base_tag="problem_mining_002",
+        prompt="Read the complete evidence and identify observed problems.",
+        prompt_atoms=prompt_atoms,
+        agent="codex",
+        model=None,
+        cfg=object(),
+        template_name="problem_miner_default.md",
+        canonical_records=[canonical],
+    )
+
+    assert len(calls) == 4
+    assert "SAME-AUTHOR RESPONSE CORRECTION" in str(calls[1]["prompt"])
+    assert "problem_mining_conflicting_problem_id" in str(calls[1]["prompt"])
+    assert calls[1]["resume_session_id"] == "019f2cca-9011-7e32-88ae-6c25af578b49"
+    assert calls[2]["resume_session_id"] == "019f2cca-9011-7e32-88ae-6c25af578b49"
+    assert calls[3]["resume_session_id"] is None
+    assert result["records"][0]["title"] == canonical["title"]
+    assert result["records"][0]["evidence_atom_ids"] == ["atom:one"]
+    attempts = result["receipt"]["primary_pass"]["attempt_history"]
+    assert attempts[1]["correction_progress"]["after_error_count"] == 1
+    assert attempts[1]["correction_progress"]["reason"] == "error_count_decreased"
+    assert attempts[2]["correction_progress"]["after_error_count"] == 0
+
+
 def test_cross_job_routing_repairs_exact_independent_reviewer_session(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1933,7 +2120,7 @@ def test_recursive_cross_job_routing_converges_distant_jobs_and_reopens_exact_at
     exact = next(
         synthesis
         for synthesis in result["exact_syntheses"]
-        if set(synthesis["candidate_atom_ids"]) == expected_related_ids
+        if expected_related_ids <= set(synthesis["candidate_atom_ids"])
     )
     assert exact_assignments
     assert all(len(assignment) <= 100 for assignment in exact_assignments)
@@ -1941,7 +2128,10 @@ def test_recursive_cross_job_routing_converges_distant_jobs_and_reopens_exact_at
     exact_workspace = Path(exact["receipt"]["workspace_dir"])
     exact_manifest = json.loads((exact_workspace / "atoms.json").read_text(encoding="utf-8"))
     assert exact_manifest["assigned_atom_count"] == len(exact["candidate_atom_ids"])
-    assert exact_manifest["assigned_atom_count"] == 2
+    assert any(
+        expected_related_ids <= set(group)
+        for group in exact["source_candidate_groups"]
+    )
     assert exact_manifest["problem_record_limit"] is None
     assert {decision["atom_id"] for decision in result["decision_overrides"]} == (
         expected_related_ids
@@ -2405,7 +2595,7 @@ def test_overbroad_cross_job_bucket_is_retained_without_blocking_stage(
     assert any("cross_job_routing_signal_ceiling_invalid" in error for error in errors)
 
 
-def test_overlapping_bounded_keys_keep_independent_exact_cases_and_union_overrides(
+def test_overlapping_bounded_keys_pack_reads_but_preserve_independent_cases(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2440,36 +2630,42 @@ def test_overlapping_bounded_keys_keep_independent_exact_cases_and_union_overrid
         if "EXACT CROSS-JOB SYNTHESIS" in prompt:
             assignment = frozenset(assigned_ids)
             exact_assignments.append(assignment)
-            exact_contract = {
-                frozenset({"atom:a", "atom:b"}): (
-                    "problem:ab",
-                    "A and B establish one exact shared mechanism",
-                ),
-                frozenset({"atom:a", "atom:c"}): (
-                    "problem:ac",
-                    "A and C establish a different exact shared mechanism",
-                ),
-            }
-            problem_id, title = exact_contract[assignment]
             records = [
                 {
-                    "problem_id": problem_id,
-                    "title": title,
+                    "problem_id": "problem:ab",
+                    "title": "A and B establish one exact shared mechanism",
                     "problem": "The exact pair establishes a shared causal failure.",
                     "user_impact": "The causal failure can recur across source jobs.",
                     "severity": "high",
                     "confidence": 0.95,
-                    "evidence_atom_ids": sorted(assignment),
+                    "evidence_atom_ids": ["atom:a", "atom:b"],
                     "evidence_summary": "Both full atoms directly establish this mechanism.",
                     "problem_status": "identified",
-                }
+                },
+                {
+                    "problem_id": "problem:ac",
+                    "title": "A and C establish a different exact shared mechanism",
+                    "problem": "The exact pair establishes a shared causal failure.",
+                    "user_impact": "The causal failure can recur across source jobs.",
+                    "severity": "high",
+                    "confidence": 0.95,
+                    "evidence_atom_ids": ["atom:a", "atom:c"],
+                    "evidence_summary": "Both full atoms directly establish this mechanism.",
+                    "problem_status": "identified",
+                },
             ]
             decisions = [
                 {
                     "atom_id": atom_id,
                     "disposition": "supports_case",
-                    "problem_ids": [problem_id],
-                    "rationale": "The exact pair establishes the retained case.",
+                    "problem_ids": (
+                        ["problem:ab", "problem:ac"]
+                        if atom_id == "atom:a"
+                        else ["problem:ab"]
+                        if atom_id == "atom:b"
+                        else ["problem:ac"]
+                    ),
+                    "rationale": "The packed exact evidence establishes the retained cases.",
                     "revisit_when": None,
                 }
                 for atom_id in assigned_ids
@@ -2524,12 +2720,9 @@ def test_overlapping_bounded_keys_keep_independent_exact_cases_and_union_overrid
     )
 
     expected_groups = [["atom:a", "atom:b"], ["atom:a", "atom:c"]]
-    assert result["candidate_groups"] == expected_groups
-    assert set(exact_assignments) == {
-        frozenset({"atom:a", "atom:b"}),
-        frozenset({"atom:a", "atom:c"}),
-    }
-    assert frozenset({"atom:a", "atom:b", "atom:c"}) not in exact_assignments
+    assert result["recall_candidate_groups"] == expected_groups
+    assert result["candidate_groups"] == [["atom:a", "atom:b", "atom:c"]]
+    assert set(exact_assignments) == {frozenset({"atom:a", "atom:b", "atom:c"})}
     assert {record["problem_id"] for record in result["records"]} == {
         "problem:ab",
         "problem:ac",
@@ -2539,10 +2732,10 @@ def test_overlapping_bounded_keys_keep_independent_exact_cases_and_union_overrid
     assert [
         provenance["problem_ids"]
         for provenance in overrides["atom:a"]["exact_synthesis_provenance"]
-    ] == [["problem:ab"], ["problem:ac"]]
+    ] == [["problem:ab", "problem:ac"]]
     assert overrides["atom:b"]["problem_ids"] == ["problem:ab"]
     assert overrides["atom:c"]["problem_ids"] == ["problem:ac"]
-    assert all(len(exact["decision_overrides"]) == 2 for exact in result["exact_syntheses"])
+    assert all(len(exact["decision_overrides"]) == 3 for exact in result["exact_syntheses"])
 
     leaf_hashes = {
         atom_id: evidence_sha
@@ -2558,6 +2751,41 @@ def test_overlapping_bounded_keys_keep_independent_exact_cases_and_union_overrid
         )
         == []
     )
+
+
+def test_cross_job_exact_groups_only_cover_recall_bearing_signals() -> None:
+    atoms = {
+        atom_id: _atoms_for_problem_mining_prompt([_atom(atom_id)])[0]
+        for atom_id in ("atom:a", "atom:b", "atom:c", "atom:d")
+    }
+    signals = [
+        {
+            "disposition": "candidate",
+            "member_atom_ids": ["atom:a", "atom:b"],
+        },
+        {
+            "disposition": "candidate",
+            "member_atom_ids": ["atom:b", "atom:c"],
+        },
+        {
+            "disposition": "candidate",
+            "member_atom_ids": ["atom:c", "atom:d"],
+        },
+    ]
+    recall, packed = _recall_bearing_cross_job_groups(
+        routing_signals=signals,
+        original_disposition_by_atom={
+            "atom:a": "supports_case",
+            "atom:b": "supports_case",
+            "atom:c": "unresolved",
+            "atom:d": "supports_case",
+        },
+        exact_atoms_by_id=atoms,
+    )
+
+    assert recall == [["atom:b", "atom:c"], ["atom:c", "atom:d"]]
+    assert packed == [["atom:b", "atom:c", "atom:d"]]
+    assert "atom:a" not in packed[0]
 
 
 def test_tiny_atom_corpus_respects_max_atoms_per_job() -> None:

@@ -291,6 +291,38 @@ def test_qualification_prepare_runs_canonical_extraction_without_models_or_ticke
     assert '"ticket_mutations": 0' in command_output
 
 
+def test_qualification_execution_restores_sealed_case_membership_before_mining() -> None:
+    atom_id = "target/run/codex/0:command_failure:1"
+    restored = staged_module._restore_sealed_qualification_lineage(
+        [
+            {
+                "atom_id": atom_id,
+                "run_id": "target/run/codex/0",
+                "run_rel": "target/run/codex/0",
+                "source": "command_failure",
+                "text": "The command failed before the workflow completed.",
+                "evidence_role": "observation",
+            }
+        ],
+        case_registry={
+            "schema_version": 1,
+            "cases": {
+                "case:existing": {
+                    "case_id": "case:existing",
+                    "case_state": "active",
+                }
+            },
+            "atom_id_to_case_id": {atom_id: "case:existing"},
+            "atom_id_to_case_ids": {atom_id: ["case:existing"]},
+        },
+    )
+
+    assert restored[0]["case_id"] == "case:existing"
+    assert restored[0]["disposition"] == "supports_case"
+    assert restored[0]["disposition_status"] == "decided"
+    assert eligible_problem_mining_atoms(restored) == []
+
+
 def test_shadow_pipeline_rejects_invalid_export_gate_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -23,8 +23,10 @@ Stage 1 only asks: what problem exists and what is the evidence?
 - State what was observed (confusion, failure, error), not what should be done.
 - Output must be limited to the fields in the Output contract below.
 - Do NOT propose or hint at solutions or implementation approaches.
-- When suggested-change atoms are present, use them only as indicators of a problem area;
-  do not treat them as solutions.
+- A suggested-change/proposal atom is not evidence that its implied problem exists.
+  It may supplement independently observed evidence, but a problem record whose cited
+  evidence is entirely proposals is invalid. Give proposal-only atoms a non-support
+  disposition unless another assigned observed atom directly establishes the problem.
 - Assign a stable problem_id using the pattern: problem:<short-slug>.
 - Set problem_status to "identified".
 

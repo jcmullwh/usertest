@@ -1846,11 +1846,61 @@ def _cross_job_synthesis_errors(
     )
     if any(not group or not set(group).issubset(eligible_ids) for group in candidate_groups):
         errors.append("problem_mining_cross_job_candidate_group_invalid")
-    if candidate_groups != [list(group) for group in sorted(candidate_signal_groups)]:
-        errors.append("problem_mining_cross_job_candidate_signal_partition_invalid")
+    schema_version = cross_job_synthesis.get("schema_version")
+    routing_groups_raw = cross_job_synthesis.get("routing_candidate_groups")
+    routing_groups = (
+        [sorted(_string_list(group)) for group in routing_groups_raw]
+        if isinstance(routing_groups_raw, list)
+        else []
+    )
+    recall_groups_raw = cross_job_synthesis.get("recall_candidate_groups")
+    recall_groups = (
+        [sorted(_string_list(group)) for group in recall_groups_raw]
+        if isinstance(recall_groups_raw, list)
+        else []
+    )
+    expected_routing_groups = [list(group) for group in sorted(candidate_signal_groups)]
+    expected_recall_groups = [
+        group
+        for group in expected_routing_groups
+        if any(leaf_original_dispositions.get(atom_id) != "supports_case" for atom_id in group)
+    ]
+    if schema_version == 1:
+        if candidate_groups != expected_routing_groups:
+            errors.append("problem_mining_cross_job_candidate_signal_partition_invalid")
+    else:
+        if schema_version != 2:
+            errors.append("problem_mining_cross_job_schema_invalid")
+        if routing_groups != expected_routing_groups:
+            errors.append("problem_mining_cross_job_candidate_signal_partition_invalid")
+        if recall_groups != expected_recall_groups:
+            errors.append("problem_mining_cross_job_recall_partition_invalid")
+        if cross_job_synthesis.get("supported_only_candidate_group_count") != (
+            len(expected_routing_groups) - len(expected_recall_groups)
+        ):
+            errors.append("problem_mining_cross_job_supported_only_count_invalid")
+        packed_sets = [set(group) for group in candidate_groups]
+        recall_sets = [set(group) for group in expected_recall_groups]
+        if candidate_groups != sorted(candidate_groups):
+            errors.append("problem_mining_cross_job_candidate_pack_order_invalid")
+        for packed in packed_sets:
+            contributors = [group for group in recall_sets if group <= packed]
+            if not contributors or set().union(*contributors) != packed:
+                errors.append("problem_mining_cross_job_candidate_pack_invalid")
+                break
+        if any(not any(group <= packed for packed in packed_sets) for group in recall_sets):
+            errors.append("problem_mining_cross_job_recall_coverage_invalid")
     if cross_job_synthesis.get("routing_sha256") != _canonical_hash(
         {
             "leaf": [str(raw.get("membership_sha256")) for raw in leaf if isinstance(raw, Mapping)],
+            **(
+                {
+                    "routing_groups": routing_groups,
+                    "recall_groups": recall_groups,
+                }
+                if schema_version == 2
+                else {}
+            ),
             "groups": candidate_groups,
             "signals": signal_hashes,
         }
@@ -1871,6 +1921,22 @@ def _cross_job_synthesis_errors(
         candidate_ids = sorted(_string_list(raw_exact.get("candidate_atom_ids")))
         if candidate_ids not in candidate_groups or assigned != set(candidate_ids):
             errors.append(f"problem_mining_cross_job_exact_candidate_mismatch:{exact_index}")
+        if schema_version == 2:
+            source_groups_raw = raw_exact.get("source_candidate_groups")
+            source_groups = (
+                [sorted(_string_list(group)) for group in source_groups_raw]
+                if isinstance(source_groups_raw, list)
+                else []
+            )
+            expected_source_groups = [
+                group
+                for group in recall_groups
+                if set(group) <= set(candidate_ids)
+            ]
+            if source_groups != expected_source_groups:
+                errors.append(
+                    f"problem_mining_cross_job_exact_source_groups_invalid:{exact_index}"
+                )
         if raw_exact.get("candidate_membership_sha256") != _canonical_hash(
             [
                 {
