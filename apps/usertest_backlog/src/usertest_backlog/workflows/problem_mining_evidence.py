@@ -37,6 +37,9 @@ _FINAL_DISPOSITIONS = frozenset(
     {"supports_case", "duplicate", "expected_noise", "deferred", "unresolved"}
 )
 _NON_SUPPORT_DISPOSITIONS = _FINAL_DISPOSITIONS - {"supports_case"}
+_CROSS_JOB_ROUTING_KEY_MIN = 2
+_CROSS_JOB_ROUTING_KEY_MAX = 5
+_CROSS_JOB_ROUTING_KEY_CHARS = 80
 STAGE1_ATOM_DECISION_FIELDS = frozenset(
     {
         "case_id",
@@ -93,6 +96,19 @@ def _string_list(value: Any) -> list[str]:
         return []
     return list(
         dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip())
+    )
+
+
+def _routing_decision_keys(value: Any) -> list[str]:
+    raw = value if isinstance(value, list) else []
+    return list(
+        dict.fromkeys(
+            "-".join(item.casefold().split())
+            for item in raw
+            if isinstance(item, str)
+            and item.strip()
+            and len(item.strip()) <= _CROSS_JOB_ROUTING_KEY_CHARS
+        )
     )
 
 
@@ -669,6 +685,10 @@ def build_live_miner_receipt(
             + ",".join(missing_attachment_reads)
         )
 
+    routing_only = template_name.endswith("cross_job_routing")
+    if routing_only and records:
+        raise ValueError(f"problem_mining_routing_records_not_empty:{tag}")
+
     record_ids: set[str] = set()
     record_evidence: dict[str, set[str]] = {}
     cited_ids: set[str] = set()
@@ -701,6 +721,8 @@ def build_live_miner_receipt(
             "rationale",
             "revisit_when",
         }
+        if routing_only:
+            expected_decision_fields.add("routing_keys")
         if set(raw_decision) - expected_decision_fields:
             raise ValueError(f"problem_mining_atom_decision_fields_invalid:{tag}:{index}")
         atom_id = _text(raw_decision.get("atom_id"))
@@ -712,8 +734,17 @@ def build_live_miner_receipt(
             raise ValueError(f"problem_mining_atom_decision_invalid:{tag}:{index}")
         if atom_id not in assigned:
             raise ValueError(f"problem_mining_atom_decision_outside_assignment:{tag}:{atom_id}")
+        routing_keys = _routing_decision_keys(raw_decision.get("routing_keys"))
+        if routing_only and not (
+            _CROSS_JOB_ROUTING_KEY_MIN <= len(routing_keys) <= _CROSS_JOB_ROUTING_KEY_MAX
+        ):
+            raise ValueError(f"problem_mining_routing_decision_keys_invalid:{tag}:{atom_id}")
+        if routing_only and (
+            disposition != "unresolved" or problem_ids or revisit_when is not None
+        ):
+            raise ValueError(f"problem_mining_routing_decision_not_neutral:{tag}:{atom_id}")
         disposition_proof: dict[str, Any] | None = None
-        if disposition == "duplicate":
+        if not routing_only and disposition == "duplicate":
             disposition = "deferred"
             rationale = (
                 "A model-only duplicate label cannot permanently suppress observed evidence. "
@@ -722,7 +753,7 @@ def build_live_miner_receipt(
             )
             revisit_when = "A canonical duplicate relation receipt names the target case."
             problem_ids = []
-        elif disposition == "expected_noise":
+        elif not routing_only and disposition == "expected_noise":
             disposition_proof = _runner_expected_noise_proof(workspace_atoms[atom_id])
             if disposition_proof is None:
                 disposition = "deferred"
@@ -753,6 +784,8 @@ def build_live_miner_receipt(
             "rationale": rationale,
             "revisit_when": revisit_when,
         }
+        if routing_only:
+            normalized["routing_keys"] = routing_keys
         if disposition_proof is not None:
             normalized["disposition_proof"] = disposition_proof
         normalized_decisions.append(normalized)

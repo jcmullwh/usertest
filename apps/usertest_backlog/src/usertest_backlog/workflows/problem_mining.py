@@ -806,6 +806,22 @@ def _reconcile_problem_mining_reviews(
             }
         )
 
+    # Routing keys are search coordinates, not support claims. The independent
+    # reviewer sees the full evidence plus the earlier claims, so its validated
+    # assignment is authoritative. A synthetic union could recreate broad keys no
+    # reviewer actually asserted.
+    for decision in final_decisions:
+        atom_id = str(decision["atom_id"])
+        primary_keys = _normalized_cross_job_routing_keys(
+            primary_by_atom[atom_id].get("routing_keys")
+        )
+        review_keys = _normalized_cross_job_routing_keys(
+            review_by_atom[atom_id].get("routing_keys")
+        )
+        if not primary_keys and not review_keys:
+            continue
+        decision["routing_keys"] = review_keys or primary_keys
+
     referenced_ids = {
         problem_id
         for decision in final_decisions
@@ -1353,6 +1369,7 @@ def _problem_mining_valid_item_keys(
     response: str,
     *,
     assigned_atom_ids: list[str],
+    routing_keys_required: bool = False,
 ) -> list[str]:
     """Return independently parse-valid stable keys without treating them as a full envelope."""
 
@@ -1367,12 +1384,12 @@ def _problem_mining_valid_item_keys(
     assigned = set(assigned_atom_ids)
     keys: list[str] = []
     records_raw = raw.get("problem_records")
-    for record in records_raw if isinstance(records_raw, list) else []:
+    for record in (
+        records_raw if isinstance(records_raw, list) and not routing_keys_required else []
+    ):
         if not isinstance(record, dict):
             continue
-        parsed, warnings = parse_problem_record_list(
-            _json.dumps([record], ensure_ascii=False)
-        )
+        parsed, warnings = parse_problem_record_list(_json.dumps([record], ensure_ascii=False))
         problem_id = _coerce_string(record.get("problem_id"))
         evidence_ids = {
             value
@@ -1383,7 +1400,13 @@ def _problem_mining_valid_item_keys(
             )
             if isinstance(value, str) and value.strip()
         }
-        if parsed and not warnings and problem_id is not None and evidence_ids and evidence_ids <= assigned:
+        if (
+            parsed
+            and not warnings
+            and problem_id is not None
+            and evidence_ids
+            and evidence_ids <= assigned
+        ):
             keys.append("problem_record:" + problem_id)
     expected_decision_fields = {
         "atom_id",
@@ -1394,20 +1417,68 @@ def _problem_mining_valid_item_keys(
     }
     decisions_raw = raw.get("atom_decisions")
     for decision in decisions_raw if isinstance(decisions_raw, list) else []:
-        if not isinstance(decision, dict) or set(decision) != expected_decision_fields:
+        required_fields = (
+            expected_decision_fields | {"routing_keys"}
+            if routing_keys_required
+            else expected_decision_fields
+        )
+        if not isinstance(decision, dict) or set(decision) != required_fields:
             continue
         atom_id = _coerce_string(decision.get("atom_id"))
         rationale = _coerce_string(decision.get("rationale"))
         problem_ids = decision.get("problem_ids")
+        routing_keys = _normalized_cross_job_routing_keys(decision.get("routing_keys"))
+        routing_contract_valid = not routing_keys_required or (
+            decision.get("disposition") == "unresolved"
+            and problem_ids == []
+            and decision.get("revisit_when") is None
+            and _CROSS_JOB_ROUTING_KEY_MIN <= len(routing_keys) <= _CROSS_JOB_ROUTING_KEY_MAX
+        )
         if (
             atom_id in assigned
             and rationale is not None
             and isinstance(decision.get("disposition"), str)
             and isinstance(problem_ids, list)
             and all(isinstance(value, str) and value.strip() for value in problem_ids)
+            and routing_contract_valid
         ):
             keys.append("atom_decision:" + str(atom_id))
     return sorted(set(keys))
+
+
+def _problem_mining_routing_decision_errors(
+    envelope: Mapping[str, Any],
+    *,
+    assigned_atom_ids: Sequence[str],
+    tag: str,
+) -> list[str]:
+    """Return every carrier defect so one same-author correction can fix the batch."""
+
+    errors: list[str] = []
+    records = envelope.get("problem_records")
+    if isinstance(records, list) and records:
+        errors.append(f"problem_mining_routing_records_not_empty:{tag}")
+    decisions_raw = envelope.get("atom_decisions")
+    decisions = decisions_raw if isinstance(decisions_raw, list) else []
+    by_atom = {
+        atom_id: decision
+        for decision in decisions
+        if isinstance(decision, Mapping)
+        for atom_id in [_coerce_string(decision.get("atom_id"))]
+        if atom_id is not None
+    }
+    for atom_id in sorted(set(assigned_atom_ids)):
+        decision = by_atom.get(atom_id) or {}
+        routing_keys = _normalized_cross_job_routing_keys(decision.get("routing_keys"))
+        if not (_CROSS_JOB_ROUTING_KEY_MIN <= len(routing_keys) <= _CROSS_JOB_ROUTING_KEY_MAX):
+            errors.append(f"problem_mining_routing_decision_keys_invalid:{tag}:{atom_id}")
+        if (
+            decision.get("disposition") != "unresolved"
+            or _coerce_string_list(decision.get("problem_ids"))
+            or decision.get("revisit_when") is not None
+        ):
+            errors.append(f"problem_mining_routing_decision_not_neutral:{tag}:{atom_id}")
+    return errors
 
 
 _PROBLEM_MINING_RESPONSE_FAILURE_PREFIXES = (
@@ -1421,6 +1492,9 @@ _PROBLEM_MINING_RESPONSE_FAILURE_PREFIXES = (
     "problem_mining_non_support_has_problem_ids:",
     "problem_mining_deferred_revisit_missing:",
     "problem_mining_revisit_on_non_deferred:",
+    "problem_mining_routing_decision_keys_invalid:",
+    "problem_mining_routing_decision_not_neutral:",
+    "problem_mining_routing_records_not_empty:",
     "problem_mining_assignment_decision_partition_mismatch:",
     "problem_mining_unavailable_attachment_must_remain_unresolved:",
     "problem_mining_citation_without_support_decision:",
@@ -1575,6 +1649,7 @@ def _run_problem_mining_attempt(
         attempt_record["valid_item_keys"] = _problem_mining_valid_item_keys(
             response,
             assigned_atom_ids=assigned_atom_ids,
+            routing_keys_required=template_name.endswith("cross_job_routing"),
         )
         normalize_problem_mining_events(
             agent=agent,
@@ -1583,6 +1658,14 @@ def _run_problem_mining_attempt(
             workspace_dir=workspace_dir,
         )
         envelope = parse_problem_mining_response_envelope(response)
+        if template_name.endswith("cross_job_routing"):
+            validation_errors = _problem_mining_routing_decision_errors(
+                envelope,
+                assigned_atom_ids=assigned_atom_ids,
+                tag=base_tag,
+            )
+            if validation_errors:
+                raise ProblemMiningResponseContractError(";".join(validation_errors))
         import json as _json
 
         records, warnings = parse_problem_record_list(
@@ -1592,9 +1675,7 @@ def _run_problem_mining_attempt(
             validation_errors = [
                 record_contract_error_prefix + ":" + str(warning) for warning in warnings
             ]
-            raise ProblemMiningResponseContractError(
-                ";".join(validation_errors)
-            )
+            raise ProblemMiningResponseContractError(";".join(validation_errors))
         with cumulative_normalized_events_path.open("wb") as cumulative_stream:
             for event_path in (*prior_normalized_events_paths, normalized_events_path):
                 if event_path.is_file():
@@ -2185,10 +2266,10 @@ def _routing_node_prompt_atom(node: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _routing_record_keys(record: dict[str, Any]) -> list[str]:
-    raw = record.get("routing_keys")
+def _normalized_cross_job_routing_keys(value: Any) -> list[str]:
+    raw = value
     values = raw if isinstance(raw, list) else []
-    normalized = list(
+    return list(
         dict.fromkeys(
             "-".join(value.casefold().split())
             for value in values
@@ -2197,10 +2278,6 @@ def _routing_record_keys(record: dict[str, Any]) -> list[str]:
             and len(value.strip()) <= _CROSS_JOB_ROUTING_KEY_CHARS
         )
     )
-    if not (_CROSS_JOB_ROUTING_KEY_MIN <= len(normalized) <= _CROSS_JOB_ROUTING_KEY_MAX):
-        problem_id = _coerce_string(record.get("problem_id")) or "(missing)"
-        raise ValueError(f"cross_job_routing_keys_invalid:{problem_id}")
-    return normalized
 
 
 def _combine_routing_nodes(
@@ -2339,6 +2416,7 @@ def _run_independently_reviewed_problem_pass(
     agent: str,
     model: str | None,
     cfg: RunnerConfig,
+    template_name: str = "cross_job_synthesis",
 ) -> dict[str, Any]:
     """Run one full-read pass and a fresh independent review over the same assignment."""
 
@@ -2367,7 +2445,7 @@ def _run_independently_reviewed_problem_pass(
         assigned_atom_ids=assigned_atom_ids,
         max_records_per_miner=0,
         eligible_atom_ids=assigned_atom_ids,
-        template_name="cross_job_synthesis",
+        template_name=template_name,
         record_contract_error_prefix="cross_job_problem_record_contract_invalid",
         agent=agent,
         model=model,
@@ -2413,7 +2491,7 @@ def _run_independently_reviewed_problem_pass(
         assigned_atom_ids=assigned_atom_ids,
         max_records_per_miner=0,
         eligible_atom_ids=assigned_atom_ids,
-        template_name="adversarial:cross_job_synthesis",
+        template_name=f"adversarial:{template_name}",
         record_contract_error_prefix="cross_job_review_record_contract_invalid",
         agent=agent,
         model=model,
@@ -2432,7 +2510,7 @@ def _run_independently_reviewed_problem_pass(
     )
     combined = build_live_miner_receipt(
         tag=base_tag,
-        template_name="cross_job_synthesis",
+        template_name=template_name,
         assigned_atom_ids=assigned_atom_ids,
         eligible_atom_ids=assigned_atom_ids,
         records=final_records,
@@ -2667,12 +2745,13 @@ def _run_cross_job_problem_synthesis(
                     "leaf decisions or child routing bundles. Identify possible shared "
                     "observed problems across source jobs. Do not claim a final problem or "
                     "solution; exact evidence will be reopened later. Do not group by wording "
-                    "alone. This routing-only pass has one deliberate extension to the record "
-                    "schema: every routing record MUST include `routing_keys`, an array of two "
+                    "alone. This is a pure routing carrier, not problem mining: return an empty "
+                    "`problem_records` array. Every atom decision MUST use `unresolved`, empty "
+                    "`problem_ids`, null `revisit_when`, and include `routing_keys`, an array of two "
                     "to five canonical semantic keys of at most 80 characters covering "
-                    "mechanism, symptom, boundary, or failure phase. Every routing atom must "
-                    "support exactly one routing record, including singleton themes. Keys are "
-                    "used across all batches so middle themes remain semantically visible."
+                    "mechanism, symptom, boundary, or failure phase. The original leaf disposition "
+                    "is already hash-bound in the carrier; do not reclassify it here. Keys are used "
+                    "across all batches so middle themes remain semantically visible."
                 ),
             )
             reviewed = _run_independently_reviewed_problem_pass(
@@ -2684,6 +2763,7 @@ def _run_cross_job_problem_synthesis(
                 agent=agent,
                 model=model,
                 cfg=cfg,
+                template_name="cross_job_routing",
             )
             level_receipts.append(dict(reviewed["receipt"]))
             batch_keys_by_route: dict[str, list[str]] = {}
@@ -2696,25 +2776,24 @@ def _run_cross_job_problem_synthesis(
             invalid_routing_decisions = sorted(
                 route_id
                 for route_id in batch_route_ids
-                if (routing_decisions.get(route_id) or {}).get("disposition") != "supports_case"
-                or len(
-                    _coerce_string_list((routing_decisions.get(route_id) or {}).get("problem_ids"))
+                if not (
+                    _CROSS_JOB_ROUTING_KEY_MIN
+                    <= len(
+                        _normalized_cross_job_routing_keys(
+                            (routing_decisions.get(route_id) or {}).get("routing_keys")
+                        )
+                    )
+                    <= _CROSS_JOB_ROUTING_KEY_MAX
                 )
-                != 1
             )
             if invalid_routing_decisions:
                 raise ValueError(
-                    "cross_job_routing_decision_contract_invalid:"
-                    + ",".join(invalid_routing_decisions)
+                    "cross_job_routing_decision_keys_invalid:" + ",".join(invalid_routing_decisions)
                 )
-            for record in reviewed["records"]:
-                cited_route_ids = _coerce_string_list(record.get("evidence_atom_ids"))
-                routing_keys = _routing_record_keys(record)
-                for route_id in cited_route_ids:
-                    if route_id not in nodes_by_route:
-                        continue
-                    existing_keys = batch_keys_by_route.setdefault(route_id, [])
-                    existing_keys.extend(key for key in routing_keys if key not in existing_keys)
+            for route_id in batch_route_ids:
+                batch_keys_by_route[route_id] = _normalized_cross_job_routing_keys(
+                    routing_decisions[route_id].get("routing_keys")
+                )
             missing_key_routes = sorted(set(batch_route_ids) - set(batch_keys_by_route))
             if missing_key_routes:
                 raise ValueError(

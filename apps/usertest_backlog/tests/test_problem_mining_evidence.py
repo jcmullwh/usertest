@@ -34,11 +34,12 @@ from usertest_backlog.workflows.problem_mining import (
     _preserve_primary_after_coverage_review_failure,
     _problem_mining_attempt_manifest_sha256,
     _problem_mining_job_batches,
+    _problem_mining_routing_decision_errors,
     _reconcile_problem_mining_reviews,
     _relation_decision_item_errors,
     _relation_review_payload,
-    _routing_record_keys,
     _run_cross_job_problem_synthesis,
+    _run_independently_reviewed_problem_pass,
     _run_problem_mining_job_with_response_retry,
     _run_problem_mining_stage,
     _run_relation_review_batches,
@@ -884,6 +885,193 @@ def test_problem_mining_correction_counts_two_old_errors_to_one_new_as_progress(
     assert all("response" in attempt["artifacts"] for attempt in result["attempt_history"])
 
 
+def test_cross_job_routing_repairs_same_author_without_promoting_carriers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atoms = [_atom("routing:one"), _atom("routing:two")]
+    prompt_atoms = _atoms_for_problem_mining_prompt(atoms)
+    initial_workspace = tmp_path / "artifacts" / "problem_mining" / "routing" / "workspace"
+    initial_manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=initial_workspace,
+        prompt_atoms=prompt_atoms,
+        max_records_per_miner=0,
+        assigned_atom_ids=["routing:one", "routing:two"],
+        source_root=tmp_path,
+    )
+    invalid_record = _problem("routing:one")
+    invalid_record.pop("case_id", None)
+    invalid_response = json.dumps(
+        {
+            "problem_records": [invalid_record],
+            "atom_decisions": [
+                {
+                    "atom_id": "routing:one",
+                    "disposition": "supports_case",
+                    "problem_ids": ["problem:one"],
+                    "rationale": "The old contract incorrectly promoted a routing carrier.",
+                    "revisit_when": None,
+                    "routing_keys": ["command-failure", "execution-boundary"],
+                },
+                {
+                    "atom_id": "routing:two",
+                    "disposition": "unresolved",
+                    "problem_ids": [],
+                    "rationale": "This carrier remains neutral but omitted its keys.",
+                    "revisit_when": None,
+                },
+            ],
+        }
+    )
+    corrected_response = json.dumps(
+        {
+            "problem_records": [],
+            "atom_decisions": [
+                {
+                    "atom_id": atom_id,
+                    "disposition": "unresolved",
+                    "problem_ids": [],
+                    "rationale": "Neutral carrier; exact evidence decides problem support.",
+                    "revisit_when": None,
+                    "routing_keys": ["command-failure", f"route-{atom_id[-3:]}"],
+                }
+                for atom_id in ("routing:one", "routing:two")
+            ],
+        }
+    )
+    calls: list[dict[str, object]] = []
+
+    def _fake_run_stage_prompt_json(**kwargs: object) -> str | StagePromptRun:
+        calls.append(dict(kwargs))
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=dict(kwargs),
+            response=invalid_response if len(calls) == 1 else corrected_response,
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        _fake_run_stage_prompt_json,
+    )
+    result = _run_problem_mining_job_with_response_retry(
+        repo_root=tmp_path,
+        stage_artifacts_dir=tmp_path / "artifacts" / "problem_mining",
+        base_tag="cross_job_routing_l01_b001",
+        prompt="Assign neutral semantic routing keys.",
+        prompt_atoms=prompt_atoms,
+        assigned_atom_ids=["routing:one", "routing:two"],
+        max_records_per_miner=0,
+        eligible_atom_ids=["routing:one", "routing:two"],
+        template_name="cross_job_routing",
+        record_contract_error_prefix="cross_job_problem_record_contract_invalid",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        initial_workspace_dir=initial_workspace,
+        initial_manifest=initial_manifest,
+    )
+
+    assert result["failure"] is None
+    assert result["correction_status"] == "corrected"
+    assert len(calls) == 2
+    assert calls[1]["resume_session_id"] == "019f2cca-9011-7e32-88ae-6c25af578b49"
+    correction_prompt = str(calls[1]["prompt"])
+    assert "problem_mining_routing_records_not_empty" in correction_prompt
+    assert "problem_mining_routing_decision_not_neutral" in correction_prompt
+    assert "problem_mining_routing_decision_keys_invalid" in correction_prompt
+    assert result["attempt_history"][0]["valid_item_keys"] == []
+    assert result["records"] == []
+    assert {decision["disposition"] for decision in result["receipt"]["atom_decisions"]} == {
+        "unresolved"
+    }
+    assert all(
+        2 <= len(decision["routing_keys"]) <= 5 for decision in result["receipt"]["atom_decisions"]
+    )
+
+
+def test_cross_job_routing_repairs_exact_independent_reviewer_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atom_ids = ("routing:one", "routing:two")
+    prompt_atoms = _atoms_for_problem_mining_prompt([_atom(atom_id) for atom_id in atom_ids])
+    primary_session = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    reviewer_session = "019f2cca-9011-7e32-88ae-6c25af578b50"
+
+    def _neutral_response(*, key_prefix: str, include_keys: bool) -> str:
+        return json.dumps(
+            {
+                "problem_records": [],
+                "atom_decisions": [
+                    {
+                        "atom_id": atom_id,
+                        "disposition": "unresolved",
+                        "problem_ids": [],
+                        "rationale": "Neutral carrier; exact evidence decides problem support.",
+                        "revisit_when": None,
+                        **(
+                            {
+                                "routing_keys": [
+                                    f"{key_prefix}-mechanism",
+                                    f"route-{atom_id[-3:]}",
+                                ]
+                            }
+                            if include_keys
+                            else {}
+                        ),
+                    }
+                    for atom_id in atom_ids
+                ],
+            }
+        )
+
+    calls: list[dict[str, object]] = []
+
+    def _fake_run_stage_prompt_json(**kwargs: object) -> str | StagePromptRun:
+        calls.append(dict(kwargs))
+        tag = str(kwargs["tag"])
+        resumed = kwargs.get("resume_session_id")
+        if "independent_review" not in tag:
+            response = _neutral_response(key_prefix="primary", include_keys=True)
+            session_id = primary_session
+        elif resumed is None:
+            response = _neutral_response(key_prefix="review", include_keys=False)
+            session_id = reviewer_session
+        else:
+            response = _neutral_response(key_prefix="review", include_keys=True)
+            session_id = reviewer_session
+        helper_kwargs = dict(kwargs)
+        helper_kwargs["resume_session_id"] = session_id
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=helper_kwargs,
+            response=response,
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        _fake_run_stage_prompt_json,
+    )
+    result = _run_independently_reviewed_problem_pass(
+        repo_root=tmp_path,
+        stage_artifacts_dir=tmp_path / "artifacts" / "problem_mining",
+        base_tag="cross_job_routing_l01_b001",
+        prompt="Assign neutral semantic routing keys.",
+        prompt_atoms=prompt_atoms,
+        agent="codex",
+        model=None,
+        cfg=object(),
+        template_name="cross_job_routing",
+    )
+
+    assert len(calls) == 3
+    assert calls[1].get("resume_session_id") is None
+    assert calls[2]["resume_session_id"] == reviewer_session
+    assert result["records"] == []
+    assert result["receipt"]["non_support_review"]["correction_status"] == "corrected"
+    assert all(
+        decision["routing_keys"][0] == "review-mechanism" for decision in result["decisions"]
+    )
+
+
 def _empty_problem_mining_response(kwargs: dict[str, object]) -> str | StagePromptRun:
     """Model a transport-valid empty author turn that remains same-session repairable."""
 
@@ -1623,6 +1811,7 @@ def test_recursive_cross_job_routing_converges_distant_jobs_and_reopens_exact_at
         records: list[dict[str, object]] = []
         supported_ids: set[str] = set()
         problem_id_by_atom: dict[str, str] = {}
+        routing_keys_by_atom: dict[str, list[str]] = {}
         if "EXACT CROSS-JOB SYNTHESIS" in prompt:
             evidence_ids = [f"atom:{index:03d}" for index in related_indexes]
             exact_assignments.append(assigned_ids)
@@ -1677,22 +1866,7 @@ def test_recursive_cross_job_routing_converges_distant_jobs_and_reopens_exact_at
                         f"unique-boundary-{route_id[-10:]}",
                     ]
                 )
-                records.append(
-                    {
-                        "problem_id": f"problem:routing-{route_id[-16:]}",
-                        "title": f"Routing theme {route_id[-12:]}",
-                        "problem": "This is a routing-only semantic theme, not a final claim.",
-                        "user_impact": "Exact evidence must be reopened before promotion.",
-                        "severity": "medium",
-                        "confidence": 0.6,
-                        "evidence_atom_ids": [route_id],
-                        "evidence_summary": "The complete compact theme received semantic keys.",
-                        "problem_status": "identified",
-                        "routing_keys": routing_keys,
-                    }
-                )
-                supported_ids.add(route_id)
-                problem_id_by_atom[route_id] = f"problem:routing-{route_id[-16:]}"
+                routing_keys_by_atom[route_id] = routing_keys
         decisions = [
             {
                 "atom_id": atom_id,
@@ -1704,6 +1878,11 @@ def test_recursive_cross_job_routing_converges_distant_jobs_and_reopens_exact_at
                     else "No cross-job relationship is established at this routing level."
                 ),
                 "revisit_when": None,
+                **(
+                    {"routing_keys": routing_keys_by_atom[atom_id]}
+                    if atom_id in routing_keys_by_atom
+                    else {}
+                ),
             }
             for atom_id in assigned_ids
         ]
@@ -1847,31 +2026,21 @@ def test_supported_leaf_is_cross_job_anchor_but_never_a_decision_override(
                 for atom_id in assigned_ids
             ]
         else:
-            problem_id = "problem:routing-shared-lifecycle"
-            records = [
+            records = []
+            decisions = [
                 {
-                    "problem_id": problem_id,
-                    "title": "Possible shared lifecycle mechanism",
-                    "problem": "The compact themes warrant exact comparison.",
-                    "user_impact": "Exact evidence must be reopened before promotion.",
-                    "severity": "medium",
-                    "confidence": 0.6,
-                    "evidence_atom_ids": assigned_ids,
-                    "evidence_summary": "Both themes describe the same phase and boundary.",
-                    "problem_status": "identified",
+                    "atom_id": atom_id,
+                    "disposition": "unresolved",
+                    "problem_ids": [],
+                    "rationale": (
+                        "This leaf alone remains inconclusive while its semantic keys permit "
+                        "bounded exact cross-job comparison."
+                    ),
+                    "revisit_when": None,
                     "routing_keys": [
                         "lifecycle-completion-classification",
                         "terminal-report-absence",
                     ],
-                }
-            ]
-            decisions = [
-                {
-                    "atom_id": atom_id,
-                    "disposition": "supports_case",
-                    "problem_ids": [problem_id],
-                    "rationale": "The routing themes share bounded causal keys.",
-                    "revisit_when": None,
                 }
                 for atom_id in assigned_ids
             ]
@@ -2034,20 +2203,31 @@ def test_cross_job_support_overrides_apply_before_case_dispositions(tmp_path: Pa
     "routing_keys",
     [
         ["only-one"],
+        ["duplicate", "duplicate"],
         ["one", "two", "three", "four", "five", "six"],
         ["a" * 81, "valid-key"],
     ],
 )
-def test_routing_key_contract_rejects_noncanonical_bounds(
+def test_routing_decision_key_contract_reports_noncanonical_bounds(
     routing_keys: list[str],
 ) -> None:
-    with pytest.raises(ValueError, match="cross_job_routing_keys_invalid"):
-        _routing_record_keys(
-            {
-                "problem_id": "problem:routing-invalid",
-                "routing_keys": routing_keys,
-            }
-        )
+    assert _problem_mining_routing_decision_errors(
+        {
+            "problem_records": [],
+            "atom_decisions": [
+                {
+                    "atom_id": "routing:one",
+                    "disposition": "unresolved",
+                    "problem_ids": [],
+                    "rationale": "Neutral routing carrier.",
+                    "revisit_when": None,
+                    "routing_keys": routing_keys,
+                }
+            ],
+        },
+        assigned_atom_ids=["routing:one"],
+        tag="routing_test",
+    ) == ["problem_mining_routing_decision_keys_invalid:routing_test:routing:one"]
 
 
 def test_cross_job_leaf_verifier_recomputes_evidence_and_membership_hashes() -> None:
@@ -2123,28 +2303,20 @@ def test_overbroad_cross_job_bucket_is_retained_without_blocking_stage(
                 }
             )
         else:
-            record = {
-                "problem_id": "problem:routing-overbroad",
-                "title": "Over-broad routing bucket",
-                "problem": "The routing layer grouped every compact theme.",
-                "user_impact": "Exact evidence would exceed one bounded model job.",
-                "severity": "medium",
-                "confidence": 0.5,
-                "evidence_atom_ids": assigned_ids,
-                "evidence_summary": "All compact themes share deliberately broad test keys.",
-                "problem_status": "identified",
-                "routing_keys": ["shared-test-mechanism", "shared-test-boundary"],
-            }
             response = json.dumps(
                 {
-                    "problem_records": [record],
+                    "problem_records": [],
                     "atom_decisions": [
                         {
                             "atom_id": atom_id,
-                            "disposition": "supports_case",
-                            "problem_ids": ["problem:routing-overbroad"],
-                            "rationale": "The routing-only keys match.",
+                            "disposition": "unresolved",
+                            "problem_ids": [],
+                            "rationale": "The neutral carrier receives deliberately broad keys.",
                             "revisit_when": None,
+                            "routing_keys": [
+                                "shared-test-mechanism",
+                                "shared-test-boundary",
+                            ],
                         }
                         for atom_id in assigned_ids
                     ],
@@ -2314,28 +2486,15 @@ def test_overlapping_bounded_keys_keep_independent_exact_cases_and_union_overrid
                 for origin in ("a", "b", "c")
                 if f"routing-origin-{origin}" in str(atom.get("text", ""))
             }
-            records = [
-                {
-                    "problem_id": f"problem:routing-{origin_by_route[route_id]}",
-                    "title": f"Routing theme {origin_by_route[route_id]}",
-                    "problem": "Routing-only semantic theme.",
-                    "user_impact": "Exact review is required before promotion.",
-                    "severity": "medium",
-                    "confidence": 0.6,
-                    "evidence_atom_ids": [route_id],
-                    "evidence_summary": "The compact theme received semantic keys.",
-                    "problem_status": "identified",
-                    "routing_keys": routing_keys_by_origin[origin_by_route[route_id]],
-                }
-                for route_id in assigned_ids
-            ]
+            records = []
             decisions = [
                 {
                     "atom_id": route_id,
-                    "disposition": "supports_case",
-                    "problem_ids": [f"problem:routing-{origin_by_route[route_id]}"],
-                    "rationale": "The routing-only atom received semantic keys.",
+                    "disposition": "unresolved",
+                    "problem_ids": [],
+                    "rationale": "The neutral routing carrier received semantic keys.",
                     "revisit_when": None,
+                    "routing_keys": routing_keys_by_origin[origin_by_route[route_id]],
                 }
                 for route_id in assigned_ids
             ]
