@@ -2662,6 +2662,126 @@ def test_current_research_attempt_history_allows_adaptive_same_session_correctio
         parse_research_dossier_list(json.dumps([dossier]))
 
 
+def test_research_attempt_history_preserves_post_output_verifier_corrections() -> None:
+    """A verifier transition is provenance, not a malformed repair baseline."""
+
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+
+    def artifacts(attempt_number: int) -> list[dict[str, object]]:
+        return [
+            {
+                "kind": kind,
+                "path": f"C:/retained/verifier-{attempt_number}/{filename}",
+                "exists": False,
+                "sha256": None,
+                "size_bytes": None,
+            }
+            for kind, filename in (
+                ("report", "report.json"),
+                ("workspace_ref", "workspace_ref.json"),
+                ("target_ref", "target_ref.json"),
+                ("normalized_events", "normalized_events.jsonl"),
+                ("codex_subscription_auth", "codex_execpolicy_overlay.json"),
+            )
+        ]
+
+    initial_dossier = {"phase": "output-valid"}
+    initial: dict[str, object] = {
+        "attempt_number": 1,
+        "attempt_kind": "full_research",
+        "outcome": "output_contract_valid",
+        "run_dir": "C:/retained/verifier-1",
+        "report_path": "C:/retained/verifier-1/report.json",
+        "validation_errors": [],
+        "validation_errors_before": [],
+        "validation_errors_after": [],
+        "attempted_dossier": initial_dossier,
+        "attempted_dossier_sha256": _fixture_json_sha256(initial_dossier),
+        "source_attempt_sha256": None,
+        "authorized_paths": [],
+        "baseline_dossier_sha256": None,
+        "baseline_projection_sha256": None,
+        "repair_contract_sha256": None,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": None,
+        "attempt_wall_seconds": 600.0,
+        "repair_progress": None,
+        "attempt_artifacts": artifacts(1),
+    }
+    initial["attempt_sha256"] = contracts.research_attempt_sha256(initial)
+
+    verifier_dossier = {"phase": "verifier-feedback"}
+    verifier_feedback: dict[str, object] = {
+        "attempt_number": 2,
+        "attempt_kind": "evidence_verification_feedback",
+        "outcome": "evidence_verification_invalid",
+        "run_dir": "C:/retained/verifier-1",
+        "report_path": "C:/retained/verifier-1/report.json",
+        "validation_errors": ["research_positive_outcome_contract_invalid"],
+        "validation_errors_before": [],
+        "validation_errors_after": ["research_positive_outcome_contract_invalid"],
+        "attempted_dossier": verifier_dossier,
+        "attempted_dossier_sha256": _fixture_json_sha256(verifier_dossier),
+        "source_attempt_sha256": initial["attempt_sha256"],
+        "authorized_paths": [],
+        "baseline_dossier_sha256": None,
+        "baseline_projection_sha256": None,
+        "repair_contract_sha256": None,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": None,
+        "attempt_wall_seconds": 0.0,
+        "repair_progress": None,
+        "attempt_artifacts": artifacts(2),
+    }
+    verifier_feedback["attempt_sha256"] = contracts.research_attempt_sha256(
+        verifier_feedback
+    )
+
+    corrected_dossier = {"phase": "verifier-corrected"}
+    verifier_repair: dict[str, object] = {
+        "attempt_number": 3,
+        "attempt_kind": "evidence_verification_research_continuation",
+        "outcome": "repair_contract_valid",
+        "run_dir": "C:/retained/verifier-3",
+        "report_path": "C:/retained/verifier-3/report.json",
+        "validation_errors": [],
+        "validation_errors_before": verifier_feedback["validation_errors_after"],
+        "validation_errors_after": [],
+        "attempted_dossier": corrected_dossier,
+        "attempted_dossier_sha256": _fixture_json_sha256(corrected_dossier),
+        "source_attempt_sha256": verifier_feedback["attempt_sha256"],
+        "authorized_paths": ["extensions.backlog_repro_research"],
+        "baseline_dossier_sha256": verifier_feedback["attempted_dossier_sha256"],
+        "baseline_projection_sha256": "a" * 64,
+        "repair_contract_sha256": "b" * 64,
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "resumed_from_session_id": session_id,
+        "attempt_wall_seconds": 30.0,
+        "repair_progress": {
+            "decision": "accepted",
+            "reason": "evidence_verification_satisfied",
+        },
+        "attempt_artifacts": artifacts(3),
+    }
+    verifier_repair["attempt_sha256"] = contracts.research_attempt_sha256(verifier_repair)
+
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = [initial, verifier_feedback, verifier_repair]
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    assert [item["attempt_kind"] for item in parsed[0]["research_attempts"]] == [
+        "full_research",
+        "evidence_verification_feedback",
+        "evidence_verification_research_continuation",
+    ]
+
+
 def test_current_research_attempt_history_allows_multiple_progress_gated_fresh_cycles() -> None:
     sessions = [
         "019f2cca-9011-7e32-88ae-6c25af578b49",

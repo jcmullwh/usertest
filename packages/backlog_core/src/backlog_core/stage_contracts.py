@@ -1124,7 +1124,14 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
         if not kinds or kinds[0] != "full_research":
             errors.append(f"research_dossier_research_attempt_sequence_missing_initial: {pid}")
         if any(
-            kind not in {"model_output_repair", "fresh_research_retry"}
+            kind
+            not in {
+                "model_output_repair",
+                "fresh_research_retry",
+                "evidence_verification_feedback",
+                "evidence_verification_dossier_repair",
+                "evidence_verification_research_continuation",
+            }
             for kind in kinds[1:]
         ):
             errors.append(f"research_dossier_invalid_targeted_repair_attempt_sequence: {pid}")
@@ -1156,8 +1163,15 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                         f"research_dossier_research_attempt_source_not_prior: {pid}: index={index}"
                     )
                 else:
-                    if attempt.get("baseline_dossier_sha256") != source_attempt.get(
-                        "attempted_dossier_sha256"
+                    # A verification-feedback record is the runner's immutable
+                    # transition from an output-valid dossier into verifier errors.
+                    # It points at the model attempt it verified but deliberately has
+                    # no repair baseline; the following same-author repair/continuation
+                    # uses the feedback record itself as its hashed baseline.
+                    if (
+                        attempt.get("attempt_kind") != "evidence_verification_feedback"
+                        and attempt.get("baseline_dossier_sha256")
+                        != source_attempt.get("attempted_dossier_sha256")
                     ):
                         errors.append(
                             f"research_dossier_research_attempt_baseline_hash_mismatch: "
