@@ -47,6 +47,7 @@ ATOM_DISPOSITION_SOURCES: frozenset[str] = frozenset(
         "runner_novel_case_classification",
         "runner_parent_lineage",
         "runner_target_ref",
+        "runner_target_ref_lineage",
         "runner_ticket_ref",
     }
 )
@@ -63,6 +64,13 @@ _SERVER_OWNED_PROBLEM_CASE_FIELDS = frozenset(
         "identity_coalesced_problem_ids",
         "source_evidence_atom_ids",
         "derived_evidence_atom_ids",
+        "case_identity_status",
+        "case_identity_candidate_ids",
+        "provisional_same_cause_group",
+        "provisional_same_cause_clearance",
+        "provisional_same_cause_integrity_errors",
+        "verified_causal_signature_sha256",
+        "verified_causal_signature_source",
     }
 )
 _MISSION_ORIGIN_STAGES: Mapping[str, tuple[str, str]] = {
@@ -70,6 +78,10 @@ _MISSION_ORIGIN_STAGES: Mapping[str, tuple[str, str]] = {
     # such as ``investigate_verification_path_failure`` look like derived evidence and
     # silently removed their observations from problem mining.
     "backlog_repro_research": ("repro_research", "research"),
+    "backlog_repro_research_dossier_repair": (
+        "repro_research_dossier_repair",
+        "research",
+    ),
     "review_backlog_implementation_pr_v1": ("verification", "verification"),
     "implement_backlog_ticket_v1": ("implementation", "implementation"),
     "implement_maintenance_backlog_ticket_v1": ("implementation", "implementation"),
@@ -96,6 +108,94 @@ def _clean_string_list(value: Any) -> list[str]:
     return list(
         dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip())
     )
+
+
+def provisional_same_cause_group_errors(
+    value: Any,
+    *,
+    owning_case_id: str | None = None,
+) -> list[str]:
+    """Validate the durable, pre-research same-cause hypothesis packet.
+
+    A provisional group is deliberately not an alias. Its complete member facets are
+    the evidence boundary used both to research the combined unit and to decide later
+    whether the hypothesis may be finalized or cleared. Older skeletal registry
+    entries remain readable, but are locally blocked until a complete group is rebuilt.
+    """
+
+    if not isinstance(value, Mapping):
+        return ["provisional_same_cause_group_missing"]
+    errors: list[str] = []
+    if value.get("schema_version") != 1:
+        errors.append("provisional_same_cause_schema_invalid")
+    if _clean_string(value.get("status")) != "research_hypothesis":
+        errors.append("provisional_same_cause_status_invalid")
+    if _clean_string(value.get("group_id")) is None:
+        errors.append("provisional_same_cause_group_id_missing")
+
+    member_case_ids = _clean_string_list(value.get("member_case_ids"))
+    if len(member_case_ids) < 2:
+        errors.append("provisional_same_cause_members_incomplete")
+    if owning_case_id is not None and owning_case_id not in member_case_ids:
+        errors.append("provisional_same_cause_owner_missing")
+
+    facets_raw = value.get("member_facets")
+    facets = (
+        [dict(item) for item in facets_raw if isinstance(item, Mapping)]
+        if isinstance(facets_raw, list)
+        else []
+    )
+    facet_case_ids = [
+        case_id
+        for facet in facets
+        for case_id in [_clean_string(facet.get("case_id"))]
+        if case_id is not None
+    ]
+    if (
+        len(facets) != len(member_case_ids)
+        or len(facet_case_ids) != len(set(facet_case_ids))
+        or set(facet_case_ids) != set(member_case_ids)
+    ):
+        errors.append("provisional_same_cause_facets_incomplete")
+    for facet in facets:
+        case_id = _clean_string(facet.get("case_id")) or "(missing)"
+        evidence_atom_ids = set(_clean_string_list(facet.get("evidence_atom_ids")))
+        source_atom_ids = set(_clean_string_list(facet.get("source_evidence_atom_ids")))
+        if not evidence_atom_ids:
+            errors.append(f"provisional_same_cause_facet_evidence_missing:{case_id}")
+        if not source_atom_ids:
+            errors.append(f"provisional_same_cause_facet_source_evidence_missing:{case_id}")
+        elif not source_atom_ids.issubset(evidence_atom_ids):
+            errors.append(f"provisional_same_cause_facet_source_evidence_invalid:{case_id}")
+    return list(dict.fromkeys(errors))
+
+
+def provisional_same_cause_clearance_errors(
+    group: Any,
+    clearance: Any,
+) -> list[str]:
+    """Validate a runner-owned, evidence-complete decision to dissolve a hypothesis."""
+
+    errors = provisional_same_cause_group_errors(group)
+    if not isinstance(group, Mapping) or not isinstance(clearance, Mapping):
+        return [*errors, "provisional_same_cause_clearance_missing"]
+    if _clean_string(clearance.get("group_id")) != _clean_string(group.get("group_id")):
+        errors.append("provisional_same_cause_clearance_group_mismatch")
+    member_case_ids = set(_clean_string_list(group.get("member_case_ids")))
+    if set(_clean_string_list(clearance.get("member_case_ids"))) != member_case_ids:
+        errors.append("provisional_same_cause_clearance_members_mismatch")
+    expected_source_atom_ids = {
+        atom_id
+        for facet in (
+            group.get("member_facets") if isinstance(group.get("member_facets"), list) else []
+        )
+        if isinstance(facet, Mapping)
+        for atom_id in _clean_string_list(facet.get("source_evidence_atom_ids"))
+    }
+    cited_atom_ids = set(_clean_string_list(clearance.get("evidence_atom_ids")))
+    if not expected_source_atom_ids or not expected_source_atom_ids.issubset(cited_atom_ids):
+        errors.append("provisional_same_cause_clearance_evidence_incomplete")
+    return list(dict.fromkeys(errors))
 
 
 def _atom_evidence_class(atom: Mapping[str, Any]) -> str:
@@ -154,6 +254,9 @@ def _runner_origin_from_target_ref(target_ref: Mapping[str, Any]) -> tuple[str, 
     must never downgrade a derived requested mission to an observation.
     """
 
+    explicit, _ = _runner_lineage_from_target_ref(target_ref)
+    if explicit is not None:
+        return explicit[0], explicit[1]
     candidates = [
         _origin_from_mission(_clean_string(target_ref.get(field)))
         for field in ("mission_id", "requested_mission_id")
@@ -163,6 +266,33 @@ def _runner_origin_from_target_ref(target_ref: Mapping[str, Any]) -> tuple[str, 
         key=lambda item: _RUNNER_ORIGIN_PRECEDENCE[item[1]],
         default=("observation", "observation"),
     )
+
+
+def _runner_lineage_from_target_ref(
+    target_ref: Mapping[str, Any],
+) -> tuple[tuple[str, str, str | None] | None, list[str]]:
+    """Validate explicit runner-owned lineage without consulting model claims."""
+
+    raw = target_ref.get("backlog_lineage")
+    if raw is None:
+        return None, []
+    if not isinstance(raw, Mapping):
+        return None, ["runner_target_ref_backlog_lineage_invalid"]
+    evidence_role = _clean_string(raw.get("evidence_role"))
+    origin_stage = _clean_string(raw.get("origin_stage"))
+    parent_case_id = _clean_string(raw.get("parent_case_id"))
+    errors: list[str] = []
+    if evidence_role not in EVIDENCE_ROLES:
+        errors.append("runner_target_ref_evidence_role_invalid")
+    if origin_stage is None:
+        errors.append("runner_target_ref_origin_stage_invalid")
+    if evidence_role in _DERIVED_EVIDENCE_ROLES and parent_case_id is None:
+        errors.append("runner_target_ref_parent_case_id_required")
+    if errors:
+        return None, errors
+    assert evidence_role is not None
+    assert origin_stage is not None
+    return (origin_stage, evidence_role, parent_case_id), []
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -491,15 +621,19 @@ def record_lineage_context(record: Mapping[str, Any], *, run_id: str) -> dict[st
 
     target_ref_raw = record.get("target_ref")
     target_ref = target_ref_raw if isinstance(target_ref_raw, Mapping) else {}
+    explicit_lineage, explicit_lineage_errors = _runner_lineage_from_target_ref(target_ref)
     origin_stage, evidence_role = _runner_origin_from_target_ref(target_ref)
     authorities: list[str] = []
-    if evidence_role in _DERIVED_EVIDENCE_ROLES:
+    if explicit_lineage is not None:
+        authorities.append("runner_target_ref_lineage")
+    elif evidence_role in _DERIVED_EVIDENCE_ROLES:
         authorities.append("runner_target_ref")
 
+    explicit_parent_case_id = explicit_lineage[2] if explicit_lineage is not None else None
     parent_case_id: str | None = None
     parent_problem_id: str | None = None
     derived_from_atom_ids: list[str] = []
-    lineage_errors: list[str] = []
+    lineage_errors: list[str] = list(explicit_lineage_errors)
 
     report_raw = record.get("report")
     report = report_raw if isinstance(report_raw, Mapping) else {}
@@ -555,7 +689,9 @@ def record_lineage_context(record: Mapping[str, Any], *, run_id: str) -> dict[st
         authorities.append("runner_ticket_ref")
 
     trusted_case_candidates = {
-        value for value in (assignment_case_id, ticket_case_id) if value is not None
+        value
+        for value in (explicit_parent_case_id, assignment_case_id, ticket_case_id)
+        if value is not None
     }
     trusted_parent_conflict = len(trusted_case_candidates) > 1
     if trusted_parent_conflict:
@@ -1053,6 +1189,48 @@ def atom_is_idea_originated(atom: Mapping[str, Any]) -> bool:
     return False
 
 
+def atom_is_independent_problem_evidence(atom: Mapping[str, Any]) -> bool:
+    """Return whether an automated atom may define its own problem work unit.
+
+    Ordinary observations are independent evidence. Research, implementation, and
+    verification atoms remain attached to their parent case by default, but a
+    runner-classified ``novel_case`` is intentionally different: it represents a
+    distinct failure discovered while processing the parent. Treat that one narrow,
+    receipted state as source-like for recovery and stability accounting so a real
+    pipeline failure cannot disappear merely because it was observed downstream.
+    """
+
+    if atom_is_idea_originated(atom):
+        return False
+    role = _clean_string(atom.get("evidence_role")) or "observation"
+    if role not in _DERIVED_EVIDENCE_ROLES:
+        return True
+    if _clean_string(atom.get("disposition")) != "novel_case":
+        return False
+    parent_case_id = _clean_string(atom.get("parent_case_id"))
+    case_id = _clean_string(atom.get("case_id"))
+    receipt_raw = atom.get("disposition_receipt")
+    receipt = receipt_raw if isinstance(receipt_raw, Mapping) else {}
+    candidate = bool(
+        parent_case_id is not None
+        and _clean_string(atom.get("novel_case_rationale")) is not None
+        and case_id != parent_case_id
+        and _clean_string(atom.get("evidence_class")) == "observed"
+        and _clean_string(receipt.get("source"))
+        in {"runner_novel_case_classification", "atom_action_ledger"}
+        and _clean_string(atom.get("lineage_mining_blocker")) is None
+        and not _operational_candidate_integrity_errors(atom)
+        and not atom_disposition_receipt_errors(atom, require_decided=True)
+    )
+    if not candidate:
+        return False
+    try:
+        validate_atom_lineage(dict(atom), context="independent_problem_evidence")
+    except ValueError:
+        return False
+    return True
+
+
 def _evidence_seed_ids(
     evidence_ids: Sequence[str], atoms_by_id: Mapping[str, Mapping[str, Any]]
 ) -> list[str]:
@@ -1168,8 +1346,24 @@ def assign_problem_case_ids(
             if is_novel and parent_case_id is not None:
                 related_parent_cases.add(parent_case_id)
 
+        identity_status = "resolved"
+        identity_candidates: list[str] = []
         if len(candidates) == 1:
             case_id = next(iter(candidates))
+        elif len(candidates) > 1:
+            # Evidence already owned by multiple durable cases is a relation question,
+            # not a reason to manufacture a third identity.  Keep the record visible as
+            # one pending relation-review packet, route it through an existing identity,
+            # and retain the complete candidate set for the reviewer and downstream
+            # evidence gates.  A merge/split/same-cause decision must resolve it before
+            # implementation planning can advance.
+            identity_candidates = sorted(candidates)
+            case_id = (
+                persisted_problem_case
+                if persisted_problem_case in candidates
+                else identity_candidates[0]
+            )
+            identity_status = "pending_relation"
         elif not candidates and operational_signatures:
             # The first occurrence set mints identity from the stable failure
             # signature, never from its mutable set of occurrence atom IDs.
@@ -1181,6 +1375,9 @@ def assign_problem_case_ids(
             case_id = mint_case_id(seeds or evidence_ids)
 
         record["case_id"] = case_id
+        record["case_identity_status"] = identity_status
+        if identity_candidates:
+            record["case_identity_candidate_ids"] = identity_candidates
         record["canonical_problem_id"] = problem_id
         record["case_member_problem_ids"] = [problem_id]
         record["case_revision"] = max(1, int(record.get("case_revision") or 1))
@@ -1225,6 +1422,30 @@ def assign_problem_case_ids(
             by_case[case_id] = dict(record)
             case_order.append(case_id)
             continue
+        identity_statuses = {
+            value
+            for value in (
+                _clean_string(existing.get("case_identity_status")),
+                _clean_string(record.get("case_identity_status")),
+            )
+            if value is not None
+        }
+        if "pending_relation" in identity_statuses:
+            existing["case_identity_status"] = "pending_relation"
+        elif "provisional_same_cause" in identity_statuses:
+            existing["case_identity_status"] = "provisional_same_cause"
+        else:
+            existing["case_identity_status"] = "resolved"
+        identity_candidates = sorted(
+            {
+                *_clean_string_list(existing.get("case_identity_candidate_ids")),
+                *_clean_string_list(record.get("case_identity_candidate_ids")),
+            }
+        )
+        if identity_candidates:
+            existing["case_identity_candidate_ids"] = identity_candidates
+        elif existing["case_identity_status"] == "resolved":
+            existing.pop("case_identity_candidate_ids", None)
         existing["evidence_atom_ids"] = list(
             dict.fromkeys(
                 _clean_string_list(existing.get("evidence_atom_ids"))
@@ -1255,6 +1476,14 @@ def assign_problem_case_ids(
                 + [_clean_string(record.get("problem_id")) or ""]
             )
         )
+        related_case_ids = sorted(
+            {
+                *_clean_string_list(existing.get("related_case_ids")),
+                *_clean_string_list(record.get("related_case_ids")),
+            }
+        )
+        if related_case_ids:
+            existing["related_case_ids"] = related_case_ids
         by_case[case_id] = existing
     return [by_case[case_id] for case_id in case_order]
 
@@ -1422,6 +1651,11 @@ def attach_supporting_atoms_to_problem_cases(
             for candidate in [
                 case_id,
                 *_clean_string_list(case.get("absorbed_case_ids")),
+                *(
+                    _clean_string_list(case.get("case_identity_candidate_ids"))
+                    if case.get("case_identity_status") == "provisional_same_cause"
+                    else []
+                ),
             ]
             if candidate is not None
         }
@@ -1612,6 +1846,75 @@ def build_case_registry(
             "split_parent_problem_id": _clean_string(record.get("split_parent_problem_id"))
             or _clean_string(previous_entry.get("split_parent_problem_id")),
         }
+        causal_signature = _clean_string(record.get("verified_causal_signature_sha256"))
+        causal_signature_source = _clean_string(record.get("verified_causal_signature_source"))
+        if (
+            _valid_sha256(causal_signature)
+            and causal_signature_source == "runner_verified_causal_signature_v1"
+        ):
+            entry["verified_causal_signature_sha256"] = causal_signature.casefold()
+            entry["verified_causal_signature_source"] = causal_signature_source
+        requested_identity_status = _clean_string(record.get("case_identity_status"))
+        prior_identity_status = _clean_string(previous_entry.get("case_identity_status"))
+        record_provisional = record.get("provisional_same_cause_group")
+        previous_provisional = previous_entry.get("provisional_same_cause_group")
+        clearance = record.get("provisional_same_cause_clearance")
+        clears_previous_provisional = bool(
+            isinstance(previous_provisional, Mapping)
+            and (
+                not provisional_same_cause_clearance_errors(previous_provisional, clearance)
+                or (
+                    requested_identity_status == "resolved"
+                    and bool(_clean_string_list(record.get("absorbed_case_ids")))
+                )
+            )
+        )
+        provisional_group: Mapping[str, Any] | None = None
+        if isinstance(record_provisional, Mapping):
+            provisional_group = record_provisional
+        elif isinstance(previous_provisional, Mapping) and not clears_previous_provisional:
+            provisional_group = previous_provisional
+
+        if provisional_group is not None:
+            provisional_errors = provisional_same_cause_group_errors(
+                provisional_group,
+                owning_case_id=case_id,
+            )
+            entry["provisional_same_cause_group"] = deepcopy(provisional_group)
+            identity_candidates = sorted(
+                {
+                    *_clean_string_list(previous_entry.get("case_identity_candidate_ids")),
+                    *_clean_string_list(record.get("case_identity_candidate_ids")),
+                    *_clean_string_list(provisional_group.get("member_case_ids")),
+                }
+            )
+            if identity_candidates:
+                entry["case_identity_candidate_ids"] = identity_candidates
+            if provisional_errors:
+                entry["case_identity_status"] = "pending_relation"
+                entry["provisional_same_cause_integrity_errors"] = provisional_errors
+            else:
+                entry["case_identity_status"] = (
+                    "pending_relation"
+                    if requested_identity_status == "pending_relation"
+                    else "provisional_same_cause"
+                )
+                entry.pop("provisional_same_cause_integrity_errors", None)
+        else:
+            identity_status = requested_identity_status or prior_identity_status
+            if identity_status is not None:
+                entry["case_identity_status"] = identity_status
+            if identity_status == "resolved" or clears_previous_provisional:
+                entry.pop("case_identity_candidate_ids", None)
+                entry.pop("provisional_same_cause_group", None)
+                entry.pop("provisional_same_cause_integrity_errors", None)
+                entry["case_identity_status"] = "resolved"
+            else:
+                identity_candidates = _clean_string_list(
+                    record.get("case_identity_candidate_ids")
+                ) or _clean_string_list(previous_entry.get("case_identity_candidate_ids"))
+                if identity_candidates:
+                    entry["case_identity_candidate_ids"] = identity_candidates
         reopened_from_state = _clean_string(record.get("reopened_from_state"))
         if reopened_from_state in TERMINAL_CASE_STATES:
             lifecycle_raw = previous_entry.get("current_lifecycle")
@@ -1664,6 +1967,9 @@ def build_case_registry(
             )
             alias_entry["state"] = "alias"
             alias_entry["alias_of"] = case_id
+            alias_entry.pop("case_identity_candidate_ids", None)
+            alias_entry.pop("provisional_same_cause_group", None)
+            alias_entry["case_identity_status"] = "resolved"
             cases[absorbed_case_id] = alias_entry
 
     # Persist split lineage after all children exist.  The parent remains a durable
@@ -2796,6 +3102,34 @@ def verified_mechanism_identities_from_case_registry(
     return identities
 
 
+def verified_causal_identities_from_case_registry(
+    registry: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Return runner-persisted full causal identities, not mechanism surface hashes."""
+
+    if not isinstance(registry, Mapping):
+        return {}
+    cases_raw = registry.get("cases")
+    if not isinstance(cases_raw, Mapping):
+        return {}
+    identities: dict[str, str] = {}
+    for raw_case_id, raw_entry in cases_raw.items():
+        if not isinstance(raw_entry, Mapping):
+            continue
+        case_id = _clean_string(raw_entry.get("case_id")) or _clean_string(raw_case_id)
+        digest = _clean_string(raw_entry.get("verified_causal_signature_sha256"))
+        if (
+            case_id is None
+            or raw_entry.get("verified_causal_signature_source")
+            != "runner_verified_causal_signature_v1"
+            or not _valid_sha256(digest)
+            or raw_entry.get("root_cause_status") != "established"
+        ):
+            continue
+        identities[case_id] = str(digest).casefold()
+    return identities
+
+
 def problem_case_records_from_registry(
     registry: Mapping[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -2861,12 +3195,34 @@ def problem_case_records_from_registry(
             "related_case_ids": _clean_string_list(raw_entry.get("related_case_ids")),
             "_historical_case_context": True,
         }
+        identity_status = _clean_string(raw_entry.get("case_identity_status"))
+        if identity_status is not None:
+            record["case_identity_status"] = identity_status
+        identity_candidates = _clean_string_list(
+            raw_entry.get("case_identity_candidate_ids")
+        )
+        if identity_candidates:
+            record["case_identity_candidate_ids"] = identity_candidates
+        provisional_group = raw_entry.get("provisional_same_cause_group")
+        if isinstance(provisional_group, Mapping):
+            record["provisional_same_cause_group"] = deepcopy(provisional_group)
+        provisional_integrity_errors = _clean_string_list(
+            raw_entry.get("provisional_same_cause_integrity_errors")
+        )
+        if provisional_integrity_errors:
+            record["provisional_same_cause_integrity_errors"] = provisional_integrity_errors
         verified_mechanisms = verified_mechanism_identities_from_case_registry(
             {"cases": {case_id: raw_entry}}
         )
         if case_id in verified_mechanisms:
             record["verified_mechanism_sha256"] = verified_mechanisms[case_id]
             record["verified_mechanism_source"] = "runner_research_evidence_verification_v1"
+        verified_causal_identities = verified_causal_identities_from_case_registry(
+            {"cases": {case_id: raw_entry}}
+        )
+        if case_id in verified_causal_identities:
+            record["verified_causal_signature_sha256"] = verified_causal_identities[case_id]
+            record["verified_causal_signature_source"] = "runner_verified_causal_signature_v1"
         prior_stage_context: dict[str, Any] = {}
         current_research = raw_entry.get("current_research_proof")
         best_research = raw_entry.get("best_research_proof")
@@ -3039,6 +3395,7 @@ __all__ = [
     "attach_supporting_atoms_to_problem_cases",
     "assign_problem_case_ids",
     "atom_disposition_summary",
+    "atom_is_independent_problem_evidence",
     "atom_is_idea_originated",
     "build_case_registry",
     "eligible_problem_mining_atoms",
@@ -3049,8 +3406,11 @@ __all__ = [
     "normalize_atom_lineage",
     "propagate_case_lineage",
     "problem_case_records_from_registry",
+    "provisional_same_cause_clearance_errors",
+    "provisional_same_cause_group_errors",
     "record_lineage_context",
     "update_case_registry_stage_lineage",
+    "verified_causal_identities_from_case_registry",
     "verified_mechanism_identities_from_case_registry",
     "validate_atom_lineage",
     "write_case_registry",

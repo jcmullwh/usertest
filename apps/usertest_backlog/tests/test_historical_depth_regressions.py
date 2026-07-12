@@ -309,7 +309,7 @@ def test_verification_path_research_crosses_production_mining_without_remining(
 
 
 @pytest.mark.parametrize("benchmark_id", ["lifecycle-classification", "storage-exhaustion"])
-def test_historical_similarity_does_not_collapse_cases_before_objective_identity(
+def test_historical_similarity_forms_only_a_provisional_research_unit(
     benchmark_id: str,
 ) -> None:
     benchmark = _benchmark_case(benchmark_id)
@@ -336,14 +336,19 @@ def test_historical_similarity_does_not_collapse_cases_before_objective_identity
 
     canonical = canonicalize_problem_cases(records, decisions, strict_review=True)
 
-    assert len(canonical) == benchmark["expected_without_verified_relation_receipt"]
-    assert all(
-        any(
-            error.startswith("collapse_objective_identity_missing:")
-            for error in item["case_relation_actions"][0]["relation_validation_errors"]
-        )
-        for item in canonical
-    )
+    assert len(canonical) == 1
+    unit = canonical[0]
+    assert unit["case_identity_status"] == "provisional_same_cause"
+    assert set(unit["case_identity_candidate_ids"]) == {
+        first["case_id"],
+        second["case_id"],
+    }
+    assert "absorbed_case_ids" not in unit
+    assert "same_cause_group_id" not in unit
+    assert {
+        facet["case_id"]
+        for facet in unit["provisional_same_cause_group"]["member_facets"]
+    } == {first["case_id"], second["case_id"]}
 
 
 def test_lifecycle_relation_applies_only_from_hash_verified_runner_receipt(

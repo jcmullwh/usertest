@@ -128,6 +128,91 @@ def test_identical_typed_failures_across_fourteen_parents_collapse() -> None:
     assert operational_candidate_receipt_errors(candidate) == []
 
 
+def test_explicit_repair_lineage_can_emit_operational_candidate_without_atoms() -> None:
+    run_id = "research/repair/1"
+    record = _record(
+        run_id,
+        error=_config_error(),
+        target_ref={
+            "mission_id": "ordinary_mission",
+            "backlog_lineage": {
+                "evidence_role": "research",
+                "origin_stage": "repro_research_dossier_repair",
+                "parent_case_id": "case:parent",
+            },
+        },
+    )
+
+    candidates = build_operational_failure_candidates(
+        [record],
+        [],
+        parent_bindings_by_run={
+            run_id: {
+                "status": "verified",
+                "case_ids": ["case:parent"],
+                "authority": "runner_target_ref_lineage",
+            }
+        },
+    )
+
+    assert len(candidates) == 1
+    receipt = candidates[0]["operational_candidate_receipt"]
+    signal = receipt["typed_signal_receipts"][0]
+    assert signal["origin_role"] == "research"
+    assert signal["origin_stage"] == "repro_research_dossier_repair"
+
+
+def test_unforeseen_runner_typed_blocker_kind_is_not_dropped() -> None:
+    run_id = "research/run/unforeseen"
+    record = _record(
+        run_id,
+        operational_failure_signals=[
+            {
+                "kind": "model_context_bridge",
+                "phase": "context_materialization",
+                "prevented_stage": True,
+                "runner_attested": True,
+                "producer": "runner_core.context_bridge",
+                "error_type": "ContextBridgeUnavailable",
+                "error_code": "context_bridge_unavailable",
+            }
+        ],
+    )
+    atom = _atom(run_id, f"{run_id}:run_failure_event:1")
+
+    candidates = build_operational_failure_candidates([record], [atom])
+
+    assert len(candidates) == 1
+    assert candidates[0]["operational_failure_class"] == "model_context_bridge"
+    assert candidates[0]["operational_failure_phase"] == "context_materialization"
+
+
+def test_untyped_blocker_signal_and_generic_exec_prose_are_ignored() -> None:
+    run_id = "research/run/unattested"
+    record = _record(
+        run_id,
+        error={
+            "type": "AgentExecFailed",
+            "stderr": "A surprising context bridge failure prevented all work.",
+        },
+        operational_failure_signals=[
+            {
+                "kind": "model_context_bridge",
+                "prevented_stage": True,
+                "error_type": "ContextBridgeUnavailable",
+            }
+        ],
+    )
+
+    assert (
+        build_operational_failure_candidates(
+            [record],
+            [_atom(run_id, f"{run_id}:run_failure_event:1")],
+        )
+        == []
+    )
+
+
 @pytest.mark.parametrize(
     "error",
     [

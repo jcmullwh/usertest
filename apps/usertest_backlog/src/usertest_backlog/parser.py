@@ -231,8 +231,12 @@ def build_parser() -> argparse.ArgumentParser:
     reports_backlog_p.add_argument(
         "--agent",
         choices=["claude", "codex", "gemini"],
-        default="claude",
-        help="Agent CLI used for ticket miner prompts.",
+        default="codex",
+        help=(
+            "Agent CLI used for backlog stages. Live runs default to the signed-in "
+            "host Codex subscription because exact-session correction is required; "
+            "other backends remain available for dry-run analysis."
+        ),
     )
     reports_backlog_p.add_argument(
         "--model",
@@ -337,6 +341,96 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     reports_backlog_p.add_argument(
+        "--score-shadow",
+        action="store_true",
+        help=(
+            "Score and record an already materialized --shadow run after independent "
+            "output adjudication, without invoking or rerunning model stages. Must be "
+            "combined with --shadow."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--operational-shadow",
+        action="store_true",
+        help=(
+            "Materialize a fresh non-exporting operational backlog run without held-out "
+            "benchmark labels. Follow with --operational-shadow --score-operational-shadow "
+            "after generating current intent and UX artifacts."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--score-operational-shadow",
+        action="store_true",
+        help=(
+            "Validate and record an already materialized operational run without rerunning "
+            "model stages. This never earns or extends release qualification."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--qualification-corpus-manifest",
+        type=Path,
+        help=(
+            "Release-shadow-only path to the sealed external qualification corpus "
+            "manifest. Overrides the export-gate config without modifying tracked files."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--qualification-manifest-sha256",
+        help=(
+            "Release-shadow pre-run byte digest for held-out labels. When a sealed "
+            "qualification input bundle is used, phase one receives only this digest; "
+            "--score-shadow supplies and verifies the actual manifest bytes."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--qualification-output-adjudication",
+        type=Path,
+        help=(
+            "Release-shadow-only path to independent post-run output adjudication. "
+            "The same path must be supplied to phase-one and --score-shadow."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--no-actionable-evidence-receipt",
+        type=Path,
+        help=(
+            "Release-shadow-only path to an independent no-actionable-evidence receipt "
+            "for an exhaustion qualification."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--qualification-input-bundle",
+        type=Path,
+        help=(
+            "Content-addressed, model-free QualificationInputBundle produced by "
+            "`reports qualification-prepare`. Required for sealed release qualification."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--stage-runs-dir",
+        type=Path,
+        help=(
+            "Isolated append-only destination for model/research runs. With a sealed "
+            "qualification bundle this must differ from the frozen --runs-dir evidence root."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--qualification-cycle-root",
+        type=Path,
+        help=(
+            "Unique write root for one fresh release cycle. Prevents case-registry and "
+            "stage-artifact carryover from another qualification cycle."
+        ),
+    )
+    reports_backlog_p.add_argument(
+        "--shadow-state",
+        type=Path,
+        help=(
+            "Shared release-state JSON path used to aggregate independently isolated cycles. "
+            "Defaults beside the backlog only for legacy, non-bundled shadows."
+        ),
+    )
+    reports_backlog_p.add_argument(
         "--labelers",
         type=int,
         default=3,
@@ -399,6 +493,70 @@ def build_parser() -> argparse.ArgumentParser:
             "`.agents/plans/_dequeued/**` back to `new`)."
         ),
     )
+
+    reports_qualification_prepare_p = reports_sub.add_parser(
+        "qualification-prepare",
+        help=(
+            "Prepare a model-free, content-addressed release-qualification input bundle "
+            "from frozen evidence and copied lifecycle state."
+        ),
+    )
+    reports_qualification_prepare_p.add_argument("--repo-root", type=Path, required=True)
+    reports_qualification_prepare_p.add_argument("--repo-input", type=Path, required=True)
+    reports_qualification_prepare_p.add_argument("--research-ref", required=True)
+    reports_qualification_prepare_p.add_argument("--source-runs-dir", type=Path, required=True)
+    reports_qualification_prepare_p.add_argument("--atom-actions-yaml", type=Path, required=True)
+    reports_qualification_prepare_p.add_argument(
+        "--case-registry-seed",
+        type=Path,
+        required=True,
+    )
+    reports_qualification_prepare_p.add_argument("--out-root", type=Path, required=True)
+    reports_qualification_prepare_p.add_argument("--work-dir", type=Path, required=True)
+    reports_qualification_prepare_p.add_argument("--target")
+    reports_qualification_prepare_p.add_argument(
+        "--breadth-profile",
+        choices=list(_BREADTH_PROFILE_CHOICES),
+        default=_BREADTH_PROFILE_EXTERNAL,
+    )
+    reports_qualification_prepare_p.add_argument(
+        "--protected-path",
+        type=Path,
+        action="append",
+        default=[],
+        help=(
+            "Additional file or directory whose exact bytes must remain unchanged "
+            "through preparation, model execution, correction, and scoring."
+        ),
+    )
+
+    reports_qualification_template_p = reports_sub.add_parser(
+        "qualification-adjudication-template",
+        help=(
+            "Materialize the scorer's exact accepted-output corpus for independent "
+            "post-run semantic adjudication."
+        ),
+    )
+    reports_qualification_template_p.add_argument("--backlog-json", type=Path, required=True)
+    reports_qualification_template_p.add_argument(
+        "--qualification-corpus-manifest",
+        type=Path,
+        required=True,
+    )
+    reports_qualification_template_p.add_argument("--out-json", type=Path, required=True)
+
+    reports_qualification_finalize_p = reports_sub.add_parser(
+        "qualification-adjudication-finalize",
+        help=(
+            "Validate independent decisions against an exact adjudication template and "
+            "write the hash-bound phase-two output contract."
+        ),
+    )
+    reports_qualification_finalize_p.add_argument("--template", type=Path, required=True)
+    reports_qualification_finalize_p.add_argument("--decisions", type=Path, required=True)
+    reports_qualification_finalize_p.add_argument("--out-json", type=Path, required=True)
+    reports_qualification_finalize_p.add_argument("--adjudicator", required=True)
+    reports_qualification_finalize_p.add_argument("--method", required=True)
 
     reports_intent_snapshot_p = reports_sub.add_parser(
         "intent-snapshot",

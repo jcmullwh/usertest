@@ -4,6 +4,7 @@ import json
 from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from agent_adapters import (
@@ -22,17 +23,19 @@ from backlog_miner.ensemble import (
     _write_codex_auth_receipt,
 )
 from backlog_miner.origin_evidence import origin_attachment_requirements
-from backlog_miner.pipeline import _write_model_invocation_manifest
+from backlog_miner.pipeline import StagePromptRun, _write_model_invocation_manifest
 from backlog_repo import write_case_relation_receipt
 
 from usertest_backlog.workflows.problem_mining import (
     _atoms_for_problem_mining_prompt,
     _cross_job_leaf_routing_nodes,
+    _failed_relation_review_batch_count,
     _partition_problem_mining_chunks,
     _preserve_primary_after_coverage_review_failure,
     _problem_mining_attempt_manifest_sha256,
     _problem_mining_job_batches,
     _reconcile_problem_mining_reviews,
+    _relation_decision_item_errors,
     _relation_review_payload,
     _routing_record_keys,
     _run_cross_job_problem_synthesis,
@@ -178,7 +181,8 @@ def _write_fake_codex_attempt_artifacts(
     kwargs: dict[str, object],
     response: str,
     read_chunks: bool = True,
-) -> str:
+    session_available: bool = True,
+) -> str | StagePromptRun:
     out_dir = Path(str(kwargs["out_dir"]))
     tag = str(kwargs["tag"])
     workspace = Path(str(kwargs["workspace_dir"]))
@@ -197,7 +201,19 @@ def _write_fake_codex_attempt_artifacts(
     relative_paths = ["atoms.json", str(manifest["index_file"])]
     if read_chunks:
         relative_paths.extend(str(chunk["text_file"]) for chunk in manifest["chunks"])
-    events = []
+    session_id = (
+        str(
+            kwargs.get("resume_session_id")
+            or "019f2cca-9011-7e32-88ae-6c25af578b49"
+        )
+        if session_available
+        else None
+    )
+    events = (
+        [{"type": "thread.started", "thread_id": session_id}]
+        if session_id is not None
+        else []
+    )
     for index, relative_path in enumerate(relative_paths, start=1):
         file_path = workspace / relative_path
         events.append(
@@ -251,6 +267,12 @@ def _write_fake_codex_attempt_artifacts(
         postcheck=login_status,
         model_attempted=True,
         model_exit_code=0,
+        agent_session_id=session_id,
+        resumed_from_session_id=(
+            str(kwargs["resume_session_id"])
+            if kwargs.get("resume_session_id") is not None
+            else None
+        ),
         raw_events_path=raw_events_path,
         last_message_path=last_message_path,
         stderr_path=stderr_path,
@@ -262,9 +284,91 @@ def _write_fake_codex_attempt_artifacts(
         out_dir=out_dir,
         prompt=str(kwargs["prompt"]),
         response=response,
-        error_kind=None,
+        error_kind=None if session_id is not None else "NoAuthorSession",
+        agent_session_id=session_id,
+        resumed_from_session_id=(
+            str(kwargs["resume_session_id"])
+            if kwargs.get("resume_session_id") is not None
+            else None
+        ),
+        workspace_dir=workspace,
     )
+    if kwargs.get("structured") is True:
+        return StagePromptRun(
+            response=response,
+            agent_session_id=session_id,
+            resumed_from_session_id=(
+                str(kwargs["resume_session_id"])
+                if kwargs.get("resume_session_id") is not None
+                else None
+            ),
+            workspace_dir=workspace,
+            invocation_manifest_path=out_dir / f"{tag}.model_invocation.json",
+            prompt_path=out_dir / f"{tag}.prompt.txt",
+            response_path=out_dir / f"{tag}.response.txt",
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+            elapsed_seconds=0.0,
+        )
     return response
+
+
+def _write_fake_relation_stage_run(
+    *,
+    kwargs: dict[str, object],
+    response: str,
+    session_available: bool = True,
+) -> StagePromptRun:
+    out_dir = Path(str(kwargs["out_dir"]))
+    tag = str(kwargs["tag"])
+    workspace = Path(str(kwargs["workspace_dir"]))
+    session_id = (
+        str(
+            kwargs.get("resume_session_id")
+            or "019f2cca-9011-7e32-88ae-6c25af578b49"
+        )
+        if session_available
+        else None
+    )
+    out_dir.mkdir(parents=True, exist_ok=True)
+    workspace.mkdir(parents=True, exist_ok=True)
+    prompt_path = out_dir / f"{tag}.prompt.txt"
+    response_path = out_dir / f"{tag}.response.txt"
+    raw_events_path = out_dir / f"{tag}.raw_events.jsonl"
+    last_message_path = out_dir / f"{tag}.last_message.txt"
+    stderr_path = out_dir / f"{tag}.stderr.txt"
+    invocation_path = out_dir / f"{tag}.model_invocation.json"
+    prompt_path.write_text(str(kwargs["prompt"]), encoding="utf-8")
+    response_path.write_text(response, encoding="utf-8")
+    raw_events_path.write_text(
+        (
+            json.dumps({"type": "thread.started", "thread_id": session_id}) + "\n"
+            if session_id is not None
+            else ""
+        ),
+        encoding="utf-8",
+    )
+    last_message_path.write_text(response, encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    invocation_path.write_text("{}\n", encoding="utf-8")
+    return StagePromptRun(
+        response=response,
+        agent_session_id=session_id,
+        resumed_from_session_id=(
+            str(kwargs["resume_session_id"])
+            if kwargs.get("resume_session_id") is not None
+            else None
+        ),
+        workspace_dir=workspace,
+        invocation_manifest_path=invocation_path,
+        prompt_path=prompt_path,
+        response_path=response_path,
+        raw_events_path=raw_events_path,
+        last_message_path=last_message_path,
+        stderr_path=stderr_path,
+        elapsed_seconds=0.0,
+    )
 
 
 def test_problem_mining_response_parser_reports_top_level_json_error() -> None:
@@ -316,7 +420,7 @@ def test_problem_miner_prompt_requires_valid_windows_path_json_escaping() -> Non
     assert "`\\\\`" in prompt
 
 
-def test_primary_response_retry_reruns_full_job_and_retains_first_attempt(
+def test_primary_response_correction_resumes_same_session_and_retains_first_attempt(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -370,14 +474,14 @@ def test_primary_response_retry_reruns_full_job_and_retains_first_attempt(
     assert result["failure"] is None
     assert [str(call["tag"]) for call in calls] == [
         "problem_mining_001",
-        "problem_mining_001_format_retry_001",
+        "problem_mining_001_correction_001",
     ]
     attempts = result["attempt_history"]
     assert [attempt["status"] for attempt in attempts] == [
         "response_contract_failed",
         "verified",
     ]
-    assert attempts[0]["workspace_dir"] != attempts[1]["workspace_dir"]
+    assert attempts[0]["workspace_dir"] == attempts[1]["workspace_dir"]
     assert (
         attempts[0]["workspace_manifest_sha256"]
         == attempts[1]["workspace_manifest_sha256"]
@@ -387,12 +491,13 @@ def test_primary_response_retry_reruns_full_job_and_retains_first_attempt(
         attempts[0]["artifacts"]["response"]["sha256"]
         == sha256(invalid_response.encode("utf-8")).hexdigest()
     )
-    assert result["receipt"]["successful_attempt_tag"] == ("problem_mining_001_format_retry_001")
+    assert result["receipt"]["successful_attempt_tag"] == ("problem_mining_001_correction_001")
     assert result["receipt"]["workspace_dir"] == attempts[1]["workspace_dir"]
     assert len(result["receipt"]["read_attestations"]) == 1
     retry_prompt = Path(attempts[1]["artifacts"]["prompt"]["path"]).read_text(encoding="utf-8")
-    assert "Previous reads do not count" in retry_prompt
-    assert "Do not copy, patch, or mechanically repair" in retry_prompt
+    assert "SAME-AUTHOR RESPONSE CORRECTION" in retry_prompt
+    assert "immediately prior complete response" in retry_prompt
+    assert "Original assignment prompt SHA-256" in retry_prompt
     assert "`\\\\`" in retry_prompt
     assert invalid_response not in retry_prompt
     rejected_response = Path(attempts[0]["artifacts"]["response"]["path"])
@@ -420,7 +525,7 @@ def test_problem_mining_workspace_rejects_stale_unmanifested_files(tmp_path: Pat
         )
 
 
-def test_primary_response_retry_cannot_reuse_first_attempt_reads(
+def test_primary_response_correction_reuses_content_bound_first_attempt_reads(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -488,16 +593,148 @@ def test_primary_response_retry_cannot_reuse_first_attempt_reads(
     )
 
     assert len(calls) == 2
-    assert isinstance(result["failure"], ValueError)
-    assert "problem_mining_required_evidence_file_not_read_in_full" in str(result["failure"])
+    assert result["failure"] is None
     assert [attempt["status"] for attempt in result["attempt_history"]] == [
         "response_contract_failed",
-        "failed",
+        "verified",
     ]
-    assert "receipt" not in result
+    assert result["receipt"]["read_attestations"]
+    assert calls[1]["workspace_dir"] == calls[0]["workspace_dir"]
+    assert calls[1]["resume_session_id"] == result["agent_session_id"]
 
 
-def test_response_contract_retry_is_bounded_to_one_complete_retry(
+def test_primary_mining_retries_fresh_until_codex_author_session_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atom = _atom()
+    prompt_atoms = _atoms_for_problem_mining_prompt([atom])
+    initial_workspace = (
+        tmp_path / "artifacts" / "problem_mining" / "problem_mining_001" / "workspace"
+    )
+    initial_manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=initial_workspace,
+        prompt_atoms=prompt_atoms,
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:one"],
+        source_root=tmp_path,
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> str | StagePromptRun:
+        calls.append(dict(kwargs))
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=dict(kwargs),
+            response="" if len(calls) == 1 else _valid_problem_mining_response(),
+            session_available=len(calls) > 1,
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+    result = _run_problem_mining_job_with_response_retry(
+        repo_root=tmp_path,
+        stage_artifacts_dir=tmp_path / "artifacts" / "problem_mining",
+        base_tag="problem_mining_001",
+        prompt="Read all assigned evidence and return the strict response.",
+        prompt_atoms=prompt_atoms,
+        assigned_atom_ids=["atom:one"],
+        max_records_per_miner=20,
+        eligible_atom_ids=["atom:one"],
+        template_name="problem_miner_default.md",
+        record_contract_error_prefix="problem_mining_problem_record_contract_invalid",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        initial_workspace_dir=initial_workspace,
+        initial_manifest=initial_manifest,
+    )
+
+    assert result["failure"] is None
+    assert len(calls) == 2
+    assert calls[0]["resume_session_id"] is None
+    assert calls[1]["resume_session_id"] is None
+    assert calls[1]["prompt"] == calls[0]["prompt"]
+    assert result["correction_status"] == "accepted"
+    assert result["correction_metrics"]["attempt_count"] == 2
+    assert result["correction_metrics"]["session_acquisition_retry_count"] == 1
+    assert [attempt["attempt_tag"] for attempt in result["attempt_history"]] == [
+        "problem_mining_001",
+        "problem_mining_001_session_acquisition_001",
+    ]
+    assert result["attempt_history"][0]["agent_session_id"] is None
+    assert result["attempt_history"][1]["agent_session_id"] is not None
+
+
+def test_primary_mining_transient_exact_session_exception_retries_same_author(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    atom = _atom()
+    prompt_atoms = _atoms_for_problem_mining_prompt([atom])
+    initial_workspace = (
+        tmp_path / "artifacts" / "problem_mining" / "problem_mining_001" / "workspace"
+    )
+    initial_manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=initial_workspace,
+        prompt_atoms=prompt_atoms,
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:one"],
+        source_root=tmp_path,
+    )
+    invalid = (
+        r'{"problem_records":[{"problem_id":"problem:one"}],'
+        r'"atom_decisions":[{"rationale":"Path .\scripts\run.ps1"}]}'
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> str | StagePromptRun:
+        calls.append(dict(kwargs))
+        if len(calls) == 2:
+            raise RuntimeError("transient resumed transport loss")
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=dict(kwargs),
+            response=invalid if len(calls) == 1 else _valid_problem_mining_response(),
+            read_chunks=len(calls) == 1,
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+    result = _run_problem_mining_job_with_response_retry(
+        repo_root=tmp_path,
+        stage_artifacts_dir=tmp_path / "artifacts" / "problem_mining",
+        base_tag="problem_mining_001",
+        prompt="Read all assigned evidence and return the strict response.",
+        prompt_atoms=prompt_atoms,
+        assigned_atom_ids=["atom:one"],
+        max_records_per_miner=20,
+        eligible_atom_ids=["atom:one"],
+        template_name="problem_miner_default.md",
+        record_contract_error_prefix="problem_mining_problem_record_contract_invalid",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        initial_workspace_dir=initial_workspace,
+        initial_manifest=initial_manifest,
+    )
+
+    session_id = result["agent_session_id"]
+    assert result["failure"] is None
+    assert len(calls) == 3
+    assert calls[1]["resume_session_id"] == session_id
+    assert calls[2]["resume_session_id"] == session_id
+    assert result["correction_metrics"]["correction_invocation_failure_count"] == 1
+    assert [attempt["status"] for attempt in result["attempt_history"]] == [
+        "response_contract_failed",
+        "invocation_failed",
+        "verified",
+    ]
+
+
+def test_response_contract_correction_stalls_only_after_repeated_exact_noop(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -546,24 +783,111 @@ def test_response_contract_retry_is_bounded_to_one_complete_retry(
         initial_manifest=initial_manifest,
     )
 
-    assert len(calls) == 2
+    assert len(calls) == 3
     assert isinstance(result["failure"], ProblemMiningResponseContractError)
-    assert len(result["attempt_history"]) == 2
+    assert len(result["attempt_history"]) == 3
     assert all(
         attempt["status"] == "response_contract_failed" for attempt in result["attempt_history"]
     )
+    assert result["correction_status"] == "stalled:same_state_repeated_after_feedback"
+    second_feedback_prompt = Path(
+        result["attempt_history"][2]["artifacts"]["prompt"]["path"]
+    ).read_text(encoding="utf-8")
+    assert "first_noop_receives_feedback" in second_feedback_prompt
+
+
+def test_problem_mining_correction_counts_two_old_errors_to_one_new_as_progress(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import usertest_backlog.workflows.problem_mining as problem_mining_module
+
+    atom = _atom()
+    prompt_atoms = _atoms_for_problem_mining_prompt([atom])
+    initial_workspace = tmp_path / "artifacts" / "problem_mining" / "job" / "workspace"
+    initial_manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=initial_workspace,
+        prompt_atoms=prompt_atoms,
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:one"],
+        source_root=tmp_path,
+    )
+    original_parser = problem_mining_module.parse_problem_record_list
+
+    def fake_parser(text: str, *args: object, **kwargs: object):
+        raw = json.loads(text)
+        title = raw[0].get("title") if isinstance(raw, list) and raw else None
+        if title == "phase-two-errors":
+            return [], ["old:a", "old:b"]
+        if title == "phase-one-new-error":
+            return [], ["new:c"]
+        return original_parser(text, *args, **kwargs)
+
+    monkeypatch.setattr(problem_mining_module, "parse_problem_record_list", fake_parser)
+    phase_responses: list[str] = []
+    for title in ("phase-two-errors", "phase-one-new-error"):
+        record = _problem()
+        record.pop("case_id", None)
+        record["title"] = title
+        phase_responses.append(
+            json.dumps(
+                {
+                    "problem_records": [record],
+                    "atom_decisions": [
+                        {
+                            "atom_id": "atom:one",
+                            "disposition": "supports_case",
+                            "problem_ids": ["problem:one"],
+                            "rationale": "The atom records the failure.",
+                            "revisit_when": None,
+                        }
+                    ],
+                }
+            )
+        )
+    phase_responses.append(_valid_problem_mining_response())
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> str | StagePromptRun:
+        calls.append(dict(kwargs))
+        return _write_fake_codex_attempt_artifacts(
+            kwargs=dict(kwargs),
+            response=phase_responses[len(calls) - 1],
+        )
+
+    monkeypatch.setattr(problem_mining_module, "run_stage_prompt_json", fake_run)
+    result = _run_problem_mining_job_with_response_retry(
+        repo_root=tmp_path,
+        stage_artifacts_dir=tmp_path / "artifacts" / "problem_mining",
+        base_tag="problem_mining_001",
+        prompt="Read the assigned evidence and return the strict envelope.",
+        prompt_atoms=prompt_atoms,
+        assigned_atom_ids=["atom:one"],
+        max_records_per_miner=20,
+        eligible_atom_ids=["atom:one"],
+        template_name="problem_miner_default.md",
+        record_contract_error_prefix="problem_record_invalid",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        initial_workspace_dir=initial_workspace,
+        initial_manifest=initial_manifest,
+    )
+
+    assert result["failure"] is None
+    assert len(calls) == 3
+    first_progress = result["attempt_history"][1]["correction_progress"]
+    assert first_progress["before_error_count"] == 2
+    assert first_progress["after_error_count"] == 1
+    assert first_progress["reason"] == "error_count_decreased"
+    assert first_progress["introduced_error_identities"] == ["problem_record_invalid:new:c"]
     assert all("response" in attempt["artifacts"] for attempt in result["attempt_history"])
 
 
-def _raise_empty_problem_mining_response(kwargs: dict[str, object]) -> None:
-    """Model the generic stage helper's empty-output failure artifact behavior."""
+def _empty_problem_mining_response(kwargs: dict[str, object]) -> str | StagePromptRun:
+    """Model a transport-valid empty author turn that remains same-session repairable."""
 
-    _write_fake_codex_attempt_artifacts(kwargs=kwargs, response="")
-    (Path(str(kwargs["out_dir"])) / f"{kwargs['tag']}.response.txt").unlink()
-    raise RuntimeError(
-        "run_stage_prompt_json: empty response from agent "
-        f"for stage=problem_mining tag={kwargs['tag']}"
-    )
+    return _write_fake_codex_attempt_artifacts(kwargs=kwargs, response="")
 
 
 def test_empty_response_retry_retains_zero_byte_attempt_then_verifies(
@@ -587,7 +911,7 @@ def test_empty_response_retry_retains_zero_byte_attempt_then_verifies(
     def _fake_run_stage_prompt_json(**kwargs: object) -> str:
         calls.append(dict(kwargs))
         if len(calls) == 1:
-            _raise_empty_problem_mining_response(dict(kwargs))
+            return _empty_problem_mining_response(dict(kwargs))
         return _write_fake_codex_attempt_artifacts(
             kwargs=dict(kwargs),
             response=_valid_problem_mining_response(),
@@ -629,7 +953,7 @@ def test_empty_response_retry_retains_zero_byte_attempt_then_verifies(
     assert _attempt_history_errors(result["receipt"], tag="problem_mining_001") == []
 
 
-def test_empty_response_retry_is_bounded_and_retains_both_empty_attempts(
+def test_empty_response_correction_retains_attempts_until_exact_noop_stall(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -648,7 +972,7 @@ def test_empty_response_retry_is_bounded_and_retains_both_empty_attempts(
 
     def _fake_run_stage_prompt_json(**kwargs: object) -> str:
         calls.append(dict(kwargs))
-        _raise_empty_problem_mining_response(dict(kwargs))
+        return _empty_problem_mining_response(dict(kwargs))
 
     monkeypatch.setattr(
         "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
@@ -673,14 +997,16 @@ def test_empty_response_retry_is_bounded_and_retains_both_empty_attempts(
         initial_manifest=initial_manifest,
     )
 
-    assert len(calls) == 2
-    assert isinstance(result["failure"], RuntimeError)
+    assert len(calls) == 3
+    assert isinstance(result["failure"], ProblemMiningResponseContractError)
     attempts = result["attempt_history"]
     assert [attempt["status"] for attempt in attempts] == [
         "response_contract_failed",
         "response_contract_failed",
+        "response_contract_failed",
     ]
     assert all(attempt["artifacts"]["response"]["bytes"] == 0 for attempt in attempts)
+    assert result["correction_status"] == "stalled:same_state_repeated_after_feedback"
     failed_receipt = {
         "status": "failed_unresolved",
         "attempt_history": attempts,
@@ -712,7 +1038,7 @@ def test_empty_response_attempt_artifact_tamper_or_removal_fails_revalidation(
         nonlocal call_count
         call_count += 1
         if call_count == 1:
-            _raise_empty_problem_mining_response(dict(kwargs))
+            return _empty_problem_mining_response(dict(kwargs))
         return _write_fake_codex_attempt_artifacts(
             kwargs=dict(kwargs),
             response=_valid_problem_mining_response(),
@@ -2242,6 +2568,70 @@ def test_problem_mining_projection_retains_unique_evidence_context(tmp_path: Pat
     assert manifest["chunks"][0]["text_bytes"] <= manifest["chunk_max_bytes"]
 
 
+def test_problem_mining_projection_preserves_and_attests_every_linked_atom(
+    tmp_path: Path,
+) -> None:
+    atom = _atom()
+    expected_links = [f"atom:linked:{index}" for index in range(7)]
+    atom["linked_atom_ids"] = [
+        *expected_links,
+        " ",
+        expected_links[2],
+        f" {expected_links[6]} ",
+    ]
+
+    projection = _atoms_for_problem_mining_prompt([atom])[0]
+
+    assert projection["linked_atom_ids"] == expected_links
+    workspace = tmp_path / "workspace"
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=workspace,
+        prompt_atoms=[projection],
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:one"],
+    )
+    chunk = manifest["chunks"][0]
+    chunk_path = workspace / str(chunk["text_file"])
+    chunk_text = chunk_path.read_text(encoding="utf-8")
+    assert all(link in chunk_text for link in expected_links)
+
+    normalized = tmp_path / "normalized_events.jsonl"
+    _write_full_read_event(
+        normalized,
+        relative_path=str(chunk["text_file"]),
+        file_path=chunk_path,
+    )
+    _write_required_workspace_read_events(
+        normalized,
+        workspace=workspace,
+        manifest=manifest,
+        append=True,
+        include_chunks=False,
+    )
+    receipt = build_live_miner_receipt(
+        tag="problem_mining_001",
+        template_name="problem_miner_default.md",
+        assigned_atom_ids=["atom:one"],
+        eligible_atom_ids=["atom:one"],
+        records=[],
+        decisions=[
+            {
+                "atom_id": "atom:one",
+                "disposition": "unresolved",
+                "problem_ids": [],
+                "rationale": "The available evidence does not establish an actionable case.",
+                "revisit_when": None,
+            }
+        ],
+        response_text="{}",
+        normalized_events_path=normalized,
+        workspace_dir=workspace,
+        workspace_manifest=manifest,
+    )
+    assert len(receipt["read_attestations"]) == 1
+    assert receipt["read_attestations"][0]["atom_id"] == "atom:one"
+
+
 def test_problem_mining_reads_middle_of_large_materialized_attachment(
     tmp_path: Path,
 ) -> None:
@@ -2757,7 +3147,7 @@ def test_coverage_review_response_retry_reruns_full_review_and_verifies(
     assert [str(call["tag"]) for call in calls] == [
         "problem_mining_001",
         "problem_mining_001_coverage_depth_review",
-        "problem_mining_001_coverage_depth_review_format_retry_001",
+        "problem_mining_001_coverage_depth_review_correction_001",
     ]
     miner_result = stage_doc["input_meta"]["miner_results"][0]
     assert miner_result["status"] == "ok"
@@ -2767,7 +3157,7 @@ def test_coverage_review_response_retry_reruns_full_review_and_verifies(
         "response_contract_failed",
         "verified",
     ]
-    assert review_attempts[0]["workspace_dir"] != review_attempts[1]["workspace_dir"]
+    assert review_attempts[0]["workspace_dir"] == review_attempts[1]["workspace_dir"]
     assert (
         review_attempts[0]["workspace_manifest_sha256"]
         == review_attempts[1]["workspace_manifest_sha256"]
@@ -2776,7 +3166,7 @@ def test_coverage_review_response_retry_reruns_full_review_and_verifies(
     assert receipt["status"] == "verified"
     assert receipt["non_support_review"]["status"] == "verified"
     assert receipt["non_support_review"]["successful_attempt_tag"] == (
-        "problem_mining_001_coverage_depth_review_format_retry_001"
+        "problem_mining_001_coverage_depth_review_correction_001"
     )
     assert len(receipt["non_support_review"]["read_attestations"]) == 1
 
@@ -2823,6 +3213,339 @@ def test_relation_payload_omits_unrelated_global_case_index_entries() -> None:
     }
 
 
+def test_relation_review_repairs_structural_errors_in_exact_reviewer_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relation_items = [
+        {
+            "problem_id": "problem:0",
+            "case_id": "case:0",
+            "title": "Problem 0",
+            "evidence_atom_ids": ["atom:0"],
+        }
+    ]
+    neighborhoods = [
+        {
+            "focus_id": "problem:0",
+            "most_related_by_semantic": [],
+            "most_related_by_evidence_overlap": [],
+            "most_related_by_metadata": [],
+            "most_related_by_path_anchor": [],
+        }
+    ]
+    invalid = json.dumps(
+        [
+            {
+                "focus_id": "problem:0",
+                "action": "merge",
+                "rationale": "These may match.",
+                "review_confidence": 0.9,
+            }
+        ]
+    )
+    valid = json.dumps(
+        [
+            {
+                "focus_id": "problem:0",
+                "action": "keep_separate",
+                "rationale": "No objective identity edge exists.",
+                "review_confidence": 0.9,
+            }
+        ]
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> StagePromptRun:
+        calls.append(dict(kwargs))
+        return _write_fake_relation_stage_run(
+            kwargs=dict(kwargs),
+            response=invalid if len(calls) == 1 else valid,
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+    review_dir = tmp_path / "relation_review"
+    review_dir.mkdir()
+    decisions, batches = _run_relation_review_batches(
+        relation_items=relation_items,
+        neighborhoods=neighborhoods,
+        focus_problem_ids=["problem:0"],
+        template="{{STAGE_GUIDANCE}}\n{{ALLOWED_ACTIONS}}\n{{NEIGHBORHOODS_JSON}}",
+        allowed_actions=["merge", "alias", "split", "same_cause_group", "keep_separate"],
+        stage_guidance_text="Use objective evidence.",
+        review_dir=review_dir,
+        tag="relation_review",
+        agent="codex",
+        model=None,
+        cfg=object(),
+    )
+
+    assert [decision["action"] for decision in decisions] == ["keep_separate"]
+    assert len(calls) == 2
+    assert calls[1]["resume_session_id"] == "019f2cca-9011-7e32-88ae-6c25af578b49"
+    assert calls[0]["workspace_dir"] == calls[1]["workspace_dir"]
+    assert batches[0]["status"] == "completed"
+    assert batches[0]["correction_status"] == "corrected"
+    correction_prompt = str(calls[1]["prompt"])
+    assert "relation_decision_merge_targets_invalid" in correction_prompt
+    assert invalid not in correction_prompt
+
+
+def test_relation_review_retries_fresh_until_codex_author_session_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relation_items = [
+        {
+            "problem_id": "problem:0",
+            "case_id": "case:0",
+            "title": "Problem 0",
+            "evidence_atom_ids": ["atom:0"],
+        }
+    ]
+    neighborhoods = [
+        {
+            "focus_id": "problem:0",
+            "most_related_by_semantic": [],
+            "most_related_by_evidence_overlap": [],
+            "most_related_by_metadata": [],
+            "most_related_by_path_anchor": [],
+        }
+    ]
+    valid = json.dumps(
+        [
+            {
+                "focus_id": "problem:0",
+                "action": "keep_separate",
+                "rationale": "No objective identity edge exists.",
+                "review_confidence": 0.9,
+            }
+        ]
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> StagePromptRun:
+        calls.append(dict(kwargs))
+        return _write_fake_relation_stage_run(
+            kwargs=dict(kwargs),
+            response="" if len(calls) == 1 else valid,
+            session_available=len(calls) > 1,
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+    review_dir = tmp_path / "relation_review"
+    review_dir.mkdir()
+    decisions, batches = _run_relation_review_batches(
+        relation_items=relation_items,
+        neighborhoods=neighborhoods,
+        focus_problem_ids=["problem:0"],
+        template="{{STAGE_GUIDANCE}}\n{{ALLOWED_ACTIONS}}\n{{NEIGHBORHOODS_JSON}}",
+        allowed_actions=["merge", "alias", "split", "same_cause_group", "keep_separate"],
+        stage_guidance_text="Use objective evidence.",
+        review_dir=review_dir,
+        tag="relation_review",
+        agent="codex",
+        model=None,
+        cfg=object(),
+    )
+
+    assert [decision["action"] for decision in decisions] == ["keep_separate"]
+    assert len(calls) == 2
+    assert calls[0]["resume_session_id"] is None
+    assert calls[1]["resume_session_id"] is None
+    assert calls[1]["prompt"] == calls[0]["prompt"]
+    assert batches[0]["status"] == "completed"
+    assert batches[0]["correction_status"] == "accepted"
+    assert batches[0]["correction_metrics"]["attempt_count"] == 2
+    assert batches[0]["correction_metrics"]["session_acquisition_retry_count"] == 1
+    assert len(batches[0]["attempt_history"]) == 2
+    assert batches[0]["attempt_history"][0]["agent_session_id"] is None
+    assert batches[0]["attempt_history"][1]["agent_session_id"] is not None
+
+
+def test_relation_review_transient_exact_session_exception_retries_same_author(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relation_items = [
+        {
+            "problem_id": "problem:0",
+            "case_id": "case:0",
+            "title": "Problem 0",
+            "evidence_atom_ids": ["atom:0"],
+        }
+    ]
+    neighborhoods = [
+        {
+            "focus_id": "problem:0",
+            "most_related_by_semantic": [],
+            "most_related_by_evidence_overlap": [],
+            "most_related_by_metadata": [],
+            "most_related_by_path_anchor": [],
+        }
+    ]
+    invalid = json.dumps(
+        [
+            {
+                "focus_id": "problem:0",
+                "action": "merge",
+                "rationale": "The target is missing.",
+                "review_confidence": 0.9,
+            }
+        ]
+    )
+    valid = json.dumps(
+        [
+            {
+                "focus_id": "problem:0",
+                "action": "keep_separate",
+                "rationale": "No objective identity edge exists.",
+                "review_confidence": 0.9,
+            }
+        ]
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> StagePromptRun:
+        calls.append(dict(kwargs))
+        if len(calls) == 2:
+            raise RuntimeError("transient resumed transport loss")
+        return _write_fake_relation_stage_run(
+            kwargs=dict(kwargs),
+            response=invalid if len(calls) == 1 else valid,
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+    review_dir = tmp_path / "relation_review"
+    review_dir.mkdir()
+    decisions, batches = _run_relation_review_batches(
+        relation_items=relation_items,
+        neighborhoods=neighborhoods,
+        focus_problem_ids=["problem:0"],
+        template="{{STAGE_GUIDANCE}}\n{{ALLOWED_ACTIONS}}\n{{NEIGHBORHOODS_JSON}}",
+        allowed_actions=["merge", "alias", "split", "same_cause_group", "keep_separate"],
+        stage_guidance_text="Use objective evidence.",
+        review_dir=review_dir,
+        tag="relation_review",
+        agent="codex",
+        model=None,
+        cfg=object(),
+    )
+
+    assert [decision["action"] for decision in decisions] == ["keep_separate"]
+    assert len(calls) == 3
+    assert calls[1]["resume_session_id"] == calls[2]["resume_session_id"]
+    assert calls[1]["resume_session_id"] is not None
+    assert batches[0]["correction_status"] == "corrected"
+    assert batches[0]["correction_metrics"]["correction_invocation_failure_count"] == 1
+    assert [attempt["status"] for attempt in batches[0]["attempt_history"]] == [
+        "invalid",
+        "invocation_failed",
+        "verified",
+    ]
+
+
+def test_relation_review_confidence_is_telemetry_not_a_collapse_gate() -> None:
+    errors = _relation_decision_item_errors(
+        {
+            "focus_id": "problem:0",
+            "action": "merge",
+            "target_ids": ["problem:1"],
+            "evidence_atom_ids": ["atom:shared"],
+            "rationale": "Both records cite the exact same observed failure.",
+            "review_confidence": 0.05,
+        },
+        focus_problem_ids={"problem:0"},
+        known_problem_ids={"problem:0", "problem:1"},
+        known_evidence_atom_ids={"atom:shared"},
+        allowed_actions={"merge", "alias", "split", "same_cause_group", "keep_separate"},
+    )
+
+    assert errors == []
+
+
+def test_relation_review_stall_preserves_valid_focus_and_falls_back_only_missing_focus(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    relation_items = [
+        {
+            "problem_id": f"problem:{index}",
+            "case_id": f"case:{index}",
+            "title": f"Problem {index}",
+            "evidence_atom_ids": [f"atom:{index}"],
+        }
+        for index in range(2)
+    ]
+    neighborhoods = [
+        {
+            "focus_id": f"problem:{index}",
+            "most_related_by_semantic": [],
+            "most_related_by_evidence_overlap": [],
+            "most_related_by_metadata": [],
+            "most_related_by_path_anchor": [],
+        }
+        for index in range(2)
+    ]
+    partial = json.dumps(
+        [
+            {
+                "focus_id": "problem:0",
+                "action": "keep_separate",
+                "rationale": "Independent evidence keeps this case distinct.",
+                "review_confidence": 0.9,
+            }
+        ]
+    )
+    calls: list[dict[str, object]] = []
+
+    def fake_run(**kwargs: object) -> StagePromptRun:
+        calls.append(dict(kwargs))
+        return _write_fake_relation_stage_run(kwargs=dict(kwargs), response=partial)
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.problem_mining.run_stage_prompt_json",
+        fake_run,
+    )
+    review_dir = tmp_path / "relation_review"
+    review_dir.mkdir()
+    decisions, batches = _run_relation_review_batches(
+        relation_items=relation_items,
+        neighborhoods=neighborhoods,
+        focus_problem_ids=["problem:0", "problem:1"],
+        template="{{STAGE_GUIDANCE}}\n{{ALLOWED_ACTIONS}}\n{{NEIGHBORHOODS_JSON}}",
+        allowed_actions=["merge", "alias", "split", "same_cause_group", "keep_separate"],
+        stage_guidance_text="Use objective evidence.",
+        review_dir=review_dir,
+        tag="relation_review",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        max_foci=2,
+    )
+
+    assert len(calls) == 3
+    by_focus = {decision["focus_id"]: decision for decision in decisions}
+    assert by_focus["problem:0"]["rationale"] == (
+        "Independent evidence keeps this case distinct."
+    )
+    assert by_focus["problem:1"]["provisional_relation_suggestion"]["kind"] == (
+        "relation_review_batch_failure"
+    )
+    assert batches[0]["status"] == "failed_partial_provisional_keep_separate"
+    assert batches[0]["retained_valid_decision_count"] == 1
+    assert "first_noop_receives_feedback" in str(calls[2]["prompt"])
+
+
 def test_failed_relation_batch_keeps_only_that_batch_provisionally_separate(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2847,18 +3570,21 @@ def test_failed_relation_batch_keeps_only_that_batch_provisionally_separate(
         for index in range(3)
     ]
 
-    def _fake_run_stage_prompt_json(**kwargs: object) -> str:
-        if str(kwargs["tag"]).endswith("batch_001"):
+    def _fake_run_stage_prompt_json(**kwargs: object) -> StagePromptRun:
+        if "batch_001" in str(kwargs["tag"]):
             raise RuntimeError("reviewer unavailable")
-        return json.dumps(
-            [
-                {
-                    "focus_id": "problem:2",
-                    "action": "keep_separate",
-                    "rationale": "No objective identity edge exists.",
-                    "review_confidence": 0.9,
-                }
-            ]
+        return _write_fake_relation_stage_run(
+            kwargs=dict(kwargs),
+            response=json.dumps(
+                [
+                    {
+                        "focus_id": "problem:2",
+                        "action": "keep_separate",
+                        "rationale": "No objective identity edge exists.",
+                        "review_confidence": 0.9,
+                    }
+                ]
+            ),
         )
 
     monkeypatch.setattr(
@@ -2897,6 +3623,19 @@ def test_failed_relation_batch_keeps_only_that_batch_provisionally_separate(
         (review_dir / "problem_mining_relation_review_001.response.txt").read_text(encoding="utf-8")
     )
     assert checkpoint == decisions
+
+
+def test_failed_relation_batch_count_includes_partial_failures() -> None:
+    assert (
+        _failed_relation_review_batch_count(
+            [
+                {"status": "completed"},
+                {"status": "failed_provisional_keep_separate"},
+                {"status": "failed_partial_provisional_keep_separate"},
+            ]
+        )
+        == 2
+    )
 
 
 def test_verified_relation_edges_require_hash_bound_runner_receipt(tmp_path: Path) -> None:
@@ -3111,3 +3850,776 @@ def test_failed_mining_job_preserves_partition_but_keeps_shadow_closed(tmp_path:
     assert receipt["status"] == "partial_failed_jobs"
     assert receipt["eligible_for_shadow_export"] is False
     assert any("problem_mining_miner_not_verified" in error for error in errors)
+
+
+def test_independent_stage1_feedback_resumes_exact_reviewer_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import usertest_backlog.workflows.problem_mining as problem_mining
+
+    session_id = "11111111-1111-4111-8111-111111111111"
+    workspace = tmp_path / "review-workspace"
+    workspace.mkdir()
+    manifest = {
+        "schema_version": 1,
+        "assigned_atom_ids": ["atom:one"],
+        "chunks": [],
+    }
+    (workspace / "atoms.json").write_text(json.dumps(manifest), encoding="utf-8")
+    manifest_sha = problem_mining._problem_mining_attempt_manifest_sha256(manifest)
+    primary_workspace = tmp_path / "primary-workspace"
+    primary_workspace.mkdir()
+    (primary_workspace / "atoms.json").write_text(
+        json.dumps(manifest), encoding="utf-8"
+    )
+    primary_events = primary_workspace / "primary.normalized.jsonl"
+    primary_events.write_text("", encoding="utf-8")
+    receipt_path = tmp_path / "problem_mining.evidence.json"
+    finalized_receipt = {
+        "schema_version": 1,
+        "receipt_kind": "problem_mining_evidence",
+        "mode": "live",
+        "eligible_atom_ids": ["atom:one"],
+        "eligible_source_atom_ids": ["atom:one"],
+        "eligible_derived_atom_ids": [],
+        "eligible_corpus_sha256": "a" * 64,
+        "atom_evidence": [],
+        "miners": [
+            {
+                "tag": "problem_mining_001",
+                "status": "verified",
+                "primary_pass": {
+                    "tag": "problem_mining_001",
+                    "status": "verified",
+                    "workspace_dir": str(primary_workspace),
+                    "normalized_events_path": str(primary_events),
+                    "atom_decisions": [
+                        {
+                            "atom_id": "atom:one",
+                            "disposition": "unresolved",
+                            "problem_ids": [],
+                            "rationale": "Primary evidence remained unresolved.",
+                            "revisit_when": None,
+                        }
+                    ],
+                },
+                "non_support_review": {"status": "verified"},
+                "review_scope": "all_assigned_atoms_positive_and_non_support",
+                "primary_problem_records": [],
+                "primary_atom_decisions": [
+                    {
+                        "atom_id": "atom:one",
+                        "disposition": "unresolved",
+                        "problem_ids": [],
+                        "rationale": "Primary evidence remained unresolved.",
+                        "revisit_when": None,
+                    }
+                ],
+            }
+        ],
+        "decision_partition": [],
+    }
+    receipt_path.write_text(json.dumps(finalized_receipt), encoding="utf-8")
+    stage_doc = {
+        "stage": "problem_mining",
+        "items": [],
+        "input_meta": {
+            "miner_results": [
+                {
+                    "tag": "problem_mining_001",
+                    "template": "problem_miner_default.md",
+                    "assigned_atom_ids": ["atom:one"],
+                    "coverage_depth_review_attempt_history": [
+                        {
+                            "status": "verified",
+                            "agent_session_id": session_id,
+                            "workspace_dir": str(workspace),
+                            "workspace_manifest_sha256": manifest_sha,
+                        }
+                    ],
+                }
+            ],
+            "problem_mining_evidence_receipt": {"path": str(receipt_path)},
+        },
+    }
+    atoms = [{"atom_id": "atom:one", "evidence_role": "observation"}]
+    feedback = {
+        "content_sha256": "b" * 64,
+        "rationale": "The source observation was falsely rejected.",
+    }
+    calls: list[dict[str, object]] = []
+
+    def attempt(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "failure": None,
+            "envelope": {
+                "atom_decisions": [
+                    {
+                        "atom_id": "atom:one",
+                        "disposition": "supports_case",
+                        "problem_ids": ["problem:one"],
+                        "rationale": "Observed failure establishes the case.",
+                    }
+                ]
+            },
+            "records": [
+                {
+                    "problem_id": "problem:one",
+                    "evidence_atom_ids": ["atom:one"],
+                }
+            ],
+            "receipt": {
+                "tag": "problem_mining_001",
+                "status": "verified",
+                "atom_decisions": [
+                    {
+                        "atom_id": "atom:one",
+                        "disposition": "supports_case",
+                        "problem_ids": ["problem:one"],
+                        "rationale": "Observed failure establishes the case.",
+                        "revisit_when": None,
+                    }
+                ],
+            },
+            "attempt_record": {"status": "verified", "artifacts": {}},
+        }
+
+    monkeypatch.setattr(problem_mining, "_run_problem_mining_attempt", attempt)
+    monkeypatch.setattr(
+        problem_mining,
+        "_build_composite_miner_receipt",
+        lambda **kwargs: (
+            {
+                "tag": "problem_mining_001",
+                "status": "verified",
+                "primary_pass": kwargs["primary_receipt"],
+                "non_support_review": kwargs["review_receipt"],
+                "review_scope": "all_assigned_atoms_positive_and_non_support",
+                "primary_problem_records": kwargs["primary_records"],
+                "primary_atom_decisions": kwargs["primary_decisions"],
+                "coverage_depth_review_problem_records": kwargs["review_records"],
+                "coverage_depth_review_atom_decisions": kwargs["review_decisions"],
+            },
+            list(kwargs["review_records"]),
+            list(kwargs["review_decisions"]),
+        ),
+    )
+    monkeypatch.setattr(
+        problem_mining,
+        "assign_problem_case_ids",
+        lambda records, *_args, **_kwargs: (
+            [{**records[0], "case_id": "case:one"}] if records else []
+        ),
+    )
+    relation_calls: list[dict[str, object]] = []
+
+    def relation(**kwargs: object) -> tuple[dict, list, list, dict]:
+        relation_calls.append(kwargs)
+        updated = dict(kwargs["stage_doc"])
+        updated["items"] = kwargs["problem_records"]
+        return (
+            updated,
+            kwargs["problem_records"],
+            kwargs["atoms"],
+            {"cases": {}},
+        )
+
+    monkeypatch.setattr(problem_mining, "_run_problem_case_relation_review", relation)
+    result = problem_mining.continue_problem_mining_from_independent_feedback(
+        stage_doc=stage_doc,
+        atoms=atoms,
+        actionable_atom_ids=["atom:one"],
+        feedback=feedback,
+        pipeline_manifest=object(),
+        stage_guidance_text="guidance",
+        artifacts_dir=tmp_path / "artifacts",
+        out_json=tmp_path / "repaired.problem_records.json",
+        out_md=tmp_path / "repaired.problem_records.md",
+        case_registry_path=tmp_path / "case_registry.json",
+        previous_case_registry={"cases": {}},
+        repo_root=tmp_path,
+        agent="codex",
+        model=None,
+        cfg=object(),
+    )
+
+    assert result["status"] == "corrected"
+    assert calls[0]["resume_session_id"] == session_id
+    assert calls[0]["initial_workspace_dir"] == workspace.resolve()
+    assert calls[0]["expected_manifest_sha256"] == manifest_sha
+    assert "BOUND FEEDBACK" in str(calls[0]["prompt"])
+    draft = relation_calls[0]["stage_doc"]["input_meta"][
+        "problem_mining_evidence_draft"
+    ]
+    assert (
+        draft["miners"][0]["non_support_review"]["attempt_history"][-1]["status"]
+        == "verified"
+    )
+    assert draft["miners"][0]["primary_problem_records"] == []
+
+    def retract_attempt(**kwargs: object) -> dict[str, object]:
+        calls.append(kwargs)
+        return {
+            "failure": None,
+            "envelope": {
+                "atom_decisions": [
+                    {
+                        "atom_id": "atom:one",
+                        "disposition": "unresolved",
+                        "problem_ids": [],
+                        "rationale": "The retained evidence does not establish a problem.",
+                        "revisit_when": None,
+                    }
+                ]
+            },
+            "records": [],
+            "receipt": {
+                "tag": "problem_mining_001",
+                "status": "verified",
+                "atom_decisions": [
+                    {
+                        "atom_id": "atom:one",
+                        "disposition": "unresolved",
+                        "problem_ids": [],
+                        "rationale": "The retained evidence does not establish a problem.",
+                        "revisit_when": None,
+                    }
+                ],
+            },
+            "attempt_record": {"status": "verified", "artifacts": {}},
+        }
+
+    monkeypatch.setattr(problem_mining, "_run_problem_mining_attempt", retract_attempt)
+    bad_stage_doc = json.loads(json.dumps(stage_doc))
+    bad_stage_doc["items"] = [
+        {
+            "problem_id": "problem:shallow",
+            "case_id": "case:shallow",
+            "evidence_atom_ids": ["atom:one"],
+        }
+    ]
+    retracted = problem_mining.continue_problem_mining_from_independent_feedback(
+        stage_doc=bad_stage_doc,
+        atoms=atoms,
+        actionable_atom_ids=["atom:one"],
+        feedback={
+            "content_sha256": "c" * 64,
+            "feedback_kind": "accepted_output_quality",
+            "rationale": "The mined problem is not established by the source evidence.",
+        },
+        pipeline_manifest=object(),
+        stage_guidance_text="guidance",
+        artifacts_dir=tmp_path / "retraction-artifacts",
+        out_json=tmp_path / "retracted.problem_records.json",
+        out_md=tmp_path / "retracted.problem_records.md",
+        case_registry_path=tmp_path / "retracted.case_registry.json",
+        previous_case_registry={"cases": {}},
+        repo_root=tmp_path,
+        agent="codex",
+        model=None,
+        cfg=object(),
+    )
+
+    assert retracted["status"] == "corrected"
+    assert retracted["stage_doc"]["items"] == []
+    assert relation_calls[-1]["problem_records"] == []
+    assert "retract the bad case" in str(calls[-1]["prompt"])
+
+
+@pytest.mark.parametrize(
+    ("mismatch", "expected_error"),
+    [
+        ("miner_tag", "stage1_author_miner_tag_binding_mismatch"),
+        ("session", "stage1_author_session_binding_mismatch"),
+        ("workspace", "stage1_author_workspace_binding_mismatch"),
+    ],
+)
+def test_stage1_correction_rejects_wrong_retained_author_before_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mismatch: str,
+    expected_error: str,
+) -> None:
+    import usertest_backlog.workflows.problem_mining as problem_mining
+
+    retained_workspace = tmp_path / "retained"
+    expected_workspace = (
+        tmp_path / "different" if mismatch == "workspace" else retained_workspace
+    )
+    retained_session = "11111111-1111-4111-8111-111111111111"
+    expected_session = (
+        "22222222-2222-4222-8222-222222222222"
+        if mismatch == "session"
+        else retained_session
+    )
+    expected_tag = "missing-miner" if mismatch == "miner_tag" else "target-miner"
+    stage_doc = {
+        "stage": "problem_mining",
+        "items": [],
+        "input_meta": {
+            "problem_mining_evidence_draft": {
+                "eligible_atom_ids": ["atom:one"],
+                "miners": [{"tag": "target-miner"}],
+            },
+            "miner_results": [
+                {
+                    "tag": "other-miner",
+                    "assigned_atom_ids": ["atom:one"],
+                    "coverage_depth_review_attempt_history": [
+                        {
+                            "status": "verified",
+                            "agent_session_id": "other-session",
+                            "workspace_dir": str(tmp_path / "other"),
+                        }
+                    ],
+                },
+                {
+                    "tag": "target-miner",
+                    "assigned_atom_ids": ["atom:one"],
+                    "coverage_depth_review_attempt_history": [
+                        {
+                            "status": "verified",
+                            "agent_session_id": retained_session,
+                            "workspace_dir": str(retained_workspace),
+                        }
+                    ],
+                },
+            ],
+        },
+    }
+
+    monkeypatch.setattr(
+        problem_mining,
+        "_run_problem_mining_attempt",
+        lambda **_kwargs: pytest.fail("mismatched author must not be invoked"),
+    )
+    result = problem_mining.continue_problem_mining_from_independent_feedback(
+        stage_doc=stage_doc,
+        atoms=[{"atom_id": "atom:one", "evidence_role": "observation"}],
+        actionable_atom_ids=["atom:one"],
+        feedback={"content_sha256": "a" * 64, "rationale": "Correct this miss."},
+        pipeline_manifest=object(),
+        stage_guidance_text="guidance",
+        artifacts_dir=tmp_path / "artifacts",
+        out_json=tmp_path / "problem.json",
+        out_md=tmp_path / "problem.md",
+        case_registry_path=tmp_path / "cases.json",
+        previous_case_registry={"cases": {}},
+        repo_root=tmp_path,
+        agent="codex",
+        model=None,
+        cfg=object(),
+        author_component="coverage_review",
+        author_provenance={
+            "miner_tag": expected_tag,
+            "agent_session_id": expected_session,
+            "workspace_dir": str(expected_workspace),
+        },
+    )
+
+    assert result["status"] == "repairable_paused:stage1_author_binding_mismatch"
+    assert result["validation_errors"] == [expected_error]
+
+
+def test_independent_relation_feedback_resumes_relation_author_not_miner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import usertest_backlog.workflows.problem_mining as problem_mining
+
+    session_id = "22222222-2222-4222-8222-222222222222"
+    workspace = tmp_path / "relation-workspace"
+    workspace.mkdir()
+    receipt_path = tmp_path / "evidence.json"
+    receipt_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "eligible_atom_ids": ["atom:one", "atom:two"],
+                "miners": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    pre_relation = [
+        {
+            "problem_id": "problem:one",
+            "case_id": "case:one",
+            "evidence_atom_ids": ["atom:one"],
+        },
+        {
+            "problem_id": "problem:two",
+            "case_id": "case:two",
+            "evidence_atom_ids": ["atom:two"],
+        },
+    ]
+    stage_doc = {
+        "stage": "problem_mining",
+        "items": [
+            {
+                "problem_id": "problem:one",
+                "case_id": "case:one",
+                "case_member_problem_ids": ["problem:one", "problem:two"],
+                "evidence_atom_ids": ["atom:one", "atom:two"],
+            }
+        ],
+        "input_meta": {
+            "pre_relation_problem_records": pre_relation,
+            "relation_review_decisions": [
+                {
+                    "focus_id": "problem:one",
+                    "action": "merge",
+                    "target_id": "problem:two",
+                    "rationale": "Initially treated as one case.",
+                    "review_confidence": 0.8,
+                },
+                {
+                    "focus_id": "problem:two",
+                    "action": "merge",
+                    "target_id": "problem:one",
+                    "rationale": "Initially treated as one case.",
+                    "review_confidence": 0.8,
+                },
+            ],
+            "relation_review_batches": [
+                {
+                    "tag": "problem_mining_relation_review_001_batch_001",
+                    "focus_ids": ["problem:one", "problem:two"],
+                    "attempt_history": [
+                        {
+                            "attempt_number": 1,
+                            "status": "verified",
+                            "agent_session_id": session_id,
+                            "workspace_dir": str(workspace.resolve()),
+                            "elapsed_seconds": 4.0,
+                        }
+                    ],
+                }
+            ],
+            "problem_mining_evidence_receipt": {"path": str(receipt_path)},
+        },
+        "artifacts": {},
+    }
+    corrected_decisions = [
+        {
+            "focus_id": "problem:one",
+            "action": "keep_separate",
+            "rationale": "The mechanisms differ.",
+            "review_confidence": 0.9,
+        },
+        {
+            "focus_id": "problem:two",
+            "action": "keep_separate",
+            "rationale": "The mechanisms differ.",
+            "review_confidence": 0.9,
+        },
+    ]
+    invocation_path = tmp_path / "relation.model_invocation.json"
+    invocation_path.write_text("{}", encoding="utf-8")
+    calls: list[dict[str, object]] = []
+
+    def run_prompt(**kwargs: object) -> SimpleNamespace:
+        calls.append(kwargs)
+        return SimpleNamespace(
+            response=json.dumps(corrected_decisions),
+            agent_session_id=session_id,
+            workspace_dir=workspace,
+            elapsed_seconds=2.0,
+            invocation_manifest_path=invocation_path,
+        )
+
+    monkeypatch.setattr(problem_mining, "run_stage_prompt_json", run_prompt)
+    monkeypatch.setattr(
+        problem_mining,
+        "model_invocation_manifest_ref",
+        lambda path: {"path": str(path), "sha256": "b" * 64},
+    )
+    relation_calls: list[dict[str, object]] = []
+
+    def rematerialize(**kwargs: object) -> tuple[dict, list, list, dict]:
+        relation_calls.append(kwargs)
+        updated = dict(kwargs["stage_doc"])
+        updated["items"] = pre_relation
+        return updated, pre_relation, kwargs["atoms"], {"cases": {}}
+
+    monkeypatch.setattr(
+        problem_mining,
+        "_run_problem_case_relation_review",
+        rematerialize,
+    )
+    result = (
+        problem_mining.continue_problem_relation_review_from_independent_feedback(
+            stage_doc=stage_doc,
+            atoms=[{"atom_id": "atom:one"}, {"atom_id": "atom:two"}],
+            feedback={"content_sha256": "a" * 64, "rationale": "Bad merge."},
+            author_provenance={
+                "agent_session_id": session_id,
+                "workspace_dir": str(workspace.resolve()),
+                "relation_review_batch_tag": (
+                    "problem_mining_relation_review_001_batch_001"
+                ),
+            },
+            pipeline_manifest=object(),
+            stage_guidance_text="guidance",
+            artifacts_dir=tmp_path / "repair",
+            out_json=tmp_path / "repaired.json",
+            out_md=tmp_path / "repaired.md",
+            case_registry_path=tmp_path / "cases.json",
+            previous_case_registry={"cases": {}},
+            repo_root=tmp_path,
+            agent="codex",
+            model=None,
+            cfg=object(),
+        )
+    )
+
+    assert result["status"] == "corrected"
+    assert calls[0]["resume_session_id"] == session_id
+    assert calls[0]["workspace_dir"] == workspace.resolve()
+    assert relation_calls[0]["relation_decisions_override"] == corrected_decisions
+    assert relation_calls[0]["relation_manifest_refs"]
+
+
+def test_primary_miner_correction_requires_retained_independent_rereview(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import usertest_backlog.workflows.problem_mining as problem_mining
+
+    primary_session = "33333333-3333-4333-8333-333333333333"
+    review_session = "44444444-4444-4444-8444-444444444444"
+    manifest = {
+        "schema_version": 1,
+        "assigned_atom_ids": ["atom:one"],
+        "chunks": [],
+    }
+    primary_workspace = tmp_path / "primary"
+    review_workspace = tmp_path / "review"
+    primary_workspace.mkdir()
+    review_workspace.mkdir()
+    for workspace in (primary_workspace, review_workspace):
+        (workspace / "atoms.json").write_text(json.dumps(manifest), encoding="utf-8")
+    primary_events = primary_workspace / "events.jsonl"
+    primary_events.write_text("", encoding="utf-8")
+    old_primary_record = {
+        "problem_id": "problem:old",
+        "evidence_atom_ids": ["atom:one"],
+    }
+    old_decision = {
+        "atom_id": "atom:one",
+        "disposition": "supports_case",
+        "problem_ids": ["problem:old"],
+        "rationale": "The old shallow claim was retained.",
+        "revisit_when": None,
+    }
+    primary_receipt = {
+        "tag": "problem_mining_001",
+        "status": "verified",
+        "workspace_dir": str(primary_workspace),
+        "normalized_events_path": str(primary_events),
+        "atom_decisions": [old_decision],
+        "response_sha256": "a" * 64,
+    }
+    review_receipt = {
+        "tag": "problem_mining_001_coverage_depth_review",
+        "status": "verified",
+        "workspace_dir": str(review_workspace),
+        "atom_decisions": [old_decision],
+        "response_sha256": "b" * 64,
+    }
+    finalized_receipt = {
+        "schema_version": 1,
+        "receipt_kind": "problem_mining_evidence",
+        "mode": "live",
+        "eligible_atom_ids": ["atom:one"],
+        "eligible_source_atom_ids": ["atom:one"],
+        "eligible_derived_atom_ids": [],
+        "eligible_corpus_sha256": "c" * 64,
+        "atom_evidence": [],
+        "miners": [
+            {
+                "tag": "problem_mining_001",
+                "status": "verified",
+                "primary_pass": primary_receipt,
+                "non_support_review": review_receipt,
+                "review_scope": "all_assigned_atoms_positive_and_non_support",
+                "primary_problem_records": [old_primary_record],
+                "primary_atom_decisions": [old_decision],
+                "coverage_depth_review_problem_records": [old_primary_record],
+                "coverage_depth_review_atom_decisions": [old_decision],
+            }
+        ],
+        "decision_partition": [],
+    }
+    receipt_path = tmp_path / "evidence.json"
+    receipt_path.write_text(json.dumps(finalized_receipt), encoding="utf-8")
+    manifest_sha = problem_mining._problem_mining_attempt_manifest_sha256(manifest)
+    stage_doc = {
+        "stage": "problem_mining",
+        "items": [{**old_primary_record, "case_id": "case:old"}],
+        "input_meta": {
+            "miner_results": [
+                {
+                    "tag": "problem_mining_001",
+                    "template": "problem_miner_default.md",
+                    "assigned_atom_ids": ["atom:one"],
+                    "attempt_history": [
+                        {
+                            "status": "verified",
+                            "agent_session_id": primary_session,
+                            "workspace_dir": str(primary_workspace),
+                            "workspace_manifest_sha256": manifest_sha,
+                        }
+                    ],
+                    "coverage_depth_review_attempt_history": [
+                        {
+                            "status": "verified",
+                            "agent_session_id": review_session,
+                            "workspace_dir": str(review_workspace),
+                            "workspace_manifest_sha256": manifest_sha,
+                        }
+                    ],
+                }
+            ],
+            "problem_mining_evidence_receipt": {"path": str(receipt_path)},
+        },
+    }
+    corrected_record = {
+        "problem_id": "problem:root",
+        "evidence_atom_ids": ["atom:one"],
+    }
+    corrected_decision = {
+        "atom_id": "atom:one",
+        "disposition": "supports_case",
+        "problem_ids": ["problem:root"],
+        "rationale": "The corrected claim describes the observed mechanism.",
+        "revisit_when": None,
+    }
+    direct_calls: list[dict[str, object]] = []
+
+    def direct_attempt(**kwargs: object) -> dict[str, object]:
+        direct_calls.append(kwargs)
+        return {
+            "failure": None,
+            "agent_session_id": primary_session,
+            "envelope": {"atom_decisions": [corrected_decision]},
+            "records": [corrected_record],
+            "receipt": {
+                **primary_receipt,
+                "atom_decisions": [corrected_decision],
+                "normalized_events_path": str(primary_events),
+            },
+            "attempt_record": {
+                "status": "verified",
+                "agent_session_id": primary_session,
+                "workspace_dir": str(primary_workspace),
+                "artifacts": {},
+            },
+        }
+
+    rereview_calls: list[dict[str, object]] = []
+
+    def rereview(**kwargs: object) -> dict[str, object]:
+        rereview_calls.append(kwargs)
+        assert kwargs["resume_session_id"] == review_session
+        assert "problem:root" in str(kwargs["prompt"])
+        return {
+            "failure": None,
+            "agent_session_id": review_session,
+            "workspace_dir": review_workspace,
+            "manifest": manifest,
+            "records": [corrected_record],
+            "receipt": {
+                **review_receipt,
+                "atom_decisions": [corrected_decision],
+            },
+            "attempt_history": [
+                {
+                    "status": "verified",
+                    "agent_session_id": review_session,
+                    "workspace_dir": str(review_workspace),
+                    "attempt_elapsed_seconds": 2.0,
+                }
+            ],
+        }
+
+    composite_calls: list[dict[str, object]] = []
+
+    def composite(**kwargs: object) -> tuple[dict, list, list]:
+        composite_calls.append(kwargs)
+        return (
+            {
+                "tag": "problem_mining_001",
+                "status": "verified",
+                "primary_pass": kwargs["primary_receipt"],
+                "non_support_review": kwargs["review_receipt"],
+                "review_scope": "all_assigned_atoms_positive_and_non_support",
+                "primary_problem_records": kwargs["primary_records"],
+                "primary_atom_decisions": kwargs["primary_decisions"],
+                "coverage_depth_review_problem_records": kwargs["review_records"],
+                "coverage_depth_review_atom_decisions": kwargs["review_decisions"],
+            },
+            [corrected_record],
+            [corrected_decision],
+        )
+
+    monkeypatch.setattr(problem_mining, "_run_problem_mining_attempt", direct_attempt)
+    monkeypatch.setattr(
+        problem_mining,
+        "_run_problem_mining_job_with_response_retry",
+        rereview,
+    )
+    monkeypatch.setattr(problem_mining, "_build_composite_miner_receipt", composite)
+    monkeypatch.setattr(
+        problem_mining,
+        "assign_problem_case_ids",
+        lambda records, *_args, **_kwargs: [
+            {**record, "case_id": "case:root"} for record in records
+        ],
+    )
+    monkeypatch.setattr(
+        problem_mining,
+        "_run_problem_case_relation_review",
+        lambda **kwargs: (
+            {**kwargs["stage_doc"], "items": kwargs["problem_records"]},
+            kwargs["problem_records"],
+            kwargs["atoms"],
+            {"cases": {}},
+        ),
+    )
+    result = problem_mining.continue_problem_mining_from_independent_feedback(
+        stage_doc=stage_doc,
+        atoms=[{"atom_id": "atom:one", "evidence_role": "observation"}],
+        actionable_atom_ids=["atom:one"],
+        feedback={
+            "content_sha256": "d" * 64,
+            "feedback_kind": "accepted_output_quality",
+            "rationale": "The primary claim was surface-level.",
+        },
+        pipeline_manifest=object(),
+        stage_guidance_text="guidance",
+        artifacts_dir=tmp_path / "repair",
+        out_json=tmp_path / "repaired.json",
+        out_md=tmp_path / "repaired.md",
+        case_registry_path=tmp_path / "cases.json",
+        previous_case_registry={"cases": {}},
+        repo_root=tmp_path,
+        agent="codex",
+        model=None,
+        cfg=object(),
+        author_component="problem_miner",
+    )
+
+    assert result["status"] == "corrected"
+    assert direct_calls[0]["resume_session_id"] == primary_session
+    assert len(rereview_calls) == 1
+    assert composite_calls[0]["primary_records"] == [corrected_record]
+    assert composite_calls[0]["review_records"] == [corrected_record]
+    assert result["attempt_record"]["dependent_coverage_review_attempt_history"]
+    repaired_miner = result["stage_doc"]["input_meta"][
+        "problem_mining_evidence_draft"
+    ]["miners"][0]
+    assert repaired_miner["primary_pass"]["attempt_history"][-1]["status"] == "verified"
+    assert repaired_miner["non_support_review"]["attempt_history"][-1]["status"] == "verified"

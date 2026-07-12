@@ -66,6 +66,7 @@ known_first_party = ["runner_core"]
 # Token monitoring is an optional best-effort integration. Runner core records a
 # non-fatal diagnostic when the separately deployed package is unavailable.
 DEP001 = ["token_monitoring"]
+DEP003 = ["token_monitoring"]
 
 [tool.ruff]
 target-version = "py311"

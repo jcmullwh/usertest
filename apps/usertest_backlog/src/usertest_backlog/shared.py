@@ -188,7 +188,14 @@ try:
         load_pipeline_prompt_manifest,
         merge_stage_model_invocation_contract,
         run_stage_prompt_json,
+        run_stage_prompt_json_result,
         verify_stage_model_invocation_contract,
+    )
+    from backlog_miner.prompt_correction import (
+        CorrectionObservation,
+        correction_run_metrics,
+        correction_state_sha256,
+        run_progressive_correction,
     )
     from backlog_miner.research_evidence import verify_persisted_research_evidence
 except ModuleNotFoundError as exc:

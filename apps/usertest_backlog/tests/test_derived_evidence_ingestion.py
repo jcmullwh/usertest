@@ -65,10 +65,10 @@ def _case_registry(*case_ids: str, atom_cases: dict[str, str] | None = None) -> 
     return registry
 
 
-def _target_contract(case_id: str) -> dict[str, Any]:
+def _target_contract(case_id: str, *, schema_version: int = 2) -> dict[str, Any]:
     payload = {
-        "schema_version": 2,
-        "contract_source": "runner_stage6_target_intent_v2",
+        "schema_version": schema_version,
+        "contract_source": f"runner_stage6_target_intent_v{schema_version}",
         "case_id": case_id,
         "problem_id": f"problem:{case_id}",
         "selected_option_id": "option:root-mechanism",
@@ -83,15 +83,21 @@ def _target_contract(case_id: str) -> dict[str, Any]:
                     b"Correct the verified root mechanism."
                 ).hexdigest(),
                 "target_role": "production",
+                **({"destination_path": None} if schema_version == 3 else {}),
             }
         ],
     }
     return {**payload, "contract_sha256": _canonical_sha256(payload)}
 
 
-def _verified_ticket_ref(*, case_id: str, plan_revision_id: str) -> dict[str, Any]:
+def _verified_ticket_ref(
+    *,
+    case_id: str,
+    plan_revision_id: str,
+    target_contract_schema_version: int = 2,
+) -> dict[str, Any]:
     fingerprint = "1" * 16
-    contract = _target_contract(case_id)
+    contract = _target_contract(case_id, schema_version=target_contract_schema_version)
     provenance = {
         "schema_version": 1,
         "fingerprint": fingerprint,
@@ -166,8 +172,10 @@ def _derived_record(
     }
 
 
+@pytest.mark.parametrize("target_contract_schema_version", [2, 3])
 def test_direct_verified_parent_and_plan_provenance_are_authoritative(
     tmp_path: Path,
+    target_contract_schema_version: int,
 ) -> None:
     case_id = "case:direct"
     plan_revision_id = "planrev:sha256:" + "5" * 64
@@ -176,6 +184,7 @@ def test_direct_verified_parent_and_plan_provenance_are_authoritative(
         ticket_ref=_verified_ticket_ref(
             case_id=case_id,
             plan_revision_id=plan_revision_id,
+            target_contract_schema_version=target_contract_schema_version,
         ),
         report={
             "confusion_points": [{"summary": "Implementation evidence retained."}],

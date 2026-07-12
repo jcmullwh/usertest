@@ -23,7 +23,13 @@ def _roles() -> dict[str, object]:
         },
         "live": {
             "description": "Probe the deployed runtime.",
-            "commands": ["python live_probe.py"],
+            "commands": ["dotnet test tests/Runtime.Tests.csproj --filter LiveProbe"],
+            "command_bindings": [
+                {
+                    "command_index": 0,
+                    "research_experiment_id": "experiment:live",
+                }
+            ],
             "predicates": [
                 {"type": "command_exit_code", "command_index": 0, "equals": 0},
                 {
@@ -217,6 +223,64 @@ def test_v2_contract_round_trip_retains_role_hashes() -> None:
     assert parsed["outcome_roles"]["recurrence"]["commands"] == []
 
 
+@pytest.mark.parametrize(
+    ("source", "operator"),
+    [
+        (source, operator)
+        for source in ("stdout", "stderr", "combined")
+        for operator in ("contains", "not_contains", "equals")
+    ],
+)
+def test_command_stream_predicate_vocabulary_round_trips(
+    source: str,
+    operator: str,
+) -> None:
+    roles = _roles()
+    live = roles["live"]
+    assert isinstance(live, dict)
+    predicate = {
+        "type": f"command_{source}_{operator}",
+        "command_index": 0,
+        "value": "  expected observation  ",
+    }
+    live["predicates"] = [
+        {"type": "command_exit_code", "command_index": 0, "equals": 0},
+        predicate,
+    ]
+
+    markdown = render_verification_contract_markdown(
+        ["python -m pytest tests/test_feature.py -q"],
+        outcome_roles=roles,
+    )
+    parsed = parse_verification_contract_markdown(markdown)
+
+    assert parsed is not None
+    assert parsed["outcome_roles"]["live"]["predicates"][1] == {
+        **predicate,
+        "value": "expected observation",
+    }
+
+
+def test_unknown_command_stream_predicate_is_rejected() -> None:
+    roles = _roles()
+    live = roles["live"]
+    assert isinstance(live, dict)
+    live["predicates"] = [
+        {"type": "command_exit_code", "command_index": 0, "equals": 0},
+        {
+            "type": "command_stdout_regex",
+            "command_index": 0,
+            "value": "expected.*observation",
+        },
+    ]
+
+    with pytest.raises(ValueError, match="outcome_role_predicate_type_invalid"):
+        render_verification_contract_markdown(
+            ["python -m pytest tests/test_feature.py -q"],
+            outcome_roles=roles,
+        )
+
+
 def test_live_and_recurrence_roles_cannot_relabel_generic_tests() -> None:
     roles = _roles()
     recurrence = roles["recurrence"]
@@ -224,6 +288,19 @@ def test_live_and_recurrence_roles_cannot_relabel_generic_tests() -> None:
     recurrence["commands"] = ["python -m pytest tests/test_feature.py -q"]
 
     with pytest.raises(ValueError, match="generic_command_reused"):
+        render_verification_contract_markdown(
+            ["python -m pytest tests/test_feature.py -q"],
+            outcome_roles=roles,
+        )
+
+
+def test_unlisted_live_runner_requires_research_experiment_binding() -> None:
+    roles = _roles()
+    live = roles["live"]
+    assert isinstance(live, dict)
+    live.pop("command_bindings")
+
+    with pytest.raises(ValueError, match="command_bindings_invalid"):
         render_verification_contract_markdown(
             ["python -m pytest tests/test_feature.py -q"],
             outcome_roles=roles,

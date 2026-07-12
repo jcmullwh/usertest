@@ -45,6 +45,7 @@ class BacklogRefreshRequest:
     model: str | None = None
     actions_yaml: Path | None = None
     atom_actions_yaml: Path | None = None
+    qualified_shadow_state_path: Path | None = None
     gh_bin: str = "gh"
 
     def normalized(self) -> BacklogRefreshRequest:
@@ -72,6 +73,11 @@ class BacklogRefreshRequest:
             if self.atom_actions_yaml is not None
             else (repo_root / "configs" / "backlog_atom_actions.yaml").resolve()
         )
+        qualified_shadow_state_path = (
+            self.qualified_shadow_state_path.expanduser().resolve()
+            if self.qualified_shadow_state_path is not None
+            else (runs_dir / target / "_compiled" / f"{target}.shadow_state.json").resolve()
+        )
         return BacklogRefreshRequest(
             repo_root=repo_root,
             repo_input=repo_input,
@@ -84,6 +90,7 @@ class BacklogRefreshRequest:
             model=model,
             actions_yaml=actions_yaml,
             atom_actions_yaml=atom_actions_yaml,
+            qualified_shadow_state_path=qualified_shadow_state_path,
             gh_bin=self.gh_bin.strip() or "gh",
         )
 
@@ -109,7 +116,11 @@ class BacklogRefreshRequest:
 
     @property
     def shadow_state_json(self) -> Path:
-        return self.compiled_dir / f"{self.target}.shadow_state.json"
+        return (
+            self.qualified_shadow_state_path
+            if self.qualified_shadow_state_path is not None
+            else self.compiled_dir / f"{self.target}.shadow_state.json"
+        )
 
     @property
     def lock_path(self) -> Path:
@@ -312,7 +323,7 @@ def build_refresh_commands(request: BacklogRefreshRequest) -> list[tuple[str, li
     """Build the exact ordered refresh contract used by every implementation entry point."""
 
     request = request.normalized()
-    shadow = [
+    operational = [
         *_base_command(request, "backlog"),
         "--out-json",
         str(request.backlog_json),
@@ -322,8 +333,10 @@ def build_refresh_commands(request: BacklogRefreshRequest) -> list[tuple[str, li
         request.breadth_profile,
         "--atom-actions-yaml",
         str(request.atom_actions_yaml),
+        "--shadow-state",
+        str(request.shadow_state_json),
         *_model_flags(request),
-        "--shadow",
+        "--operational-shadow",
         "--force",
         "--no-resume",
     ]
@@ -363,57 +376,111 @@ def build_refresh_commands(request: BacklogRefreshRequest) -> list[tuple[str, li
         "--out-json",
         str(request.export_json),
     ]
+    score_operational = [
+        *operational,
+        "--score-operational-shadow",
+    ]
     return [
-        ("preliminary shadow", list(shadow)),
+        ("operational shadow materialization", operational),
         ("intent snapshot", intent),
         ("UX review", ux),
-        ("qualifying shadow 1", list(shadow)),
-        ("qualifying shadow 2", list(shadow)),
+        ("operational shadow validation", score_operational),
         ("ticket export", export),
     ]
 
 
-def _latest_cycle_id(state_path: Path) -> str:
+def _read_shadow_state(state_path: Path, *, allow_missing: bool = False) -> dict[str, Any]:
+    if allow_missing and not state_path.exists():
+        return {"cycles": []}
     try:
         state = json.loads(state_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as exc:
         raise BacklogRefreshError(f"Shadow state is missing or invalid: {state_path}") from exc
-    cycles = state.get("cycles") if isinstance(state, dict) else None
-    if not isinstance(cycles, list) or not cycles or not isinstance(cycles[-1], dict):
-        raise BacklogRefreshError("Shadow state does not contain a completed cycle")
-    cycle_id = cycles[-1].get("cycle_id")
-    if not isinstance(cycle_id, str) or re.fullmatch(r"[0-9a-f]{64}", cycle_id) is None:
-        raise BacklogRefreshError("Latest shadow cycle has no valid runner-owned identity")
-    return cycle_id
+    if not isinstance(state, dict):
+        raise BacklogRefreshError("Shadow state must contain an object")
+    cycles = state.get("cycles")
+    if not isinstance(cycles, list) or any(not isinstance(item, dict) for item in cycles):
+        raise BacklogRefreshError("Shadow state does not contain valid completed cycles")
+    return state
 
 
-def _validate_qualifying_cycles(
+def _cycle_ids(state: dict[str, Any]) -> list[str]:
+    cycles_raw = state.get("cycles")
+    cycles = cycles_raw if isinstance(cycles_raw, list) else []
+    ids: list[str] = []
+    for cycle in cycles:
+        cycle_id = cycle.get("cycle_id") if isinstance(cycle, dict) else None
+        if not isinstance(cycle_id, str) or re.fullmatch(r"[0-9a-f]{64}", cycle_id) is None:
+            raise BacklogRefreshError("Shadow cycle has no valid runner-owned identity")
+        ids.append(cycle_id)
+    if len(ids) != len(set(ids)):
+        raise BacklogRefreshError("Shadow state repeats a runner-owned cycle identity")
+    return ids
+
+
+def _validate_fresh_operational_cycle(
     request: BacklogRefreshRequest,
     *,
-    first_cycle_id: str,
-    second_cycle_id: str,
-) -> dict[str, Any]:
-    try:
-        state = json.loads(request.shadow_state_json.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
-        raise BacklogRefreshError("Final shadow state is missing or invalid") from exc
-    cycles = state.get("cycles") if isinstance(state, dict) else None
-    if not isinstance(cycles, list) or len(cycles) < 2:
-        raise BacklogRefreshError("Two fresh qualifying shadow cycles were not retained")
-    latest_ids = [
-        item.get("cycle_id") if isinstance(item, dict) else None for item in cycles[-2:]
-    ]
-    if latest_ids != [first_cycle_id, second_cycle_id]:
-        raise BacklogRefreshError("Qualifying shadow-cycle identities changed before export")
-    if first_cycle_id == second_cycle_id:
-        raise BacklogRefreshError("Qualifying shadow cycles are not distinct fresh executions")
-    if any(not isinstance(item, dict) or item.get("passed") is not True for item in cycles[-2:]):
-        raise BacklogRefreshError("A qualifying shadow cycle did not pass all depth invariants")
+    prior_cycle_ids: Sequence[str],
+) -> tuple[dict[str, Any], str]:
+    state = _read_shadow_state(request.shadow_state_json)
+    cycles_raw = state.get("cycles")
+    cycles = cycles_raw if isinstance(cycles_raw, list) else []
+    current_ids = _cycle_ids(state)
+    new_ids = [cycle_id for cycle_id in current_ids if cycle_id not in set(prior_cycle_ids)]
+    if len(new_ids) != 1 or not cycles or current_ids[-1] != new_ids[0]:
+        raise BacklogRefreshError(
+            "Operational validation must append exactly one fresh latest cycle"
+        )
+    latest = cycles[-1]
+    if latest.get("cycle_mode") != "operational":
+        raise BacklogRefreshError("Fresh shadow cycle is not operational")
+    if latest.get("passed") is not True:
+        raise BacklogRefreshError("Fresh operational cycle failed depth invariants")
     if state.get("ready_for_export") is not True:
-        raise BacklogRefreshError("Two qualifying shadow cycles did not open the export gate")
-    if int(state.get("consecutive_stable_passes") or 0) < 2:
-        raise BacklogRefreshError("Qualifying shadow cycles are not stable")
-    return state
+        raise BacklogRefreshError("Fresh operational cycle did not open the export gate")
+    if state.get("activation_mode") != "operational_bound":
+        raise BacklogRefreshError(
+            "Operational export is not bound to a release-qualified pipeline/config anchor"
+        )
+    if state.get("validated_cycle_id") != new_ids[0]:
+        raise BacklogRefreshError("Validated cycle is not the fresh operational cycle")
+    required = state.get("required_consecutive_cycles")
+    stable = state.get("consecutive_stable_passes")
+    anchor_ids = state.get("release_anchor_cycle_ids")
+    if (
+        isinstance(required, bool)
+        or not isinstance(required, int)
+        or required < 1
+        or isinstance(stable, bool)
+        or not isinstance(stable, int)
+        or stable < required
+        or not isinstance(anchor_ids, list)
+        or len(anchor_ids) < required
+        or any(not isinstance(item, str) or item not in current_ids for item in anchor_ids)
+    ):
+        raise BacklogRefreshError("Operational release anchor is missing or invalid")
+    cycles_by_id = {
+        str(cycle.get("cycle_id")): cycle
+        for cycle in cycles
+        if isinstance(cycle, dict) and isinstance(cycle.get("cycle_id"), str)
+    }
+    for cycle_id in anchor_ids:
+        anchor = cycles_by_id[cycle_id]
+        qualification = anchor.get("qualification")
+        if (
+            anchor.get("cycle_mode") != "release"
+            or anchor.get("passed") is not True
+            or not isinstance(qualification, dict)
+            or qualification.get("qualification_class") != "positive_throughput"
+            or qualification.get("status") != "verified"
+        ):
+            raise BacklogRefreshError("Operational anchor is not a positive release cycle")
+    if latest.get("stability_inputs_sha256") != state.get(
+        "release_anchor_stability_inputs_sha256"
+    ):
+        raise BacklogRefreshError("Operational pipeline/config inputs drifted from release anchor")
+    return state, new_ids[0]
 
 
 def _source_observation_window(atoms_snapshot: Path) -> dict[str, Any]:
@@ -476,8 +543,7 @@ def _source_observation_window(atoms_snapshot: Path) -> dict[str, Any]:
 def _write_refresh_receipt(
     request: BacklogRefreshRequest,
     *,
-    preliminary_cycle_id: str,
-    qualifying_cycle_ids: Sequence[str],
+    operational_cycle_id: str,
     shadow_state: dict[str, Any],
     outcome_progression: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
@@ -492,21 +558,20 @@ def _write_refresh_receipt(
         "model": request.model,
         "actions_yaml": str(request.actions_yaml),
         "atom_actions_yaml": str(request.atom_actions_yaml),
+        "shadow_state_path": str(request.shadow_state_json),
     }
-    qualifying_cycles: list[dict[str, Any]] = []
     cycles_raw = shadow_state.get("cycles")
     cycles = cycles_raw if isinstance(cycles_raw, list) else []
-    cycles_by_id = {
-        str(cycle.get("cycle_id")): cycle
+    operational_cycles = [
+        cycle
         for cycle in cycles
-        if isinstance(cycle, dict) and isinstance(cycle.get("cycle_id"), str)
-    }
-    for cycle_id in qualifying_cycle_ids:
-        cycle = cycles_by_id.get(cycle_id)
-        if cycle is None:
-            raise BacklogRefreshError(
-                f"Qualifying shadow cycle disappeared before receipt: {cycle_id}"
-            )
+        if isinstance(cycle, dict)
+        and cycle.get("cycle_mode") == "operational"
+        and cycle.get("passed") is True
+    ][-2:]
+    observation_cycles: list[dict[str, Any]] = []
+    for cycle in operational_cycles:
+        cycle_id = str(cycle.get("cycle_id"))
         artifact_receipts_raw = cycle.get("artifact_receipts")
         artifact_receipts = (
             artifact_receipts_raw if isinstance(artifact_receipts_raw, list) else []
@@ -521,7 +586,7 @@ def _write_refresh_receipt(
         )
         if not isinstance(case_registry, dict):
             raise BacklogRefreshError(
-                f"Qualifying shadow cycle lacks its case-registry receipt: {cycle_id}"
+                f"Operational shadow cycle lacks its case-registry receipt: {cycle_id}"
             )
         atoms_receipt = next(
             (
@@ -533,7 +598,7 @@ def _write_refresh_receipt(
         )
         if not isinstance(atoms_receipt, dict):
             raise BacklogRefreshError(
-                f"Qualifying shadow cycle lacks its atoms receipt: {cycle_id}"
+                f"Operational shadow cycle lacks its atoms receipt: {cycle_id}"
             )
         atoms_snapshot_raw = atoms_receipt.get("snapshot_path")
         atoms_snapshot = (
@@ -543,9 +608,9 @@ def _write_refresh_receipt(
         )
         if atoms_snapshot is None or not atoms_snapshot.is_file():
             raise BacklogRefreshError(
-                f"Qualifying shadow cycle lacks its atoms snapshot: {cycle_id}"
+                f"Operational shadow cycle lacks its atoms snapshot: {cycle_id}"
             )
-        qualifying_cycles.append(
+        observation_cycles.append(
             {
                 "cycle_id": cycle_id,
                 "generated_at": cycle.get("generated_at"),
@@ -562,14 +627,19 @@ def _write_refresh_receipt(
             }
         )
     receipt = {
-        "schema_version": 3,
+        "schema_version": 4,
         "producer": "usertest_implement.backlog_refresh",
         "recorded_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "configuration": config,
         "configuration_sha256": _sha256_json(config),
-        "preliminary_cycle_id": preliminary_cycle_id,
-        "qualifying_cycle_ids": list(qualifying_cycle_ids),
-        "qualifying_cycles": qualifying_cycles,
+        "operational_cycle_id": operational_cycle_id,
+        "observation_cycle_ids": [item["cycle_id"] for item in observation_cycles],
+        "observation_cycles": observation_cycles,
+        "activation_mode": shadow_state.get("activation_mode"),
+        "release_anchor_cycle_ids": shadow_state.get("release_anchor_cycle_ids"),
+        "release_anchor_stability_inputs_sha256": shadow_state.get(
+            "release_anchor_stability_inputs_sha256"
+        ),
         "validated_cycle_id": shadow_state.get("validated_cycle_id"),
         "validated_backlog_sha256": shadow_state.get("validated_backlog_sha256"),
         "outcome_progression": list(outcome_progression),
@@ -606,10 +676,11 @@ def run_shadow_backlog_refresh(
     # gate.  The OS-backed refresh lock below remains the mutation boundary.
     _ = open_pr_probe
     commands = build_refresh_commands(request)
-    preliminary_cycle_id = ""
-    qualifying_cycle_ids: list[str] = []
+    operational_cycle_id = ""
     outcome_progression_summary: list[dict[str, Any]] = []
     with exclusive_refresh_scope(request):
+        prior_state = _read_shadow_state(request.shadow_state_json, allow_missing=True)
+        prior_cycle_ids = _cycle_ids(prior_state)
         local_owner = Path(request.repo_input).expanduser()
         if local_owner.is_dir():
             if outcome_progressor is None:
@@ -650,22 +721,26 @@ def run_shadow_backlog_refresh(
                 outcome_progression_summary.append(payload)
         shadow_state: dict[str, Any] | None = None
         for label, argv in commands:
-            if label == "ticket export":
-                if len(qualifying_cycle_ids) != 2:
-                    raise BacklogRefreshError(
-                        "Backlog refresh did not execute two qualifying shadows"
-                    )
-                shadow_state = _validate_qualifying_cycles(
-                    request,
-                    first_cycle_id=qualifying_cycle_ids[0],
-                    second_cycle_id=qualifying_cycle_ids[1],
-                )
             execute(argv, request.repo_root, label)
-            if label == "preliminary shadow":
-                preliminary_cycle_id = _latest_cycle_id(request.shadow_state_json)
-            elif label.startswith("qualifying shadow"):
-                qualifying_cycle_ids.append(_latest_cycle_id(request.shadow_state_json))
+            if label == "operational shadow materialization":
+                materialized_state = _read_shadow_state(
+                    request.shadow_state_json,
+                    allow_missing=True,
+                )
+                if _cycle_ids(materialized_state) != prior_cycle_ids:
+                    raise BacklogRefreshError(
+                        "Operational materialization changed shadow state before validation"
+                    )
+            elif label == "operational shadow validation":
+                shadow_state, operational_cycle_id = _validate_fresh_operational_cycle(
+                    request,
+                    prior_cycle_ids=prior_cycle_ids,
+                )
             elif label == "ticket export":
+                if shadow_state is None or not operational_cycle_id:
+                    raise BacklogRefreshError(
+                        "Ticket export ran without a fresh validated operational cycle"
+                    )
                 if not request.export_json.is_file():
                     raise BacklogRefreshError(
                         "Ticket export did not produce its declared artifact: "
@@ -675,8 +750,7 @@ def run_shadow_backlog_refresh(
             raise BacklogRefreshError("Backlog refresh did not reach its guarded export boundary")
         _write_refresh_receipt(
             request,
-            preliminary_cycle_id=preliminary_cycle_id,
-            qualifying_cycle_ids=qualifying_cycle_ids,
+            operational_cycle_id=operational_cycle_id,
             shadow_state=shadow_state,
             outcome_progression=outcome_progression_summary,
         )

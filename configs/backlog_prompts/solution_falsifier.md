@@ -47,9 +47,12 @@ Do not modify files, install dependencies, or run commands that can mutate the c
   assertion/property and its `semantic_basis` with the immutable source problem and the
   established mechanism. Decide whether post-change success proves intended operation,
   merely removes a marker/classifies a failure, or leaves material paths untested. Select
-  exactly one contract for implementation planning. An `accept` verdict requires that
-  selected contract to cover the full source problem and prove intended operation; a
-  classifier-only, diagnostic-only, or swallowed-error condition is not sufficient.
+  exactly one contract per retained oracle for implementation planning. An `accept`
+  verdict requires selected evidence to prove intended operation for its stated bound;
+  a classifier-only, diagnostic-only, or swallowed-error condition is not sufficient.
+  Partial coverage or an untested path is acceptable only when it is noncritical, named
+  exactly, and has an evidence-backed `accepted` or `mitigated` disposition. The runner
+  then bounds the downstream outcome to `mitigated`, never `resolved`.
 - Identify unsupported assumptions and credible recurrence paths left open.
 - For a shared abstraction or class-level option, verify at least two independent
   consumers or failure paths and cite the inspected files, symbols, or research evidence.
@@ -75,8 +78,9 @@ Return ONLY one JSON object with:
   to risk disposition, but cannot substitute for a causal challenge.
 - `unsupported_assumptions`: list, possibly empty
 - `residual_risks`: list, possibly empty
-- `critical_findings`: list, possibly empty. Each object contains `finding`, `affects`
-  (`root_cause`, `interface`, or `change_surface`), and non-empty bound
+- `critical_findings`: list, possibly empty. Each object contains `finding`, a non-empty
+  open-language `affects` description (for example a mechanism, interface, compatibility,
+  platform, outcome, or failure-mode decision), and non-empty bound
   `mechanism_evidence_id` refs. An `accept` verdict cannot contain a critical finding.
 - `material_risk_dispositions`: one object for every unsupported assumption, residual
   recurrence path, and compatibility risk in the selected option, plus every new
@@ -100,5 +104,10 @@ Return ONLY one JSON object with:
   `semantic_relation_assessment`, `proves_intended_operation` (boolean), `problem_coverage`
   (`full`, `partial`, or `unknown`), `residual_untested_paths` (list), and non-empty
   `evidence_refs` using mechanism evidence IDs already cited by the review. Overall
-  `accept` is invalid unless every selected review is `sufficient`, full coverage,
-  `proves_intended_operation=true`, and has no residual untested path.
+  `accept` requires every selected review to be `sufficient`, to prove intended operation,
+  and to have `full` or explicitly bounded `partial` coverage. Every residual untested path
+  must have an exact evidence-backed `accepted` or `mitigated` risk disposition. Unknown
+  coverage, undisposed residuals, surface-only proof, and critical findings block selection.
+  When a retained contract has `semantic_review_required=true` (including an authenticated
+  semantic citation), assess its actual relation to the source problem in
+  `semantic_relation_assessment`; do not reject or accept it merely because of its proof kind.

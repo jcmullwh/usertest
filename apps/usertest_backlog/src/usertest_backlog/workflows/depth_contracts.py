@@ -24,6 +24,7 @@ from backlog_core import (
     assess_selection_readiness,
     assess_solution_option_readiness,
     falsification_review_receipt_errors,
+    material_unknowns_block_advancement,
     plan_revision_id_for,
     research_limitation_references,
     verified_mechanism_evidence,
@@ -63,11 +64,6 @@ def _mechanisms_too_similar(left: str, right: str) -> bool:
 
 _VAGUE_COMMAND_RE = re.compile(
     r"\b(?:relevant|appropriate|as needed|tbd|todo|<[^>]+>)\b", re.IGNORECASE
-)
-_VERIFICATION_TOOL_RE = re.compile(
-    r"^\s*(?:pdm|uv|pytest|python\s+-m\s+pytest|python|npm|pnpm|yarn|cargo|"
-    r"go\s+test|dotnet\s+test|mvn|gradle|make|cmake|bash|powershell)\b",
-    re.IGNORECASE,
 )
 _COMMAND_PATH_RE = re.compile(
     r"(?P<path>(?:[A-Za-z0-9_.-]+[\\/])+[A-Za-z0-9_.{}-]+(?:\.[A-Za-z0-9]+)?)"
@@ -394,7 +390,8 @@ def selection_quality_errors(
     if selected is None:
         errors.append(f"selection_unknown_option: {expected_problem_id}: {option_id!r}")
         return errors
-    if decision.get("selected_family_id") != selected.get("family_id"):
+    selected_family_id = decision.get("selected_family_id")
+    if selected_family_id is not None and selected_family_id != selected.get("family_id"):
         errors.append(f"selection_family_mismatch: {expected_problem_id}: {option_id}")
 
     evaluation = decision.get("causal_coverage_evaluation")
@@ -494,8 +491,7 @@ def falsification_review_errors(
             if (
                 not isinstance(finding, dict)
                 or not _nonempty_string(finding.get("finding"))
-                or finding.get("affects")
-                not in {"root_cause", "interface", "change_surface"}
+                or not _nonempty_string(finding.get("affects"))
                 or not refs
                 or any(ref not in allowed_refs for ref in refs)
             ):
@@ -521,6 +517,20 @@ def falsification_review_errors(
         if isinstance(values, list):
             material_risks.update(
                 value.strip() for value in values if isinstance(value, str) and value.strip()
+            )
+    for contract_review in (
+        review.get("outcome_contract_reviews")
+        if isinstance(review.get("outcome_contract_reviews"), list)
+        else []
+    ):
+        if not isinstance(contract_review, dict):
+            continue
+        values = contract_review.get("residual_untested_paths")
+        if isinstance(values, list):
+            material_risks.update(
+                value.strip()
+                for value in values
+                if isinstance(value, str) and value.strip()
             )
     dispositions = review.get("material_risk_dispositions")
     if not isinstance(dispositions, list):
@@ -757,6 +767,7 @@ def _command_quality_errors(
     plan_id: str,
     repo_root: Path | None,
     label: str,
+    planned_create_paths: set[str] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     safety_errors = verification_command_safety_errors(command)
@@ -765,15 +776,17 @@ def _command_quality_errors(
             f"change_plan_unsafe_{label}: {plan_id}: {reason}" for reason in safety_errors
         )
         return errors
-    if _VAGUE_COMMAND_RE.search(command) or not _VERIFICATION_TOOL_RE.search(command):
+    if _VAGUE_COMMAND_RE.search(command):
         errors.append(f"change_plan_non_executable_{label}: {plan_id}: {command!r}")
-        return errors
-    if repo_root is None:
         return errors
     try:
         tokens = shlex.split(command)
     except ValueError:
         return [f"change_plan_invalid_{label}_quoting: {plan_id}"]
+    if not tokens or tokens[0].startswith("-") or _VAGUE_COMMAND_RE.search(tokens[0]):
+        return [f"change_plan_non_executable_{label}: {plan_id}: {command!r}"]
+    if repo_root is None:
+        return errors
     project_root = repo_root
     for index, token in enumerate(tokens[:-1]):
         if token in {"-p", "--project"}:
@@ -786,11 +799,15 @@ def _command_quality_errors(
                 project_root = candidate
     for match in _COMMAND_PATH_RE.finditer(command):
         raw_path = match.group("path").strip("'\"(),;:")
+        path_without_selector = raw_path.split("::", 1)[0]
         if raw_path in {"python", "pytest"} or "://" in raw_path:
             continue
-        candidate = _path_within_repo(repo_root, raw_path)
+        normalized_path = Path(path_without_selector.replace("\\", "/")).as_posix()
+        if normalized_path in (planned_create_paths or set()):
+            continue
+        candidate = _path_within_repo(repo_root, path_without_selector)
         if candidate is None or not candidate.exists():
-            project_candidate = _path_within_repo(project_root, raw_path)
+            project_candidate = _path_within_repo(project_root, path_without_selector)
             if project_candidate is None or not project_candidate.exists():
                 errors.append(f"change_plan_{label}_path_missing: {plan_id}: {raw_path!r}")
     return errors
@@ -833,6 +850,7 @@ def change_plan_quality_errors(
         )
 
     targets = plan.get("change_targets")
+    planned_create_paths: set[str] = set()
     if not isinstance(targets, list) or not targets:
         errors.append(f"change_plan_missing_change_targets: {plan_id}")
     else:
@@ -842,28 +860,56 @@ def change_plan_quality_errors(
                 continue
             path = str(target["path"]).strip()
             action = str(target.get("action") or "").strip()
-            if action not in {"modify", "create"}:
+            if action not in {"modify", "create", "delete", "rename", "move"}:
                 errors.append(f"change_plan_invalid_target_action: {plan_id}: {path}")
+            if action == "create":
+                planned_create_paths.add(Path(path.replace("\\", "/")).as_posix())
             if any(token in path.casefold() for token in ("tbd", "unknown", "*")):
                 errors.append(f"change_plan_non_concrete_target: {plan_id}: {path!r}")
-            symbols = target.get("symbols")
-            if (
-                not isinstance(symbols, list)
-                or not symbols
-                or not all(_nonempty_string(symbol) for symbol in symbols)
+            symbols_raw = target.get("symbols", [])
+            symbols = [] if symbols_raw is None else symbols_raw
+            if not isinstance(symbols, list) or not all(
+                _nonempty_string(symbol) for symbol in symbols
             ):
                 errors.append(f"change_plan_invalid_target_symbols: {plan_id}: {path}")
+                symbols = []
+            elif len(symbols) != len(set(symbols)):
+                errors.append(f"change_plan_duplicate_target_symbols: {plan_id}: {path}")
+            destination_path_raw = target.get("destination_path")
+            destination_path = (
+                str(destination_path_raw).strip()
+                if _nonempty_string(destination_path_raw)
+                else None
+            )
+            if action in {"rename", "move"} and destination_path is None:
+                errors.append(f"change_plan_target_destination_missing: {plan_id}: {path}")
+            elif action not in {"rename", "move"} and destination_path is not None:
+                errors.append(f"change_plan_target_destination_unexpected: {plan_id}: {path}")
             if not _nonempty_string(target.get("change")):
                 errors.append(f"change_plan_missing_target_change: {plan_id}: {path}")
             if repo_root is not None:
                 target_path = _path_within_repo(repo_root, path)
-                if action == "modify" and (target_path is None or not target_path.is_file()):
+                destination = (
+                    _path_within_repo(repo_root, destination_path)
+                    if destination_path is not None
+                    else None
+                )
+                if action in {"modify", "delete", "rename", "move"} and (
+                    target_path is None or not target_path.exists()
+                ):
                     errors.append(f"change_plan_target_path_missing: {plan_id}: {path}")
                 elif action == "create" and (
                     target_path is None or target_path.exists()
                 ):
                     errors.append(f"change_plan_create_target_invalid: {plan_id}: {path}")
-                elif action == "modify" and isinstance(symbols, list):
+                elif action in {"rename", "move"} and (
+                    destination is None or destination.exists()
+                ):
+                    errors.append(
+                        f"change_plan_target_destination_invalid: {plan_id}:"
+                        f"{destination_path}"
+                    )
+                elif action == "modify" and symbols:
                     target_text = target_path.read_text(encoding="utf-8", errors="replace")
                     for symbol in symbols:
                         if not _nonempty_string(symbol):
@@ -901,6 +947,7 @@ def change_plan_quality_errors(
                     plan_id=str(plan_id),
                     repo_root=repo_root,
                     label="verification_command",
+                    planned_create_paths=planned_create_paths,
                 )
             )
 
@@ -915,7 +962,14 @@ def change_plan_quality_errors(
                 errors.append(f"change_plan_invalid_outcome_role: {plan_id}: {role}")
                 continue
             role_commands = role_contract.get("commands")
-            if not _string_list(role_commands, allow_empty=False):
+            oracle = role_contract.get("oracle")
+            oracle_bound = isinstance(oracle, dict) and oracle.get("kind") in {
+                "staged_replay",
+                "causal_proof_replay",
+                "config_state",
+                "multi_scenario",
+            }
+            if not _string_list(role_commands, allow_empty=oracle_bound):
                 errors.append(f"change_plan_missing_outcome_role_commands: {plan_id}: {role}")
                 continue
             for command in role_commands:
@@ -938,7 +992,6 @@ def change_plan_quality_errors(
         before = reproduction.get("before_change")
         after = reproduction.get("after_change")
         if _nonempty_string(limitation):
-            errors.append(f"change_plan_unverified_proof_limitation: {plan_id}")
             alternate = reproduction.get("alternate_verification")
             if not _nonempty_string(alternate):
                 errors.append(f"change_plan_missing_alternate_verification: {plan_id}")
@@ -949,6 +1002,7 @@ def change_plan_quality_errors(
                         plan_id=str(plan_id),
                         repo_root=repo_root,
                         label="alternate_verification",
+                        planned_create_paths=planned_create_paths,
                     )
                 )
                 commands_raw = plan.get("verification_commands")
@@ -975,12 +1029,57 @@ def change_plan_quality_errors(
                 or any(ref not in allowed_limitations for ref in limitation_refs)
             ):
                 errors.append(f"change_plan_unbound_proof_limitation: {plan_id}")
+            matching_unknowns = [
+                unknown
+                for unknown in (
+                    research_dossier.get("material_unknowns", [])
+                    if isinstance(research_dossier, dict)
+                    else []
+                )
+                if isinstance(unknown, dict)
+                and any(
+                    ref
+                    in {
+                        str(unknown.get("unknown_id") or "").strip(),
+                        str(unknown.get("unknown") or "").strip(),
+                    }
+                    for ref in limitation_refs
+                )
+            ]
+            if matching_unknowns and material_unknowns_block_advancement(matching_unknowns):
+                errors.append(f"change_plan_material_limitation_requires_research: {plan_id}")
+            if reproduction.get("expected_outcome_state") != "unverified":
+                errors.append(f"change_plan_limited_outcome_must_remain_unverified: {plan_id}")
         else:
             if reproduction.get("proof_limitation_refs") not in (None, []):
                 errors.append(f"change_plan_limitation_refs_without_limitation: {plan_id}")
+            roles = plan.get("outcome_verification_roles")
+            original_role = (
+                roles.get("original_scenario") if isinstance(roles, dict) else None
+            )
+            bound_oracle = (
+                original_role.get("oracle") if isinstance(original_role, dict) else None
+            )
+            oracle_kind = (
+                bound_oracle.get("kind") if isinstance(bound_oracle, dict) else None
+            )
             for phase, mapping in (("before", before), ("after", after)):
                 if not isinstance(mapping, dict):
                     errors.append(f"change_plan_missing_{phase}_mapping: {plan_id}")
+                    continue
+                if phase == "after" and oracle_kind == "causal_proof_replay":
+                    expectations = mapping.get("causal_proof_expectations")
+                    if not isinstance(expectations, list) or not expectations:
+                        errors.append(
+                            f"change_plan_missing_after_causal_expectations: {plan_id}"
+                        )
+                    continue
+                if phase == "after" and oracle_kind == "multi_scenario":
+                    expectations = mapping.get("scenario_expectations")
+                    if not isinstance(expectations, list) or not expectations:
+                        errors.append(
+                            f"change_plan_missing_after_scenario_expectations: {plan_id}"
+                        )
                     continue
                 if not _nonempty_string(mapping.get("command")):
                     errors.append(f"change_plan_missing_{phase}_command: {plan_id}")
@@ -991,6 +1090,7 @@ def change_plan_quality_errors(
                             plan_id=str(plan_id),
                             repo_root=repo_root,
                             label=f"{phase}_command",
+                            planned_create_paths=planned_create_paths,
                         )
                     )
                 if not _nonempty_string(mapping.get("expected_result")):

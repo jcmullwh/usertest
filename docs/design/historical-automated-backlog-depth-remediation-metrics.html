@@ -1,0 +1,872 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Automated-backlog depth remediation - metrics companion</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17212b;
+      --muted: #5f6b76;
+      --paper: #f4f2ec;
+      --card: #fffefa;
+      --line: #d9d4c8;
+      --navy: #163b54;
+      --blue: #1f6388;
+      --blue-soft: #e5f1f6;
+      --green: #256448;
+      --green-soft: #e6f2eb;
+      --amber: #8a5a13;
+      --amber-soft: #fbefd8;
+      --red: #923c36;
+      --red-soft: #f9e8e5;
+      --gray-soft: #eeece6;
+      --shadow: 0 14px 38px rgba(23, 33, 43, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 90% 0, rgba(31, 99, 136, 0.13), transparent 28rem),
+        linear-gradient(180deg, #fbfaf6 0, var(--paper) 44rem);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.55;
+    }
+
+    a { color: var(--blue); text-underline-offset: 0.16em; }
+    a:hover { text-decoration-thickness: 2px; }
+    code {
+      padding: 0.08rem 0.28rem;
+      border-radius: 0.25rem;
+      background: #eeeae0;
+      font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+      font-size: 0.88em;
+      overflow-wrap: anywhere;
+    }
+
+    .page {
+      width: min(1220px, calc(100% - 2rem));
+      margin: 0 auto;
+      padding: 2rem 0 5rem;
+    }
+
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: clamp(2rem, 6vw, 4.6rem);
+      border: 1px solid rgba(255,255,255,0.18);
+      border-radius: 1.25rem;
+      background: linear-gradient(135deg, #102f44 0%, #175678 62%, #245a49 145%);
+      color: white;
+      box-shadow: var(--shadow);
+    }
+
+    .hero::after {
+      content: "";
+      position: absolute;
+      width: 25rem;
+      height: 25rem;
+      right: -11rem;
+      bottom: -17rem;
+      border: 4rem solid rgba(255,255,255,0.06);
+      border-radius: 50%;
+    }
+
+    .eyebrow {
+      margin: 0 0 0.7rem;
+      color: #cbe7f2;
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3 { line-height: 1.16; }
+    h1 {
+      max-width: 19ch;
+      margin: 0;
+      font-size: clamp(2.35rem, 6.4vw, 4.9rem);
+      letter-spacing: -0.052em;
+    }
+
+    .hero .dek {
+      max-width: 76ch;
+      margin: 1.25rem 0 0;
+      color: #eef8fb;
+      font-size: clamp(1.02rem, 2.2vw, 1.25rem);
+    }
+
+    .meta {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.6rem;
+      margin-top: 1.7rem;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.4rem 0.7rem;
+      border: 1px solid rgba(255,255,255,0.25);
+      border-radius: 999px;
+      background: rgba(255,255,255,0.1);
+      font-size: 0.8rem;
+      font-weight: 750;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 16rem;
+      gap: 2rem;
+      align-items: start;
+      margin-top: 2rem;
+    }
+
+    .toc {
+      position: sticky;
+      top: 1rem;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 0.85rem;
+      background: rgba(255,254,250,0.92);
+      box-shadow: 0 8px 26px rgba(23,33,43,0.06);
+      backdrop-filter: blur(12px);
+    }
+
+    .toc strong {
+      display: block;
+      margin-bottom: 0.55rem;
+      font-size: 0.76rem;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+    }
+
+    .toc a {
+      display: block;
+      padding: 0.25rem 0;
+      color: var(--muted);
+      font-size: 0.83rem;
+      text-decoration: none;
+    }
+
+    .toc a:hover { color: var(--blue); }
+    main { min-width: 0; }
+
+    section {
+      scroll-margin-top: 1rem;
+      margin: 0 0 1.5rem;
+      padding: clamp(1.25rem, 3.4vw, 2.15rem);
+      border: 1px solid var(--line);
+      border-radius: 1rem;
+      background: var(--card);
+      box-shadow: 0 8px 28px rgba(23,33,43,0.05);
+    }
+
+    section > h2 {
+      margin: 0 0 0.9rem;
+      color: var(--navy);
+      font-size: clamp(1.5rem, 3vw, 2.05rem);
+      letter-spacing: -0.026em;
+    }
+
+    section > p:first-of-type { margin-top: 0; }
+    h3 { margin: 1.4rem 0 0.55rem; font-size: 1.06rem; }
+    .muted { color: var(--muted); }
+    .small { font-size: 0.86rem; }
+
+    .notice {
+      margin: 1rem 0;
+      padding: 0.9rem 1rem;
+      border-left: 4px solid var(--amber);
+      border-radius: 0.35rem;
+      background: var(--amber-soft);
+    }
+
+    .notice.danger { border-color: var(--red); background: var(--red-soft); }
+    .notice.info { border-color: var(--blue); background: var(--blue-soft); }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 0.9rem;
+      margin: 1.15rem 0;
+    }
+
+    .stat {
+      min-width: 0;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 0.8rem;
+      background: #fff;
+    }
+
+    .stat .label {
+      display: block;
+      min-height: 2.35em;
+      color: var(--muted);
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.055em;
+      line-height: 1.25;
+      text-transform: uppercase;
+    }
+
+    .stat .value {
+      display: block;
+      margin: 0.28rem 0 0.16rem;
+      font-size: clamp(1.55rem, 3vw, 2.2rem);
+      font-weight: 850;
+      letter-spacing: -0.04em;
+    }
+
+    .stat .detail { color: var(--muted); font-size: 0.8rem; }
+    .good .value { color: var(--green); }
+    .warn .value { color: var(--amber); }
+    .bad .value { color: var(--red); }
+    .neutral .value { color: var(--navy); }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.17rem 0.48rem;
+      border-radius: 999px;
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.025em;
+      white-space: nowrap;
+    }
+
+    .tag.good { color: var(--green); background: var(--green-soft); }
+    .tag.warn { color: var(--amber); background: var(--amber-soft); }
+    .tag.bad { color: var(--red); background: var(--red-soft); }
+    .tag.neutral { color: #4e5963; background: var(--gray-soft); }
+    .tag.info { color: var(--blue); background: var(--blue-soft); }
+
+    .table-wrap {
+      width: 100%;
+      overflow-x: auto;
+      margin: 0.9rem 0;
+      border: 1px solid var(--line);
+      border-radius: 0.75rem;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      background: white;
+      font-size: 0.86rem;
+    }
+
+    th, td {
+      padding: 0.72rem 0.8rem;
+      border-bottom: 1px solid #e7e3da;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: #43505c;
+      background: #f4f2ec;
+      font-size: 0.71rem;
+      font-weight: 850;
+      letter-spacing: 0.045em;
+      text-transform: uppercase;
+    }
+
+    tr:last-child td { border-bottom: 0; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .nowrap { white-space: nowrap; }
+
+    .meter-list { display: grid; gap: 0.8rem; margin: 1rem 0; }
+    .meter-row {
+      display: grid;
+      grid-template-columns: minmax(11rem, 1.35fr) minmax(10rem, 2fr) 5.8rem;
+      gap: 0.8rem;
+      align-items: center;
+    }
+    .meter-label { font-size: 0.84rem; font-weight: 700; }
+    .meter-track {
+      height: 0.7rem;
+      overflow: hidden;
+      border-radius: 999px;
+      background: #e6e2d9;
+    }
+    .meter-fill {
+      width: var(--pct);
+      height: 100%;
+      border-radius: inherit;
+      background: var(--blue);
+    }
+    .meter-fill.bad { background: var(--red); }
+    .meter-fill.warn { background: var(--amber); }
+    .meter-fill.good { background: var(--green); }
+    .meter-value { text-align: right; font-size: 0.82rem; font-variant-numeric: tabular-nums; }
+
+    .timeline { position: relative; margin: 1.25rem 0 0; padding-left: 1.5rem; }
+    .timeline::before {
+      content: "";
+      position: absolute;
+      top: 0.25rem;
+      bottom: 0.35rem;
+      left: 0.34rem;
+      width: 2px;
+      background: var(--line);
+    }
+    .event { position: relative; padding: 0 0 1.35rem 0.35rem; }
+    .event:last-child { padding-bottom: 0; }
+    .event::before {
+      content: "";
+      position: absolute;
+      top: 0.24rem;
+      left: -1.49rem;
+      width: 0.7rem;
+      height: 0.7rem;
+      border: 3px solid var(--card);
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 0 1px var(--line);
+    }
+    .event.failed::before { background: var(--red); }
+    .event.mixed::before { background: var(--amber); }
+    .event h3 { margin: 0 0 0.25rem; }
+    .event .event-meta { color: var(--muted); font-size: 0.78rem; }
+    .event p { margin: 0.4rem 0; }
+
+    .funnel {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 0.6rem;
+      margin: 1rem 0;
+    }
+    .funnel-step {
+      position: relative;
+      padding: 0.85rem 0.7rem;
+      border: 1px solid var(--line);
+      border-radius: 0.7rem;
+      background: white;
+      text-align: center;
+    }
+    .funnel-step:not(:last-child)::after {
+      content: ">";
+      position: absolute;
+      z-index: 2;
+      top: 50%;
+      right: -0.48rem;
+      transform: translateY(-50%);
+      width: 0.9rem;
+      color: var(--muted);
+      background: var(--card);
+      font-weight: 900;
+    }
+    .funnel-step strong { display: block; font-size: 1.35rem; }
+    .funnel-step span { display: block; color: var(--muted); font-size: 0.73rem; }
+    .funnel-step.pass strong { color: var(--green); }
+    .funnel-step.fail strong { color: var(--red); }
+    .funnel-step.mixed strong { color: var(--amber); }
+
+    .split {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 1rem;
+      margin: 1rem 0;
+    }
+    .panel {
+      min-width: 0;
+      padding: 1rem;
+      border: 1px solid var(--line);
+      border-radius: 0.8rem;
+      background: white;
+    }
+    .panel h3 { margin-top: 0; }
+    .panel ul { margin-bottom: 0; padding-left: 1.15rem; }
+    .panel li + li { margin-top: 0.35rem; }
+
+    .source-list {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 0.75rem;
+      padding: 0;
+      list-style: none;
+    }
+    .source-list li {
+      min-width: 0;
+      padding: 0.75rem;
+      border: 1px solid var(--line);
+      border-radius: 0.65rem;
+      background: white;
+      font-size: 0.82rem;
+    }
+    .source-list a { font-weight: 750; overflow-wrap: anywhere; }
+    .source-list span { display: block; margin-top: 0.22rem; color: var(--muted); }
+
+    footer {
+      padding: 1rem 0 0;
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-align: center;
+    }
+
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      .toc { position: static; order: -1; columns: 2; }
+      .toc strong { column-span: all; }
+      .status-grid { grid-template-columns: repeat(2, minmax(0,1fr)); }
+      .funnel { grid-template-columns: 1fr; }
+      .funnel-step:not(:last-child)::after {
+        content: "v";
+        top: auto;
+        right: 50%;
+        bottom: -0.56rem;
+        transform: translateX(50%);
+      }
+    }
+
+    @media (max-width: 680px) {
+      .page { width: min(100% - 1rem, 1220px); padding-top: 0.5rem; }
+      .hero { border-radius: 0.85rem; }
+      .status-grid, .split, .source-list { grid-template-columns: 1fr; }
+      .toc { columns: 1; }
+      .meter-row { grid-template-columns: 1fr 4.7rem; gap: 0.4rem; }
+      .meter-track { grid-column: 1 / -1; grid-row: 2; }
+      .meter-value { grid-column: 2; grid-row: 1; }
+      th, td { padding: 0.62rem; }
+    }
+
+    @media print {
+      @page { size: letter; margin: 0.55in; }
+      body { background: white; font-size: 9pt; }
+      .page { width: 100%; padding: 0; }
+      .hero { padding: 1.4rem; border-radius: 0; background: white; color: var(--ink); box-shadow: none; }
+      .hero::after, .toc { display: none; }
+      .hero .eyebrow, .hero .dek { color: var(--ink); }
+      .pill { border-color: var(--line); background: white; color: var(--ink); }
+      .layout { display: block; margin-top: 0.8rem; }
+      section { break-inside: avoid; padding: 0.9rem; margin-bottom: 0.8rem; box-shadow: none; }
+      .table-wrap { overflow: visible; }
+      table { font-size: 7.5pt; }
+      a { color: inherit; text-decoration: none; }
+      .source-list { display: block; }
+      .source-list li { break-inside: avoid; margin-bottom: 0.35rem; }
+      footer { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <p class="eyebrow">Measurement companion / evidence snapshot</p>
+      <h1>Depth remediation is not yet qualified</h1>
+      <p class="dek">The project has gained much stronger offline contracts, source-evidence accounting, and subscription-route proof. It has not yet demonstrated that a real shadow cycle can turn mined evidence into accepted causal research and a correct, code-grounded plan. This report keeps those results separate.</p>
+      <div class="meta">
+        <span class="pill">Snapshot: July 11, 2026</span>
+        <span class="pill">Branch: codex/backlog-depth-remediation</span>
+        <span class="pill">Export: disabled</span>
+        <span class="pill">Overall: not qualified</span>
+      </div>
+    </header>
+
+    <div class="layout">
+      <main>
+        <section id="reading-rules">
+          <h2>How to read these numbers</h2>
+          <p>There is intentionally no blended project score. A deterministic test passing, a model returning output, a dossier passing causal verification, a shadow cycle qualifying, and an implemented case resolving its original problem are different claims. Combining them would make the current operational failures look better than they are.</p>
+          <div class="notice danger"><strong>Bottom line:</strong> offline contract suites are green, but live accepted-research throughput is zero in the measurements available here. No revised-pipeline case has completed the ticket-to-outcome lifecycle, so the current resolution rate is undefined, not 0% and not 100%.</div>
+          <div class="split">
+            <div class="panel">
+              <h3>Rates are denominator-bound</h3>
+              <ul>
+                <li>Percentages describe only the named sample.</li>
+                <li>The two Stage 3 attempts are retries for one case, not two independent cases.</li>
+                <li>The two shadows ran on different commits and do not form one stable streak.</li>
+                <li>Unknown and not measured are never silently converted to zero.</li>
+              </ul>
+            </div>
+            <div class="panel">
+              <h3>Evidence layers stay separate</h3>
+              <ul>
+                <li>Historical corpus: what the old process actually emitted.</li>
+                <li>Offline contract: deterministic behavior encoded in tests.</li>
+                <li>Live Stage 3: model output and evidence-gate behavior.</li>
+                <li>Live shadow: full export-disabled backlog cycles.</li>
+                <li>Outcome: implementation plus original-scenario and recurrence proof.</li>
+              </ul>
+            </div>
+          </div>
+          <p class="small muted">Scope is automated atom-derived work. IDEA and other externally originated items are excluded as sources of new automated cases.</p>
+        </section>
+
+        <section id="current-status">
+          <h2>Current status at a glance</h2>
+          <div class="status-grid">
+            <div class="stat good">
+              <span class="label">Offline depth and outcome tests</span>
+              <span class="value">14/14 + 24/24</span>
+              <span class="detail">Passed; offline evidence only</span>
+            </div>
+            <div class="stat bad">
+              <span class="label">Aggregate causal benchmark</span>
+              <span class="value">0/1 valid</span>
+              <span class="detail">Nominal pass is a known false positive</span>
+            </div>
+            <div class="stat bad">
+              <span class="label">Live Stage 3 raw validity</span>
+              <span class="value">0/2</span>
+              <span class="detail">Both full attempts blocked</span>
+            </div>
+            <div class="stat bad">
+              <span class="label">Shadow qualification</span>
+              <span class="value">0/2</span>
+              <span class="detail">Two attempted cycles, both failed</span>
+            </div>
+            <div class="stat good">
+              <span class="label">Subscription-route provenance</span>
+              <span class="value">2/2</span>
+              <span class="detail">Direct signed-in host ChatGPT route</span>
+            </div>
+            <div class="stat bad">
+              <span class="label">Later-shadow research accepted</span>
+              <span class="value">0/15</span>
+              <span class="detail">Substantive raw output did not pass the gate</span>
+            </div>
+            <div class="stat warn">
+              <span class="label">Required stable shadow streak</span>
+              <span class="value">0/2</span>
+              <span class="detail">No passing cycle on one exact revision</span>
+            </div>
+            <div class="stat neutral">
+              <span class="label">New-contract resolution rate</span>
+              <span class="value">Undefined</span>
+              <span class="detail">No qualified cases have completed the lifecycle</span>
+            </div>
+          </div>
+          <p>The current working tree includes fixes prompted by the live failures, but those changes have not yet been rerun through exact-revision live Stage 3, two consecutive shadows, backlog regeneration, implementation, or outcome verification.</p>
+        </section>
+
+        <section id="evolution">
+          <h2>Project evolution</h2>
+          <p>The system moved from permissive, self-amplifying artifact production toward explicit evidence accounting and hard causal gates. That direction is supported by code and offline tests. Live measurements show a second truth: the first controls produced no usable work, later changes restored mining and raw-research throughput, but the pipeline still has not accepted a real research dossier or emitted a qualified plan.</p>
+          <div class="timeline">
+            <article class="event failed">
+              <div class="event-meta">Historical baseline / two retained July corpora</div>
+              <h3>Detailed artifacts, weak causal enforcement <span class="tag bad">Baseline failure</span></h3>
+              <p>155 of 1,305 atoms were covered. 69 of 172 high-severity atoms lacked coverage or explicit disposition. 30 of 38 dossiers were partial, yet all 38 advanced. Same-cause findings did not reduce the 38 selections and 39 plans.</p>
+            </article>
+            <article class="event failed">
+              <div class="event-meta">Commit c03ed318 / first live shadow</div>
+              <h3>Complete accounting, zero mining throughput <span class="tag bad">Failed</span></h3>
+              <p>All 133 eligible source atoms received an unresolved disposition after zero of three miners verified. No cases, research, options, plans, or ready tickets were produced. The controls exposed failure honestly, but the system did not perform its primary job.</p>
+            </article>
+            <article class="event mixed">
+              <div class="event-meta">Commit 1f57437e / second live shadow</div>
+              <h3>Mining and raw research recovered; acceptance stayed at zero <span class="tag warn">Mixed, failed overall</span></h3>
+              <p>Two of three miners verified. 85 of 133 source atoms supported 15 cases; 14 of 15 raw reports were substantive. None of the 15 dossiers passed the evidence gate, and no options, plans, or ready tickets emerged.</p>
+            </article>
+            <article class="event mixed">
+              <div class="event-meta">Commit cdd666f31af5cc91d8df4d42a5b38b47a1e99305 / controlled Stage 3</div>
+              <h3>Subscription route proven; dossier contract still unusable <span class="tag warn">Failed safely</span></h3>
+              <p>Both long-running attempts completed via the signed-in host ChatGPT subscription and both invalid dossiers were blocked. Raw contract validity was 0 of 2; the controlled case was not accepted and produced no plan.</p>
+            </article>
+            <article class="event failed">
+              <div class="event-meta">Current dirty working tree / after cdd666</div>
+              <h3>More offline coverage, one newly discovered false positive <span class="tag bad">Not qualified</span></h3>
+              <p>Prompt and evidence-contract fixes target the observed Stage 3 failures. However, the aggregate multi-hop test is semantically unsound because disconnected supports can be accepted as one causal chain. Current live performance is not measured.</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="historical-baseline">
+          <h2>Historical baseline</h2>
+          <p>The baseline combines two retained July compiled corpora. It contains <strong>1,305 atoms, 66 problem records, 38 research dossiers, 114 options, 38 selections, 39 change plans, and 67 final tickets</strong>.</p>
+          <div class="meter-list" aria-label="Historical baseline ratios">
+            <div class="meter-row">
+              <span class="meter-label">Atoms covered across both corpora</span>
+              <span class="meter-track"><span class="meter-fill bad" style="--pct:11.9%"></span></span>
+              <span class="meter-value">155/1,305</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">High-severity atoms without coverage/disposition</span>
+              <span class="meter-track"><span class="meter-fill bad" style="--pct:40.1%"></span></span>
+              <span class="meter-value">69/172</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">Research dossiers classified partial</span>
+              <span class="meter-track"><span class="meter-fill bad" style="--pct:78.9%"></span></span>
+              <span class="meter-value">30/38</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">Research dossiers advanced downstream</span>
+              <span class="meter-track"><span class="meter-fill bad" style="--pct:100%"></span></span>
+              <span class="meter-value">38/38</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">Selections labeled most_comprehensive</span>
+              <span class="meter-track"><span class="meter-fill bad" style="--pct:94.7%"></span></span>
+              <span class="meter-value">36/38</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">Plans beginning with discovery work</span>
+              <span class="meter-track"><span class="meter-fill bad" style="--pct:89.7%"></span></span>
+              <span class="meter-value">35/39</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">Plans naming concrete paths</span>
+              <span class="meter-track"><span class="meter-fill warn" style="--pct:7.7%"></span></span>
+              <span class="meter-value">3/39</span>
+            </div>
+            <div class="meter-row">
+              <span class="meter-label">Plans with exact-ish verification commands</span>
+              <span class="meter-track"><span class="meter-fill warn" style="--pct:5.1%"></span></span>
+              <span class="meter-value">2/39</span>
+            </div>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Measure</th><th class="num">Run/corpus 1</th><th class="num">Run/corpus 2</th><th>Interpretation</th></tr></thead>
+              <tbody>
+                <tr><td>Atom coverage</td><td class="num">85/1,076 (7.9%)</td><td class="num">70/229 (30.6%)</td><td>Different corpora; the percentage difference is not treated as a time trend. Combined: 155/1,305 (11.9%).</td></tr>
+                <tr><td>Same-cause review</td><td class="num">17/23 into 7 groups</td><td class="num">15/15 into 6 groups</td><td>Strong duplicate/same-cause signal, but it did not reduce downstream production: 38 selections and 39 plans remained.</td></tr>
+                <tr><td>Research status</td><td colspan="2" class="num">30/38 partial; 8/38 reproduced; 38/38 advanced</td><td>Advancement meant a report existed, not that the mechanism was established.</td></tr>
+                <tr><td>Option selection labels</td><td colspan="2" class="num">36/38 comprehensive; 2/38 direct; 0/38 robust</td><td>The distribution closely follows the mandatory prompt families and is not evidence that broad abstractions were causally justified.</td></tr>
+                <tr><td>Historical resolution</td><td colspan="2" class="num">Unknown</td><td>Commit, branch, original-scenario replay, live outcome, recurrence, and integrity evidence are incomplete.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="notice info">The baseline answers what was wrong with the old process. It does not give a historical solve rate: the retained records cannot support one.</div>
+        </section>
+
+        <section id="benchmarks">
+          <h2>Benchmarks created and their current status</h2>
+          <p>New deterministic suites now encode historical grouping, positive causal acceptance, full-chain flow, and outcome-state requirements. Their passing state is meaningful code-contract evidence. It is not evidence that the model produces valid dossiers on real evidence or that implementations resolve live problems.</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Benchmark</th><th class="num">Result</th><th>Status</th><th>What it does and does not prove</th></tr></thead>
+              <tbody>
+                <tr><td>Historical depth regressions<br><span class="small muted">7 representative fixture cases</span></td><td class="num">14/14 (100%)</td><td><span class="tag good">Pass</span></td><td>Encoded historical contracts pass. The fixture is representative, not a statistically complete sample or live resolution proof.</td></tr>
+                <tr><td>Positive depth acceptance</td><td class="num">9/9 (100%)</td><td><span class="tag good">Pass</span></td><td>Known-good dossiers can advance. It does not estimate success on unseen model output.</td></tr>
+                <tr><td>Full-chain causal acceptance</td><td class="num">1/1 (100%)</td><td><span class="tag warn">Pass, tiny n</span></td><td>One fixture traverses the intended chain. A denominator of one cannot support a general success claim.</td></tr>
+                <tr><td>Outcome progression</td><td class="num">14/14 (100%)</td><td><span class="tag good">Pass</span></td><td>Lifecycle states and proof requirements behave as encoded. No real case outcome is measured.</td></tr>
+                <tr><td>Positive + full-chain + outcome combined</td><td class="num">24/24 (100%)</td><td><span class="tag good">Pass</span></td><td>Convenient total of the preceding three independent offline suites; it is not a blended project score.</td></tr>
+                <tr><td>Aggregate multi-hop causal coverage</td><td class="num">Nominal 1/1; semantic 0/1</td><td><span class="tag bad">FAIL</span></td><td>The green fixture accepts disconnected supports whose symbol union happens to cover the hypothesis. It can certify two unrelated paths as one mechanism and must be fixed before use.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="notice danger"><strong>Known benchmark regression:</strong> the aggregate multi-hop addition made the nominal test count look better while weakening the meaning of “verified mechanism.” Design review caught the false positive. Until connectivity and production-entrypoint binding are enforced, its honest semantic result is 0 of 1.</div>
+
+          <h3>Repository matrix checkpoints</h3>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Checkpoint</th><th class="num">Project environments</th><th class="num">Elapsed</th><th>Evidence quality</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><td class="num">14/14</td><td class="num">615.9 s</td><td rowspan="6">Recorded in the in-progress execution plan. The six raw matrix logs are not linked or independently reconstructed in this companion.</td></tr>
+                <tr><td>2</td><td class="num">14/14</td><td class="num">704.9 s</td></tr>
+                <tr><td>3</td><td class="num">14/14</td><td class="num">1,031.1 s</td></tr>
+                <tr><td>4</td><td class="num">14/14</td><td class="num">929.3 s</td></tr>
+                <tr><td>5</td><td class="num">14/14</td><td class="num">1,107.3 s</td></tr>
+                <tr><td>6 / cdd666</td><td class="num">14/14</td><td class="num">875.8 s</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <p class="small muted">No runtime performance trend is claimed. Suite content grew and machine contention varied. The recorded conclusion is only that all 14 environments passed at every checkpoint and the slow runner_core suite completed in 623.3 seconds without being cut short.</p>
+        </section>
+
+        <section id="shadow-evolution">
+          <h2>Live shadow evolution</h2>
+          <p>Each shadow was an export-disabled cycle over real evidence. Both failed. The second shows meaningful intermediate recovery, but the final indicators that matter for the objective - accepted research, plans, ready tickets, and qualification - stayed at zero.</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Funnel stage</th><th class="num">c03ed318</th><th class="num">1f57437e</th><th>Trend and limitation</th></tr></thead>
+              <tbody>
+                <tr><td>Eligible source atoms</td><td class="num">133</td><td class="num">133</td><td><span class="tag neutral">Stable denominator</span> Same source-evidence count.</td></tr>
+                <tr><td>Verified mining jobs</td><td class="num">0/3 (0%)</td><td class="num">2/3 (66.7%)</td><td><span class="tag good">Improved</span> Job verification recovered, but one miner still failed.</td></tr>
+                <tr><td>Source atoms supporting cases</td><td class="num">0/133 (0%)</td><td class="num">85/133 (63.9%)</td><td><span class="tag good">Improved</span> Whether grouping was correct remains unproven downstream.</td></tr>
+                <tr><td>Source atoms unresolved</td><td class="num">133/133 (100%)</td><td class="num">48/133 (36.1%)</td><td><span class="tag good">Improved</span> Explicit unresolved state is preferable to silent omission.</td></tr>
+                <tr><td>Canonical cases</td><td class="num">0</td><td class="num">15</td><td><span class="tag good">Intermediate throughput</span> Cases are candidates, not validated root causes.</td></tr>
+                <tr><td>Substantive raw research reports</td><td class="num">0</td><td class="num">14/15 (93.3%)</td><td><span class="tag good">Improved</span> Content volume is not acceptance.</td></tr>
+                <tr><td>Accepted causal research</td><td class="num">0</td><td class="num">0/15 (0%)</td><td><span class="tag bad">No improvement</span> Every case remained blocked.</td></tr>
+                <tr><td>Solution options</td><td class="num">0</td><td class="num">0</td><td><span class="tag bad">No throughput</span></td></tr>
+                <tr><td>Change plans</td><td class="num">0</td><td class="num">0</td><td><span class="tag bad">No throughput</span></td></tr>
+                <tr><td>Ready tickets</td><td class="num">0</td><td class="num">0</td><td><span class="tag bad">No throughput</span></td></tr>
+                <tr><td>Cycle passed</td><td class="num">No (0/1)</td><td class="num">No (0/1)</td><td><span class="tag bad">0/2 overall</span> Different commits; not one consecutive run.</td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <h3>What “substantive” meant in the later raw reports</h3>
+          <div class="status-grid">
+            <div class="stat neutral"><span class="label">Raw reports</span><span class="value">14/15</span><span class="detail">Contained substantive research</span></div>
+            <div class="stat neutral"><span class="label">Experiments</span><span class="value">63</span><span class="detail">Across those raw reports</span></div>
+            <div class="stat neutral"><span class="label">Inspected files</span><span class="value">156</span><span class="detail">Aggregate references</span></div>
+            <div class="stat neutral"><span class="label">Inspected symbols</span><span class="value">211</span><span class="detail">Aggregate references</span></div>
+            <div class="stat neutral"><span class="label">Hypotheses</span><span class="value">25</span><span class="detail">Across raw reports</span></div>
+            <div class="stat bad"><span class="label">Accepted dossiers</span><span class="value">0/15</span><span class="detail">Evidence gate result</span></div>
+          </div>
+          <div class="notice"><strong>Placeholder distinction:</strong> the retained 15 Stage 3 items and 15 backlog entries are blocked failure placeholders. They are not accepted research proofs, solution options, plans, implementation-ready tickets, or evidence of resolution.</div>
+          <div class="notice info"><strong>Separate denominator:</strong> both shadow states also report 311 high-severity atoms pending disposition. Those are research-origin atoms, not members of the 133 eligible source-atom mining corpus. Adding 311 to 133 would misstate the mining denominator.</div>
+        </section>
+
+        <section id="stage3">
+          <h2>Controlled live Stage 3</h2>
+          <p>The exact-commit smoke at <code>cdd666f31af5cc91d8df4d42a5b38b47a1e99305</code> ran two complete subscription-backed attempts for one controlled case. The model process and auth route worked; the research output contract did not.</p>
+          <div class="funnel" aria-label="Controlled Stage 3 funnel">
+            <div class="funnel-step pass"><strong>2/2</strong><span>model processes completed</span></div>
+            <div class="funnel-step pass"><strong>2/2</strong><span>subscription provenance verified</span></div>
+            <div class="funnel-step fail"><strong>0/2</strong><span>raw dossiers valid</span></div>
+            <div class="funnel-step fail"><strong>0/1</strong><span>controlled cases accepted</span></div>
+            <div class="funnel-step fail"><strong>0/1</strong><span>plans produced</span></div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Attempt</th><th class="num">Duration</th><th>Execution/auth</th><th>Contract result</th></tr></thead>
+              <tbody>
+                <tr><td>1</td><td class="num">549.29 s</td><td>Exit 0; turn completed; subscription provenance passed.</td><td><span class="tag bad">Invalid</span> Positive-outcome contract invalid; ancillary diagnostic mislabeled as a control.</td></tr>
+                <tr><td>2</td><td class="num">685.06 s</td><td>Exit 0; turn completed; subscription provenance passed.</td><td><span class="tag bad">Invalid</span> Alternative hypothesis cited an origin atom that contradicted it.</td></tr>
+                <tr><td><strong>Total</strong></td><td class="num"><strong>1,234.35 s</strong></td><td colspan="2">Both attempts were allowed to complete; neither result was inferred from a wrapper timeout.</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="split">
+            <div class="panel">
+              <h3>Proven live</h3>
+              <ul>
+                <li>Direct host <code>CODEX_HOME</code> was used.</li>
+                <li>Canonical ChatGPT endpoints were used.</li>
+                <li>All seven monitored API/provider variables were blank.</li>
+                <li>API fallback was false and no auth cache was copied.</li>
+                <li>Invalid dossiers did not advance.</li>
+              </ul>
+            </div>
+            <div class="panel">
+              <h3>Not proven live</h3>
+              <ul>
+                <li>A contract-valid raw dossier from current prompts.</li>
+                <li>Full evidence-verifier execution on that dossier.</li>
+                <li>An evidence-sufficient causal case.</li>
+                <li>A decision-complete plan.</li>
+                <li>Any resolved original scenario.</li>
+              </ul>
+            </div>
+          </div>
+          <p class="small muted">The current uncommitted prompt and aggregation changes were made after this run. Their live Stage 3 result is not measured; passing offline tests cannot substitute for rerunning it.</p>
+        </section>
+
+        <section id="status-change">
+          <h2>What improved, worsened, and stayed unresolved</h2>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Area</th><th>Direction</th><th>Evidence-bounded assessment</th></tr></thead>
+              <tbody>
+                <tr><td>Source-evidence accounting</td><td><span class="tag good">Improved</span></td><td>Shadows explicitly partitioned all 133 eligible source atoms. The old process silently covered only 155 of 1,305 across the retained corpora.</td></tr>
+                <tr><td>Mining throughput</td><td><span class="tag good">Improved between shadows</span></td><td>Verified miners moved from 0/3 to 2/3 and case-supporting source atoms from 0/133 to 85/133.</td></tr>
+                <tr><td>Raw research depth</td><td><span class="tag good">Improved between shadows</span></td><td>The later shadow produced 14 substantive raw reports with experiments and code references; the earlier produced none.</td></tr>
+                <tr><td>Accepted causal research</td><td><span class="tag bad">Unchanged at zero</span></td><td>0/15 later-shadow dossiers passed the gate; controlled Stage 3 raw validity was 0/2.</td></tr>
+                <tr><td>Plan throughput</td><td><span class="tag bad">Unchanged at zero</span></td><td>Neither shadow and neither controlled attempt produced a qualified plan.</td></tr>
+                <tr><td>Subscription billing route</td><td><span class="tag good">Improved and proven</span></td><td>2/2 controlled attempts verified direct signed-in host ChatGPT subscription use with no API fallback.</td></tr>
+                <tr><td>Offline causal/outcome contracts</td><td><span class="tag good">Expanded</span></td><td>New historical, positive, full-chain, and outcome suites pass their collected tests.</td></tr>
+                <tr><td>Aggregate multi-hop mechanism contract</td><td><span class="tag bad">Worsened in current dirty tree</span></td><td>A new nominally green test was found to accept disconnected evidence. Its semantic status is FAIL until repaired.</td></tr>
+                <tr><td>Shadow qualification</td><td><span class="tag bad">Unchanged at zero</span></td><td>0/2 attempted cycles passed; stable streak is 0/2; export remains disabled.</td></tr>
+                <tr><td>Real outcome resolution</td><td><span class="tag neutral">Not measured</span></td><td>Qualified regeneration and implementation have not started. Historical solve rate is unknown; new-contract solve rate is undefined.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="ticket-outcomes">
+          <h2>Ticket and outcome lifecycle status</h2>
+          <div class="status-grid">
+            <div class="stat warn"><span class="label">Active generated queue</span><span class="value">20</span><span class="detail">19 ready, 1 in progress under the old contract</span></div>
+            <div class="stat bad"><span class="label">Queue reconciled</span><span class="value">0/20</span><span class="detail">Intentionally deferred until qualification</span></div>
+            <div class="stat neutral"><span class="label">Qualified regeneration</span><span class="value">Not started</span><span class="detail">No eligible run yet</span></div>
+            <div class="stat neutral"><span class="label">Qualified implement drain</span><span class="value">Not started</span><span class="detail">No eligible tickets yet</span></div>
+          </div>
+          <p>“Ready” in the current queue is an old workflow state; it is not evidence that those tickets reflect real, unactioned problems or correct root-cause solutions. Reconciliation is being held until the revised pipeline qualifies so protected IDEA/user items are preserved and stale automated items are not confused with newly proven work.</p>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Plan inventory classification</th><th class="num">Count</th><th class="num">Share of 606</th></tr></thead>
+              <tbody>
+                <tr><td>Definitely automated</td><td class="num">369</td><td class="num">60.9%</td></tr>
+                <tr><td>Definitely IDEA or user originated</td><td class="num">25</td><td class="num">4.1%</td></tr>
+                <tr><td>Readable, origin unproven, protected</td><td class="num">170</td><td class="num">28.1%</td></tr>
+                <tr><td>Corrupt or semantically not plans</td><td class="num">42</td><td class="num">6.9%</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="notice info"><strong>Outcome status:</strong> historical resolution remains unknown because provenance is incomplete. New-contract resolution is not measurable because the qualified-case denominator is zero. The next valid percentage requires qualified cases to be regenerated, implemented, replayed against their original scenarios, and checked for recurrence.</div>
+        </section>
+
+        <section id="next-gates">
+          <h2>What must happen before “working” is a supported claim</h2>
+          <ol>
+            <li>Fix the aggregate support-connectivity and production-entrypoint false positive, then adversarially test it.</li>
+            <li>Run the full project matrix and a new exact-revision, subscription-backed live Stage 3. A valid dossier must reach and pass evidence verification.</li>
+            <li>Run two consecutive export-disabled shadows on one exact revision. Each must produce real cases, accepted research, code-grounded plans, and a stable case graph.</li>
+            <li>Only after qualification, reconcile the stale generated queue while preserving IDEA/user and origin-unproven records.</li>
+            <li>Regenerate, implement through <code>usertest implement</code>, replay original scenarios, record branch/commit/test/live evidence, and continue until the qualified backlog is actually complete.</li>
+          </ol>
+          <p>Passing controls alone is insufficient. The decisive measurement is whether the system repeatedly finds real evidence, establishes a connected causal mechanism, produces a plan that closes that mechanism, and proves the original problem no longer occurs.</p>
+        </section>
+
+        <section id="sources">
+          <h2>Evidence sources and limitations</h2>
+          <p>The historical metrics combine both retained compiled corpora. The live metrics point to exact local receipts. Links are local and require access to this workspace.</p>
+          <h3>Historical corpus: usertest</h3>
+          <ul class="source-list">
+            <li><a href="file:///I:/code/usertest/runs/usertest/usertest/_compiled/usertest.research.json">Research dossiers</a><span>Historical research content; incomplete outcome provenance.</span></li>
+            <li><a href="file:///I:/code/usertest/runs/usertest/usertest/_compiled/usertest.change_plans.json">Change plans</a><span>Used for discovery-first, concrete-path, and verification-command measurements.</span></li>
+            <li><a href="file:///I:/code/usertest/runs/usertest/usertest/_compiled/usertest.backlog.json">Backlog</a><span>First retained July compiled backlog corpus.</span></li>
+            <li><a href="file:///I:/code/usertest/runs/usertest/usertest/_compiled/usertest.backlog_artifacts/solution_optioning/solution_optioning_relation_review_001/solution_optioning_relation_review_001.response.txt">Relation review</a><span>Shows same-cause grouping that was not durably applied downstream.</span></li>
+          </ul>
+          <h3>Historical corpus: usertest_implement</h3>
+          <ul class="source-list">
+            <li><a href="file:///I:/code/usertest/runs/usertest_implement/usertest/_compiled/usertest.research.json">Research dossiers</a><span>Second retained July corpus used in combined totals.</span></li>
+            <li><a href="file:///I:/code/usertest/runs/usertest_implement/usertest/_compiled/usertest.change_plans.json">Change plans</a><span>Second compiled plan corpus; separate archived plans include corrupt files.</span></li>
+            <li><a href="file:///I:/code/usertest/runs/usertest_implement/usertest/_compiled/usertest.backlog.json">Backlog</a><span>Second retained July compiled backlog corpus.</span></li>
+            <li><a href="file:///I:/code/usertest/runs/usertest_implement/usertest/_compiled/usertest.backlog_artifacts/solution_optioning/solution_optioning_relation_review_001/solution_optioning_relation_review_001.response.txt">Relation review</a><span>Second same-cause review; annotations were not persisted into canonical downstream records.</span></li>
+          </ul>
+          <h3>Current benchmarks and live receipts</h3>
+          <ul class="source-list">
+            <li><a href="../../apps/usertest_backlog/tests/fixtures/historical_depth_benchmark.json">Historical depth fixture</a><span>Seven representative regression cases, not a statistical sample.</span></li>
+            <li><a href="../../apps/usertest_backlog/tests/test_historical_depth_regressions.py">Historical regression tests</a><span>Offline contract evidence only.</span></li>
+            <li><a href="../../apps/usertest_backlog/tests/test_positive_depth_acceptance.py">Positive depth tests</a><span>Known-good acceptance paths.</span></li>
+            <li><a href="../../packages/backlog_miner/tests/test_full_chain_causal_acceptance.py">Full-chain test</a><span>One-case denominator.</span></li>
+            <li><a href="../../apps/usertest_implement/tests/test_outcome_progression.py">Outcome progression tests</a><span>State/proof contract, not real outcomes.</span></li>
+            <li><a href="../../packages/backlog_miner/tests/test_research_evidence.py">Aggregate mechanism tests</a><span>Contains the current known disconnected-support false positive.</span></li>
+            <li><a href="../../.tmp/live_subscription_smoke/cdd666f31af5cc91d8df4d42a5b38b47a1e99305/controlled_stage3/stage3_result.json">Controlled Stage 3 result</a><span>Two full attempts for one case at exact commit cdd666.</span></li>
+            <li><a href="../../.tmp/shadow_depth_live/c03ed318/usertest.shadow_state.json">First shadow state</a><span>One failed cycle on c03ed318.</span></li>
+            <li><a href="../../.tmp/shadow_depth_live/c03ed318/usertest.problem_records.evidence_receipt.json">First shadow mining receipt</a><span>133 eligible source atoms; zero verified miners; all 133 unresolved.</span></li>
+            <li><a href="../../.tmp/shadow_depth_live/1f57437e/usertest.shadow_state.json">Second shadow state</a><span>One failed cycle on 1f57437e.</span></li>
+            <li><a href="../../.tmp/shadow_depth_live/1f57437e/usertest.problem_records.evidence_receipt.json">Second shadow mining receipt</a><span>133 eligible source atoms; two verified miners; 85 supports-case and 48 unresolved dispositions.</span></li>
+            <li><a href="../../.tmp/shadow_depth_live/1f57437e/usertest.research.json">Second shadow research output</a><span>Fifteen blocked placeholders whose artifact references bind the raw report measurements.</span></li>
+            <li><a href="../../.agents/plans/3%20-%20in_progress/20260709_historical_automated_backlog_depth_remediation.md">In-progress execution plan</a><span>Records work and matrix checkpoints; not itself outcome proof.</span></li>
+            <li><a href="historical-automated-backlog-depth-remediation-metrics.json">Machine-readable metrics</a><span>Structured denominators, statuses, source IDs, and caveats behind this report.</span></li>
+            <li><a href="historical-automated-backlog-depth-remediation-executive-summary.html">Executive summary</a><span>Narrative companion; numerical claims should be checked here and against primary artifacts.</span></li>
+          </ul>
+          <div class="notice"><strong>Matrix caveat:</strong> the six 14/14 matrix checkpoints and their durations are recorded in the in-progress execution plan. Raw matrix logs are not linked in this companion, so they are labeled as plan-recorded rather than independently reconstructed.</div>
+        </section>
+      </main>
+
+      <nav class="toc" aria-label="Contents">
+        <strong>Contents</strong>
+        <a href="#reading-rules">How to read</a>
+        <a href="#current-status">Current status</a>
+        <a href="#evolution">Evolution</a>
+        <a href="#historical-baseline">Historical baseline</a>
+        <a href="#benchmarks">Benchmarks</a>
+        <a href="#shadow-evolution">Live shadows</a>
+        <a href="#stage3">Controlled Stage 3</a>
+        <a href="#status-change">Improved / worsened</a>
+        <a href="#ticket-outcomes">Tickets and outcomes</a>
+        <a href="#next-gates">Next gates</a>
+        <a href="#sources">Sources</a>
+      </nav>
+    </div>
+
+    <footer>Historical automated-backlog depth remediation - measurement companion - snapshot July 11, 2026</footer>
+  </div>
+</body>
+</html>

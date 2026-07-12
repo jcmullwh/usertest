@@ -321,6 +321,37 @@ def test_strict_relation_allows_exact_shared_source_identity() -> None:
     assert len(result) == 1
 
 
+def test_strict_relation_low_confidence_does_not_override_objective_identity() -> None:
+    items = [
+        _case("problem:a", "case:a", ["atom:shared"]),
+        _case("problem:b", "case:b", ["atom:shared"]),
+    ]
+    result = canonicalize_problem_cases(
+        items,
+        [
+            {
+                "focus_id": "problem:a",
+                "action": "merge",
+                "target_ids": ["problem:b"],
+                "evidence_atom_ids": ["atom:shared"],
+                "rationale": "Both records cite the exact same observed failure.",
+                "review_confidence": 0.05,
+            },
+            {
+                "focus_id": "problem:b",
+                "action": "merge",
+                "target_ids": ["problem:a"],
+                "evidence_atom_ids": ["atom:shared"],
+                "rationale": "Both records cite the exact same observed failure.",
+                "review_confidence": 0.05,
+            },
+        ],
+        strict_review=True,
+    )
+
+    assert len(result) == 1
+
+
 def _reciprocal_same_cause_decisions() -> list[dict[str, object]]:
     return [
         {
@@ -344,7 +375,7 @@ def _reciprocal_same_cause_decisions() -> list[dict[str, object]]:
     ]
 
 
-def test_model_supplied_mechanism_hash_cannot_collapse_disjoint_cases() -> None:
+def test_reciprocal_disjoint_same_cause_is_one_provisional_research_unit() -> None:
     items = [
         _case("problem:a", "case:a", ["atom:a"]),
         _case("problem:b", "case:b", ["atom:b"]),
@@ -359,17 +390,163 @@ def test_model_supplied_mechanism_hash_cannot_collapse_disjoint_cases() -> None:
         strict_review=True,
     )
 
+    assert len(result) == 1
+    unit = result[0]
+    assert unit["case_identity_status"] == "provisional_same_cause"
+    assert unit["case_identity_candidate_ids"] == ["case:a", "case:b"]
+    assert unit["provisional_same_cause_group"]["member_case_ids"] == [
+        "case:a",
+        "case:b",
+    ]
+    assert "absorbed_case_ids" not in unit
+    assert "same_cause_group_id" not in unit
+
+
+def test_one_sided_disjoint_same_cause_stays_separate() -> None:
+    items = [
+        _case("problem:a", "case:a", ["atom:a"]),
+        _case("problem:b", "case:b", ["atom:b"]),
+    ]
+    decisions = _reciprocal_same_cause_decisions()
+    decisions[1] = {
+        "focus_id": "problem:b",
+        "action": "keep_separate",
+        "rationale": "The second observation contradicts the shared-cause hypothesis.",
+        "review_confidence": 0.8,
+    }
+
+    result = canonicalize_problem_cases(items, decisions, strict_review=True)
+
     assert len(result) == 2
-    assert all(
-        any(
-            error.startswith("collapse_objective_identity_missing:")
-            for error in item["case_relation_actions"][0]["relation_validation_errors"]
-        )
-        for item in result
+    assert all("absorbed_case_ids" not in item for item in result)
+    assert any(
+        "collapse_not_reciprocal:case:b"
+        in action.get("relation_validation_errors", [])
+        for action in result[0]["case_relation_actions"]
     )
 
 
-def test_runner_verified_mechanism_identity_allows_post_research_grouping() -> None:
+def _provisional_same_cause_unit() -> dict[str, object]:
+    return canonicalize_problem_cases(
+        [
+            _case("problem:a", "case:a", ["atom:a"]),
+            _case("problem:b", "case:b", ["atom:b"]),
+        ],
+        _reciprocal_same_cause_decisions(),
+        strict_review=True,
+    )[0]
+
+
+def test_failed_keep_separate_review_preserves_prior_provisional_group() -> None:
+    unit = _provisional_same_cause_unit()
+
+    result = canonicalize_problem_cases(
+        [unit],
+        [
+            {
+                "focus_id": "problem:a",
+                "action": "keep_separate",
+                "rationale": "The relation reviewer failed, so retain prior state.",
+                "review_confidence": 0.0,
+                "provisional_relation_suggestion": {
+                    "kind": "relation_review_batch_failure"
+                },
+                "relation_validation_errors": ["relation_review_batch_failed"],
+            }
+        ],
+        strict_review=True,
+    )
+
+    assert result[0]["case_identity_status"] == "provisional_same_cause"
+    assert result[0]["provisional_same_cause_group"] == unit[
+        "provisional_same_cause_group"
+    ]
+
+
+def test_evidence_complete_keep_separate_clears_prior_provisional_group() -> None:
+    unit = _provisional_same_cause_unit()
+
+    result = canonicalize_problem_cases(
+        [unit],
+        [
+            {
+                "focus_id": "problem:a",
+                "action": "keep_separate",
+                "evidence_atom_ids": ["atom:a", "atom:b"],
+                "rationale": "The cited observations falsify the shared-cause hypothesis.",
+                "review_confidence": 0.9,
+            }
+        ],
+        strict_review=True,
+    )
+
+    assert result[0]["case_identity_status"] == "resolved"
+    assert "provisional_same_cause_group" not in result[0]
+    assert result[0]["provisional_same_cause_clearance"]["member_case_ids"] == [
+        "case:a",
+        "case:b",
+    ]
+
+
+def test_incomplete_provisional_group_blocks_locally_instead_of_clearing() -> None:
+    unit = _provisional_same_cause_unit()
+    unit["provisional_same_cause_group"] = dict(unit["provisional_same_cause_group"])
+    unit["provisional_same_cause_group"]["member_facets"] = unit[
+        "provisional_same_cause_group"
+    ]["member_facets"][:1]
+
+    result = canonicalize_problem_cases(
+        [unit],
+        [
+            {
+                "focus_id": "problem:a",
+                "action": "keep_separate",
+                "evidence_atom_ids": ["atom:a", "atom:b"],
+                "rationale": "Attempt to clear an incomplete historical packet.",
+                "review_confidence": 0.9,
+            }
+        ],
+        strict_review=True,
+    )
+
+    assert result[0]["case_identity_status"] == "pending_relation"
+    assert "provisional_same_cause_group" in result[0]
+    assert "provisional_same_cause_facets_incomplete" in result[0][
+        "provisional_same_cause_integrity_errors"
+    ]
+
+
+def test_disjoint_historical_candidate_same_cause_is_still_provisional() -> None:
+    current = _case("problem:current", "case:current", ["atom:current"])
+    historical = _case("problem:historical", "case:historical", ["atom:historical"])
+    historical["_relation_candidate_only"] = True
+
+    result = canonicalize_problem_cases(
+        [current, historical],
+        [
+            {
+                "focus_id": "problem:current",
+                "action": "same_cause_group",
+                "group_id": "cause:suspected",
+                "member_ids": ["problem:current", "problem:historical"],
+                "evidence_atom_ids": ["atom:current", "atom:historical"],
+                "rationale": "Both symptoms point to the same boundary and need one proof.",
+                "review_confidence": 0.9,
+            }
+        ],
+        strict_review=True,
+    )
+
+    assert len(result) == 1
+    assert result[0]["case_identity_status"] == "provisional_same_cause"
+    assert "absorbed_case_ids" not in result[0]
+    assert set(result[0]["case_identity_candidate_ids"]) == {
+        "case:current",
+        "case:historical",
+    }
+
+
+def test_equal_verified_mechanism_surface_hash_remains_provisional() -> None:
     items = [
         _case("problem:a", "case:a", ["atom:a"]),
         _case("problem:b", "case:b", ["atom:b"]),
@@ -386,7 +563,33 @@ def test_runner_verified_mechanism_identity_allows_post_research_grouping() -> N
     )
 
     assert len(result) == 1
+    assert result[0]["case_identity_status"] == "provisional_same_cause"
+    assert "same_cause_group_id" not in result[0]
+
+
+def test_full_runner_verified_causal_identity_allows_durable_grouping() -> None:
+    items = [
+        _case("problem:a", "case:a", ["atom:a"]),
+        _case("problem:b", "case:b", ["atom:b"]),
+    ]
+
+    result = canonicalize_problem_cases(
+        items,
+        _reciprocal_same_cause_decisions(),
+        strict_review=True,
+        verified_mechanism_sha256_by_case={
+            "case:a": "a" * 64,
+            "case:b": "a" * 64,
+        },
+        verified_causal_signature_sha256_by_case={
+            "case:a": "b" * 64,
+            "case:b": "b" * 64,
+        },
+    )
+
+    assert len(result) == 1
     assert result[0]["same_cause_group_id"] == "cause:verified"
+    assert result[0].get("case_identity_status") != "provisional_same_cause"
 
 
 @pytest.mark.parametrize("action", ["merge", "same_cause_group"])

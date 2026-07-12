@@ -27,7 +27,11 @@ import logging
 from collections.abc import Mapping, Sequence
 from typing import Any, Protocol
 
-from backlog_core.case_lineage import mint_case_id
+from backlog_core.case_lineage import (
+    mint_case_id,
+    provisional_same_cause_clearance_errors,
+    provisional_same_cause_group_errors,
+)
 
 _LOG = logging.getLogger(__name__)
 
@@ -788,6 +792,7 @@ def canonicalize_problem_cases(
     stage: str = "problem_mining",
     strict_review: bool = False,
     verified_mechanism_sha256_by_case: Mapping[str, str] | None = None,
+    verified_causal_signature_sha256_by_case: Mapping[str, str] | None = None,
     verified_relation_edges: set[tuple[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply reviewer decisions to canonical pre-research problem work units.
@@ -816,6 +821,15 @@ def canonicalize_problem_cases(
             )
         if case_id in by_case:
             raise ValueError(f"canonicalize_problem_cases: duplicate case_id {case_id!r}")
+        provisional_group = item.get("provisional_same_cause_group")
+        if isinstance(provisional_group, Mapping):
+            provisional_errors = provisional_same_cause_group_errors(
+                provisional_group,
+                owning_case_id=case_id,
+            )
+            if provisional_errors:
+                item["case_identity_status"] = "pending_relation"
+                item["provisional_same_cause_integrity_errors"] = provisional_errors
         by_case[case_id] = item
         order.append(case_id)
         for alias in [
@@ -878,12 +892,12 @@ def canonicalize_problem_cases(
                 ]
             return []
 
-        def verified_mechanism_identity(case_id: str) -> str | None:
-            # This mapping is constructed by the runner from the persisted,
-            # self-hashed research receipt. Same-named fields in model output are
-            # intentionally inert.
+        def verified_causal_identity(case_id: str) -> str | None:
+            # A normalized mechanism hash identifies a code surface, not necessarily
+            # the complete causal path. Only the runner's full causal signature (or a
+            # prior verified relation edge) may make a pre-research grouping durable.
             value = _clean_relation_string(
-                (verified_mechanism_sha256_by_case or {}).get(case_id)
+                (verified_causal_signature_sha256_by_case or {}).get(case_id)
             )
             if (
                 value is not None
@@ -905,15 +919,16 @@ def canonicalize_problem_cases(
             relation_edge = tuple(sorted((left, right)))
             if relation_edge in (verified_relation_edges or set()):
                 return True
-            left_mechanism = verified_mechanism_identity(left)
-            right_mechanism = verified_mechanism_identity(right)
+            left_causal_identity = verified_causal_identity(left)
+            right_causal_identity = verified_causal_identity(right)
             return (
                 action == "same_cause_group"
-                and left_mechanism is not None
-                and left_mechanism == right_mechanism
+                and left_causal_identity is not None
+                and left_causal_identity == right_causal_identity
             )
 
         errors_by_focus: dict[str, list[str]] = {}
+        provisional_same_cause_peers: dict[str, set[str]] = {}
         for raw_decision in decisions:
             decision = dict(raw_decision)
             focus_case = resolve(decision.get("focus_id"), field="focus_id")
@@ -952,12 +967,29 @@ def canonicalize_problem_cases(
                 decision.get("group_id")
             ) is None:
                 errors.append("same_cause_group_id_missing")
+            if action == "keep_separate" and isinstance(
+                by_case[focus_case].get("provisional_same_cause_group"), Mapping
+            ):
+                provisional_group = by_case[focus_case]["provisional_same_cause_group"]
+                clearance = {
+                    "group_id": provisional_group.get("group_id"),
+                    "member_case_ids": _clean_relation_string_list(
+                        provisional_group.get("member_case_ids")
+                    ),
+                    "evidence_atom_ids": _clean_relation_string_list(
+                        decision.get("evidence_atom_ids")
+                    ),
+                }
+                clearance_errors = provisional_same_cause_clearance_errors(
+                    provisional_group,
+                    clearance,
+                )
+                if clearance_errors:
+                    errors.extend(clearance_errors)
+                else:
+                    decision["_provisional_same_cause_clearance"] = clearance
             if not peers:
                 continue
-            if not isinstance(confidence, (int, float)) or isinstance(confidence, bool) or float(
-                confidence
-            ) < 0.7:
-                errors.append("collapse_confidence_insufficient")
             evidence_refs = set(
                 _clean_relation_string_list(decision.get("evidence_atom_ids"))
             )
@@ -975,7 +1007,18 @@ def canonicalize_problem_cases(
                 if not evidence_refs.intersection(peer_evidence):
                     errors.append(f"collapse_peer_evidence_missing:{peer_case}")
                 if not objective_identity_edge(focus_case, peer_case, action=action):
-                    errors.append(f"collapse_objective_identity_missing:{peer_case}")
+                    if action == "same_cause_group":
+                        # A reciprocal, evidence-citing same-cause judgment is useful
+                        # before the common mechanism can be runner-verified.  Treat it
+                        # as a provisional research hypothesis, never as a permanent
+                        # alias.  Merge and alias still require an objective identity
+                        # edge at this boundary.
+                        provisional_same_cause_peers.setdefault(focus_case, set()).add(
+                            peer_case
+                        )
+                        decision["_provisional_same_cause"] = True
+                    else:
+                        errors.append(f"collapse_objective_identity_missing:{peer_case}")
             if not evidence_refs.issubset(allowed_evidence):
                 errors.append("collapse_unrelated_evidence_cited")
 
@@ -1020,6 +1063,20 @@ def canonicalize_problem_cases(
                     errors_by_focus[peer_case].append(
                         f"collapse_relation_incompatible:{focus_case}"
                     )
+                    continue
+                if (
+                    focus_action == peer_action == "same_cause_group"
+                    and (
+                        peer_case
+                        in provisional_same_cause_peers.get(focus_case, set())
+                        or focus_case
+                        in provisional_same_cause_peers.get(peer_case, set())
+                    )
+                ):
+                    # This marker is runner-owned and is applied only after reciprocal
+                    # compatibility and evidence coverage have been checked.
+                    decision["_provisional_same_cause"] = True
+                    peer_decision["_provisional_same_cause"] = True
 
         strict_decisions: list[dict[str, Any]] = []
         for focus_case, decision in decision_by_focus.items():
@@ -1045,6 +1102,8 @@ def canonicalize_problem_cases(
     preferences: list[str] = []
     split_by_case: dict[str, dict[str, Any]] = {}
     group_by_case: dict[str, str] = {}
+    provisional_group_ids: set[str] = set()
+    provisional_clearance_by_case: dict[str, dict[str, Any]] = {}
     audit_by_case: dict[str, list[dict[str, Any]]] = {case_id: [] for case_id in order}
 
     for index, raw_decision in enumerate(decisions):
@@ -1069,6 +1128,9 @@ def canonicalize_problem_cases(
             )
 
         if action == "keep_separate":
+            clearance = decision.get("_provisional_same_cause_clearance")
+            if isinstance(clearance, Mapping):
+                provisional_clearance_by_case[focus_case] = dict(clearance)
             audit_by_case[focus_case].append(audit_entry)
             continue
         if action == "split":
@@ -1110,6 +1172,8 @@ def canonicalize_problem_cases(
                 "canonicalize_problem_cases: same_cause_group requires at least two members"
             )
         preferences.append(focus_case)
+        if decision.get("_provisional_same_cause") is True:
+            provisional_group_ids.add(group_id)
         for member in members:
             previous_group = group_by_case.get(member)
             if previous_group is not None and previous_group != group_id:
@@ -1147,6 +1211,13 @@ def canonicalize_problem_cases(
             ),
         )
         base = dict(by_case[preferred])
+        provisional_clearance = provisional_clearance_by_case.get(preferred)
+        if provisional_clearance is not None:
+            base.pop("provisional_same_cause_group", None)
+            base.pop("case_identity_candidate_ids", None)
+            base.pop("provisional_same_cause_integrity_errors", None)
+            base["case_identity_status"] = "resolved"
+            base["provisional_same_cause_clearance"] = provisional_clearance
 
         if split_members:
             split_case = split_members[0]
@@ -1238,12 +1309,63 @@ def canonicalize_problem_cases(
         base["source_evidence_atom_ids"] = list(dict.fromkeys(source_evidence_ids))
         base["derived_evidence_atom_ids"] = list(dict.fromkeys(derived_evidence_ids))
         absorbed = [case_id for case_id in members if case_id != preferred]
-        if absorbed:
-            base["absorbed_case_ids"] = absorbed
         if relation_actions:
             base["case_relation_actions"] = relation_actions
-        if group_ids:
-            base["same_cause_group_id"] = next(iter(group_ids))
+        component_group_id = next(iter(group_ids)) if group_ids else None
+        provisional_group = (
+            component_group_id is not None
+            and component_group_id in provisional_group_ids
+        )
+        if provisional_group:
+            member_facets = []
+            for member in members:
+                item = by_case[member]
+                member_facets.append(
+                    {
+                        "case_id": member,
+                        "problem_id": _clean_relation_string(item.get("problem_id")),
+                        "title": _clean_relation_string(item.get("title")),
+                        "problem": _clean_relation_string(item.get("problem")),
+                        "user_impact": _clean_relation_string(item.get("user_impact")),
+                        "canonical_symptoms": _clean_relation_string_list(
+                            item.get("canonical_symptoms")
+                        ),
+                        "evidence_atom_ids": _clean_relation_string_list(
+                            item.get("evidence_atom_ids")
+                        ),
+                        "source_evidence_atom_ids": _clean_relation_string_list(
+                            item.get("source_evidence_atom_ids")
+                        ),
+                    }
+                )
+            base.pop("absorbed_case_ids", None)
+            base.pop("same_cause_group_id", None)
+            base["case_identity_status"] = "provisional_same_cause"
+            base["case_identity_candidate_ids"] = list(members)
+            base["provisional_same_cause_group"] = {
+                "schema_version": 1,
+                "status": "research_hypothesis",
+                "group_id": component_group_id,
+                "member_case_ids": list(members),
+                "member_problem_ids": list(dict.fromkeys(problem_ids)),
+                "member_facets": member_facets,
+            }
+        else:
+            if absorbed:
+                base["absorbed_case_ids"] = absorbed
+            if component_group_id is not None:
+                base["same_cause_group_id"] = component_group_id
+            pending_candidates = set(
+                _clean_relation_string_list(base.get("case_identity_candidate_ids"))
+            )
+            if (
+                base.get("case_identity_status") == "pending_relation"
+                and pending_candidates
+                and pending_candidates.issubset(set(members))
+                and len(members) > 1
+            ):
+                base["case_identity_status"] = "resolved"
+                base.pop("case_identity_candidate_ids", None)
         canonical_records.append(base)
 
     _LOG.info(

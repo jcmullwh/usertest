@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
+import threading
+from collections.abc import Mapping
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,6 +18,7 @@ from runner_core import find_repo_root
 
 import usertest_backlog.workflows.staged as staged_module
 from usertest_backlog.cli import _write_chunked_problem_mining_atoms_workspace, main
+from usertest_backlog.parser import build_parser
 from usertest_backlog.workflows.problem_mining import _validate_relation_decision_focuses
 from usertest_backlog.workflows.staged import (
     _reset_stale_unproven_actioned_atoms,
@@ -28,6 +34,55 @@ def _write_json(path: Path, obj: object) -> None:
 def _write_yaml(path: Path, obj: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(yaml.safe_dump(obj, sort_keys=False), encoding="utf-8")
+
+
+def _minimal_shadow_artifact_paths(
+    *,
+    repo_root: Path,
+    atoms_path: Path,
+    stage_paths: dict[str, Path],
+    policy_path: Path,
+    manifest_path: Path,
+    adjudication_path: Path,
+    pending_path: Path,
+) -> dict[str, Path | None]:
+    return {
+        "atoms": atoms_path,
+        "problem_records": stage_paths["problem_records"],
+        "problem_mining_evidence": stage_paths["problem_mining_evidence"],
+        "prioritized_problems": stage_paths["prioritized_problems"],
+        "research": stage_paths["research"],
+        "solution_options": stage_paths["solution_options"],
+        "solution_selection": stage_paths["solution_selection"],
+        "change_plans": stage_paths["change_plans"],
+        "case_registry": stage_paths["case_registry"],
+        "config.policy": policy_path,
+        "config.research": repo_root / "configs" / "backlog_research.yaml",
+        "config.export_gate": repo_root / "configs" / "backlog_export_gate.yaml",
+        "qualification.corpus_manifest": manifest_path,
+        "qualification.output_adjudication": adjudication_path,
+        "qualification.no_actionable_receipt": None,
+        "qualification.pending_run_receipt": pending_path,
+    }
+
+
+def _seal_minimal_shadow_pending(
+    *,
+    out_json: Path,
+    pending_path: Path,
+    manifest_path: Path,
+    artifact_paths: dict[str, Path | None],
+) -> dict[str, Any]:
+    return staged_module.write_pending_shadow_run(
+        pending_path=pending_path,
+        backlog_path=out_json,
+        artifact_paths=artifact_paths,
+        qualification_manifest_sha256_expected=hashlib.sha256(
+            manifest_path.read_bytes()
+        ).hexdigest(),
+        output_adjudication_sha256_pre_run=None,
+        generated_at="2026-07-11T00:00:00Z",
+    )
 
 
 def _stage1_assigned_atom(compiled_dir: Path, atom_id: str) -> dict[str, Any]:
@@ -81,6 +136,161 @@ def _runner_receipt(
     }
 
 
+def test_reports_backlog_defaults_to_signed_in_codex_author() -> None:
+    args = build_parser().parse_args(["reports", "backlog", "--target", "target_a"])
+
+    assert args.agent == "codex"
+
+
+def test_live_backlog_rejects_agent_without_exact_session_correction() -> None:
+    assert staged_module._live_agent_preflight_error(
+        agent="claude",
+        dry_run=False,
+        score_shadow=False,
+    ) == ("live_backlog_agent_exact_session_correction_unsupported:claude:use=codex_or_dry_run")
+    assert (
+        staged_module._live_agent_preflight_error(
+            agent="gemini",
+            dry_run=False,
+            score_shadow=False,
+        )
+        is not None
+    )
+
+
+def test_non_codex_agent_remains_available_for_non_live_paths() -> None:
+    assert (
+        staged_module._live_agent_preflight_error(
+            agent="claude",
+            dry_run=True,
+            score_shadow=False,
+        )
+        is None
+    )
+    assert (
+        staged_module._live_agent_preflight_error(
+            agent="claude",
+            dry_run=False,
+            score_shadow=True,
+        )
+        is None
+    )
+
+
+def test_qualification_prepare_runs_canonical_extraction_without_models_or_tickets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    research_ref = subprocess.run(
+        ["git", "-C", str(repo_root), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    ).stdout.strip()
+    source_runs = tmp_path / "frozen" / "usertest"
+    _seed_runs_fixture(source_runs)
+    for target_ref_path in source_runs.rglob("target_ref.json"):
+        target_ref = json.loads(target_ref_path.read_text(encoding="utf-8"))
+        target_ref["repo_input"] = str(repo_root)
+        _write_json(target_ref_path, target_ref)
+    (source_runs.parent / "usertest_implement").mkdir(parents=True)
+
+    atom_actions_path = tmp_path / "custody" / "atom_actions.yaml"
+    case_registry_seed = tmp_path / "custody" / "case_registry.json"
+    _write_yaml(atom_actions_path, {"version": 1, "atoms": []})
+    _write_json(
+        case_registry_seed,
+        {
+            "schema_version": 1,
+            "cases": {},
+            "problem_id_to_case_id": {},
+            "atom_id_to_case_id": {},
+            "atom_id_to_case_ids": {},
+            "ticket_fingerprint_to_case_id": {},
+            "operational_signature_to_case_id": {},
+        },
+    )
+    atom_actions_before = atom_actions_path.read_bytes()
+
+    counters = {"model": 0, "stage": 0, "ticket": 0}
+
+    def forbidden_model(*_args: object, **_kwargs: object) -> object:
+        counters["model"] += 1
+        raise AssertionError("qualification preparation must not invoke a model")
+
+    def forbidden_stage(*_args: object, **_kwargs: object) -> object:
+        counters["stage"] += 1
+        raise AssertionError("qualification preparation must stop before Stage 1")
+
+    def forbidden_ticket(*_args: object, **_kwargs: object) -> object:
+        counters["ticket"] += 1
+        raise AssertionError("qualification preparation must not assemble or mutate tickets")
+
+    import backlog_miner.ensemble as ensemble_module
+    import backlog_miner.pipeline as pipeline_module
+
+    monkeypatch.setattr(ensemble_module, "run_backlog_prompt", forbidden_model)
+    monkeypatch.setattr(ensemble_module, "run_backlog_prompt_result", forbidden_model)
+    monkeypatch.setattr(pipeline_module, "run_stage_prompt_json", forbidden_model)
+    for name in (
+        "_run_problem_mining_stage",
+        "_run_problem_prioritization_stage",
+        "_run_repro_research_stage",
+        "_run_solution_optioning_stage",
+        "_run_solution_selection_stage",
+        "_run_implementation_planning_stage",
+    ):
+        monkeypatch.setattr(staged_module, name, forbidden_stage)
+    monkeypatch.setattr(staged_module, "assemble_backlog_tickets", forbidden_ticket)
+    monkeypatch.setattr(staged_module, "_write_atom_actions_yaml", forbidden_ticket)
+
+    out_root = tmp_path / "prepared-bundles"
+    work_dir = tmp_path / "prepare-work"
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "qualification-prepare",
+                "--repo-root",
+                str(repo_root),
+                "--repo-input",
+                str(repo_root),
+                "--research-ref",
+                research_ref,
+                "--source-runs-dir",
+                str(source_runs),
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--case-registry-seed",
+                str(case_registry_seed),
+                "--out-root",
+                str(out_root),
+                "--work-dir",
+                str(work_dir),
+                "--target",
+                "target_a",
+            ]
+        )
+
+    assert exc.value.code == 0
+    assert counters == {"model": 0, "stage": 0, "ticket": 0}
+    assert atom_actions_path.read_bytes() == atom_actions_before
+    bundle_paths = list(out_root.glob("*/qualification_input_bundle.json"))
+    assert len(bundle_paths) == 1
+    bundle = json.loads(bundle_paths[0].read_text(encoding="utf-8"))
+    assert bundle["contract_kind"] == "qualification_input_bundle"
+    assert bundle["scope"]["research_ref"] == research_ref.casefold()
+    assert bundle["atom_corpus"]["count"] == len(bundle["atoms"])
+    assert bundle["atom_corpus"]["count"] > 0
+    assert not (work_dir / "prepared.backlog.json").exists()
+    command_output = capsys.readouterr().out
+    assert '"model_invocations": 0' in command_output
+    assert '"ticket_mutations": 0' in command_output
+
+
 def test_shadow_pipeline_rejects_invalid_export_gate_config(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -117,6 +327,1653 @@ def test_shadow_pipeline_rejects_invalid_export_gate_config(
         )
 
     assert exc.value.code == 2
+
+
+def test_qualification_manifest_pre_run_anchor_detects_byte_exact_replacement(
+    tmp_path: Path,
+) -> None:
+    manifest_path = tmp_path / "qualification.manifest.json"
+    _write_json(manifest_path, {"content_sha256": "a" * 64, "labels": ["first"]})
+
+    expected = staged_module._qualification_file_sha256(manifest_path)
+    _write_json(manifest_path, {"content_sha256": "b" * 64, "labels": ["replacement"]})
+    observed = staged_module._qualification_file_sha256(manifest_path)
+
+    assert expected is not None
+    assert observed is not None
+    assert observed != expected
+
+
+def test_qualification_labels_inside_model_readable_workspace_are_rejected(
+    tmp_path: Path,
+) -> None:
+    model_workspace = tmp_path / "model-workspace"
+    inside = model_workspace / "held-out" / "manifest.json"
+    outside = tmp_path / "independent-label-store" / "manifest.json"
+
+    errors = staged_module._qualification_workspace_exposure_errors(
+        artifact_paths={"inside": inside, "outside": outside},
+        model_readable_roots=[model_workspace],
+    )
+
+    assert len(errors) == 1
+    assert errors[0].startswith("qualification_artifact_inside_model_readable_root:inside:")
+
+
+def test_score_shadow_uses_phase_two_path_without_invoking_model_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    manifest = tmp_path / "external" / "manifest.json"
+    adjudication = tmp_path / "external" / "adjudication.json"
+    no_actionable = tmp_path / "external" / "no-actionable.json"
+    calls: list[dict[str, object]] = []
+
+    def score(**kwargs: object) -> int:
+        calls.append(kwargs)
+        return 0
+
+    def forbidden_stage(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("phase-two scoring must not invoke Stage 1")
+
+    monkeypatch.setattr(staged_module, "_score_materialized_shadow_run", score)
+    monkeypatch.setattr(staged_module, "_run_problem_mining_stage", forbidden_stage)
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(tmp_path / "runs"),
+                "--target",
+                "target_a",
+                "--shadow",
+                "--score-shadow",
+                "--qualification-corpus-manifest",
+                str(manifest),
+                "--qualification-output-adjudication",
+                str(adjudication),
+                "--no-actionable-evidence-receipt",
+                str(no_actionable),
+            ]
+        )
+
+    assert exc.value.code == 0
+    assert len(calls) == 1
+    assert calls[0]["qualification_manifest_path"] == manifest.resolve()
+    assert calls[0]["qualification_output_adjudication_path"] == adjudication.resolve()
+    assert calls[0]["no_actionable_evidence_receipt_path"] == no_actionable.resolve()
+
+
+def test_external_qualification_overrides_are_rejected_for_operational_shadow(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    gate_path = repo_root / "configs" / "backlog_export_gate.yaml"
+    gate_before = gate_path.read_bytes()
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(tmp_path / "runs"),
+                "--target",
+                "target_a",
+                "--operational-shadow",
+                "--qualification-corpus-manifest",
+                str(tmp_path / "external" / "manifest.json"),
+            ]
+        )
+
+    assert exc.value.code == 2
+    assert gate_path.read_bytes() == gate_before
+
+
+def test_score_operational_shadow_records_without_invoking_model_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    calls: list[dict[str, object]] = []
+
+    def score(**kwargs: object) -> int:
+        calls.append(kwargs)
+        return 0
+
+    def forbidden_stage(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("operational phase-two validation must not invoke Stage 1")
+
+    monkeypatch.setattr(
+        staged_module,
+        "_score_materialized_operational_shadow_run",
+        score,
+    )
+    monkeypatch.setattr(staged_module, "_run_problem_mining_stage", forbidden_stage)
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(tmp_path / "runs"),
+                "--target",
+                "target_a",
+                "--operational-shadow",
+                "--score-operational-shadow",
+            ]
+        )
+
+    assert exc.value.code == 0
+    assert len(calls) == 1
+
+
+def test_phase_two_scores_exact_materialized_artifacts_and_records_without_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    out_json = tmp_path / "target.backlog.json"
+    out_md = tmp_path / "target.backlog.md"
+    manifest_path = tmp_path / "held-out" / "manifest.json"
+    adjudication_path = tmp_path / "held-out" / "adjudication.json"
+    pending_path = tmp_path / "target.shadow_pending.json"
+    atoms_path = tmp_path / "atoms.json"
+    _write_json(manifest_path, {"contract_kind": "qualification_corpus_manifest"})
+    _write_json(adjudication_path, {"contract_kind": "qualification_output_adjudication"})
+    _write_json(atoms_path, [])
+    stage_paths: dict[str, Path] = {}
+    for name in (
+        "problem_records",
+        "problem_mining_evidence",
+        "prioritized_problems",
+        "research",
+        "solution_options",
+        "solution_selection",
+        "change_plans",
+        "case_registry",
+    ):
+        stage_paths[name] = tmp_path / f"{name}.json"
+        _write_json(stage_paths[name], {"items": []})
+    policy_path = repo_root / "configs" / "backlog_policy.yaml"
+    backlog = {
+        "tickets": [],
+        "artifacts": {
+            "atoms_jsonl": str(atoms_path),
+            "case_registry_json": str(stage_paths["case_registry"]),
+            "six_stage_pipeline": {
+                "problem_records_json": str(stage_paths["problem_records"]),
+                "problem_mining_evidence_json": str(
+                    stage_paths["problem_mining_evidence"]
+                ),
+                "prioritized_problems_json": str(stage_paths["prioritized_problems"]),
+                "research_json": str(stage_paths["research"]),
+                "solution_options_json": str(stage_paths["solution_options"]),
+                "solution_selection_json": str(stage_paths["solution_selection"]),
+                "change_plans_json": str(stage_paths["change_plans"]),
+                "case_registry_json": str(stage_paths["case_registry"]),
+            },
+            "export_contract": {"policy_config_path": str(policy_path)},
+            "shadow_qualification": {
+                "pending_adjudication": True,
+                "qualification_corpus_manifest_path": str(manifest_path),
+                "qualification_output_adjudication_path": str(adjudication_path),
+                "no_actionable_evidence_receipt_path": None,
+                "pending_run_receipt_path": str(pending_path),
+                "model_readable_roots": [str(repo_root)],
+            },
+        },
+    }
+    _write_json(out_json, backlog)
+    captured: list[dict[str, object]] = []
+    artifact_paths = _minimal_shadow_artifact_paths(
+        repo_root=repo_root,
+        atoms_path=atoms_path,
+        stage_paths=stage_paths,
+        policy_path=policy_path,
+        manifest_path=manifest_path,
+        adjudication_path=adjudication_path,
+        pending_path=pending_path,
+    )
+    pending = _seal_minimal_shadow_pending(
+        out_json=out_json,
+        pending_path=pending_path,
+        manifest_path=manifest_path,
+        artifact_paths=artifact_paths,
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "_export_artifact_paths",
+        lambda **_kwargs: artifact_paths,
+    )
+
+    def evaluate(**kwargs: object) -> dict[str, object]:
+        captured.append(kwargs)
+        return {
+            "passed": True,
+            "failures": [],
+            "qualification_basis_sha256": "e" * 64,
+            "qualification": {"status": "verified", "failures": []},
+        }
+
+    monkeypatch.setattr(staged_module, "evaluate_shadow_invariants", evaluate)
+    monkeypatch.setattr(
+        staged_module,
+        "_build_export_projection",
+        lambda **_kwargs: {"sha256": "f" * 64},
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "write_backlog",
+        lambda summary, **_kwargs: _write_json(out_json, summary),
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "record_shadow_cycle",
+        lambda **_kwargs: {"ready_for_export": True},
+    )
+    real_snapshot = staged_module._snapshot_phase1_qualification_bundle
+    source_mutated_after_snapshot = False
+
+    def snapshot_then_mutate(**kwargs: object) -> object:
+        nonlocal source_mutated_after_snapshot
+        result = real_snapshot(**kwargs)
+        if not source_mutated_after_snapshot:
+            source_mutated_after_snapshot = True
+            _write_json(atoms_path, [{"atom_id": "atom:mutated-after-snapshot"}])
+            for name, path in stage_paths.items():
+                _write_json(path, {"items": [{"source": f"mutated:{name}"}]})
+            _write_json(manifest_path, {"contract_kind": "mutated_manifest"})
+            _write_json(adjudication_path, {"contract_kind": "mutated_adjudication"})
+        return result
+
+    monkeypatch.setattr(
+        staged_module,
+        "_snapshot_phase1_qualification_bundle",
+        snapshot_then_mutate,
+    )
+    pending_backlog_bytes = out_json.read_bytes()
+
+    result = staged_module._score_materialized_shadow_run(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        out_json=out_json,
+        out_md=out_md,
+        repo_input=None,
+        shadow_gate_config={
+            "required_consecutive_shadow_cycles": 2,
+            "require_exact_export_projection": True,
+        },
+        qualification_manifest_path=manifest_path,
+        qualification_output_adjudication_path=adjudication_path,
+        no_actionable_evidence_receipt_path=None,
+        agent="codex",
+        model=None,
+        cfg=SimpleNamespace(runs_dir=tmp_path / "runs"),
+        research_config={},
+        research_ref=None,
+        replay_timeout_seconds=10800.0,
+    )
+
+    assert result == 0
+    assert len(captured) == 1
+    assert captured[0]["qualification_pending_run_sha256"] == pending["content_sha256"]
+    assert captured[0]["qualification_output_adjudication_sha256_pre_run"] is None
+    assert isinstance(captured[0]["qualification_output_adjudication_sha256_post_run"], str)
+    assert captured[0]["atoms"] == []
+    assert captured[0]["stage1"] == {"items": []}
+    assert captured[0]["qualification_manifest"] == {
+        "contract_kind": "qualification_corpus_manifest"
+    }
+    assert captured[0]["qualification_output_adjudication"] == {
+        "contract_kind": "qualification_output_adjudication"
+    }
+    scored_backlog_bytes = out_json.read_bytes()
+    scored_backlog = json.loads(scored_backlog_bytes)
+    snapshot_path = Path(
+        scored_backlog["artifacts"]["shadow_qualification"][
+            "phase1_backlog_snapshot_path"
+        ]
+    )
+    assert snapshot_path.read_bytes() == pending_backlog_bytes
+    assert staged_module._score_materialized_shadow_run(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        out_json=out_json,
+        out_md=out_md,
+        repo_input=None,
+        shadow_gate_config={
+            "required_consecutive_shadow_cycles": 2,
+            "require_exact_export_projection": True,
+        },
+        qualification_manifest_path=manifest_path,
+        qualification_output_adjudication_path=adjudication_path,
+        no_actionable_evidence_receipt_path=None,
+        agent="codex",
+        model=None,
+        cfg=SimpleNamespace(runs_dir=tmp_path / "runs"),
+        research_config={},
+        research_ref=None,
+        replay_timeout_seconds=10800.0,
+    ) == 0
+    assert len(captured) == 1
+    assert out_json.read_bytes() == scored_backlog_bytes
+    scored_meta = json.loads(scored_backlog_bytes)["artifacts"]["shadow_qualification"]
+    bundle = json.loads(
+        Path(scored_meta["phase1_bundle_path"]).read_text(encoding="utf-8")
+    )
+    stage1_snapshot = Path(bundle["artifacts"]["problem_records"]["snapshot_path"])
+    _write_json(stage1_snapshot, {"items": [{"tampered": True}]})
+    assert staged_module._score_materialized_shadow_run(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        out_json=out_json,
+        out_md=out_md,
+        repo_input=None,
+        shadow_gate_config={
+            "required_consecutive_shadow_cycles": 2,
+            "require_exact_export_projection": True,
+        },
+        qualification_manifest_path=manifest_path,
+        qualification_output_adjudication_path=adjudication_path,
+        no_actionable_evidence_receipt_path=None,
+        agent="codex",
+        model=None,
+        cfg=SimpleNamespace(runs_dir=tmp_path / "runs"),
+        research_config={},
+        research_ref=None,
+        replay_timeout_seconds=10800.0,
+    ) == 2
+    assert len(captured) == 1
+
+
+def test_score_path_consumes_routes_and_persists_isolated_repaired_pending_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    out_json = tmp_path / "target.backlog.json"
+    out_md = tmp_path / "target.backlog.md"
+    manifest_path = tmp_path / "held-out" / "manifest.json"
+    adjudication_path = tmp_path / "held-out" / "adjudication.json"
+    pending_path = tmp_path / "target.shadow_pending.json"
+    atoms_path = tmp_path / "atoms.json"
+    _write_json(manifest_path, {"contract_kind": "qualification_corpus_manifest"})
+    _write_json(adjudication_path, {"contract_kind": "qualification_output_adjudication"})
+    _write_json(atoms_path, [])
+    stage_paths: dict[str, Path] = {}
+    for name in (
+        "problem_records",
+        "problem_mining_evidence",
+        "prioritized_problems",
+        "research",
+        "solution_options",
+        "solution_selection",
+        "change_plans",
+        "case_registry",
+    ):
+        stage_paths[name] = tmp_path / f"{name}.json"
+        _write_json(stage_paths[name], {"items": []})
+    policy_path = repo_root / "configs" / "backlog_policy.yaml"
+    _write_json(
+        out_json,
+        {
+            "tickets": [],
+            "input": {"breadth_profile": "standard"},
+            "artifacts": {
+                "atoms_jsonl": str(atoms_path),
+                "prompts_dir": str(repo_root / "configs" / "backlog_prompts"),
+                "case_registry_json": str(stage_paths["case_registry"]),
+                "six_stage_pipeline": {
+                    "problem_records_json": str(stage_paths["problem_records"]),
+                    "problem_mining_evidence_json": str(
+                        stage_paths["problem_mining_evidence"]
+                    ),
+                    "prioritized_problems_json": str(stage_paths["prioritized_problems"]),
+                    "research_json": str(stage_paths["research"]),
+                    "solution_options_json": str(stage_paths["solution_options"]),
+                    "solution_selection_json": str(stage_paths["solution_selection"]),
+                    "change_plans_json": str(stage_paths["change_plans"]),
+                    "case_registry_json": str(stage_paths["case_registry"]),
+                },
+                "export_contract": {"policy_config_path": str(policy_path)},
+                "shadow_qualification": {
+                    "pending_adjudication": True,
+                    "qualification_corpus_manifest_path": str(manifest_path),
+                    "qualification_output_adjudication_path": str(adjudication_path),
+                    "no_actionable_evidence_receipt_path": None,
+                    "pending_run_receipt_path": str(pending_path),
+                    "model_readable_roots": [str(repo_root)],
+                },
+            },
+        },
+    )
+    route = _qualification_execution_route("9")
+    artifact_paths = _minimal_shadow_artifact_paths(
+        repo_root=repo_root,
+        atoms_path=atoms_path,
+        stage_paths=stage_paths,
+        policy_path=policy_path,
+        manifest_path=manifest_path,
+        adjudication_path=adjudication_path,
+        pending_path=pending_path,
+    )
+    _seal_minimal_shadow_pending(
+        out_json=out_json,
+        pending_path=pending_path,
+        manifest_path=manifest_path,
+        artifact_paths=artifact_paths,
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "_export_artifact_paths",
+        lambda **_kwargs: artifact_paths,
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "evaluate_shadow_invariants",
+        lambda **_kwargs: {
+            "passed": False,
+            "failures": ["held_out_failure"],
+            "qualification_basis_sha256": "e" * 64,
+            "qualification": {
+                "status": "failed",
+                "failures": ["held_out_failure"],
+                "correction_routes": [route],
+            },
+        },
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "_build_export_projection",
+        lambda **_kwargs: {"sha256": "f" * 64},
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "write_backlog",
+        lambda summary, **_kwargs: _write_json(out_json, summary),
+    )
+    scored_bytes: list[bytes] = []
+
+    def record(**_kwargs: object) -> dict[str, object]:
+        scored_bytes.append(out_json.read_bytes())
+        return {"ready_for_export": False}
+
+    monkeypatch.setattr(staged_module, "record_shadow_cycle", record)
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+    runtime_calls: list[dict[str, object]] = []
+    runtime_result = staged_module.QualificationRepairRuntimeResult(
+        consumption={
+            "content_sha256": "7" * 64,
+            "accepted_repair_count": 1,
+            "unresolved_route_count": 0,
+            "route_receipts": [
+                {"route_sha256": route["route_sha256"], "status": "corrected"}
+            ],
+            "rerun_downstream_stages": [],
+            "downstream_result": {},
+        },
+        stage_documents={},
+        tickets=[],
+        affected_problem_ids=["problem:one"],
+        atoms=[],
+    )
+
+    def run_runtime(**kwargs: object) -> object:
+        runtime_calls.append(kwargs)
+        return runtime_result
+
+    monkeypatch.setattr(staged_module, "run_stage456_qualification_repairs", run_runtime)
+    materialize_calls: list[dict[str, object]] = []
+
+    def materialize(**kwargs: object) -> dict[str, object]:
+        materialize_calls.append(kwargs)
+        if len(materialize_calls) == 1:
+            raise KeyboardInterrupt("injected_after_runtime_checkpoint")
+        return {
+            "repaired_backlog_path": str(tmp_path / "repair" / "backlog.json"),
+            "pending_repaired_shadow_run_path": str(
+                tmp_path / "repair" / "pending.json"
+            ),
+            "fresh_independent_readjudication_required": True,
+            "release_qualification_eligible": False,
+        }
+
+    monkeypatch.setattr(staged_module, "materialize_repaired_shadow_run", materialize)
+    pending_backlog_bytes = out_json.read_bytes()
+
+    def score() -> int:
+        return staged_module._score_materialized_shadow_run(
+            repo_root=repo_root,
+            runs_dir=tmp_path / "runs",
+            out_json=out_json,
+            out_md=out_md,
+            repo_input=None,
+            shadow_gate_config={
+                "required_consecutive_shadow_cycles": 2,
+                "require_exact_export_projection": True,
+            },
+            qualification_manifest_path=manifest_path,
+            qualification_output_adjudication_path=adjudication_path,
+            no_actionable_evidence_receipt_path=None,
+            agent="codex",
+            model=None,
+            cfg=SimpleNamespace(runs_dir=tmp_path / "runs"),
+            research_config={},
+            research_ref=None,
+            replay_timeout_seconds=10800.0,
+        )
+
+    with pytest.raises(KeyboardInterrupt, match="injected_after_runtime_checkpoint"):
+        score()
+    scored_after_crash = out_json.read_bytes()
+    scored_after_crash_doc = json.loads(scored_after_crash)
+    qualification_meta = scored_after_crash_doc["artifacts"]["shadow_qualification"]
+    pending_correction_path = Path(
+        qualification_meta["qualification_correction_pending_path"]
+    )
+    pending_correction_bytes = pending_correction_path.read_bytes()
+    pending_correction = json.loads(pending_correction_bytes)
+    assert pending_correction["phase1_bundle_sha256"] == qualification_meta[
+        "phase1_bundle_sha256"
+    ]
+    assert pending_correction["phase1_backlog_snapshot_sha256"] == qualification_meta[
+        "phase1_backlog_snapshot_sha256"
+    ]
+    assert pending_correction["qualification_manifest_snapshot_sha256"]
+    assert pending_correction[
+        "qualification_output_adjudication_snapshot_sha256"
+    ]
+    assert set(pending_correction["source_artifact_sha256s"]) == {
+        "atoms",
+        "problem_records",
+        "problem_mining_evidence",
+        "prioritized_problems",
+        "research",
+        "solution_options",
+        "solution_selection",
+        "change_plans",
+        "case_registry",
+    }
+    tampered_pending = json.loads(json.dumps(pending_correction))
+    tampered_pending["source_artifact_sha256s"]["atoms"] = "0" * 64
+    tampered_pending.pop("content_sha256")
+    tampered_pending["content_sha256"] = staged_module._qualification_canonical_sha256(
+        tampered_pending
+    )
+    _write_json(pending_correction_path, tampered_pending)
+    assert score() == 2
+    assert len(runtime_calls) == 1
+    pending_correction_path.write_bytes(pending_correction_bytes)
+    # Recovery must use the immutable bundle, not these now-mutated phase-one originals.
+    _write_json(atoms_path, [{"atom_id": "atom:mutated-before-recovery"}])
+    for name, path in stage_paths.items():
+        _write_json(path, {"items": [{"source": f"mutated:{name}"}]})
+    _write_json(manifest_path, {"contract_kind": "mutated_manifest"})
+    _write_json(adjudication_path, {"contract_kind": "mutated_adjudication"})
+    result = score()
+
+    assert result == 3
+    assert len(runtime_calls) == 1
+    assert runtime_calls[0]["routes"] == [route]
+    assert len(materialize_calls) == 2
+    # The raw correctable failure is retained in the backlog/diagnostic bundle,
+    # but does not become a separate release-streak cycle before repaired output
+    # receives fresh independent adjudication.
+    assert scored_bytes == []
+    assert out_json.read_bytes() == scored_after_crash
+    sidecars = list(
+        out_json.parent.glob(
+            f"{out_json.stem}.qualification_correction_consumption.*.json"
+        )
+    )
+    assert len(sidecars) == 1
+    sidecar = sidecars[0]
+    sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    assert sidecar_payload["accepted_repair_count"] == 1
+    assert sidecar_payload["route_receipts"] == runtime_result.consumption[
+        "route_receipts"
+    ]
+    scored_backlog_bytes = out_json.read_bytes()
+    scored_backlog = json.loads(scored_backlog_bytes)
+    snapshot_path = Path(
+        scored_backlog["artifacts"]["shadow_qualification"][
+            "phase1_backlog_snapshot_path"
+        ]
+    )
+    assert snapshot_path.read_bytes() == pending_backlog_bytes
+    assert score() == 3
+    assert len(runtime_calls) == 1
+    assert len(materialize_calls) == 2
+    assert out_json.read_bytes() == scored_backlog_bytes
+    assert sidecar.read_bytes() == sidecars[0].read_bytes()
+
+
+def test_phase1_bundle_rejects_source_or_snapshot_mutation_after_validation(
+    tmp_path: Path,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    out_json = tmp_path / "target.backlog.json"
+    manifest_path = tmp_path / "manifest.json"
+    adjudication_path = tmp_path / "adjudication.json"
+    pending_path = tmp_path / "pending.json"
+    atoms_path = tmp_path / "atoms.json"
+    _write_json(manifest_path, {"contract_kind": "qualification_corpus_manifest"})
+    _write_json(adjudication_path, {"contract_kind": "qualification_output_adjudication"})
+    _write_json(atoms_path, [])
+    stage_paths: dict[str, Path] = {}
+    for name in (
+        "problem_records",
+        "problem_mining_evidence",
+        "prioritized_problems",
+        "research",
+        "solution_options",
+        "solution_selection",
+        "change_plans",
+        "case_registry",
+    ):
+        stage_paths[name] = tmp_path / f"{name}.json"
+        _write_json(stage_paths[name], {"items": []})
+    policy_path = repo_root / "configs" / "backlog_policy.yaml"
+    backlog = {
+        "tickets": [],
+        "artifacts": {
+            "atoms_jsonl": str(atoms_path),
+            "case_registry_json": str(stage_paths["case_registry"]),
+            "six_stage_pipeline": {
+                "problem_records_json": str(stage_paths["problem_records"]),
+                "problem_mining_evidence_json": str(
+                    stage_paths["problem_mining_evidence"]
+                ),
+                "prioritized_problems_json": str(stage_paths["prioritized_problems"]),
+                "research_json": str(stage_paths["research"]),
+                "solution_options_json": str(stage_paths["solution_options"]),
+                "solution_selection_json": str(stage_paths["solution_selection"]),
+                "change_plans_json": str(stage_paths["change_plans"]),
+                "case_registry_json": str(stage_paths["case_registry"]),
+            },
+        },
+    }
+    _write_json(out_json, backlog)
+    artifact_paths = _minimal_shadow_artifact_paths(
+        repo_root=repo_root,
+        atoms_path=atoms_path,
+        stage_paths=stage_paths,
+        policy_path=policy_path,
+        manifest_path=manifest_path,
+        adjudication_path=adjudication_path,
+        pending_path=pending_path,
+    )
+    pending = _seal_minimal_shadow_pending(
+        out_json=out_json,
+        pending_path=pending_path,
+        manifest_path=manifest_path,
+        artifact_paths=artifact_paths,
+    )
+    validated, errors = staged_module.validate_pending_shadow_run(
+        pending_path=pending_path,
+        backlog_path=out_json,
+        artifact_paths=artifact_paths,
+    )
+    assert errors == []
+    assert validated == pending
+
+    _, phase1_bundle, _ = staged_module._snapshot_phase1_qualification_bundle(
+        backlog=backlog,
+        backlog_path=out_json,
+        repo_root=repo_root,
+        pending=pending,
+        artifact_paths=artifact_paths,
+        qualification_output_adjudication_path=adjudication_path,
+    )
+    immutable_pending_path = Path(phase1_bundle["immutable_pending_run"]["path"])
+    immutable_pending_bytes = immutable_pending_path.read_bytes()
+    _write_json(immutable_pending_path, {"tampered": True})
+    with pytest.raises(
+        ValueError,
+        match="qualification_write_once_conflict:.*phase1.validation.pending.json",
+    ):
+        staged_module._snapshot_phase1_qualification_bundle(
+            backlog=backlog,
+            backlog_path=out_json,
+            repo_root=repo_root,
+            pending=pending,
+            artifact_paths=artifact_paths,
+            qualification_output_adjudication_path=adjudication_path,
+        )
+    immutable_pending_path.write_bytes(immutable_pending_bytes)
+
+    _write_json(stage_paths["problem_records"], {"items": [{"mutated": True}]})
+
+    with pytest.raises(
+        ValueError,
+        match="qualification_phase1_source_changed_after_validation:problem_records",
+    ):
+        staged_module._snapshot_phase1_qualification_bundle(
+            backlog=backlog,
+            backlog_path=out_json,
+            repo_root=repo_root,
+            pending=pending,
+            artifact_paths=artifact_paths,
+            qualification_output_adjudication_path=adjudication_path,
+        )
+
+
+def _qualification_execute_inputs(
+    *,
+    tmp_path: Path,
+    repo_root: Path,
+) -> dict[str, Any]:
+    out_json = tmp_path / "score.backlog.json"
+    manifest_path = tmp_path / "snapshot" / "manifest.json"
+    adjudication_path = tmp_path / "snapshot" / "adjudication.json"
+    _write_json(out_json, {"tickets": []})
+    _write_json(manifest_path, {"contract_kind": "qualification_corpus_manifest"})
+    _write_json(
+        adjudication_path,
+        {"contract_kind": "qualification_output_adjudication"},
+    )
+    empty_stage = {"items": []}
+    context = {
+        "artifacts": {"prompts_dir": str(repo_root / "configs" / "backlog_prompts")},
+        "atoms": [],
+        "stage1": empty_stage,
+        "stage2": empty_stage,
+        "stage3": empty_stage,
+        "stage4": empty_stage,
+        "stage5": empty_stage,
+        "stage6": empty_stage,
+        "case_registry": {"cases": {}},
+        "qualification_manifest": {"contract_kind": "qualification_corpus_manifest"},
+    }
+    policy_path = repo_root / "configs" / "backlog_policy.yaml"
+    policy = staged_module.BacklogPolicyConfig.from_dict(
+        staged_module._load_yaml(policy_path).get("backlog_policy", {})
+    )
+    return {
+        "repo_root": repo_root,
+        "out_json": out_json,
+        "backlog": {"tickets": []},
+        "context": context,
+        "source_pending_run_sha256": "1" * 64,
+        "source_adjudication_sha256": hashlib.sha256(
+            adjudication_path.read_bytes()
+        ).hexdigest(),
+        "correction_input_sha256": "2" * 64,
+        "completion_path": tmp_path / "work" / "completion.json",
+        "phase1_bundle_sha256": "3" * 64,
+        "qualification_manifest_path": manifest_path,
+        "qualification_manifest_sha256": hashlib.sha256(
+            manifest_path.read_bytes()
+        ).hexdigest(),
+        "qualification_output_adjudication_path": adjudication_path,
+        "policy_config": policy,
+        "policy_config_path": policy_path,
+        "export_gate_config_path": repo_root / "configs" / "backlog_export_gate.yaml",
+        "agent": "codex",
+        "model": None,
+        "cfg": object(),
+        "repo_input": None,
+        "research_config": {},
+        "research_ref": None,
+        "replay_timeout_seconds": 10800.0,
+    }
+
+
+def _qualification_execution_route(
+    marker: str,
+    *,
+    status: str = "same_author_resume",
+    component: str = "case:one",
+) -> dict[str, Any]:
+    session_id = f"{marker * 8}-{marker * 4}-4{marker * 3}-8{marker * 3}-{marker * 12}"
+    return {
+        "route_sha256": marker * 64,
+        "route_status": status,
+        "authoring_stage": "implementation_planning",
+        "agent_session_id": session_id if status == "same_author_resume" else None,
+        "workspace_dir": (
+            f"C:/retained/{marker}" if status == "same_author_resume" else None
+        ),
+        "actionable_label_ids": [component],
+        "author_provenance": {
+            "exact_session_continuation": status == "same_author_resume",
+            "problem_id": component,
+        },
+    }
+
+
+def _qualification_execution_runtime(
+    route: Mapping[str, Any],
+    *,
+    status: str,
+    accepted: bool,
+    frontier: Mapping[str, Any] | None = None,
+) -> Any:
+    receipt: dict[str, Any] = {
+        "route_sha256": route["route_sha256"],
+        "status": status,
+    }
+    if frontier is not None:
+        receipt["correction_frontier"] = dict(frontier)
+    empty_stage = {"items": []}
+    return staged_module.QualificationRepairRuntimeResult(
+        consumption={
+            "content_sha256": ("a" if accepted else "b") * 64,
+            "accepted_repair_count": 1 if accepted else 0,
+            "unresolved_route_count": 0 if accepted else 1,
+            "route_receipts": [receipt],
+            "rerun_downstream_stages": [],
+            "downstream_result": {},
+        },
+        stage_documents={
+            "problem_mining": empty_stage,
+            "problem_prioritization": empty_stage,
+            "repro_research": empty_stage,
+            "solution_optioning": empty_stage,
+            "solution_selection": empty_stage,
+            "implementation_planning": empty_stage,
+        },
+        tickets=[],
+        affected_problem_ids=[],
+        atoms=[],
+    )
+
+
+def test_unavailable_author_route_is_retained_without_model_invocation_or_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
+    route = {"route_sha256": "4" * 64, "route_status": "author_provenance_unavailable"}
+    runtime_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+
+    def crash(**kwargs: object) -> object:
+        runtime_calls.append(kwargs)
+        raise AssertionError("unavailable route must not invoke a model")
+
+    monkeypatch.setattr(staged_module, "run_stage456_qualification_repairs", crash)
+
+    result = staged_module._execute_qualification_correction(routes=[route], **inputs)
+
+    assert runtime_calls == []
+    assert result["status"] == (
+        "repairable_paused:qualification_correction_frontier_retained"
+    )
+    assert result["qualification_scheduler_pending"] is True
+    assert not Path(inputs["completion_path"]).exists()
+
+
+def test_indeterminate_crash_uses_one_bound_exact_session_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    route = {
+        "route_sha256": "5" * 64,
+        "route_status": "same_author_resume",
+        "agent_session_id": session_id,
+        "author_provenance": {"exact_session_continuation": True},
+    }
+    runtime_calls: list[dict[str, object]] = []
+    runtime_result = staged_module.QualificationRepairRuntimeResult(
+        consumption={
+            "content_sha256": "6" * 64,
+            "accepted_repair_count": 1,
+            "unresolved_route_count": 0,
+            "route_receipts": [
+                {"route_sha256": route["route_sha256"], "status": "corrected"}
+            ],
+            "rerun_downstream_stages": [],
+            "downstream_result": {},
+        },
+        stage_documents={},
+        tickets=[],
+        affected_problem_ids=[],
+        atoms=[],
+    )
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+
+    def reconcile(**kwargs: object) -> object:
+        runtime_calls.append(kwargs)
+        if len(runtime_calls) == 1:
+            raise KeyboardInterrupt("unknown_after_exact_session_turn")
+        return runtime_result
+
+    monkeypatch.setattr(staged_module, "run_stage456_qualification_repairs", reconcile)
+    monkeypatch.setattr(
+        staged_module,
+        "materialize_repaired_shadow_run",
+        lambda **_kwargs: {
+            "accepted_repair_count": 1,
+            "fresh_independent_readjudication_required": True,
+            "release_qualification_eligible": False,
+        },
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="unknown_after_exact_session_turn"):
+        staged_module._execute_qualification_correction(routes=[route], **inputs)
+    recovered = staged_module._execute_qualification_correction(routes=[route], **inputs)
+    reused = staged_module._execute_qualification_correction(routes=[route], **inputs)
+
+    assert len(runtime_calls) == 2
+    assert all(call["routes"] == [route] for call in runtime_calls)
+    assert recovered["accepted_repair_count"] == 1
+    assert reused["correction_completion_reused"] is True
+    assert Path(inputs["completion_path"]).is_file()
+    assert len(
+        list(
+            Path(inputs["completion_path"]).parent.glob(
+                "group_attempts/*/*/reconciliation_claim.json"
+            )
+        )
+    ) == 1
+
+
+def test_concurrent_scorer_returns_in_progress_without_duplicate_model_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    route = {
+        "route_sha256": "7" * 64,
+        "route_status": "same_author_resume",
+        "agent_session_id": session_id,
+        "author_provenance": {"exact_session_continuation": True},
+    }
+    runtime_result = staged_module.QualificationRepairRuntimeResult(
+        consumption={
+            "content_sha256": "8" * 64,
+            "accepted_repair_count": 1,
+            "unresolved_route_count": 0,
+            "route_receipts": [
+                {"route_sha256": route["route_sha256"], "status": "corrected"}
+            ],
+            "rerun_downstream_stages": [],
+            "downstream_result": {},
+        },
+        stage_documents={},
+        tickets=[],
+        affected_problem_ids=[],
+        atoms=[],
+    )
+    entered_runtime = threading.Event()
+    release_runtime = threading.Event()
+    runtime_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+
+    def blocked_runtime(**kwargs: object) -> object:
+        runtime_calls.append(kwargs)
+        entered_runtime.set()
+        release_runtime.wait()
+        return runtime_result
+
+    monkeypatch.setattr(
+        staged_module,
+        "run_stage456_qualification_repairs",
+        blocked_runtime,
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "materialize_repaired_shadow_run",
+        lambda **_kwargs: {
+            "accepted_repair_count": 1,
+            "fresh_independent_readjudication_required": True,
+            "release_qualification_eligible": False,
+        },
+    )
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        first = executor.submit(
+            staged_module._execute_qualification_correction,
+            routes=[route],
+            **inputs,
+        )
+        entered_runtime.wait()
+        concurrent = staged_module._execute_qualification_correction(
+            routes=[route],
+            **inputs,
+        )
+        release_runtime.set()
+        completed = first.result()
+
+    assert concurrent["status"] == "correction_in_progress"
+    assert concurrent["authored_work_disposition"] == "retained"
+    assert concurrent["fresh_author_invocation_suppressed"] is True
+    assert len(runtime_calls) == 1
+    assert completed["accepted_repair_count"] == 1
+
+
+def test_paused_qualification_resumes_same_frontier_without_terminal_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
+    route = _qualification_execution_route("c")
+    frontier = {
+        "content_sha256": "d" * 64,
+        "agent_session_id": route["agent_session_id"],
+        "workspace_dir": route["workspace_dir"],
+        "current": {"payload": {"revision": 2}},
+        "best": {"payload": {"revision": 2}},
+        "attempts": [{"payload": {"revision": 1}}, {"payload": {"revision": 2}}],
+        "assessments": [{"decision": "continue"}],
+        "correction_cost_since_progress": 12.0,
+        "total_correction_cost": 12.0,
+    }
+    runtime_calls: list[dict[str, object]] = []
+    results = iter(
+        [
+            _qualification_execution_runtime(
+                route,
+                status="repairable_paused:correction_cost_reached_original_authoring_cost",
+                accepted=False,
+                frontier=frontier,
+            ),
+            _qualification_execution_runtime(
+                route,
+                status="corrected",
+                accepted=True,
+            ),
+        ]
+    )
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+
+    def run_runtime(**kwargs: object) -> object:
+        runtime_calls.append(kwargs)
+        return next(results)
+
+    monkeypatch.setattr(staged_module, "run_stage456_qualification_repairs", run_runtime)
+    monkeypatch.setattr(
+        staged_module,
+        "materialize_repaired_shadow_run",
+        lambda **kwargs: (
+            {
+                "accepted_repair_count": 1,
+                "fresh_independent_readjudication_required": True,
+                "release_qualification_eligible": False,
+            }
+            if kwargs["runtime"].consumption["accepted_repair_count"] > 0
+            else None
+        ),
+    )
+
+    paused = staged_module._execute_qualification_correction(routes=[route], **inputs)
+
+    assert paused["qualification_scheduler_pending"] is True
+    assert paused["status"].startswith("repairable_paused:")
+    assert not Path(inputs["completion_path"]).exists()
+    first_checkpoint = Path(paused["qualification_scheduler_checkpoint_path"])
+    assert first_checkpoint.name == (
+        paused["qualification_scheduler_checkpoint_sha256"] + ".json"
+    )
+
+    resumed = staged_module._execute_qualification_correction(routes=[route], **inputs)
+    reused = staged_module._execute_qualification_correction(routes=[route], **inputs)
+
+    assert len(runtime_calls) == 2
+    assert runtime_calls[0]["routes"] == [route]
+    assert runtime_calls[0]["resume_frontiers"] == {}
+    assert runtime_calls[1]["routes"] == [route]
+    assert runtime_calls[1]["resume_frontiers"] == {
+        route["route_sha256"]: frontier
+    }
+    assert resumed["status"] == "corrected_pending_independent_readjudication"
+    assert resumed["qualification_scheduler_pending"] is False
+    assert Path(inputs["completion_path"]).is_file()
+    assert reused["correction_completion_reused"] is True
+    scheduler_checkpoints = list(
+        (Path(inputs["completion_path"]).parent / "scheduler_checkpoints").glob("*.json")
+    )
+    assert len(scheduler_checkpoints) >= 5
+
+
+def test_confirmed_recurrence_terminalizes_and_reuses_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
+    route = _qualification_execution_route("d")
+    runtime_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+
+    def run_runtime(**kwargs: object) -> object:
+        runtime_calls.append(kwargs)
+        return _qualification_execution_runtime(
+            route,
+            status="stalled:previous_state_recurred",
+            accepted=False,
+        )
+
+    monkeypatch.setattr(staged_module, "run_stage456_qualification_repairs", run_runtime)
+    monkeypatch.setattr(staged_module, "materialize_repaired_shadow_run", lambda **_kwargs: None)
+
+    first = staged_module._execute_qualification_correction(routes=[route], **inputs)
+    reused = staged_module._execute_qualification_correction(routes=[route], **inputs)
+
+    assert len(runtime_calls) == 1
+    assert first["status"] == "terminal_nonprogress"
+    assert first["qualification_scheduler_pending"] is False
+    assert Path(inputs["completion_path"]).is_file()
+    assert reused["correction_completion_reused"] is True
+
+
+def test_explicit_uncorrectable_route_terminalizes_without_model_invocation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
+    route = _qualification_execution_route(
+        "b",
+        status="uncorrectable",
+    )
+    runtime_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+    monkeypatch.setattr(
+        staged_module,
+        "run_stage456_qualification_repairs",
+        lambda **kwargs: runtime_calls.append(kwargs),
+    )
+    monkeypatch.setattr(staged_module, "materialize_repaired_shadow_run", lambda **_kwargs: None)
+
+    first = staged_module._execute_qualification_correction(routes=[route], **inputs)
+    reused = staged_module._execute_qualification_correction(routes=[route], **inputs)
+
+    assert runtime_calls == []
+    assert first["status"] == "terminal_nonprogress"
+    assert first["qualification_scheduler_pending"] is False
+    assert reused["correction_completion_reused"] is True
+
+
+def test_scheduler_materializes_six_stage_and_auxiliary_receipts_without_mock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
+    route = _qualification_execution_route("8")
+    stage_documents: dict[str, dict[str, Any]] = {}
+    receipts: list[dict[str, Any]] = []
+    for stage in (
+        "problem_mining",
+        "problem_prioritization",
+        "repro_research",
+        "solution_optioning",
+        "solution_selection",
+        "implementation_planning",
+        "problem_mining_evidence",
+        "case_registry",
+    ):
+        document = {
+            "schema_version": 1,
+            "stage": stage,
+            "items": [],
+            "marker": f"repaired:{stage}",
+        }
+        path = tmp_path / "runtime-materialized" / f"{stage}.json"
+        _write_json(path, document)
+        receipts.append(
+            {
+                "stage": stage,
+                "path": str(path.resolve()),
+                "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "content_sha256": staged_module._qualification_canonical_sha256(
+                    document
+                ),
+            }
+        )
+        if stage in {
+            "problem_mining",
+            "problem_prioritization",
+            "repro_research",
+            "solution_optioning",
+            "solution_selection",
+            "implementation_planning",
+        }:
+            stage_documents[stage] = document
+    runtime_result = staged_module.QualificationRepairRuntimeResult(
+        consumption={
+            "content_sha256": "7" * 64,
+            "accepted_repair_count": 1,
+            "unresolved_route_count": 0,
+            "route_receipts": [
+                {"route_sha256": route["route_sha256"], "status": "corrected"}
+            ],
+            "rerun_downstream_stages": ["implementation_planning"],
+            "downstream_result": {
+                "affected_problem_ids": ["problem:one"],
+                "requested_downstream_stages": ["implementation_planning"],
+                "materialized_stage_receipts": receipts,
+            },
+        },
+        stage_documents=stage_documents,
+        tickets=[],
+        affected_problem_ids=["problem:one"],
+        atoms=[{"atom_id": "atom:one", "disposition": "supports_case"}],
+        case_registry={"cases": {"case:one": {"case_id": "case:one"}}},
+    )
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+    monkeypatch.setattr(
+        staged_module,
+        "run_stage456_qualification_repairs",
+        lambda **_kwargs: runtime_result,
+    )
+
+    result = staged_module._execute_qualification_correction(routes=[route], **inputs)
+
+    repaired_backlog_path = Path(result["repaired_backlog_path"])
+    assert repaired_backlog_path.is_file()
+    repaired = json.loads(repaired_backlog_path.read_text(encoding="utf-8"))
+    pipeline = repaired["artifacts"]["six_stage_pipeline"]
+    published = {
+        "problem_mining": Path(pipeline["problem_records_json"]),
+        "problem_prioritization": Path(pipeline["prioritized_problems_json"]),
+        "repro_research": Path(pipeline["research_json"]),
+        "solution_optioning": Path(pipeline["solution_options_json"]),
+        "solution_selection": Path(pipeline["solution_selection_json"]),
+        "implementation_planning": Path(pipeline["change_plans_json"]),
+        "problem_mining_evidence": Path(pipeline["problem_mining_evidence_json"]),
+        "case_registry": Path(pipeline["case_registry_json"]),
+    }
+    assert all(path.is_file() for path in published.values())
+    assert {
+        json.loads(path.read_text(encoding="utf-8"))["marker"]
+        for path in published.values()
+    } == {f"repaired:{stage}" for stage in published}
+    assert Path(result["pending_repaired_shadow_run_path"]).is_file()
+    assert result["release_qualification_eligible"] is False
+    published_consumption = json.loads(
+        Path(result["correction_consumption_path"]).read_text(encoding="utf-8")
+    )
+    assert json.loads(json.dumps(published_consumption)) == published_consumption
+    assert published_consumption["content_sha256"] == (
+        staged_module._qualification_canonical_sha256(
+            {
+                key: value
+                for key, value in published_consumption.items()
+                if key != "content_sha256"
+            }
+        )
+    )
+
+
+def test_legacy_zero_accepted_completion_is_resumed_not_reused_forever(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
+    route = _qualification_execution_route("a")
+    legacy_consumption = tmp_path / "legacy_consumption.json"
+    _write_json(legacy_consumption, {"legacy": True})
+    legacy_completion = staged_module._build_qualification_correction_completion(
+        correction_input_sha256=inputs["correction_input_sha256"],
+        consumption_path=legacy_consumption,
+        consumption_sha256="b" * 64,
+        repair_result={
+            "accepted_repair_count": 0,
+            "unresolved_route_count": 1,
+            "fresh_independent_readjudication_required": False,
+            "release_qualification_eligible": False,
+        },
+    )
+    _write_json(inputs["completion_path"], legacy_completion)
+    runtime_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+
+    def run_runtime(**kwargs: object) -> object:
+        runtime_calls.append(kwargs)
+        return _qualification_execution_runtime(
+            route,
+            status="corrected",
+            accepted=True,
+        )
+
+    monkeypatch.setattr(staged_module, "run_stage456_qualification_repairs", run_runtime)
+    monkeypatch.setattr(
+        staged_module,
+        "materialize_repaired_shadow_run",
+        lambda **_kwargs: {
+            "accepted_repair_count": 1,
+            "fresh_independent_readjudication_required": True,
+            "release_qualification_eligible": False,
+        },
+    )
+
+    corrected = staged_module._execute_qualification_correction(routes=[route], **inputs)
+    reused = staged_module._execute_qualification_correction(routes=[route], **inputs)
+
+    assert len(runtime_calls) == 1
+    assert corrected["accepted_repair_count"] == 1
+    assert ".terminal." in Path(corrected["correction_completion_path"]).name
+    assert reused["correction_completion_reused"] is True
+
+
+def test_unavailable_route_does_not_poison_recoverable_group_crash_reconciliation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
+    unavailable = _qualification_execution_route(
+        "e",
+        status="author_provenance_unavailable",
+        component="case:unavailable",
+    )
+    recoverable = _qualification_execution_route(
+        "f",
+        component="case:recoverable",
+    )
+    runtime_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+
+    def run_runtime(**kwargs: object) -> object:
+        runtime_calls.append(kwargs)
+        if len(runtime_calls) == 1:
+            raise KeyboardInterrupt("lost_after_exact_group_turn")
+        return _qualification_execution_runtime(
+            recoverable,
+            status="corrected",
+            accepted=True,
+        )
+
+    monkeypatch.setattr(staged_module, "run_stage456_qualification_repairs", run_runtime)
+    monkeypatch.setattr(
+        staged_module,
+        "materialize_repaired_shadow_run",
+        lambda **_kwargs: {
+            "accepted_repair_count": 1,
+            "fresh_independent_readjudication_required": True,
+            "release_qualification_eligible": False,
+        },
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="lost_after_exact_group_turn"):
+        staged_module._execute_qualification_correction(
+            routes=[unavailable, recoverable],
+            **inputs,
+        )
+    recovered = staged_module._execute_qualification_correction(
+        routes=[unavailable, recoverable],
+        **inputs,
+    )
+
+    assert len(runtime_calls) == 2
+    assert all(call["routes"] == [recoverable] for call in runtime_calls)
+    assert recovered["accepted_repair_count"] == 1
+    assert recovered["qualification_scheduler_pending"] is True
+    assert not Path(inputs["completion_path"]).exists()
+    assert len(
+        list(
+            Path(inputs["completion_path"]).parent.glob(
+                "group_attempts/*/*/reconciliation_claim.json"
+            )
+        )
+    ) == 1
+
+
+def test_scheduler_replans_after_stage1_merge_and_never_invokes_stale_planner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
+    stage1_route = _qualification_execution_route("1", component="label:stage1")
+    stage1_route.update(
+        {
+            "authoring_stage": "problem_mining",
+            "causal_target": {
+                "problem_ids": ["problem:one"],
+                "case_ids": ["case:one"],
+                "evidence_atom_ids": ["atom:one"],
+                "actionable_label_ids": [],
+                "expected_item_keys": ["atom:one"],
+            },
+        }
+    )
+    stage1_route["author_provenance"] = {
+        **stage1_route["author_provenance"],
+        "authoring_stage": "problem_mining",
+        "problem_id": "problem:one",
+        "case_id": "case:one",
+        "stage1_correction_adapter": "problem_miner",
+    }
+    planner_route = _qualification_execution_route("2", component="label:planner")
+    planner_route["causal_target"] = {
+        "problem_ids": ["problem:two"],
+        "case_ids": ["case:two"],
+        "evidence_atom_ids": [],
+        "actionable_label_ids": [],
+        "expected_item_keys": ["problem:two"],
+    }
+    planner_route["author_provenance"] = {
+        **planner_route["author_provenance"],
+        "problem_id": "problem:two",
+        "case_id": "case:two",
+    }
+    corrected_stage1 = {
+        "items": [
+            {
+                "problem_id": "problem:one",
+                "case_id": "case:one",
+                "case_member_problem_ids": ["problem:one", "problem:two"],
+                "evidence_atom_ids": ["atom:one"],
+            }
+        ]
+    }
+    documents = {
+        "problem_mining": corrected_stage1,
+        "problem_prioritization": {"items": []},
+        "repro_research": {"items": []},
+        "solution_optioning": {"items": []},
+        "solution_selection": {"items": []},
+        "implementation_planning": {"items": []},
+    }
+    corrected_registry = {
+        "problem_id_to_case_id": {
+            "problem:one": "case:one",
+            "problem:two": "case:one",
+        },
+        "cases": {
+            "case:one": {
+                "case_id": "case:one",
+                "canonical_problem_id": "problem:one",
+                "problem_ids": ["problem:one", "problem:two"],
+                "absorbed_case_ids": ["case:two"],
+            }
+        },
+    }
+    runtime_calls: list[list[Mapping[str, Any]]] = []
+
+    def run_runtime(**kwargs: object) -> Any:
+        routes = kwargs["routes"]
+        assert isinstance(routes, list)
+        runtime_calls.append(routes)
+        assert routes == [stage1_route]
+        return staged_module.QualificationRepairRuntimeResult(
+            consumption={
+                "content_sha256": "3" * 64,
+                "accepted_repair_count": 1,
+                "unresolved_route_count": 0,
+                "route_receipts": [
+                    {
+                        "route_sha256": stage1_route["route_sha256"],
+                        "status": "corrected",
+                    }
+                ],
+                "rerun_downstream_stages": [],
+                "downstream_result": {},
+            },
+            stage_documents=documents,
+            tickets=[],
+            affected_problem_ids=["problem:one", "problem:two"],
+            atoms=[{"atom_id": "atom:one", "disposition": "supports_case"}],
+            case_registry=corrected_registry,
+        )
+
+    monkeypatch.setattr(staged_module, "load_pipeline_prompt_manifest", lambda _path: object())
+    monkeypatch.setattr(staged_module, "run_stage456_qualification_repairs", run_runtime)
+    monkeypatch.setattr(
+        staged_module,
+        "materialize_repaired_shadow_run",
+        lambda **_kwargs: {
+            "accepted_repair_count": 1,
+            "fresh_independent_readjudication_required": True,
+            "release_qualification_eligible": False,
+        },
+    )
+
+    result = staged_module._execute_qualification_correction(
+        routes=[stage1_route, planner_route],
+        **inputs,
+    )
+
+    assert runtime_calls == [[stage1_route]]
+    assert result["qualification_scheduler_pending"] is True
+    checkpoint = json.loads(
+        Path(result["qualification_scheduler_checkpoint_path"]).read_text(
+            encoding="utf-8"
+        )
+    )
+    planner_group = next(
+        group
+        for group in checkpoint["group_states"].values()
+        if planner_route["route_sha256"] in group["route_sha256s"]
+    )
+    assert planner_group["status"] == "retained_pending_causal_predecessor"
+    assert planner_group["blocked_by_group_id"] is not None
+    assert checkpoint["current_causal_plan_sha256"]
+
+
+def test_operational_phase_two_evaluates_internal_contract_without_benchmark_labels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    out_json = tmp_path / "target.backlog.json"
+    atoms_path = tmp_path / "atoms.json"
+    _write_json(atoms_path, [])
+    stage_paths: dict[str, Path] = {}
+    for name in (
+        "problem_records",
+        "prioritized_problems",
+        "research",
+        "solution_options",
+        "solution_selection",
+        "change_plans",
+        "case_registry",
+    ):
+        stage_paths[name] = tmp_path / f"{name}.json"
+        _write_json(stage_paths[name], {"items": []})
+    pending_path = tmp_path / "target.operational_shadow_pending.json"
+    backlog = {
+        "tickets": [],
+        "artifacts": {
+            "atoms_jsonl": str(atoms_path),
+            "case_registry_json": str(stage_paths["case_registry"]),
+            "six_stage_pipeline": {
+                "problem_records_json": str(stage_paths["problem_records"]),
+                "prioritized_problems_json": str(stage_paths["prioritized_problems"]),
+                "research_json": str(stage_paths["research"]),
+                "solution_options_json": str(stage_paths["solution_options"]),
+                "solution_selection_json": str(stage_paths["solution_selection"]),
+                "change_plans_json": str(stage_paths["change_plans"]),
+                "case_registry_json": str(stage_paths["case_registry"]),
+            },
+            "export_contract": {
+                "policy_config_path": str(repo_root / "configs" / "backlog_policy.yaml")
+            },
+            "operational_shadow": {
+                "pending_internal_validation": True,
+                "pending_run_receipt_path": str(pending_path),
+                "model_readable_roots": [str(repo_root)],
+            },
+        },
+    }
+    _write_json(out_json, backlog)
+    captured: list[dict[str, object]] = []
+    monkeypatch.setattr(staged_module, "_export_artifact_paths", lambda **_kwargs: {})
+    release_bundle = tmp_path / "release" / "qualification_input_bundle.json"
+    release_bundle.parent.mkdir(parents=True, exist_ok=True)
+    release_bundle.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        staged_module,
+        "_release_qualification_bundle_from_state",
+        lambda _state_path: release_bundle,
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "load_qualification_input_bundle",
+        lambda _path, *, verify_files: {},
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "qualification_runtime_compatibility_errors",
+        lambda _bundle, *, repo_root: [],
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "validate_pending_operational_shadow_run",
+        lambda **_kwargs: ({"content_sha256": "d" * 64}, []),
+    )
+
+    def evaluate(**kwargs: object) -> dict[str, object]:
+        captured.append(kwargs)
+        return {"passed": True, "failures": []}
+
+    monkeypatch.setattr(staged_module, "evaluate_shadow_invariants", evaluate)
+    monkeypatch.setattr(
+        staged_module,
+        "_build_export_projection",
+        lambda **_kwargs: {"sha256": "f" * 64},
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "record_shadow_cycle",
+        lambda **_kwargs: {
+            "ready_for_export": True,
+            "activation_mode": "operational_bound",
+            "release_anchor_cycle_ids": ["1" * 64, "2" * 64],
+        },
+    )
+
+    result = staged_module._score_materialized_operational_shadow_run(
+        repo_root=repo_root,
+        runs_dir=tmp_path / "runs",
+        out_json=out_json,
+        repo_input=None,
+        shadow_gate_config={
+            "required_consecutive_shadow_cycles": 2,
+            "require_exact_export_projection": True,
+        },
+        state_path=tmp_path / "external" / "release_state.json",
+    )
+
+    assert result == 0
+    assert len(captured) == 1
+    assert captured[0]["cycle_mode"] == "operational"
+    assert "qualification_manifest" not in captured[0]
 
 
 def test_case_outcome_sync_persists_a_validated_current_lifecycle_pointer() -> None:
@@ -1424,9 +3281,7 @@ def test_actioned_unproven_terminal_case_is_reopened_at_mining_boundary(
 
     assigned = _stage1_assigned_atom(compiled, atom_id)
     assert assigned["disposition"] == "unresolved"
-    assert [item["atom_id"] for item in eligible_problem_mining_atoms([assigned])] == [
-        atom_id
-    ]
+    assert [item["atom_id"] for item in eligible_problem_mining_atoms([assigned])] == [atom_id]
     actions = yaml.safe_load(atom_actions_path.read_text(encoding="utf-8"))["atoms"]
     action = next(item for item in actions if item["atom_id"] == atom_id)
     assert action["status"] == "new"

@@ -3,12 +3,15 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 import os
+import platform
 import re
 import shutil
 import stat
 import subprocess
 import tomllib
+from collections.abc import Callable, Mapping
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -41,6 +44,303 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+CausalPredicateEvaluator = Callable[[Mapping[str, Any], Any], tuple[bool, str | None]]
+CausalObservationReader = Callable[
+    [Mapping[str, Any], list[dict[str, Any]], Path],
+    tuple[bool, Any, str | None],
+]
+
+_CAUSAL_PREDICATE_EVALUATORS: dict[str, CausalPredicateEvaluator] = {}
+_CAUSAL_OBSERVATION_READERS: dict[str, CausalObservationReader] = {}
+
+
+def register_causal_outcome_predicate(
+    kind: str,
+    evaluator: CausalPredicateEvaluator,
+    *,
+    replace: bool = False,
+) -> None:
+    """Register an adapter-neutral predicate without editing the outcome runner."""
+
+    normalized = kind.strip() if isinstance(kind, str) else ""
+    if not normalized or not callable(evaluator):
+        raise ValueError("causal_outcome_predicate_registration_invalid")
+    if normalized in _CAUSAL_PREDICATE_EVALUATORS and not replace:
+        raise ValueError(f"causal_outcome_predicate_already_registered:{normalized}")
+    _CAUSAL_PREDICATE_EVALUATORS[normalized] = evaluator
+
+
+def register_causal_observation_source(
+    source: str,
+    reader: CausalObservationReader,
+    *,
+    replace: bool = False,
+) -> None:
+    """Register a portable post-change observation source."""
+
+    normalized = source.strip() if isinstance(source, str) else ""
+    if not normalized or not callable(reader):
+        raise ValueError("causal_observation_source_registration_invalid")
+    if normalized in _CAUSAL_OBSERVATION_READERS and not replace:
+        raise ValueError(f"causal_observation_source_already_registered:{normalized}")
+    _CAUSAL_OBSERVATION_READERS[normalized] = reader
+
+
+def _schema_observation_errors(value: Any, schema: Any, *, path: str = "$") -> list[str]:
+    if not isinstance(schema, Mapping):
+        return [f"schema_invalid:{path}"]
+    errors: list[str] = []
+    expected_type = schema.get("type")
+    checks: dict[str, Callable[[Any], bool]] = {
+        "object": lambda item: isinstance(item, Mapping),
+        "array": lambda item: isinstance(item, list),
+        "string": lambda item: isinstance(item, str),
+        "number": lambda item: (
+            isinstance(item, (int, float))
+            and not isinstance(item, bool)
+            and math.isfinite(float(item))
+        ),
+        "integer": lambda item: isinstance(item, int) and not isinstance(item, bool),
+        "boolean": lambda item: isinstance(item, bool),
+        "null": lambda item: item is None,
+    }
+    if expected_type is not None:
+        check = checks.get(str(expected_type))
+        if check is None or not check(value):
+            errors.append(f"schema_type_mismatch:{path}:{expected_type}")
+    if isinstance(value, Mapping):
+        required = schema.get("required", [])
+        if not isinstance(required, list) or any(not isinstance(key, str) for key in required):
+            errors.append(f"schema_required_invalid:{path}")
+        else:
+            errors.extend(
+                f"schema_required_missing:{path}.{key}" for key in required if key not in value
+            )
+        properties = schema.get("properties", {})
+        if not isinstance(properties, Mapping):
+            errors.append(f"schema_properties_invalid:{path}")
+        else:
+            for key, child in properties.items():
+                if isinstance(key, str) and key in value:
+                    errors.extend(
+                        _schema_observation_errors(value[key], child, path=f"{path}.{key}")
+                    )
+    if isinstance(value, list) and "items" in schema:
+        errors.extend(
+            error
+            for index, item in enumerate(value)
+            for error in _schema_observation_errors(
+                item,
+                schema["items"],
+                path=f"{path}[{index}]",
+            )
+        )
+    return errors
+
+
+def _evaluate_builtin_causal_predicate(
+    predicate: Mapping[str, Any], observed: Any
+) -> tuple[bool, str | None]:
+    kind = predicate.get("kind")
+    if kind == "equals":
+        return observed == predicate.get("expected"), None
+    if kind == "membership":
+        members = predicate.get("members")
+        return (
+            observed in members if isinstance(members, list) else False,
+            None if isinstance(members, list) else "predicate_members_invalid",
+        )
+    if kind == "range":
+        if not isinstance(observed, (int, float)) or isinstance(observed, bool):
+            return False, "predicate_range_observation_invalid"
+        minimum = predicate.get("minimum")
+        maximum = predicate.get("maximum")
+        if minimum is None and maximum is None:
+            return False, "predicate_range_unbounded"
+        passed = True
+        if minimum is not None:
+            passed = passed and (
+                observed >= minimum
+                if predicate.get("minimum_inclusive", True) is True
+                else observed > minimum
+            )
+        if maximum is not None:
+            passed = passed and (
+                observed <= maximum
+                if predicate.get("maximum_inclusive", True) is True
+                else observed < maximum
+            )
+        return passed, None
+    if kind == "schema":
+        errors = _schema_observation_errors(observed, predicate.get("schema"))
+        return not errors, ";".join(errors) if errors else None
+    if kind == "existence":
+        if not isinstance(observed, Mapping) or not isinstance(observed.get("exists"), bool):
+            return False, "predicate_existence_observation_invalid"
+        return observed.get("exists") is predicate.get("expected"), None
+    if kind == "state_transition":
+        if not isinstance(observed, Mapping):
+            return False, "predicate_state_transition_observation_invalid"
+        return (
+            observed.get("before") == predicate.get("from")
+            and observed.get("after") == predicate.get("to"),
+            None,
+        )
+    if kind == "event_sequence":
+        events = predicate.get("events")
+        if not isinstance(observed, list) or not isinstance(events, list) or not events:
+            return False, "predicate_event_sequence_observation_invalid"
+        if predicate.get("mode", "exact") == "exact":
+            return observed == events, None
+        iterator = iter(observed)
+        return all(any(candidate == event for candidate in iterator) for event in events), None
+    return False, f"predicate_kind_unsupported:{kind}"
+
+
+for _predicate_kind in (
+    "equals",
+    "membership",
+    "range",
+    "schema",
+    "existence",
+    "state_transition",
+    "event_sequence",
+):
+    register_causal_outcome_predicate(
+        _predicate_kind,
+        _evaluate_builtin_causal_predicate,
+    )
+
+
+def _json_pointer_value(value: Any, pointer: str) -> tuple[bool, Any]:
+    if pointer == "":
+        return True, value
+    if not isinstance(pointer, str) or not pointer.startswith("/"):
+        return False, None
+    current = value
+    for raw_segment in pointer[1:].split("/"):
+        segment = raw_segment.replace("~1", "/").replace("~0", "~")
+        if isinstance(current, Mapping) and segment in current:
+            current = current[segment]
+        elif isinstance(current, list) and segment.isdigit() and int(segment) < len(current):
+            current = current[int(segment)]
+        else:
+            return False, None
+    return True, current
+
+
+def _command_observation(
+    selector: Mapping[str, Any],
+    commands: list[dict[str, Any]],
+    _workspace: Path,
+) -> tuple[bool, Any, str | None]:
+    command_index = selector.get("command_index", 0)
+    if (
+        isinstance(command_index, bool)
+        or not isinstance(command_index, int)
+        or command_index < 0
+        or command_index >= len(commands)
+    ):
+        return False, None, "causal_observation_command_index_invalid"
+    command = commands[command_index]
+    source = selector.get("source")
+    if source == "exit_code":
+        return True, command.get("exit_code"), None
+    if source in {"stdout_text", "stderr_text", "combined_text", "event_lines"}:
+        stream = (
+            f"{command.get('stdout') or ''}{command.get('stderr') or ''}"
+            if source == "combined_text"
+            else command.get("stdout")
+            if source in {"stdout_text", "event_lines"}
+            else command.get("stderr")
+        )
+        if not isinstance(stream, str):
+            return False, None, "causal_observation_stream_invalid"
+        observed: Any = (
+            [line for line in stream.splitlines() if line]
+            if source == "event_lines"
+            else stream
+        )
+        return True, observed, None
+    if source in {"stdout_json", "stderr_json", "event_json"}:
+        stream = command.get("stdout") if source != "stderr_json" else command.get("stderr")
+        if not isinstance(stream, str):
+            return False, None, "causal_observation_stream_invalid"
+        try:
+            document = json.loads(stream)
+        except json.JSONDecodeError:
+            return False, None, "causal_observation_json_invalid"
+        found, observed = _json_pointer_value(document, str(selector.get("json_pointer") or ""))
+        return (
+            (True, observed, None)
+            if found
+            else (False, None, "causal_observation_json_pointer_missing")
+        )
+    return False, None, f"causal_observation_source_unsupported:{source}"
+
+
+def _platform_observation(
+    _selector: Mapping[str, Any],
+    _commands: list[dict[str, Any]],
+    _workspace: Path,
+) -> tuple[bool, Any, str | None]:
+    return True, platform.system().casefold(), None
+
+
+def _workspace_state_observation(
+    selector: Mapping[str, Any],
+    _commands: list[dict[str, Any]],
+    workspace: Path,
+) -> tuple[bool, Any, str | None]:
+    path_raw = selector.get("path")
+    if not isinstance(path_raw, str) or not path_raw.strip():
+        return False, None, "causal_observation_workspace_path_invalid"
+    relative = Path(path_raw)
+    path = (workspace / relative).resolve()
+    if (
+        relative.is_absolute()
+        or ".." in relative.parts
+        or not path.is_relative_to(workspace)
+        or path.is_symlink()
+    ):
+        return False, None, "causal_observation_workspace_path_unsafe"
+    observation_kind = selector.get("observation_kind", "value")
+    if observation_kind == "existence":
+        return True, {"exists": path.exists()}, None
+    if not path.is_file():
+        return False, None, "causal_observation_workspace_file_missing"
+    try:
+        if selector.get("format") == "json" or path.suffix.casefold() == ".json":
+            document = json.loads(path.read_text(encoding="utf-8"))
+            found, observed = _json_pointer_value(
+                document,
+                str(selector.get("json_pointer") or ""),
+            )
+            return (
+                (True, observed, None)
+                if found
+                else (False, None, "causal_observation_json_pointer_missing")
+            )
+        return True, path.read_text(encoding="utf-8", errors="strict"), None
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False, None, "causal_observation_workspace_read_failed"
+
+
+for _command_source in (
+    "exit_code",
+    "stdout_text",
+    "stderr_text",
+    "combined_text",
+    "event_lines",
+    "stdout_json",
+    "stderr_json",
+    "event_json",
+):
+    register_causal_observation_source(_command_source, _command_observation)
+register_causal_observation_source("platform", _platform_observation)
+register_causal_observation_source("workspace_state", _workspace_state_observation)
 
 
 def _required_sha256(value: Any, *, field: str) -> str:
@@ -148,7 +448,8 @@ def _validate_recurrence_refresh(
 
     path = refresh_receipt_path.expanduser().resolve()
     receipt = _load_json_object(path, error="outcome_recurrence_refresh_receipt_invalid")
-    if receipt.get("schema_version") != 3 or receipt.get("producer") != (
+    receipt_schema = receipt.get("schema_version")
+    if receipt_schema not in {3, 4} or receipt.get("producer") != (
         "usertest_implement.backlog_refresh"
     ):
         raise ValueError("outcome_recurrence_refresh_receipt_identity_invalid")
@@ -177,8 +478,21 @@ def _validate_recurrence_refresh(
     ) < 2:
         raise ValueError("outcome_recurrence_shadow_gate_not_open")
 
-    ids = receipt.get("qualifying_cycle_ids")
-    cycles = receipt.get("qualifying_cycles")
+    if receipt_schema == 4:
+        if receipt.get("activation_mode") != "operational_bound":
+            raise ValueError("outcome_recurrence_operational_activation_required")
+        anchor_ids = receipt.get("release_anchor_cycle_ids")
+        if (
+            not isinstance(anchor_ids, list)
+            or len(anchor_ids) < 2
+            or state.get("release_anchor_cycle_ids") != anchor_ids
+        ):
+            raise ValueError("outcome_recurrence_release_anchor_invalid")
+        ids = receipt.get("observation_cycle_ids")
+        cycles = receipt.get("observation_cycles")
+    else:
+        ids = receipt.get("qualifying_cycle_ids")
+        cycles = receipt.get("qualifying_cycles")
     if (
         not isinstance(ids, list)
         or len(ids) != 2
@@ -191,9 +505,18 @@ def _validate_recurrence_refresh(
         raise ValueError("outcome_recurrence_two_fresh_cycles_required")
     state_cycles_raw = state.get("cycles")
     state_cycles = state_cycles_raw if isinstance(state_cycles_raw, list) else []
+    state_observation_cycles = (
+        [
+            cycle
+            for cycle in state_cycles
+            if isinstance(cycle, dict) and cycle.get("cycle_mode") == "operational"
+        ]
+        if receipt_schema == 4
+        else state_cycles
+    )
     if [
         cycle.get("cycle_id") if isinstance(cycle, dict) else None
-        for cycle in state_cycles[-2:]
+        for cycle in state_observation_cycles[-2:]
     ] != ids:
         raise ValueError("outcome_recurrence_cycles_not_latest")
 
@@ -229,6 +552,7 @@ def _validate_recurrence_refresh(
             cycle_receipt.get("cycle_id") != ids[index]
             or cycle_receipt.get("generated_at") != cycle.get("generated_at")
             or cycle_receipt.get("passed") is not True
+            or (receipt_schema == 4 and cycle_receipt.get("cycle_mode") != "operational")
         ):
             raise ValueError(f"outcome_recurrence_cycle_identity_mismatch:{index}")
 
@@ -429,6 +753,220 @@ def _require_ancestor(workspace: Path, *, ancestor: str, descendant: str, field:
         raise ValueError(f"outcome_role_commit_not_ancestor:{field}")
 
 
+def _normalized_causal_proof_receipts(raw: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(raw, list) or not raw:
+        raise ValueError("outcome_role_causal_proof_receipts_invalid")
+    normalized: dict[str, dict[str, Any]] = {}
+    for index, receipt in enumerate(raw):
+        if not isinstance(receipt, dict):
+            raise ValueError(f"outcome_role_causal_proof_receipt_invalid:{index}")
+        proof_id = receipt.get("proof_receipt_id")
+        proof_projection = {
+            key: value for key, value in receipt.items() if key != "proof_receipt_id"
+        }
+        source_root = receipt.get("source_root")
+        source_projection = (
+            {
+                key: value
+                for key, value in source_root.items()
+                if key != "source_root_sha256"
+            }
+            if isinstance(source_root, Mapping)
+            else {}
+        )
+        positive_basis = (
+            source_root.get("positive_basis") if isinstance(source_root, Mapping) else None
+        )
+        basis_projection = (
+            {
+                key: value for key, value in positive_basis.items() if key != "basis_sha256"
+            }
+            if isinstance(positive_basis, Mapping)
+            else {}
+        )
+        observations = receipt.get("observations")
+        baseline = observations.get("baseline") if isinstance(observations, Mapping) else None
+        challenge = observations.get("challenge") if isinstance(observations, Mapping) else None
+        intervention = receipt.get("intervention")
+        positive = receipt.get("positive_outcome")
+        replay_inputs = receipt.get("replay_inputs")
+        replay_inputs_projection = (
+            {
+                key: value
+                for key, value in replay_inputs.items()
+                if key != "replay_inputs_sha256"
+            }
+            if isinstance(replay_inputs, Mapping)
+            else {}
+        )
+        replay = receipt.get("replay_observation")
+        replay_projection = (
+            {
+                key: value
+                for key, value in replay.items()
+                if key != "replay_observation_sha256"
+            }
+            if isinstance(replay, Mapping)
+            else {}
+        )
+        predicate = positive.get("predicate") if isinstance(positive, Mapping) else None
+        predicate_kind = predicate.get("kind") if isinstance(predicate, Mapping) else None
+        evaluator = _CAUSAL_PREDICATE_EVALUATORS.get(str(predicate_kind))
+        recorded_passed, recorded_error = (
+            evaluator(predicate, positive.get("observed"))
+            if evaluator is not None and isinstance(positive, Mapping)
+            else (False, "predicate_unavailable")
+        )
+        expected_intervention_id = (
+            "intervention:"
+            + _sha256_json(
+                {
+                    "source_root_sha256": source_root.get("source_root_sha256"),
+                    "baseline_observation_sha256": baseline.get("observation_sha256"),
+                    "challenge_observation_sha256": challenge.get("observation_sha256"),
+                    "intervention": {
+                        key: value
+                        for key, value in intervention.items()
+                        if key not in {"intervention_id", "adapter_evidence"}
+                    },
+                }
+            )
+            if isinstance(source_root, Mapping)
+            and isinstance(baseline, Mapping)
+            and isinstance(challenge, Mapping)
+            and isinstance(intervention, Mapping)
+            else None
+        )
+        if (
+            receipt.get("schema_version") != 1
+            or not isinstance(proof_id, str)
+            or proof_id != f"causal_proof:{_sha256_json(proof_projection)}"
+            or proof_id in normalized
+            or not isinstance(receipt.get("adapter_id"), str)
+            or not receipt.get("adapter_id", "").strip()
+            or not isinstance(receipt.get("adapter_version"), str)
+            or not receipt.get("adapter_version", "").strip()
+            or not isinstance(source_root, Mapping)
+            or source_root.get("runner_attested") is not True
+            or source_root.get("source_root_sha256") != _sha256_json(source_projection)
+            or not isinstance(positive_basis, Mapping)
+            or positive_basis.get("runner_attested") is not True
+            or positive_basis.get("basis_sha256") != _sha256_json(basis_projection)
+            or positive_basis.get("predicate_sha256") != _sha256_json(predicate)
+            or not isinstance(baseline, Mapping)
+            or not isinstance(challenge, Mapping)
+            or baseline.get("runner_attested") is not True
+            or challenge.get("runner_attested") is not True
+            or baseline.get("observation_sha256")
+            != _sha256_json(
+                {
+                    key: value
+                    for key, value in baseline.items()
+                    if key != "observation_sha256"
+                }
+            )
+            or challenge.get("observation_sha256")
+            != _sha256_json(
+                {
+                    key: value
+                    for key, value in challenge.items()
+                    if key != "observation_sha256"
+                }
+            )
+            or not isinstance(intervention, Mapping)
+            or intervention.get("baseline_experiment_id") != baseline.get("experiment_id")
+            or intervention.get("challenge_experiment_id") != challenge.get("experiment_id")
+            or receipt.get("intervention_id") != expected_intervention_id
+            or not isinstance(positive, Mapping)
+            or positive.get("runner_evaluated") is not True
+            or positive.get("passed") is not True
+            or recorded_error is not None
+            or recorded_passed is not True
+            or not isinstance(replay_inputs, Mapping)
+            or replay_inputs.get("schema_version") != 1
+            or replay_inputs.get("runner_approved") is not True
+            or replay_inputs.get("source_experiment_id") != baseline.get("experiment_id")
+            or replay_inputs.get("replay_inputs_sha256")
+            != _sha256_json(replay_inputs_projection)
+            or not isinstance(replay_inputs.get("environment"), Mapping)
+            or not isinstance(replay_inputs.get("disposable_state_paths"), list)
+            or not isinstance(replay, Mapping)
+            or replay.get("schema_version") != 1
+            or replay.get("runner_attested") is not True
+            or replay.get("source_experiment_id") != baseline.get("experiment_id")
+            or replay.get("positive_reference_experiment_id")
+            != challenge.get("experiment_id")
+            or replay.get("predicate_input_mode")
+            not in {
+                "post_change_observation",
+                "historical_baseline_and_post_change_observation",
+            }
+            or not isinstance(replay.get("selector"), Mapping)
+            or not isinstance(replay.get("positive_reference_selector"), Mapping)
+            or replay.get("selector", {}).get("source")
+            not in _CAUSAL_OBSERVATION_READERS
+            or replay.get("replay_observation_sha256") != _sha256_json(replay_projection)
+        ):
+            raise ValueError(f"outcome_role_causal_proof_receipt_invalid:{index}")
+        normalized[proof_id] = dict(receipt)
+    return normalized
+
+
+def _causal_positive_contract_valid(
+    contract: Mapping[str, Any],
+    *,
+    oracle: Mapping[str, Any],
+    proofs: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    proof_id = contract.get("proof_receipt_id")
+    proof = proofs.get(str(proof_id))
+    if not isinstance(proof, Mapping):
+        return False
+    intervention = proof.get("intervention")
+    observations = proof.get("observations")
+    baseline = observations.get("baseline") if isinstance(observations, Mapping) else None
+    challenge = observations.get("challenge") if isinstance(observations, Mapping) else None
+    positive = proof.get("positive_outcome")
+    source_root = proof.get("source_root")
+    basis = source_root.get("positive_basis") if isinstance(source_root, Mapping) else None
+    adapter_contract = contract.get("adapter_contract")
+    expected_postcondition = {
+        "type": "causal_proof_predicate",
+        "proof_receipt_id": proof_id,
+        "intervention_id": proof.get("intervention_id"),
+        "adapter_id": proof.get("adapter_id"),
+        "adapter_version": proof.get("adapter_version"),
+        "predicate": positive.get("predicate") if isinstance(positive, Mapping) else None,
+        "observation_source": (
+            positive.get("observation_source") if isinstance(positive, Mapping) else None
+        ),
+        "positive_basis_sha256": (
+            basis.get("basis_sha256") if isinstance(basis, Mapping) else None
+        ),
+    }
+    return bool(
+        oracle.get("kind") == "causal_proof_replay"
+        and proof_id in oracle.get("proof_receipt_ids", [])
+        and isinstance(intervention, Mapping)
+        and intervention.get("baseline_experiment_id") == oracle.get("research_experiment_id")
+        and isinstance(baseline, Mapping)
+        and isinstance(challenge, Mapping)
+        and isinstance(adapter_contract, Mapping)
+        and adapter_contract.get("adapter_id") == proof.get("adapter_id")
+        and adapter_contract.get("adapter_version") == proof.get("adapter_version")
+        and adapter_contract.get("baseline_observation_sha256")
+        == baseline.get("observation_sha256")
+        and adapter_contract.get("challenge_observation_sha256")
+        == challenge.get("observation_sha256")
+        and adapter_contract.get("adapter_evidence_sha256")
+        == _sha256_json(proof.get("adapter_evidence"))
+        and contract.get("positive_basis") == basis
+        and contract.get("semantic_review_required")
+        is (isinstance(basis, Mapping) and basis.get("semantic_review_required") is True)
+        and contract.get("postconditions") == [expected_postcondition]
+    )
+
+
 def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise ValueError("outcome_role_oracle_invalid")
@@ -457,6 +995,7 @@ def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:
                 "repository_test_assertion",
                 "retained_research_harness_assertion",
                 "origin_evidence_semantic_contract",
+                "causal_proof_predicate",
             }
             or not isinstance(postconditions, list)
             or not postconditions
@@ -464,7 +1003,7 @@ def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:
         ):
             raise ValueError(f"outcome_role_positive_contract_invalid:{index}")
     kind = raw.get("kind")
-    if kind == "staged_replay":
+    if kind in {"staged_replay", "causal_proof_replay"}:
         execution = raw.get("execution")
         argv = execution.get("argv") if isinstance(execution, dict) else None
         authorization = (
@@ -473,23 +1012,56 @@ def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:
             else None
         )
         if (
-            raw.get("proof_scope") != "behavioral"
+            raw.get("proof_scope")
+            != (
+                "behavioral"
+                if kind == "staged_replay"
+                else "adapter_causal_behavior"
+            )
             or not isinstance(argv, list)
             or not argv
             or any(not isinstance(token, str) or not token for token in argv)
             or execution.get("shell") is not False
             or not isinstance(authorization, dict)
-            or authorization.get("authorization_kind")
-            not in {
-                "standard_test_or_research_harness",
-                "immutable_source_command",
-                "declared_inspected_repository_entrypoint",
-            }
+            or not isinstance(authorization.get("authorization_kind"), str)
+            or not authorization.get("authorization_kind", "").strip()
             or authorization.get("executed_argv_sha256") != _sha256_json(argv)
             or authorization.get("shell") is not False
             or authorization.get("workspace_confined") is not True
         ):
             raise ValueError("outcome_role_replay_oracle_invalid")
+        if kind == "causal_proof_replay":
+            proof_ids = raw.get("proof_receipt_ids")
+            setup = execution.get("replay_setup_receipt")
+            setup_reference = execution.get("replay_setup_reference")
+            setup_projection = (
+                {
+                    key: value
+                    for key, value in setup.items()
+                    if key != "replay_setup_sha256"
+                }
+                if isinstance(setup, Mapping)
+                else {}
+            )
+            if (
+                not isinstance(proof_ids, list)
+                or not proof_ids
+                or proof_ids != sorted(set(proof_ids))
+                or not isinstance(setup, Mapping)
+                or setup.get("runner_applied") is not True
+                or setup.get("replay_setup_sha256") != _sha256_json(setup_projection)
+                or not isinstance(setup_reference, Mapping)
+                or setup_reference.get("source") != "research_experiment"
+                or setup_reference.get("experiment_id")
+                != raw.get("research_experiment_id")
+                or not isinstance(setup_reference.get("replay_setup_sha256"), str)
+                or re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(setup_reference.get("replay_setup_sha256")),
+                )
+                is None
+            ):
+                raise ValueError("outcome_role_causal_replay_oracle_invalid")
     elif kind == "config_state":
         targets = raw.get("state_targets")
         if (
@@ -913,6 +1485,31 @@ def _normalize_role_contract(role: str, raw: Any) -> dict[str, Any]:
         raise ValueError("outcome_role_oracle_for_non_original_role")
     oracle = _normalize_outcome_oracle(oracle_raw) if oracle_raw is not None else None
     oracle_kind = oracle.get("kind") if oracle is not None else None
+    causal_proofs = (
+        _normalized_causal_proof_receipts(unsigned.get("causal_proof_receipts"))
+        if oracle_kind == "causal_proof_replay"
+        else {}
+    )
+    if oracle_kind == "causal_proof_replay":
+        if set(causal_proofs) != set(oracle.get("proof_receipt_ids", [])):
+            raise ValueError("outcome_role_causal_proof_receipt_coverage_invalid")
+        causal_contracts = [
+            contract
+            for contract in oracle.get("positive_outcome_contracts", [])
+            if isinstance(contract, Mapping)
+            and contract.get("kind") == "causal_proof_predicate"
+        ]
+        if not causal_contracts or any(
+            not _causal_positive_contract_valid(
+                contract,
+                oracle=oracle,
+                proofs=causal_proofs,
+            )
+            for contract in causal_contracts
+        ):
+            raise ValueError("outcome_role_causal_positive_contract_invalid")
+    elif unsigned.get("causal_proof_receipts") not in (None, []):
+        raise ValueError("outcome_role_causal_proof_receipts_unexpected")
     if oracle is not None:
         contract_ids = {
             str(contract.get("positive_outcome_contract_id"))
@@ -972,6 +1569,24 @@ def _normalize_role_contract(role: str, raw: Any) -> dict[str, Any]:
         for predicate in predicates
     ):
         raise ValueError("outcome_role_oracle_exit_predicate_missing")
+    if oracle_kind == "causal_proof_replay":
+        expected_predicates = {
+            _canonical_json(contract["postconditions"][0])
+            for contract in oracle.get("positive_outcome_contracts", [])
+            if isinstance(contract, Mapping)
+            and contract.get("kind") == "causal_proof_predicate"
+            and isinstance(contract.get("postconditions"), list)
+            and len(contract["postconditions"]) == 1
+        }
+        observed_predicates = {
+            _canonical_json(predicate)
+            for predicate in predicates
+            if predicate.get("type") == "causal_proof_predicate"
+        }
+        if observed_predicates != expected_predicates or len(predicates) != len(
+            expected_predicates
+        ):
+            raise ValueError("outcome_role_causal_predicate_coverage_invalid")
     if oracle_kind == "config_state":
         target_ids = {
             str(target.get("target_id"))
@@ -1006,6 +1621,11 @@ def _normalize_role_contract(role: str, raw: Any) -> dict[str, Any]:
         "commands": commands,
         "predicates": [dict(predicate) for predicate in predicates],
         **({"oracle": oracle} if oracle is not None else {}),
+        **(
+            {"causal_proof_receipts": list(causal_proofs.values())}
+            if causal_proofs
+            else {}
+        ),
         "role_contract_sha256": supplied_hash,
     }
 
@@ -1078,15 +1698,22 @@ def _run_argv(
     *,
     workspace: Path,
     timeout_seconds: float | None,
+    environment_overrides: Mapping[str, str | None] | None = None,
 ) -> dict[str, Any]:
     timed_out = False
+    environment = _sanitized_environment()
+    for key, value in (environment_overrides or {}).items():
+        if value is None:
+            environment.pop(key, None)
+        else:
+            environment[key] = value
     try:
         proc = subprocess.run(
             argv,
             cwd=str(workspace),
             capture_output=True,
             text=True,
-            env=_sanitized_environment(),
+            env=environment,
             timeout=timeout_seconds,
             check=False,
             shell=False,
@@ -1117,6 +1744,165 @@ def _run_argv(
         "cancelled": False,
         "error": error,
     }
+
+
+def _causal_replay_setup(
+    execution: Mapping[str, Any],
+    *,
+    workspace: Path,
+    causal_proofs: Mapping[str, Mapping[str, Any]],
+) -> tuple[dict[str, str | None], list[Path], list[str]]:
+    receipt = execution.get("replay_setup_receipt")
+    if not isinstance(receipt, Mapping):
+        raise ValueError("outcome_oracle_replay_setup_missing")
+    receipt_environment = receipt.get("environment")
+    receipt_environment = (
+        receipt_environment if isinstance(receipt_environment, Mapping) else {}
+    )
+    proof_inputs = [
+        proof.get("replay_inputs")
+        for proof in causal_proofs.values()
+        if isinstance(proof.get("replay_inputs"), Mapping)
+    ]
+    retained_inputs = (
+        proof_inputs[0]
+        if proof_inputs
+        and len(proof_inputs) == len(causal_proofs)
+        and all(value == proof_inputs[0] for value in proof_inputs)
+        else None
+    )
+    retained_environment = (
+        retained_inputs.get("environment")
+        if isinstance(retained_inputs, Mapping)
+        and isinstance(retained_inputs.get("environment"), Mapping)
+        else {}
+    )
+    if isinstance(retained_inputs, Mapping):
+        supplied_hash = retained_inputs.get("replay_inputs_sha256")
+        projection = {
+            key: value
+            for key, value in retained_inputs.items()
+            if key != "replay_inputs_sha256"
+        }
+        if (
+            retained_inputs.get("schema_version") != 1
+            or retained_inputs.get("runner_approved") is not True
+            or supplied_hash != _sha256_json(projection)
+        ):
+            raise ValueError("outcome_oracle_replay_inputs_invalid")
+    overrides: dict[str, str | None] = {}
+    for key, variable_receipt in receipt_environment.items():
+        if (
+            not isinstance(key, str)
+            or not key
+            or _SENSITIVE_ENVIRONMENT_RE.search(key) is not None
+            or not isinstance(variable_receipt, Mapping)
+            or not isinstance(variable_receipt.get("present"), bool)
+        ):
+            raise ValueError("outcome_oracle_replay_environment_invalid")
+        if variable_receipt.get("present") is False:
+            overrides[key] = None
+            continue
+        value = retained_environment.get(key)
+        if (
+            not isinstance(value, str)
+            or hashlib.sha256(value.encode("utf-8")).hexdigest()
+            != variable_receipt.get("value_sha256")
+        ):
+            raise ValueError(f"outcome_oracle_replay_input_unavailable:{key}")
+        overrides[key] = value
+    if set(retained_environment) - set(receipt_environment):
+        raise ValueError("outcome_oracle_replay_environment_unbound")
+
+    paths_raw = receipt.get("disposable_state_paths")
+    path_values = paths_raw if isinstance(paths_raw, list) else []
+    if isinstance(retained_inputs, Mapping) and retained_inputs.get(
+        "disposable_state_paths"
+    ) != path_values:
+        raise ValueError("outcome_oracle_replay_state_paths_mismatch")
+    resolved: list[Path] = []
+    normalized_paths: list[str] = []
+    for index, path_raw in enumerate(path_values):
+        if not isinstance(path_raw, str) or not path_raw.strip():
+            raise ValueError(f"outcome_oracle_replay_state_path_invalid:{index}")
+        relative = Path(path_raw)
+        path = (workspace / relative).resolve()
+        if (
+            relative.is_absolute()
+            or ".." in relative.parts
+            or not path.is_relative_to(workspace)
+            or any(parent.is_symlink() for parent in [path, *path.parents] if parent != workspace)
+            or path.exists()
+        ):
+            raise ValueError(f"outcome_oracle_replay_state_path_unsafe:{index}")
+        resolved.append(path)
+        normalized_paths.append(relative.as_posix())
+    return overrides, resolved, normalized_paths
+
+
+def _remove_causal_disposable_state(paths: list[Path], *, workspace: Path) -> None:
+    for path in sorted(paths, key=lambda item: len(item.parts), reverse=True):
+        if not path.is_relative_to(workspace) or path.is_symlink():
+            raise ValueError("outcome_oracle_replay_cleanup_unsafe")
+        if path.is_dir():
+            shutil.rmtree(path)
+        elif path.exists():
+            path.unlink()
+        parent = path.parent
+        while parent != workspace and parent.is_dir():
+            try:
+                parent.rmdir()
+            except OSError:
+                break
+            parent = parent.parent
+
+
+def _causal_observation_results(
+    proofs: Mapping[str, Mapping[str, Any]],
+    *,
+    commands: list[dict[str, Any]],
+    workspace: Path,
+) -> dict[str, dict[str, Any]]:
+    results: dict[str, dict[str, Any]] = {}
+    for proof_id, proof in proofs.items():
+        replay = proof.get("replay_observation")
+        selector = replay.get("selector") if isinstance(replay, Mapping) else None
+        source = selector.get("source") if isinstance(selector, Mapping) else None
+        reader = _CAUSAL_OBSERVATION_READERS.get(str(source))
+        if reader is None or not isinstance(selector, Mapping):
+            results[proof_id] = {
+                "proof_receipt_id": proof_id,
+                "selector": selector,
+                "observed": None,
+                "error": f"causal_observation_source_unavailable:{source}",
+            }
+            continue
+        observed_ok, fresh_observed, observation_error = reader(
+            selector,
+            commands,
+            workspace,
+        )
+        observations = proof.get("observations")
+        baseline = observations.get("baseline") if isinstance(observations, Mapping) else None
+        mode = replay.get("predicate_input_mode") if isinstance(replay, Mapping) else None
+        predicate_observed = (
+            {
+                "before": baseline.get("observed"),
+                "after": fresh_observed,
+            }
+            if mode == "historical_baseline_and_post_change_observation"
+            and isinstance(baseline, Mapping)
+            else fresh_observed
+        )
+        results[proof_id] = {
+            "proof_receipt_id": proof_id,
+            "selector": dict(selector),
+            "observed": predicate_observed,
+            "fresh_observed": fresh_observed,
+            "observed_sha256": _sha256_json(predicate_observed),
+            "error": None if observed_ok else observation_error or "causal_observation_failed",
+        }
+    return results
 
 
 def _workspace_status(workspace: Path) -> str:
@@ -1340,6 +2126,7 @@ def _evaluate_predicates(
     output_dir: Path,
     oracle_states: dict[str, dict[str, Any]] | None = None,
     oracle_scenarios: list[dict[str, Any]] | None = None,
+    causal_observations: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     results: list[dict[str, Any]] = []
     for index, predicate in enumerate(predicates):
@@ -1453,6 +2240,29 @@ def _evaluate_predicates(
                         or state.get("value") == predicate.get("equals")
                     )
                 )
+        elif predicate_type == "causal_proof_predicate":
+            proof_id = predicate.get("proof_receipt_id")
+            observation = (
+                causal_observations.get(str(proof_id))
+                if isinstance(causal_observations, dict)
+                else None
+            )
+            causal_predicate = predicate.get("predicate")
+            evaluator = (
+                _CAUSAL_PREDICATE_EVALUATORS.get(str(causal_predicate.get("kind")))
+                if isinstance(causal_predicate, Mapping)
+                else None
+            )
+            if not isinstance(observation, dict):
+                error = "causal_observation_missing"
+            elif observation.get("error") is not None:
+                error = str(observation.get("error"))
+                observed = observation.get("observed")
+            elif evaluator is None or not isinstance(causal_predicate, Mapping):
+                error = "causal_predicate_unavailable"
+            else:
+                observed = observation.get("observed")
+                passed, error = evaluator(causal_predicate, observed)
         else:
             error = "predicate_type_invalid"
         row = {
@@ -1568,6 +2378,7 @@ def run_outcome_evidence_role(
         else []
     )
     oracle_states: dict[str, dict[str, Any]] = {}
+    causal_observations: dict[str, dict[str, Any]] = {}
     materialization: dict[str, Any] | None = None
     oracle_scenario_artifacts: list[dict[str, Any]] = []
     execution_integrity = True
@@ -1588,6 +2399,15 @@ def run_outcome_evidence_role(
                 "predicates": scenario["predicates"],
                 "oracle": child_oracle,
                 "required_proof_scope": child_oracle.get("proof_scope"),
+                **(
+                    {
+                        "causal_proof_receipts": scenario.get(
+                            "causal_proof_receipts"
+                        )
+                    }
+                    if child_oracle.get("kind") == "causal_proof_replay"
+                    else {}
+                ),
             }
             child_contract = {
                 **child_unsigned,
@@ -1694,6 +2514,99 @@ def run_outcome_evidence_role(
             "final_status_clean": final_status == "",
             "final_head": _resolved_head(workspace),
         }
+    elif isinstance(oracle, dict) and oracle.get("kind") == "causal_proof_replay":
+        initial_status = _workspace_status(workspace)
+        initial_manifest = _workspace_file_manifest(workspace)
+        if initial_status:
+            raise ValueError("outcome_oracle_workspace_not_clean")
+        asset = oracle.get("asset")
+        copied: list[Path] = []
+        source_manifest: dict[str, Any] = {}
+        disposable_paths: list[Path] = []
+        normalized_disposable_paths: list[str] = []
+        pre_execution_manifest: dict[str, dict[str, Any]] = {}
+        post_execution_manifest: dict[str, dict[str, Any]] = {}
+        try:
+            if asset is not None:
+                if trusted_oracle_assets_root is None or not isinstance(asset, dict):
+                    raise ValueError("outcome_oracle_trusted_asset_root_required")
+                source_root, source_manifest = _verify_oracle_asset(
+                    asset,
+                    trusted_root=trusted_oracle_assets_root,
+                )
+                copied = _materialize_oracle_asset(
+                    source_root=source_root,
+                    manifest=source_manifest,
+                    workspace=workspace,
+                )
+            execution = oracle["execution"]
+            causal_proofs = {
+                str(proof["proof_receipt_id"]): proof
+                for proof in normalized_contract.get("causal_proof_receipts", [])
+                if isinstance(proof, Mapping)
+            }
+            environment_overrides, disposable_paths, normalized_disposable_paths = (
+                _causal_replay_setup(
+                    execution,
+                    workspace=workspace,
+                    causal_proofs=causal_proofs,
+                )
+            )
+            pre_execution_manifest = _workspace_file_manifest(workspace)
+            command_results = [
+                _run_argv(
+                    list(execution["argv"]),
+                    workspace=workspace,
+                    timeout_seconds=timeout_seconds,
+                    environment_overrides=environment_overrides,
+                )
+            ]
+            causal_observations = _causal_observation_results(
+                causal_proofs,
+                commands=command_results,
+                workspace=workspace,
+            )
+            post_execution_manifest = _workspace_file_manifest(workspace)
+            changed_paths = {
+                path
+                for path in set(pre_execution_manifest) | set(post_execution_manifest)
+                if pre_execution_manifest.get(path) != post_execution_manifest.get(path)
+            }
+            disposable_roots = [Path(path) for path in normalized_disposable_paths]
+            changes_confined = all(
+                any(
+                    Path(path) == root or root in Path(path).parents
+                    for root in disposable_roots
+                )
+                for path in changed_paths
+            )
+            execution_integrity = changes_confined and _resolved_head(workspace) == expected_commit
+        finally:
+            _remove_causal_disposable_state(disposable_paths, workspace=workspace)
+            _remove_materialized_asset(copied, workspace=workspace)
+        final_manifest = _workspace_file_manifest(workspace)
+        final_status = _workspace_status(workspace)
+        cleanup_confirmed = (
+            final_manifest == initial_manifest
+            and final_status == initial_status == ""
+            and _resolved_head(workspace) == expected_commit
+        )
+        execution_integrity = execution_integrity and cleanup_confirmed
+        materialization = {
+            "asset_id": asset.get("asset_id") if isinstance(asset, dict) else None,
+            "source_manifest_sha256": (
+                _sha256_json(source_manifest) if source_manifest else None
+            ),
+            "copied_paths": sorted(
+                path.relative_to(workspace).as_posix() for path in copied
+            ),
+            "disposable_state_paths": normalized_disposable_paths,
+            "pre_execution_state_sha256": _sha256_json(pre_execution_manifest),
+            "post_execution_state_sha256": _sha256_json(post_execution_manifest),
+            "cleanup_confirmed": cleanup_confirmed,
+            "final_status_clean": final_status == "",
+            "final_head": _resolved_head(workspace),
+        }
     elif isinstance(oracle, dict) and oracle.get("kind") == "config_state":
         initial_status = _workspace_status(workspace)
         if initial_status:
@@ -1723,6 +2636,7 @@ def run_outcome_evidence_role(
         output_dir=output_path.parent,
         oracle_states=oracle_states,
         oracle_scenarios=oracle_scenario_artifacts,
+        causal_observations=causal_observations,
     )
     timed_out = any(result["timed_out"] is True for result in command_results) or any(
         result.get("timed_out") is True for result in oracle_scenario_artifacts
@@ -1770,6 +2684,10 @@ def run_outcome_evidence_role(
         artifact["oracle_states"] = [oracle_states[key] for key in sorted(oracle_states)]
     if oracle_scenario_artifacts:
         artifact["oracle_scenario_artifacts"] = oracle_scenario_artifacts
+    if causal_observations:
+        artifact["causal_observations"] = [
+            causal_observations[key] for key in sorted(causal_observations)
+        ]
     if recurrence_proof is not None:
         artifact["recurrence_refresh_proof"] = recurrence_proof
     artifact["artifact_content_sha256"] = _sha256_json(artifact)
@@ -1845,7 +2763,7 @@ def validate_outcome_evidence_role_artifact(
     oracle_kind = oracle.get("kind") if isinstance(oracle, dict) else None
     expected_command_count = (
         1
-        if oracle_kind == "staged_replay"
+        if oracle_kind in {"staged_replay", "causal_proof_replay"}
         else 0
         if oracle_kind == "multi_scenario"
         else len(normalized_contract["commands"])
@@ -1853,14 +2771,17 @@ def validate_outcome_evidence_role_artifact(
     if not isinstance(commands, list) or len(commands) != expected_command_count:
         raise ValueError("outcome_role_artifact_command_coverage_invalid")
     expected_commands = normalized_contract["commands"]
-    if oracle_kind == "staged_replay":
+    if oracle_kind in {"staged_replay", "causal_proof_replay"}:
         expected_commands = [" ".join(oracle["execution"]["argv"])]
     for index, (expected_command, result) in enumerate(
         zip(expected_commands, commands, strict=True)
     ):
         if not isinstance(result, dict) or result.get("command") != expected_command:
             raise ValueError(f"outcome_role_artifact_command_identity_mismatch:{index}")
-        if oracle_kind == "staged_replay" and result.get("argv") != oracle["execution"]["argv"]:
+        if (
+            oracle_kind in {"staged_replay", "causal_proof_replay"}
+            and result.get("argv") != oracle["execution"]["argv"]
+        ):
             raise ValueError(f"outcome_role_artifact_argv_identity_mismatch:{index}")
         if result.get("timed_out") is not False or result.get("cancelled") is not False:
             raise ValueError(f"outcome_role_artifact_command_blocked:{index}")
@@ -1930,6 +2851,34 @@ def validate_outcome_evidence_role_artifact(
                 or materialization.get("command_workspace_unchanged") is not True
             ):
                 raise ValueError("outcome_role_artifact_materialization_invalid")
+        elif oracle_kind == "causal_proof_replay":
+            materialization = artifact.get("oracle_materialization")
+            observations = artifact.get("causal_observations")
+            expected_proof_ids = {
+                str(proof.get("proof_receipt_id"))
+                for proof in normalized_contract.get("causal_proof_receipts", [])
+                if isinstance(proof, Mapping)
+            }
+            if (
+                not isinstance(materialization, dict)
+                or materialization.get("cleanup_confirmed") is not True
+                or materialization.get("final_status_clean") is not True
+                or not isinstance(observations, list)
+                or {
+                    str(observation.get("proof_receipt_id"))
+                    for observation in observations
+                    if isinstance(observation, Mapping)
+                }
+                != expected_proof_ids
+                or any(
+                    not isinstance(observation, Mapping)
+                    or observation.get("error") is not None
+                    or observation.get("observed_sha256")
+                    != _sha256_json(observation.get("observed"))
+                    for observation in observations
+                )
+            ):
+                raise ValueError("outcome_role_artifact_causal_replay_invalid")
         elif oracle_kind == "config_state":
             states = artifact.get("oracle_states")
             if not isinstance(states, list) or {
@@ -1980,6 +2929,8 @@ def validate_outcome_evidence_role_artifact(
 
 __all__ = [
     "OUTCOME_EVIDENCE_ROLES",
+    "register_causal_observation_source",
+    "register_causal_outcome_predicate",
     "run_outcome_evidence_role",
     "validate_outcome_evidence_role_artifact",
 ]

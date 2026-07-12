@@ -77,7 +77,20 @@ def _make_resume_run(tmp_path: Path, *, workspace_exists: bool = True) -> tuple[
             "owner_repo": {"root": str(tmp_path), "idea_path": str(ticket_path)},
         },
     )
-    _write_json(run_dir / "target_ref.json", {"repo_input": str(tmp_path / "remote.git")})
+    _write_json(
+        run_dir / "target_ref.json",
+        {"repo_input": str(tmp_path / "remote.git"), "agent": "codex"},
+    )
+    (run_dir / "raw_events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "thread.started",
+                "thread_id": "019f5000-0000-7000-8000-000000000002",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     _write_json(
         run_dir / "ticket_resume_state.json",
         {
@@ -131,6 +144,11 @@ def test_resume_dry_run_builds_focused_prompt_from_structured_artifacts(
     assert payload["run_request"]["verification_commands"] == [
         "python -m pytest tests/test_resume.py"
     ]
+    assert (
+        payload["run_request"]["codex_resume_session_id"]
+        == "019f5000-0000-7000-8000-000000000002"
+    )
+    assert payload["implementation_author_continuity"]["status"] == "exact_author_session"
     prompt = payload["prompt"]
     assert "Do not restart the original full ticket prompt from scratch" in prompt
     assert "verification.json" in prompt
@@ -175,6 +193,9 @@ def test_resume_uses_same_workspace_when_available(
     assert request.resume_workspace_dir == workspace
     assert request.ref == "backlog/abc123abc123"
     assert request.keep_workspace is True
+    assert request.agent == "codex"
+    assert request.codex_resume_session_id == "019f5000-0000-7000-8000-000000000002"
+    assert request.exec_use_host_agent_login is True
     resume_ref = json.loads((resumed_run / "resume_ref.json").read_text(encoding="utf-8"))
     assert resume_ref["resumed_from_run_dir"] == str(run_dir)
     original_state = json.loads((run_dir / "ticket_resume_state.json").read_text(encoding="utf-8"))
@@ -263,6 +284,17 @@ def _make_pr_resume_run(
     ticket_path.write_text("# PR Resume Ticket\n\nImplement the thing.\n", encoding="utf-8")
     review_run_dir = tmp_path / "review_run"
     _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+    _write_json(run_dir / "target_ref.json", {"agent": "codex"})
+    (run_dir / "raw_events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "thread.started",
+                "thread_id": "019f5000-0000-7000-8000-000000000003",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     _write_json(
         run_dir / "ticket_ref.json",
         {
@@ -401,6 +433,11 @@ def test_pr_resume_review_changes_requested_dry_run_refreshes_and_prompts(
     assert payload["branch"] == "backlog/current-pr-branch"
     assert payload["run_request"]["ref"] == "backlog/current-pr-branch"
     assert payload["run_request"]["pr"] is False
+    assert (
+        payload["run_request"]["codex_resume_session_id"]
+        == "019f5000-0000-7000-8000-000000000003"
+    )
+    assert payload["implementation_author_continuity"]["fresh_restart"] is False
     assert payload["failing_check_pointers"][0]["link"] == "https://example.invalid/runs/current"
     prompt = payload["prompt"]
     assert "Current PR metadata (refreshed immediately before this prompt)" in prompt
@@ -590,6 +627,9 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
     request = seen["request"]
     assert request.ref == "backlog/current-pr-branch"
     assert request.keep_workspace is True
+    assert request.agent == "codex"
+    assert request.codex_resume_session_id == "019f5000-0000-7000-8000-000000000003"
+    assert request.exec_use_host_agent_login is True
     assert seen["commit"]["branch"] == "backlog/current-pr-branch"
     assert seen["push"]["branch"] == "backlog/current-pr-branch"
     pr_ref = json.loads((resumed_run / "pr_ref.json").read_text(encoding="utf-8"))

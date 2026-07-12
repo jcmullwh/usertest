@@ -1126,9 +1126,13 @@ def test_run_once_uses_failed_broker_result_directly_before_followup(
     target = _setup_target_repo(tmp_path)
     _stub_codex_binary_preflight(monkeypatch)
     state = {"attempt": 0}
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
 
     def _fake_run_codex_exec(**kwargs: object) -> object:
         state["attempt"] += 1
+        assert kwargs.get("resume_session_id") == (
+            None if state["attempt"] == 1 else session_id
+        )
         raw_events_path = Path(str(kwargs["raw_events_path"]))
         last_message_path = Path(str(kwargs["last_message_path"]))
         stderr_path = Path(str(kwargs["stderr_path"]))
@@ -1149,7 +1153,11 @@ def test_run_once_uses_failed_broker_result_directly_before_followup(
             assert broker.returncode == 0, broker.stderr or broker.stdout
 
         last_message_path.write_text(json.dumps({"ok": "yes"}) + "\n", encoding="utf-8")
-        return SimpleNamespace(exit_code=0, argv=["codex", "exec"])
+        return SimpleNamespace(
+            exit_code=0,
+            argv=["codex", "exec"],
+            thread_id=session_id,
+        )
 
     monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
 

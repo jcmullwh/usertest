@@ -18,6 +18,7 @@ from usertest_backlog.workflows.depth_contracts import (
     read_repo_revision,
     stage_include_directories,
 )
+from usertest_backlog.workflows.planning_healing import run_stage6_live_case
 
 
 def _render_change_plans_markdown(
@@ -148,6 +149,7 @@ def _run_implementation_planning_stage(
     cfg: RunnerConfig,
     dry_run: bool,
     stage_guidance_text: str,
+    external_corrections_by_problem: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run stage 6 using orchestrator prompts and per-problem target workspaces."""
     import json as _json
@@ -197,6 +199,8 @@ def _run_implementation_planning_stage(
     all_plans: list[dict[str, Any]] = []
     seen_plan_revision_ids: set[str] = set()
     rejected_plans: list[dict[str, Any]] = []
+    planning_correction_runs: list[dict[str, Any]] = []
+    planning_outcomes: list[dict[str, Any]] = []
     warnings_list: list[str] = []
     status: str = "ok"
 
@@ -438,27 +442,89 @@ def _run_implementation_planning_stage(
             warnings_list.extend(parse_warnings)
         else:
             live_prompt_expected_count += 1
-            try:
-                response = run_stage_prompt_json(
-                    stage=stage,
-                    prompt=prompt,
-                    out_dir=run_out_dir,
-                    tag=tag,
-                    agent=agent,
-                    model=model,
-                    cfg=cfg,
-                    workspace_dir=target_repo_root,
-                    allowed_tools=read_only_stage_tools(agent),
-                    include_directories=stage_include_directories(agent, target_repo_root),
+            assert target_repo_root is not None
+            assert expected_case_id is not None
+            assert selected_option_id is not None
+            external_correction = (
+                external_corrections_by_problem.get(pid)
+                if external_corrections_by_problem is not None
+                else None
+            )
+            planning_result = run_stage6_live_case(
+                problem_id=pid,
+                case_id=expected_case_id,
+                selected_option_id=selected_option_id,
+                index=idx,
+                planner_prompt=prompt,
+                stage_artifacts_dir=stage_artifacts_dir,
+                target_repo_root=target_repo_root,
+                repo_revision=research_revision,
+                problem_record=rec,
+                research_dossier=dossier,
+                selection_decision=decision,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                initial_resume_session_id=(
+                    _coerce_string(external_correction.get("agent_session_id"))
+                    if isinstance(external_correction, Mapping)
+                    else None
+                ),
+                author_cost_seconds=(
+                    external_correction.get("original_author_cost_seconds")
+                    if isinstance(external_correction, Mapping)
+                    else None
+                ),
+                external_feedback=(
+                    external_correction.get("feedback")
+                    if isinstance(external_correction, Mapping)
+                    and isinstance(external_correction.get("feedback"), Mapping)
+                    else None
+                ),
+            )
+            planning_correction_runs.append(
+                {
+                    "problem_id": pid,
+                    "case_id": expected_case_id,
+                    "selected_option_id": selected_option_id,
+                    **planning_result["role_run"],
+                }
+            )
+            planning_outcome = {
+                "problem_id": pid,
+                "case_id": expected_case_id,
+                "selected_option_id": selected_option_id,
+                "planning_status": planning_result["status"],
+                "metrics": planning_result["metrics"],
+                "research_required": planning_result["research_required"],
+                "partial_valid_plans": planning_result["partial_valid_plans"],
+            }
+            planning_outcomes.append(planning_outcome)
+            if planning_result["status"] == "planned":
+                parsed_plans = list(planning_result["plans"])
+            else:
+                if planning_result["status"] == "research_required":
+                    status = "research_required" if status == "ok" else status
+                    reasons = [
+                        reason
+                        for item in planning_result["research_required"]
+                        for reason in item.get("reasons", [])
+                        if isinstance(reason, str)
+                    ] or ["planner_returned_grounded_material_evidence_gap"]
+                else:
+                    status = "error"
+                    reasons = ["planner_correction_incomplete:" + planning_result["status"]]
+                warnings_list.extend(f"implementation_planning_blocked: {pid}: {r}" for r in reasons)
+                rejected_plans.append(
+                    {
+                        "problem_id": pid,
+                        "selected_option_id": selected_option_id,
+                        "planning_status": planning_result["status"],
+                        "reasons": reasons,
+                        "research_required": planning_result["research_required"],
+                        "partial_valid_plans": planning_result["partial_valid_plans"],
+                    }
                 )
-                parsed_plans, parse_warnings = parse_change_plan_list(
-                    response,
-                    allow_pending_target_contract=True,
-                )
-                warnings_list.extend(parse_warnings)
-            except Exception as exc:  # noqa: BLE001
-                status = "error"
-                warnings_list.append(f"change_planner_error: {pid}: {exc}")
                 continue
 
         for plan in parsed_plans:
@@ -554,6 +620,43 @@ def _run_implementation_planning_stage(
             "change_plan_count": len(all_plans),
             "rejected_plan_count": len(rejected_plans),
             "rejected_plans": rejected_plans,
+            "planning_correction_runs": planning_correction_runs,
+            "planning_outcomes": planning_outcomes,
+            "planning_self_healing_metrics": {
+                "live_case_count": len(planning_outcomes),
+                "planned_case_count": sum(
+                    outcome.get("planning_status") == "planned"
+                    for outcome in planning_outcomes
+                ),
+                "research_required_case_count": sum(
+                    outcome.get("planning_status") == "research_required"
+                    for outcome in planning_outcomes
+                ),
+                "partial_valid_plan_count": sum(
+                    len(outcome.get("partial_valid_plans") or [])
+                    for outcome in planning_outcomes
+                ),
+                "repairable_paused_or_stalled_case_count": sum(
+                    str(outcome.get("planning_status") or "").startswith(
+                        ("repairable_paused:", "stalled:")
+                    )
+                    for outcome in planning_outcomes
+                ),
+                "total_attempt_count": sum(
+                    int(outcome.get("metrics", {}).get("attempt_count") or 0)
+                    for outcome in planning_outcomes
+                ),
+                "total_correction_cost_seconds": sum(
+                    float(
+                        outcome.get("metrics", {}).get("total_correction_cost_seconds") or 0.0
+                    )
+                    for outcome in planning_outcomes
+                ),
+                "accepted_good": None,
+                "accepted_bad": None,
+                "false_rejected": None,
+                "ground_truth_note": "runtime_ground_truth_unavailable",
+            },
             "orchestrator_head_revision": orchestrator_head_revision,
             "orchestrator_repo_root": str(repo_root.resolve()),
             "target_workspace_count": len(

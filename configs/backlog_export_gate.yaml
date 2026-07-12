@@ -1,17 +1,35 @@
 backlog_export_gate:
   enabled: true
-  # State schema v6 / cycle schema v4 require the runner-owned research proof
-  # basis to remain stable. Earlier shadow state is rejected rather than migrated.
+  # State schema v11 / cycle schema v9 keep exact case/proof/plan hashes per cycle
+  # while streaking on sealed source-group recovery semantics. Earlier state is rejected.
   required_consecutive_shadow_cycles: 2
-  # Compatibility name: exactness applies to canonical case/plan intent across
-  # cycles. The latest complete rendered projection is still bound at export.
+  # Compatibility name: the latest complete rendered projection is still bound at
+  # export; cross-cycle stability intentionally tolerates different good mechanisms.
   require_exact_export_projection: true
   # A shadow cycle with selected active cases proves productive depth, not merely
-  # that every case acquired a syntactically valid blocked dossier. Exhausted
-  # corpora whose cases are terminal do not have to fabricate new work.
+  # that every case acquired a syntactically valid blocked dossier. A separately
+  # certified exact empty corpus may export as verified_exhaustion, but it never
+  # earns or extends the required positive_throughput release streak.
   require_nonempty_throughput: true
   minimum_evidence_sufficient_research_proofs: 1
   minimum_authoritative_ready_tickets: 1
+  # Positive qualification is intentionally not a zero-defect purity gate. It
+  # permits independently rated noncritical bad tickets only when good tickets
+  # materially outnumber them. Critical bad or unknown tickets never qualify.
+  minimum_good_ticket_count: 1
+  minimum_good_to_bad_ratio: 2.0
+  # Useful source cases must also be recovered materially more often than they are
+  # missed. Every missed source case remains explicit as a false rejection.
+  minimum_recovered_to_missed_ratio: 2.0
+  require_zero_unknown_authoritative_tickets: true
+  # Positive qualification requires a corpus manifest that is sealed and byte-hashed
+  # before Stage 1. Configure absolute paths outside the repository, runs directory,
+  # and every target/model workspace. Output quality is independently adjudicated
+  # after phase one, then scored with --shadow --score-shadow. Null paths intentionally
+  # fail positive qualification rather than using pipeline output as its own benchmark.
+  qualification_corpus_manifest_path: null
+  qualification_output_adjudication_path: null
+  no_actionable_evidence_receipt_path: null
   # Case-specific insufficient evidence remains a valid disposition. Internal
   # auth, invocation, runner-contract, or produced-artifact failures do not.
   fail_on_systemic_research_blockers: true

@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -353,6 +354,297 @@ def _staged_stdout_oracle(
     return oracle, contract
 
 
+def _causal_role_contract(
+    *,
+    argv: list[str],
+    adapter_id: str,
+    selector: dict[str, object],
+    predicate: dict[str, object],
+    baseline_observed: object,
+    challenge_observed: object,
+    replay_environment: dict[str, str | None] | None = None,
+    disposable_state_paths: list[str] | None = None,
+) -> dict[str, object]:
+    baseline_id = "experiment:baseline"
+    challenge_id = "experiment:positive-reference"
+    basis: dict[str, object] = {
+        "basis_kind": "origin_exact_value",
+        "runner_attested": True,
+        "predicate_sha256": _sha(predicate),
+    }
+    basis["basis_sha256"] = _sha(basis)
+    source_root: dict[str, object] = {
+        "root_kind": "origin_symptom_observation",
+        "origin_atom_ids": ["atom:causal"],
+        "runner_attested": True,
+        "positive_basis": basis,
+    }
+    source_root["source_root_sha256"] = _sha(source_root)
+
+    def observation(experiment_id: str, observed: object) -> dict[str, object]:
+        receipt: dict[str, object] = {
+            "experiment_id": experiment_id,
+            "runner_attested": True,
+            "executed_argv": argv,
+            "exit_code": 0,
+            "stdout_sha256": "a" * 64,
+            "stderr_sha256": "b" * 64,
+            "observed": observed,
+            "observed_sha256": _sha(observed),
+            "execution_isolation_sha256": "c" * 64,
+        }
+        receipt["observation_sha256"] = _sha(receipt)
+        return receipt
+
+    baseline = observation(baseline_id, baseline_observed)
+    challenge = observation(challenge_id, challenge_observed)
+    intervention = {
+        "kind": "runner_controlled_input",
+        "target": "causal:test-target",
+        "baseline_experiment_id": baseline_id,
+        "challenge_experiment_id": challenge_id,
+        "predicted_polarity": "baseline_to_positive",
+        "before": baseline_observed,
+        "after": challenge_observed,
+    }
+    intervention_id = "intervention:" + _sha(
+        {
+            "source_root_sha256": source_root["source_root_sha256"],
+            "baseline_observation_sha256": baseline["observation_sha256"],
+            "challenge_observation_sha256": challenge["observation_sha256"],
+            "intervention": intervention,
+        }
+    )
+    replay_inputs: dict[str, object] = {
+        "schema_version": 1,
+        "source_experiment_id": baseline_id,
+        "environment": replay_environment or {},
+        "disposable_state_paths": disposable_state_paths or [],
+        "runner_approved": True,
+    }
+    replay_inputs["replay_inputs_sha256"] = _sha(replay_inputs)
+    replay_observation: dict[str, object] = {
+        "schema_version": 1,
+        "source_experiment_id": baseline_id,
+        "selector": selector,
+        "source_observation_sha256": baseline["observation_sha256"],
+        "positive_reference_experiment_id": challenge_id,
+        "positive_reference_selector": selector,
+        "positive_reference_observation_sha256": challenge["observation_sha256"],
+        "predicate_input_mode": "post_change_observation",
+        "runner_attested": True,
+    }
+    replay_observation["replay_observation_sha256"] = _sha(replay_observation)
+    positive = {
+        "problem_binding": {
+            "origin_atom_ids": ["atom:causal"],
+            "basis_kind": basis["basis_kind"],
+            "basis_sha256": basis["basis_sha256"],
+        },
+        "predicate": predicate,
+        "observed": challenge_observed,
+        "observation_source": selector["source"],
+        "runner_evaluated": True,
+        "passed": True,
+    }
+    proof: dict[str, object] = {
+        "schema_version": 1,
+        "adapter_id": adapter_id,
+        "adapter_version": "1",
+        "case_id": "case:causal",
+        "problem_id": "problem:causal",
+        "hypothesis_id": "hypothesis:causal",
+        "source_root": source_root,
+        "observations": {"baseline": baseline, "challenge": challenge},
+        "replay_inputs": replay_inputs,
+        "replay_observation": replay_observation,
+        "intervention": intervention,
+        "intervention_id": intervention_id,
+        "positive_outcome": positive,
+        "adapter_evidence": {"selector": selector},
+    }
+    proof["proof_receipt_id"] = "causal_proof:" + _sha(proof)
+    postcondition = {
+        "type": "causal_proof_predicate",
+        "proof_receipt_id": proof["proof_receipt_id"],
+        "intervention_id": intervention_id,
+        "adapter_id": adapter_id,
+        "adapter_version": "1",
+        "predicate": predicate,
+        "observation_source": selector["source"],
+        "positive_basis_sha256": basis["basis_sha256"],
+    }
+    contract: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "causal_proof_predicate",
+        "research_experiment_id": baseline_id,
+        "mechanism_evidence_ids": ["mechanism_evidence:causal"],
+        "proof_receipt_id": proof["proof_receipt_id"],
+        "intervention_id": intervention_id,
+        "adapter_contract": {
+            "adapter_id": adapter_id,
+            "adapter_version": "1",
+            "baseline_observation_sha256": baseline["observation_sha256"],
+            "challenge_observation_sha256": challenge["observation_sha256"],
+            "adapter_evidence_sha256": _sha(proof["adapter_evidence"]),
+        },
+        "positive_basis": basis,
+        "semantic_review_required": False,
+        "postconditions": [postcondition],
+    }
+    contract["positive_outcome_contract_id"] = (
+        "positive_outcome_contract:" + _sha(contract)
+    )
+    setup_receipt: dict[str, object] = {
+        "runner_applied": True,
+        "environment": {
+            key: (
+                {"present": False}
+                if value is None
+                else {
+                    "present": True,
+                    "value_sha256": hashlib.sha256(value.encode()).hexdigest(),
+                }
+            )
+            for key, value in sorted((replay_environment or {}).items())
+        },
+        "disposable_state_paths": disposable_state_paths or [],
+    }
+    setup_receipt["replay_setup_sha256"] = _sha(setup_receipt)
+    oracle: dict[str, object] = {
+        "schema_version": 1,
+        "case_id": "case:causal",
+        "repo_revision": "research-revision",
+        "research_experiment_id": baseline_id,
+        "scenario_kind": "arbitrary-unseen-scenario-label",
+        "origin_atom_ids": ["atom:causal"],
+        "mechanism_evidence_ids": ["mechanism_evidence:causal"],
+        "baseline": {
+            "exit_code": 0,
+            "observable_assertion": {"source": "exit_code", "operator": "equals", "expected": 0},
+            "stdout_sha256": "a" * 64,
+            "stderr_sha256": "b" * 64,
+        },
+        "kind": "causal_proof_replay",
+        "proof_scope": "adapter_causal_behavior",
+        "proof_receipt_ids": [proof["proof_receipt_id"]],
+        "execution": {
+            "argv": argv,
+            "command_authorization": {
+                "authorization_kind": "arbitrary_runner_attested_entrypoint",
+                "executed_argv_sha256": _sha(argv),
+                "shell": False,
+                "workspace_confined": True,
+            },
+            "platform_requirement": "any",
+            "shell": False,
+            "replay_setup_receipt": setup_receipt,
+            "replay_setup_reference": {
+                "source": "research_experiment",
+                "experiment_id": baseline_id,
+                "replay_setup_sha256": "d" * 64,
+            },
+        },
+        "asset": None,
+        "positive_outcome_contracts": [contract],
+    }
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _sha(oracle)
+    unsigned = {
+        "description": "Replay the content-bound causal scenario after implementation.",
+        "research_experiment_id": baseline_id,
+        "research_experiment_ids": [baseline_id],
+        "selected_positive_outcome_contract_ids": [
+            contract["positive_outcome_contract_id"]
+        ],
+        "commands": [],
+        "predicates": [postcondition],
+        "oracle": oracle,
+        "causal_proof_receipts": [proof],
+        "required_proof_scope": "adapter_causal_behavior",
+    }
+    return {**unsigned, "role_contract_sha256": _sha(unsigned)}
+
+
+@pytest.mark.parametrize("proof_kind", ["stdout_json", "workspace_state"])
+def test_causal_oracle_replays_portable_adapter_observation(
+    tmp_path: Path,
+    proof_kind: str,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _git(workspace, "init")
+    _git(workspace, "config", "user.email", "tests@example.com")
+    _git(workspace, "config", "user.name", "Tests")
+    if proof_kind == "stdout_json":
+        script = "import json; print(json.dumps({'mode': 'ready'}))\n"
+        selector: dict[str, object] = {"source": "stdout_json", "json_pointer": "/mode"}
+        predicate: dict[str, object] = {"kind": "equals", "expected": "ready"}
+        baseline_observed: object = None
+        challenge_observed: object = "ready"
+        environment = {"UNLISTED_RUNTIME_MODE": None}
+        disposable: list[str] = []
+    else:
+        script = (
+            "import json\nfrom pathlib import Path\n"
+            "p=Path('tmp/state.json'); p.parent.mkdir(parents=True, exist_ok=True); "
+            "p.write_text(json.dumps({'ready': True}))\n"
+        )
+        selector = {
+            "source": "workspace_state",
+            "path": "tmp/state.json",
+            "observation_kind": "existence",
+        }
+        predicate = {"kind": "existence", "expected": True}
+        baseline_observed = {"exists": False}
+        challenge_observed = {"exists": True}
+        environment = {}
+        disposable = ["tmp/state.json"]
+    (workspace / "probe.py").write_text(script, encoding="utf-8")
+    _git(workspace, "add", "probe.py")
+    _git(workspace, "commit", "-m", "causal probe")
+    commit = _git(workspace, "rev-parse", "HEAD")
+    role_contract = _causal_role_contract(
+        argv=[sys.executable, "probe.py"],
+        adapter_id=f"unlisted.{proof_kind}.v1",
+        selector=selector,
+        predicate=predicate,
+        baseline_observed=baseline_observed,
+        challenge_observed=challenge_observed,
+        replay_environment=environment,
+        disposable_state_paths=disposable,
+    )
+    output = tmp_path / f"{proof_kind}.json"
+
+    artifact = run_outcome_evidence_role(
+        workspace=workspace,
+        output_path=output,
+        role="original_scenario",
+        role_contract=role_contract,
+        case_id="case:causal",
+        plan_revision_id="plan:causal:v1",
+        merged_commit=commit,
+        verification_contract_sha256="a" * 64,
+        target_contract_sha256="b" * 64,
+        verified_implementation_head=commit,
+        timeout_seconds=None,
+    )
+
+    assert artifact["passed"] is True
+    assert artifact["causal_observations"][0]["fresh_observed"] == challenge_observed
+    assert _git(workspace, "status", "--porcelain=v1", "--untracked-files=all") == ""
+    assert validate_outcome_evidence_role_artifact(
+        json.loads(output.read_text(encoding="utf-8")),
+        role="original_scenario",
+        case_id="case:causal",
+        plan_revision_id="plan:causal:v1",
+        merged_commit=commit,
+        verification_contract_sha256="a" * 64,
+        target_contract_sha256="b" * 64,
+        verified_implementation_head=commit,
+        role_contract=role_contract,
+    )["passed"] is True
+
+
 def _multi_scenario_role_contract(
     pairs: list[tuple[dict[str, object], dict[str, object]]],
 ) -> dict[str, object]:
@@ -487,6 +779,7 @@ def _write_recurrence_refresh_receipt(
     plan_revision_id: str,
     extra_evidence: bool = False,
     new_source_window: bool = True,
+    operational: bool = False,
 ) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     ids = ["1" * 64, "2" * 64]
@@ -592,6 +885,7 @@ def _write_recurrence_refresh_receipt(
         }
         cycle_receipt_doc = {
             "cycle_id": cycle_id,
+            **({"cycle_mode": "operational"} if operational else {}),
             "generated_at": generated_at,
             "passed": True,
             "artifact_receipts": [registry_receipt, atoms_receipt],
@@ -615,20 +909,37 @@ def _write_recurrence_refresh_receipt(
                 "source_observation_window": source_window,
             }
         )
-        state_cycles.append({"cycle_id": cycle_id})
+        state_cycles.append(
+            {"cycle_id": cycle_id, **({"cycle_mode": "operational"} if operational else {})}
+        )
     state = {
         "ready_for_export": True,
         "consecutive_stable_passes": 2,
         "cycles": state_cycles,
     }
+    if operational:
+        state.update(
+            {
+                "activation_mode": "operational_bound",
+                "release_anchor_cycle_ids": ["a" * 64, "b" * 64],
+            }
+        )
     state_path = root / "shadow_state.json"
     state_path.write_text(json.dumps(state), encoding="utf-8")
     receipt = {
-        "schema_version": 3,
+        "schema_version": 4 if operational else 3,
         "producer": "usertest_implement.backlog_refresh",
         "recorded_at_utc": "2026-07-10T12:03:00Z",
-        "qualifying_cycle_ids": ids,
-        "qualifying_cycles": cycle_rows,
+        **(
+            {
+                "observation_cycle_ids": ids,
+                "observation_cycles": cycle_rows,
+                "activation_mode": "operational_bound",
+                "release_anchor_cycle_ids": ["a" * 64, "b" * 64],
+            }
+            if operational
+            else {"qualifying_cycle_ids": ids, "qualifying_cycles": cycle_rows}
+        ),
         "shadow_state_path": str(state_path),
         "shadow_state_sha256": hashlib.sha256(state_path.read_bytes()).hexdigest(),
     }
@@ -702,6 +1013,20 @@ def test_recurrence_requires_later_shadow_case_proof_not_just_command(
         verified_implementation_head=commit,
         role_contract=contract,
     )["passed"] is True
+
+    operational_receipt = _write_recurrence_refresh_receipt(
+        tmp_path / "operational-refresh",
+        case_id="case:one",
+        plan_revision_id="plan:one:v1",
+        operational=True,
+    )
+    operational_artifact = run_outcome_evidence_role(
+        **{**common, "output_path": tmp_path / "operational-recurrence.json"},
+        recurrence_refresh_receipt_path=operational_receipt,
+        recurrence_after="2026-07-10T12:00:00Z",
+    )
+    assert operational_artifact["passed"] is True
+    assert len(operational_artifact["recurrence_refresh_proof"]["qualifying_cycles"]) == 2
 
     recurrent_receipt = _write_recurrence_refresh_receipt(
         tmp_path / "recurrent-refresh",

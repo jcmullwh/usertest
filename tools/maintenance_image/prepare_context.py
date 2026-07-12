@@ -67,9 +67,22 @@ def _write_manifest(path: Path, *, header: str, items: list[str]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8", newline="\n")
 
 
+def _ignore_transient_python_artifacts(_directory: str, names: list[str]) -> set[str]:
+    return {
+        name
+        for name in names
+        if name == "__pycache__" or Path(name).suffix.casefold() in {".pyc", ".pyo"}
+    }
+
+
 def _copy_tree(src: Path, dest: Path) -> None:
     if src.is_dir():
-        shutil.copytree(src, dest, dirs_exist_ok=True)
+        shutil.copytree(
+            src,
+            dest,
+            dirs_exist_ok=True,
+            ignore=_ignore_transient_python_artifacts,
+        )
     else:
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dest)
@@ -200,8 +213,17 @@ def prepare_context(*, repo_root: Path, output_dir: Path) -> dict[str, Any]:
 
     if output_dir.exists():
         shutil.rmtree(output_dir)
-    shutil.copytree(base_context, output_dir)
-    shutil.copytree(maintenance_template, output_dir, dirs_exist_ok=True)
+    shutil.copytree(
+        base_context,
+        output_dir,
+        ignore=_ignore_transient_python_artifacts,
+    )
+    shutil.copytree(
+        maintenance_template,
+        output_dir,
+        dirs_exist_ok=True,
+        ignore=_ignore_transient_python_artifacts,
+    )
 
     install_union = _collect_agent_install_union(repo_root)
     manifests_dir = output_dir / "overlays" / "manifests"

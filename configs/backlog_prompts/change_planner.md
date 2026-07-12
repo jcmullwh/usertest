@@ -33,8 +33,10 @@ The pipeline has already inferred the live-verification requirement from provena
 
 ## Planning rules
 
-- Name exact repository-relative files or modules and symbols. State the data-flow or
-  interface change at each target.
+- Name exact repository-relative files or modules and, where the target has a meaningful
+  addressable symbol or configuration pointer, name it. File-level assets, schemas, deletes,
+  and relocations do not need fictional symbols. State the data-flow, interface, content, or
+  lifecycle change at each target.
 - Do not begin implementation steps with discovery tasks such as locate, identify,
   determine, inspect, audit, review, investigate, find, explore, or decide.
 - Include copy-paste verification commands. “Run relevant tests” is not a command.
@@ -51,6 +53,10 @@ The pipeline has already inferred the live-verification requirement from provena
   when no grounded contract exists. A repository-test contract makes that exact test's zero
   exit semantic because the runner hashed its mechanism-dependent assertion; generic exit zero
   remains insufficient.
+- Copy the falsifier's server-bound outcome claim into
+  `before_after_reproduction.expected_outcome_state`. A bounded noncritical residual produces
+  `mitigated` and must never be upgraded to `resolved`. A separate bound proof limitation
+  remains `unverified`.
 - Use only the contracts named by
   `selection.falsification_review.selected_positive_outcome_contract_ids`, exactly one for
   every retained research experiment/oracle. Stage 5 has independently compared each
@@ -70,16 +76,19 @@ The pipeline has already inferred the live-verification requirement from provena
 - Copy the supplied `requires_live_verification` boolean exactly. Explain how the named
   provenance makes live proof required or unnecessary; do not weaken the requirement.
 - Preserve the selected option's causal coverage. Do not invent a new mechanism.
-- Copy the selected option's `scope_evidence` exactly. Every selected intervention point
+- Copy the selected option's `scope_evidence` exactly. Every code-backed intervention point
   in `causal_coverage.research_binding` must appear as the same path+symbol in
-  `change_targets`. Additional inspected callers or compatibility targets are allowed only
+  `change_targets`. For an adapter-backed point, resolve every selected
+  `implementation_touchpoint_id` from the runner receipt and copy its exact repository path and
+  optional inspected symbols; the `causal_locator` remains evidence identity and must never be
+  used as a repository path. Additional inspected callers or compatibility targets are allowed only
   when they propagate the established mechanism rather than introduce a new one. Tag each
   such target with `rationale_kind` (`causal_propagation` or `compatibility`), a concrete
   `rationale`, and bound `mechanism_evidence_id` refs.
-- For `multiple_independent_paths` or `shared_abstraction`, the post-change outcome oracle
-  must exercise mechanism evidence for every selected runner independence key. One replay is
-  sufficient only when its bound mechanism evidence covers them all. Otherwise return to
-  research for separate path-specific outcome oracles; a generic suite is not path proof.
+- For a `resolved` claim over `multiple_independent_paths` or `shared_abstraction`, the
+  post-change outcome evidence must exercise every selected runner independence key. A
+  `mitigated` claim may leave an explicitly dispositioned noncritical bound unexercised, but
+  must prove intended operation on at least one retained path and preserve that bound as risk.
 - When the canonical problem carries `symptom_facets` or
   `same_mechanism_outcome_oracles`, map every retained facet and oracle to an explicit
   post-change verification. The representative dossier's original scenario proves only that
@@ -102,10 +111,43 @@ The pipeline has already inferred the live-verification requirement from provena
   production change when runner mechanism-link or strong-control evidence places it on
   every selected path. The rationale explains this choice but does not establish it.
 
+If repository inspection shows that the selected mechanism cannot be made decision-complete
+from the supplied evidence, do not invent a target, interface, compatibility behavior, or
+outcome oracle. Return exactly one grounded `research_required` item instead of a plan. Its
+`evidence_refs` must use identifiers or material-boundary text already present in the research
+dossier, and `blocks` must describe the actual unresolved planning decision in open language.
+Do not choose from a fixed category vocabulary. Name the evidence needed to make that decision.
+This route is for a material evidence gap, not for avoiding ordinary planning work or repairing
+JSON; structural and plan-quality feedback will be returned to this same planner session.
+
 ## Output contract
 
-Return ONLY a JSON array with one or more independently implementable plan objects. Each
-object must include all existing change-plan fields plus:
+Return ONLY a JSON array. It must contain either one or more independently implementable plan
+objects, or exactly one grounded `research_required` object. Never mix ready plans and a
+research return. A research return has this shape:
+
+```json
+[
+  {
+    "planning_status": "research_required",
+    "case_id": "the input case ID",
+    "problem_id": "the input problem ID",
+    "selected_option_id": "the input selected option ID",
+    "return_to_stage": "repro_research",
+    "evidence_gaps": [
+      {
+        "gap": "the concrete unresolved evidence question",
+        "blocks": ["an open-language description of the decision this prevents"],
+        "evidence_needed": "the exact experiment, trace, or inspection needed",
+        "evidence_refs": ["existing research identifier or material-boundary text"]
+      }
+    ],
+    "rationale": "why assuming an answer could produce a shallow or wrong fix"
+  }
+]
+```
+
+Each plan object must include all existing change-plan fields plus:
 
 Do not emit `plan_revision_id`. The pipeline assigns a content-addressed revision ID
 after validating the plan; model-authored lifecycle identities are ignored.
@@ -119,9 +161,10 @@ content-addresses the case, selected option, target paths/symbols, and intervent
   "repo_revision": "the exact supplied revision",
   "change_targets": [
     {
-      "action": "modify",
+      "action": "modify | create | delete | rename | move",
       "path": "exact/repository/relative/path.py",
-      "symbols": ["ExactSymbolOrFunction"],
+      "destination_path": "required only for rename or move",
+      "symbols": ["ExactSymbolOrFunction or config:/pointer; omit or use [] at file level"],
       "change": "concrete behavior, interface, or data-flow change",
       "rationale_kind": "causal_propagation | compatibility (additional non-test targets only)",
       "rationale": "why this inspected target propagates or preserves the established mechanism",
@@ -147,7 +190,10 @@ content-addresses the case, selected option, target paths/symbols, and intervent
     },
     "live": {
       "description": "faithful live-runtime check; null only when requires_live_verification is false",
-      "commands": ["exact live probe that is not a generic test command"],
+      "commands": ["exact runner-verified live probe"],
+      "command_bindings": [
+        {"command_index": 0, "research_experiment_id": "the verified experiment that ran this exact command"}
+      ],
       "predicates": [
         {"type": "command_exit_code", "command_index": 0, "equals": 0},
         {"type": "command_stdout_contains", "command_index": 0, "value": "machine-observable success marker"}
@@ -163,7 +209,7 @@ content-addresses the case, selected option, target paths/symbols, and intervent
   "before_after_reproduction": {
     "original_scenario": "...",
     "research_experiment_id": "the supporting original_replay or faithful_replay experiment",
-    "expected_outcome_state": "resolved | mitigated",
+    "expected_outcome_state": "resolved | mitigated | unverified (only for a bound runtime/live proof limitation)",
     "before_change": {
       "command": "exact command from that research experiment",
       "expected_exit_code": 1,
@@ -223,8 +269,13 @@ content-addresses the case, selected option, target paths/symbols, and intervent
 ```
 
 An evidence-sufficient dossier already includes a runner-verified original or faithful
-replay, so a planner may not replace it with a model-authored `proof_limitation`. If the
-replay is no longer usable, return the case to research. `research_experiment_id` must
+replay, so a planner may not replace that available proof with a model-authored
+`proof_limitation`. If a separate required runtime/live proof is impossible because of a
+research-recorded boundary, preserve every available replay, cite the exact boundary in
+`proof_limitation_refs`, include a safe executable alternate in `verification_commands`, and
+set `expected_outcome_state` to `unverified`. This permits code/test planning but does not claim
+runtime resolution. If the limitation leaves root cause, interface, or change surface undecided,
+return the case to research instead. `research_experiment_id` must
 identify a verified supporting original/faithful replay or a runner-minted
 `config_state` outcome oracle. For a config-state oracle, copy the exact
 `oracle_state_equals` postcondition already minted from expected-behavior evidence into
@@ -253,8 +304,11 @@ for a plan intended to resolve the case and required for `expected_outcome_state
 An underlying provider, platform, storage, or context failure may correctly remain nonzero
 when the plan fixes classification, cleanup, recovery, or diagnostics; prove that effect rather
 than forcing a false success. Every supplied role command needs an exact `command_exit_code`
-predicate. Live, mitigation-effect, and recurrence commands must
-be operational probes, not pytest/ruff/mypy or another generic test command. Use additional
+predicate. Every live, mitigation-effect, or nonempty recurrence command must carry one
+`command_bindings` entry with its index and a verified research experiment that ran that exact
+command. This evidence binding is tool-neutral: executable names do not prove or disprove that a
+command is an operational probe. A command reused from `verification_commands` remains invalid.
+Use additional
 `command_stdout_contains`, `command_stdout_not_contains`, corresponding stderr/combined
 predicates, or `artifact_json_value` when exit status alone does not prove the claimed effect.
 A timed-out or cancelled role remains blocked; never weaken its allowance to make a slow check

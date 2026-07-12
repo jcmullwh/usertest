@@ -90,6 +90,10 @@ _CODE_PREFIX_CLASSIFICATION: tuple[tuple[str, str, str], ...] = (
 )
 _MISSION_ROLES: Mapping[str, tuple[str, str]] = {
     "backlog_repro_research": ("research", "repro_research"),
+    "backlog_repro_research_dossier_repair": (
+        "research",
+        "repro_research_dossier_repair",
+    ),
     "implement_backlog_ticket_v1": ("implementation", "implementation"),
     "implement_maintenance_backlog_ticket_v1": ("implementation", "implementation"),
     "review_backlog_implementation_pr_v1": ("verification", "verification"),
@@ -659,6 +663,17 @@ def _atom_run_key(atom: Mapping[str, Any]) -> str | None:
 def _mission_role(record: Mapping[str, Any]) -> tuple[str, str] | None:
     target_ref_raw = record.get("target_ref")
     target_ref = target_ref_raw if isinstance(target_ref_raw, Mapping) else {}
+    explicit_raw = target_ref.get("backlog_lineage")
+    explicit = explicit_raw if isinstance(explicit_raw, Mapping) else {}
+    explicit_role = _clean_string(explicit.get("evidence_role"))
+    explicit_stage = _clean_string(explicit.get("origin_stage"))
+    explicit_parent = _clean_string(explicit.get("parent_case_id"))
+    if (
+        explicit_role in _DERIVED_ROLES
+        and explicit_stage is not None
+        and explicit_parent is not None
+    ):
+        return explicit_role, explicit_stage
     candidates = [
         _clean_string(target_ref.get("mission_id")),
         _clean_string(target_ref.get("requested_mission_id")),
@@ -774,14 +789,26 @@ def _explicit_signal(record: Mapping[str, Any]) -> dict[str, Any] | None:
         if not isinstance(raw, Mapping) or raw.get("prevented_stage") is not True:
             continue
         kind = _clean_string(raw.get("kind"))
-        if kind not in _TYPED_SIGNAL_KINDS:
+        phase = _clean_string(raw.get("phase"))
+        # ``operational_failure_signals`` is itself a runner-owned record field. Its
+        # known vocabulary is normalization guidance, never an allowlist. Requiring
+        # extra inner attestation only for unforeseen kinds would silently recreate
+        # a closed world during rollout. Uniformly accept bounded typed kind+phase
+        # values; free-form AgentExecFailed stderr remains on a separate ignored path.
+        runner_typed_signal = bool(
+            kind is not None
+            and _safe_evidence_token(kind) == kind
+            and phase is not None
+            and _safe_evidence_token(phase) == phase
+        )
+        if not runner_typed_signal:
             continue
         if _clean_string(raw.get("outcome_role")) == "original_scenario":
             continue
         accepted.append(
             {
                 "failure_class": kind,
-                "phase": _clean_string(raw.get("phase")) or "unknown",
+                "phase": phase or "unknown",
                 "error_type": _clean_string(raw.get("error_type")),
                 "error_subtype": _clean_string(raw.get("error_subtype")),
                 "error_code": _clean_string(raw.get("error_code")),
@@ -1003,7 +1030,12 @@ def _normalize_parent_binding(
         if len(case_ids) == 1:
             verified = bool(
                 authorities
-                & {"runner_evidence_assignment", "runner_ticket_ref", "runner_target_ref"}
+                & {
+                    "runner_evidence_assignment",
+                    "runner_ticket_ref",
+                    "runner_target_ref",
+                    "runner_target_ref_lineage",
+                }
             )
             status = "verified" if verified else "reconstructed"
         else:

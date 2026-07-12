@@ -1,0 +1,852 @@
+{
+  "schema_version": 1,
+  "document_id": "historical-automated-backlog-depth-remediation-metrics",
+  "title": "Historical automated-backlog depth remediation: measurement companion",
+  "snapshot": {
+    "generated_at": "2026-07-11T13:00:26Z",
+    "branch": "codex/backlog-depth-remediation",
+    "last_committed_revision_with_full_matrix": "cdd666f31af5cc91d8df4d42a5b38b47a1e99305",
+    "working_tree_state": "uncommitted remediation changes present",
+    "current_uncommitted_changes_live_rerun": "not_measured"
+  },
+  "scope": {
+    "included": "Automated atom-derived problem mining, research, optioning, planning, shadow qualification, export readiness, and outcome tracking.",
+    "excluded": "IDEA and other externally originated work as sources of new automated cases.",
+    "primary_objective": "Mine real unactioned problems, establish their causal mechanisms, plan solutions that close those mechanisms, and prove the original problems were resolved.",
+    "not_the_primary_objective": "Bulletproofing ordinary pull-request scope."
+  },
+  "interpretation": {
+    "single_blended_score": null,
+    "single_blended_score_reason": "Mining coverage, offline contract tests, live model validity, shadow qualification, and real outcome resolution are different evidence layers. Combining them would conceal the current live failures.",
+    "allowed_trends": [
+      "improved",
+      "worsened",
+      "unchanged",
+      "not_comparable"
+    ],
+    "unknown_policy": "Unknown and not-measured values are not converted to zero percent.",
+    "evidence_layers": [
+      {
+        "id": "historical_corpus",
+        "meaning": "Observed behavior in retained historical artifacts."
+      },
+      {
+        "id": "offline_contract",
+        "meaning": "Deterministic tests of code and artifact contracts; not live model or operational proof."
+      },
+      {
+        "id": "live_stage3",
+        "meaning": "Subscription-backed model execution and Stage 3 dossier validation."
+      },
+      {
+        "id": "live_shadow",
+        "meaning": "Export-disabled full backlog cycles over real evidence."
+      },
+      {
+        "id": "ticket_lifecycle",
+        "meaning": "Queue reconciliation, regeneration, implementation, and outcome proof."
+      }
+    ]
+  },
+  "sources": [
+    {
+      "id": "historical_research",
+      "path": "I:\\code\\usertest\\runs\\usertest\\usertest\\_compiled\\usertest.research.json",
+      "kind": "historical_compiled_artifact",
+      "limitations": "The retained corpus does not provide complete merged-commit, original-scenario, or live outcome provenance."
+    },
+    {
+      "id": "historical_change_plans",
+      "path": "I:\\code\\usertest\\runs\\usertest\\usertest\\_compiled\\usertest.change_plans.json",
+      "kind": "historical_compiled_artifact",
+      "limitations": "Plan quality was measured from retained plan content; some separate archived plan files are corrupt."
+    },
+    {
+      "id": "historical_relation_review",
+      "path": "I:\\code\\usertest\\runs\\usertest\\usertest\\_compiled\\usertest.backlog_artifacts\\solution_optioning\\solution_optioning_relation_review_001\\solution_optioning_relation_review_001.response.txt",
+      "kind": "historical_agent_artifact",
+      "limitations": "Shows same-cause findings, but the old pipeline did not persist those findings into canonical downstream records."
+    },
+    {
+      "id": "historical_backlog_usertest",
+      "path": "I:\\code\\usertest\\runs\\usertest\\usertest\\_compiled\\usertest.backlog.json",
+      "kind": "historical_compiled_artifact",
+      "limitations": "First of two retained July compiled backlog corpora used by the audit."
+    },
+    {
+      "id": "historical_research_implement",
+      "path": "I:\\code\\usertest\\runs\\usertest_implement\\usertest\\_compiled\\usertest.research.json",
+      "kind": "historical_compiled_artifact",
+      "limitations": "Second retained July compiled corpus; totals in this document combine it with the usertest corpus."
+    },
+    {
+      "id": "historical_change_plans_implement",
+      "path": "I:\\code\\usertest\\runs\\usertest_implement\\usertest\\_compiled\\usertest.change_plans.json",
+      "kind": "historical_compiled_artifact",
+      "limitations": "Second retained July compiled plan corpus; some separately archived plans are corrupt."
+    },
+    {
+      "id": "historical_backlog_implement",
+      "path": "I:\\code\\usertest\\runs\\usertest_implement\\usertest\\_compiled\\usertest.backlog.json",
+      "kind": "historical_compiled_artifact",
+      "limitations": "Second of two retained July compiled backlog corpora used by the audit."
+    },
+    {
+      "id": "historical_relation_review_implement",
+      "path": "I:\\code\\usertest\\runs\\usertest_implement\\usertest\\_compiled\\usertest.backlog_artifacts\\solution_optioning\\solution_optioning_relation_review_001\\solution_optioning_relation_review_001.response.txt",
+      "kind": "historical_agent_artifact",
+      "limitations": "Second relation-review artifact; its same-cause annotations were not applied to durable downstream canonical records."
+    },
+    {
+      "id": "historical_fixture",
+      "path": "apps/usertest_backlog/tests/fixtures/historical_depth_benchmark.json",
+      "kind": "sanitized_regression_fixture",
+      "limitations": "Seven representative cases are a regression corpus, not a statistically complete sample and not proof of current live resolution."
+    },
+    {
+      "id": "historical_regression_tests",
+      "path": "apps/usertest_backlog/tests/test_historical_depth_regressions.py",
+      "kind": "offline_test_suite",
+      "limitations": "Passing deterministic tests demonstrates the encoded contract, not live pipeline success."
+    },
+    {
+      "id": "positive_depth_tests",
+      "path": "apps/usertest_backlog/tests/test_positive_depth_acceptance.py",
+      "kind": "offline_test_suite",
+      "limitations": "Positive-path acceptance coverage does not establish model output quality on unseen evidence."
+    },
+    {
+      "id": "full_chain_tests",
+      "path": "packages/backlog_miner/tests/test_full_chain_causal_acceptance.py",
+      "kind": "offline_test_suite",
+      "limitations": "One full-chain fixture passed; this denominator is too small to estimate a general success rate."
+    },
+    {
+      "id": "outcome_progression_tests",
+      "path": "apps/usertest_implement/tests/test_outcome_progression.py",
+      "kind": "offline_test_suite",
+      "limitations": "Tests state transitions and proof requirements, not actual production outcomes."
+    },
+    {
+      "id": "aggregate_mechanism_tests",
+      "path": "packages/backlog_miner/tests/test_research_evidence.py",
+      "kind": "uncommitted_offline_test_and_fixture",
+      "limitations": "The nominally passing aggregate fixture contains disconnected support paths and is therefore a known semantic false positive."
+    },
+    {
+      "id": "stage3_result",
+      "path": ".tmp/live_subscription_smoke/cdd666f31af5cc91d8df4d42a5b38b47a1e99305/controlled_stage3/stage3_result.json",
+      "kind": "exact_commit_live_result",
+      "limitations": "Two attempts belong to one controlled case and both precede the current uncommitted prompt and aggregation changes."
+    },
+    {
+      "id": "stage3_attempt_1",
+      "path": ".tmp/live_subscription_smoke/cdd666f31af5cc91d8df4d42a5b38b47a1e99305/controlled_stage3/runs/usertest_backlog_depth/20260711T114010Z/codex/3608554477/report.json",
+      "kind": "live_model_report",
+      "limitations": "The dossier failed the positive-outcome contract and mislabeled an ancillary diagnostic as a control."
+    },
+    {
+      "id": "stage3_attempt_2",
+      "path": ".tmp/live_subscription_smoke/cdd666f31af5cc91d8df4d42a5b38b47a1e99305/controlled_stage3/runs/usertest_backlog_depth/20260711T114953Z/codex/3224679023/report.json",
+      "kind": "live_model_report",
+      "limitations": "The dossier cited an origin atom as support for an alternative hypothesis even though that atom contradicted it."
+    },
+    {
+      "id": "shadow_1",
+      "path": ".tmp/shadow_depth_live/c03ed318/usertest.shadow_state.json",
+      "kind": "live_shadow_state",
+      "limitations": "One failed cycle on an earlier remediation commit; it is not a measurement of the current uncommitted code."
+    },
+    {
+      "id": "shadow_1_mining_receipt",
+      "path": ".tmp/shadow_depth_live/c03ed318/usertest.problem_records.evidence_receipt.json",
+      "kind": "live_problem_mining_receipt",
+      "limitations": "Establishes the 133 eligible source atoms, three failed miners, and 133 unresolved dispositions for the first shadow."
+    },
+    {
+      "id": "shadow_2",
+      "path": ".tmp/shadow_depth_live/1f57437e/usertest.shadow_state.json",
+      "kind": "live_shadow_state",
+      "limitations": "One failed cycle on an earlier remediation commit; it is not a measurement of the current uncommitted code."
+    },
+    {
+      "id": "shadow_2_mining_receipt",
+      "path": ".tmp/shadow_depth_live/1f57437e/usertest.problem_records.evidence_receipt.json",
+      "kind": "live_problem_mining_receipt",
+      "limitations": "Establishes the 133 eligible source atoms, two verified miners, 85 supports-case dispositions, and 48 unresolved dispositions for the second shadow."
+    },
+    {
+      "id": "shadow_2_research",
+      "path": ".tmp/shadow_depth_live/1f57437e/usertest.research.json",
+      "kind": "live_research_stage_output",
+      "limitations": "The 15 retained items are blocked placeholders. Their artifact references point to the raw reports used to measure substantive content; none was accepted as evidence-sufficient."
+    },
+    {
+      "id": "execution_plan",
+      "path": ".agents/plans/3 - in_progress/20260709_historical_automated_backlog_depth_remediation.md",
+      "kind": "in_progress_execution_record",
+      "limitations": "Records work and test checkpoints but is not itself outcome proof."
+    },
+    {
+      "id": "executive_summary",
+      "path": "docs/design/historical-automated-backlog-depth-remediation-executive-summary.html",
+      "kind": "narrative_summary",
+      "limitations": "Narrative interpretation; numerical claims should be checked against the primary artifacts listed above."
+    }
+  ],
+  "historical_baseline": {
+    "corpus_source_ids": [
+      "historical_research",
+      "historical_change_plans",
+      "historical_backlog_usertest",
+      "historical_relation_review",
+      "historical_research_implement",
+      "historical_change_plans_implement",
+      "historical_backlog_implement",
+      "historical_relation_review_implement"
+    ],
+    "corpus_counts": {
+      "atoms": 1305,
+      "problem_records": 66,
+      "research_dossiers": 38,
+      "solution_options": 114,
+      "selections": 38,
+      "change_plans": 39,
+      "final_tickets": 67
+    },
+    "metrics": [
+      {
+        "id": "historical_atom_coverage_combined",
+        "label": "Atoms covered by miners across both retained July runs",
+        "measurement": {"kind": "rate", "numerator": 155, "denominator": 1305, "percent": 11.9, "unit": "atoms"},
+        "status": "low_coverage",
+        "trend": "not_comparable",
+        "note": "Descriptive aggregate of 85 plus 70 covered atoms over 1,076 plus 229 atoms. It is not a run-to-run trend.",
+        "source_ids": ["historical_backlog_usertest", "historical_backlog_implement", "execution_plan"]
+      },
+      {
+        "id": "historical_atom_coverage_run_1",
+        "label": "Atoms covered by miners, July run 1",
+        "measurement": {"kind": "rate", "numerator": 85, "denominator": 1076, "percent": 7.9, "unit": "atoms"},
+        "status": "low_coverage",
+        "trend": "not_comparable",
+        "source_ids": ["historical_research", "execution_plan"]
+      },
+      {
+        "id": "historical_atom_coverage_run_2",
+        "label": "Atoms covered by miners, July run 2",
+        "measurement": {"kind": "rate", "numerator": 70, "denominator": 229, "percent": 30.6, "unit": "atoms"},
+        "status": "low_coverage",
+        "trend": "not_comparable",
+        "note": "Different run corpus; the apparent percentage increase is not treated as a project trend.",
+        "source_ids": ["historical_research", "execution_plan"]
+      },
+      {
+        "id": "historical_high_severity_without_disposition",
+        "label": "High-severity atoms without coverage or explicit disposition",
+        "measurement": {"kind": "rate", "numerator": 69, "denominator": 172, "percent": 40.1, "unit": "high-severity atoms"},
+        "status": "observed_failure",
+        "trend": "not_comparable",
+        "note": "Independently recomputed over the retained high-severity corpus.",
+        "source_ids": ["historical_backlog_usertest", "historical_backlog_implement", "execution_plan"]
+      },
+      {
+        "id": "historical_derived_research_atoms",
+        "label": "Current atoms generated by backlog research",
+        "measurement": {"kind": "rate", "numerator": 982, "denominator": 1076, "percent": 91.3, "unit": "atoms"},
+        "status": "self_amplifying_evidence_risk",
+        "trend": "not_comparable",
+        "source_ids": ["historical_research", "execution_plan"]
+      },
+      {
+        "id": "historical_ready_tickets_research_only",
+        "label": "Ready tickets relying only on research-generated atoms",
+        "measurement": {"kind": "rate", "numerator": 14, "denominator": 19, "percent": 73.7, "unit": "ready tickets"},
+        "status": "self_referential_demand",
+        "trend": "not_comparable",
+        "source_ids": ["execution_plan"]
+      },
+      {
+        "id": "historical_partial_research",
+        "label": "Research dossiers classified partial",
+        "measurement": {"kind": "rate", "numerator": 30, "denominator": 38, "percent": 78.9, "unit": "dossiers"},
+        "status": "insufficient_evidence",
+        "trend": "not_comparable",
+        "source_ids": ["historical_research"]
+      },
+      {
+        "id": "historical_reproduced_research",
+        "label": "Research dossiers classified reproduced",
+        "measurement": {"kind": "rate", "numerator": 8, "denominator": 38, "percent": 21.1, "unit": "dossiers"},
+        "status": "minority_reproduced",
+        "trend": "not_comparable",
+        "source_ids": ["historical_research"]
+      },
+      {
+        "id": "historical_dossiers_advanced",
+        "label": "Research dossiers that advanced downstream",
+        "measurement": {"kind": "rate", "numerator": 38, "denominator": 38, "percent": 100.0, "unit": "dossiers"},
+        "status": "gate_did_not_filter_partial_work",
+        "trend": "not_comparable",
+        "source_ids": ["historical_research", "historical_change_plans"]
+      },
+      {
+        "id": "historical_most_comprehensive_selection",
+        "label": "Selections labeled most_comprehensive",
+        "measurement": {"kind": "rate", "numerator": 36, "denominator": 38, "percent": 94.7, "unit": "selections"},
+        "status": "prompt_induced_breadth_bias",
+        "trend": "not_comparable",
+        "source_ids": ["historical_research", "execution_plan"]
+      },
+      {
+        "id": "historical_most_direct_selection",
+        "label": "Selections labeled most_direct",
+        "measurement": {"kind": "rate", "numerator": 2, "denominator": 38, "percent": 5.3, "unit": "selections"},
+        "status": "observed",
+        "trend": "not_comparable",
+        "source_ids": ["execution_plan"]
+      },
+      {
+        "id": "historical_most_robust_selection",
+        "label": "Selections labeled most_robust",
+        "measurement": {"kind": "rate", "numerator": 0, "denominator": 38, "percent": 0.0, "unit": "selections"},
+        "status": "observed",
+        "trend": "not_comparable",
+        "source_ids": ["execution_plan"]
+      },
+      {
+        "id": "historical_discovery_first_plans",
+        "label": "Plans beginning implementation with discovery work",
+        "measurement": {"kind": "rate", "numerator": 35, "denominator": 39, "percent": 89.7, "unit": "plans"},
+        "status": "not_decision_complete",
+        "trend": "not_comparable",
+        "source_ids": ["historical_change_plans"]
+      },
+      {
+        "id": "historical_plans_with_concrete_paths",
+        "label": "Plans naming concrete paths",
+        "measurement": {"kind": "rate", "numerator": 3, "denominator": 39, "percent": 7.7, "unit": "plans"},
+        "status": "low_grounding",
+        "trend": "not_comparable",
+        "source_ids": ["historical_change_plans"]
+      },
+      {
+        "id": "historical_plans_with_exactish_command",
+        "label": "Plans containing an exact-ish verification command",
+        "measurement": {"kind": "rate", "numerator": 2, "denominator": 39, "percent": 5.1, "unit": "plans"},
+        "status": "low_verifiability",
+        "trend": "not_comparable",
+        "source_ids": ["historical_change_plans"]
+      },
+      {
+        "id": "historical_relation_decisions_applied",
+        "label": "Observed same-cause groups with persisted application to canonical downstream records",
+        "measurement": {"kind": "rate", "numerator": 0, "denominator": 13, "percent": 0.0, "unit": "same-cause groups"},
+        "status": "discarded_annotation",
+        "trend": "not_comparable",
+        "note": "Inferred from seven groups in one relation review plus six in the other and no persisted canonical application in the retained downstream artifacts. This is an observed application count, not a claim about unretained executions.",
+        "source_ids": ["historical_relation_review", "historical_relation_review_implement", "historical_change_plans", "historical_change_plans_implement", "execution_plan"]
+      },
+      {
+        "id": "historical_resolution_rate",
+        "label": "Historical automated-case resolution rate",
+        "measurement": {"kind": "unknown", "numerator": null, "denominator": null, "percent": null, "unit": "cases"},
+        "status": "unknown",
+        "trend": "not_comparable",
+        "note": "Missing commit, branch, original-scenario replay, live outcome, recurrence, and integrity evidence prevents a defensible numerator and denominator.",
+        "source_ids": ["historical_research", "historical_change_plans", "execution_plan"]
+      }
+    ]
+  },
+  "offline_benchmarks": [
+    {
+      "id": "historical_depth_regressions",
+      "label": "Historical depth regression suite",
+      "created_during_remediation": true,
+      "case_fixture_count": 7,
+      "measurement": {"kind": "rate", "numerator": 14, "denominator": 14, "percent": 100.0, "unit": "tests"},
+      "nominal_status": "passed",
+      "semantic_status": "passed_with_scope_limitations",
+      "trend": "not_comparable",
+      "run_date": "2026-07-11",
+      "note": "Independently rerun in the current workspace. The seven fixture cases are representative contracts, not live outcome samples.",
+      "source_ids": ["historical_fixture", "historical_regression_tests"]
+    },
+    {
+      "id": "positive_depth_acceptance",
+      "label": "Positive depth acceptance suite",
+      "created_during_remediation": true,
+      "measurement": {"kind": "rate", "numerator": 9, "denominator": 9, "percent": 100.0, "unit": "tests"},
+      "nominal_status": "passed",
+      "semantic_status": "passed_with_scope_limitations",
+      "trend": "not_comparable",
+      "run_date": "2026-07-11",
+      "source_ids": ["positive_depth_tests"]
+    },
+    {
+      "id": "full_chain_causal_acceptance",
+      "label": "Full-chain causal acceptance suite",
+      "created_during_remediation": true,
+      "measurement": {"kind": "rate", "numerator": 1, "denominator": 1, "percent": 100.0, "unit": "tests"},
+      "nominal_status": "passed",
+      "semantic_status": "passed_with_small_denominator",
+      "trend": "not_comparable",
+      "run_date": "2026-07-11",
+      "source_ids": ["full_chain_tests"]
+    },
+    {
+      "id": "outcome_progression",
+      "label": "Outcome progression suite",
+      "created_during_remediation": true,
+      "measurement": {"kind": "rate", "numerator": 14, "denominator": 14, "percent": 100.0, "unit": "tests"},
+      "nominal_status": "passed",
+      "semantic_status": "passed_with_scope_limitations",
+      "trend": "not_comparable",
+      "run_date": "2026-07-11",
+      "source_ids": ["outcome_progression_tests"]
+    },
+    {
+      "id": "combined_positive_full_chain_outcome",
+      "label": "Combined positive-depth, full-chain, and outcome tests",
+      "created_during_remediation": true,
+      "measurement": {"kind": "rate", "numerator": 24, "denominator": 24, "percent": 100.0, "unit": "tests"},
+      "nominal_status": "passed",
+      "semantic_status": "passed_with_scope_limitations",
+      "trend": "not_comparable",
+      "run_date": "2026-07-11",
+      "note": "Independently rerun as 9 positive-depth, 1 full-chain, and 14 outcome-progression tests. This is offline code evidence only.",
+      "source_ids": ["positive_depth_tests", "full_chain_tests", "outcome_progression_tests"]
+    },
+    {
+      "id": "aggregate_multihop_causal_coverage",
+      "label": "Aggregate multi-hop causal coverage benchmark",
+      "created_during_remediation": true,
+      "nominal_measurement": {"kind": "rate", "numerator": 1, "denominator": 1, "percent": 100.0, "unit": "tests"},
+      "semantic_measurement": {"kind": "rate", "numerator": 0, "denominator": 1, "percent": 0.0, "unit": "valid benchmark cases"},
+      "nominal_status": "passed",
+      "semantic_status": "failed_known_false_positive",
+      "trend": "worsened",
+      "failure": "The fixture accepts two disjoint supports whose symbol union covers core.enter and core.resolve, but neither support proves a connecting call path. The symptom-bearing harness can also be treated as an entrypoint. A green assertion therefore certifies disconnected evidence as one causal mechanism.",
+      "consequence": "The aggregate mechanism feature and its nominal green test must be treated as failed until a connectivity invariant and a production-entrypoint binding are added and reviewed.",
+      "source_ids": ["aggregate_mechanism_tests"]
+    }
+  ],
+  "evolution_timeline": [
+    {
+      "phase": "historical_baseline",
+      "revision": null,
+      "measurement_date": "retained July 2026 corpora",
+      "result": "failed_depth_model",
+      "improved": [],
+      "failed_or_unknown": [
+        "Only 155 of 1,305 atoms were covered by the miners across the two retained corpora.",
+        "69 of 172 high-severity atoms had neither coverage nor an explicit disposition.",
+        "30 of 38 research dossiers were partial, yet all 38 advanced.",
+        "Same-cause review grouped 17 of 23 problems into seven groups and 15 of 15 into six groups, but the pipeline still emitted 38 selections and 39 plans.",
+        "Historical resolution rate is unknown because outcome provenance is incomplete."
+      ],
+      "interpretation": "This is the comparison baseline, not a scored benchmark run. It establishes the failure modes the remediation is intended to change."
+    },
+    {
+      "phase": "first_live_shadow",
+      "revision": "c03ed318",
+      "measurement_date": "2026-07-10",
+      "result": "failed",
+      "improved": [
+        "The cycle evaluated and explicitly partitioned all 133 eligible source atoms rather than silently ignoring unselected evidence."
+      ],
+      "failed_or_unknown": [
+        "Zero of three mining jobs verified.",
+        "Zero atoms supported a case and all 133 remained unresolved.",
+        "No cases, research, options, plans, or ready tickets were produced.",
+        "The export qualification cycle failed."
+      ],
+      "interpretation": "Coverage accounting improved, but usable mining throughput was zero. This was a control-heavy system that did not yet perform the objective."
+    },
+    {
+      "phase": "second_live_shadow",
+      "revision": "1f57437e",
+      "measurement_date": "2026-07-11",
+      "result": "failed",
+      "improved": [
+        "Two of three mining jobs verified.",
+        "85 of 133 eligible source atoms supported 15 canonical cases; 48 remained unresolved.",
+        "Fourteen of 15 raw research reports were substantive, containing 63 experiments, 156 inspected files, 211 inspected symbols, and 25 hypotheses in aggregate."
+      ],
+      "failed_or_unknown": [
+        "Zero of 15 research dossiers were accepted by the evidence gate.",
+        "The retained 15 Stage 3 items are blocked placeholders, not accepted research proofs or tickets.",
+        "No options, plans, or ready tickets were produced.",
+        "The export qualification cycle failed."
+      ],
+      "interpretation": "Mining and raw research throughput materially improved, but accepted causal research and plan throughput remained zero."
+    },
+    {
+      "phase": "exact_commit_controlled_stage3",
+      "revision": "cdd666f31af5cc91d8df4d42a5b38b47a1e99305",
+      "measurement_date": "2026-07-11",
+      "result": "failed_safely",
+      "improved": [
+        "Two of two model attempts completed through the direct signed-in host ChatGPT subscription route with no API fallback.",
+        "Both invalid dossiers were blocked rather than advanced."
+      ],
+      "failed_or_unknown": [
+        "Zero of two raw dossier attempts passed the output contract.",
+        "The one controlled case was not accepted and produced no plan."
+      ],
+      "interpretation": "Execution and billing-route provenance were proven; research usability was not. Blocking invalid work is necessary, but it is not success on the primary objective."
+    },
+    {
+      "phase": "current_working_tree",
+      "revision": "uncommitted changes after cdd666f31af5cc91d8df4d42a5b38b47a1e99305",
+      "measurement_date": "2026-07-11",
+      "result": "not_qualified",
+      "improved": [
+        "The collected historical, positive-depth, full-chain, and outcome offline suites pass 14 of 14 plus 24 of 24 tests.",
+        "Prompt and evidence-contract fixes address the concrete Stage 3 output failures observed at cdd666."
+      ],
+      "failed_or_unknown": [
+        "The aggregate multi-hop causal benchmark is a known semantic false positive despite its nominal green assertion.",
+        "The uncommitted changes have not been measured in a new exact-revision live Stage 3 run.",
+        "No shadow cycle has passed, the stable streak is zero of two, and export remains disabled.",
+        "Qualified ticket regeneration, implementation drain, and outcome resolution have not started."
+      ],
+      "interpretation": "Offline contract coverage has expanded, but the current working tree remains unqualified and its live success rate is not yet measured."
+    }
+  ],
+  "repository_matrix_history": {
+    "metric": "Full project-environment suites passed",
+    "trend": "unchanged",
+    "checkpoints": [
+      {"checkpoint": 1, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 615.9, "commit": null},
+      {"checkpoint": 2, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 704.9, "commit": null},
+      {"checkpoint": 3, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 1031.1, "commit": null},
+      {"checkpoint": 4, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 929.3, "commit": null},
+      {"checkpoint": 5, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 1107.3, "commit": null},
+      {"checkpoint": 6, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 875.8, "commit": "cdd666f31af5cc91d8df4d42a5b38b47a1e99305"}
+    ],
+    "latest_slow_suite": {
+      "name": "runner_core",
+      "elapsed_seconds": 623.3,
+      "completed_without_shortened_timeout": true
+    },
+    "performance_interpretation": "No performance trend is claimed. Suite content grew and machine contention varied; elapsed times are not like-for-like. The stable conclusion is only that every checkpoint completed with all 14 environments passing.",
+    "evidence_quality": "ExecPlan-recorded; the six raw matrix logs were not independently retained or reconstructed for this companion.",
+    "source_ids": ["execution_plan", "executive_summary"]
+  },
+  "live_stage3": {
+    "revision": "cdd666f31af5cc91d8df4d42a5b38b47a1e99305",
+    "case_count": 1,
+    "attempt_count": 2,
+    "attempts": [
+      {
+        "attempt": 1,
+        "elapsed_seconds": 549.29,
+        "process_exit_zero": true,
+        "turn_completed": true,
+        "subscription_provenance_passed": true,
+        "raw_dossier_contract_passed": false,
+        "full_evidence_verification_reached": false,
+        "errors": [
+          "research_dossier_positive_outcome_contract_invalid",
+          "research_dossier_control_relationship_missing"
+        ],
+        "source_ids": ["stage3_attempt_1", "stage3_result"]
+      },
+      {
+        "attempt": 2,
+        "elapsed_seconds": 685.06,
+        "process_exit_zero": true,
+        "turn_completed": true,
+        "subscription_provenance_passed": true,
+        "raw_dossier_contract_passed": false,
+        "full_evidence_verification_reached": false,
+        "errors": [
+          "research_dossier_unresolved_hypothesis_evidence_ref"
+        ],
+        "source_ids": ["stage3_attempt_2", "stage3_result"]
+      }
+    ],
+    "total_elapsed_seconds": 1234.35,
+    "metrics": [
+      {
+        "id": "stage3_process_completion",
+        "label": "Model processes completed",
+        "measurement": {"kind": "rate", "numerator": 2, "denominator": 2, "percent": 100.0, "unit": "attempts"},
+        "status": "passed",
+        "trend": "not_comparable"
+      },
+      {
+        "id": "stage3_subscription_provenance",
+        "label": "Attempts verified as direct host ChatGPT-subscription use",
+        "measurement": {"kind": "rate", "numerator": 2, "denominator": 2, "percent": 100.0, "unit": "attempts"},
+        "status": "passed",
+        "trend": "improved",
+        "note": "Both attempts used the host CODEX_HOME directly; seven monitored API/provider variables were blank, canonical ChatGPT endpoints were used, API fallback was false, no auth cache was copied, and the original host config hash was restored."
+      },
+      {
+        "id": "stage3_raw_dossier_validity",
+        "label": "Attempts passing the raw dossier output contract",
+        "measurement": {"kind": "rate", "numerator": 0, "denominator": 2, "percent": 0.0, "unit": "attempts"},
+        "status": "failed",
+        "trend": "unchanged"
+      },
+      {
+        "id": "stage3_full_evidence_verification_reached",
+        "label": "Attempts reaching full evidence verification",
+        "measurement": {"kind": "rate", "numerator": 0, "denominator": 2, "percent": 0.0, "unit": "attempts"},
+        "status": "blocked_before_verifier",
+        "trend": "unchanged",
+        "note": "This is not a claim that the verifier executed and rejected evidence; raw dossier validation prevented it from being reached."
+      },
+      {
+        "id": "stage3_case_accepted",
+        "label": "Controlled cases accepted as evidence-sufficient",
+        "measurement": {"kind": "rate", "numerator": 0, "denominator": 1, "percent": 0.0, "unit": "cases"},
+        "status": "failed",
+        "trend": "not_comparable"
+      },
+      {
+        "id": "stage3_case_planned",
+        "label": "Controlled cases producing an accepted plan or ticket",
+        "measurement": {"kind": "rate", "numerator": 0, "denominator": 1, "percent": 0.0, "unit": "cases"},
+        "status": "not_reached",
+        "trend": "not_comparable"
+      },
+      {
+        "id": "stage3_current_uncommitted_rerun",
+        "label": "Live result after current uncommitted prompt and aggregation changes",
+        "measurement": {"kind": "not_measured", "numerator": null, "denominator": null, "percent": null, "unit": "attempts"},
+        "status": "not_measured",
+        "trend": "not_comparable",
+        "note": "Offline tests after the changes cannot be substituted for a new exact-revision live run."
+      }
+    ],
+    "source_ids": ["stage3_result", "stage3_attempt_1", "stage3_attempt_2"]
+  },
+  "live_shadows": {
+    "required_consecutive_passes": 2,
+    "cycles": [
+      {
+        "id": "shadow_c03ed318",
+        "revision_label": "c03ed318",
+        "generated_at": "2026-07-10T21:39:40.339680Z",
+        "cycle_id": "78be69d651b48c14193525e8956b76da0a3df3e5f7216373e46d674e6dc3abd9",
+        "passed": false,
+        "pass_measurement": {"kind": "rate", "numerator": 0, "denominator": 1, "percent": 0.0, "unit": "cycles"},
+        "ready_for_export": false,
+        "consecutive_stable_passes": 0,
+        "source_evidence_funnel": {
+          "eligible_source_atoms": 133,
+          "verified_miners": {"count": 0, "denominator": 3, "percent": 0.0},
+          "supports_case": {"count": 0, "denominator": 133, "percent": 0.0},
+          "unresolved": {"count": 133, "denominator": 133, "percent": 100.0},
+          "canonical_cases": 0,
+          "research_placeholders": 0,
+          "accepted_research": 0,
+          "solution_options": 0,
+          "change_plans": 0,
+          "ready_tickets": 0
+        },
+        "artifact_reported_counts": {
+          "atoms_total_all_origins": 1886,
+          "qualifying_observed_atoms_under_shadow_check": 96,
+          "unresolved_high_severity_without_active_work": 20
+        },
+        "failure_count": 335,
+        "failure_groups": {
+          "high_severity_atom_without_explicit_disposition": 311,
+          "high_severity_unresolved_without_active_work": 20,
+          "problem_mining_miner_not_verified": 3,
+          "problem_mining_evidence_receipt_not_live_verified": 1
+        },
+        "trend": "not_comparable",
+        "interpretation": "The cycle explicitly dispositioned the 133 eligible source atoms, but every assigned mining job failed and every atom remained unresolved. It generated no usable backlog work.",
+        "source_ids": ["shadow_1", "shadow_1_mining_receipt"]
+      },
+      {
+        "id": "shadow_1f57437e",
+        "revision_label": "1f57437e",
+        "generated_at": "2026-07-11T00:39:24.649113Z",
+        "cycle_id": "d3c87ff5acb8b2b714da31b7fc930a9febd5a7431681e4e92ec14219e61f4ea6",
+        "passed": false,
+        "pass_measurement": {"kind": "rate", "numerator": 0, "denominator": 1, "percent": 0.0, "unit": "cycles"},
+        "ready_for_export": false,
+        "consecutive_stable_passes": 0,
+        "source_evidence_funnel": {
+          "eligible_source_atoms": 133,
+          "verified_miners": {"count": 2, "denominator": 3, "percent": 66.7},
+          "supports_case": {"count": 85, "denominator": 133, "percent": 63.9},
+          "unresolved": {"count": 48, "denominator": 133, "percent": 36.1},
+          "canonical_cases": 15,
+          "research_placeholders": 15,
+          "substantive_raw_research_reports": {"count": 14, "denominator": 15, "percent": 93.3},
+          "raw_report_content_totals": {
+            "experiments": 63,
+            "inspected_files": 156,
+            "inspected_symbols": 211,
+            "hypotheses": 25
+          },
+          "accepted_research": {"count": 0, "denominator": 15, "percent": 0.0},
+          "solution_options": 0,
+          "change_plans": 0,
+          "ready_tickets": 0
+        },
+        "artifact_reported_counts": {
+          "atoms_total_all_origins": 1886,
+          "qualifying_observed_atoms_under_shadow_check": 96,
+          "unresolved_high_severity_without_active_work": 3,
+          "backlog_entries": 15
+        },
+        "placeholder_caveat": "The 15 retained research items and 15 backlog entries are blocked failure placeholders. They are not accepted research proofs, solution options, plans, implementation-ready tickets, or evidence of resolution.",
+        "failure_count": 316,
+        "failure_groups": {
+          "high_severity_atom_without_explicit_disposition": 311,
+          "high_severity_unresolved_without_active_work": 3,
+          "problem_mining_miner_not_verified": 1,
+          "problem_mining_evidence_receipt_not_live_verified": 1
+        },
+        "trend": "improved",
+        "trend_note": "Mining and raw-report throughput improved: two miners verified, 85 source atoms supported 15 cases, and 14 raw reports were substantive. Accepted research did not improve: zero of 15 passed the evidence gate, zero plans were produced, and the cycle still failed.",
+        "source_ids": ["shadow_2", "shadow_2_mining_receipt", "shadow_2_research"]
+      }
+    ],
+    "comparison_metrics": [
+      {
+        "id": "shadow_overall_passes",
+        "label": "Observed shadow cycles passing",
+        "measurement": {"kind": "rate", "numerator": 0, "denominator": 2, "percent": 0.0, "unit": "cycles"},
+        "status": "failed",
+        "trend": "unchanged"
+      },
+      {
+        "id": "shadow_required_stable_passes",
+        "label": "Required consecutive stable passes achieved",
+        "measurement": {"kind": "rate", "numerator": 0, "denominator": 2, "percent": 0.0, "unit": "required consecutive passes"},
+        "status": "not_qualified",
+        "trend": "unchanged"
+      },
+      {
+        "id": "shadow_verified_mining_jobs",
+        "label": "Verified mining jobs in the later shadow",
+        "measurement": {"kind": "rate", "numerator": 2, "denominator": 3, "percent": 66.7, "unit": "miners"},
+        "status": "intermediate_improvement",
+        "trend": "improved",
+        "note": "The earlier shadow verified zero of three. This measures mining-job execution, not problem correctness or end-to-end success."
+      },
+      {
+        "id": "shadow_source_atom_case_support",
+        "label": "Eligible source atoms supporting cases in the later shadow",
+        "measurement": {"kind": "rate", "numerator": 85, "denominator": 133, "percent": 63.9, "unit": "eligible source atoms"},
+        "status": "intermediate_improvement",
+        "trend": "improved",
+        "note": "The earlier shadow had zero supporting atoms. Whether the 15 resulting cases are correctly grouped and causally valid remains unproven because no research dossier was accepted."
+      },
+      {
+        "id": "shadow_accepted_research_later_cycle",
+        "label": "Later-shadow research accepted by the evidence gate",
+        "measurement": {"kind": "rate", "numerator": 0, "denominator": 15, "percent": 0.0, "unit": "cases"},
+        "status": "failed",
+        "trend": "unchanged",
+        "note": "Fourteen raw reports were substantive, but content volume did not substitute for contract-valid causal evidence."
+      },
+      {
+        "id": "shadow_unresolved_high_severity_reduced",
+        "label": "Reduction in unresolved high-severity atoms without active work",
+        "measurement": {"kind": "rate", "numerator": 17, "denominator": 20, "percent": 85.0, "unit": "first-shadow unresolved atoms"},
+        "status": "intermediate_improvement",
+        "trend": "improved",
+        "note": "The count fell from 20 to 3. The separate 311 pending-disposition failures in both shadow receipts are research-origin atoms, not members of the 133 eligible source-atom mining corpus."
+      },
+      {
+        "id": "shadow_ready_plans",
+        "label": "Shadow cycles producing at least one ready plan",
+        "measurement": {"kind": "rate", "numerator": 0, "denominator": 2, "percent": 0.0, "unit": "cycles"},
+        "status": "failed",
+        "trend": "unchanged"
+      }
+    ],
+    "research_origin_pending_caveat": "Both shadow states report 311 high-severity atoms pending disposition. Those atoms originated from research output and are distinct from the 133 eligible source atoms evaluated by problem mining; the counts must not be combined into a single source-evidence denominator.",
+    "current_code_caveat": "The two shadows ran once each on different earlier remediation commits. Neither measures the current uncommitted fixes, neither contributes to one consecutive streak across one exact revision, and neither qualifies the system for export.",
+    "source_ids": ["shadow_1", "shadow_1_mining_receipt", "shadow_2", "shadow_2_mining_receipt", "shadow_2_research"]
+  },
+  "ticket_and_outcome_status": {
+    "plan_file_inventory": {
+      "total": 606,
+      "classifications": [
+        {"label": "definitely automated", "count": 369, "denominator": 606, "percent": 60.9},
+        {"label": "definitely IDEA or user originated", "count": 25, "denominator": 606, "percent": 4.1},
+        {"label": "readable but origin unproven and protected", "count": 170, "denominator": 606, "percent": 28.1},
+        {"label": "corrupt or semantically not plans", "count": 42, "denominator": 606, "percent": 6.9}
+      ]
+    },
+    "active_generated_queue": {
+      "total": 20,
+      "ready": {"count": 19, "denominator": 20, "percent": 95.0},
+      "in_progress": {"count": 1, "denominator": 20, "percent": 5.0},
+      "quality_status": "stale_under_pre_depth_contract",
+      "reconciled": {"count": 0, "denominator": 20, "percent": 0.0},
+      "note": "Ready is the old workflow state, not evidence that these tickets are causally valid. Reconciliation is intentionally deferred until qualification."
+    },
+    "duplicate_fingerprint_groups": {
+      "total": 43,
+      "ambiguous": {"count": 13, "denominator": 43, "percent": 30.2},
+      "real_plus_corrupt": {"count": 12, "denominator": 43, "percent": 27.9}
+    },
+    "qualified_regeneration_runs": {
+      "measurement": {"kind": "not_started", "numerator": 0, "denominator": null, "percent": null, "unit": "runs"},
+      "status": "not_started"
+    },
+    "qualified_implementation_drain_runs": {
+      "measurement": {"kind": "not_started", "numerator": 0, "denominator": null, "percent": null, "unit": "runs"},
+      "status": "not_started"
+    },
+    "new_contract_resolution_rate": {
+      "measurement": {"kind": "not_measurable", "numerator": null, "denominator": null, "percent": null, "unit": "qualified cases"},
+      "status": "not_measurable",
+      "reason": "No backlog has yet been regenerated and implemented under a qualified revised pipeline; the qualified-case denominator is zero."
+    },
+    "historical_resolution_rate": {
+      "measurement": {"kind": "unknown", "numerator": null, "denominator": null, "percent": null, "unit": "historical cases"},
+      "status": "unknown",
+      "reason": "Historical outcome provenance and artifact integrity are insufficient to establish either numerator or denominator."
+    },
+    "trend": "unchanged",
+    "source_ids": ["execution_plan", "executive_summary"]
+  },
+  "current_status": {
+    "overall": "not_qualified",
+    "objective_complete": false,
+    "export_enabled": false,
+    "ticket_regeneration_started": false,
+    "implementation_drain_started": false,
+    "what_is_proven": [
+      "The encoded historical, positive-depth, full-chain, and outcome contracts pass their currently collected offline tests.",
+      "The execution plan records that the last committed revision completed all 14 project test environments without a shortened timeout; raw matrix logs are not linked in this companion.",
+      "Both controlled Stage 3 attempts used the direct signed-in host ChatGPT subscription path without API fallback.",
+      "The pipeline blocked invalid Stage 3 dossiers instead of advancing them."
+    ],
+    "what_is_not_proven": [
+      "That current uncommitted research changes produce a valid live causal dossier.",
+      "That aggregate multi-hop evidence forms one connected causal mechanism; the current nominal test is a known false positive.",
+      "That two consecutive real shadow cycles can produce well-researched, code-grounded ready plans.",
+      "That a regenerated backlog can be implemented and its original problems resolved.",
+      "Any aggregate historical or new-contract solve rate."
+    ],
+    "next_decisive_measurements": [
+      "Correct and adversarially test the aggregate support-connectivity and production-entrypoint invariants.",
+      "Run the full project matrix and exact-revision live subscription-backed Stage 3 again.",
+      "Run two consecutive export-disabled shadows and inspect their cases, evidence, plans, and stability.",
+      "Only then reconcile tickets, regenerate, implement, replay original scenarios, and record outcomes."
+    ]
+  },
+  "limitations": [
+    "Percentages are descriptive ratios for their stated denominators, not estimates of future success probability.",
+    "The two Stage 3 attempts are retries for one case; they are not two independent cases.",
+    "The two shadows ran on different earlier commits and contain model-dependent outputs. Their overall pass states are comparable; every internal count is not necessarily a like-for-like quality measure.",
+    "Offline test counts can grow as benchmarks are added. A stable 100 percent pass ratio does not mean the objective is 100 percent complete.",
+    "The aggregate multi-hop benchmark is deliberately reported as semantic failure even though its current assertion passes.",
+    "Historical resolution is unknown, not zero. New-contract resolution is not measurable because no qualified cases have completed the lifecycle.",
+    "Current uncommitted changes have not yet been rerun through live Stage 3, live shadows, or the full end-to-end ticket lifecycle."
+  ]
+}

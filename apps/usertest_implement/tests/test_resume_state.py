@@ -52,6 +52,17 @@ def _base_run(tmp_path: Path) -> tuple[SelectedTicket, Path, Path]:
         },
     )
     _write_json(run_dir / "git_ref.json", {"branch": "backlog/test", "head_commit": "abc"})
+    _write_json(run_dir / "target_ref.json", {"agent": "codex"})
+    (run_dir / "raw_events.jsonl").write_text(
+        json.dumps(
+            {
+                "type": "thread.started",
+                "thread_id": "019f5000-0000-7000-8000-000000000001",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     return selected, run_dir, workspace
 
 
@@ -73,7 +84,38 @@ def test_resume_state_records_required_identity_fields(tmp_path: Path) -> None:
     assert state["run_dir"] == str(run_dir)
     assert state["workspace_path"] == str(workspace)
     assert state["branch"] == "backlog/test"
+    assert state["implementation_author"] == {
+        "agent": "codex",
+        "session_id": "019f5000-0000-7000-8000-000000000001",
+        "status": "exact_session_available",
+        "exact_session_available": True,
+        "agent_source": str(run_dir / "target_ref.json"),
+        "session_source": str(run_dir / "raw_events.jsonl"),
+    }
     assert state["source_evidence_paths"]["ticket_ref"] == str(run_dir / "ticket_ref.json")
+    assert state["source_evidence_paths"]["raw_events"] == str(run_dir / "raw_events.jsonl")
+
+
+def test_resume_state_never_claims_exact_continuity_for_malformed_thread_id(
+    tmp_path: Path,
+) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    (run_dir / "raw_events.jsonl").write_text(
+        json.dumps({"type": "thread.started", "thread_id": "not-a-canonical-session"})
+        + "\n",
+        encoding="utf-8",
+    )
+
+    state = build_ticket_resume_state(
+        selected=selected,
+        run_dir=run_dir,
+        owner_root=tmp_path,
+        exit_code=1,
+    )
+
+    assert state["implementation_author"]["session_id"] is None
+    assert state["implementation_author"]["status"] == "author_session_unavailable"
+    assert state["implementation_author"]["exact_session_available"] is False
 
 
 def test_resume_state_maps_verification_failure(tmp_path: Path) -> None:

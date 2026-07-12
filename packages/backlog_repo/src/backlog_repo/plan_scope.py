@@ -16,6 +16,7 @@ _PLAN_TARGET_CONTRACT_RE = re.compile(
     r"<!-- backlog-plan-target-contract:end -->",
     flags=re.DOTALL,
 )
+_PLAN_TARGET_ACTIONS = frozenset({"modify", "create", "delete", "rename", "move"})
 
 
 def _canonical_json(value: Any) -> str:
@@ -102,32 +103,49 @@ def build_plan_target_contract(
         if not isinstance(raw, Mapping):
             raise ValueError(f"plan_target_contract_target_invalid:{index}")
         action = _required_text(raw.get("action"), label="action")
-        if action not in {"modify", "create"}:
+        if action not in _PLAN_TARGET_ACTIONS:
             raise ValueError(f"plan_target_contract_action_invalid:{index}")
         relative_path = _safe_relative_path(raw.get("path"))
         if relative_path in seen_paths:
             raise ValueError(f"plan_target_contract_path_duplicate:{relative_path}")
         seen_paths.add(relative_path)
-        symbols_raw = raw.get("symbols")
-        if not isinstance(symbols_raw, list) or not symbols_raw:
+        symbols_raw = raw.get("symbols", [])
+        if symbols_raw is None:
+            symbols_raw = []
+        if not isinstance(symbols_raw, list):
             raise ValueError(f"plan_target_contract_symbols_invalid:{relative_path}")
         symbols = [_required_text(symbol, label="symbol") for symbol in symbols_raw]
         if len(symbols) != len(set(symbols)):
             raise ValueError(f"plan_target_contract_symbol_duplicate:{relative_path}")
+        destination_path = (
+            _safe_relative_path(raw.get("destination_path"))
+            if action in {"rename", "move"}
+            else None
+        )
+        if action not in {"rename", "move"} and raw.get("destination_path") is not None:
+            raise ValueError(f"plan_target_contract_destination_unexpected:{relative_path}")
+        if destination_path is not None and destination_path in seen_paths:
+            raise ValueError(f"plan_target_contract_path_duplicate:{destination_path}")
+        if destination_path is not None:
+            seen_paths.add(destination_path)
         intervention = _required_text(raw.get("change"), label="change")
+        target_paths = [relative_path, *([destination_path] if destination_path else [])]
         targets.append(
             {
                 "action": action,
                 "path": relative_path,
+                "destination_path": destination_path,
                 "symbols": symbols,
                 "change": intervention,
                 "change_sha256": _sha256_text(intervention),
-                "target_role": "test" if _is_test_path(relative_path) else "production",
+                "target_role": (
+                    "test" if all(_is_test_path(path) for path in target_paths) else "production"
+                ),
             }
         )
     payload = {
-        "schema_version": 2,
-        "contract_source": "runner_stage6_target_intent_v2",
+        "schema_version": 3,
+        "contract_source": "runner_stage6_target_intent_v3",
         "case_id": _required_text(plan.get("case_id"), label="case_id"),
         "problem_id": _required_text(plan.get("problem_id"), label="problem_id"),
         "selected_option_id": _required_text(
@@ -142,7 +160,7 @@ def build_plan_target_contract(
 def validate_plan_target_contract(contract: Any) -> dict[str, Any]:
     """Validate a persisted target-intent contract and return a normalized copy."""
 
-    if not isinstance(contract, Mapping) or contract.get("schema_version") != 2:
+    if not isinstance(contract, Mapping) or contract.get("schema_version") not in {2, 3}:
         raise ValueError("plan_target_contract_schema_invalid")
     allowed = {
         "schema_version",
@@ -156,7 +174,9 @@ def validate_plan_target_contract(contract: Any) -> dict[str, Any]:
     }
     if set(contract) != allowed:
         raise ValueError("plan_target_contract_fields_invalid")
-    if contract.get("contract_source") != "runner_stage6_target_intent_v2":
+    schema_version = int(contract["schema_version"])
+    expected_source = f"runner_stage6_target_intent_v{schema_version}"
+    if contract.get("contract_source") != expected_source:
         raise ValueError("plan_target_contract_source_invalid")
     payload = {key: contract[key] for key in contract if key != "contract_sha256"}
     if contract.get("contract_sha256") != _sha256_text(_canonical_json(payload)):
@@ -170,33 +190,49 @@ def validate_plan_target_contract(contract: Any) -> dict[str, Any]:
     for index, target in enumerate(targets):
         if not isinstance(target, Mapping):
             raise ValueError(f"plan_target_contract_target_invalid:{index}")
-        if set(target) != {
+        expected_target_fields = {
             "action",
             "path",
             "symbols",
             "change",
             "change_sha256",
             "target_role",
-        }:
+        }
+        if schema_version == 3:
+            expected_target_fields.add("destination_path")
+        if set(target) != expected_target_fields:
             raise ValueError(f"plan_target_contract_target_fields_invalid:{index}")
         path = _safe_relative_path(target.get("path"))
         if path in paths:
             raise ValueError(f"plan_target_contract_path_duplicate:{path}")
         paths.add(path)
-        if target.get("action") not in {"modify", "create"}:
+        action = target.get("action")
+        allowed_actions = _PLAN_TARGET_ACTIONS if schema_version == 3 else {"modify", "create"}
+        if action not in allowed_actions:
             raise ValueError(f"plan_target_contract_action_invalid:{path}")
         symbols = target.get("symbols")
         if (
             not isinstance(symbols, list)
-            or not symbols
+            or (schema_version == 2 and not symbols)
             or len(symbols) != len(set(symbols))
             or not all(isinstance(symbol, str) and symbol.strip() for symbol in symbols)
         ):
             raise ValueError(f"plan_target_contract_symbols_invalid:{path}")
+        destination_path = target.get("destination_path") if schema_version == 3 else None
+        if action in {"rename", "move"}:
+            destination_path = _safe_relative_path(destination_path)
+            if destination_path in paths:
+                raise ValueError(f"plan_target_contract_path_duplicate:{destination_path}")
+            paths.add(destination_path)
+        elif destination_path is not None:
+            raise ValueError(f"plan_target_contract_destination_unexpected:{path}")
         intervention = _required_text(target.get("change"), label="change")
         if target.get("change_sha256") != _sha256_text(intervention):
             raise ValueError(f"plan_target_contract_change_hash_mismatch:{path}")
-        expected_role = "test" if _is_test_path(path) else "production"
+        role_paths = [path, *([destination_path] if isinstance(destination_path, str) else [])]
+        expected_role = (
+            "test" if all(_is_test_path(value) for value in role_paths) else "production"
+        )
         if target.get("target_role") != expected_role:
             raise ValueError(f"plan_target_contract_target_role_invalid:{path}")
     return json.loads(_canonical_json(contract))
@@ -248,12 +284,31 @@ def assess_pr_plan_scope(
     }
     observed_paths = [path.replace("\\", "/").removeprefix("./") for path in changed_files]
     observed_set = set(observed_paths)
+    expected_observed_paths = {
+        value
+        for path, target in expected.items()
+        for value in (path, target.get("destination_path"))
+        if isinstance(value, str) and value
+    }
+
+    def target_touched(path: str, target: Mapping[str, Any]) -> bool:
+        destination = target.get("destination_path")
+        return path in observed_set or (
+            isinstance(destination, str) and destination in observed_set
+        )
+
     production_paths = {
         path for path, target in expected.items() if target.get("target_role") == "production"
     }
-    missing_production = sorted(production_paths - observed_set)
-    missing_test_or_support = sorted((set(expected) - production_paths) - observed_set)
-    unplanned_paths = sorted(observed_set - set(expected))
+    missing_production = sorted(
+        path for path in production_paths if not target_touched(path, expected[path])
+    )
+    missing_test_or_support = sorted(
+        path
+        for path, target in expected.items()
+        if path not in production_paths and not target_touched(path, target)
+    )
+    unplanned_paths = sorted(observed_set - expected_observed_paths)
     errors = [
         f"implementation_scope_required_production_path_untouched:{path}"
         for path in missing_production
@@ -273,8 +328,9 @@ def assess_pr_plan_scope(
     target_receipts = [
         {
             "path": path,
+            "destination_path": target.get("destination_path"),
             "target_role": target["target_role"],
-            "path_touched": path in observed_set,
+            "path_touched": target_touched(path, target),
             "planned_symbols": list(target["symbols"]),
             "planned_intervention_sha256": target["change_sha256"],
         }

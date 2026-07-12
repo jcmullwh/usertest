@@ -11,6 +11,7 @@ from usertest_implement.resume_state import (
     LIFECYCLE_VERIFICATION_FAILED,
     LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
     RESUME_STATE_ARTIFACT_NAME,
+    implementation_author_continuity,
     write_ticket_resume_state,
 )
 from usertest_implement.review_context import (
@@ -57,6 +58,63 @@ def _read_text_if_present(path: Path, *, max_chars: int) -> str | None:
     if len(text) <= max_chars:
         return text
     return text[-max_chars:] + "\n...[truncated to tail]"
+
+
+def _implementation_author_for_resume(
+    *, run_dir: Path, resume_state: dict[str, Any]
+) -> dict[str, Any]:
+    recorded = resume_state.get("implementation_author")
+    if isinstance(recorded, dict):
+        agent = _clean_str(recorded.get("agent"))
+        session_id = _clean_str(recorded.get("session_id"))
+        if agent is not None or session_id is not None:
+            exact = agent == "codex" and session_id is not None
+            return {
+                **recorded,
+                "agent": agent,
+                "session_id": session_id,
+                "exact_session_available": exact,
+                "status": (
+                    "exact_session_available"
+                    if exact
+                    else _clean_str(recorded.get("status")) or "author_session_unavailable"
+                ),
+            }
+    return implementation_author_continuity(run_dir)
+
+
+def _resume_agent_continuity(
+    *, run_dir: Path, resume_state: dict[str, Any], requested_agent: str
+) -> tuple[str, str | None, dict[str, Any]]:
+    author = _implementation_author_for_resume(run_dir=run_dir, resume_state=resume_state)
+    author_agent = _clean_str(author.get("agent"))
+    author_session_id = _clean_str(author.get("session_id"))
+    if author_agent == "codex" and author_session_id is not None:
+        return (
+            "codex",
+            author_session_id,
+            {
+                **author,
+                "status": "exact_author_session",
+                "requested_agent": requested_agent,
+                "effective_agent": "codex",
+                "fresh_restart": False,
+            },
+        )
+    # Legacy/incomplete runs may not have a resumable author session. Preserve
+    # throughput, but make the fresh restart explicit instead of claiming that
+    # the author received the feedback.
+    return (
+        requested_agent,
+        None,
+        {
+            **author,
+            "status": _clean_str(author.get("status")) or "author_session_unavailable",
+            "requested_agent": requested_agent,
+            "effective_agent": requested_agent,
+            "fresh_restart": True,
+        },
+    )
 
 
 def _artifact_status(run_dir: Path, filename: str) -> str:
@@ -720,10 +778,16 @@ def _cmd_resume_pr(
     if exec_maintenance_image_metadata_path is not None:
         exec_maintenance_image_metadata_path = exec_maintenance_image_metadata_path.resolve()
 
+    effective_agent, codex_resume_session_id, author_continuity = _resume_agent_continuity(
+        run_dir=run_dir,
+        resume_state=resume_state,
+        requested_agent=str(args.agent),
+    )
+
     request = RunRequest(
         repo=repo_input,
         ref=ref,
-        agent=str(args.agent),
+        agent=effective_agent,
         policy=str(args.policy),
         persona_id=args.persona_id,
         mission_id=args.mission_id,
@@ -731,6 +795,7 @@ def _cmd_resume_pr(
         model=args.model,
         agent_config_overrides=tuple(args.agent_config_override or []),
         agent_append_system_prompt=prompt,
+        codex_resume_session_id=codex_resume_session_id,
         keep_workspace=True,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
@@ -759,6 +824,7 @@ def _cmd_resume_pr(
                     "pr_url": pr_url,
                     "branch": ref,
                     "current_pr_context": pr_context,
+                    "implementation_author_continuity": author_continuity,
                     "unresolved_review_findings": _review_findings_for_resume(review_summary),
                     "failing_check_pointers": _failing_check_pointers(pr_context),
                     "run_request": {
@@ -767,6 +833,7 @@ def _cmd_resume_pr(
                         "agent": request.agent,
                         "policy": request.policy,
                         "model": request.model,
+                        "codex_resume_session_id": request.codex_resume_session_id,
                         "keep_workspace": request.keep_workspace,
                         "resume_workspace_dir": str(request.resume_workspace_dir) if request.resume_workspace_dir is not None else None,
                         "verification_commands": list(request.verification_commands),
@@ -803,6 +870,7 @@ def _cmd_resume_pr(
             "workspace_strategy": workspace_strategy,
             "pr_url": pr_url,
             "branch": ref,
+            "implementation_author_continuity": author_continuity,
             "source_evidence_paths": _artifact_path_map_for_pr_resume(
                 run_dir=run_dir,
                 review_run_dir=_review_run_dir_from_state(resume_state),
@@ -820,7 +888,7 @@ def _cmd_resume_pr(
             "url": pr_url,
             "branch": ref,
             "title": pr_meta.get("title"),
-            "agent": str(args.agent),
+            "agent": effective_agent,
             "model": args.model,
             "error": None,
         },
@@ -1124,10 +1192,16 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     if exec_maintenance_image_metadata_path is not None:
         exec_maintenance_image_metadata_path = exec_maintenance_image_metadata_path.resolve()
 
+    effective_agent, codex_resume_session_id, author_continuity = _resume_agent_continuity(
+        run_dir=run_dir,
+        resume_state=resume_state,
+        requested_agent=str(args.agent),
+    )
+
     request = RunRequest(
         repo=repo_input,
         ref=ref,
-        agent=str(args.agent),
+        agent=effective_agent,
         policy=str(args.policy),
         persona_id=args.persona_id,
         mission_id=args.mission_id,
@@ -1135,6 +1209,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         model=args.model,
         agent_config_overrides=tuple(args.agent_config_override or []),
         agent_append_system_prompt=prompt,
+        codex_resume_session_id=codex_resume_session_id,
         keep_workspace=True,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
@@ -1159,12 +1234,14 @@ def _cmd_resume(args: argparse.Namespace) -> int:
                     "original_run_dir": str(run_dir),
                     "resume_state_path": str(state_path),
                     "workspace_strategy": workspace_strategy,
+                    "implementation_author_continuity": author_continuity,
                     "run_request": {
                         "repo": request.repo,
                         "ref": request.ref,
                         "agent": request.agent,
                         "policy": request.policy,
                         "model": request.model,
+                        "codex_resume_session_id": request.codex_resume_session_id,
                         "keep_workspace": request.keep_workspace,
                         "resume_workspace_dir": str(request.resume_workspace_dir) if request.resume_workspace_dir is not None else None,
                         "verification_commands": list(request.verification_commands),
@@ -1193,6 +1270,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             "resumed_from_resume_state_path": str(state_path),
             "resumed_from_lifecycle_state": lifecycle,
             "workspace_strategy": workspace_strategy,
+            "implementation_author_continuity": author_continuity,
             "source_evidence_paths": {name.removesuffix(".json"): str(run_dir / name) for name in _REQUIRED_RESUME_ARTIFACTS},
         },
     )

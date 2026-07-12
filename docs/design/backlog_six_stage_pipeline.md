@@ -315,36 +315,78 @@ Generated-plan cleanup is non-destructive. Duplicate and superseded files move t
 
 ## Shadow rollout and export gate
 
-`--shadow` runs the complete live pipeline and evaluates the depth invariants without exporting
-tickets or updating the atom-action ledger. It cannot be combined with `--dry-run`. The cycle and
-its content hashes are appended beside the backlog in `<target>.shadow_state.json`.
+`--shadow` runs the complete live pipeline without exporting tickets or updating the atom-action
+ledger, seals the exact materialized artifacts in `<target>.shadow_pending.json`, and exits pending
+independent adjudication. After the post-run adjudication is written, `--shadow --score-shadow`
+evaluates and records that exact run without invoking any model stage. A preexisting unchanged
+adjudication cannot qualify the new run. The scored cycle and its content hashes are appended beside
+the backlog in `<target>.shadow_state.json`. Neither phase can be combined with `--dry-run`.
 
-Implementation entry points use one centralized refresh transaction under an OS-backed scope lock:
-a preliminary shadow, a fresh intent snapshot and UX review, then two fresh stable qualifying
-shadows followed immediately by export. The transaction uses one repo/ref/profile/agent/model and
-one ledger pair throughout, probes live PR state before every boundary, and fails closed if any PR
-is open or the probe cannot establish that none are open.
+Release qualification and routine regeneration are separate. Release runs use the two-phase
+`--shadow` workflow above and never happen implicitly during implementation throughput. Machine-local
+held-out paths can be supplied with `--qualification-corpus-manifest`,
+`--qualification-output-adjudication`, and `--no-actionable-evidence-receipt`; the overrides are
+release-only, do not edit tracked configuration, and remain subject to the same model-workspace
+exposure check.
+
+Implementation entry points use one centralized operational transaction under an OS-backed scope
+lock: one `--operational-shadow` model run, a current intent snapshot and UX review, then
+`--operational-shadow --score-operational-shadow` and immediate export. Phase two does not invoke a
+model or consume benchmark labels. It proves the phase-one backlog and model-stage artifacts are
+unchanged, binds the current UX/config/source artifacts, and appends exactly one fresh operational
+cycle. Open IDEA, release, or unrelated implementation PRs are not a repository-wide mining lock;
+active generated cases are suppressed by canonical case/plan provenance during export.
 
 `configs/backlog_export_gate.yaml` keeps `reports export-tickets` locked until the configured number
-of consecutive shadow cycles pass with the same source-observation atom corpus, canonical case
-graph, ticket set, complete pipeline source/configuration manifest, and runner-owned research proof
-basis. The proof-basis hash covers each implementation-ready stage-3 case's origin evidence
+of consecutive `positive_throughput` shadow cycles pass with the same source-observation atom corpus,
+sealed source-group recovered/missed outcomes, and complete pipeline source/configuration manifest.
+Each cycle still binds its exact canonical case graph, ticket set, and runner-owned research proof
+basis; those shapes are not cross-cycle equality keys because independently good nondeterministic
+runs may group symptoms or select mechanisms differently. The proof-basis hash covers each
+implementation-ready stage-3 case's origin evidence
 assignment and artifact hashes, repository revision, replay state/output receipts, inspected source,
 causal and control links, and actual Docker `image_id`. Mutable image tags, run-local paths,
 container names, and generation timestamps are excluded; changing the immutable image ID or any
-decision-bearing receipt resets the streak. A Docker receipt without an observed
+decision-bearing receipt invalidates that cycle's exact proof, but a different independently good
+proof does not by itself reset the semantic streak. A Docker receipt without an observed
 `sha256:<digest>` image ID cannot qualify even when its configured tag is present. Source atom hashes
 include evidence content, severity, and lineage; derived research/implementation/verification atoms
 remain auditable but do not reset stability merely because a shadow run created another receipted
 investigation with the same verified basis. `require_exact_export_projection` remains a compatible
-configuration field, but cross-cycle equality is evaluated over canonical case and plan intent:
-source evidence, mechanism/hypothesis binding, exact target paths and symbols, and executable
-before/after oracles. Generated prose, fingerprints, and content-addressed plan revision IDs are not
-stability signals. In both modes separate byte hashes bind export to the latest backlog and complete
-rendered export projection; any later edit locks the gate. A failed shadow cycle resets the
-consecutive count.
+configuration field. Generated prose, case-graph shape, fingerprints, exact ticket mechanisms,
+research-proof hashes, and content-addressed plan revision IDs are not cross-cycle stability
+signals. In both modes separate byte hashes bind export to the latest backlog and complete rendered
+export projection; any later edit locks the gate. Operational cycles never earn or extend the
+positive release streak. A passing operational cycle may preserve that streak only when its exact
+pipeline/config stability hash matches the retained release anchor. A failed operational cycle
+blocks its current export; a newer failed release qualification invalidates every older anchor.
 
-Shadow state schema 7 and cycle schema 5 are strict. Earlier state is rejected rather than upgraded
+Qualification uses a pre-run, byte-hash-anchored corpus manifest outside every model-readable
+workspace and a separately hash-bound post-run output adjudication. The manifest independently
+groups source atoms as actionable, non-actionable, ambiguous, or unknown. The adjudication rates
+accepted research, selection, plan, and authoritative ticket artifacts as good, bad, or unknown;
+it must include the new pending-run receipt's `content_sha256`, so a stale pre-run judgment cannot
+be refreshed by merely touching its file. Readiness and green syntax never imply quality. Positive qualification requires the configured
+minimum good ticket count and good-to-bad ratio, permits noncritical bad tickets when good materially
+outnumbers them, and rejects critical or unknown authoritative tickets. Every bad or unknown
+artifact emits a hash-bound correction route to its exact author session when runner provenance
+supports continuation. Those routes remain explicitly `pending_orchestration` until a consumer
+records their use; emitting a route alone is not a claim that self-healing completed. A certified
+exact empty corpus is recorded as `verified_exhaustion`: it can safely export the empty operational
+refresh, but it never earns or extends the positive-throughput release streak.
+
+Exact qualification sidecar bytes remain bound to each cycle for integrity, but they are not
+cross-cycle equality keys. Streak stability uses source-evidence actionability groups and typed
+outcome classes, excluding derived-only atom growth, generated prose, and output content hashes.
+This lets independently good nondeterministic runs form a streak without weakening per-cycle
+tamper detection.
+
+These labels are sampled independent judgments, not a closed specification. Contract integrity
+does not prove adjudicator calibration or coverage of every future failure shape. Reports therefore
+retain unknown, false-rejected-good, repaired, per-kind quality, recovery, and good-to-bad metrics;
+non-authoritative unknowns and false-rejection observations are not hidden purity gates.
+
+Shadow state schema 10 and cycle schema 8 are strict. Earlier state is rejected rather than upgraded
 or counted toward a qualifying streak; archive the old state and complete the configured number of
 new live shadow cycles. This is deliberately a rollout gate,
 not a test-only assertion; operators must run the configured number of real agent-backed shadow
@@ -361,6 +403,8 @@ target.solution_selection.json
 target.change_plans.json
 target.case_registry.json
 target.backlog.json
+target.shadow_pending.json
+target.shadow_state.json
 target.backlog_artifacts/
   problem_mining/
   problem_prioritization/

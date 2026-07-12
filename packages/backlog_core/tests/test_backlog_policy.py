@@ -22,6 +22,141 @@ def _canonical_sha256(value: object) -> str:
     return sha256(encoded.encode()).hexdigest()
 
 
+def _attach_exact_origin_boundary(
+    *,
+    proof: dict[str, object],
+    verification: dict[str, object],
+    oracle: dict[str, object],
+    positive_contract: dict[str, object],
+    mechanism_evidence_ids: list[str],
+    atom_id: str,
+) -> None:
+    experiment_id = str(oracle["research_experiment_id"])
+    replay = next(
+        value
+        for value in verification["experiments"]
+        if value["experiment_id"] == experiment_id
+    )
+    atom_receipt = next(
+        value
+        for value in proof["evidence_assignment"]["atom_receipts"]
+        if value["atom_id"] == atom_id
+    )
+    atom_snapshot = atom_receipt["atom_snapshot"]
+    command = str(atom_snapshot["command"])
+    argv = list(replay["executed_argv"])
+    authorization = {
+        "authorization_kind": "fixture_exact_origin_command",
+        "executed_argv_sha256": _canonical_sha256(argv),
+        "shell": False,
+        "workspace_confined": True,
+        "origin_atom_id": atom_id,
+        "origin_atom_sha256": atom_receipt["atom_sha256"],
+        "origin_atom_field_path": "$.command",
+        "origin_command_value_sha256": _canonical_sha256(command),
+        "runner_attested": True,
+    }
+    authorization["authorization_sha256"] = _canonical_sha256(authorization)
+    replay_inputs = {
+        "schema_version": 1,
+        "source_experiment_id": experiment_id,
+        "environment": {},
+        "disposable_state_paths": [],
+        "runner_approved": True,
+    }
+    replay_inputs["replay_inputs_sha256"] = _canonical_sha256(replay_inputs)
+    contract_id = str(positive_contract["positive_outcome_contract_id"])
+    replay_observation = {
+        "schema_version": 1,
+        "source_experiment_id": experiment_id,
+        "selector": {"source": "exit_code"},
+        "source_observation_sha256": _canonical_sha256(
+            {
+                "exit_code": replay["exit_code"],
+                "stdout_sha256": replay["stdout_sha256"],
+                "stderr_sha256": replay["stderr_sha256"],
+            }
+        ),
+        "predicate_input_mode": "post_change_observation",
+        "positive_outcome_contract_ids": [contract_id],
+        "runner_attested": True,
+    }
+    replay_observation["replay_observation_sha256"] = _canonical_sha256(
+        replay_observation
+    )
+    replay["command_authorization"] = authorization
+    replay["replay_inputs"] = replay_inputs
+    oracle["execution"] = {
+        "argv": argv,
+        "command_authorization": authorization,
+        "platform_requirement": "any",
+        "shell": False,
+        "replay_inputs": replay_inputs,
+        "replay_observation": replay_observation,
+    }
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _canonical_sha256(oracle)
+    source_identity = {
+        "schema_version": 1,
+        "origin_atom_id": atom_id,
+        "origin_atom_sha256": atom_receipt["atom_sha256"],
+        "origin_atom_field_path": "$.command",
+        "origin_command_value_sha256": _canonical_sha256(command),
+        "executed_argv_sha256": authorization["executed_argv_sha256"],
+        "command_authorization_sha256": authorization["authorization_sha256"],
+        "runner_attested": True,
+    }
+    source_identity["source_identity_sha256"] = _canonical_sha256(source_identity)
+    equivalence = {
+        "schema_version": 1,
+        "equivalence_mode": "exact_origin_scenario_identity",
+        "source_experiment_id": experiment_id,
+        "origin_atom_ids": [atom_id],
+        "source_identity": source_identity,
+        "source_identity_refs": [
+            f"origin_command_identity:{source_identity['source_identity_sha256']}"
+        ],
+        "replay_inputs_sha256": replay_inputs["replay_inputs_sha256"],
+        "replay_observation_sha256": replay_observation[
+            "replay_observation_sha256"
+        ],
+        "positive_outcome_contract_ids": [contract_id],
+        "selected_mechanism_evidence_ids": sorted(mechanism_evidence_ids),
+        "outcome_oracle_id": oracle["outcome_oracle_id"],
+        "runner_attested": True,
+    }
+    equivalence["equivalence_sha256"] = _canonical_sha256(equivalence)
+    replay_projection = {
+        "experiment_id": experiment_id,
+        "executed_argv_sha256": authorization["executed_argv_sha256"],
+        "command_authorization_sha256": authorization["authorization_sha256"],
+        "stdout_sha256": replay["stdout_sha256"],
+        "stderr_sha256": replay["stderr_sha256"],
+        "replay_inputs_sha256": replay_inputs["replay_inputs_sha256"],
+        "execution_isolation_sha256": _canonical_sha256(replay["execution_isolation"]),
+    }
+    boundary = {
+        "schema_version": 1,
+        "experiment_id": experiment_id,
+        "boundary_kind": "fixture/repository-original-scenario",
+        "requires_live_verification": False,
+        "faithful_equivalence": True,
+        "provenance_refs": sorted(
+            {
+                f"research_experiment:{experiment_id}",
+                f"clean_replay:{_canonical_sha256(replay_projection)}",
+                *mechanism_evidence_ids,
+                str(oracle["outcome_oracle_id"]),
+                f"equivalence_proof:{equivalence['equivalence_sha256']}",
+            }
+        ),
+        "rationale_sha256": _canonical_sha256("exact original fixture identity"),
+        "runner_attested": True,
+        "equivalence_proof": equivalence,
+    }
+    boundary["boundary_sha256"] = _canonical_sha256(boundary)
+    verification["verification_boundaries"] = [boundary]
+
+
 def _research_proof() -> dict[str, object]:
     proof: dict[str, object] = {
         "research_schema_version": 3,
@@ -166,9 +301,7 @@ def _research_proof() -> dict[str, object]:
                         {
                             "atom_id": "atom:test",
                             "text": "failure",
-                            "command": (
-                                "pytest -q tests/test_core.py::test_reported_failure"
-                            ),
+                            "command": ("pytest -q tests/test_core.py::test_reported_failure"),
                             "exit_code": 1,
                             "evidence_role": "observation",
                             "origin_stage": "runtime",
@@ -426,6 +559,7 @@ def _research_proof() -> dict[str, object]:
                 "experiment_id": "exp-1",
                 "atom_id": "atom:test",
                 "match_kind": "command_and_exit_code",
+                "origin_atom_sha256": assignment["atom_receipts"][0]["atom_sha256"],
             },
             {
                 "experiment_id": "exp-1",
@@ -449,9 +583,7 @@ def _research_proof() -> dict[str, object]:
         "expression": "True",
         "ast_sha256": sha256(b"Constant(value=True)").hexdigest(),
     }
-    control_call.update(
-        {"arguments": [control_argument], "arguments_complete": True}
-    )
+    control_call.update({"arguments": [control_argument], "arguments_complete": True})
     control_receipt = {
         "verification_method": "pytest_ast_controlled_difference_v2",
         "hypothesis_id": "h1",
@@ -500,13 +632,21 @@ def _research_proof() -> dict[str, object]:
             }
         ),
     }
-    control_receipt["control_verification_id"] = (
-        "control_verification:" + _canonical_sha256(control_receipt)
+    control_receipt["control_verification_id"] = "control_verification:" + _canonical_sha256(
+        control_receipt
     )
     verification["control_verifications"] = [control_receipt]
-    production_consumer = {
-        "kind": "production_entrypoint",
+    production_consumer_projection = {
+        "kind": "runner_observed_entrypoint",
         "entrypoint": "core.run",
+        "attestation_basis": "runner_mechanism_link",
+        "runner_attested": True,
+    }
+    production_consumer = {
+        **production_consumer_projection,
+        "consumer_identity_sha256": _canonical_sha256(
+            production_consumer_projection
+        ),
     }
     mechanism_evidence = {
         "evidence_type": "controlled_scenario",
@@ -516,6 +656,14 @@ def _research_proof() -> dict[str, object]:
         "experiment_ids": ["exp-1", "exp-control"],
         "artifact_refs": ["artifact:repro", "artifact:source"],
         "origin_atom_ids": ["atom:test"],
+        "origin_symptom_bindings": [
+            {
+                "experiment_id": "exp-1",
+                "atom_id": "atom:test",
+                "match_kind": "command_and_exit_code",
+                "origin_atom_sha256": assignment["atom_receipts"][0]["atom_sha256"],
+            }
+        ],
         "path_name": "core.run",
         "consumer_identity": production_consumer,
         "independence_key": _canonical_sha256(production_consumer),
@@ -525,10 +673,33 @@ def _research_proof() -> dict[str, object]:
         },
         "observable_difference": control_receipt["observable_difference"],
         "strong_pytest_control_id": control_receipt["control_verification_id"],
-        "adversarial_effect": "limits_scope",
+        "mechanism_link": {
+            "verification_method": "runner_exception_symbol_trace_v1",
+            "entrypoint": "core.run",
+            "code_path": [
+                {
+                    "symbol": "core.run",
+                    "path": "src/core.py",
+                    "trace_excerpt_sha256": "8" * 64,
+                }
+            ],
+        },
+        "adversarial_effect": "supports_selection",
     }
-    mechanism_evidence["mechanism_evidence_id"] = (
-        "mechanism_evidence:" + _canonical_sha256(mechanism_evidence)
+    mechanism_evidence["causal_root_bindings"] = [
+        {
+            "kind": "origin_symptom_observation",
+            "experiment_ids": ["exp-1", "exp-control"],
+            "origin_atom_ids": ["atom:test"],
+            "origin_bindings_sha256": _canonical_sha256(
+                mechanism_evidence["origin_symptom_bindings"]
+            ),
+            "mechanism_link_sha256": _canonical_sha256(mechanism_evidence["mechanism_link"]),
+            "root_mechanism_symbol": "core.run",
+        }
+    ]
+    mechanism_evidence["mechanism_evidence_id"] = "mechanism_evidence:" + _canonical_sha256(
+        mechanism_evidence
     )
     challenge_evidence = {
         "evidence_type": "exception_trace",
@@ -538,6 +709,7 @@ def _research_proof() -> dict[str, object]:
         "experiment_ids": ["exp-challenge"],
         "artifact_refs": ["artifact:repro", "artifact:source"],
         "origin_atom_ids": ["atom:test"],
+        "origin_symptom_bindings": [],
         "path_name": "core.run",
         "consumer_identity": production_consumer,
         "independence_key": _canonical_sha256(production_consumer),
@@ -567,13 +739,11 @@ def _research_proof() -> dict[str, object]:
         "observed_platform": "windows",
         "adversarial_effect": "supports_selection",
     }
-    challenge_evidence["mechanism_evidence_id"] = (
-        "mechanism_evidence:" + _canonical_sha256(challenge_evidence)
+    challenge_evidence["mechanism_evidence_id"] = "mechanism_evidence:" + _canonical_sha256(
+        challenge_evidence
     )
     verification["mechanism_evidence"] = [mechanism_evidence, challenge_evidence]
-    replay_by_id = {
-        replay["experiment_id"]: replay for replay in verification["experiments"]
-    }
+    replay_by_id = {replay["experiment_id"]: replay for replay in verification["experiments"]}
     alternative_argument = {
         "slot": "keyword:alternative",
         "expression": "False",
@@ -623,8 +793,8 @@ def _research_proof() -> dict[str, object]:
             }
         ),
     }
-    intervention["intervention_receipt_id"] = (
-        "falsification_intervention:" + _canonical_sha256(intervention)
+    intervention["intervention_receipt_id"] = "falsification_intervention:" + _canonical_sha256(
+        intervention
     )
     verification["falsification_interventions"] = [intervention]
     verification["deterministic_mechanism_closures"] = []
@@ -644,28 +814,22 @@ def _research_proof() -> dict[str, object]:
             "scenario_kind": "control",
             "command": proof["experiments"][2]["command"],
             "declared_result": proof["experiments"][2]["result"],
-            "observable_assertion": proof["experiments"][2][
-                "observable_assertion"
-            ],
+            "observable_assertion": proof["experiments"][2]["observable_assertion"],
             "exit_code": replay_by_id["exp-challenge"]["exit_code"],
             "stdout_sha256": replay_by_id["exp-challenge"]["stdout_sha256"],
             "stderr_sha256": replay_by_id["exp-challenge"]["stderr_sha256"],
-            "mechanism_evidence_ids": [
-                challenge_evidence["mechanism_evidence_id"]
-            ],
+            "mechanism_evidence_ids": [challenge_evidence["mechanism_evidence_id"]],
             "intervention_receipt_id": intervention["intervention_receipt_id"],
         }
     ]
     verification["verified_mechanism"] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "mechanism_symbols": ["core.run"],
         "code_paths": [{"symbol": "core.run", "path": "src/core.py"}],
     }
     probe_points = [
         {
-            "verification_method": receipt["controlled_input_difference"][
-                "verification_method"
-            ],
+            "verification_method": receipt["controlled_input_difference"]["verification_method"],
             "mechanism_symbols": ["core.run"],
             "slot": receipt["controlled_input_difference"]["difference"]["slot"],
             "mechanism_symbol": "core.run",
@@ -673,7 +837,7 @@ def _research_proof() -> dict[str, object]:
         for receipt in (control_receipt, intervention)
     ]
     verification["verified_mechanism_provenance"] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "primary_hypothesis_id": "h1",
         "mechanism_evidence_ids": sorted(
             [
@@ -681,10 +845,49 @@ def _research_proof() -> dict[str, object]:
                 challenge_evidence["mechanism_evidence_id"],
             ]
         ),
+        "causal_root_evidence_ids": [mechanism_evidence["mechanism_evidence_id"]],
+        "support_connectivity": sorted(
+            [
+                {
+                    "mechanism_evidence_id": mechanism_evidence["mechanism_evidence_id"],
+                    "experiment_ids": ["exp-1", "exp-control"],
+                    "connection_kind": "causal_root",
+                    "connected_from_mechanism_evidence_id": None,
+                    "shared_verified_symbols": [],
+                    "verified_causal_edge": None,
+                    "verified_causal_edges": [],
+                    "causal_root_kinds": ["origin_symptom_observation"],
+                },
+                {
+                    "mechanism_evidence_id": challenge_evidence["mechanism_evidence_id"],
+                    "experiment_ids": ["exp-challenge"],
+                    "connection_kind": "shared_verified_symbol",
+                    "connected_from_mechanism_evidence_id": mechanism_evidence[
+                        "mechanism_evidence_id"
+                    ],
+                    "shared_verified_symbols": ["core.run"],
+                    "verified_causal_edge": None,
+                    "verified_causal_edges": [],
+                    "causal_root_kinds": [],
+                },
+            ],
+            key=lambda value: value["mechanism_evidence_id"],
+        ),
+        "support_symbol_coverage": sorted(
+            [
+                {
+                    "experiment_ids": ["exp-1", "exp-control"],
+                    "mechanism_symbols": ["core.run"],
+                },
+                {
+                    "experiment_ids": ["exp-challenge"],
+                    "mechanism_symbols": ["core.run"],
+                },
+            ],
+            key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+        ),
         "causal_control_ids": [control_receipt["control_verification_id"]],
-        "falsification_intervention_ids": [
-            intervention["intervention_receipt_id"]
-        ],
+        "falsification_intervention_ids": [intervention["intervention_receipt_id"]],
         "deterministic_closure_ids": [],
         "research_probe_control_points": sorted(
             probe_points,
@@ -701,15 +904,18 @@ def _research_proof() -> dict[str, object]:
         "schema_version": 1,
         "case_id": proof["case_id"],
         "repo_revision": proof["repo_revision"],
+        "primary_hypothesis_id": "h1",
+        "primary_verified_mechanism_sha256": verification["verified_mechanism_sha256"],
+        "primary_verified_mechanism_provenance_sha256": verification[
+            "verified_mechanism_provenance_sha256"
+        ],
         "research_experiment_id": "exp-1",
         "scenario_kind": "original_replay",
         "origin_atom_ids": ["atom:test"],
         "mechanism_evidence_ids": [mechanism_evidence["mechanism_evidence_id"]],
         "baseline": {
             "exit_code": 1,
-            "observable_assertion": proof["experiments"][0][
-                "observable_assertion"
-            ],
+            "observable_assertion": proof["experiments"][0]["observable_assertion"],
             "stdout_sha256": replay_by_id["exp-1"]["stdout_sha256"],
             "stderr_sha256": replay_by_id["exp-1"]["stderr_sha256"],
         },
@@ -719,9 +925,7 @@ def _research_proof() -> dict[str, object]:
             "argv": replay_by_id["exp-1"]["executed_argv"],
             "command_authorization": {
                 "authorization_kind": "standard_test_or_research_harness",
-                "executed_argv_sha256": _canonical_sha256(
-                    replay_by_id["exp-1"]["executed_argv"]
-                ),
+                "executed_argv_sha256": _canonical_sha256(replay_by_id["exp-1"]["executed_argv"]),
                 "shell": False,
                 "workspace_confined": True,
             },
@@ -735,6 +939,11 @@ def _research_proof() -> dict[str, object]:
         "kind": "origin_evidence_semantic_contract",
         "research_experiment_id": "exp-1",
         "mechanism_evidence_ids": [mechanism_evidence["mechanism_evidence_id"]],
+        "primary_hypothesis_id": "h1",
+        "primary_verified_mechanism_sha256": verification["verified_mechanism_sha256"],
+        "primary_verified_mechanism_provenance_sha256": verification[
+            "verified_mechanism_provenance_sha256"
+        ],
         "origin_evidence": {
             "atom_id": "atom:test",
             "atom_sha256": assignment["atom_receipts"][0]["atom_sha256"],
@@ -754,7 +963,14 @@ def _research_proof() -> dict[str, object]:
         "positive_outcome_contract:" + _canonical_sha256(positive_contract)
     )
     oracle["positive_outcome_contracts"] = [positive_contract]
-    oracle["outcome_oracle_id"] = "outcome_oracle:" + _canonical_sha256(oracle)
+    _attach_exact_origin_boundary(
+        proof=proof,
+        verification=verification,
+        oracle=oracle,
+        positive_contract=positive_contract,
+        mechanism_evidence_ids=[str(mechanism_evidence["mechanism_evidence_id"])],
+        atom_id="atom:test",
+    )
     verification["outcome_oracles"] = [oracle]
     selector_consumer = {
         "kind": "evidence_selector",
@@ -790,9 +1006,7 @@ def _strict_ticket(*, kinds: list[str], breadth: dict[str, int]) -> dict[str, ob
     assert isinstance(verification, dict)
     failure_path = verification["failure_paths"][0]
     mechanism_evidence = verification["mechanism_evidence"][0]
-    positive_contract = verification["outcome_oracles"][0][
-        "positive_outcome_contracts"
-    ][0]
+    positive_contract = verification["outcome_oracles"][0]["positive_outcome_contracts"][0]
     option = {
         "case_id": "case:test",
         "option_id": "option:test:direct",
@@ -910,9 +1124,7 @@ def _strict_ticket(*, kinds: list[str], breadth: dict[str, int]) -> dict[str, ob
         "implementation_steps": ["Update `src/core.py` at `run`."],
         "verification_steps": ["Replay regression."],
         "success_criteria": ["Scenario passes."],
-        "verification_commands": [
-            "pytest -q tests/test_core.py::test_reported_failure"
-        ],
+        "verification_commands": ["pytest -q tests/test_core.py::test_reported_failure"],
         "outcome_verification_roles": {
             "original_scenario": {
                 "description": "Replay the exact reported failure after the change.",
@@ -931,10 +1143,8 @@ def _strict_ticket(*, kinds: list[str], breadth: dict[str, int]) -> dict[str, ob
             "mitigation_effect": None,
             "recurrence": {
                 "description": "Inspect fresh same-class recurrence evidence.",
-                "commands": ["python tools/recurrence_probe.py"],
-                "predicates": [
-                    {"type": "command_exit_code", "command_index": 0, "equals": 0}
-                ],
+                "commands": [],
+                "predicates": [],
             },
         },
         "change_targets": [

@@ -1,6 +1,7 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from collections.abc import Mapping
 from hashlib import sha256
 
 from backlog_core import assess_ticket_readiness
@@ -35,6 +36,12 @@ from usertest_backlog.commands.review_ux import (
     _render_ux_review_section_for_ticket,
 )
 from usertest_backlog.shared import *
+from usertest_backlog.workflows.pipeline_provenance import (
+    pipeline_source_config_bindings as _pipeline_source_config_bindings,
+)
+from usertest_backlog.workflows.qualification_transaction import (
+    load_qualification_input_bundle,
+)
 from usertest_backlog.workflows.shadow_validation import (
     normalize_shadow_gate_config,
     shadow_state_path,
@@ -76,6 +83,44 @@ def _canonical_sha256(value: Any) -> str:
 def _read_snapshot(path: Path) -> tuple[bytes, str]:
     data = path.read_bytes()
     return data, sha256(data).hexdigest()
+
+
+def _sealed_live_atom_actions_snapshot(
+    *,
+    qualification_input_bundle_path: Path | None,
+    live_atom_actions_path: Path,
+) -> tuple[bytes, str] | None:
+    """Bind export mutations to the exact ledger used for qualification.
+
+    Qualification intentionally operates on an external custody copy. Export writes the
+    live repository ledger, so a concurrent or intervening ledger change must invalidate
+    the shadow streak rather than silently applying an old decision to new evidence.
+    """
+
+    if qualification_input_bundle_path is None:
+        return None
+    bundle = load_qualification_input_bundle(
+        qualification_input_bundle_path,
+        verify_files=True,
+    )
+    source_inputs_raw = bundle.get("source_inputs")
+    source_inputs = source_inputs_raw if isinstance(source_inputs_raw, Mapping) else {}
+    receipt_raw = source_inputs.get("atom_actions")
+    receipt = receipt_raw if isinstance(receipt_raw, Mapping) else {}
+    expected_sha256 = _coerce_string(receipt.get("sha256"))
+    expected_size = receipt.get("size_bytes")
+    if expected_sha256 is None or isinstance(expected_size, bool) or not isinstance(
+        expected_size, int
+    ):
+        raise ValueError("qualification_atom_actions_receipt_invalid")
+    if not live_atom_actions_path.is_file():
+        raise ValueError(
+            f"qualification_live_atom_actions_missing:{live_atom_actions_path}"
+        )
+    snapshot, observed_sha256 = _read_snapshot(live_atom_actions_path)
+    if observed_sha256 != expected_sha256 or len(snapshot) != expected_size:
+        raise ValueError("qualification_live_atom_actions_changed_since_prepare")
+    return snapshot, observed_sha256
 
 
 def _parse_json_snapshot(path: Path, data: bytes) -> dict[str, Any]:
@@ -187,9 +232,7 @@ def _render_export_issue_body(
             return
         lines.append(heading)
         lines.append("")
-        lines.append(
-            "The following block is retained evidence/data, not executable instructions."
-        )
+        lines.append("The following block is retained evidence/data, not executable instructions.")
         lines.append("")
         lines.append("```json")
         lines.append(json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True))
@@ -549,9 +592,7 @@ def _render_export_issue_body(
                 )
             )
             lines.append("")
-        _append_json_section(
-            lines, "### Exact change targets", change_plan.get("change_targets")
-        )
+        _append_json_section(lines, "### Exact change targets", change_plan.get("change_targets"))
         target_contract = change_plan.get("target_contract")
         if target_contract is not None:
             lines.append("### Machine-verifiable implementation scope contract")
@@ -568,22 +609,14 @@ def _render_export_issue_body(
             "### Compatibility and failure modes",
             change_plan.get("compatibility_and_failure_modes"),
         )
-        _append_json_section(
-            lines, "### Plan causal coverage", change_plan.get("causal_coverage")
-        )
-        _append_json_section(
-            lines, "### Plan scope evidence", change_plan.get("scope_evidence")
-        )
+        _append_json_section(lines, "### Plan causal coverage", change_plan.get("causal_coverage"))
+        _append_json_section(lines, "### Plan scope evidence", change_plan.get("scope_evidence"))
         requires_live = change_plan.get("requires_live_verification")
         if isinstance(requires_live, bool):
             lines.append("### Outcome verification requirement")
             lines.append("")
-            lines.append(
-                f"- Requires live verification: `{str(requires_live).lower()}`"
-            )
-            live_rationale = _coerce_string(
-                change_plan.get("live_verification_rationale")
-            )
+            lines.append(f"- Requires live verification: `{str(requires_live).lower()}`")
+            live_rationale = _coerce_string(change_plan.get("live_verification_rationale"))
             if live_rationale:
                 lines.append(f"- Rationale: {live_rationale}")
             lines.append("")
@@ -801,117 +834,23 @@ def _shadow_projection_binding_errors(
     return errors
 
 
-def _pipeline_source_config_bindings(*, source_root: Path, config_root: Path) -> dict[str, Path]:
-    """Manifest every repository-owned generator source and configuration input.
+def _shadow_state_path_for_backlog(
+    backlog: Mapping[str, Any],
+    backlog_path: Path,
+) -> Path:
+    """Resolve the state ledger bound by the shadow transaction.
 
-    A hand-maintained source list inevitably omitted transitive pipeline modules. This
-    manifest deliberately covers the complete backlog application source tree, every
-    internal package source tree it can import, all repository configuration, the
-    dependency manifests for those components, and Git HEAD metadata. The enumerated
-    file/content set is the dirty manifest and includes untracked source without relying
-    on Git's mutable index cache. Adding, deleting, or changing any such file changes the
-    shadow export-input projection and resets the qualifying streak.
+    Legacy backlogs keep the colocated default. Sealed qualification cycles use
+    different cycle-local backlog paths but intentionally share one explicit
+    state ledger so consecutive independent cycles can form a release streak.
     """
 
-    source_root = source_root.resolve()
-    config_root = config_root.resolve()
-    candidates: set[Path] = set()
-    source_dirs = [source_root / "apps" / "usertest_backlog" / "src"]
-    packages_root = source_root / "packages"
-    if packages_root.is_dir():
-        source_dirs.extend(
-            path
-            for path in sorted(packages_root.glob("*/src"), key=lambda item: item.as_posix())
-            if path.is_dir()
-        )
-    for source_dir in source_dirs:
-        if not source_dir.is_dir():
-            continue
-        candidates.update(
-            path.resolve()
-            for path in source_dir.rglob("*")
-            if path.is_file()
-            and "__pycache__" not in path.parts
-            and path.suffix.casefold() not in {".pyc", ".pyo"}
-        )
-
-    if config_root.is_dir():
-        candidates.update(
-            path.resolve()
-            for path in config_root.rglob("*")
-            if path.is_file() and "__pycache__" not in path.parts
-        )
-
-    component_roots = [source_root, source_root / "apps" / "usertest_backlog"]
-    if packages_root.is_dir():
-        component_roots.extend(
-            path
-            for path in sorted(packages_root.iterdir(), key=lambda item: item.as_posix())
-            if path.is_dir() and (path / "src").is_dir()
-        )
-    for component_root in component_roots:
-        for filename in ("pyproject.toml", "pdm.lock"):
-            candidate = component_root / filename
-            if candidate.is_file():
-                candidates.add(candidate.resolve())
-
-    dot_git = source_root / ".git"
-    git_dir: Path | None = None
-    if dot_git.is_dir():
-        git_dir = dot_git.resolve()
-    elif dot_git.is_file():
-        try:
-            marker = dot_git.read_text(encoding="utf-8").strip()
-        except (OSError, UnicodeDecodeError):
-            marker = ""
-        if marker.casefold().startswith("gitdir:"):
-            raw_git_dir = marker.split(":", 1)[1].strip()
-            candidate = Path(raw_git_dir)
-            if not candidate.is_absolute():
-                candidate = source_root / candidate
-            git_dir = candidate.resolve()
-        candidates.add(dot_git.resolve())
-    if git_dir is not None:
-        candidates.update(
-            path.resolve()
-            for path in (git_dir / "HEAD", git_dir / "commondir")
-            if path.is_file()
-        )
-        common_dir = git_dir
-        commondir_path = git_dir / "commondir"
-        if commondir_path.is_file():
-            try:
-                raw_common = commondir_path.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeDecodeError):
-                raw_common = ""
-            if raw_common:
-                candidate = Path(raw_common)
-                if not candidate.is_absolute():
-                    candidate = git_dir / candidate
-                common_dir = candidate.resolve()
-        head_path = git_dir / "HEAD"
-        if head_path.is_file():
-            try:
-                head_text = head_path.read_text(encoding="utf-8").strip()
-            except (OSError, UnicodeDecodeError):
-                head_text = ""
-            if head_text.startswith("ref:"):
-                ref_path = common_dir / head_text.removeprefix("ref:").strip()
-                if ref_path.is_file():
-                    candidates.add(ref_path.resolve())
-                else:
-                    packed_refs = common_dir / "packed-refs"
-                    if packed_refs.is_file():
-                        candidates.add(packed_refs.resolve())
-
-    bindings: dict[str, Path] = {}
-    for path in sorted(candidates, key=lambda item: item.as_posix()):
-        try:
-            relative = path.relative_to(source_root).as_posix()
-        except ValueError:
-            relative = f"external/{sha256(str(path).encode('utf-8')).hexdigest()}/{path.name}"
-        bindings[f"pipeline.manifest:{relative}"] = path
-    return bindings
+    artifacts = backlog.get("artifacts")
+    artifacts = artifacts if isinstance(artifacts, Mapping) else {}
+    export_contract = artifacts.get("export_contract")
+    export_contract = export_contract if isinstance(export_contract, Mapping) else {}
+    configured = _coerce_string(export_contract.get("shadow_state_path"))
+    return Path(configured).expanduser().resolve() if configured else shadow_state_path(backlog_path)
 
 
 def _export_artifact_paths(
@@ -927,6 +866,10 @@ def _export_artifact_paths(
     artifacts = artifacts_raw if isinstance(artifacts_raw, dict) else {}
     pipeline_raw = artifacts.get("six_stage_pipeline")
     pipeline = pipeline_raw if isinstance(pipeline_raw, dict) else {}
+    qualification_raw = artifacts.get("shadow_qualification")
+    qualification = qualification_raw if isinstance(qualification_raw, dict) else {}
+    operational_raw = artifacts.get("operational_shadow")
+    operational = operational_raw if isinstance(operational_raw, dict) else {}
     bindings: dict[str, Path | None] = {
         "atoms": _contract_path(artifacts.get("atoms_jsonl"), repo_root=repo_root),
         "problem_records": _contract_path(
@@ -954,7 +897,65 @@ def _export_artifact_paths(
         "config.research": (repo_root / "configs" / "backlog_research.yaml").resolve(),
         "config.export_gate": export_gate_config_path.resolve(),
         "ux.review_json": _ux_review_path_for_backlog(backlog_path).resolve(),
+        "qualification.corpus_manifest": _contract_path(
+            qualification.get("qualification_corpus_manifest_path"),
+            repo_root=repo_root,
+        ),
+        "qualification.input_bundle": _contract_path(
+            qualification.get("qualification_input_bundle_path"),
+            repo_root=repo_root,
+        ),
+        "qualification.raw_first_pass_report": _contract_path(
+            qualification.get("raw_first_pass_report_path"),
+            repo_root=repo_root,
+        ),
+        "qualification.repaired_child_contract": _contract_path(
+            qualification.get("pending_repaired_run_receipt_path"),
+            repo_root=repo_root,
+        ),
+        "qualification.repair_bundle_manifest": _contract_path(
+            artifacts.get("qualification_repair_bundle_manifest"),
+            repo_root=repo_root,
+        ),
+        "qualification.output_adjudication": _contract_path(
+            qualification.get("qualification_output_adjudication_path"),
+            repo_root=repo_root,
+        ),
+        "qualification.no_actionable_receipt": _contract_path(
+            qualification.get("no_actionable_evidence_receipt_path"),
+            repo_root=repo_root,
+        ),
+        "qualification.pending_run_receipt": _contract_path(
+            qualification.get("pending_run_receipt_path"),
+            repo_root=repo_root,
+        ),
+        "operational.pending_run_receipt": _contract_path(
+            operational.get("pending_run_receipt_path"),
+            repo_root=repo_root,
+        ),
     }
+    correction_history_raw = qualification.get("correction_history")
+    correction_history = (
+        correction_history_raw if isinstance(correction_history_raw, list) else []
+    )
+    for index, item in enumerate(correction_history):
+        if not isinstance(item, Mapping):
+            continue
+        bindings[f"qualification.correction_history:{index}:failed_report"] = (
+            _contract_path(item.get("failed_report_path"), repo_root=repo_root)
+        )
+        bindings[f"qualification.correction_history:{index}:consumption"] = (
+            _contract_path(
+                item.get("correction_consumption_path"),
+                repo_root=repo_root,
+            )
+        )
+        bindings[f"qualification.correction_history:{index}:failure"] = (
+            _contract_path(
+                item.get("correction_failure_path"),
+                repo_root=repo_root,
+            )
+        )
 
     input_raw = backlog.get("input")
     input_meta = input_raw if isinstance(input_raw, dict) else {}
@@ -1160,20 +1161,16 @@ def _validate_export_change_plan(
         ticket_for_body["ticket_readiness"] = {
             "ready": readiness.get("ready") is True,
             "reasons": [
-                reason
-                for reason in readiness.get("reasons", [])
-                if isinstance(reason, str)
+                reason for reason in readiness.get("reasons", []) if isinstance(reason, str)
             ],
         }
         ticket_for_body["stage"] = stage
 
-        owner_repo_root, owner_repo_input, owner_repo_resolution = (
-            _resolve_owner_repo_root(
-                ticket=ticket,
-                scope_repo_input=backlog_scope_repo_input,
-                cli_repo_input=repo_input,
-                repo_root=repo_root,
-            )
+        owner_repo_root, owner_repo_input, owner_repo_resolution = _resolve_owner_repo_root(
+            ticket=ticket,
+            scope_repo_input=backlog_scope_repo_input,
+            cli_repo_input=repo_input,
+            repo_root=repo_root,
         )
         actual_owner = {
             "root": str(owner_repo_root.resolve()),
@@ -1188,8 +1185,7 @@ def _validate_export_change_plan(
         }
         if actual_owner != decision.get("owner"):
             raise ValueError(
-                "Ticket owner routing changed outside the shadowed projection: "
-                f"{fingerprint}"
+                f"Ticket owner routing changed outside the shadowed projection: {fingerprint}"
             )
 
         owner_key = owner_repo_root.resolve()
@@ -1247,9 +1243,7 @@ def _validate_export_change_plan(
                                     "relationship_outcome_states",
                                 )
                                 for item in (
-                                    existing.get(field, [])
-                                    if isinstance(existing, dict)
-                                    else []
+                                    existing.get(field, []) if isinstance(existing, dict) else []
                                 )
                                 if isinstance(item, str) and item.strip()
                             }
@@ -1275,8 +1269,7 @@ def _validate_export_change_plan(
             not include_actioned
             and not skip_plan_folder_dedupe
             and case_id is not None
-            and case_id
-            in _case_ids_awaiting_outcome_verification(plan_indexes.get(owner_key, {}))
+            and case_id in _case_ids_awaiting_outcome_verification(plan_indexes.get(owner_key, {}))
         ):
             continue
 
@@ -1288,9 +1281,7 @@ def _validate_export_change_plan(
             surface_area_high=surface_area_high,
         )
         if sha256(base_body.encode("utf-8")).hexdigest() != decision.get("body_sha256"):
-            raise ValueError(
-                f"Ticket body changed outside the shadowed projection: {fingerprint}"
-            )
+            raise ValueError(f"Ticket body changed outside the shadowed projection: {fingerprint}")
         body = (
             ux_section.strip() + "\n\n" + base_body.strip() + "\n"
             if ux_section is not None
@@ -1303,9 +1294,7 @@ def _validate_export_change_plan(
         if not isinstance(existing, dict):
             continue
         integrity_records = [
-            item
-            for item in existing.get("integrity_unknown_records", [])
-            if isinstance(item, dict)
+            item for item in existing.get("integrity_unknown_records", []) if isinstance(item, dict)
         ]
         if integrity_records:
             continue
@@ -1465,6 +1454,17 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     backlog_content_projection = dict(backlog_doc)
     backlog_content_projection.pop("generated_at_utc", None)
     backlog_snapshot_content_sha256 = _canonical_sha256(backlog_content_projection)
+    if (
+        backlog_doc.get("pipeline_kind") == "legacy_one_pass_analysis"
+        or backlog_doc.get("analysis_only") is True
+        or backlog_doc.get("export_eligible") is False
+    ):
+        print(
+            "Legacy one-pass backlog output is analysis-only and cannot be exported; "
+            "materialize the authoritative six-stage pipeline instead.",
+            file=sys.stderr,
+        )
+        return 2
     backlog_scope_raw = backlog_doc.get("scope")
     backlog_scope = backlog_scope_raw if isinstance(backlog_scope_raw, dict) else {}
     backlog_scope_repo_input = _coerce_string(backlog_scope.get("repo_input"))
@@ -1504,10 +1504,11 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         return 2
     required_consecutive_cycles = shadow_gate_config["required_consecutive_shadow_cycles"]
     require_exact_export_projection = shadow_gate_config["require_exact_export_projection"]
+    bound_shadow_state_path = _shadow_state_path_for_backlog(backlog_doc, backlog_path)
     shadow_gate_meta: dict[str, Any] = {
         "enabled": True,
         "config_path": str(shadow_gate_config_path),
-        "state_path": str(shadow_state_path(backlog_path)),
+        "state_path": str(bound_shadow_state_path),
         "required_consecutive_shadow_cycles": required_consecutive_cycles,
         "require_exact_export_projection": require_exact_export_projection,
     }
@@ -1626,7 +1627,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         return 2
 
     gate_ready, gate_reasons, gate_state = validate_shadow_export_state(
-        state_path=shadow_state_path(backlog_path),
+        state_path=bound_shadow_state_path,
         backlog_path=backlog_path,
         backlog_snapshot_sha256=backlog_snapshot_sha256,
         backlog_snapshot_content_sha256=backlog_snapshot_content_sha256,
@@ -1674,6 +1675,57 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         )
         return 2
 
+    qualification_bundle_path = export_artifact_paths.get(
+        "qualification.input_bundle"
+    )
+    if isinstance(qualification_bundle_path, Path):
+        scope_owner_candidate = (
+            Path(backlog_scope_repo_input).expanduser()
+            if backlog_scope_repo_input is not None
+            else repo_root
+        )
+        scope_owner_root = (
+            scope_owner_candidate.resolve()
+            if scope_owner_candidate.is_dir()
+            else repo_root.resolve()
+        )
+        canonical_actions_path = (
+            scope_owner_root / "configs" / "backlog_actions.yaml"
+        ).resolve()
+        canonical_atom_actions_path = (
+            scope_owner_root / "configs" / "backlog_atom_actions.yaml"
+        ).resolve()
+        if actions_path.resolve() != canonical_actions_path:
+            print(
+                "Sealed export requires the canonical live ticket-action ledger: "
+                f"{canonical_actions_path}",
+                file=sys.stderr,
+            )
+            return 2
+        if atom_actions_path.resolve() != canonical_atom_actions_path:
+            print(
+                "Sealed export requires the canonical live atom-action ledger: "
+                f"{canonical_atom_actions_path}",
+                file=sys.stderr,
+            )
+            return 2
+    try:
+        sealed_atom_actions_snapshot = _sealed_live_atom_actions_snapshot(
+            qualification_input_bundle_path=(
+                qualification_bundle_path
+                if isinstance(qualification_bundle_path, Path)
+                else None
+            ),
+            live_atom_actions_path=atom_actions_path,
+        )
+    except (OSError, ValueError) as exc:
+        print(
+            "Live atom ledger no longer matches the sealed qualification corpus: "
+            f"{exc}",
+            file=sys.stderr,
+        )
+        return 2
+
     projection_by_fingerprint = {
         str(item["fingerprint"]): item
         for item in current_projection["tickets"]
@@ -1683,9 +1735,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
     case_registry_path = export_artifact_paths.get("case_registry")
     if isinstance(case_registry_path, Path) and case_registry_path.is_file():
         try:
-            case_registry_bytes, _case_registry_sha256 = _read_snapshot(
-                case_registry_path
-            )
+            case_registry_bytes, _case_registry_sha256 = _read_snapshot(case_registry_path)
             case_registry = _parse_json_snapshot(
                 case_registry_path,
                 case_registry_bytes,
@@ -1788,8 +1838,18 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        final_sealed_atom_actions_snapshot = _sealed_live_atom_actions_snapshot(
+            qualification_input_bundle_path=(
+                qualification_bundle_path
+                if isinstance(qualification_bundle_path, Path)
+                else None
+            ),
+            live_atom_actions_path=atom_actions_path,
+        )
+        if final_sealed_atom_actions_snapshot != sealed_atom_actions_snapshot:
+            raise ValueError("qualification_live_atom_actions_changed_during_export")
         atom_actions = _load_atom_actions_yaml(atom_actions_path)
-    except ValueError as e:
+    except (OSError, ValueError) as e:
         print(str(e), file=sys.stderr)
         return 2
     pre_export_atom_sync_meta = _reconcile_atom_actions_from_plan_folders(
@@ -1824,7 +1884,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
         )
         return 2
     final_gate_ready, final_gate_reasons, _ = validate_shadow_export_state(
-        state_path=shadow_state_path(backlog_path),
+        state_path=bound_shadow_state_path,
         backlog_path=backlog_path,
         backlog_snapshot_sha256=backlog_snapshot_sha256,
         backlog_snapshot_content_sha256=backlog_snapshot_content_sha256,
@@ -1909,10 +1969,9 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 outcome_raw = action_entry.get("outcome")
                 if isinstance(outcome_raw, dict):
                     outcome = validated_action_outcomes[fingerprint]
-                    if (
-                        outcome.get("_export_suppression_provenance_verified") is True
-                        and _outcome_suppresses_new_case_discovery(outcome)
-                    ):
+                    if outcome.get(
+                        "_export_suppression_provenance_verified"
+                    ) is True and _outcome_suppresses_new_case_discovery(outcome):
                         skipped_actioned += 1
                         continue
                 elif case_id is None or action_status == "deferred":
@@ -1958,10 +2017,8 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                     include_discarded=False,
                 )
             case_id = ticket_export_case_id(ticket)
-            if (
-                case_id is not None
-                and case_id
-                in _case_ids_awaiting_outcome_verification(plan_index_cache[owner_key])
+            if case_id is not None and case_id in _case_ids_awaiting_outcome_verification(
+                plan_index_cache[owner_key]
             ):
                 prior_fingerprints = {
                     prior_fingerprint
@@ -1982,9 +2039,7 @@ def _cmd_reports_export_tickets(args: argparse.Namespace) -> int:
                 )
                 by_case = keep_fingerprint_by_case_by_owner_root.setdefault(owner_key, {})
                 by_case[case_id] = (
-                    next(iter(prior_fingerprints))
-                    if len(prior_fingerprints) == 1
-                    else None
+                    next(iter(prior_fingerprints)) if len(prior_fingerprints) == 1 else None
                 )
                 skipped_awaiting_outcome += 1
                 continue

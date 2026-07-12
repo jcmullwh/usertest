@@ -9,6 +9,8 @@ from agent_adapters import CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS, CodexLoginStatus
 from backlog_miner import run_backlog_prompt
 from runner_core import RunnerConfig
 
+_CODEX_THREAD_ID = "11111111-1111-4111-8111-111111111111"
+
 
 def _chatgpt_status(codex_home: Path) -> CodexLoginStatusResult:
     return CodexLoginStatusResult(
@@ -42,7 +44,7 @@ def test_run_backlog_prompt_codex_prefers_host_login_env(
         last_message_path.write_text("[]", encoding="utf-8")
         raw_events_path.write_text("", encoding="utf-8")
         stderr_path.write_text("", encoding="utf-8")
-        return SimpleNamespace(exit_code=0)
+        return SimpleNamespace(exit_code=0, thread_id=_CODEX_THREAD_ID)
 
     monkeypatch.setattr("backlog_miner.ensemble.run_codex_exec", _fake_run_codex_exec)
     monkeypatch.setattr(

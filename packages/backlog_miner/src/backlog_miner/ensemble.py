@@ -4,12 +4,14 @@ import json
 import os
 import random
 import tempfile
+import time
 import warnings
 from collections import Counter
 from dataclasses import dataclass, field
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from agent_adapters import (
     CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
@@ -113,11 +115,22 @@ def _codex_auth_receipt_path(raw_events_path: Path) -> Path:
     return raw_events_path.with_name(f"{tag}{_CODEX_AUTH_RECEIPT_SUFFIX}")
 
 
+def _canonical_session_id(value: object) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = UUID(value.strip())
+    except (ValueError, AttributeError):
+        return None
+    canonical = str(parsed)
+    return canonical if value.strip().casefold() == canonical else None
+
+
 def _write_pending_codex_auth_receipt(*, receipt_path: Path, prompt: str) -> None:
     """Replace any prior verified proof before a new invocation can start."""
 
     payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "pending",
         "prompt_sha256": _sha256_text(prompt),
         "chatgpt_subscription_auth_verified": False,
@@ -138,6 +151,8 @@ def _write_codex_auth_receipt(
     postcheck: CodexLoginStatusResult,
     model_attempted: bool,
     model_exit_code: int | None,
+    agent_session_id: str | None,
+    resumed_from_session_id: str | None,
     raw_events_path: Path,
     last_message_path: Path,
     stderr_path: Path,
@@ -153,15 +168,29 @@ def _write_codex_auth_receipt(
     )
     routing_config_errors = codex_subscription_config_errors(effective_overrides)
     routing_config_verified = not routing_config_errors
+    canonical_session_id = _canonical_session_id(agent_session_id)
+    canonical_resumed_id = (
+        _canonical_session_id(resumed_from_session_id)
+        if resumed_from_session_id is not None
+        else None
+    )
+    session_continuity_verified = bool(
+        canonical_session_id is not None
+        and (
+            resumed_from_session_id is None
+            or (canonical_resumed_id is not None and canonical_session_id == canonical_resumed_id)
+        )
+    )
     fully_verified = bool(
         preflight.ok
         and model_succeeded
         and postcheck.ok
         and environment_verified
         and routing_config_verified
+        and session_continuity_verified
     )
     payload: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "status": "verified" if fully_verified else "failed",
         "auth_mode": "canonical_host_chatgpt_subscription_cache",
         "chatgpt_base_url": CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
@@ -190,6 +219,9 @@ def _write_codex_auth_receipt(
             "attempted": model_attempted,
             "exit_code": model_exit_code,
             "succeeded": model_succeeded,
+            "agent_session_id": agent_session_id,
+            "resumed_from_session_id": resumed_from_session_id,
+            "session_continuity_verified": session_continuity_verified,
             "artifacts": {
                 "raw_events": _artifact_attestation(raw_events_path),
                 "last_message": _artifact_attestation(last_message_path),
@@ -225,8 +257,10 @@ def verify_codex_auth_receipt(
     )
     if raw.get("receipt_sha256") != expected_hash:
         errors.append("codex_auth_receipt_hash_changed")
+    schema_version = raw.get("schema_version")
+    if schema_version not in {1, 2}:
+        errors.append("codex_auth_receipt_schema_version_invalid")
     exact_fields = {
-        "schema_version": 1,
         "status": "verified",
         "auth_mode": "canonical_host_chatgpt_subscription_cache",
         "chatgpt_base_url": CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
@@ -279,6 +313,16 @@ def verify_codex_auth_receipt(
         or activation.get("succeeded") is not True
     ):
         errors.append("codex_auth_receipt_model_activation_invalid")
+    if schema_version == 2:
+        session_id = _canonical_session_id(activation.get("agent_session_id"))
+        resumed_raw = activation.get("resumed_from_session_id")
+        resumed_id = _canonical_session_id(resumed_raw) if resumed_raw is not None else None
+        if session_id is None:
+            errors.append("codex_auth_receipt_agent_session_id_invalid")
+        if resumed_raw is not None and (resumed_id is None or resumed_id != session_id):
+            errors.append("codex_auth_receipt_resumed_session_mismatch")
+        if activation.get("session_continuity_verified") is not True:
+            errors.append("codex_auth_receipt_session_continuity_not_verified")
     artifacts_raw = activation.get("artifacts")
     artifacts = artifacts_raw if isinstance(artifacts_raw, dict) else {}
     for kind, path in (
@@ -310,6 +354,23 @@ class PromptManifest:
     orphan_template: str
     merge_judge_template: str
     labeler_template: str
+
+
+@dataclass(frozen=True)
+class BacklogPromptResult:
+    """One content-retained agent invocation with exact continuation identity."""
+
+    response: str
+    agent_session_id: str | None
+    resumed_from_session_id: str | None
+    workspace_dir: Path | None
+    prompt_path: Path
+    response_path: Path
+    raw_events_path: Path
+    last_message_path: Path
+    stderr_path: Path
+    auth_receipt_path: Path | None
+    elapsed_seconds: float
 
 
 _CHANGE_SURFACE_KIND_ENUM = {
@@ -1463,7 +1524,7 @@ def _codex_overrides(cfg: RunnerConfig) -> list[str]:
     return []
 
 
-def run_backlog_prompt(
+def run_backlog_prompt_result(
     *,
     agent: str,
     prompt: str,
@@ -1474,8 +1535,9 @@ def run_backlog_prompt(
     workspace_dir: Path | None = None,
     allowed_tools: list[str] | None = None,
     include_directories: list[str] | None = None,
-) -> str:
-    """Execute a single backlog prompt and persist raw agent artifacts.
+    resume_session_id: str | None = None,
+) -> BacklogPromptResult:
+    """Execute one backlog prompt and retain its exact continuation identity.
 
     Parameters
     ----------
@@ -1500,8 +1562,8 @@ def run_backlog_prompt(
 
     Returns
     -------
-    str
-        Assistant output text extracted from adapter events.
+    BacklogPromptResult
+        Assistant output plus content-retained transport and session provenance.
     """
 
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -1513,11 +1575,31 @@ def run_backlog_prompt(
 
     prompt_path.write_text(prompt, encoding="utf-8", newline="\n")
     _clear_agent_output_files(response_path)
+    invocation_started = time.monotonic()
 
     def _read_and_persist_response() -> str:
         response = _read_text(last_message_path)
         response_path.write_text(response, encoding="utf-8", newline="\n")
         return response
+
+    def _result(
+        *, response: str, session_id: str | None, workspace: Path | None
+    ) -> BacklogPromptResult:
+        return BacklogPromptResult(
+            response=response,
+            agent_session_id=session_id,
+            resumed_from_session_id=resume_session_id,
+            workspace_dir=workspace,
+            prompt_path=prompt_path,
+            response_path=response_path,
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+            auth_receipt_path=(
+                _codex_auth_receipt_path(raw_events_path) if agent == "codex" else None
+            ),
+            elapsed_seconds=max(0.0, time.monotonic() - invocation_started),
+        )
 
     workspace: Path | None = None
     if workspace_dir is not None:
@@ -1528,7 +1610,7 @@ def run_backlog_prompt(
             ignore_cleanup_errors=(os.name == "nt"),
         ) as temp_dir:
             workspace = Path(temp_dir)
-            _run_agent_in_workspace(
+            session_id = _run_agent_in_workspace(
                 agent=agent,
                 workspace=workspace,
                 prompt=prompt,
@@ -1539,10 +1621,16 @@ def run_backlog_prompt(
                 cfg=cfg,
                 allowed_tools=allowed_tools,
                 include_directories=include_directories,
+                resume_session_id=resume_session_id,
             )
-            return _read_and_persist_response()
+            return _result(
+                response=_read_and_persist_response(),
+                session_id=session_id,
+                # Temporary workspaces are intentionally gone when this function returns.
+                workspace=None,
+            )
 
-    _run_agent_in_workspace(
+    session_id = _run_agent_in_workspace(
         agent=agent,
         workspace=workspace,
         prompt=prompt,
@@ -1553,9 +1641,41 @@ def run_backlog_prompt(
         cfg=cfg,
         allowed_tools=allowed_tools,
         include_directories=include_directories,
+        resume_session_id=resume_session_id,
     )
 
-    return _read_and_persist_response()
+    return _result(
+        response=_read_and_persist_response(),
+        session_id=session_id,
+        workspace=workspace.resolve(),
+    )
+
+
+def run_backlog_prompt(
+    *,
+    agent: str,
+    prompt: str,
+    out_dir: Path,
+    tag: str,
+    model: str | None,
+    cfg: RunnerConfig,
+    workspace_dir: Path | None = None,
+    allowed_tools: list[str] | None = None,
+    include_directories: list[str] | None = None,
+) -> str:
+    """Backward-compatible text-only wrapper around :func:`run_backlog_prompt_result`."""
+
+    return run_backlog_prompt_result(
+        agent=agent,
+        prompt=prompt,
+        out_dir=out_dir,
+        tag=tag,
+        model=model,
+        cfg=cfg,
+        workspace_dir=workspace_dir,
+        allowed_tools=allowed_tools,
+        include_directories=include_directories,
+    ).response
 
 
 def _run_agent_in_workspace(
@@ -1570,7 +1690,8 @@ def _run_agent_in_workspace(
     cfg: RunnerConfig,
     allowed_tools: list[str] | None = None,
     include_directories: list[str] | None = None,
-) -> None:
+    resume_session_id: str | None = None,
+) -> str | None:
     tools = [t for t in (allowed_tools or []) if isinstance(t, str) and t.strip()]
     include_dirs = [d for d in (include_directories or []) if isinstance(d, str) and d.strip()]
     _clear_agent_output_files(raw_events_path, last_message_path, stderr_path)
@@ -1620,6 +1741,7 @@ def _run_agent_in_workspace(
                         ignore_rules=True,
                         skip_git_repo_check=True,
                         env_overrides=process_env_overrides,
+                        resume_session_id=resume_session_id,
                     )
                 except Exception as exc:
                     primary_error = exc
@@ -1651,6 +1773,12 @@ def _run_agent_in_workspace(
                 model_exit_code=(
                     int(getattr(result, "exit_code", 1)) if result is not None else None
                 ),
+                agent_session_id=(
+                    str(getattr(result, "thread_id", "")).strip() or None
+                    if result is not None
+                    else None
+                ),
+                resumed_from_session_id=resume_session_id,
                 raw_events_path=raw_events_path,
                 last_message_path=last_message_path,
                 stderr_path=stderr_path,
@@ -1675,7 +1803,17 @@ def _run_agent_in_workspace(
             ) from primary_error
         if primary_error is not None:
             raise primary_error
-        return
+        session_id = (
+            str(getattr(result, "thread_id", "")).strip() or None if result is not None else None
+        )
+        if resume_session_id is not None and session_id != resume_session_id:
+            raise RuntimeError(
+                "backlog_prompt_codex_session_continuity_failed:"
+                f"expected={resume_session_id}:actual={session_id}"
+            )
+        return session_id
+    if resume_session_id is not None:
+        raise ValueError("backlog_prompt_resume_session_requires_codex")
     if agent == "claude":
         result = run_claude_print(
             workspace_dir=workspace,
@@ -1693,7 +1831,7 @@ def _run_agent_in_workspace(
             excerpt = _stderr_excerpt(stderr_path)
             detail = f": {excerpt}" if excerpt else ""
             raise RuntimeError(f"Claude backlog prompt failed exit_code={result.exit_code}{detail}")
-        return
+        return None
     if agent == "gemini":
         result = run_gemini(
             workspace_dir=workspace,
@@ -1713,7 +1851,7 @@ def _run_agent_in_workspace(
             excerpt = _stderr_excerpt(stderr_path)
             detail = f": {excerpt}" if excerpt else ""
             raise RuntimeError(f"Gemini backlog prompt failed exit_code={result.exit_code}{detail}")
-        return
+        return None
     raise ValueError(f"Unsupported backlog agent: {agent!r}")
 
 
@@ -2795,7 +2933,11 @@ def run_backlog_ensemble(
     merge_keep_anchor_pairs: bool = False,
     orphan_pass: int,
 ) -> dict[str, Any]:
-    """Execute full backlog mining pipeline and return tickets plus run metadata.
+    """Run the legacy one-pass miner for analysis only.
+
+    This compatibility API is intentionally non-exporting. Authoritative automated
+    backlog work must use the staged case/research/option/selection/plan pipeline so
+    lineage, self-healing, and outcome contracts are retained exactly once.
 
     Parameters
     ----------
@@ -2842,6 +2984,12 @@ def run_backlog_ensemble(
         Ticket payload and miners metadata.
     """
 
+    warnings.warn(
+        "run_backlog_ensemble is legacy analysis-only output and is not eligible "
+        "for automated ticket export; use the six-stage reports backlog pipeline",
+        DeprecationWarning,
+        stacklevel=2,
+    )
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     jobs = _build_miner_jobs(
         atoms=atoms,
@@ -2931,6 +3079,9 @@ def run_backlog_ensemble(
     miners_failed = sum(1 for item in job_meta if item.get("status") == "parse_failed")
 
     return {
+        "pipeline_kind": "legacy_one_pass_analysis",
+        "analysis_only": True,
+        "export_eligible": False,
         "tickets": unique_tickets,
         "miners_meta": {
             "miners_total": len(jobs),

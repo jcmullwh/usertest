@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, TypedDict
+from uuid import UUID
 
 from agent_adapters import (
     normalize_claude_events,
@@ -36,14 +37,24 @@ _FINAL_DISPOSITIONS = frozenset(
     {"supports_case", "duplicate", "expected_noise", "deferred", "unresolved"}
 )
 _NON_SUPPORT_DISPOSITIONS = _FINAL_DISPOSITIONS - {"supports_case"}
-_DECISION_FIELDS = frozenset(
+STAGE1_ATOM_DECISION_FIELDS = frozenset(
     {
         "case_id",
+        "disposition_decision_error",
         "supporting_case_ids",
         "disposition",
         "disposition_status",
         "disposition_receipt",
+        "disposition_rationale",
+        "disposition_proof",
         "disposition_revisit_when",
+        "novel_case_rationale",
+        # These fields describe workflow/lifecycle processing, not the observed
+        # evidence. Including their wall-clock values made a separately prepared
+        # qualification corpus differ from the live run despite identical source
+        # bytes and also made nondeterministic correction history reset a streak.
+        "qualification_repair_history",
+        "status_reopen_audit",
     }
 )
 
@@ -117,13 +128,13 @@ def _receipt_hash(receipt: Mapping[str, Any]) -> str:
     )
 
 
-def _atom_evidence_projection(atom: Mapping[str, Any]) -> dict[str, Any]:
+def immutable_atom_evidence_projection(atom: Mapping[str, Any]) -> dict[str, Any]:
     """Return immutable evidence content, excluding stage-1 decisions."""
 
     projection = {
         key: value
         for key, value in sorted(atom.items(), key=lambda item: str(item[0]))
-        if key not in _DECISION_FIELDS
+        if key not in STAGE1_ATOM_DECISION_FIELDS
     }
     if _text(projection.get("evidence_class")) is None:
         projection["evidence_class"] = (
@@ -141,7 +152,7 @@ def _atom_evidence_row(atom: Mapping[str, Any]) -> dict[str, Any]:
         "atom_id": atom_id,
         "evidence_role": role,
         "is_source_observation": role not in _DERIVED_EVIDENCE_ROLES,
-        "evidence_sha256": _canonical_hash(_atom_evidence_projection(atom)),
+        "evidence_sha256": _canonical_hash(immutable_atom_evidence_projection(atom)),
     }
 
 
@@ -1201,10 +1212,11 @@ def _attempt_history_errors(miner: Mapping[str, Any], *, tag: str) -> list[str]:
     if not isinstance(raw_history, list) or not raw_history:
         return [f"problem_mining_attempt_history_invalid:{tag}"]
     errors: list[str] = []
-    if len(raw_history) > 2:
-        errors.append(f"problem_mining_attempt_history_unbounded:{tag}")
     observed_numbers: list[int] = []
     verified_tags: list[str] = []
+    initial_session_id: str | None = None
+    initial_workspace_dir: str | None = None
+    initial_manifest_sha256: str | None = None
     for index, raw_attempt in enumerate(raw_history, start=1):
         if not isinstance(raw_attempt, Mapping):
             errors.append(f"problem_mining_attempt_invalid:{tag}:{index}")
@@ -1212,6 +1224,9 @@ def _attempt_history_errors(miner: Mapping[str, Any], *, tag: str) -> list[str]:
         attempt_number = raw_attempt.get("attempt_number")
         attempt_tag = _text(raw_attempt.get("attempt_tag"))
         status = _text(raw_attempt.get("status"))
+        schema_version = raw_attempt.get("schema_version", 1)
+        if schema_version not in {1, 2}:
+            errors.append(f"problem_mining_attempt_schema_invalid:{tag}:{index}")
         if isinstance(attempt_number, bool) or not isinstance(attempt_number, int):
             errors.append(f"problem_mining_attempt_number_invalid:{tag}:{index}")
         else:
@@ -1225,6 +1240,46 @@ def _attempt_history_errors(miner: Mapping[str, Any], *, tag: str) -> list[str]:
             errors.append(f"problem_mining_attempt_state_invalid:{tag}:{index}")
         if status == "verified" and attempt_tag is not None:
             verified_tags.append(attempt_tag)
+        if schema_version == 2:
+            session_raw = _text(raw_attempt.get("agent_session_id"))
+            resumed_raw = raw_attempt.get("resumed_from_session_id")
+            try:
+                session_id = str(UUID(session_raw)) if session_raw is not None else None
+            except (ValueError, AttributeError):
+                session_id = None
+            if status in {"verified", "response_contract_failed"} and (
+                session_id is None or session_raw != session_id
+            ):
+                errors.append(f"problem_mining_attempt_session_invalid:{tag}:{index}")
+            workspace_dir = _text(raw_attempt.get("workspace_dir"))
+            manifest_sha256 = _text(raw_attempt.get("workspace_manifest_sha256"))
+            if index == 1:
+                initial_session_id = session_id
+                initial_workspace_dir = workspace_dir
+                initial_manifest_sha256 = manifest_sha256
+                if resumed_raw is not None:
+                    errors.append(f"problem_mining_initial_attempt_resumed:{tag}")
+            else:
+                if (
+                    session_id is None
+                    or session_id != initial_session_id
+                    or resumed_raw != initial_session_id
+                ):
+                    errors.append(f"problem_mining_attempt_session_continuity_invalid:{tag}:{index}")
+                if (
+                    workspace_dir != initial_workspace_dir
+                    or manifest_sha256 != initial_manifest_sha256
+                ):
+                    errors.append(
+                        f"problem_mining_attempt_workspace_continuity_invalid:{tag}:{index}"
+                    )
+            elapsed = raw_attempt.get("attempt_elapsed_seconds")
+            if (
+                isinstance(elapsed, bool)
+                or not isinstance(elapsed, (int, float))
+                or float(elapsed) < 0.0
+            ):
+                errors.append(f"problem_mining_attempt_elapsed_invalid:{tag}:{index}")
         artifacts_raw = raw_attempt.get("artifacts")
         artifacts = artifacts_raw if isinstance(artifacts_raw, Mapping) else {}
         required_artifacts = {"workspace_manifest"}
@@ -1983,7 +2038,9 @@ def verify_problem_mining_evidence_receipt(
             continue
         role = _text(atom.get("evidence_role")) or "observation"
         is_source = role not in _DERIVED_EVIDENCE_ROLES
-        if row.get("evidence_sha256") != _canonical_hash(_atom_evidence_projection(atom)):
+        if row.get("evidence_sha256") != _canonical_hash(
+            immutable_atom_evidence_projection(atom)
+        ):
             errors.append(f"problem_mining_atom_evidence_changed:{atom_id}")
         if row.get("evidence_role") != role or row.get("is_source_observation") is not is_source:
             errors.append(f"problem_mining_atom_evidence_role_changed:{atom_id}")
@@ -2086,6 +2143,7 @@ def verify_problem_mining_evidence_receipt(
 
 __all__ = [
     "PROBLEM_MINING_EVIDENCE_SCHEMA_VERSION",
+    "STAGE1_ATOM_DECISION_FIELDS",
     "ProblemMiningEvidenceReceipt",
     "ProblemMiningResponseContractError",
     "apply_problem_mining_decision_partition",
@@ -2094,6 +2152,7 @@ __all__ = [
     "build_live_miner_receipt",
     "build_problem_mining_evidence_draft",
     "finalize_problem_mining_evidence_receipt",
+    "immutable_atom_evidence_projection",
     "normalize_problem_mining_events",
     "parse_problem_mining_response_envelope",
     "problem_mining_evidence_receipt_ref",

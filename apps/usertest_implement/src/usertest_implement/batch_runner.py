@@ -119,6 +119,7 @@ class BacklogSource:
     target: str
     breadth_profile: str = "internal_maintenance"
     research_ref: str = "origin/dev"
+    shadow_state_path: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -784,6 +785,7 @@ def _refresh_backlog(
             model=model,
             actions_yaml=owner_root / "configs" / "backlog_actions.yaml",
             atom_actions_yaml=owner_root / "configs" / "backlog_atom_actions.yaml",
+            qualified_shadow_state_path=source.shadow_state_path,
         ),
         command_executor=_execute,
     )
@@ -1536,6 +1538,12 @@ def _build_phases(config: dict[str, Any], *, data_root: Path) -> list[PhaseConfi
                     research_ref=str(
                         source_raw.get("research_ref") or "origin/dev"
                     ).strip(),
+                    shadow_state_path=(
+                        (data_root / str(source_raw["shadow_state_path"])).resolve()
+                        if isinstance(source_raw.get("shadow_state_path"), str)
+                        and str(source_raw["shadow_state_path"]).strip()
+                        else None
+                    ),
                 )
             )
         if sources:
@@ -1563,6 +1571,7 @@ def _pin_phase_research_revision(
                     target=source.target,
                     breadth_profile=source.breadth_profile,
                     research_ref=revision,
+                    shadow_state_path=source.shadow_state_path,
                 )
                 for source in phase.sources
             ],

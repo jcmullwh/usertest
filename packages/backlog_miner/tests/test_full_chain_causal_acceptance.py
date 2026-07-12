@@ -22,6 +22,7 @@ from backlog_core import (
     bind_falsification_review,
     bind_plan_outcome_oracle,
     evidence_assignment_sha256,
+    infer_live_verification_requirement,
 )
 from backlog_repo import (
     canonical_plan_sha256,
@@ -131,6 +132,15 @@ def _research_claims(revision: str) -> dict[str, object]:
                     "source": "exit_code",
                     "operator": "equals",
                     "expected": 1,
+                },
+                "verification_boundary": {
+                    "boundary_kind": "repository_original_scenario",
+                    "requires_live_verification": False,
+                    "faithful_equivalence": True,
+                    "rationale": (
+                        "The exact immutable source command is the complete local behavior and "
+                        "the retained repository assertion is its post-change oracle."
+                    ),
                 },
                 "artifact_refs": ["artifact:repro", "artifact:source"],
             },
@@ -400,6 +410,20 @@ def test_real_causal_evidence_reaches_durable_resolution(
     assert verification["failure_paths"]
     assert verification["mechanism_evidence"]
     assert verification["outcome_oracles"]
+    assert len(verification["verification_boundaries"]) == 1
+    assert verification["verification_boundaries"][0]["equivalence_proof"][
+        "equivalence_mode"
+    ] == "exact_origin_scenario_identity"
+    tampered = json.loads(json.dumps(persisted))
+    tampered["evidence_assignment"]["atom_receipts"][0]["atom_snapshot"][
+        "command"
+    ] = "python -m pytest tests/test_unrelated.py"
+    tampered_required, tampered_reasons = infer_live_verification_requirement(
+        {},
+        tampered,
+    )
+    assert tampered_required is False
+    assert tampered_reasons == ["verification_boundary_unverified_legacy"]
     assert len(verification["falsification_interventions"]) == 1
     intervention_receipt = verification["falsification_interventions"][0]
     assert intervention_receipt["controlled_input_difference"]["difference_count"] == 1

@@ -12,6 +12,11 @@ from usertest_backlog.commands.reports import (
 )
 from usertest_backlog.commands.review_ux import _cmd_reports_review_ux
 from usertest_backlog.commands.triage import _cmd_triage_atoms, _cmd_triage_backlog, _cmd_triage_prs
+from usertest_backlog.workflows.qualification_transaction import (
+    _cmd_reports_qualification_adjudication_finalize,
+    _cmd_reports_qualification_adjudication_template,
+    _cmd_reports_qualification_prepare,
+)
 from usertest_backlog.workflows.staged import _cmd_reports_backlog
 
 
@@ -33,6 +38,12 @@ def dispatch(args: argparse.Namespace) -> int:
             return _cmd_reports_export_tickets(args)
         if args.reports_cmd == "backlog":
             return _cmd_reports_backlog(args)
+        if args.reports_cmd == "qualification-prepare":
+            return _cmd_reports_qualification_prepare(args)
+        if args.reports_cmd == "qualification-adjudication-template":
+            return _cmd_reports_qualification_adjudication_template(args)
+        if args.reports_cmd == "qualification-adjudication-finalize":
+            return _cmd_reports_qualification_adjudication_finalize(args)
         return 2
     if args.cmd == "triage-prs":
         return _cmd_triage_prs(args)

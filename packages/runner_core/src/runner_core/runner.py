@@ -233,6 +233,13 @@ class RunRequest:
     agent_system_prompt_file: Path | None = None
     agent_append_system_prompt: str | None = None
     agent_append_system_prompt_file: Path | None = None
+    # Runner-owned backlog lineage. These fields are persisted in target_ref.json
+    # and outrank legacy mission-name inference and model-authored extensions.
+    evidence_role: str | None = None
+    origin_stage: str | None = None
+    parent_case_id: str | None = None
+    # Exact Codex thread.started.thread_id to continue. Never infer with `--last`.
+    codex_resume_session_id: str | None = None
     keep_workspace: bool = False
     preflight_commands: tuple[str, ...] = ()
     preflight_required_commands: tuple[str, ...] = ()
@@ -268,6 +275,7 @@ class RunResult:
     run_dir: Path
     exit_code: int
     report_validation_errors: list[str]
+    agent_session_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -1607,6 +1615,26 @@ def _agent_auth_present_docker(
             return True, f"env:{key}"
 
     return False, "missing:env_unset"
+
+
+def _controlled_codex_overlay_required(
+    request: RunRequest,
+    *,
+    has_sandbox_backend: bool,
+) -> bool:
+    """Keep the research exec-policy overlay separate from ordinary session resume.
+
+    A local Stage-3 continuation without explicit prefixes still needs the controlled
+    host-subscription overlay.  A Docker implementation continuation already receives
+    the host ``.codex`` mount and must not be rejected as though it requested the
+    local-only research exec policy.
+    """
+
+    if request.agent != "codex":
+        return False
+    if request.codex_execpolicy_allow_prefixes:
+        return True
+    return bool(request.codex_resume_session_id and not has_sandbox_backend)
 
 
 def _build_auth_missing_hints(
@@ -3490,6 +3518,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
     controlled_codex_binary: str | None = None
     controlled_codex_env_overrides: dict[str, str] | None = None
     controlled_codex_config_overrides: list[str] | None = None
+    codex_session_id: str | None = request.codex_resume_session_id
+    codex_last_invocation_resumed = False
+
+    if request.codex_resume_session_id is not None and request.agent != "codex":
+        raise ValueError("codex_resume_session_id is only valid for the codex agent")
 
     target_slug = slugify(request.repo)
     timestamp = utc_timestamp_compact()
@@ -3577,9 +3610,43 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             "obfuscate_agent_docs": bool(request.obfuscate_agent_docs),
             "requested_persona_id": request.persona_id,
             "requested_mission_id": request.mission_id,
+            "requested_codex_resume_session_id": request.codex_resume_session_id,
             **({"model": effective_model} if effective_model is not None else {}),
             **({"model_source": model_source} if model_source is not None else {}),
         }
+        lineage_values = {
+            "evidence_role": request.evidence_role,
+            "origin_stage": request.origin_stage,
+            "parent_case_id": request.parent_case_id,
+        }
+        if any(value is not None for value in lineage_values.values()):
+            evidence_role = (
+                request.evidence_role.strip() if isinstance(request.evidence_role, str) else ""
+            )
+            origin_stage = (
+                request.origin_stage.strip() if isinstance(request.origin_stage, str) else ""
+            )
+            parent_case_id = (
+                request.parent_case_id.strip() if isinstance(request.parent_case_id, str) else ""
+            )
+            if evidence_role not in {
+                "observation",
+                "research",
+                "implementation",
+                "verification",
+            }:
+                raise ValueError("runner_backlog_lineage_evidence_role_invalid")
+            if not origin_stage:
+                raise ValueError("runner_backlog_lineage_origin_stage_invalid")
+            if evidence_role in {"research", "implementation", "verification"} and not (
+                parent_case_id
+            ):
+                raise ValueError("runner_backlog_lineage_parent_case_id_required")
+            target_ref["backlog_lineage"] = {
+                "evidence_role": evidence_role,
+                "origin_stage": origin_stage,
+                "parent_case_id": parent_case_id or None,
+            }
         if request.model is not None and request.model.strip():
             target_ref["requested_model"] = request.model.strip()
         _write_json(run_dir / "target_ref.json", target_ref)
@@ -4367,8 +4434,33 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     workspace_dir=acquired.workspace_dir,
                     env_overrides=agent_env_overrides,
                 )
+            signed_in_codex_resume = bool(
+                request.agent == "codex" and request.codex_resume_session_id is not None
+            )
+            if signed_in_codex_resume:
+                if not bool(request.exec_use_host_agent_login):
+                    raise ValueError("codex_resume_requires_host_subscription_login")
+                validate_codex_subscription_config_overrides(
+                    combined_overrides,
+                    source="signed_in_codex_resume",
+                )
+                agent_env_overrides = dict(agent_env_overrides or {})
+                for auth_env_var in CONTROLLED_CODEX_AUTH_ENV_VARS:
+                    agent_env_overrides[auth_env_var] = ""
+                target_ref["codex_resume_auth"] = {
+                    "auth_mode": "host_chatgpt_subscription_login",
+                    "host_agent_login_required": True,
+                    "api_billing_environment_disabled": True,
+                    "blocked_child_env_vars": list(CONTROLLED_CODEX_AUTH_ENV_VARS),
+                }
+                _write_json(run_dir / "target_ref.json", target_ref)
+
             controlled_codex_probe_commands: list[str] = []
-            if request.agent == "codex" and request.codex_execpolicy_allow_prefixes:
+            controlled_codex_requested = _controlled_codex_overlay_required(
+                request,
+                has_sandbox_backend=sandbox is not None,
+            )
+            if controlled_codex_requested:
                 if sandbox is not None:
                     raise ValueError("codex_execpolicy_requires_local_execution_backend")
                 validate_codex_subscription_config_overrides(
@@ -4476,6 +4568,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 codex_overrides.append(
                     "model_instructions_file="
                     + toml_basic_string(codex_instructions_path_for_agent)
+                )
+            if signed_in_codex_resume and codex_execpolicy_overlay is None:
+                codex_overrides = build_codex_subscription_config_overrides(
+                    codex_overrides,
+                    source="signed_in_codex_resume_effective",
                 )
             if codex_execpolicy_overlay is not None:
                 codex_overrides = build_codex_subscription_config_overrides(
@@ -5966,6 +6063,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 last_message_attempt_path: Path,
                 stderr_attempt_path: Path,
             ) -> tuple[int, list[str]]:
+                nonlocal codex_last_invocation_resumed
+                nonlocal codex_session_id
                 if request.agent == "codex":
                     codex_last_message_for_attempt = (
                         _agent_path_for_staged_file(
@@ -5976,6 +6075,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         if backend.run_dir_mount
                         else None
                     )
+                    require_continuation = (
+                        bool(request.codex_resume_session_id) or followup_count > 0
+                    )
+                    resume_session_id = codex_session_id if require_continuation else None
+                    if require_continuation and resume_session_id is None:
+                        raise RuntimeError("codex_continuation_thread_id_unavailable")
+                    codex_last_invocation_resumed = resume_session_id is not None
                     codex_result = run_codex_exec(
                         workspace_dir=workspace_dir_for_agent,
                         prompt=prompt_text,
@@ -5993,7 +6099,13 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         command_prefix=command_prefix,
                         env_overrides=agent_env_overrides,
                         agent_last_message_path=codex_last_message_for_attempt,
+                        resume_session_id=resume_session_id,
                     )
+                    result_thread_id = getattr(codex_result, "thread_id", None)
+                    if isinstance(result_thread_id, str) and result_thread_id.strip():
+                        if resume_session_id is not None and result_thread_id != resume_session_id:
+                            raise RuntimeError("codex_continuation_thread_id_changed")
+                        codex_session_id = result_thread_id
                     return codex_result.exit_code, codex_result.argv
 
                 if request.agent == "claude":
@@ -6728,6 +6840,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "agent_exec_wall_seconds": agent_exec_wall_seconds,
                     "exit_code": agent_exit_code,
                     "argv": agent_argv,
+                    "agent_session_id": codex_session_id if request.agent == "codex" else None,
+                    "continued_session": bool(
+                        request.agent == "codex" and codex_last_invocation_resumed
+                    ),
                     "failure_subtype": failure_subtype,
                     "report_validation_errors": attempt_report_validation_errors,
                     "warnings": attempt_warnings,
@@ -7537,6 +7653,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             run_dir=run_dir,
             exit_code=final_exit_code,
             report_validation_errors=report_validation_errors,
+            agent_session_id=codex_session_id,
         )
     except Exception as e:  # noqa: BLE001
         message = str(e)
@@ -7604,7 +7721,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 **extra,
             },
         )
-        return RunResult(run_dir=run_dir, exit_code=1, report_validation_errors=user_errors)
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=1,
+            report_validation_errors=user_errors,
+            agent_session_id=codex_session_id,
+        )
     finally:
         if codex_execpolicy_overlay is not None and not codex_execpolicy_overlay.restored:
             try:

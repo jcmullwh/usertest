@@ -10,6 +10,7 @@ from backlog_core import assign_plan_revision_id
 from backlog_core.case_lineage import apply_atom_disposition_decision
 from backlog_repo import write_case_relation_receipt
 
+import usertest_backlog.workflows.qualification as qualification_mod
 import usertest_backlog.workflows.shadow_validation as shadow_mod
 from usertest_backlog.commands.export_tickets import _pipeline_source_config_bindings
 from usertest_backlog.workflows.problem_mining_evidence import (
@@ -17,18 +18,129 @@ from usertest_backlog.workflows.problem_mining_evidence import (
     finalize_problem_mining_evidence_receipt,
     problem_mining_evidence_receipt_ref,
 )
+from usertest_backlog.workflows.qualification import (
+    build_no_actionable_evidence_receipt,
+    build_qualification_corpus_manifest,
+    build_qualification_output_adjudication,
+)
 from usertest_backlog.workflows.shadow_validation import (
     evaluate_shadow_invariants,
     normalize_shadow_gate_config,
-    record_shadow_cycle,
+    operational_shadow_pending_run_path,
+    shadow_pending_run_path,
     shadow_state_path,
+    validate_pending_operational_shadow_run,
+    validate_pending_shadow_run,
     validate_shadow_export_state,
+    write_pending_operational_shadow_run,
+    write_pending_shadow_run,
 )
+from usertest_backlog.workflows.shadow_validation import (
+    record_shadow_cycle as _record_shadow_cycle_impl,
+)
+
+
+def test_runtime_compatibility_anchor_ignores_unrelated_target_source_drift(
+    tmp_path: Path,
+) -> None:
+    bundle_path = tmp_path / "qualification_input_bundle.json"
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "pipeline": {
+                    "runtime_compatibility_sha256": "a" * 64,
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def receipts(unrelated_sha: str) -> list[dict[str, object]]:
+        return [
+            {
+                "name": "qualification.input_bundle",
+                "source_path": str(bundle_path),
+                "snapshot_path": None,
+                "exists": True,
+                "sha256": sha256(bundle_path.read_bytes()).hexdigest(),
+                "content_sha256": sha256(bundle_path.read_bytes()).hexdigest(),
+                "size_bytes": bundle_path.stat().st_size,
+            },
+            {
+                "name": "pipeline.manifest:apps/usertest/src/usertest/cli.py",
+                "source_path": str(tmp_path / "unrelated.py"),
+                "snapshot_path": None,
+                "exists": True,
+                "sha256": unrelated_sha,
+                "content_sha256": unrelated_sha,
+                "size_bytes": 10,
+            },
+        ]
+
+    assert shadow_mod._stability_input_projection(receipts("b" * 64)) == (
+        shadow_mod._stability_input_projection(receipts("c" * 64))
+    )
+
+    bundle_path.write_text(
+        json.dumps(
+            {
+                "pipeline": {
+                    "runtime_compatibility_sha256": "d" * 64,
+                }
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert shadow_mod._stability_input_projection(receipts("c" * 64)) == [
+        {"name": "pipeline.runtime_compatibility", "sha256": "d" * 64}
+    ]
 
 
 def _write_json(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
+
+
+def _target_contract(
+    plan: dict[str, object],
+    *,
+    schema_version: int = 3,
+) -> dict[str, object]:
+    targets: list[dict[str, object]] = []
+    for raw in plan["change_targets"]:
+        target = dict(raw)
+        change = str(target["change"])
+        contract_target: dict[str, object] = {
+            "action": target["action"],
+            "path": target["path"],
+            "symbols": target.get("symbols", []),
+            "change": change,
+            "change_sha256": sha256(change.encode()).hexdigest(),
+            "target_role": "test" if str(target["path"]).startswith("tests/") else "production",
+        }
+        if schema_version == 3:
+            contract_target["destination_path"] = target.get("destination_path")
+        targets.append(contract_target)
+    payload: dict[str, object] = {
+        "schema_version": schema_version,
+        "contract_source": f"runner_stage6_target_intent_v{schema_version}",
+        "case_id": plan["case_id"],
+        "problem_id": plan["problem_id"],
+        "selected_option_id": plan["selected_option_id"],
+        "repo_revision": plan["repo_revision"],
+        "targets": targets,
+    }
+    contract_sha256 = sha256(
+        json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+    ).hexdigest()
+    return {**payload, "contract_sha256": contract_sha256}
 
 
 def _relation_review_artifacts(
@@ -129,6 +241,40 @@ def _record_cycle(tmp_path: Path, **kwargs: object) -> dict[str, object]:
         **kwargs,  # type: ignore[arg-type]
         artifact_paths=_cycle_artifacts(tmp_path),
     )
+
+
+def record_shadow_cycle(**kwargs: object) -> dict[str, object]:
+    """Give non-qualification state tests an explicit positive release fixture."""
+
+    report_raw = kwargs.get("invariant_report")
+    if isinstance(report_raw, dict):
+        report = deepcopy(report_raw)
+        report.setdefault("cycle_mode", "release")
+        report.setdefault("schema_version", 4)
+        qualification_raw = report.get("qualification")
+        qualification = deepcopy(qualification_raw) if isinstance(qualification_raw, dict) else None
+        if (
+            report.get("passed") is True
+            and report.get("cycle_mode") == "release"
+            and isinstance(qualification, dict)
+            and qualification.get("status") == "missing"
+            and qualification.get("qualification_class") == "unqualified"
+        ):
+            policy = qualification.get("policy")
+            counts = qualification.get("counts")
+            assert isinstance(policy, dict)
+            assert isinstance(counts, dict)
+            policy["positive_throughput_required"] = True
+            counts["actionable_cases"] = 1
+            counts["positive_qualifying_corpus"] = 1
+            counts["exhausted_corpus"] = 0
+            qualification["status"] = "verified"
+            qualification["qualification_class"] = "positive_throughput"
+            qualification["failures"] = []
+            qualification["correction_routing_status"] = "not_required"
+            report["qualification"] = qualification
+            kwargs["invariant_report"] = report
+    return _record_shadow_cycle_impl(**kwargs)  # type: ignore[arg-type]
 
 
 def _proof_basis_dossier() -> dict[str, object]:
@@ -786,17 +932,17 @@ def _mixed_productive_inputs(tmp_path: Path) -> dict[str, object]:
             "case_id": "case:positive",
             "problem_id": "problem:positive",
             "research_status": "evidence_sufficient",
-            "research_attempts": [
-                {
-                    "attempt_number": 1,
-                    "outcome": "output_contract_valid",
-                    "attempted_dossier": {
-                        "research_status": "evidence_sufficient",
-                    },
-                }
-            ],
         }
     )
+    attempted_dossier = deepcopy(positive_dossier)
+    positive_dossier["research_attempts"] = [
+        {
+            "attempt_number": 1,
+            "outcome": "output_contract_valid",
+            "attempted_dossier": attempted_dossier,
+            "attempted_dossier_sha256": shadow_mod._canonical_hash(attempted_dossier),
+        }
+    ]
     inputs["stage3"]["items"].append(positive_dossier)
     inputs["stage4"]["items"].append(
         {
@@ -812,22 +958,23 @@ def _mixed_productive_inputs(tmp_path: Path) -> dict[str, object]:
             "selected_option_id": "option:positive",
         }
     )
-    plan = assign_plan_revision_id(
-        {
-            "case_id": "case:positive",
-            "problem_id": "problem:positive",
-            "repo_revision": "a" * 40,
-            "change_targets": [
-                {
-                    "action": "modify",
-                    "path": "src/core.py",
-                    "symbols": ["core.run"],
-                    "change": "Correct the verified failure mechanism at core.run.",
-                }
-            ],
-            "verification_commands": ["pdm run pytest tests/test_core.py -q"],
-        }
-    )
+    plan_draft: dict[str, object] = {
+        "case_id": "case:positive",
+        "problem_id": "problem:positive",
+        "selected_option_id": "option:positive",
+        "repo_revision": "a" * 40,
+        "change_targets": [
+            {
+                "action": "modify",
+                "path": "src/core.py",
+                "symbols": ["core.run"],
+                "change": "Correct the verified failure mechanism at core.run.",
+            }
+        ],
+        "verification_commands": ["pdm run pytest tests/test_core.py -q"],
+    }
+    plan_draft["target_contract"] = _target_contract(plan_draft)
+    plan = assign_plan_revision_id(plan_draft)
     inputs["stage6"]["items"].append(plan)
     inputs["backlog"]["tickets"].append(
         {
@@ -846,6 +993,36 @@ def _mixed_productive_inputs(tmp_path: Path) -> dict[str, object]:
     }
     inputs["case_registry"]["problem_id_to_case_id"]["problem:positive"] = "case:positive"
     inputs["case_registry"]["atom_id_to_case_id"]["atom:positive"] = "case:positive"
+    accepted_outputs_by_kind = {
+        "research": [positive_dossier],
+        "selection": [inputs["stage5"]["items"][0]],
+        "plan": [plan],
+        "ticket": [inputs["backlog"]["tickets"][-1]],
+    }
+    _attach_independent_qualification(
+        inputs,
+        atom_labels=[
+            _actionable_label(
+                "label:blocked",
+                ["atom:high"],
+                classification="non_actionable",
+            ),
+            _actionable_label("label:positive", ["atom:positive"]),
+        ],
+        accepted_outputs_by_kind=accepted_outputs_by_kind,
+        output_ratings=[
+            (
+                output_kind,
+                output,
+                "good",
+                "not_repaired",
+                ["label:positive"],
+            )
+            for output_kind, outputs in accepted_outputs_by_kind.items()
+            for output in outputs
+        ],
+        false_rejections=[],
+    )
     return inputs
 
 
@@ -863,11 +1040,141 @@ def _accept_productive_fixture_contracts(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setattr(shadow_mod, "assess_ticket_readiness", lambda _item: (True, []))
 
 
+def _attach_independent_qualification(
+    inputs: dict[str, object],
+    *,
+    atom_labels: list[dict[str, object]],
+    accepted_outputs_by_kind: dict[str, list[dict[str, object]]],
+    output_ratings: list[tuple[str, dict[str, object], str, str, list[str]]],
+    false_rejections: list[str] | None = None,
+    no_actionable_receipt: bool = False,
+) -> None:
+    expanded_outputs = {
+        kind: list(accepted_outputs_by_kind.get(kind, []))
+        for kind in (
+            "problem",
+            "relation",
+            "priority",
+            "research",
+            "option",
+            "selection",
+            "plan",
+            "ticket",
+        )
+    }
+    expanded_outputs["problem"] = list(inputs["stage1"].get("items", []))
+    stage1_meta = inputs["stage1"].get("input_meta", {})
+    expanded_outputs["relation"] = list(
+        stage1_meta.get("relation_review_decisions", [])
+        if isinstance(stage1_meta, dict)
+        else []
+    )
+    expanded_outputs["priority"] = list(inputs["stage2"].get("items", []))
+    expanded_outputs["option"] = list(inputs["stage4"].get("items", []))
+    rated_identities = {
+        (kind, shadow_mod._canonical_hash(output))
+        for kind, output, _quality, _repair, _labels in output_ratings
+    }
+    expanded_ratings = list(output_ratings)
+    actionable_label_ids = [
+        str(label["label_id"])
+        for label in atom_labels
+        if label.get("classification") == "actionable"
+    ]
+    for kind in ("problem", "relation", "priority", "option"):
+        for output in expanded_outputs[kind]:
+            identity = (kind, shadow_mod._canonical_hash(output))
+            if identity in rated_identities:
+                continue
+            expanded_ratings.append(
+                (
+                    kind,
+                    output,
+                    "good" if actionable_label_ids else "unknown",
+                    "not_repaired",
+                    actionable_label_ids,
+                )
+            )
+    manifest = build_qualification_corpus_manifest(
+        atoms=inputs["atoms"],
+        atom_labels=atom_labels,
+        adjudicator="held-out-shadow-reviewer",
+        method="independent fixture evidence review",
+    )
+    adjudication = build_qualification_output_adjudication(
+        manifest=manifest,
+        accepted_outputs_by_kind=expanded_outputs,
+        output_adjudications=[
+            {
+                "output_kind": output_kind,
+                "output_sha256": shadow_mod._canonical_hash(output),
+                "quality": quality,
+                "repair_status": repair_status,
+                "actionable_label_ids": label_ids,
+                "rationale": f"Independent {output_kind} output assessment.",
+                **(
+                    {
+                        "bad_severity": "noncritical",
+                        "bad_categories": ["limited_causal_coverage"],
+                    }
+                    if quality == "bad"
+                    else {}
+                ),
+            }
+            for output_kind, output, quality, repair_status, label_ids in expanded_ratings
+        ],
+        false_rejections=[
+            {
+                "label_id": label_id,
+                "rationale": "The useful held-out case did not reach an accepted ticket.",
+            }
+            for label_id in (false_rejections or [])
+        ],
+        pending_run_sha256="d" * 64,
+        adjudicator="held-out-shadow-reviewer",
+        method="independent post-run artifact review",
+    )
+    inputs["qualification_manifest"] = manifest
+    inputs["qualification_manifest_sha256_expected"] = "a" * 64
+    inputs["qualification_manifest_sha256_observed"] = "a" * 64
+    inputs["qualification_output_adjudication"] = adjudication
+    inputs["qualification_output_adjudication_sha256_pre_run"] = None
+    inputs["qualification_output_adjudication_sha256_post_run"] = "b" * 64
+    inputs["qualification_pending_run_sha256"] = "d" * 64
+    if no_actionable_receipt:
+        inputs["no_actionable_evidence_receipt"] = build_no_actionable_evidence_receipt(
+            manifest=manifest,
+            adjudicator="held-out-shadow-reviewer",
+            method="complete clean-corpus review",
+        )
+
+
+def _actionable_label(
+    label_id: str,
+    atom_ids: list[str],
+    *,
+    classification: str = "actionable",
+) -> dict[str, object]:
+    return {
+        "label_id": label_id,
+        "classification": classification,
+        "atom_ids": atom_ids,
+        "rationale": f"Independent classification of {label_id}.",
+    }
+
+
 def test_shadow_invariants_reject_all_blocked_nonempty_cycle(
     tmp_path: Path,
 ) -> None:
     inputs = _passing_inputs(tmp_path)
     inputs["qualification_contract"] = {}
+    _attach_independent_qualification(
+        inputs,
+        atom_labels=[_actionable_label("label:one", ["atom:high"])],
+        accepted_outputs_by_kind={},
+        output_ratings=[],
+        false_rejections=["label:one"],
+    )
 
     report = evaluate_shadow_invariants(**inputs)
 
@@ -877,15 +1184,76 @@ def test_shadow_invariants_reject_all_blocked_nonempty_cycle(
         "below_minimum:observed=0:required=1",
         "shadow_qualification_authoritative_ready_ticket_throughput_"
         "below_minimum:observed=0:required=1",
+        "independent_qualification_actionable_zero_output",
     }
     assert report["counts"]["qualifying_observed_atoms"] == 1
     assert report["counts"]["actionable_nonterminal_cases"] == 1
+    assert report["counts"]["independent_actionable_cases"] == 1
     assert report["counts"]["cases"] == 1
     assert report["counts"]["research_proofs"] == 1
     assert report["counts"]["honest_case_specific_blocked_research"] == 1
     assert report["counts"]["systemic_research_blockers"] == 0
     assert inputs["stage3"]["items"][0]["research_status"] == "blocked"
     assert inputs["backlog"]["tickets"][0]["stage"] == "research_required"
+
+
+def test_shadow_stage2_cannot_fabricate_actionability_for_independently_clean_corpus(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    inputs["qualification_contract"] = {}
+    _attach_independent_qualification(
+        inputs,
+        atom_labels=[
+            _actionable_label(
+                "label:clean",
+                ["atom:high"],
+                classification="non_actionable",
+            )
+        ],
+        accepted_outputs_by_kind={},
+        output_ratings=[],
+        no_actionable_receipt=True,
+    )
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["failures"] == ["shadow_verified_exhaustion_backlog_not_empty:ticket_count=1"]
+    assert report["qualification"]["qualification_class"] == "verified_exhaustion"
+    assert report["counts"]["actionable_nonterminal_cases"] == 1
+    assert report["counts"]["independent_actionable_cases"] == 0
+    assert not any("throughput_below_minimum" in item for item in report["failures"])
+
+
+def test_shadow_stage2_cannot_erase_independently_actionable_zero_output(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    inputs["qualification_contract"] = {}
+    inputs["stage2"]["items"][0].update(
+        {
+            "priority_bucket": "watch",
+            "selected_for_research": False,
+            "priority_rationale": "The model tried to defer the held-out actionable case.",
+        }
+    )
+    _attach_independent_qualification(
+        inputs,
+        atom_labels=[_actionable_label("label:one", ["atom:high"])],
+        accepted_outputs_by_kind={},
+        output_ratings=[],
+        false_rejections=["label:one"],
+    )
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert "independent_qualification_actionable_zero_output" in report["failures"]
+    assert (
+        "shadow_qualification_authoritative_ready_ticket_throughput_"
+        "below_minimum:observed=0:required=1" in report["failures"]
+    )
+    assert report["counts"]["actionable_nonterminal_cases"] == 0
+    assert report["counts"]["independent_actionable_cases"] == 1
 
 
 def test_shadow_rejects_missing_codex_stage_invocation_provenance(
@@ -932,6 +1300,71 @@ def test_shadow_invariants_accept_mixed_honest_block_and_productive_case(
     assert report["counts"]["model_produced_evidence_sufficient_research_proofs"] == 1
     assert report["counts"]["code_grounded_plans"] == 1
     assert report["counts"]["authoritative_ready_tickets"] == 1
+    assert report["qualification"]["end_to_end"]["counts"]["good"] == 1
+
+
+def test_shadow_green_artifacts_do_not_infer_good_end_to_end_quality(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _mixed_productive_inputs(tmp_path)
+    _accept_productive_fixture_contracts(monkeypatch)
+    accepted_outputs_by_kind = {
+        "problem": list(inputs["stage1"]["items"]),
+        "relation": list(
+            inputs["stage1"].get("input_meta", {}).get(
+                "relation_review_decisions", []
+            )
+        ),
+        "priority": list(inputs["stage2"]["items"]),
+        "research": [inputs["stage3"]["items"][1]],
+        "option": list(inputs["stage4"]["items"]),
+        "selection": [inputs["stage5"]["items"][0]],
+        "plan": [inputs["stage6"]["items"][0]],
+        "ticket": [inputs["backlog"]["tickets"][-1]],
+    }
+    inputs["qualification_output_adjudication"] = build_qualification_output_adjudication(
+        manifest=inputs["qualification_manifest"],
+        accepted_outputs_by_kind=accepted_outputs_by_kind,
+        output_adjudications=[
+            {
+                "output_kind": output_kind,
+                "output_sha256": shadow_mod._canonical_hash(output),
+                "quality": "bad" if output_kind == "ticket" else "good",
+                "repair_status": "not_repaired",
+                "actionable_label_ids": ["label:positive"],
+                "rationale": "Independent semantic review, not readiness inference.",
+                **(
+                    {
+                        "bad_severity": "noncritical",
+                        "bad_categories": ["limited_causal_coverage"],
+                    }
+                    if output_kind == "ticket"
+                    else {}
+                ),
+            }
+            for output_kind, outputs in accepted_outputs_by_kind.items()
+            for output in outputs
+        ],
+        false_rejections=[
+            {
+                "label_id": "label:positive",
+                "rationale": "The bad ticket did not recover the actionable case.",
+            }
+        ],
+        pending_run_sha256="d" * 64,
+        adjudicator="held-out-shadow-reviewer",
+        method="independent post-run artifact review",
+    )
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["counts"]["authoritative_ready_tickets"] == 1
+    assert report["qualification"]["end_to_end"]["counts"]["bad"] == 1
+    assert (
+        "independent_qualification_good_ticket_count_below_minimum:"
+        "observed=0:required=1" in report["failures"]
+    )
 
 
 def test_shadow_invariants_reject_systemic_research_blocker_despite_throughput(
@@ -1017,6 +1450,533 @@ def test_systemic_research_blocker_failure_codes(
     )
 
 
+def test_final_same_session_repair_is_retained_as_model_produced_research(
+    tmp_path: Path,
+) -> None:
+    inputs = _mixed_productive_inputs(tmp_path)
+    dossier = inputs["stage3"]["items"][-1]
+    repaired = {
+        key: deepcopy(value) for key, value in dossier.items() if key != "research_attempts"
+    }
+    for runner_owned_field in (
+        "research_schema_version",
+        "repo_revision",
+        "diff_classification",
+        "evidence_assignment",
+    ):
+        repaired.pop(runner_owned_field, None)
+    repaired["artifact_refs"] = []
+    dossier["artifact_refs"] = []
+    dossier["research_attempts"] = [
+        {
+            "attempt_number": 1,
+            "attempt_kind": "full_research",
+            "outcome": "output_contract_invalid",
+            "validation_errors": ["positive_outcome_contract_invalid"],
+            "attempted_dossier": {},
+            "attempted_dossier_sha256": shadow_mod._canonical_hash({}),
+        },
+        {
+            "attempt_number": 2,
+            "attempt_kind": "model_output_repair",
+            "outcome": "repair_contract_valid",
+            "validation_errors": [],
+            "attempted_dossier": repaired,
+            "attempted_dossier_sha256": shadow_mod._canonical_hash(repaired),
+            "agent_session_id": "session:author",
+            "observed_agent_session_id": "session:author",
+            "resumed_from_session_id": "session:author",
+            "repair_progress": {"decision": "accepted"},
+        },
+    ]
+    dossier["artifact_refs"].append(
+        {
+            "kind": "runner_report",
+            "path": "C:/volatile/run/report.json",
+            "sha256": "f" * 64,
+            "size_bytes": 123,
+        }
+    )
+
+    assert shadow_mod._model_produced_evidence_sufficient_proof(dossier) is True
+    assert not any(
+        signal.startswith("attempt_outcome:")
+        for signal in shadow_mod._research_blocker_signals(dossier)
+    )
+
+
+def test_superseded_invalid_attempt_is_telemetry_after_honest_repair_downgrade() -> None:
+    repaired = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "research_status": "insufficient_evidence",
+        "blocking_reasons": ["origin_evidence_atoms_unresolved:atom:missing"],
+    }
+    dossier = {
+        **repaired,
+        "research_attempts": [
+            {
+                "attempt_number": 1,
+                "outcome": "output_contract_invalid",
+                "validation_errors": ["research_dossier_output_contract_invalid"],
+            },
+            {
+                "attempt_number": 2,
+                "attempt_kind": "model_output_repair",
+                "outcome": "repair_contract_valid",
+                "validation_errors": [],
+                "attempted_dossier": repaired,
+                "attempted_dossier_sha256": shadow_mod._canonical_hash(repaired),
+                "agent_session_id": "session:author",
+                "observed_agent_session_id": "session:author",
+                "resumed_from_session_id": "session:author",
+                "repair_progress": {"decision": "accepted"},
+            },
+        ],
+    }
+
+    signals = shadow_mod._research_blocker_signals(dossier)
+    assert "attempt_outcome:output_contract_invalid" not in signals
+    assert "research_dossier_output_contract_invalid" not in signals
+    assert shadow_mod._systemic_research_blocker_code(dossier) is None
+
+
+def test_qualification_author_index_uses_stage_owned_role_histories() -> None:
+    role_run = {
+        "role": "planner",
+        "status": "corrected",
+        "accepted": True,
+        "session_id": "session:planner",
+        "response_sha256": "a" * 64,
+        "attempt_history": [
+            {
+                "attempt_number": 1,
+                "attempt_tag": "planner_001",
+                "status": "verified",
+                "agent_session_id": "session:planner",
+                "prompt_sha256": "b" * 64,
+                "response_sha256": "a" * 64,
+            }
+        ],
+    }
+    selector_run = {
+        **role_run,
+        "role": "selector",
+        "session_id": "session:selector",
+        "attempt_history": [
+            {
+                **role_run["attempt_history"][0],
+                "agent_session_id": "session:selector",
+            }
+        ],
+    }
+    selection = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "selected_option_id": "option:one",
+    }
+    plan = {
+        **selection,
+        "plan_revision_id": "planrev:one",
+    }
+    ticket = {
+        **selection,
+        "plan_revision_id": "planrev:one",
+        "change_plan": plan,
+    }
+    index = shadow_mod._qualification_output_author_provenance(
+        stage1={"items": [], "input_meta": {}},
+        stage2={"items": [], "input_meta": {}},
+        stage3={"items": []},
+        stage4={"items": [], "input_meta": {}},
+        stage5={
+            "items": [selection],
+            "input_meta": {
+                "selection_outcomes": [
+                    {
+                        "problem_id": "problem:one",
+                        "role_runs": [selector_run],
+                    }
+                ]
+            },
+        },
+        stage6={
+            "items": [plan],
+            "input_meta": {
+                "planning_correction_runs": [
+                    {
+                        "case_id": "case:one",
+                        "problem_id": "problem:one",
+                        "selected_option_id": "option:one",
+                        **role_run,
+                    }
+                ]
+            },
+        },
+        accepted_outputs_by_kind={
+            "research": [],
+            "selection": [selection],
+            "plan": [plan],
+            "ticket": [ticket],
+        },
+    )
+
+    assert (
+        index[f"selection:{shadow_mod._canonical_hash(selection)}"]["agent_session_id"]
+        == "session:selector"
+    )
+    assert (
+        index[f"plan:{shadow_mod._canonical_hash(plan)}"]["agent_session_id"] == "session:planner"
+    )
+    assert (
+        index[f"ticket:{shadow_mod._canonical_hash(ticket)}"]["exact_session_continuation"] is True
+    )
+
+
+def test_relation_priority_and_problem_component_routes_bind_exact_authors() -> None:
+    def attempt(session: str, workspace: str) -> dict[str, object]:
+        return {
+            "attempt_number": 1,
+            "status": "verified",
+            "agent_session_id": session,
+            "workspace_dir": workspace,
+        }
+
+    problem = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "evidence_atom_ids": ["atom:one"],
+    }
+    relation = {
+        "focus_id": "problem:one",
+        "action": "keep_separate",
+        "rationale": "The initial reviewer treated the mechanisms as distinct.",
+        "review_confidence": 0.7,
+    }
+    priority = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "priority_bucket": "watch",
+        "selected_for_research": True,
+    }
+    accepted = {
+        "problem": [problem],
+        "relation": [relation],
+        "priority": [priority],
+    }
+    index = shadow_mod._qualification_output_author_provenance(
+        stage1={
+            "items": [problem],
+            "input_meta": {
+                "miner_results": [
+                    {
+                        "tag": "problem_mining_001",
+                        "assigned_atom_ids": ["atom:one"],
+                        "attempt_history": [
+                            attempt("session:miner", "C:/workspace/miner")
+                        ],
+                        "coverage_depth_review_attempt_history": [
+                            attempt("session:coverage", "C:/workspace/coverage")
+                        ],
+                    }
+                ],
+                "relation_review_batches": [
+                    {
+                        "tag": "relation_batch_001",
+                        "focus_ids": ["problem:one", "problem:two"],
+                        "attempt_history": [
+                            attempt("session:relation", "C:/workspace/relation")
+                        ],
+                    }
+                ],
+            },
+        },
+        stage2={
+            "items": [priority],
+            "input_meta": {
+                "prioritizer_attempt_history": [
+                    attempt("session:priority", "C:/workspace/priority")
+                ]
+            },
+        },
+        stage3={"items": []},
+        stage4={"items": [], "input_meta": {}},
+        stage5={"items": [], "input_meta": {}},
+        stage6={"items": [], "input_meta": {}},
+        accepted_outputs_by_kind=accepted,
+    )
+    problem_identity = "problem:" + shadow_mod._canonical_hash(problem)
+    relation_identity = "relation:" + shadow_mod._canonical_hash(relation)
+    priority_identity = "priority:" + shadow_mod._canonical_hash(priority)
+    assert {
+        item["component_id"]
+        for item in index[problem_identity]["author_component_frontiers"]
+    } == {
+        "problem_miner:problem_mining_001",
+        "coverage_review:problem_mining_001",
+    }
+    assert index[relation_identity]["agent_session_id"] == "session:relation"
+    assert index[priority_identity]["agent_session_id"] == "session:priority"
+    missed = shadow_mod._false_rejection_author_provenance(
+        manifest={
+            "atom_labels": [
+                {
+                    "label_id": "label:missed",
+                    "classification": "actionable",
+                    "atom_ids": ["atom:one"],
+                }
+            ]
+        },
+        stage1={
+            "items": [],
+            "input_meta": {
+                "miner_results": [
+                    {
+                        "tag": "problem_mining_001",
+                        "assigned_atom_ids": ["atom:one"],
+                        "attempt_history": [
+                            attempt("session:miner", "C:/workspace/miner")
+                        ],
+                        "coverage_depth_review_attempt_history": [
+                            attempt("session:coverage", "C:/workspace/coverage")
+                        ],
+                    }
+                ]
+            },
+        },
+        stage2={"items": [], "input_meta": {}},
+        stage3={"items": []},
+        stage4={"items": [], "input_meta": {}},
+        stage5={"items": [], "input_meta": {}},
+        stage6={"items": [], "input_meta": {}},
+    )["label:missed"]
+    assert missed["agent_session_id"] == "session:coverage"
+    assert missed["stage1_correction_adapter"] == "coverage_review"
+    assert missed["miner_tag"] == "problem_mining_001"
+    assert missed["evidence_atom_ids"] == ["atom:one"]
+
+    def bad_item(
+        kind: str,
+        output: dict[str, object],
+        *,
+        component: str | None = None,
+    ) -> dict[str, object]:
+        item: dict[str, object] = {
+            "output_kind": kind,
+            "output_sha256": shadow_mod._canonical_hash(output),
+            "quality": "bad",
+            "repair_status": "not_repaired",
+            "correctability": "correctable",
+            "bad_severity": "noncritical",
+            "bad_categories": ["independent_semantic_finding"],
+            "rationale": "The retained authored decision is semantically wrong.",
+            "actionable_label_ids": ["label:one"],
+        }
+        if component is not None:
+            item["author_component_target"] = component
+        return item
+
+    routes = qualification_mod._qualification_correction_routes(
+        [
+            bad_item(
+                "problem",
+                problem,
+                component="problem_miner:problem_mining_001",
+            ),
+            bad_item("relation", relation),
+            bad_item("priority", priority),
+        ],
+        output_author_provenance=index,
+    )
+    by_kind = {route["output_kind"]: route for route in routes}
+    assert by_kind["problem"]["agent_session_id"] == "session:miner"
+    assert (
+        by_kind["problem"]["author_component_resolution_status"]
+        == "explicit_component"
+    )
+    assert by_kind["relation"]["agent_session_id"] == "session:relation"
+    assert by_kind["relation"]["author_provenance"][
+        "stage1_correction_adapter"
+    ] == "relation_review"
+    assert by_kind["priority"]["agent_session_id"] == "session:priority"
+    assert by_kind["priority"]["restart_from_stage"] == "problem_prioritization"
+
+    invalid = qualification_mod._qualification_correction_routes(
+        [bad_item("problem", problem, component="relation_review:not-a-frontier")],
+        output_author_provenance=index,
+    )[0]
+    assert invalid["route_status"] == "author_provenance_unavailable"
+    assert invalid["agent_session_id"] is None
+    assert invalid["selected_author_component_target"] is None
+    assert invalid["author_component_resolution_status"] == "invalid_component_target"
+    assert set(invalid["available_author_component_targets"]) == {
+        "problem_miner:problem_mining_001",
+        "coverage_review:problem_mining_001",
+    }
+
+
+def test_false_rejection_spanning_assignments_returns_every_exact_stage1_author() -> None:
+    def attempt(session: str, workspace: str) -> dict[str, object]:
+        return {
+            "attempt_number": 1,
+            "status": "verified",
+            "agent_session_id": session,
+            "workspace_dir": workspace,
+        }
+
+    provenance = shadow_mod._false_rejection_author_provenance(
+        manifest={
+            "atom_labels": [
+                {
+                    "label_id": "label:spanning",
+                    "classification": "actionable",
+                    "atom_ids": ["atom:one", "atom:two"],
+                }
+            ]
+        },
+        stage1={
+            "items": [],
+            "input_meta": {
+                "miner_results": [
+                    {
+                        "tag": "assignment:one",
+                        "assigned_atom_ids": ["atom:one"],
+                        "coverage_depth_review_attempt_history": [
+                            attempt("session:one", "C:/workspace/one")
+                        ],
+                    },
+                    {
+                        "tag": "assignment:two",
+                        "assigned_atom_ids": ["atom:two"],
+                        "coverage_depth_review_attempt_history": [
+                            attempt("session:two", "C:/workspace/two")
+                        ],
+                    },
+                ]
+            },
+        },
+        stage2={"items": [], "input_meta": {}},
+        stage3={"items": []},
+        stage4={"items": [], "input_meta": {}},
+        stage5={"items": [], "input_meta": {}},
+        stage6={"items": [], "input_meta": {}},
+    )["label:spanning"]
+
+    assert isinstance(provenance, list)
+    assert {item["agent_session_id"] for item in provenance} == {
+        "session:one",
+        "session:two",
+    }
+    assert {tuple(item["evidence_atom_ids"]) for item in provenance} == {
+        ("atom:one",),
+        ("atom:two",),
+    }
+    assert {
+        tuple(item["causal_target"]["expected_item_keys"])
+        for item in provenance
+    } == {("atom:atom:one",), ("atom:atom:two",)}
+
+def test_second_cycle_routes_to_earlier_per_problem_repair_author() -> None:
+    option = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "option_id": "option:one",
+    }
+
+    def option_meta(problem_id: str, session: str, workspace: str) -> dict[str, object]:
+        return {
+            "optioning_correction_runs": [
+                {
+                    "problem_id": problem_id,
+                    "attempt_history": [
+                        {
+                            "attempt_number": 2,
+                            "status": "verified",
+                            "agent_session_id": session,
+                            "workspace_dir": workspace,
+                        }
+                    ],
+                }
+            ]
+        }
+
+    stage4 = {
+        "items": [option, {"problem_id": "problem:two", "option_id": "option:two"}],
+        "input_meta": {
+            **option_meta("problem:two", "session:latest", "C:/workspace/latest"),
+            "qualification_repair_history": [
+                {
+                    "affected_problem_ids": ["problem:one"],
+                    "replacement_stage_document_sha256": "a" * 64,
+                    "replacement_author_input_meta": option_meta(
+                        "problem:one",
+                        "session:earlier",
+                        "C:/workspace/earlier",
+                    ),
+                    "route_consumption_receipts": [
+                        {
+                            "route_sha256": "b" * 64,
+                            "consumption_receipt_sha256": "c" * 64,
+                        }
+                    ],
+                },
+                {
+                    "affected_problem_ids": ["problem:two"],
+                    "replacement_stage_document_sha256": "d" * 64,
+                    "replacement_author_input_meta": option_meta(
+                        "problem:two",
+                        "session:latest",
+                        "C:/workspace/latest",
+                    ),
+                    "route_consumption_receipts": [],
+                },
+            ],
+        },
+    }
+    index = shadow_mod._qualification_output_author_provenance(
+        stage1={"items": [], "input_meta": {}},
+        stage2={"items": [], "input_meta": {}},
+        stage3={"items": []},
+        stage4=stage4,
+        stage5={"items": [], "input_meta": {}},
+        stage6={"items": [], "input_meta": {}},
+        accepted_outputs_by_kind={"option": [option]},
+    )
+    identity = "option:" + shadow_mod._canonical_hash(option)
+    provenance = index[identity]
+    assert provenance["agent_session_id"] == "session:earlier"
+    assert provenance["workspace_dir"] == "C:/workspace/earlier"
+    assert provenance["qualification_repair_frontier"] == {
+        "source": "qualification_repair_history",
+        "affected_problem_ids": ["problem:one"],
+        "replacement_stage_document_sha256": "a" * 64,
+        "route_consumption_receipts": [
+            {
+                "route_sha256": "b" * 64,
+                "consumption_receipt_sha256": "c" * 64,
+            }
+        ],
+    }
+    route = qualification_mod._qualification_correction_routes(
+        [
+            {
+                "output_kind": "option",
+                "output_sha256": shadow_mod._canonical_hash(option),
+                "quality": "bad",
+                "repair_status": "not_repaired",
+                "correctability": "correctable",
+                "bad_severity": "noncritical",
+                "bad_categories": ["residual_recurrence_path"],
+                "rationale": "The earlier repaired option still leaves a recurrence path.",
+                "actionable_label_ids": ["label:one"],
+            }
+        ],
+        output_author_provenance=index,
+    )[0]
+    assert route["route_status"] == "same_author_resume"
+    assert route["agent_session_id"] == "session:earlier"
+
+
 def test_shadow_invariants_require_code_grounded_persisted_ready_plan(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1030,7 +1990,7 @@ def test_shadow_invariants_require_code_grounded_persisted_ready_plan(
     assert report["passed"] is False
     assert any(
         failure.startswith("ready_ticket_persisted_plan_not_code_grounded:")
-        and "change_target_symbols_missing:0" in failure
+        and "plan_target_contract_targets_mismatch" in failure
         for failure in report["failures"]
     )
     assert (
@@ -1039,6 +1999,48 @@ def test_shadow_invariants_require_code_grounded_persisted_ready_plan(
     )
     assert report["counts"]["code_grounded_plans"] == 0
     assert report["counts"]["authoritative_ready_tickets"] == 0
+
+
+@pytest.mark.parametrize(
+    ("schema_version", "action", "destination_path", "symbols"),
+    [
+        (2, "modify", None, ["core.run"]),
+        (3, "modify", None, []),
+        (3, "create", None, []),
+        (3, "delete", None, []),
+        (3, "rename", "src/renamed.py", []),
+        (3, "move", "src/moved.py", []),
+    ],
+)
+def test_persisted_plan_grounding_uses_authoritative_v2_v3_target_contract(
+    schema_version: int,
+    action: str,
+    destination_path: str | None,
+    symbols: list[str],
+) -> None:
+    target: dict[str, object] = {
+        "action": action,
+        "path": "src/core.py",
+        "symbols": symbols,
+        "change": "Apply the researched intervention to the exact target.",
+    }
+    if destination_path is not None:
+        target["destination_path"] = destination_path
+    draft: dict[str, object] = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "selected_option_id": "option:one",
+        "repo_revision": "a" * 40,
+        "change_targets": [target],
+        "verification_commands": ["pdm run pytest tests/test_core.py -q"],
+    }
+    draft["target_contract"] = _target_contract(
+        draft,
+        schema_version=schema_version,
+    )
+    plan = assign_plan_revision_id(draft)
+
+    assert shadow_mod._persisted_plan_grounding_errors(plan) == []
 
 
 def test_honest_missing_origin_evidence_is_not_a_systemic_blocker(
@@ -1067,7 +2069,7 @@ def test_empty_or_proposal_only_cycles_are_recorded_but_never_qualify(
     corpus_kind: str,
 ) -> None:
     inputs = _passing_inputs(tmp_path)
-    inputs["qualification_contract"] = {}
+    inputs["qualification_contract"] = {"require_nonempty_throughput": False}
     inputs["atoms"] = (
         []
         if corpus_kind == "empty"
@@ -1130,11 +2132,24 @@ def test_exhausted_terminal_corpus_does_not_require_fabricated_throughput(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     inputs = _passing_inputs(tmp_path)
-    inputs["qualification_contract"] = {}
+    inputs["qualification_contract"] = {"require_nonempty_throughput": False}
     inputs["backlog"] = {"tickets": []}
     inputs["stage2"] = {"items": []}
     inputs["stage3"] = {"items": []}
     inputs["case_registry"]["cases"]["case:one"]["state"] = "resolved"
+    _attach_independent_qualification(
+        inputs,
+        atom_labels=[
+            _actionable_label(
+                "label:clean",
+                ["atom:high"],
+                classification="non_actionable",
+            )
+        ],
+        accepted_outputs_by_kind={},
+        output_ratings=[],
+        no_actionable_receipt=True,
+    )
     monkeypatch.setattr(shadow_mod, "_terminal_outcome_errors", lambda *_args, **_kwargs: [])
 
     report = evaluate_shadow_invariants(**inputs)
@@ -1143,8 +2158,31 @@ def test_exhausted_terminal_corpus_does_not_require_fabricated_throughput(
     assert report["failures"] == []
     assert report["counts"]["qualifying_observed_atoms"] == 1
     assert report["counts"]["actionable_nonterminal_cases"] == 0
+    assert report["counts"]["independent_actionable_cases"] == 0
+    assert report["qualification"]["counts"]["exhausted_corpus"] == 1
+    assert report["qualification"]["qualification_class"] == "verified_exhaustion"
     assert report["counts"]["model_produced_evidence_sufficient_research_proofs"] == 0
     assert report["counts"]["authoritative_ready_tickets"] == 0
+
+    backlog_path = tmp_path / "exhausted.backlog.json"
+    _write_json(backlog_path, inputs["backlog"])
+    state_path = shadow_state_path(backlog_path)
+    state = _record_cycle(
+        tmp_path,
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=report,
+        generated_at="2026-07-09T00:00:00Z",
+    )
+
+    assert state["ready_for_export"] is True
+    assert state["consecutive_stable_passes"] == 0
+    ready, reasons, _ = validate_shadow_export_state(
+        state_path=state_path,
+        backlog_path=backlog_path,
+    )
+    assert ready is True
+    assert reasons == []
 
 
 def test_two_stable_shadow_cycles_unlock_only_the_exact_backlog(tmp_path: Path) -> None:
@@ -1246,10 +2284,10 @@ def test_two_stable_shadow_cycles_unlock_only_the_exact_backlog(tmp_path: Path) 
         state_path=state_path,
         backlog_path=backlog_path,
     )
-    assert third["ready_for_export"] is False
-    assert third["consecutive_stable_passes"] == 1
-    assert ready is False
-    assert "stable_shadow_cycles_required:1/2" in reasons
+    assert third["ready_for_export"] is True
+    assert third["consecutive_stable_passes"] == 3
+    assert ready is True
+    assert reasons == []
 
     fourth = _record_cycle(
         tmp_path,
@@ -1263,7 +2301,7 @@ def test_two_stable_shadow_cycles_unlock_only_the_exact_backlog(tmp_path: Path) 
         backlog_path=backlog_path,
     )
     assert fourth["ready_for_export"] is True
-    assert fourth["consecutive_stable_passes"] == 2
+    assert fourth["consecutive_stable_passes"] == 4
     assert ready is True
     assert reasons == []
 
@@ -1455,6 +2493,127 @@ def test_shadow_gate_can_allow_projection_drift_when_configured(tmp_path: Path) 
     assert reasons == []
 
 
+def test_stability_streak_ignores_per_cycle_qualification_hashes_but_not_semantics() -> None:
+    common = {
+        "cycle_mode": "release",
+        "passed": True,
+        "qualification": {"qualification_class": "positive_throughput"},
+        "required_consecutive_cycles": 2,
+        "require_exact_export_projection": True,
+        "source_atom_corpus_sha256": "a" * 64,
+        "case_graph_sha256": "b" * 64,
+        "ticket_set_sha256": "c" * 64,
+        "research_proof_basis_sha256": "d" * 64,
+        "qualification_stability_sha256": "e" * 64,
+        "stability_inputs_sha256": "f" * 64,
+    }
+    first = {
+        **common,
+        "qualification_basis_sha256": "1" * 64,
+        "export_inputs_sha256": "2" * 64,
+    }
+    second = {
+        **common,
+        "qualification_basis_sha256": "3" * 64,
+        "export_inputs_sha256": "4" * 64,
+    }
+
+    assert (
+        shadow_mod._consecutive_stable_passes(
+            [first, second],
+            required_consecutive_cycles=2,
+            require_exact_export_projection=True,
+        )
+        == 2
+    )
+
+    changed_actionability = {**second, "qualification_stability_sha256": "9" * 64}
+    assert (
+        shadow_mod._consecutive_stable_passes(
+            [first, changed_actionability],
+            required_consecutive_cycles=2,
+            require_exact_export_projection=True,
+        )
+        == 1
+    )
+
+    bad_ratio_cycle = {**second, "passed": False}
+    assert (
+        shadow_mod._consecutive_stable_passes(
+            [first, bad_ratio_cycle],
+            required_consecutive_cycles=2,
+            require_exact_export_projection=True,
+        )
+        == 0
+    )
+
+
+def test_stability_input_projection_excludes_qualification_bytes_only() -> None:
+    base = {
+        "name": "config.policy",
+        "source_path": "C:/repo/config.yaml",
+        "exists": True,
+        "sha256": "a" * 64,
+        "content_sha256": None,
+        "size_bytes": 10,
+    }
+    first = [
+        base,
+        {
+            **base,
+            "name": "qualification.output_adjudication",
+            "source_path": "C:/held-out/first.json",
+            "sha256": "1" * 64,
+        },
+    ]
+    second = [
+        base,
+        {
+            **base,
+            "name": "qualification.output_adjudication",
+            "source_path": "C:/held-out/second.json",
+            "sha256": "2" * 64,
+        },
+    ]
+
+    assert shadow_mod._export_input_projection(first) != shadow_mod._export_input_projection(second)
+    assert shadow_mod._stability_input_projection(first) == shadow_mod._stability_input_projection(
+        second
+    )
+
+
+def test_stability_input_projection_ignores_custody_path_but_not_bytes() -> None:
+    first = [
+        {
+            "name": "config.policy",
+            "source_path": "C:/cycle-one/snapshot/config.yaml",
+            "exists": True,
+            "sha256": "a" * 64,
+            "content_sha256": None,
+            "size_bytes": 10,
+        }
+    ]
+    relocated = [
+        {
+            **first[0],
+            "source_path": "D:/cycle-two/snapshot/config.yaml",
+        }
+    ]
+    changed = [
+        {
+            **relocated[0],
+            "sha256": "b" * 64,
+        }
+    ]
+
+    assert shadow_mod._stability_input_projection(first) == (
+        shadow_mod._stability_input_projection(relocated)
+    )
+    assert shadow_mod._stability_input_projection(first) != (
+        shadow_mod._stability_input_projection(changed)
+    )
+
+
 def test_rendered_export_projection_drift_does_not_reset_semantic_streak(
     tmp_path: Path,
 ) -> None:
@@ -1628,7 +2787,7 @@ def test_ticket_stability_resets_for_material_plan_intent_change(
         "image_id",
     ],
 )
-def test_research_proof_basis_change_resets_stability_streak(
+def test_research_proof_basis_change_remains_bound_without_resetting_semantic_streak(
     tmp_path: Path,
     changed_evidence: str,
 ) -> None:
@@ -1715,8 +2874,10 @@ def test_research_proof_basis_change_resets_stability_streak(
         generated_at="2026-07-09T01:00:00Z",
     )
 
-    assert state["ready_for_export"] is False
-    assert state["consecutive_stable_passes"] == 1
+    assert state["cycles"][0]["research_proof_basis_sha256"] == first_basis
+    assert state["cycles"][1]["research_proof_basis_sha256"] == second_basis
+    assert state["ready_for_export"] is True
+    assert state["consecutive_stable_passes"] == 2
 
 
 def test_two_cycle_shadow_stability_ignores_rephrased_causal_narration(
@@ -1944,6 +3105,222 @@ def test_generated_stage_byte_drift_does_not_make_stability_impossible(
     assert second["consecutive_stable_passes"] == 2
 
 
+def test_operational_cycle_preserves_but_does_not_extend_release_qualification(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    release_report = evaluate_shadow_invariants(**inputs)
+    release_report["export_projection_sha256"] = "1" * 64
+    operational_report = evaluate_shadow_invariants(**inputs, cycle_mode="operational")
+    operational_report["export_projection_sha256"] = "2" * 64
+    backlog_path = tmp_path / "target.backlog.json"
+    _write_json(backlog_path, inputs["backlog"])
+    state_path = shadow_state_path(backlog_path)
+    artifacts = _cycle_artifacts(tmp_path)
+    config_path = tmp_path / "backlog_policy.yaml"
+    config_path.write_text("backlog_policy:\n  version: 1\n", encoding="utf-8")
+    artifacts["config.policy"] = config_path
+
+    first = record_shadow_cycle(
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=release_report,
+        artifact_paths=artifacts,
+        generated_at="2026-07-09T00:00:00Z",
+    )
+    second = record_shadow_cycle(
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=release_report,
+        artifact_paths=artifacts,
+        generated_at="2026-07-09T01:00:00Z",
+    )
+    operational = record_shadow_cycle(
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=operational_report,
+        artifact_paths=artifacts,
+        generated_at="2026-07-09T02:00:00Z",
+    )
+
+    assert first["ready_for_export"] is False
+    assert second["ready_for_export"] is True
+    assert operational["ready_for_export"] is True
+    assert operational["activation_mode"] == "operational_bound"
+    assert operational["consecutive_stable_passes"] == 2
+    assert operational["release_anchor_cycle_ids"] == [
+        first["cycles"][-1]["cycle_id"],
+        second["cycles"][-1]["cycle_id"],
+    ]
+    assert operational["cycles"][-1]["cycle_mode"] == "operational"
+    assert operational["cycles"][-1]["qualification"]["qualification_class"] == (
+        "unqualified"
+    )
+
+
+def test_operational_cycle_refuses_export_after_pipeline_config_drift(tmp_path: Path) -> None:
+    inputs = _passing_inputs(tmp_path)
+    release_report = evaluate_shadow_invariants(**inputs)
+    release_report["export_projection_sha256"] = "1" * 64
+    operational_report = evaluate_shadow_invariants(**inputs, cycle_mode="operational")
+    operational_report["export_projection_sha256"] = "2" * 64
+    backlog_path = tmp_path / "target.backlog.json"
+    _write_json(backlog_path, inputs["backlog"])
+    state_path = shadow_state_path(backlog_path)
+    artifacts = _cycle_artifacts(tmp_path)
+    config_path = tmp_path / "backlog_policy.yaml"
+    config_path.write_text("backlog_policy:\n  version: 1\n", encoding="utf-8")
+    artifacts["config.policy"] = config_path
+
+    record_shadow_cycle(
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=release_report,
+        artifact_paths=artifacts,
+        generated_at="2026-07-09T00:00:00Z",
+    )
+    record_shadow_cycle(
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=release_report,
+        artifact_paths=artifacts,
+        generated_at="2026-07-09T01:00:00Z",
+    )
+    config_path.write_text("backlog_policy:\n  version: 2\n", encoding="utf-8")
+    operational = record_shadow_cycle(
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=operational_report,
+        artifact_paths=artifacts,
+        generated_at="2026-07-09T02:00:00Z",
+    )
+
+    assert operational["ready_for_export"] is False
+    assert operational["activation_mode"] is None
+    assert operational["consecutive_stable_passes"] == 0
+    assert operational["release_anchor_cycle_ids"] == []
+
+
+def test_release_anchor_survives_operational_cycle_retention_window(tmp_path: Path) -> None:
+    inputs = _passing_inputs(tmp_path)
+    release_report = evaluate_shadow_invariants(**inputs)
+    release_report["export_projection_sha256"] = "1" * 64
+    operational_report = evaluate_shadow_invariants(**inputs, cycle_mode="operational")
+    operational_report["export_projection_sha256"] = "2" * 64
+    backlog_path = tmp_path / "target.backlog.json"
+    _write_json(backlog_path, inputs["backlog"])
+    state_path = shadow_state_path(backlog_path)
+    artifacts = _cycle_artifacts(tmp_path)
+    first = record_shadow_cycle(
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=release_report,
+        artifact_paths=artifacts,
+        generated_at="2026-07-09T00:00:00Z",
+    )
+    second = record_shadow_cycle(
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=release_report,
+        artifact_paths=artifacts,
+        generated_at="2026-07-09T00:01:00Z",
+    )
+    state = second
+    for index in range(12):
+        state = record_shadow_cycle(
+            state_path=state_path,
+            backlog_path=backlog_path,
+            invariant_report=operational_report,
+            artifact_paths=artifacts,
+            generated_at=f"2026-07-09T01:{index:02d}:00Z",
+        )
+
+    assert state["ready_for_export"] is True
+    assert state["activation_mode"] == "operational_bound"
+    assert state["release_anchor_cycle_ids"] == [
+        first["cycles"][-1]["cycle_id"],
+        second["cycles"][-1]["cycle_id"],
+    ]
+    retained_modes = [cycle["cycle_mode"] for cycle in state["cycles"]]
+    assert retained_modes.count("release") == 2
+    assert retained_modes.count("operational") == 10
+
+
+def test_new_release_failure_invalidates_an_older_positive_anchor(tmp_path: Path) -> None:
+    inputs = _passing_inputs(tmp_path)
+    release_report = evaluate_shadow_invariants(**inputs)
+    release_report["export_projection_sha256"] = "1" * 64
+    failed_release_report = deepcopy(release_report)
+    failed_release_report["passed"] = False
+    failed_release_report["failures"] = ["independent_adjudication_rejected"]
+    operational_report = evaluate_shadow_invariants(**inputs, cycle_mode="operational")
+    operational_report["export_projection_sha256"] = "2" * 64
+    backlog_path = tmp_path / "target.backlog.json"
+    _write_json(backlog_path, inputs["backlog"])
+    state_path = shadow_state_path(backlog_path)
+    artifacts = _cycle_artifacts(tmp_path)
+
+    for index in range(2):
+        record_shadow_cycle(
+            state_path=state_path,
+            backlog_path=backlog_path,
+            invariant_report=release_report,
+            artifact_paths=artifacts,
+            generated_at=f"2026-07-09T00:0{index}:00Z",
+        )
+    failed = record_shadow_cycle(
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=failed_release_report,
+        artifact_paths=artifacts,
+        generated_at="2026-07-09T00:02:00Z",
+    )
+    operational = record_shadow_cycle(
+        state_path=state_path,
+        backlog_path=backlog_path,
+        invariant_report=operational_report,
+        artifact_paths=artifacts,
+        generated_at="2026-07-09T00:03:00Z",
+    )
+
+    assert failed["ready_for_export"] is False
+    assert operational["ready_for_export"] is False
+    assert operational["release_anchor_cycle_ids"] == []
+
+
+def test_operational_pending_receipt_allows_ux_but_rejects_stage_drift(
+    tmp_path: Path,
+) -> None:
+    backlog_path = tmp_path / "target.backlog.json"
+    _write_json(backlog_path, {"generated_at_utc": "2026-07-09T00:00:00Z", "tickets": []})
+    artifact_paths = _cycle_artifacts(tmp_path)
+    ux_path = tmp_path / "target.ux_review.json"
+    artifact_paths["ux.review_json"] = ux_path
+    pending_path = operational_shadow_pending_run_path(backlog_path)
+    write_pending_operational_shadow_run(
+        pending_path=pending_path,
+        backlog_path=backlog_path,
+        artifact_paths=artifact_paths,
+        generated_at="2026-07-09T00:00:00Z",
+    )
+
+    _write_json(ux_path, {"status": "reviewed"})
+    _pending, errors = validate_pending_operational_shadow_run(
+        pending_path=pending_path,
+        backlog_path=backlog_path,
+        artifact_paths=artifact_paths,
+    )
+    assert errors == []
+
+    _write_json(artifact_paths["research"], {"artifact": "research", "changed": True})
+    _pending, errors = validate_pending_operational_shadow_run(
+        pending_path=pending_path,
+        backlog_path=backlog_path,
+        artifact_paths=artifact_paths,
+    )
+    assert "pending_operational_shadow_run_materialized_artifacts_changed" in errors
+
+
 @pytest.mark.parametrize(
     "config",
     [
@@ -1956,7 +3333,17 @@ def test_generated_stage_byte_drift_does_not_make_stability_impossible(
         {"minimum_evidence_sufficient_research_proofs": True},
         {"minimum_authoritative_ready_tickets": 0},
         {"minimum_authoritative_ready_tickets": True},
+        {"minimum_good_ticket_count": 0},
+        {"minimum_good_ticket_count": True},
+        {"minimum_good_to_bad_ratio": 1.0},
+        {"minimum_good_to_bad_ratio": True},
+        {"minimum_recovered_to_missed_ratio": 1.0},
+        {"minimum_recovered_to_missed_ratio": True},
+        {"require_zero_unknown_authoritative_tickets": "yes"},
         {"fail_on_systemic_research_blockers": "yes"},
+        {"qualification_corpus_manifest_path": 42},
+        {"qualification_output_adjudication_path": ""},
+        {"no_actionable_evidence_receipt_path": []},
     ],
 )
 def test_shadow_gate_rejects_invalid_config(config: object) -> None:
@@ -1970,7 +3357,14 @@ def test_shadow_gate_defaults_require_productive_depth() -> None:
     assert config["require_nonempty_throughput"] is True
     assert config["minimum_evidence_sufficient_research_proofs"] == 1
     assert config["minimum_authoritative_ready_tickets"] == 1
+    assert config["minimum_good_ticket_count"] == 1
+    assert config["minimum_good_to_bad_ratio"] == 2.0
+    assert config["minimum_recovered_to_missed_ratio"] == 2.0
+    assert config["require_zero_unknown_authoritative_tickets"] is True
     assert config["fail_on_systemic_research_blockers"] is True
+    assert config["qualification_corpus_manifest_path"] is None
+    assert config["qualification_output_adjudication_path"] is None
+    assert config["no_actionable_evidence_receipt_path"] is None
 
 
 @pytest.mark.parametrize(
@@ -2005,6 +3399,46 @@ def test_shadow_cycle_rejects_duplicate_runner_provenance(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="shadow_cycle_duplicate"):
         _record_cycle(tmp_path, **kwargs)
+
+
+def test_pending_shadow_run_allows_fresh_adjudication_but_binds_model_artifacts(
+    tmp_path: Path,
+) -> None:
+    backlog_path = tmp_path / "target.backlog.json"
+    _write_json(backlog_path, {"tickets": []})
+    artifacts = _cycle_artifacts(tmp_path)
+    output_adjudication_path = tmp_path / "held-out" / "output.json"
+    _write_json(output_adjudication_path, {"version": "pre-run"})
+    pending_path = shadow_pending_run_path(backlog_path)
+    artifacts["qualification.output_adjudication"] = output_adjudication_path
+    artifacts["qualification.pending_run_receipt"] = pending_path
+    pre_hash = sha256(output_adjudication_path.read_bytes()).hexdigest()
+    write_pending_shadow_run(
+        pending_path=pending_path,
+        backlog_path=backlog_path,
+        artifact_paths=artifacts,
+        qualification_manifest_sha256_expected="a" * 64,
+        output_adjudication_sha256_pre_run=pre_hash,
+        generated_at="2026-07-11T12:00:00Z",
+    )
+
+    _write_json(output_adjudication_path, {"version": "post-run-independent"})
+    _pending, errors = validate_pending_shadow_run(
+        pending_path=pending_path,
+        backlog_path=backlog_path,
+        artifact_paths=artifacts,
+    )
+
+    assert errors == []
+
+    _write_json(artifacts["research"], {"artifact": "mutated-research"})
+    _pending, errors = validate_pending_shadow_run(
+        pending_path=pending_path,
+        backlog_path=backlog_path,
+        artifact_paths=artifacts,
+    )
+
+    assert "pending_shadow_run_materialized_artifacts_changed" in errors
 
 
 def test_shadow_state_rejects_duplicate_cycle_rows(tmp_path: Path) -> None:
@@ -2328,6 +3762,42 @@ def test_shadow_invariants_reject_unreviewed_derived_case_creation(tmp_path: Pat
         "derived_atom_novel_without_decision:atom:derived",
         "shadow_qualification_no_observed_automated_evidence",
     }
+
+
+def test_shadow_requires_durable_work_for_receipted_novel_derived_failure(
+    tmp_path: Path,
+) -> None:
+    inputs = _passing_inputs(tmp_path)
+    inputs["atoms"] = [
+        apply_atom_disposition_decision(
+            {
+                "atom_id": "atom:derived-novel",
+                "severity_hint": "high",
+                "evidence_role": "research",
+                "evidence_class": "observed",
+                "origin_run_id": "run:research-infrastructure",
+                "origin_stage": "repro_research",
+                "parent_case_id": "case:original",
+                "case_id": "case:research-infrastructure",
+                "derived_from_atom_ids": ["atom:original"],
+                "supporting_case_ids": ["case:research-infrastructure"],
+                "disposition": "novel_case",
+                "novel_case_rationale": (
+                    "The research runner failed independently before inspecting the parent case."
+                ),
+            },
+            disposition="novel_case",
+            source="runner_novel_case_classification",
+            rationale="The runner recorded a distinct research-infrastructure failure.",
+        )
+    ]
+
+    report = evaluate_shadow_invariants(**inputs)
+
+    assert report["passed"] is False
+    assert report["failures"] == [
+        "high_severity_unresolved_without_active_work:atom:derived-novel"
+    ]
 
 
 def test_shadow_invariants_reject_high_atom_with_default_unresolved_disposition(

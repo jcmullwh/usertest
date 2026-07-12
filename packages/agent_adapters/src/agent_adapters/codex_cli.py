@@ -10,6 +10,7 @@ import tomllib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import UUID
 
 from agent_adapters.docker_exec_env import inject_docker_exec_env, looks_like_docker_exec_prefix
 from agent_adapters.events import utc_now_iso
@@ -207,6 +208,46 @@ class CodexExecResult:
     raw_events_path: Path
     last_message_path: Path
     stderr_path: Path
+    thread_id: str | None = None
+
+
+def _canonical_codex_thread_id(value: str) -> str:
+    """Accept only an exact UUID captured from a prior Codex thread.started event."""
+    normalized = str(value).strip()
+    try:
+        parsed = UUID(normalized)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError("codex_resume_session_id_invalid") from exc
+    canonical = str(parsed)
+    if normalized.casefold() != canonical:
+        raise ValueError("codex_resume_session_id_not_canonical")
+    return canonical
+
+
+def _codex_thread_id_from_raw_events(path: Path) -> str | None:
+    """Extract one unambiguous, canonical Codex session id from JSONL output."""
+    if not path.is_file():
+        return None
+    observed: set[str] = set()
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return None
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except (json.JSONDecodeError, TypeError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "thread.started":
+            continue
+        raw = event.get("thread_id")
+        if not isinstance(raw, str):
+            continue
+        try:
+            observed.add(_canonical_codex_thread_id(raw))
+        except ValueError:
+            continue
+    return next(iter(observed)) if len(observed) == 1 else None
 
 
 @dataclass(frozen=True)
@@ -672,6 +713,7 @@ def run_codex_exec(
     command_prefix: Iterable[str] = (),
     env_overrides: dict[str, str] | None = None,
     agent_last_message_path: str | None = None,
+    resume_session_id: str | None = None,
 ) -> CodexExecResult:
     raw_events_path.parent.mkdir(parents=True, exist_ok=True)
     last_message_path.parent.mkdir(parents=True, exist_ok=True)
@@ -688,18 +730,23 @@ def run_codex_exec(
     if ask_for_approval is not None:
         argv.extend(["--ask-for-approval", ask_for_approval])
 
+    canonical_resume_session_id = (
+        _canonical_codex_thread_id(resume_session_id)
+        if resume_session_id is not None
+        else None
+    )
+    if canonical_resume_session_id is not None and subcommand != "exec":
+        raise ValueError("codex_resume_requires_exec_subcommand")
     argv.append(subcommand)
+    if canonical_resume_session_id is not None:
+        argv.append("resume")
     if ignore_user_config:
         argv.append("--ignore-user-config")
-    argv.extend(
-        [
-            "--json",
-            "--cd",
-            str(workspace_dir),
-            "--sandbox",
-            sandbox,
-        ]
-    )
+    argv.append("--json")
+    # `codex exec resume` restores the original session's cwd and sandbox. Its CLI deliberately
+    # does not accept --cd/--sandbox, so never fake continuation by starting a fresh exec.
+    if canonical_resume_session_id is None:
+        argv.extend(["--cd", str(workspace_dir), "--sandbox", sandbox])
     if ignore_rules:
         argv.append("--ignore-rules")
     if skip_git_repo_check:
@@ -709,6 +756,8 @@ def run_codex_exec(
     for override in config_overrides:
         argv.extend(["-c", override])
     argv.extend(["--output-last-message", agent_last_message_path or str(last_message_path)])
+    if canonical_resume_session_id is not None:
+        argv.append(canonical_resume_session_id)
     argv.append("-")
 
     full_argv, env = _prepare_codex_argv_and_env(
@@ -750,6 +799,7 @@ def run_codex_exec(
                 text=True,
                 encoding="utf-8",
                 env=env,
+                cwd=None if prefix else str(workspace_dir),
             )
         except FileNotFoundError as e:
             stderr_f.write(
@@ -888,10 +938,18 @@ def run_codex_exec(
     if saw_refresh_token_reused:
         _rewrite_refresh_token_reused_stderr(stderr_path)
 
+    observed_thread_id = _codex_thread_id_from_raw_events(raw_events_path)
+    if (
+        canonical_resume_session_id is not None
+        and observed_thread_id is not None
+        and observed_thread_id != canonical_resume_session_id
+    ):
+        raise RuntimeError("codex_resume_session_id_changed")
     return CodexExecResult(
         argv=full_argv,
         exit_code=proc.returncode if proc.returncode is not None else 1,
         raw_events_path=raw_events_path,
         last_message_path=last_message_path,
         stderr_path=stderr_path,
+        thread_id=observed_thread_id or canonical_resume_session_id,
     )

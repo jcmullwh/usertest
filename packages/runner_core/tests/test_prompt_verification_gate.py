@@ -357,11 +357,107 @@ def test_codex_uses_model_instructions_file_for_large_append_prompt(
     assert not any(item.startswith("developer_instructions=") for item in overrides)
 
 
+def test_codex_report_followups_resume_exact_author_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_binary(tmp_path)
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_commands_local",
+        lambda commands, **kwargs: (
+            {cmd: True for cmd in commands},
+            {"command_probe_details": {cmd: {"present": True} for cmd in commands}},
+        ),
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_probe_agent_cli_version",
+        lambda **kwargs: {
+            "ok": True,
+            "argv": [str(kwargs.get("binary", "codex")), "--version"],
+            "returncode": 0,
+            "stdout": "codex test stub\n",
+            "stderr": "",
+        },
+    )
+    monkeypatch.setattr(
+        runner_mod,
+        "_agent_auth_present_local",
+        lambda **kwargs: (True, "test_stub"),
+    )
+    resumes: list[str | None] = []
+
+    def _fake_run_codex_exec(**kwargs: object) -> CodexExecResult:
+        resumes.append(kwargs.get("resume_session_id"))
+        raw_events_path = kwargs["raw_events_path"]
+        last_message_path = kwargs["last_message_path"]
+        stderr_path = kwargs["stderr_path"]
+        assert isinstance(raw_events_path, Path)
+        assert isinstance(last_message_path, Path)
+        assert isinstance(stderr_path, Path)
+        raw_events_path.write_text(
+            json.dumps({"type": "thread.started", "thread_id": session_id}) + "\n",
+            encoding="utf-8",
+        )
+        report = {"wrong": "shape"} if len(resumes) == 1 else {"ok": "yes"}
+        last_message_path.write_text(json.dumps(report) + "\n", encoding="utf-8")
+        stderr_path.write_text("", encoding="utf-8")
+        return CodexExecResult(
+            argv=["codex", "exec"] if len(resumes) == 1 else ["codex", "exec", "resume"],
+            exit_code=0,
+            raw_events_path=raw_events_path,
+            last_message_path=last_message_path,
+            stderr_path=stderr_path,
+            thread_id=session_id,
+        )
+
+    monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
+    result = run_once(
+        RunnerConfig(
+            repo_root=runner_root,
+            runs_dir=tmp_path / "runs",
+            agents={"codex": {"binary": dummy_binary}},
+            policies={"write": {"codex": {"sandbox": "workspace-write", "allow_edits": True}}},
+        ),
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="write",
+            persona_id="p",
+            mission_id="m",
+            evidence_role="research",
+            origin_stage="repro_research_verifier_continuation",
+            parent_case_id="case:one",
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert result.agent_session_id == session_id
+    assert resumes == [None, session_id]
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert [attempt["agent_session_id"] for attempt in attempts["attempts"]] == [
+        session_id,
+        session_id,
+    ]
+    assert attempts["attempts"][1]["continued_session"] is True
+    target_ref = json.loads((result.run_dir / "target_ref.json").read_text(encoding="utf-8"))
+    assert target_ref["backlog_lineage"] == {
+        "evidence_role": "research",
+        "origin_stage": "repro_research_verifier_continuation",
+        "parent_case_id": "case:one",
+    }
+
+
 def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     native_windows = os.name == "nt"
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
     runner_root = _setup_runner_root(tmp_path)
     mission_path = runner_root / "configs" / "missions" / "m.mission.md"
     mission_path.write_text(
@@ -488,6 +584,7 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
                 "ignore_user_config": kwargs.get("ignore_user_config"),
                 "ignore_rules": kwargs.get("ignore_rules"),
                 "env_overrides": dict(env_overrides) if isinstance(env_overrides, dict) else {},
+                "resume_session_id": kwargs.get("resume_session_id"),
             }
         )
         controlled = workspace / ".codex" / "rules" / "usertest-controlled.rules"
@@ -564,6 +661,7 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
             raw_events_path=raw_events_path,
             last_message_path=last_message_path,
             stderr_path=stderr_path,
+            thread_id=session_id,
         )
 
     monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
@@ -585,12 +683,14 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
             persona_id="p",
             mission_id="m",
             agent_append_system_prompt="RESEARCH MISSION SENTINEL",
-            codex_execpolicy_allow_prefixes=(("git", "rev-parse"), ("python",)),
+            codex_execpolicy_allow_prefixes=(),
+            codex_resume_session_id=session_id,
             keep_workspace=True,
         ),
     )
 
     assert result.exit_code == 0
+    assert result.agent_session_id == session_id
     assert captured["ignore_user_config"] is True
     assert captured["ignore_rules"] is native_windows
     assert "sandbox_workspace_write.writable_roots=[]" in captured["config_overrides"]
@@ -685,6 +785,8 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
             CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES
         )
         assert not any("alternate.invalid" in str(value) for value in call["config_overrides"])
+    assert probe_call["resume_session_id"] is None
+    assert mission_call["resume_session_id"] == session_id
     assert any(
         str(value).startswith("model_instructions_file=")
         for value in probe_call["config_overrides"]
@@ -698,14 +800,40 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
     assert "RESEARCH MISSION SENTINEL" not in str(probe_call["prompt"])
     assert receipt["activation_probe"]["ok"] is True
     assert receipt["activation_probe"]["workspace_unchanged"] is True
-    assert receipt["activation_probe"]["required_commands_seen"] == [
-        "git rev-parse --is-inside-work-tree",
-        "python --version",
-    ]
+    # A dossier-correction resume deliberately authorizes no research commands; the marker-only
+    # activation probe still proves the controlled subscription route before continuation.
+    assert receipt["activation_probe"]["required_commands_seen"] == []
     assert not any(
         row.get("path", "").startswith(".codex/rules")
         for row in json.loads((result.run_dir / "diff_numstat.json").read_text(encoding="utf-8"))
     )
+
+
+def test_docker_codex_resume_uses_host_login_without_local_research_overlay() -> None:
+    session_id = "019f5000-0000-7000-8000-000000000004"
+    docker_resume = RunRequest(
+        repo="repo",
+        agent="codex",
+        codex_resume_session_id=session_id,
+        exec_backend="docker",
+        exec_use_host_agent_login=True,
+    )
+    local_resume = RunRequest(
+        repo="repo",
+        agent="codex",
+        codex_resume_session_id=session_id,
+        exec_backend="local",
+        exec_use_host_agent_login=True,
+    )
+
+    assert runner_mod._controlled_codex_overlay_required(
+        docker_resume,
+        has_sandbox_backend=True,
+    ) is False
+    assert runner_mod._controlled_codex_overlay_required(
+        local_resume,
+        has_sandbox_backend=False,
+    ) is True
 
 
 @pytest.mark.parametrize(

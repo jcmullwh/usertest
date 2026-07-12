@@ -42,6 +42,7 @@ known_first_party = ["usertest_implement"]
 # dependencies; token monitoring remains deliberately best-effort telemetry.
 DEP001 = ["token_monitoring"]
 DEP002 = ["agent-adapters", "normalized_events", "reporter", "sandbox_runner"]
+DEP003 = ["token_monitoring"]
 
 [tool.ruff]
 target-version = "py311"

@@ -4,9 +4,11 @@ from pathlib import Path
 
 from runner_core import RunnerConfig
 
+from backlog_miner.ensemble import BacklogPromptResult
 from backlog_miner.ensemble import run_backlog_prompt as _run_backlog_prompt
+from backlog_miner.ensemble import run_backlog_prompt_result as _run_backlog_prompt_result
 
-__all__ = ["run_backlog_prompt"]
+__all__ = ["BacklogPromptResult", "run_backlog_prompt", "run_backlog_prompt_result"]
 
 
 def run_backlog_prompt(
@@ -62,4 +64,33 @@ def run_backlog_prompt(
         workspace_dir=workspace_dir,
         allowed_tools=allowed_tools,
         include_directories=include_directories,
+    )
+
+
+def run_backlog_prompt_result(
+    *,
+    agent: str,
+    prompt: str,
+    out_dir: Path,
+    tag: str,
+    model: str | None,
+    cfg: RunnerConfig,
+    workspace_dir: Path | None = None,
+    allowed_tools: list[str] | None = None,
+    include_directories: list[str] | None = None,
+    resume_session_id: str | None = None,
+) -> BacklogPromptResult:
+    """Return a structured prompt result suitable for exact-session correction."""
+
+    return _run_backlog_prompt_result(
+        agent=agent,
+        prompt=prompt,
+        out_dir=out_dir,
+        tag=tag,
+        model=model,
+        cfg=cfg,
+        workspace_dir=workspace_dir,
+        allowed_tools=allowed_tools,
+        include_directories=include_directories,
+        resume_session_id=resume_session_id,
     )

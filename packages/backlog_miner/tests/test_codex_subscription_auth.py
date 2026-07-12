@@ -15,12 +15,14 @@ from runner_core import RunnerConfig
 
 import backlog_miner.ensemble as mod
 from backlog_miner.pipeline import (
+    StagePromptRun,
     model_invocation_manifest_path,
     run_stage_prompt_json,
     verify_model_invocation_manifest,
 )
 
 _BLOCKED_ENV_VARS = CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS
+_THREAD_ID = "019f2cca-9011-7e32-88ae-6c25af578b49"
 
 
 def _cfg(tmp_path: Path) -> RunnerConfig:
@@ -67,10 +69,14 @@ def _write_success_artifacts(
     assert isinstance(raw_events_path, Path)
     assert isinstance(last_message_path, Path)
     assert isinstance(stderr_path, Path)
-    raw_events_path.write_text('{"type":"item.completed"}\n', encoding="utf-8")
+    raw_events_path.write_text(
+        json.dumps({"type": "thread.started", "thread_id": _THREAD_ID})
+        + '\n{"type":"item.completed"}\n',
+        encoding="utf-8",
+    )
     last_message_path.write_text(response, encoding="utf-8", newline="\n")
     stderr_path.write_text("", encoding="utf-8")
-    return SimpleNamespace(exit_code=0)
+    return SimpleNamespace(exit_code=0, thread_id=_THREAD_ID)
 
 
 def _load_receipt(out_dir: Path, tag: str = "miner_001") -> dict[str, object]:
@@ -148,6 +154,170 @@ def test_codex_prompt_uses_child_only_chatgpt_subscription_controls_and_receipt(
     assert receipt["model_activation"]["succeeded"] is True
     serialized = json.dumps(receipt, sort_keys=True)
     assert not any(value in serialized for value in originals.values())
+
+
+def test_structured_stage_prompt_binds_exact_initial_and_resumed_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "host_codex_home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    exec_calls: list[dict[str, object]] = []
+
+    monkeypatch.setattr(
+        mod,
+        "probe_codex_login_status",
+        lambda **_: _login_status(codex_home=codex_home),
+    )
+
+    def fake_exec(**kwargs: object) -> SimpleNamespace:
+        exec_calls.append(dict(kwargs))
+        return _write_success_artifacts(kwargs, response='{"ok":true}')
+
+    monkeypatch.setattr(mod, "run_codex_exec", fake_exec)
+    out_dir = tmp_path / "stage"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+
+    initial = run_stage_prompt_json(
+        stage="problem_mining",
+        prompt="Return JSON.",
+        out_dir=out_dir,
+        tag="initial",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        workspace_dir=workspace,
+        structured=True,
+    )
+    assert isinstance(initial, StagePromptRun)
+    correction = run_stage_prompt_json(
+        stage="problem_mining",
+        prompt="Correct the immediately prior JSON.",
+        out_dir=out_dir,
+        tag="correction",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        workspace_dir=workspace,
+        resume_session_id=initial.agent_session_id,
+        structured=True,
+    )
+    assert isinstance(correction, StagePromptRun)
+
+    assert initial.agent_session_id == correction.agent_session_id == _THREAD_ID
+    assert correction.resumed_from_session_id == _THREAD_ID
+    assert exec_calls[0]["resume_session_id"] is None
+    assert exec_calls[1]["resume_session_id"] == _THREAD_ID
+    for tag, resumed in (("initial", None), ("correction", _THREAD_ID)):
+        receipt = _load_receipt(out_dir, tag)
+        assert receipt["schema_version"] == 2
+        activation = receipt["model_activation"]
+        assert activation["agent_session_id"] == _THREAD_ID
+        assert activation["resumed_from_session_id"] == resumed
+        assert activation["session_continuity_verified"] is True
+        manifest_path = model_invocation_manifest_path(out_dir=out_dir, tag=tag)
+        assert verify_model_invocation_manifest(manifest_path) == []
+
+
+def test_v2_manifest_rejects_rehashed_auth_receipt_session_switch(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "host_codex_home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        mod,
+        "probe_codex_login_status",
+        lambda **_: _login_status(codex_home=codex_home),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_codex_exec",
+        lambda **kwargs: _write_success_artifacts(kwargs, response='{"ok":true}'),
+    )
+    out_dir = tmp_path / "stage"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_stage_prompt_json(
+        stage="problem_mining",
+        prompt="Return JSON.",
+        out_dir=out_dir,
+        tag="initial",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        workspace_dir=workspace,
+        structured=True,
+    )
+    receipt_path = out_dir / "initial.codex_auth_receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    switched = "019f2cca-9011-7e32-88ae-6c25af578b50"
+    receipt["model_activation"]["agent_session_id"] = switched
+    receipt["receipt_sha256"] = mod._json_digest(
+        {key: value for key, value in receipt.items() if key != "receipt_sha256"}
+    )
+    receipt_path.write_text(json.dumps(receipt, indent=2) + "\n", encoding="utf-8")
+
+    manifest_path = model_invocation_manifest_path(out_dir=out_dir, tag="initial")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    receipt_bytes = receipt_path.read_bytes()
+    manifest["codex_subscription"]["receipt"] = {
+        "path": str(receipt_path.resolve()),
+        "exists": True,
+        "size_bytes": len(receipt_bytes),
+        "sha256": __import__("hashlib").sha256(receipt_bytes).hexdigest(),
+    }
+    manifest["manifest_sha256"] = mod._json_digest(
+        {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+    )
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+
+    errors = verify_model_invocation_manifest(manifest_path)
+    assert "model_invocation_session_receipt_mismatch" in errors
+
+
+def test_resume_rejects_model_session_switch_without_fresh_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "host_codex_home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        mod,
+        "probe_codex_login_status",
+        lambda **_: _login_status(codex_home=codex_home),
+    )
+
+    def switched_exec(**kwargs: object) -> SimpleNamespace:
+        result = _write_success_artifacts(kwargs, response='{"ok":true}')
+        switched = "019f2cca-9011-7e32-88ae-6c25af578b50"
+        raw_events_path = kwargs["raw_events_path"]
+        assert isinstance(raw_events_path, Path)
+        raw_events_path.write_text(
+            json.dumps({"type": "thread.started", "thread_id": switched}) + "\n",
+            encoding="utf-8",
+        )
+        result.thread_id = switched
+        return result
+
+    monkeypatch.setattr(mod, "run_codex_exec", switched_exec)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    with pytest.raises(RuntimeError, match="session"):
+        mod.run_backlog_prompt_result(
+            agent="codex",
+            prompt="Correct prior JSON.",
+            out_dir=tmp_path / "artifacts",
+            tag="correction",
+            model=None,
+            cfg=_cfg(tmp_path),
+            workspace_dir=workspace,
+            resume_session_id=_THREAD_ID,
+        )
 
 
 @pytest.mark.parametrize(
@@ -441,4 +611,48 @@ def test_stage_prompt_binds_verified_codex_subscription_manifest(
     receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
     assert "model_invocation_codex_receipt_changed" in (
         verify_model_invocation_manifest(manifest_path)
+    )
+
+
+def test_failed_fresh_codex_invocation_retains_manifest_without_author_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "host_codex_home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        mod,
+        "probe_codex_login_status",
+        lambda **_: _login_status(codex_home=codex_home),
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_codex_exec",
+        lambda **_: (_ for _ in ()).throw(RuntimeError("transport unavailable")),
+    )
+    out_dir = tmp_path / "stage"
+
+    with pytest.raises(RuntimeError, match="transport unavailable"):
+        run_stage_prompt_json(
+            stage="problem_prioritization",
+            prompt="Return JSON.",
+            out_dir=out_dir,
+            tag="problem_prioritization_001",
+            agent="codex",
+            model=None,
+            cfg=_cfg(tmp_path),
+            structured=True,
+        )
+
+    manifest_path = model_invocation_manifest_path(
+        out_dir=out_dir,
+        tag="problem_prioritization_001",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["agent_session_id"] is None
+    assert verify_model_invocation_manifest(manifest_path, require_verified=False) == []
+    assert "model_invocation_manifest_not_verified" in verify_model_invocation_manifest(
+        manifest_path
     )

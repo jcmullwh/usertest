@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 _LOG = logging.getLogger(__name__)
 
@@ -36,10 +36,28 @@ _STAGE_INVOCATION_NAMES: dict[str, frozenset[str]] = {
         {
             "solution_selection",
             "solution_falsification",
+            "solution_optioning",
             "selected_solution_labeler",
         }
     ),
 }
+
+
+@dataclass(frozen=True)
+class StagePromptRun:
+    """Structured stage invocation used by exact-session correction loops."""
+
+    response: str
+    agent_session_id: str | None
+    resumed_from_session_id: str | None
+    workspace_dir: Path | None
+    invocation_manifest_path: Path
+    prompt_path: Path
+    response_path: Path
+    raw_events_path: Path
+    last_message_path: Path
+    stderr_path: Path
+    elapsed_seconds: float
 
 
 def _canonical_sha256(value: Any) -> str:
@@ -90,6 +108,9 @@ def _write_model_invocation_manifest(
     prompt: str,
     response: str | None,
     error_kind: str | None,
+    agent_session_id: str | None = None,
+    resumed_from_session_id: str | None = None,
+    workspace_dir: Path | None = None,
 ) -> Path:
     """Persist one prompt invocation, including a verified Codex auth proof."""
 
@@ -133,11 +154,14 @@ def _write_model_invocation_manifest(
         and (not auth_required or not auth_errors)
     )
     manifest: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "invocation_id": uuid4().hex,
         "stage": stage,
         "tag": tag,
         "agent": agent.strip().lower(),
+        "agent_session_id": agent_session_id,
+        "resumed_from_session_id": resumed_from_session_id,
+        "workspace_dir": str(workspace_dir.resolve()) if workspace_dir is not None else None,
         "status": "verified" if verified else "failed",
         "error_kind": error_kind,
         "prompt_sha256": sha256(prompt.encode("utf-8")).hexdigest(),
@@ -179,7 +203,8 @@ def verify_model_invocation_manifest(
     )
     if raw.get("manifest_sha256") != expected_hash:
         errors.append("model_invocation_manifest_hash_changed")
-    if raw.get("schema_version") != 1:
+    schema_version = raw.get("schema_version")
+    if schema_version not in {1, 2}:
         errors.append("model_invocation_manifest_schema_invalid")
     if require_verified and raw.get("status") != "verified":
         errors.append("model_invocation_manifest_not_verified")
@@ -217,6 +242,32 @@ def verify_model_invocation_manifest(
     auth = auth_raw if isinstance(auth_raw, dict) else {}
     agent = str(raw.get("agent") or "").strip().lower()
     if agent == "codex":
+        session_raw = raw.get("agent_session_id")
+        resumed_raw = raw.get("resumed_from_session_id")
+        session_id: str | None = None
+        if schema_version == 2:
+            # A verified author turn must bind a UUID. A failed fresh invocation may
+            # terminate before Codex creates an author session; retaining that failed
+            # receipt is necessary for session acquisition telemetry and replay.
+            session_required = bool(
+                raw.get("status") == "verified"
+                or session_raw is not None
+                or resumed_raw is not None
+            )
+            if session_required:
+                try:
+                    session_id = str(UUID(str(session_raw)))
+                except (ValueError, AttributeError, TypeError):
+                    session_id = None
+                if session_id is None or session_raw != session_id:
+                    errors.append("model_invocation_agent_session_id_invalid")
+            if resumed_raw is not None:
+                try:
+                    resumed_id = str(UUID(str(resumed_raw)))
+                except (ValueError, AttributeError, TypeError):
+                    resumed_id = None
+                if resumed_id is None or resumed_raw != resumed_id or resumed_id != session_id:
+                    errors.append("model_invocation_resumed_session_mismatch")
         if auth.get("required") is not True:
             errors.append("model_invocation_codex_subscription_not_required")
         if require_verified and auth.get("verified") is not True:
@@ -240,6 +291,21 @@ def verify_model_invocation_manifest(
                     stderr_path=resolved_paths["stderr"],
                 )
             )
+            try:
+                receipt_payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                receipt_payload = {}
+            activation = (
+                receipt_payload.get("model_activation")
+                if isinstance(receipt_payload, dict)
+                else None
+            )
+            if schema_version == 2 and (
+                not isinstance(activation, dict)
+                or activation.get("agent_session_id") != session_raw
+                or activation.get("resumed_from_session_id") != resumed_raw
+            ):
+                errors.append("model_invocation_session_receipt_mismatch")
     elif auth.get("required") is not False:
         errors.append("model_invocation_unexpected_subscription_requirement")
     return list(dict.fromkeys(errors))
@@ -261,6 +327,8 @@ def model_invocation_manifest_ref(
         "tag": payload["tag"],
         "agent": payload["agent"],
         "status": payload["status"],
+        "agent_session_id": payload.get("agent_session_id"),
+        "resumed_from_session_id": payload.get("resumed_from_session_id"),
         "manifest_sha256": payload["manifest_sha256"],
     }
 
@@ -763,7 +831,7 @@ def load_pipeline_prompt_manifest(prompts_dir: Path) -> PipelinePromptManifest:
 # ---------------------------------------------------------------------------
 
 
-def run_stage_prompt_json(
+def run_stage_prompt_json_result(
     *,
     stage: str,
     prompt: str,
@@ -775,8 +843,10 @@ def run_stage_prompt_json(
     workspace_dir: Path | None = None,
     allowed_tools: list[str] | None = None,
     include_directories: list[str] | None = None,
-) -> str:
-    """Run a stage prompt through the agent backend and return the raw response text.
+    resume_session_id: str | None = None,
+    allow_empty: bool = False,
+) -> StagePromptRun:
+    """Run one stage prompt and retain exact session, workspace, auth, and bytes.
 
     This is a generic helper used by each stage helper in the CLI.  Stage-specific
     orchestration passes the fully-rendered prompt and receives the raw LLM response
@@ -821,7 +891,7 @@ def run_stage_prompt_json(
     RuntimeError
         When the agent backend returns an empty response.
     """
-    from backlog_miner.agent import run_backlog_prompt
+    from backlog_miner.agent import run_backlog_prompt_result
 
     out_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = out_dir / f"{tag}.prompt.txt"
@@ -831,8 +901,9 @@ def run_stage_prompt_json(
     _LOG.info("run_stage_prompt_json: stage=%s tag=%s agent=%s", stage, tag, agent)
 
     response: str | None = None
+    prompt_result: Any | None = None
     try:
-        response = run_backlog_prompt(
+        prompt_result = run_backlog_prompt_result(
             prompt=prompt,
             agent=agent,
             model=model,
@@ -842,8 +913,10 @@ def run_stage_prompt_json(
             workspace_dir=workspace_dir,
             allowed_tools=allowed_tools,
             include_directories=include_directories,
+            resume_session_id=resume_session_id,
         )
-        if not response or not response.strip():
+        response = prompt_result.response
+        if (not response or not response.strip()) and not allow_empty:
             raise RuntimeError(
                 f"run_stage_prompt_json: empty response from agent for stage={stage} tag={tag}"
             )
@@ -857,6 +930,9 @@ def run_stage_prompt_json(
             prompt=prompt,
             response=response,
             error_kind=None,
+            agent_session_id=prompt_result.agent_session_id,
+            resumed_from_session_id=resume_session_id,
+            workspace_dir=prompt_result.workspace_dir,
         )
         invocation_errors = verify_model_invocation_manifest(invocation_path)
         if invocation_errors:
@@ -873,9 +949,63 @@ def run_stage_prompt_json(
             prompt=prompt,
             response=response,
             error_kind=type(exc).__name__,
+            agent_session_id=(
+                prompt_result.agent_session_id if prompt_result is not None else None
+            ),
+            resumed_from_session_id=resume_session_id,
+            workspace_dir=(
+                prompt_result.workspace_dir if prompt_result is not None else workspace_dir
+            ),
         )
         raise
 
-    assert response is not None
+    assert response is not None and prompt_result is not None
     _LOG.info("run_stage_prompt_json: stage=%s tag=%s response_len=%d", stage, tag, len(response))
-    return response
+    return StagePromptRun(
+        response=response,
+        agent_session_id=prompt_result.agent_session_id,
+        resumed_from_session_id=resume_session_id,
+        workspace_dir=prompt_result.workspace_dir,
+        invocation_manifest_path=invocation_path,
+        prompt_path=prompt_result.prompt_path,
+        response_path=prompt_result.response_path,
+        raw_events_path=prompt_result.raw_events_path,
+        last_message_path=prompt_result.last_message_path,
+        stderr_path=prompt_result.stderr_path,
+        elapsed_seconds=prompt_result.elapsed_seconds,
+    )
+
+
+def run_stage_prompt_json(
+    *,
+    stage: str,
+    prompt: str,
+    out_dir: Path,
+    tag: str,
+    agent: str,
+    model: str | None,
+    cfg: Any,
+    workspace_dir: Path | None = None,
+    allowed_tools: list[str] | None = None,
+    include_directories: list[str] | None = None,
+    resume_session_id: str | None = None,
+    allow_empty: bool = False,
+    structured: bool = False,
+) -> str | StagePromptRun:
+    """Backward-compatible text-only wrapper around :func:`run_stage_prompt_json_result`."""
+
+    result = run_stage_prompt_json_result(
+        stage=stage,
+        prompt=prompt,
+        out_dir=out_dir,
+        tag=tag,
+        agent=agent,
+        model=model,
+        cfg=cfg,
+        workspace_dir=workspace_dir,
+        allowed_tools=allowed_tools,
+        include_directories=include_directories,
+        resume_session_id=resume_session_id,
+        allow_empty=allow_empty,
+    )
+    return result if structured else result.response

@@ -134,6 +134,7 @@ def _refresh_backlog_for_ticket_implementation(
     )
     actions_yaml_raw = getattr(args, "backlog_actions_yaml", None)
     atom_actions_yaml_raw = getattr(args, "backlog_atom_actions_yaml", None)
+    shadow_state_raw = getattr(args, "backlog_shadow_state", None)
     backlog_python_candidate = (
         repo_root
         / "apps"
@@ -163,6 +164,9 @@ def _refresh_backlog_for_ticket_implementation(
                 atom_actions_yaml_raw.resolve()
                 if isinstance(atom_actions_yaml_raw, Path)
                 else None
+            ),
+            qualified_shadow_state_path=(
+                shadow_state_raw.resolve() if isinstance(shadow_state_raw, Path) else None
             ),
         )
     )

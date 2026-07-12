@@ -37,6 +37,12 @@ def _roles() -> dict[str, object]:
         "recurrence": {
             "description": "Inspect fresh same-class recurrence evidence.",
             "commands": ["python recurrence_probe.py"],
+            "command_bindings": [
+                {
+                    "command_index": 0,
+                    "research_experiment_id": "experiment:recurrence",
+                }
+            ],
             "predicates": [
                 {"type": "command_exit_code", "command_index": 0, "equals": 0}
             ],

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from usertest_implement.shared import SelectedTicket, _utc_now_z, _write_json
 
@@ -24,6 +25,8 @@ LIFECYCLE_IN_PROGRESS = "in_progress"
 
 _RUN_EVIDENCE_FILES: tuple[tuple[str, str], ...] = (
     ("workspace_ref", "workspace_ref.json"),
+    ("target_ref", "target_ref.json"),
+    ("raw_events", "raw_events.jsonl"),
     ("ticket_ref", "ticket_ref.json"),
     ("verification", "verification.json"),
     ("verification_reuse", "verification_reuse.json"),
@@ -73,6 +76,69 @@ def _clean_str(value: Any) -> str | None:
 
 def _path_str(path: Path | None) -> str | None:
     return str(path) if path is not None else None
+
+
+def _canonical_uuid(value: Any) -> str | None:
+    text = _clean_str(value)
+    if text is None:
+        return None
+    try:
+        canonical = str(UUID(text))
+    except ValueError:
+        return None
+    return canonical if text == canonical else None
+
+
+def implementation_author_continuity(run_dir: Path) -> dict[str, Any]:
+    """Return runner-attested author/session provenance for a repair run.
+
+    Codex emits the durable thread id in ``raw_events.jsonl``.  That id is the
+    only safe continuation target: using the most recent thread would risk
+    sending review feedback to a different author.  Missing provenance remains
+    an explicit fresh-restart condition for legacy or incomplete runs; it is
+    never represented as exact-session continuity.
+    """
+
+    target_ref = _read_json(run_dir / "target_ref.json")
+    agent = _clean_str(target_ref.get("agent")) if isinstance(target_ref, dict) else None
+    session_id: str | None = None
+    raw_events_path = run_dir / "raw_events.jsonl"
+    try:
+        with raw_events_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(event, dict) or event.get("type") != "thread.started":
+                    continue
+                session_id = _canonical_uuid(event.get("thread_id"))
+                if session_id is not None:
+                    break
+    except (FileNotFoundError, OSError, UnicodeError):
+        session_id = None
+
+    exact_session_available = agent == "codex" and session_id is not None
+    if exact_session_available:
+        status = "exact_session_available"
+    elif agent == "codex":
+        status = "author_session_unavailable"
+    elif agent is None:
+        status = "author_provenance_unavailable"
+    else:
+        status = "agent_continuation_unsupported"
+    return {
+        "agent": agent,
+        "session_id": session_id,
+        "status": status,
+        "exact_session_available": exact_session_available,
+        "agent_source": (
+            str(run_dir / "target_ref.json")
+            if (run_dir / "target_ref.json").exists()
+            else None
+        ),
+        "session_source": str(raw_events_path) if raw_events_path.exists() else None,
+    }
 
 
 def _existing_evidence_paths(*, run_dir: Path, review_run_dir: Path | None) -> dict[str, str]:
@@ -292,6 +358,7 @@ def build_ticket_resume_state(
     handoff_summary_dict = handoff_summary if isinstance(handoff_summary, dict) else None
     review_summary_dict = review_summary if isinstance(review_summary, dict) else None
     merge_ref_dict = merge_ref if isinstance(merge_ref, dict) else None
+    author_continuity = implementation_author_continuity(run_dir)
 
     lifecycle_state, blocking_reason = _classify_resume_state(
         run_dir=run_dir,
@@ -340,6 +407,7 @@ def build_ticket_resume_state(
             review_summary=review_summary_dict,
         ),
         "review_run_dir": str(review_run_dir) if review_run_dir is not None else None,
+        "implementation_author": author_continuity,
         "lifecycle_state": lifecycle_state,
         "blocking_reason": blocking_reason,
         "source_evidence_paths": _existing_evidence_paths(

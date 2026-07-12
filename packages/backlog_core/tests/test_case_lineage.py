@@ -12,6 +12,7 @@ from backlog_core.case_lineage import (
     assign_problem_case_ids,
     atom_disposition_receipt_errors,
     atom_disposition_summary,
+    atom_is_independent_problem_evidence,
     attach_supporting_atoms_to_problem_cases,
     build_case_registry,
     eligible_problem_mining_atoms,
@@ -21,6 +22,7 @@ from backlog_core.case_lineage import (
     propagate_case_lineage,
     record_lineage_context,
     update_case_registry_stage_lineage,
+    verified_causal_identities_from_case_registry,
     verified_mechanism_identities_from_case_registry,
     write_case_registry,
 )
@@ -297,6 +299,51 @@ def test_record_lineage_context_binds_validated_runner_evidence_assignment() -> 
     assert "runner_evidence_assignment" in context["lineage_authorities"]
 
 
+def test_explicit_runner_target_lineage_outranks_legacy_mission_mapping() -> None:
+    context = record_lineage_context(
+        {
+            "target_ref": {
+                "mission_id": "ordinary_mission",
+                "backlog_lineage": {
+                    "evidence_role": "research",
+                    "origin_stage": "repro_research_dossier_repair",
+                    "parent_case_id": "case:parent",
+                },
+            },
+            "report": {
+                "extensions": {
+                    "backlog_lineage": {
+                        "evidence_role": "observation",
+                        "parent_case_id": "case:model-selected",
+                    }
+                }
+            },
+        },
+        run_id="target/run/agent/repair",
+    )
+
+    assert context["origin_stage"] == "repro_research_dossier_repair"
+    assert context["evidence_role"] == "research"
+    assert context["parent_case_id"] == "case:parent"
+    assert context["case_id"] == "case:parent"
+    assert context["disposition"] == "supports_case"
+    assert context["lineage_authorities"] == ["runner_target_ref_lineage"]
+
+
+def test_repair_mission_legacy_fallback_is_research_not_observation() -> None:
+    context = record_lineage_context(
+        {
+            "target_ref": {
+                "mission_id": "backlog_repro_research_dossier_repair",
+            }
+        },
+        run_id="target/run/agent/legacy-repair",
+    )
+
+    assert context["origin_stage"] == "repro_research_dossier_repair"
+    assert context["evidence_role"] == "research"
+
+
 def test_record_lineage_context_accepts_mixed_artifact_and_signed_snapshot_receipts() -> None:
     assignment = _evidence_assignment()
     aggregate_snapshot = {
@@ -486,6 +533,15 @@ def test_explicit_novel_derived_failure_is_eligible() -> None:
     ]
     assert atoms[0]["parent_case_id"] == "case:researched-problem"
     assert atoms[0]["case_id"] is None
+    assert atom_is_independent_problem_evidence(atoms[0]) is True
+
+    ledger_persisted = apply_atom_disposition_decision(
+        atoms[0],
+        disposition="novel_case",
+        source="atom_action_ledger",
+        rationale="The runner-owned ledger persisted the distinct failure decision.",
+    )
+    assert atom_is_independent_problem_evidence(ledger_persisted) is True
 
     records = assign_problem_case_ids(
         [
@@ -517,7 +573,24 @@ def test_explicit_novel_derived_failure_is_eligible() -> None:
     )
     assert repeated[0]["disposition"] == "novel_case"
     assert repeated[0]["case_id"] == records[0]["case_id"]
+    assert atom_is_independent_problem_evidence(repeated[0]) is True
     assert eligible_problem_mining_atoms(repeated) == []
+
+
+def test_ordinary_derived_parent_evidence_is_not_an_independent_work_unit() -> None:
+    atom = normalize_atom_lineage(
+        [
+            _atom(
+                "target/run/agent/1:research_note:1",
+                mission_id="backlog_repro_research",
+                parent_case_id="case:researched-problem",
+            )
+        ],
+        strict_new_output=True,
+    )[0]
+
+    assert atom["disposition"] == "supports_case"
+    assert atom_is_independent_problem_evidence(atom) is False
 
 
 def test_deferred_source_observation_is_revisited_next_cycle() -> None:
@@ -846,6 +919,8 @@ def test_problem_case_cannot_be_originated_or_supported_by_proposals_alone() -> 
         ("case_revision", 99),
         ("source_evidence_atom_ids", ["atom:model-forged"]),
         ("derived_evidence_atom_ids", ["atom:model-forged"]),
+        ("case_identity_status", "resolved"),
+        ("case_identity_candidate_ids", ["case:model-forged"]),
     ],
 )
 def test_new_problem_record_rejects_model_supplied_server_case_identity(
@@ -893,6 +968,183 @@ def test_legacy_problem_case_identity_is_stripped_and_server_registry_wins() -> 
 
     assert assigned[0]["case_id"] == "case:server"
     assert assigned[0]["canonical_problem_id"] == "problem:known"
+
+
+def test_multi_case_evidence_requires_relation_without_minting_third_case() -> None:
+    atom_a = "target/run-a/agent/1:confusion_point:1"
+    atom_b = "target/run-b/agent/1:confusion_point:1"
+    registry = {
+        "schema_version": 1,
+        "cases": {
+            "case:a": {"case_id": "case:a", "state": "active"},
+            "case:b": {"case_id": "case:b", "state": "active"},
+        },
+        "problem_id_to_case_id": {},
+        "atom_id_to_case_id": {atom_a: "case:a", atom_b: "case:b"},
+        "atom_id_to_case_ids": {atom_a: ["case:a"], atom_b: ["case:b"]},
+        "ticket_fingerprint_to_case_id": {},
+        "operational_signature_to_case_id": {},
+    }
+    atoms = normalize_atom_lineage(
+        [_atom(atom_a), _atom(atom_b)],
+        case_registry=registry,
+        strict_new_output=True,
+    )
+
+    assigned = assign_problem_case_ids(
+        [
+            {
+                "problem_id": "problem:ambiguous-linkage",
+                "title": "The observations may be related",
+                "evidence_atom_ids": [atom_a, atom_b],
+            }
+        ],
+        atoms,
+        case_registry=registry,
+    )
+
+    assert len(assigned) == 1
+    assert assigned[0]["case_id"] in {"case:a", "case:b"}
+    assert assigned[0]["case_identity_status"] == "pending_relation"
+    assert assigned[0]["case_identity_candidate_ids"] == ["case:a", "case:b"]
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_coalesced_identity_state_join_is_order_independent(reverse: bool) -> None:
+    atom_a = "target/run-a/agent/1:confusion_point:1"
+    atom_b = "target/run-b/agent/1:confusion_point:1"
+    registry = {
+        "schema_version": 1,
+        "cases": {
+            "case:a": {"case_id": "case:a", "state": "active"},
+            "case:b": {"case_id": "case:b", "state": "active"},
+        },
+        "problem_id_to_case_id": {},
+        "atom_id_to_case_id": {atom_a: "case:a", atom_b: "case:b"},
+        "atom_id_to_case_ids": {atom_a: ["case:a"], atom_b: ["case:b"]},
+        "ticket_fingerprint_to_case_id": {},
+        "operational_signature_to_case_id": {},
+    }
+    atoms = normalize_atom_lineage(
+        [_atom(atom_a), _atom(atom_b)],
+        case_registry=registry,
+        strict_new_output=True,
+    )
+    records = [
+        {
+            "problem_id": "problem:resolved",
+            "evidence_atom_ids": [atom_a],
+        },
+        {
+            "problem_id": "problem:pending",
+            "evidence_atom_ids": [atom_a, atom_b],
+        },
+    ]
+    if reverse:
+        records.reverse()
+
+    assigned = assign_problem_case_ids(records, atoms, case_registry=registry)
+
+    assert len(assigned) == 1
+    assert assigned[0]["case_id"] == "case:a"
+    assert assigned[0]["case_identity_status"] == "pending_relation"
+    assert assigned[0]["case_identity_candidate_ids"] == ["case:a", "case:b"]
+    assert set(assigned[0]["evidence_atom_ids"]) == {atom_a, atom_b}
+
+
+def _complete_provisional_group() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "status": "research_hypothesis",
+        "group_id": "cause:provisional",
+        "research_unit_case_id": "case:a",
+        "member_case_ids": ["case:a", "case:b"],
+        "member_problem_ids": ["problem:a", "problem:b"],
+        "member_facets": [
+            {
+                "case_id": "case:a",
+                "problem_id": "problem:a",
+                "evidence_atom_ids": ["atom:a"],
+                "source_evidence_atom_ids": ["atom:a"],
+            },
+            {
+                "case_id": "case:b",
+                "problem_id": "problem:b",
+                "evidence_atom_ids": ["atom:b"],
+                "source_evidence_atom_ids": ["atom:b"],
+            },
+        ],
+    }
+
+
+def test_registry_cycle_preserves_complete_provisional_group_and_facets() -> None:
+    group = _complete_provisional_group()
+    previous = build_case_registry(
+        [
+            {
+                "case_id": "case:a",
+                "problem_id": "problem:a",
+                "evidence_atom_ids": ["atom:a"],
+                "source_evidence_atom_ids": ["atom:a"],
+                "case_identity_status": "provisional_same_cause",
+                "case_identity_candidate_ids": ["case:a", "case:b"],
+                "provisional_same_cause_group": group,
+            },
+            {
+                "case_id": "case:b",
+                "problem_id": "problem:b",
+                "evidence_atom_ids": ["atom:b"],
+                "source_evidence_atom_ids": ["atom:b"],
+                "case_identity_status": "provisional_same_cause",
+                "case_identity_candidate_ids": ["case:a", "case:b"],
+                "provisional_same_cause_group": group,
+            },
+        ]
+    )
+
+    current = build_case_registry(
+        [
+            {
+                "case_id": "case:a",
+                "problem_id": "problem:a:new-observation",
+                "evidence_atom_ids": ["atom:a"],
+                "source_evidence_atom_ids": ["atom:a"],
+                "case_identity_status": "resolved",
+            }
+        ],
+        previous=previous,
+    )
+
+    entry = current["cases"]["case:a"]
+    assert entry["case_identity_status"] == "provisional_same_cause"
+    assert entry["case_identity_candidate_ids"] == ["case:a", "case:b"]
+    assert entry["provisional_same_cause_group"] == group
+    assert len(entry["provisional_same_cause_group"]["member_facets"]) == 2
+
+
+def test_incomplete_historical_provisional_group_is_locally_pending() -> None:
+    incomplete_group = _complete_provisional_group()
+    incomplete_group["member_facets"] = incomplete_group["member_facets"][:1]
+    previous = build_case_registry(
+        [
+            {
+                "case_id": "case:a",
+                "problem_id": "problem:a",
+                "evidence_atom_ids": ["atom:a"],
+                "source_evidence_atom_ids": ["atom:a"],
+                "case_identity_status": "provisional_same_cause",
+                "case_identity_candidate_ids": ["case:a", "case:b"],
+                "provisional_same_cause_group": incomplete_group,
+            }
+        ]
+    )
+
+    entry = previous["cases"]["case:a"]
+    assert entry["case_identity_status"] == "pending_relation"
+    assert "provisional_same_cause_facets_incomplete" in entry[
+        "provisional_same_cause_integrity_errors"
+    ]
+    assert problem_case_records_from_registry(previous)[0]["case_id"] == "case:a"
 
 
 def test_atom_dispositions_and_group_lineage_propagate() -> None:
@@ -1374,6 +1626,27 @@ def test_registry_mechanism_identity_comes_only_from_verified_runner_receipt() -
         "mechanism_symbols": ["model_supplied_symbol"],
     }
     assert verified_mechanism_identities_from_case_registry(registry) == {}
+
+
+def test_registry_exposes_only_runner_persisted_full_causal_identity() -> None:
+    registry = build_case_registry(
+        [
+            {
+                "problem_id": "problem:one",
+                "case_id": "case:one",
+                "evidence_atom_ids": ["atom:one"],
+                "root_cause_status": "established",
+                "verified_causal_signature_sha256": "a" * 64,
+                "verified_causal_signature_source": "runner_verified_causal_signature_v1",
+            }
+        ]
+    )
+
+    assert verified_causal_identities_from_case_registry(registry) == {
+        "case:one": "a" * 64
+    }
+    registry["cases"]["case:one"]["verified_causal_signature_source"] = "model_claim"
+    assert verified_causal_identities_from_case_registry(registry) == {}
 
 
 def test_stage_lineage_rejects_records_without_a_persisted_case() -> None:

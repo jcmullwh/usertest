@@ -26,6 +26,7 @@ from usertest_backlog.commands.plan_cleanup import (
     _extract_generated_ticket_scope_metadata,
     _refresh_generated_ticket_idea_file,
 )
+from usertest_backlog.workflows.qualification import evaluate_independent_qualification
 from usertest_backlog.workflows.shadow_validation import (
     record_shadow_cycle,
     shadow_state_path,
@@ -48,9 +49,7 @@ def test_awaiting_outcome_is_case_local_and_failed_solution_can_reenter_research
             ]
         },
         "fp-progressing": {
-            "active_outcome_records": [
-                {"case_id": "case:progressing", "state": "tests_verified"}
-            ]
+            "active_outcome_records": [{"case_id": "case:progressing", "state": "tests_verified"}]
         },
         "fp-failed": {
             "active_outcome_records": [
@@ -65,9 +64,7 @@ def test_awaiting_outcome_is_case_local_and_failed_solution_can_reenter_research
             ]
         },
         "fp-mitigated": {
-            "active_outcome_records": [
-                {"case_id": "case:mitigated", "state": "mitigated"}
-            ]
+            "active_outcome_records": [{"case_id": "case:mitigated", "state": "mitigated"}]
         },
     }
 
@@ -80,6 +77,152 @@ def test_awaiting_outcome_is_case_local_and_failed_solution_can_reenter_research
 def _write_json(path: Path, obj: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _canonical_sha256(value: object) -> str:
+    return sha256(
+        json.dumps(
+            value,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def _attach_exact_origin_boundary(
+    *,
+    research: dict[str, object],
+    verification: dict[str, object],
+    oracle: dict[str, object],
+    positive_contract: dict[str, object],
+    mechanism_evidence_ids: list[str],
+    atom_id: str,
+) -> None:
+    experiment_id = str(oracle["research_experiment_id"])
+    replay = next(
+        value
+        for value in verification["experiments"]
+        if value["experiment_id"] == experiment_id
+    )
+    atom_receipt = next(
+        value
+        for value in research["evidence_assignment"]["atom_receipts"]
+        if value["atom_id"] == atom_id
+    )
+    atom_snapshot = atom_receipt["atom_snapshot"]
+    command = str(atom_snapshot["command"])
+    argv = list(replay["executed_argv"])
+    authorization = {
+        "authorization_kind": "fixture_exact_origin_command",
+        "executed_argv_sha256": _canonical_sha256(argv),
+        "shell": False,
+        "workspace_confined": True,
+        "origin_atom_id": atom_id,
+        "origin_atom_sha256": atom_receipt["atom_sha256"],
+        "origin_atom_field_path": "$.command",
+        "origin_command_value_sha256": _canonical_sha256(command),
+        "runner_attested": True,
+    }
+    authorization["authorization_sha256"] = _canonical_sha256(authorization)
+    replay_inputs = {
+        "schema_version": 1,
+        "source_experiment_id": experiment_id,
+        "environment": {},
+        "disposable_state_paths": [],
+        "runner_approved": True,
+    }
+    replay_inputs["replay_inputs_sha256"] = _canonical_sha256(replay_inputs)
+    contract_id = str(positive_contract["positive_outcome_contract_id"])
+    replay_observation = {
+        "schema_version": 1,
+        "source_experiment_id": experiment_id,
+        "selector": {"source": "exit_code"},
+        "source_observation_sha256": _canonical_sha256(
+            {
+                "exit_code": replay["exit_code"],
+                "stdout_sha256": replay["stdout_sha256"],
+                "stderr_sha256": replay["stderr_sha256"],
+            }
+        ),
+        "predicate_input_mode": "post_change_observation",
+        "positive_outcome_contract_ids": [contract_id],
+        "runner_attested": True,
+    }
+    replay_observation["replay_observation_sha256"] = _canonical_sha256(
+        replay_observation
+    )
+    replay["command_authorization"] = authorization
+    replay["replay_inputs"] = replay_inputs
+    oracle["execution"] = {
+        "argv": argv,
+        "command_authorization": authorization,
+        "platform_requirement": "any",
+        "shell": False,
+        "replay_inputs": replay_inputs,
+        "replay_observation": replay_observation,
+    }
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _canonical_sha256(oracle)
+    source_identity = {
+        "schema_version": 1,
+        "origin_atom_id": atom_id,
+        "origin_atom_sha256": atom_receipt["atom_sha256"],
+        "origin_atom_field_path": "$.command",
+        "origin_command_value_sha256": _canonical_sha256(command),
+        "executed_argv_sha256": authorization["executed_argv_sha256"],
+        "command_authorization_sha256": authorization["authorization_sha256"],
+        "runner_attested": True,
+    }
+    source_identity["source_identity_sha256"] = _canonical_sha256(source_identity)
+    equivalence = {
+        "schema_version": 1,
+        "equivalence_mode": "exact_origin_scenario_identity",
+        "source_experiment_id": experiment_id,
+        "origin_atom_ids": [atom_id],
+        "source_identity": source_identity,
+        "source_identity_refs": [
+            f"origin_command_identity:{source_identity['source_identity_sha256']}"
+        ],
+        "replay_inputs_sha256": replay_inputs["replay_inputs_sha256"],
+        "replay_observation_sha256": replay_observation[
+            "replay_observation_sha256"
+        ],
+        "positive_outcome_contract_ids": [contract_id],
+        "selected_mechanism_evidence_ids": sorted(mechanism_evidence_ids),
+        "outcome_oracle_id": oracle["outcome_oracle_id"],
+        "runner_attested": True,
+    }
+    equivalence["equivalence_sha256"] = _canonical_sha256(equivalence)
+    replay_projection = {
+        "experiment_id": experiment_id,
+        "executed_argv_sha256": authorization["executed_argv_sha256"],
+        "command_authorization_sha256": authorization["authorization_sha256"],
+        "stdout_sha256": replay["stdout_sha256"],
+        "stderr_sha256": replay["stderr_sha256"],
+        "replay_inputs_sha256": replay_inputs["replay_inputs_sha256"],
+        "execution_isolation_sha256": _canonical_sha256(replay["execution_isolation"]),
+    }
+    boundary = {
+        "schema_version": 1,
+        "experiment_id": experiment_id,
+        "boundary_kind": "fixture/repository-original-scenario",
+        "requires_live_verification": False,
+        "faithful_equivalence": True,
+        "provenance_refs": sorted(
+            {
+                f"research_experiment:{experiment_id}",
+                f"clean_replay:{_canonical_sha256(replay_projection)}",
+                *mechanism_evidence_ids,
+                str(oracle["outcome_oracle_id"]),
+                f"equivalence_proof:{equivalence['equivalence_sha256']}",
+            }
+        ),
+        "rationale_sha256": _canonical_sha256("exact original fixture identity"),
+        "runner_attested": True,
+        "equivalence_proof": equivalence,
+    }
+    boundary["boundary_sha256"] = _canonical_sha256(boundary)
+    verification["verification_boundaries"] = [boundary]
 
 
 def _write_yaml(path: Path, obj: object) -> None:
@@ -218,9 +361,7 @@ def _bind_shadow_export_contract(
             "case_registry_json": str(stage_paths["case_registry"]),
             "six_stage_pipeline": {
                 "problem_records_json": str(stage_paths["problem_records"]),
-                "problem_mining_evidence_json": str(
-                    stage_paths["problem_mining_evidence"]
-                ),
+                "problem_mining_evidence_json": str(stage_paths["problem_mining_evidence"]),
                 "prioritized_problems_json": str(stage_paths["prioritized_problems"]),
                 "research_json": str(stage_paths["research"]),
                 "solution_options_json": str(stage_paths["solution_options"]),
@@ -256,8 +397,22 @@ def _bind_shadow_export_contract(
         export_gate_config_path=repo_root / "configs" / "backlog_export_gate.yaml",
         cli_repo_input=None,
     )
+    qualification = evaluate_independent_qualification(
+        atoms=[],
+        accepted_outputs_by_kind={},
+        positive_throughput_required=False,
+    )
+    qualification["policy"]["positive_throughput_required"] = True
+    qualification["counts"]["actionable_cases"] = 1
+    qualification["counts"]["positive_qualifying_corpus"] = 1
+    qualification["counts"]["exhausted_corpus"] = 0
+    qualification["status"] = "verified"
+    qualification["qualification_class"] = "positive_throughput"
+    qualification["failures"] = []
+    qualification["correction_routing_status"] = "not_required"
     invariant_report = {
-        "schema_version": 3,
+        "schema_version": 4,
+        "cycle_mode": "release",
         "passed": True,
         "failures": [],
         "checks": {},
@@ -266,7 +421,10 @@ def _bind_shadow_export_contract(
         "case_graph_sha256": "b" * 64,
         "ticket_set_sha256": "c" * 64,
         "research_proof_basis_sha256": "d" * 64,
+        "qualification_basis_sha256": qualification["basis_sha256"],
+        "qualification_stability_sha256": qualification["stability_sha256"],
         "export_projection_sha256": projection["sha256"],
+        "qualification": qualification,
         "counts": {},
     }
     record_shadow_cycle(
@@ -407,6 +565,45 @@ def test_export_gate_honors_configured_stable_shadow_cycle_count(
     assert exc.value.code == 0
 
 
+def test_sealed_qualification_rejects_live_atom_ledger_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    live_ledger = tmp_path / "live_atom_actions.yaml"
+    live_ledger.write_text("atom:one:\n  status: new\n", encoding="utf-8")
+    original = live_ledger.read_bytes()
+    expected_sha256 = sha256(original).hexdigest()
+    bundle_path = tmp_path / "qualification_input_bundle.json"
+    bundle_path.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        export_commands,
+        "load_qualification_input_bundle",
+        lambda _path, *, verify_files: {
+            "source_inputs": {
+                "atom_actions": {
+                    "sha256": expected_sha256,
+                    "size_bytes": len(original),
+                }
+            }
+        },
+    )
+
+    assert export_commands._sealed_live_atom_actions_snapshot(
+        qualification_input_bundle_path=bundle_path,
+        live_atom_actions_path=live_ledger,
+    ) == (original, expected_sha256)
+
+    live_ledger.write_text("atom:one:\n  status: actioned\n", encoding="utf-8")
+    with pytest.raises(
+        ValueError,
+        match="qualification_live_atom_actions_changed_since_prepare",
+    ):
+        export_commands._sealed_live_atom_actions_snapshot(
+            qualification_input_bundle_path=bundle_path,
+            live_atom_actions_path=live_ledger,
+        )
+
+
 @pytest.mark.parametrize("gate_mode", ["missing", "disabled"])
 def test_export_gate_missing_or_disabled_fails_closed_before_mutation(
     tmp_path: Path,
@@ -498,6 +695,40 @@ def test_export_rejects_missing_or_mismatched_canonical_scope(
         )
 
     assert exc.value.code == 2
+
+
+def test_export_rejects_legacy_one_pass_analysis_before_shadow_gate(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo_root = _make_repo_root(tmp_path)
+    backlog_path = tmp_path / "runs" / "target_a" / "_compiled" / "target_a.backlog.json"
+    _write_json(
+        backlog_path,
+        {
+            "pipeline_kind": "legacy_one_pass_analysis",
+            "analysis_only": True,
+            "export_eligible": False,
+            "tickets": [],
+        },
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "export-tickets",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(tmp_path / "runs"),
+                "--target",
+                "target_a",
+            ]
+        )
+
+    assert exc.value.code == 2
+    assert "analysis-only" in capsys.readouterr().err
 
 
 def test_export_accepts_explicit_global_scope(
@@ -807,9 +1038,7 @@ def test_late_invalid_ticket_leaves_all_scoped_files_byte_identical(
     }
     assert after == before
     assert legacy_plan.exists()
-    assert not legacy_plan.with_name(
-        f"20260709_{first_fingerprint}_legacy.md"
-    ).exists()
+    assert not legacy_plan.with_name(f"20260709_{first_fingerprint}_legacy.md").exists()
     assert not (backlog_path.parent / "target.tickets_export.json").exists()
 
 
@@ -1101,10 +1330,7 @@ def _with_strict_readiness(
                 "experiment_id": "exp-1",
                 "scenario_kind": "original_replay",
                 "addresses_atom_ids": ["atom:test"],
-                "command": (
-                    "python -m pytest -q "
-                    "tests/test_core.py::test_missing_guard"
-                ),
+                "command": ("python -m pytest -q tests/test_core.py::test_missing_guard"),
                 "result": "Trace establishes the missing guard",
                 "outcome": "supports",
                 "exit_code": 1,
@@ -1150,10 +1376,7 @@ def _with_strict_readiness(
                     "expected_difference": "The guarded control succeeds without the symptom.",
                 },
                 "addresses_atom_ids": ["atom:test"],
-                "command": (
-                    "python -m pytest -q "
-                    "tests/test_core.py::test_guarded_control"
-                ),
+                "command": ("python -m pytest -q tests/test_core.py::test_guarded_control"),
                 "result": "The guarded path succeeds",
                 "outcome": "refutes",
                 "exit_code": 0,
@@ -1176,10 +1399,7 @@ def _with_strict_readiness(
                     ),
                 },
                 "addresses_atom_ids": ["atom:test"],
-                "command": (
-                    "python -m pytest -q "
-                    "tests/test_core.py::test_alternative_removed"
-                ),
+                "command": ("python -m pytest -q tests/test_core.py::test_alternative_removed"),
                 "result": "The original failure remains",
                 "outcome": "supports",
                 "exit_code": 1,
@@ -1241,8 +1461,7 @@ def _with_strict_readiness(
                             "atom_id": "atom:test",
                             "text": "failure",
                             "command": (
-                                "python -m pytest -q "
-                                "tests/test_core.py::test_missing_guard"
+                                "python -m pytest -q tests/test_core.py::test_missing_guard"
                             ),
                             "exit_code": 1,
                             "evidence_role": "observation",
@@ -1256,10 +1475,7 @@ def _with_strict_readiness(
                 "atom_snapshot": {
                     "atom_id": "atom:test",
                     "text": "failure",
-                    "command": (
-                        "python -m pytest -q "
-                        "tests/test_core.py::test_missing_guard"
-                    ),
+                    "command": ("python -m pytest -q tests/test_core.py::test_missing_guard"),
                     "exit_code": 1,
                     "evidence_role": "observation",
                     "origin_stage": "runtime",
@@ -1533,6 +1749,9 @@ def _with_strict_readiness(
                 "experiment_id": "exp-1",
                 "atom_id": "atom:test",
                 "match_kind": "command_and_exit_code",
+                "origin_atom_sha256": assignment["atom_receipts"][0][
+                    "atom_sha256"
+                ],
             }
         ],
         "errors": [],
@@ -1565,9 +1784,7 @@ def _with_strict_readiness(
         "expression": "True",
         "ast_sha256": sha256(b"Constant(value=True)").hexdigest(),
     }
-    control_call.update(
-        {"arguments": [control_argument], "arguments_complete": True}
-    )
+    control_call.update({"arguments": [control_argument], "arguments_complete": True})
     old_control = verification["control_verifications"][0]
     control_receipt = {
         "verification_method": "pytest_ast_controlled_difference_v2",
@@ -1611,18 +1828,33 @@ def _with_strict_readiness(
         "adversarial_effect": "limits_scope",
         "relationship_sha256": old_control["relationship_sha256"],
     }
-    control_receipt["control_verification_id"] = "control_verification:" + sha256(
-        json.dumps(
-            control_receipt,
-            sort_keys=True,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    control_receipt["control_verification_id"] = (
+        "control_verification:"
+        + sha256(
+            json.dumps(
+                control_receipt,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    )
     verification["control_verifications"] = [control_receipt]
-    consumer_identity = {
-        "kind": "production_entrypoint",
+    consumer_projection = {
+        "kind": "runner_observed_entrypoint",
         "entrypoint": "core.run",
+        "attestation_basis": "runner_mechanism_link",
+        "runner_attested": True,
+    }
+    consumer_identity = {
+        **consumer_projection,
+        "consumer_identity_sha256": sha256(
+            json.dumps(
+                consumer_projection,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
     }
     consumer_independence_key = sha256(
         json.dumps(
@@ -1639,6 +1871,16 @@ def _with_strict_readiness(
         "experiment_ids": ["exp-1", "exp-control"],
         "artifact_refs": ["artifact:source"],
         "origin_atom_ids": ["atom:test"],
+        "origin_symptom_bindings": [
+            {
+                "experiment_id": "exp-1",
+                "atom_id": "atom:test",
+                "match_kind": "command_and_exit_code",
+                "origin_atom_sha256": assignment["atom_receipts"][0][
+                    "atom_sha256"
+                ],
+            }
+        ],
         "path_name": "core.run",
         "consumer_identity": consumer_identity,
         "independence_key": consumer_independence_key,
@@ -1648,8 +1890,41 @@ def _with_strict_readiness(
         },
         "observable_difference": control_receipt["observable_difference"],
         "strong_pytest_control_id": control_receipt["control_verification_id"],
-        "adversarial_effect": "limits_scope",
+        "mechanism_link": {
+            "verification_method": "runner_exception_symbol_trace_v1",
+            "entrypoint": "core.run",
+            "code_path": [
+                {
+                    "symbol": "core.run",
+                    "path": "src/core.py",
+                    "trace_excerpt_sha256": "8" * 64,
+                }
+            ],
+        },
+        "adversarial_effect": "supports_selection",
     }
+    mechanism_evidence["causal_root_bindings"] = [
+        {
+            "kind": "origin_symptom_observation",
+            "experiment_ids": ["exp-1", "exp-control"],
+            "origin_atom_ids": ["atom:test"],
+            "origin_bindings_sha256": sha256(
+                json.dumps(
+                    mechanism_evidence["origin_symptom_bindings"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+            "mechanism_link_sha256": sha256(
+                json.dumps(
+                    mechanism_evidence["mechanism_link"],
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest(),
+            "root_mechanism_symbol": "core.run",
+        }
+    ]
     mechanism_evidence["mechanism_evidence_id"] = (
         "mechanism_evidence:"
         + sha256(
@@ -1669,6 +1944,7 @@ def _with_strict_readiness(
         "experiment_ids": ["exp-challenge"],
         "artifact_refs": ["artifact:source"],
         "origin_atom_ids": ["atom:test"],
+        "origin_symptom_bindings": [],
         "path_name": "core.run",
         "consumer_identity": consumer_identity,
         "independence_key": consumer_independence_key,
@@ -1713,9 +1989,7 @@ def _with_strict_readiness(
         mechanism_evidence,
         challenge_evidence,
     ]
-    replay_by_id = {
-        replay["experiment_id"]: replay for replay in verification["experiments"]
-    }
+    replay_by_id = {replay["experiment_id"]: replay for replay in verification["experiments"]}
     alternative_argument = {
         "slot": "keyword:alternative",
         "expression": "False",
@@ -1798,28 +2072,22 @@ def _with_strict_readiness(
             "scenario_kind": "control",
             "command": research["experiments"][2]["command"],
             "declared_result": research["experiments"][2]["result"],
-            "observable_assertion": research["experiments"][2][
-                "observable_assertion"
-            ],
+            "observable_assertion": research["experiments"][2]["observable_assertion"],
             "exit_code": replay_by_id["exp-challenge"]["exit_code"],
             "stdout_sha256": replay_by_id["exp-challenge"]["stdout_sha256"],
             "stderr_sha256": replay_by_id["exp-challenge"]["stderr_sha256"],
-            "mechanism_evidence_ids": [
-                challenge_evidence["mechanism_evidence_id"]
-            ],
+            "mechanism_evidence_ids": [challenge_evidence["mechanism_evidence_id"]],
             "intervention_receipt_id": intervention["intervention_receipt_id"],
         }
     ]
     verification["verified_mechanism"] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "mechanism_symbols": ["core.run"],
         "code_paths": [{"symbol": "core.run", "path": "src/core.py"}],
     }
     probe_points = [
         {
-            "verification_method": receipt["controlled_input_difference"][
-                "verification_method"
-            ],
+            "verification_method": receipt["controlled_input_difference"]["verification_method"],
             "mechanism_symbols": ["core.run"],
             "slot": receipt["controlled_input_difference"]["difference"]["slot"],
             "mechanism_symbol": "core.run",
@@ -1827,7 +2095,7 @@ def _with_strict_readiness(
         for receipt in (control_receipt, intervention)
     ]
     verification["verified_mechanism_provenance"] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "primary_hypothesis_id": "h1",
         "mechanism_evidence_ids": sorted(
             [
@@ -1835,10 +2103,59 @@ def _with_strict_readiness(
                 challenge_evidence["mechanism_evidence_id"],
             ]
         ),
-        "causal_control_ids": [control_receipt["control_verification_id"]],
-        "falsification_intervention_ids": [
-            intervention["intervention_receipt_id"]
+        "causal_root_evidence_ids": [
+            mechanism_evidence["mechanism_evidence_id"]
         ],
+        "support_connectivity": sorted(
+            [
+                {
+                    "mechanism_evidence_id": mechanism_evidence[
+                        "mechanism_evidence_id"
+                    ],
+                    "experiment_ids": ["exp-1", "exp-control"],
+                    "connection_kind": "causal_root",
+                    "connected_from_mechanism_evidence_id": None,
+                    "shared_verified_symbols": [],
+                    "verified_causal_edge": None,
+                    "verified_causal_edges": [],
+                    "causal_root_kinds": ["origin_symptom_observation"],
+                },
+                {
+                    "mechanism_evidence_id": challenge_evidence[
+                        "mechanism_evidence_id"
+                    ],
+                    "experiment_ids": ["exp-challenge"],
+                    "connection_kind": "shared_verified_symbol",
+                    "connected_from_mechanism_evidence_id": mechanism_evidence[
+                        "mechanism_evidence_id"
+                    ],
+                    "shared_verified_symbols": ["core.run"],
+                    "verified_causal_edge": None,
+                    "verified_causal_edges": [],
+                    "causal_root_kinds": [],
+                },
+            ],
+            key=lambda value: value["mechanism_evidence_id"],
+        ),
+        "support_symbol_coverage": sorted(
+            [
+                {
+                    "experiment_ids": ["exp-1", "exp-control"],
+                    "mechanism_symbols": ["core.run"],
+                },
+                {
+                    "experiment_ids": ["exp-challenge"],
+                    "mechanism_symbols": ["core.run"],
+                },
+            ],
+            key=lambda value: json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
+        "causal_control_ids": [control_receipt["control_verification_id"]],
+        "falsification_intervention_ids": [intervention["intervention_receipt_id"]],
         "deterministic_closure_ids": [],
         "research_probe_control_points": sorted(
             probe_points,
@@ -1863,15 +2180,20 @@ def _with_strict_readiness(
         "schema_version": 1,
         "case_id": case_id,
         "repo_revision": "abc123",
+        "primary_hypothesis_id": "h1",
+        "primary_verified_mechanism_sha256": verification[
+            "verified_mechanism_sha256"
+        ],
+        "primary_verified_mechanism_provenance_sha256": verification[
+            "verified_mechanism_provenance_sha256"
+        ],
         "research_experiment_id": "exp-1",
         "scenario_kind": "original_replay",
         "origin_atom_ids": ["atom:test"],
         "mechanism_evidence_ids": [mechanism_evidence["mechanism_evidence_id"]],
         "baseline": {
             "exit_code": 1,
-            "observable_assertion": research["experiments"][0][
-                "observable_assertion"
-            ],
+            "observable_assertion": research["experiments"][0]["observable_assertion"],
             "stdout_sha256": replay_by_id["exp-1"]["stdout_sha256"],
             "stderr_sha256": replay_by_id["exp-1"]["stderr_sha256"],
         },
@@ -1899,6 +2221,13 @@ def _with_strict_readiness(
     positive_contract = {
         "schema_version": 1,
         "kind": "origin_evidence_semantic_contract",
+        "primary_hypothesis_id": "h1",
+        "primary_verified_mechanism_sha256": verification[
+            "verified_mechanism_sha256"
+        ],
+        "primary_verified_mechanism_provenance_sha256": verification[
+            "verified_mechanism_provenance_sha256"
+        ],
         "research_experiment_id": "exp-1",
         "mechanism_evidence_ids": [mechanism_evidence["mechanism_evidence_id"]],
         "origin_evidence": {
@@ -1935,14 +2264,14 @@ def _with_strict_readiness(
         ).hexdigest()
     )
     oracle["positive_outcome_contracts"] = [positive_contract]
-    oracle["outcome_oracle_id"] = "outcome_oracle:" + sha256(
-        json.dumps(
-            oracle,
-            sort_keys=True,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    _attach_exact_origin_boundary(
+        research=research,
+        verification=verification,
+        oracle=oracle,
+        positive_contract=positive_contract,
+        mechanism_evidence_ids=[str(mechanism_evidence["mechanism_evidence_id"])],
+        atom_id="atom:test",
+    )
     verification["outcome_oracles"] = [oracle]
     selector_identity = {
         "kind": "evidence_selector",
@@ -1971,14 +2300,17 @@ def _with_strict_readiness(
             **control_receipt["observable_difference"]["support"],
         },
     }
-    failure_path["failure_path_id"] = "failure_path:" + sha256(
-        json.dumps(
-            failure_path,
-            sort_keys=True,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ).encode()
-    ).hexdigest()
+    failure_path["failure_path_id"] = (
+        "failure_path:"
+        + sha256(
+            json.dumps(
+                failure_path,
+                sort_keys=True,
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()
+    )
     verification["failure_paths"] = [failure_path]
     verification["receipt_sha256"] = evidence_verification_sha256(verification)
     research["evidence_verification"] = verification
@@ -1997,14 +2329,12 @@ def _with_strict_readiness(
             "finding": "The verified control bounds the local guard mechanism.",
         }
     ]
-    selection["falsification_review"]["selected_positive_outcome_contract_id"] = (
-        positive_contract["positive_outcome_contract_id"]
-    )
+    selection["falsification_review"]["selected_positive_outcome_contract_id"] = positive_contract[
+        "positive_outcome_contract_id"
+    ]
     selection["falsification_review"]["outcome_contract_reviews"] = [
         {
-            "positive_outcome_contract_id": positive_contract[
-                "positive_outcome_contract_id"
-            ],
+            "positive_outcome_contract_id": positive_contract["positive_outcome_contract_id"],
             "verdict": "sufficient",
             "semantic_relation_assessment": (
                 "The expected output proves the reproduced guard path completed."
@@ -2044,16 +2374,12 @@ def _with_strict_readiness(
                 "change": "Apply the guard at the verified local decision.",
             }
         ],
-        "verification_commands": [
-            "python -m pytest -q tests/test_core.py::test_missing_guard"
-        ],
+        "verification_commands": ["python -m pytest -q tests/test_core.py::test_missing_guard"],
         "outcome_verification_roles": {
             "original_scenario": {
                 "description": "Replay the exact post-change original scenario.",
                 "research_experiment_id": "exp-1",
-                "commands": [
-                    "python -m pytest -q tests/test_core.py::test_missing_guard"
-                ],
+                "commands": ["python -m pytest -q tests/test_core.py::test_missing_guard"],
                 "predicates": [
                     {"type": "command_exit_code", "command_index": 0, "equals": 0},
                     {
@@ -2067,20 +2393,15 @@ def _with_strict_readiness(
             "mitigation_effect": None,
             "recurrence": {
                 "description": "Probe the canonical case for fresh recurrence evidence.",
-                "commands": ["python tools/check_case_recurrence.py --case atom:test"],
-                "predicates": [
-                    {"type": "command_exit_code", "command_index": 0, "equals": 0}
-                ],
+                "commands": [],
+                "predicates": [],
             },
         },
         "before_after_reproduction": {
             "original_scenario": "Execute the focused case",
             "research_experiment_id": "exp-1",
             "before_change": {
-                "command": (
-                    "python -m pytest -q "
-                    "tests/test_core.py::test_missing_guard"
-                ),
+                "command": ("python -m pytest -q tests/test_core.py::test_missing_guard"),
                 "expected_exit_code": 1,
                 "expected_result": "fails",
                 "observable_assertion": {
@@ -2090,10 +2411,7 @@ def _with_strict_readiness(
                 },
             },
             "after_change": {
-                "command": (
-                    "python -m pytest -q "
-                    "tests/test_core.py::test_missing_guard"
-                ),
+                "command": ("python -m pytest -q tests/test_core.py::test_missing_guard"),
                 "expected_exit_code": 0,
                 "expected_result": "passes",
                 "observable_assertions": [
@@ -2525,9 +2843,7 @@ def test_reports_export_tickets_applies_stage_gates_and_ledger_skip(tmp_path: Pa
     assert kinds[fingerprint_gated] == "research"
     assert kinds[fingerprint_triage] == "research"
     triage_export = next(
-        item
-        for item in exports
-        if item["source_ticket"]["fingerprint"] == fingerprint_triage
+        item for item in exports if item["source_ticket"]["fingerprint"] == fingerprint_triage
     )
     assert triage_export["source_ticket"]["stage"] == "triage"
     assert triage_export["title"].startswith("[Research]")

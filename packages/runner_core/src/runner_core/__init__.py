@@ -1,5 +1,7 @@
 from runner_core.outcome_roles import (
     OUTCOME_EVIDENCE_ROLES,
+    register_causal_observation_source,
+    register_causal_outcome_predicate,
     run_outcome_evidence_role,
     validate_outcome_evidence_role_artifact,
 )
@@ -16,6 +18,8 @@ __all__ = [
     "RunResult",
     "RunnerConfig",
     "find_repo_root",
+    "register_causal_observation_source",
+    "register_causal_outcome_predicate",
     "run_once",
     "run_outcome_evidence_role",
     "validate_outcome_evidence_role_artifact",

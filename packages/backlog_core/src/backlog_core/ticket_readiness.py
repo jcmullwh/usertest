@@ -13,6 +13,24 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from run_artifacts import (
+    COMMAND_STREAM_OPERATORS as _COMMAND_STREAM_OPERATORS,
+)
+from run_artifacts import (
+    COMMAND_STREAM_PREDICATE_TYPES as _COMMAND_STREAM_PREDICATE_TYPES,
+)
+from run_artifacts import (
+    COMMAND_STREAMS as _COMMAND_STREAMS,
+)
+from run_artifacts import (
+    normalize_command_stream_predicate,
+)
+
+from backlog_core.causal_proof import (
+    material_unknowns_block_advancement,
+    proof_predicate_contract_errors,
+    validate_causal_proof_receipt,
+)
 from backlog_core.stage_contracts import (
     assess_research_readiness,
     verified_deterministic_mechanism_closures,
@@ -20,9 +38,6 @@ from backlog_core.stage_contracts import (
 )
 
 _SCOPE_LEVELS = frozenset({"single_path", "multiple_independent_paths", "shared_abstraction"})
-_BREADTH_CONSUMER_KINDS = frozenset(
-    {"production_entrypoint", "config_consumer", "live_failure_surface"}
-)
 _DISCOVERY_FIRST_RE = re.compile(
     r"^\s*(?:\d+[.)]\s*)?"
     r"(?:locate|identify|determine|inspect|audit|review|investigate|find|explore|"
@@ -71,12 +86,6 @@ _FALSIFICATION_EVIDENCE_EFFECTS = frozenset(
 )
 _MATERIAL_RISK_DISPOSITIONS = frozenset({"accepted", "mitigated", "blocks_selection"})
 _OUTCOME_ROLES = frozenset({"original_scenario", "live", "mitigation_effect", "recurrence"})
-_COMMAND_STREAMS = frozenset({"stdout", "stderr", "combined"})
-_COMMAND_STREAM_OPERATORS = frozenset({"contains", "not_contains", "equals"})
-_GENERIC_TEST_COMMAND_RE = re.compile(
-    r"(?:^|[\s/\\])(?:pytest|unittest|ruff|mypy|pyright|eslint|jest|vitest|cargo\s+test|go\s+test)(?:\s|$)",
-    re.IGNORECASE,
-)
 _PLAN_REVISION_FIELDS = (
     "change_plan_id",
     "case_id",
@@ -201,6 +210,142 @@ def _research_dossier_members(
     return [value for value in members if isinstance(value, Mapping)]
 
 
+def _verified_causal_proof_receipts(
+    research: Mapping[str, Any] | None,
+) -> dict[str, Mapping[str, Any]]:
+    """Return content-bound, adapter-independent proof receipts retained by Stage 3."""
+
+    verified: dict[str, Mapping[str, Any]] = {}
+    conflicts: set[str] = set()
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        raw = verification.get("proof_adapter_receipts")
+        for receipt in raw if isinstance(raw, list) else []:
+            if not isinstance(receipt, Mapping) or validate_causal_proof_receipt(receipt):
+                continue
+            proof_id = _string(receipt.get("proof_receipt_id"))
+            if proof_id is None:
+                continue
+            previous = verified.get(proof_id)
+            if previous is not None and dict(previous) != dict(receipt):
+                conflicts.add(proof_id)
+            else:
+                verified[proof_id] = receipt
+    for proof_id in conflicts:
+        verified.pop(proof_id, None)
+    return verified
+
+
+def _causal_positive_contract_is_bound(
+    contract: Mapping[str, Any],
+    *,
+    oracle: Mapping[str, Any],
+    causal_proofs: Mapping[str, Mapping[str, Any]],
+) -> bool:
+    """Validate a causal predicate against its exact runner receipt and positive basis."""
+
+    proof_id = _string(contract.get("proof_receipt_id"))
+    proof = causal_proofs.get(proof_id or "")
+    if not isinstance(proof, Mapping) or validate_causal_proof_receipt(proof):
+        return False
+    intervention = proof.get("intervention")
+    observations = proof.get("observations")
+    baseline = observations.get("baseline") if isinstance(observations, Mapping) else None
+    challenge = observations.get("challenge") if isinstance(observations, Mapping) else None
+    positive = proof.get("positive_outcome")
+    source_root = proof.get("source_root")
+    positive_basis = (
+        source_root.get("positive_basis") if isinstance(source_root, Mapping) else None
+    )
+    adapter_contract = contract.get("adapter_contract")
+    proof_ids = oracle.get("proof_receipt_ids")
+    postconditions = contract.get("postconditions")
+    replay_observation = proof.get("replay_observation")
+    replay_observation_projection = (
+        {
+            key: value
+            for key, value in replay_observation.items()
+            if key != "replay_observation_sha256"
+        }
+        if isinstance(replay_observation, Mapping)
+        else {}
+    )
+    replay_observation_valid = bool(
+        isinstance(replay_observation, Mapping)
+        and replay_observation.get("schema_version") == 1
+        and replay_observation.get("runner_attested") is True
+        and isinstance(replay_observation.get("selector"), Mapping)
+        and isinstance(replay_observation.get("positive_reference_selector"), Mapping)
+        and replay_observation.get("source_experiment_id")
+        == (
+            intervention.get("baseline_experiment_id")
+            if isinstance(intervention, Mapping)
+            else None
+        )
+        and replay_observation.get("positive_reference_experiment_id")
+        == (
+            intervention.get("challenge_experiment_id")
+            if isinstance(intervention, Mapping)
+            else None
+        )
+        and replay_observation.get("predicate_input_mode")
+        in {
+            "post_change_observation",
+            "historical_baseline_and_post_change_observation",
+        }
+        and replay_observation.get("replay_observation_sha256")
+        == _canonical_sha256(replay_observation_projection)
+    )
+    expected_postcondition = {
+        "type": "causal_proof_predicate",
+        "proof_receipt_id": proof_id,
+        "intervention_id": proof.get("intervention_id"),
+        "adapter_id": proof.get("adapter_id"),
+        "adapter_version": proof.get("adapter_version"),
+        "predicate": positive.get("predicate") if isinstance(positive, Mapping) else None,
+        "observation_source": (
+            positive.get("observation_source") if isinstance(positive, Mapping) else None
+        ),
+        "positive_basis_sha256": (
+            positive_basis.get("basis_sha256")
+            if isinstance(positive_basis, Mapping)
+            else None
+        ),
+    }
+    return bool(
+        oracle.get("kind") == "causal_proof_replay"
+        and oracle.get("proof_scope") == "adapter_causal_behavior"
+        and isinstance(proof_ids, list)
+        and proof_id in proof_ids
+        and isinstance(intervention, Mapping)
+        and intervention.get("baseline_experiment_id")
+        == oracle.get("research_experiment_id")
+        and isinstance(baseline, Mapping)
+        and isinstance(challenge, Mapping)
+        and isinstance(positive, Mapping)
+        and isinstance(positive_basis, Mapping)
+        and positive_basis.get("runner_attested") is True
+        and replay_observation_valid
+        and not proof_predicate_contract_errors(positive.get("predicate"))
+        and contract.get("intervention_id") == proof.get("intervention_id")
+        and isinstance(adapter_contract, Mapping)
+        and adapter_contract.get("adapter_id") == proof.get("adapter_id")
+        and adapter_contract.get("adapter_version") == proof.get("adapter_version")
+        and adapter_contract.get("baseline_observation_sha256")
+        == baseline.get("observation_sha256")
+        and adapter_contract.get("challenge_observation_sha256")
+        == challenge.get("observation_sha256")
+        and adapter_contract.get("adapter_evidence_sha256")
+        == _canonical_sha256(proof.get("adapter_evidence"))
+        and contract.get("positive_basis") == positive_basis
+        and contract.get("semantic_review_required")
+        is (positive_basis.get("semantic_review_required") is True)
+        and postconditions == [expected_postcondition]
+    )
+
+
 def verified_outcome_oracles(
     research: Mapping[str, Any] | None,
 ) -> dict[str, Mapping[str, Any]]:
@@ -211,18 +356,83 @@ def verified_outcome_oracles(
         verification = member.get("evidence_verification")
         if not isinstance(verification, Mapping) or verification.get("status") != "verified":
             continue
+        verified_mechanism = verification.get("verified_mechanism")
+        mechanism_sha256 = _string(verification.get("verified_mechanism_sha256"))
+        provenance = verification.get("verified_mechanism_provenance")
+        provenance_sha256 = _string(verification.get("verified_mechanism_provenance_sha256"))
+        if (
+            not isinstance(verified_mechanism, Mapping)
+            or mechanism_sha256 != _canonical_sha256(verified_mechanism)
+            or not isinstance(provenance, Mapping)
+            or provenance_sha256 != _canonical_sha256(provenance)
+        ):
+            continue
+        primary_hypothesis_id = _string(provenance.get("primary_hypothesis_id"))
+        selected_evidence_ids = {
+            value
+            for value in provenance.get("mechanism_evidence_ids", [])
+            if isinstance(value, str) and value
+        }
+        root_evidence_ids = {
+            value
+            for value in provenance.get("causal_root_evidence_ids", [])
+            if isinstance(value, str) and value
+        }
+        mechanisms = _verified_mechanism_evidence(member)
+        causal_proofs = _verified_causal_proof_receipts(member)
+        if primary_hypothesis_id is None or not selected_evidence_ids or not root_evidence_ids:
+            continue
         raw = verification.get("outcome_oracles")
+        member_oracles: list[tuple[str, str | None, Mapping[str, Any]]] = []
+        has_root_bound_positive_contract = False
         for item in raw if isinstance(raw, list) else []:
             if not isinstance(item, Mapping):
                 continue
             oracle_id = _string(item.get("outcome_oracle_id"))
             projection = {key: value for key, value in item.items() if key != "outcome_oracle_id"}
-            if oracle_id != f"outcome_oracle:{_canonical_sha256(projection)}":
+            evidence_ids_raw = item.get("mechanism_evidence_ids")
+            evidence_ids = (
+                {value for value in evidence_ids_raw if isinstance(value, str) and value}
+                if isinstance(evidence_ids_raw, list)
+                else set()
+            )
+            if (
+                oracle_id != f"outcome_oracle:{_canonical_sha256(projection)}"
+                or item.get("primary_hypothesis_id") != primary_hypothesis_id
+                or item.get("primary_verified_mechanism_sha256") != mechanism_sha256
+                or item.get("primary_verified_mechanism_provenance_sha256") != provenance_sha256
+                or not evidence_ids
+                or not evidence_ids.issubset(selected_evidence_ids)
+                or any(
+                    evidence_id not in mechanisms
+                    or mechanisms[evidence_id].get("hypothesis_id") != primary_hypothesis_id
+                    for evidence_id in evidence_ids
+                )
+            ):
                 continue
             experiment_id = _string(item.get("research_experiment_id"))
             case_id = _string(item.get("case_id")) or _string(member.get("case_id"))
             if experiment_id is None:
                 continue
+            contracts = _verified_positive_outcome_contracts(
+                item,
+                causal_proofs=causal_proofs,
+            )
+            if not contracts:
+                continue
+            has_root_bound_positive_contract = has_root_bound_positive_contract or any(
+                {
+                    value
+                    for value in contract.get("mechanism_evidence_ids", [])
+                    if isinstance(value, str) and value
+                }
+                & root_evidence_ids
+                for contract in contracts
+            )
+            member_oracles.append((experiment_id, case_id, item))
+        if not has_root_bound_positive_contract:
+            continue
+        for experiment_id, case_id, item in member_oracles:
             key = experiment_id
             if key in oracles:
                 key = f"{case_id}::{experiment_id}"
@@ -233,6 +443,8 @@ def verified_outcome_oracles(
 
 def _verified_positive_outcome_contracts(
     oracle: Mapping[str, Any],
+    *,
+    causal_proofs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[Mapping[str, Any]]:
     raw = oracle.get("positive_outcome_contracts")
     verified: list[Mapping[str, Any]] = []
@@ -244,17 +456,43 @@ def _verified_positive_outcome_contracts(
             key: value for key, value in contract.items() if key != "positive_outcome_contract_id"
         }
         postconditions = contract.get("postconditions")
+        kind = contract.get("kind")
         if (
             contract_id != f"positive_outcome_contract:{_canonical_sha256(projection)}"
-            or contract.get("kind")
+            or kind
             not in {
                 "repository_test_assertion",
                 "retained_research_harness_assertion",
                 "origin_evidence_semantic_contract",
+                "causal_proof_predicate",
             }
             or not isinstance(postconditions, list)
             or not postconditions
             or any(not isinstance(item, Mapping) for item in postconditions)
+            or contract.get("primary_hypothesis_id") != oracle.get("primary_hypothesis_id")
+            or contract.get("primary_verified_mechanism_sha256")
+            != oracle.get("primary_verified_mechanism_sha256")
+            or contract.get("primary_verified_mechanism_provenance_sha256")
+            != oracle.get("primary_verified_mechanism_provenance_sha256")
+            or not isinstance(contract.get("mechanism_evidence_ids"), list)
+            or not contract.get("mechanism_evidence_ids")
+            or not {
+                value
+                for value in contract.get("mechanism_evidence_ids", [])
+                if isinstance(value, str) and value
+            }.issubset(
+                {
+                    value
+                    for value in oracle.get("mechanism_evidence_ids", [])
+                    if isinstance(value, str) and value
+                }
+            )
+        ):
+            continue
+        if kind == "causal_proof_predicate" and not _causal_positive_contract_is_bound(
+            contract,
+            oracle=oracle,
+            causal_proofs=causal_proofs or {},
         ):
             continue
         verified.append(contract)
@@ -265,9 +503,13 @@ def _grounded_positive_predicates(
     oracle: Mapping[str, Any],
     *,
     selected_contract_ids: set[str] | None = None,
+    causal_proofs: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     predicates: list[dict[str, Any]] = []
-    for contract in _verified_positive_outcome_contracts(oracle):
+    for contract in _verified_positive_outcome_contracts(
+        oracle,
+        causal_proofs=causal_proofs,
+    ):
         contract_id = _string(contract.get("positive_outcome_contract_id"))
         if selected_contract_ids is not None and contract_id not in selected_contract_ids:
             continue
@@ -283,8 +525,12 @@ def _research_positive_contract_index(
     research: Mapping[str, Any] | None,
 ) -> dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]]:
     indexed: dict[str, tuple[Mapping[str, Any], Mapping[str, Any]]] = {}
+    causal_proofs = _verified_causal_proof_receipts(research)
     for oracle in verified_outcome_oracles(research).values():
-        for contract in _verified_positive_outcome_contracts(oracle):
+        for contract in _verified_positive_outcome_contracts(
+            oracle,
+            causal_proofs=causal_proofs,
+        ):
             contract_id = _string(contract.get("positive_outcome_contract_id"))
             if contract_id is not None and contract_id not in indexed:
                 indexed[contract_id] = (contract, oracle)
@@ -403,16 +649,19 @@ def _bind_single_outcome_scenario(
     oracle: Mapping[str, Any],
     *,
     selected_contract_id: str,
+    causal_proofs: Mapping[str, Mapping[str, Any]],
     after: Mapping[str, Any] | None = None,
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[dict[str, Any]]]:
     bound_after = dict(after) if isinstance(after, Mapping) else {}
     grounded_predicates = _grounded_positive_predicates(
         oracle,
         selected_contract_ids={selected_contract_id},
+        causal_proofs=causal_proofs,
     )
     if not grounded_predicates:
         raise ValueError("research_selected_positive_outcome_contract_missing")
     predicates: list[dict[str, Any]] = []
+    selected_proofs: list[dict[str, Any]] = []
     if oracle.get("kind") == "staged_replay":
         grounded_exits = {
             predicate.get("equals")
@@ -488,9 +737,41 @@ def _bind_single_outcome_scenario(
         ]
         bound_after.pop("observable_assertions", None)
         bound_after.pop("artifact_expectations", None)
+    elif oracle.get("kind") == "causal_proof_replay":
+        predicates.extend(
+            predicate
+            for predicate in grounded_predicates
+            if predicate.get("type") == "causal_proof_predicate"
+        )
+        proof_ids = {
+            _string(predicate.get("proof_receipt_id")) for predicate in predicates
+        }
+        if None in proof_ids or not proof_ids:
+            raise ValueError("change_plan_causal_proof_predicate_unbound")
+        selected_proofs = [dict(causal_proofs[proof_id]) for proof_id in sorted(proof_ids)]
+        bound_after["causal_proof_expectations"] = [
+            {
+                "proof_receipt_id": proof.get("proof_receipt_id"),
+                "intervention_id": proof.get("intervention_id"),
+                "replay_observation_sha256": (
+                    proof.get("replay_observation", {}).get(
+                        "replay_observation_sha256"
+                    )
+                    if isinstance(proof.get("replay_observation"), Mapping)
+                    else None
+                ),
+            }
+            for proof in selected_proofs
+        ]
+        bound_after.pop("expected_exit_code", None)
+        bound_after.pop("command", None)
+        bound_after.pop("expected_result", None)
+        bound_after.pop("observable_assertions", None)
+        bound_after.pop("artifact_expectations", None)
+        bound_after.pop("state_expectations", None)
     if not predicates:
         raise ValueError("change_plan_outcome_oracle_predicates_missing")
-    return predicates, bound_after
+    return predicates, bound_after, selected_proofs
 
 
 def bind_plan_outcome_oracle(
@@ -510,12 +791,14 @@ def bind_plan_outcome_oracle(
     original = dict(original_raw) if isinstance(original_raw, Mapping) else {}
     selected_ids = _selected_outcome_contract_ids(selection, research=research)
     positive_index = _research_positive_contract_index(research)
+    causal_proofs = _verified_causal_proof_receipts(research)
     scenarios: list[dict[str, Any]] = []
     for selected_id in selected_ids:
         _contract, oracle = positive_index[selected_id]
-        predicates, scenario_after = _bind_single_outcome_scenario(
+        predicates, scenario_after, selected_proofs = _bind_single_outcome_scenario(
             oracle,
             selected_contract_id=selected_id,
+            causal_proofs=causal_proofs,
             after=reproduction.get("after_change"),
         )
         scenario = {
@@ -523,6 +806,7 @@ def bind_plan_outcome_oracle(
             "oracle": dict(oracle),
             "predicates": predicates,
             "after_change": scenario_after,
+            "causal_proof_receipts": selected_proofs,
         }
         scenario["scenario_id"] = "outcome_scenario:" + _canonical_sha256(scenario)
         scenarios.append(scenario)
@@ -531,6 +815,7 @@ def bind_plan_outcome_oracle(
         scenario = scenarios[0]
         oracle = scenario["oracle"]
         role_predicates = scenario["predicates"]
+        role_causal_proofs = scenario["causal_proof_receipts"]
         reproduction["after_change"] = scenario["after_change"]
         bound_oracle = oracle
         experiment_ids = [_string(oracle.get("research_experiment_id"))]
@@ -554,6 +839,7 @@ def bind_plan_outcome_oracle(
             }
             for index, scenario in enumerate(scenarios)
         ]
+        role_causal_proofs = []
         reproduction["after_change"] = {
             "scenario_expectations": [
                 {
@@ -580,6 +866,8 @@ def bind_plan_outcome_oracle(
         "oracle": bound_oracle,
         "required_proof_scope": bound_oracle.get("proof_scope"),
     }
+    if role_causal_proofs:
+        original["causal_proof_receipts"] = role_causal_proofs
     roles["original_scenario"] = original
     bound["outcome_verification_roles"] = roles
     reproduction["research_experiment_id"] = experiment_ids[0]
@@ -647,7 +935,47 @@ def _positive_outcome_predicate(predicate: Mapping[str, Any]) -> bool:
             and isinstance(predicate.get("exists"), bool)
             and "equals" in predicate
         )
+    if predicate_type == "causal_proof_predicate":
+        return bool(
+            _string(predicate.get("proof_receipt_id")) is not None
+            and _string(predicate.get("intervention_id")) is not None
+            and _string(predicate.get("adapter_id")) is not None
+            and _string(predicate.get("adapter_version")) is not None
+            and not proof_predicate_contract_errors(predicate.get("predicate"))
+            and _string(predicate.get("observation_source")) is not None
+            and _string(predicate.get("positive_basis_sha256")) is not None
+        )
     return False
+
+
+def _verified_research_experiment_commands(
+    research: Mapping[str, Any] | None,
+) -> dict[str, str]:
+    """Return commands whose experiment identity and execution were runner-verified."""
+
+    commands: dict[str, str] = {}
+    conflicts: set[str] = set()
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        experiments = verification.get("experiments")
+        for experiment in experiments if isinstance(experiments, list) else []:
+            if not isinstance(experiment, Mapping):
+                continue
+            experiment_id = _string(experiment.get("experiment_id"))
+            command = _string(experiment.get("command"))
+            if experiment_id is None or command is None:
+                continue
+            normalized = " ".join(command.split())
+            previous = commands.get(experiment_id)
+            if previous is not None and previous != normalized:
+                conflicts.add(experiment_id)
+            else:
+                commands[experiment_id] = normalized
+    for experiment_id in conflicts:
+        commands.pop(experiment_id, None)
+    return commands
 
 
 def _outcome_role_contract_errors(
@@ -656,13 +984,19 @@ def _outcome_role_contract_errors(
     verification_commands: Sequence[str],
     reproduction: Mapping[str, Any] | None,
     requires_live: bool | None,
+    research: Mapping[str, Any] | None,
 ) -> list[str]:
     reasons: list[str] = []
+    has_proof_limitation = bool(
+        isinstance(reproduction, Mapping)
+        and _string(reproduction.get("proof_limitation")) is not None
+    )
     if not isinstance(raw, Mapping):
         return ["change_plan_outcome_roles_missing"]
     if set(raw) != _OUTCOME_ROLES:
         reasons.append("change_plan_outcome_role_fields_invalid")
     normalized_tests = {" ".join(command.split()) for command in verification_commands}
+    verified_research_commands = _verified_research_experiment_commands(research)
     normalized_roles: dict[str, Mapping[str, Any] | None] = {}
     for role in sorted(_OUTCOME_ROLES):
         value = raw.get(role)
@@ -678,7 +1012,12 @@ def _outcome_role_contract_errors(
             reasons.append(f"change_plan_outcome_role_description_missing:{role}")
         oracle = value.get("oracle") if role == "original_scenario" else None
         oracle_kind = oracle.get("kind") if isinstance(oracle, Mapping) else None
-        oracle_mode = oracle_kind in {"staged_replay", "config_state", "multi_scenario"}
+        oracle_mode = oracle_kind in {
+            "staged_replay",
+            "causal_proof_replay",
+            "config_state",
+            "multi_scenario",
+        }
         commands = _string_list(
             value.get("commands"), nonempty=role != "recurrence" and not oracle_mode
         )
@@ -687,13 +1026,86 @@ def _outcome_role_contract_errors(
             commands = []
         if oracle_mode and commands:
             reasons.append("change_plan_outcome_oracle_commands_forbidden")
-        virtual_command_count = 1 if oracle_kind == "staged_replay" else len(commands)
+        virtual_command_count = (
+            1
+            if oracle_kind in {"staged_replay", "causal_proof_replay"}
+            else len(commands)
+        )
+        retained_causal_proofs: dict[str, Mapping[str, Any]] = {}
+        raw_causal_proofs = value.get("causal_proof_receipts")
+        verified_causal_proofs = _verified_causal_proof_receipts(research)
+        if oracle_kind == "causal_proof_replay":
+            if not isinstance(raw_causal_proofs, list) or not raw_causal_proofs:
+                reasons.append("change_plan_outcome_causal_proof_receipts_missing")
+            else:
+                for proof_index, proof in enumerate(raw_causal_proofs):
+                    proof_id = (
+                        _string(proof.get("proof_receipt_id"))
+                        if isinstance(proof, Mapping)
+                        else None
+                    )
+                    if (
+                        proof_id is None
+                        or proof_id in retained_causal_proofs
+                        or verified_causal_proofs.get(proof_id) != proof
+                    ):
+                        reasons.append(
+                            f"change_plan_outcome_causal_proof_receipt_invalid:{proof_index}"
+                        )
+                        continue
+                    retained_causal_proofs[proof_id] = proof
+                expected_proof_ids = {
+                    value
+                    for value in oracle.get("proof_receipt_ids", [])
+                    if isinstance(value, str) and value
+                }
+                if set(retained_causal_proofs) != expected_proof_ids:
+                    reasons.append("change_plan_outcome_causal_proof_receipt_coverage_invalid")
+        elif raw_causal_proofs not in (None, []):
+            reasons.append("change_plan_outcome_causal_proof_receipts_unexpected")
         normalized_commands = {" ".join(command.split()) for command in commands}
         if role in {"live", "mitigation_effect", "recurrence"}:
             if normalized_commands.intersection(normalized_tests):
                 reasons.append(f"change_plan_outcome_role_reuses_generic_verification:{role}")
-            if any(_GENERIC_TEST_COMMAND_RE.search(command) for command in commands):
-                reasons.append(f"change_plan_outcome_role_generic_test_forbidden:{role}")
+            command_bindings = value.get("command_bindings")
+            if commands:
+                if not isinstance(command_bindings, list):
+                    reasons.append(f"change_plan_outcome_role_command_bindings_invalid:{role}")
+                else:
+                    bound_indices: set[int] = set()
+                    for binding_index, command_binding in enumerate(command_bindings):
+                        if not isinstance(command_binding, Mapping):
+                            reasons.append(
+                                f"change_plan_outcome_role_command_binding_invalid:"
+                                f"{role}:{binding_index}"
+                            )
+                            continue
+                        command_index = command_binding.get("command_index")
+                        experiment_id = _string(
+                            command_binding.get("research_experiment_id")
+                        )
+                        if (
+                            isinstance(command_index, bool)
+                            or not isinstance(command_index, int)
+                            or command_index < 0
+                            or command_index >= len(commands)
+                            or command_index in bound_indices
+                            or experiment_id is None
+                            or verified_research_commands.get(experiment_id)
+                            != " ".join(commands[command_index].split())
+                        ):
+                            reasons.append(
+                                f"change_plan_outcome_role_command_binding_unverified:"
+                                f"{role}:{binding_index}"
+                            )
+                            continue
+                        bound_indices.add(command_index)
+                    if bound_indices != set(range(len(commands))):
+                        reasons.append(
+                            f"change_plan_outcome_role_command_binding_coverage_invalid:{role}"
+                        )
+            elif command_bindings not in (None, []):
+                reasons.append(f"change_plan_outcome_role_command_bindings_without_commands:{role}")
         predicates = value.get("predicates")
         if not isinstance(predicates, list) or (not predicates and role != "recurrence"):
             reasons.append(f"change_plan_outcome_role_predicates_invalid:{role}")
@@ -720,19 +1132,13 @@ def _outcome_role_contract_errors(
                     )
                 else:
                     exit_coverage.add(command_index)
-            elif predicate_type in {
-                f"command_{source}_{operator}"
-                for source in _COMMAND_STREAMS
-                for operator in _COMMAND_STREAM_OPERATORS
-            }:
-                command_index = predicate.get("command_index")
-                if (
-                    isinstance(command_index, bool)
-                    or not isinstance(command_index, int)
-                    or command_index < 0
-                    or command_index >= virtual_command_count
-                    or _string(predicate.get("value")) is None
-                ):
+            elif predicate_type in _COMMAND_STREAM_PREDICATE_TYPES:
+                try:
+                    normalize_command_stream_predicate(
+                        predicate,
+                        command_count=virtual_command_count,
+                    )
+                except ValueError:
                     reasons.append(
                         f"change_plan_outcome_role_stream_predicate_invalid:{role}:{index}"
                     )
@@ -760,6 +1166,48 @@ def _outcome_role_contract_errors(
                 ):
                     reasons.append(
                         f"change_plan_outcome_role_state_predicate_invalid:{role}:{index}"
+                    )
+            elif predicate_type == "causal_proof_predicate":
+                proof_id = _string(predicate.get("proof_receipt_id"))
+                proof = retained_causal_proofs.get(proof_id or "")
+                positive = proof.get("positive_outcome") if isinstance(proof, Mapping) else None
+                source_root = proof.get("source_root") if isinstance(proof, Mapping) else None
+                basis = (
+                    source_root.get("positive_basis")
+                    if isinstance(source_root, Mapping)
+                    else None
+                )
+                expected = {
+                    "type": "causal_proof_predicate",
+                    "proof_receipt_id": proof_id,
+                    "intervention_id": (
+                        proof.get("intervention_id")
+                        if isinstance(proof, Mapping)
+                        else None
+                    ),
+                    "adapter_id": proof.get("adapter_id") if isinstance(proof, Mapping) else None,
+                    "adapter_version": (
+                        proof.get("adapter_version")
+                        if isinstance(proof, Mapping)
+                        else None
+                    ),
+                    "predicate": (
+                        positive.get("predicate")
+                        if isinstance(positive, Mapping)
+                        else None
+                    ),
+                    "observation_source": (
+                        positive.get("observation_source")
+                        if isinstance(positive, Mapping)
+                        else None
+                    ),
+                    "positive_basis_sha256": (
+                        basis.get("basis_sha256") if isinstance(basis, Mapping) else None
+                    ),
+                }
+                if oracle_kind != "causal_proof_replay" or dict(predicate) != expected:
+                    reasons.append(
+                        f"change_plan_outcome_role_causal_predicate_invalid:{role}:{index}"
                     )
             elif predicate_type == "oracle_scenario_passed":
                 scenario_index = predicate.get("scenario_index")
@@ -797,15 +1245,20 @@ def _outcome_role_contract_errors(
                 reasons.append("change_plan_outcome_oracle_scope_mismatch")
             if oracle_kind == "staged_replay" and oracle.get("proof_scope") != "behavioral":
                 reasons.append("change_plan_outcome_replay_scope_invalid")
+            if (
+                oracle_kind == "causal_proof_replay"
+                and oracle.get("proof_scope") != "adapter_causal_behavior"
+            ):
+                reasons.append("change_plan_outcome_causal_replay_scope_invalid")
             if oracle_kind == "config_state" and oracle.get("proof_scope") != "configuration_state":
                 reasons.append("change_plan_outcome_config_scope_invalid")
             if oracle_kind == "multi_scenario" and oracle.get("proof_scope") != "multi_scenario":
                 reasons.append("change_plan_outcome_multi_scenario_scope_invalid")
 
     original = normalized_roles.get("original_scenario")
-    if original is None:
+    if original is None and not has_proof_limitation:
         reasons.append("change_plan_outcome_original_role_required")
-    elif reproduction is not None:
+    elif reproduction is not None and not has_proof_limitation:
         after = reproduction.get("after_change")
         after = after if isinstance(after, Mapping) else {}
         original_oracle = original.get("oracle")
@@ -840,7 +1293,11 @@ def _outcome_role_contract_errors(
             and predicate.get("equals") == expected_exit
             for predicate in (original_predicates if isinstance(original_predicates, list) else [])
         )
-        if oracle_kind not in {"config_state", "multi_scenario"} and not original_exit_matches:
+        if oracle_kind not in {
+            "causal_proof_replay",
+            "config_state",
+            "multi_scenario",
+        } and not original_exit_matches:
             reasons.append("change_plan_outcome_original_predicate_mismatch")
         after_assertions_raw = after.get("observable_assertions")
         after_assertions = after_assertions_raw if isinstance(after_assertions_raw, list) else []
@@ -866,6 +1323,26 @@ def _outcome_role_contract_errors(
         )
         if any(predicate not in original_predicate_list for predicate in expected_predicates):
             reasons.append("change_plan_outcome_original_observable_oracle_mismatch")
+        if oracle_kind == "causal_proof_replay":
+            retained = original.get("causal_proof_receipts")
+            expectations = after.get("causal_proof_expectations")
+            expected_expectations = [
+                {
+                    "proof_receipt_id": proof.get("proof_receipt_id"),
+                    "intervention_id": proof.get("intervention_id"),
+                    "replay_observation_sha256": (
+                        proof.get("replay_observation", {}).get(
+                            "replay_observation_sha256"
+                        )
+                        if isinstance(proof.get("replay_observation"), Mapping)
+                        else None
+                    ),
+                }
+                for proof in (retained if isinstance(retained, list) else [])
+                if isinstance(proof, Mapping)
+            ]
+            if not expected_expectations or expectations != expected_expectations:
+                reasons.append("change_plan_outcome_causal_expectation_binding_mismatch")
         if oracle_kind == "config_state":
             targets = {
                 str(target.get("target_id")): target
@@ -910,7 +1387,11 @@ def _outcome_role_contract_errors(
                 reasons.append("change_plan_outcome_multi_scenario_coverage_invalid")
     if normalized_roles.get("recurrence") is None:
         reasons.append("change_plan_outcome_recurrence_role_required")
-    if requires_live is True and normalized_roles.get("live") is None:
+    if (
+        requires_live is True
+        and normalized_roles.get("live") is None
+        and not has_proof_limitation
+    ):
         reasons.append("change_plan_outcome_live_role_required")
     if requires_live is False and normalized_roles.get("live") is not None:
         reasons.append("change_plan_outcome_live_role_unjustified")
@@ -924,8 +1405,12 @@ def _outcome_role_contract_errors(
             else []
         )
         original_oracle = original.get("oracle") if isinstance(original, Mapping) else None
+        causal_proofs = _verified_causal_proof_receipts(research)
         grounded_predicates = (
-            _grounded_positive_predicates(original_oracle)
+            _grounded_positive_predicates(
+                original_oracle,
+                causal_proofs=causal_proofs,
+            )
             if isinstance(original_oracle, Mapping)
             else []
         )
@@ -936,7 +1421,10 @@ def _outcome_role_contract_errors(
                 "retained_research_harness_assertion",
             }
             for contract in (
-                _verified_positive_outcome_contracts(original_oracle)
+                _verified_positive_outcome_contracts(
+                    original_oracle,
+                    causal_proofs=causal_proofs,
+                )
                 if isinstance(original_oracle, Mapping)
                 else []
             )
@@ -990,6 +1478,23 @@ def _content_address_matches(
     return receipt_id == f"{prefix}:{_canonical_sha256(projection)}"
 
 
+def _runner_attested_consumer_identity(value: Any) -> bool:
+    """Validate an open runner-minted production-consumer identity."""
+
+    if not isinstance(value, Mapping):
+        return False
+    supplied = _string(value.get("consumer_identity_sha256"))
+    projection = {
+        key: item for key, item in value.items() if key != "consumer_identity_sha256"
+    }
+    return (
+        value.get("runner_attested") is True
+        and _string(value.get("kind")) is not None
+        and _string(value.get("entrypoint")) is not None
+        and supplied == _canonical_sha256(projection)
+    )
+
+
 def _verified_control_receipts(
     research: Mapping[str, Any] | None,
 ) -> dict[str, Mapping[str, Any]]:
@@ -1032,6 +1537,7 @@ def _verified_mechanism_evidence(
 
     verified: dict[str, Mapping[str, Any]] = {}
     allowed_types = {
+        "adapter_proof",
         "exception_trace",
         "observed_output",
         "controlled_scenario",
@@ -1065,6 +1571,170 @@ def _verified_mechanism_evidence(
         if evidence_id is not None and evidence_id not in verified:
             verified[evidence_id] = evidence
     return verified
+
+
+def _adapter_proof_target_locators(evidence: Mapping[str, Any]) -> set[str]:
+    """Return runner-attested generic locators that were causally intervened on."""
+
+    if evidence.get("evidence_type") != "adapter_proof":
+        return set()
+    mechanism_targets = {
+        locator
+        for target in (
+            evidence.get("mechanism_targets")
+            if isinstance(evidence.get("mechanism_targets"), list)
+            else []
+        )
+        if isinstance(target, Mapping)
+        and target.get("runner_attested") is True
+        and _string(target.get("node_id")) is not None
+        and _string(target.get("kind")) is not None
+        and _string(target.get("evidence_sha256")) is not None
+        for locator in [_string(target.get("locator"))]
+        if locator is not None
+    }
+    intervention_targets = {
+        locator
+        for target in (
+            evidence.get("intervention_targets")
+            if isinstance(evidence.get("intervention_targets"), list)
+            else []
+        )
+        if isinstance(target, Mapping)
+        and _string(target.get("intervention_id")) is not None
+        and _string(target.get("kind")) is not None
+        for locator in [_string(target.get("target"))]
+        if locator is not None
+    }
+    return mechanism_targets.intersection(intervention_targets)
+
+
+def _verified_adapter_implementation_touchpoints(
+    research: Mapping[str, Any] | None,
+    *,
+    hypothesis_id: str,
+    mechanism_symbols: Sequence[str],
+) -> dict[str, Mapping[str, Any]]:
+    """Return generic causal locators connected to attested repository touchpoints.
+
+    Adapter locators such as ``env:NAME`` or ``fs:/path`` are causal identities,
+    never repository paths.  A downstream edit is actionable only when the runner
+    separately binds that locator to a file it observed at the researched revision.
+    """
+
+    inspected_files = _verified_inspected_file_receipts(research)
+    inspected_symbols = _verified_symbol_paths(research)
+    expected_symbols = list(mechanism_symbols)
+    verified: dict[str, Mapping[str, Any]] = {}
+    for evidence in _verified_mechanism_evidence(research).values():
+        if (
+            evidence.get("evidence_type") != "adapter_proof"
+            or _string(evidence.get("hypothesis_id")) != hypothesis_id
+            or _string_list(evidence.get("mechanism_symbols"), nonempty=True)
+            != expected_symbols
+        ):
+            continue
+        causal_locators = _adapter_proof_target_locators(evidence)
+        raw_touchpoints = evidence.get("implementation_touchpoints")
+        for touchpoint in raw_touchpoints if isinstance(raw_touchpoints, list) else []:
+            if not isinstance(touchpoint, Mapping):
+                continue
+            touchpoint_id = _string(touchpoint.get("touchpoint_id"))
+            evidence_sha256 = _string(touchpoint.get("evidence_sha256"))
+            causal_locator = _string(touchpoint.get("causal_locator"))
+            path = _string(touchpoint.get("path"))
+            symbols = _string_list(touchpoint.get("symbols"))
+            relationship = _string(touchpoint.get("relationship"))
+            file_receipt = inspected_files.get(path or "")
+            inspected_sha256 = (
+                _string(file_receipt.get("observed_content_sha256"))
+                if isinstance(file_receipt, Mapping)
+                else None
+            )
+            if (
+                inspected_sha256 is None
+                and isinstance(file_receipt, Mapping)
+                and file_receipt.get("whole_file_observed") is True
+            ):
+                inspected_sha256 = _string(file_receipt.get("sha256"))
+            projection = {
+                key: value
+                for key, value in touchpoint.items()
+                if key not in {"touchpoint_id", "evidence_sha256"}
+            }
+            expected_hash = _canonical_sha256(projection)
+            if (
+                touchpoint_id != f"implementation_touchpoint:{expected_hash}"
+                or evidence_sha256 != expected_hash
+                or touchpoint.get("runner_attested") is not True
+                or causal_locator not in causal_locators
+                or path is None
+                or symbols is None
+                or len(symbols) != len(set(symbols))
+                or relationship is None
+                or file_receipt is None
+                or _string(touchpoint.get("inspected_content_sha256"))
+                != inspected_sha256
+                or any(inspected_symbols.get(symbol) != path for symbol in symbols)
+            ):
+                continue
+            if touchpoint_id not in verified:
+                verified[touchpoint_id] = touchpoint
+    return verified
+
+
+def _implementation_touchpoint_target_keys(
+    touchpoint: Mapping[str, Any],
+) -> set[tuple[str, str | None]]:
+    path = _string(touchpoint.get("path"))
+    symbols = _string_list(touchpoint.get("symbols"))
+    if path is None or symbols is None:
+        return set()
+    return {(path, symbol) for symbol in symbols} if symbols else {(path, None)}
+
+
+def _required_plan_intervention_targets(
+    binding: Mapping[str, Any],
+    *,
+    research: Mapping[str, Any] | None,
+) -> dict[tuple[str, str | None], str]:
+    """Resolve selected causal points to exact attested repository plan targets."""
+
+    hypothesis_id = _string(binding.get("hypothesis_id")) or ""
+    mechanism_symbols = _string_list(binding.get("mechanism_symbols"), nonempty=True) or []
+    touchpoints = _verified_adapter_implementation_touchpoints(
+        research,
+        hypothesis_id=hypothesis_id,
+        mechanism_symbols=mechanism_symbols,
+    )
+    required: dict[tuple[str, str | None], str] = {}
+    points = binding.get("intervention_points")
+    for point in points if isinstance(points, list) else []:
+        if not isinstance(point, Mapping):
+            continue
+        intervention = _string(point.get("intervention"))
+        if intervention is None:
+            continue
+        causal_locator = _string(point.get("causal_locator"))
+        if causal_locator is not None:
+            touchpoint_ids = _string_list(
+                point.get("implementation_touchpoint_ids"),
+                nonempty=True,
+            ) or []
+            for touchpoint_id in touchpoint_ids:
+                touchpoint = touchpoints.get(touchpoint_id)
+                if (
+                    isinstance(touchpoint, Mapping)
+                    and _string(touchpoint.get("causal_locator")) == causal_locator
+                ):
+                    for key in _implementation_touchpoint_target_keys(touchpoint):
+                        required[key] = intervention
+            continue
+        path = _string(point.get("target_path"))
+        symbol = _string(point.get("target_symbol"))
+        if path is not None and symbol is not None:
+            required[(path, symbol)] = intervention
+    return required
 
 
 def verified_mechanism_evidence(
@@ -1154,7 +1824,7 @@ def falsification_acceptance_has_adversarial_basis(
     )
     return bool(closures) and all(
         isinstance(closure, Mapping)
-        and closure.get("verification_method") == "runner_deterministic_mechanism_closure_v1"
+        and closure.get("verification_method") == "runner_deterministic_mechanism_closure_v2"
         for closure in (closures if isinstance(closures, list) else [])
     )
 
@@ -1232,6 +1902,7 @@ def _mechanism_link_symbols(link: Any) -> set[str]:
         "runner_python_call_chain_v1",
         "runner_exception_symbol_trace_v1",
         "runner_deterministic_static_trace_v1",
+        "runner_causal_proof_adapter_v1",
     }:
         code_path = link.get("code_path")
         return {
@@ -1258,8 +1929,8 @@ def _verified_intervention_path_keys(
     research: Mapping[str, Any] | None,
     hypothesis_id: str,
     mechanism_symbols: Sequence[str],
-    target_path: str,
-    target_symbol: str,
+    target_path: str | None,
+    causal_locator: str,
     controlled_symbols: Sequence[str],
 ) -> set[str]:
     """Return observed path keys on which the selected intervention is grounded.
@@ -1280,12 +1951,14 @@ def _verified_intervention_path_keys(
         ):
             continue
         code_paths = evidence.get("code_paths")
-        if not any(
+        legacy_target_bound = target_path is not None and any(
             isinstance(point, Mapping)
             and _string(point.get("path")) == target_path
-            and _string(point.get("symbol")) == target_symbol
+            and _string(point.get("symbol")) == causal_locator
             for point in (code_paths if isinstance(code_paths, list) else [])
-        ):
+        )
+        generic_target_bound = causal_locator in _adapter_proof_target_locators(evidence)
+        if not legacy_target_bound and not generic_target_bound:
             continue
         linked_symbols = _mechanism_link_symbols(evidence.get("mechanism_link"))
         link_covers = controlled.issubset(linked_symbols)
@@ -1345,13 +2018,14 @@ def _intervention_sufficiency_reasons(
         ):
             continue
         controlled_symbols = _string_list(point.get("controls_mechanism_symbols"), nonempty=True)
-        target_path = _string(point.get("target_path"))
-        target_symbol = _string(point.get("target_symbol"))
+        causal_locator = _string(point.get("causal_locator"))
+        target_path = None if causal_locator is not None else _string(point.get("target_path"))
+        if causal_locator is None:
+            causal_locator = _string(point.get("target_symbol"))
         if (
             controlled_symbols is None
             or set(controlled_symbols) != set(mechanism_symbols)
-            or target_path is None
-            or target_symbol is None
+            or causal_locator is None
         ):
             continue
         verified_path_keys = _verified_intervention_path_keys(
@@ -1359,7 +2033,7 @@ def _intervention_sufficiency_reasons(
             hypothesis_id=hypothesis_id,
             mechanism_symbols=mechanism_symbols,
             target_path=target_path,
-            target_symbol=target_symbol,
+            causal_locator=causal_locator,
             controlled_symbols=controlled_symbols,
         )
         if not required_path_keys.issubset(verified_path_keys):
@@ -1372,13 +2046,15 @@ def _broad_scope_outcome_coverage_reasons(
     *,
     selected_option: Mapping[str, Any] | None,
     research: Mapping[str, Any] | None,
+    selection: Mapping[str, Any] | None = None,
 ) -> list[str]:
-    """Require one post-change proof path for every evidenced class-level path.
+    """Bound broad-scope outcome claims to the paths their evidence actually exercises.
 
     A shared-abstraction plan may legitimately use one replay when that replay's
     runner-bound mechanism evidence spans every selected independence key.  It may
-    also need multiple research oracles, but until those are bound it must remain
-    non-ready.  Single-path plans deliberately bypass this class-level gate.
+    also use a Stage-5-bounded mitigation after proving intended operation on at least
+    one retained path; only a resolved claim requires complete selected-key coverage.
+    Single-path plans deliberately bypass this class-level gate.
     """
 
     if not isinstance(selected_option, Mapping):
@@ -1425,7 +2101,25 @@ def _broad_scope_outcome_coverage_reasons(
         if independence_key is not None
     }
     if not required_keys.issubset(covered_keys):
-        return ["change_plan_broad_scope_outcome_path_coverage_missing"]
+        reproduction = plan.get("before_after_reproduction")
+        expected_state = (
+            _string(reproduction.get("expected_outcome_state"))
+            if isinstance(reproduction, Mapping)
+            else None
+        )
+        falsification = (
+            selection.get("falsification_review")
+            if isinstance(selection, Mapping)
+            else None
+        )
+        bounded_mitigation = bool(
+            expected_state == "mitigated"
+            and isinstance(falsification, Mapping)
+            and _string(falsification.get("outcome_claim_status")) == "mitigated"
+            and bool(required_keys.intersection(covered_keys))
+        )
+        if not bounded_mitigation:
+            return ["change_plan_broad_scope_outcome_path_coverage_missing"]
     return []
 
 
@@ -1498,6 +2192,8 @@ def bind_falsification_review(
         raise ValueError("falsification_research_receipt_hash_missing")
 
     overall_verdict = _string(review.get("verdict"))
+    outcome_claim_status = "unverified"
+    outcome_confidence = "unverified"
     positive_contracts = _research_positive_contract_index(research)
     reviews_raw = review.get("outcome_contract_reviews")
     selected_contract_id = _string(review.get("selected_positive_outcome_contract_id"))
@@ -1592,18 +2288,81 @@ def bind_falsification_review(
             for value in contract_reviews
             if value["positive_outcome_contract_id"] in selected_contract_ids
         ]
-        if overall_verdict == "accept" and any(
-            selected_review["verdict"] != "sufficient"
-            or selected_review["problem_coverage"] != "full"
-            or selected_review["proves_intended_operation"] is not True
-            or bool(selected_review["residual_untested_paths"])
+        disposition_by_risk = {
+            risk: raw_disposition
+            for raw_disposition in (
+                review.get("material_risk_dispositions")
+                if isinstance(review.get("material_risk_dispositions"), list)
+                else []
+            )
+            if isinstance(raw_disposition, Mapping)
+            for risk in [_string(raw_disposition.get("risk"))]
+            if risk is not None
+        }
+        selected_residual_paths = {
+            risk
             for selected_review in selected_reviews
-        ):
+            for risk in selected_review["residual_untested_paths"]
+        }
+        selected_semantics_valid = all(
+            selected_review["verdict"] == "sufficient"
+            and selected_review["problem_coverage"] in {"full", "partial"}
+            and selected_review["proves_intended_operation"] is True
+            and (
+                selected_review["problem_coverage"] == "full"
+                or bool(selected_review["residual_untested_paths"])
+            )
+            and all(
+                _string(disposition_by_risk.get(risk, {}).get("disposition"))
+                in {"accepted", "mitigated"}
+                for risk in selected_review["residual_untested_paths"]
+            )
+            for selected_review in selected_reviews
+        )
+        if overall_verdict == "accept" and not selected_semantics_valid:
             raise ValueError("falsification_accepts_insufficient_outcome_semantics")
+        option_coverage = selected_option.get("causal_coverage")
+        option_coverage = option_coverage if isinstance(option_coverage, Mapping) else {}
+        selected_outcome_evidence = {
+            evidence_ref
+            for selected_review in selected_reviews
+            for evidence_ref in selected_review["evidence_refs"]
+        }
+        evidenced_mitigations = {
+            risk
+            for risk, disposition in disposition_by_risk.items()
+            if _string(disposition.get("disposition")) == "mitigated"
+            and bool(
+                selected_outcome_evidence.intersection(
+                    _string_list(disposition.get("evidence_refs"), nonempty=True)
+                    or []
+                )
+            )
+        }
+        # An explicitly untested path remains a bounded outcome even when a
+        # mitigation reduces its impact. Other option/review risks stop being
+        # residual only when their mitigation is tied to evidence used by the
+        # selected sufficient outcome contract (for example a compatibility
+        # regression oracle).
+        bounded_risks = set(selected_residual_paths)
+        for field in ("unsupported_assumptions", "residual_recurrence_paths"):
+            bounded_risks.update(_string_list(option_coverage.get(field)) or [])
+        bounded_risks.update(
+            risk
+            for risk in (_string_list(option_coverage.get("compatibility_risks")) or [])
+            if risk not in evidenced_mitigations
+        )
+        for field in ("unsupported_assumptions", "residual_risks"):
+            bounded_risks.update(_string_list(review.get(field)) or [])
+        if overall_verdict == "accept":
+            outcome_claim_status = "mitigated" if bounded_risks else "resolved"
+            outcome_confidence = "bounded" if bounded_risks else "full"
         selected_contract_id = selected_contract_ids[0] if len(selected_contract_ids) == 1 else None
 
     bound = dict(review)
     bound.pop("adversarial_evidence_receipt", None)
+    bound["outcome_claim_status"] = outcome_claim_status
+    bound["outcome_confidence"] = outcome_confidence
     bound["selected_positive_outcome_contract_id"] = selected_contract_id
     bound["selected_positive_outcome_contract_ids"] = selected_contract_ids
     bound["outcome_contract_reviews"] = contract_reviews
@@ -1680,6 +2439,8 @@ def bind_falsification_review(
         "selected_positive_outcome_contract_id": selected_contract_id,
         "selected_positive_outcome_contract_ids": selected_contract_ids,
         "outcome_contract_reviews_sha256": _canonical_sha256(contract_reviews),
+        "outcome_claim_status": outcome_claim_status,
+        "outcome_confidence": outcome_confidence,
     }
     receipt["receipt_sha256"] = _canonical_sha256(receipt)
     bound["adversarial_evidence_receipt"] = receipt
@@ -1878,20 +2639,44 @@ def _research_hypotheses(
 def _verified_symbol_paths(
     research: Mapping[str, Any] | None,
 ) -> dict[str, str]:
-    if not isinstance(research, Mapping):
-        return {}
-    verification = research.get("evidence_verification")
-    if not isinstance(verification, Mapping) or verification.get("status") != "verified":
-        return {}
-    raw = verification.get("inspected_symbols")
     return {
         symbol: path
-        for receipt in (raw if isinstance(raw, list) else [])
+        for member in _research_dossier_members(research)
+        for verification in [member.get("evidence_verification")]
+        if isinstance(verification, Mapping) and verification.get("status") == "verified"
+        for receipt in (
+            verification.get("inspected_symbols")
+            if isinstance(verification.get("inspected_symbols"), list)
+            else []
+        )
         if isinstance(receipt, Mapping)
         for symbol in [_string(receipt.get("symbol"))]
         for path in [_string(receipt.get("path"))]
         if symbol is not None and path is not None
     }
+
+
+def _verified_inspected_file_receipts(
+    research: Mapping[str, Any] | None,
+) -> dict[str, Mapping[str, Any]]:
+    """Return runner receipts for exact repository files read during research."""
+
+    receipts: dict[str, Mapping[str, Any]] = {}
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        raw = verification.get("inspected_files")
+        for receipt in raw if isinstance(raw, list) else []:
+            if not isinstance(receipt, Mapping):
+                continue
+            path = _string(receipt.get("path"))
+            observed_sha256 = _string(receipt.get("observed_content_sha256"))
+            if observed_sha256 is None:
+                observed_sha256 = _string(receipt.get("sha256"))
+            if path is not None and observed_sha256 is not None:
+                receipts.setdefault(path, receipt)
+    return receipts
 
 
 def _create_target_integration_reasons(
@@ -2057,15 +2842,72 @@ def _research_binding_reasons(
             reasons.append("solution_option_research_deterministic_closure_unverified")
 
     verified_symbol_paths = _verified_symbol_paths(research)
+    verified_generic_locators = {
+        locator
+        for evidence in _verified_mechanism_evidence(research).values()
+        if _string(evidence.get("hypothesis_id")) == hypothesis_id
+        and _string_list(evidence.get("mechanism_symbols"), nonempty=True)
+        == expected_symbols
+        for locator in _adapter_proof_target_locators(evidence)
+    }
+    verified_generic_touchpoints = _verified_adapter_implementation_touchpoints(
+        research,
+        hypothesis_id=hypothesis_id or "",
+        mechanism_symbols=expected_symbols or [],
+    )
     sufficient_control_points = 0
-    intervention_targets: dict[tuple[str, str], str] = {}
+    intervention_targets: dict[tuple[str, str | None], str] = {}
     for index, point in enumerate(intervention_points):
         if not isinstance(point, Mapping):
             reasons.append(f"solution_option_intervention_point_invalid:{index}")
             continue
+        causal_locator = _string(point.get("causal_locator"))
         mechanism_symbol = _string(point.get("mechanism_symbol"))
-        target_symbol = _string(point.get("target_symbol"))
-        target_path = _string(point.get("target_path"))
+        generic_point = causal_locator is not None
+        selected_touchpoints: list[Mapping[str, Any]] = []
+        target_symbol = None
+        target_path = None
+        if generic_point:
+            if mechanism_symbol is not None and mechanism_symbol != causal_locator:
+                reasons.append(
+                    f"solution_option_intervention_causal_locator_mismatch:{index}"
+                )
+            mechanism_symbol = causal_locator
+            touchpoint_ids = _string_list(
+                point.get("implementation_touchpoint_ids"),
+                nonempty=True,
+            )
+            if touchpoint_ids is None or len(touchpoint_ids) != len(set(touchpoint_ids)):
+                reasons.append(
+                    f"solution_option_intervention_touchpoint_ids_invalid:{index}"
+                )
+                touchpoint_ids = []
+            if point.get("target_path") is not None or point.get("target_symbol") is not None:
+                reasons.append(
+                    f"solution_option_intervention_mixes_locator_and_legacy_target:{index}"
+                )
+            for touchpoint_id in touchpoint_ids:
+                touchpoint = verified_generic_touchpoints.get(touchpoint_id)
+                if touchpoint is None:
+                    reasons.append(
+                        f"solution_option_intervention_touchpoint_unbound:{index}:"
+                        f"{touchpoint_id}"
+                    )
+                    continue
+                if _string(touchpoint.get("causal_locator")) != causal_locator:
+                    reasons.append(
+                        f"solution_option_intervention_touchpoint_locator_mismatch:{index}:"
+                        f"{touchpoint_id}"
+                    )
+                    continue
+                selected_touchpoints.append(touchpoint)
+            if causal_locator not in verified_generic_locators:
+                reasons.append(
+                    f"solution_option_intervention_causal_locator_unbound:{index}"
+                )
+        else:
+            target_symbol = _string(point.get("target_symbol"))
+            target_path = _string(point.get("target_path"))
         intervention = _string(point.get("intervention"))
         if mechanism_symbol is None or mechanism_symbol not in (expected_symbols or []):
             reasons.append(f"solution_option_intervention_mechanism_symbol_unbound:{index}")
@@ -2101,16 +2943,31 @@ def _research_binding_reasons(
                 )
             else:
                 sufficient_control_points += 1
-        if target_symbol is None or target_path is None:
-            reasons.append(f"solution_option_intervention_target_invalid:{index}")
-        elif verified_symbol_paths.get(target_symbol) != target_path:
-            reasons.append(f"solution_option_intervention_target_unverified:{index}")
-        elif target_symbol != mechanism_symbol:
-            reasons.append(f"solution_option_intervention_target_mechanism_mismatch:{index}")
+        if not generic_point:
+            if target_symbol is None or target_path is None:
+                reasons.append(f"solution_option_intervention_target_invalid:{index}")
+            elif verified_symbol_paths.get(target_symbol) != target_path:
+                reasons.append(f"solution_option_intervention_target_unverified:{index}")
+            elif target_symbol != mechanism_symbol:
+                reasons.append(
+                    f"solution_option_intervention_target_mechanism_mismatch:{index}"
+                )
         if intervention is None:
             reasons.append(f"solution_option_intervention_effect_missing:{index}")
-        if target_path is not None and target_symbol is not None and intervention is not None:
-            target_key = (target_path, target_symbol)
+        target_keys = (
+            {
+                target_key
+                for touchpoint in selected_touchpoints
+                for target_key in _implementation_touchpoint_target_keys(touchpoint)
+            }
+            if generic_point
+            else (
+                {(target_path, target_symbol)}
+                if target_path is not None and target_symbol is not None
+                else set()
+            )
+        )
+        for target_key in target_keys if intervention is not None else []:
             previous = intervention_targets.get(target_key)
             if previous is not None:
                 reasons.append(f"solution_option_intervention_target_duplicate:{index}")
@@ -2148,6 +3005,588 @@ def assign_plan_revision_id(plan: Mapping[str, Any]) -> dict[str, Any]:
     return assigned
 
 
+def _verified_verification_boundaries(
+    research: Mapping[str, Any] | None,
+) -> tuple[list[Mapping[str, Any]], bool]:
+    """Return authentic runner boundaries and whether they cover every selected mechanism.
+
+    A model-authored ``faithful_equivalence`` flag is only a request.  A local-proof
+    waiver becomes authoritative here only when the nested equivalence receipt binds an
+    authenticated origin-atom identity to the exact causal proof, replay inputs,
+    portable observation, selected mechanism evidence, and outcome oracle.
+    """
+
+    receipts: list[Mapping[str, Any]] = []
+    covered_evidence_ids: set[str] = set()
+    required_resolution_evidence_ids: set[str] = set()
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        verified_mechanism = verification.get("verified_mechanism")
+        provenance = verification.get("verified_mechanism_provenance")
+        if (
+            not isinstance(verified_mechanism, Mapping)
+            or verification.get("verified_mechanism_sha256")
+            != _canonical_sha256(verified_mechanism)
+            or not isinstance(provenance, Mapping)
+            or verification.get("verified_mechanism_provenance_sha256")
+            != _canonical_sha256(provenance)
+        ):
+            continue
+        member_selected_ids = {
+            value
+            for value in (
+                provenance.get("mechanism_evidence_ids", [])
+                if isinstance(provenance, Mapping)
+                else []
+            )
+            if isinstance(value, str) and value
+        }
+        mechanisms = _verified_mechanism_evidence(member)
+        member_selected_ids.intersection_update(mechanisms)
+        experiments = {
+            str(value["experiment_id"]): value
+            for value in (
+                verification.get("experiments", [])
+                if isinstance(verification.get("experiments"), list)
+                else []
+            )
+            if isinstance(value, Mapping)
+            and _string(value.get("experiment_id")) is not None
+        }
+        causal_proofs = _verified_causal_proof_receipts(member)
+        outcome_oracles = {
+            str(oracle["outcome_oracle_id"]): oracle
+            for oracle in verified_outcome_oracles(member).values()
+            if _string(oracle.get("outcome_oracle_id")) is not None
+        }
+        member_required_evidence_ids = {
+            value
+            for value in provenance.get("causal_root_evidence_ids", [])
+            if isinstance(value, str) and value in member_selected_ids
+        }
+        member_required_evidence_ids.update(
+            evidence_id
+            for oracle in outcome_oracles.values()
+            for evidence_id in (_string_list(oracle.get("mechanism_evidence_ids")) or [])
+            if evidence_id in member_selected_ids
+        )
+        required_resolution_evidence_ids.update(member_required_evidence_ids)
+        atom_receipts_raw = (
+            member.get("evidence_assignment", {}).get("atom_receipts", [])
+            if isinstance(member.get("evidence_assignment"), Mapping)
+            else []
+        )
+        atom_receipts_by_id = {
+            str(value["atom_id"]): value
+            for value in atom_receipts_raw if isinstance(atom_receipts_raw, list)
+            if isinstance(value, Mapping)
+            and _string(value.get("atom_id")) is not None
+            and isinstance(value.get("atom_snapshot"), Mapping)
+            and value.get("atom_sha256") == _canonical_sha256(value["atom_snapshot"])
+        }
+        atom_sha256_by_id = {
+            atom_id: str(value["atom_sha256"])
+            for atom_id, value in atom_receipts_by_id.items()
+        }
+
+        def attested_authorization(experiment: Mapping[str, Any]) -> Mapping[str, Any] | None:
+            argv = experiment.get("executed_argv")
+            authorization = experiment.get("command_authorization")
+            if not isinstance(argv, list) or not argv or any(
+                not isinstance(token, str) or not token for token in argv
+            ):
+                return None
+            if not isinstance(authorization, Mapping):
+                return None
+            projection = {
+                key: value
+                for key, value in authorization.items()
+                if key != "authorization_sha256"
+            }
+            if (
+                _string(authorization.get("authorization_kind")) is None
+                or authorization.get("runner_attested") is not True
+                or authorization.get("authorization_sha256")
+                != _canonical_sha256(projection)
+                or authorization.get("executed_argv_sha256") != _canonical_sha256(argv)
+                or authorization.get("shell") is not False
+                or authorization.get("workspace_confined") is not True
+            ):
+                return None
+            return authorization
+
+        clean_replay_refs: dict[str, str] = {}
+        for experiment_id, experiment in experiments.items():
+            authorization = attested_authorization(experiment)
+            argv = experiment.get("executed_argv")
+            if authorization is None or not isinstance(argv, list):
+                continue
+            replay_projection = {
+                "experiment_id": experiment_id,
+                "executed_argv_sha256": _canonical_sha256(argv),
+                "command_authorization_sha256": authorization.get(
+                    "authorization_sha256"
+                ),
+                "stdout_sha256": experiment.get("stdout_sha256"),
+                "stderr_sha256": experiment.get("stderr_sha256"),
+                "replay_inputs_sha256": (
+                    experiment.get("replay_inputs", {}).get("replay_inputs_sha256")
+                    if isinstance(experiment.get("replay_inputs"), Mapping)
+                    else None
+                ),
+                "execution_isolation_sha256": _canonical_sha256(
+                    experiment.get("execution_isolation")
+                ),
+            }
+            clean_replay_refs[experiment_id] = (
+                f"clean_replay:{_canonical_sha256(replay_projection)}"
+            )
+
+        raw_boundaries = verification.get("verification_boundaries")
+        for boundary in raw_boundaries if isinstance(raw_boundaries, list) else []:
+            if not isinstance(boundary, Mapping):
+                continue
+            experiment_id = _string(boundary.get("experiment_id"))
+            refs = _string_list(boundary.get("provenance_refs"), nonempty=True)
+            requires_live = boundary.get("requires_live_verification")
+            faithful = boundary.get("faithful_equivalence")
+            if (
+                boundary.get("schema_version") != 1
+                or boundary.get("boundary_sha256")
+                != _canonical_sha256(
+                    {
+                        key: value
+                        for key, value in boundary.items()
+                        if key != "boundary_sha256"
+                    }
+                )
+                or boundary.get("runner_attested") is not True
+                or experiment_id not in experiments
+                or experiment_id not in clean_replay_refs
+                or not isinstance(requires_live, bool)
+                or not isinstance(faithful, bool)
+                or _string(boundary.get("boundary_kind")) is None
+                or refs is None
+                or refs != sorted(set(refs))
+                or re.fullmatch(
+                    r"[0-9a-f]{64}", str(boundary.get("rationale_sha256") or "")
+                )
+                is None
+            ):
+                continue
+
+            selected_for_experiment = sorted(
+                evidence_id
+                for evidence_id in member_selected_ids
+                if experiment_id
+                in (_string_list(mechanisms[evidence_id].get("experiment_ids")) or [])
+            )
+            proof_ids = sorted(
+                proof_id
+                for proof_id, proof in causal_proofs.items()
+                if isinstance(proof.get("replay_observation"), Mapping)
+                and proof["replay_observation"].get("source_experiment_id")
+                == experiment_id
+            )
+            oracle_ids = sorted(
+                oracle_id
+                for oracle_id, oracle in outcome_oracles.items()
+                if oracle.get("research_experiment_id") == experiment_id
+            )
+            equivalence = boundary.get("equivalence_proof")
+            equivalence_valid = False
+            equivalence_ref: str | None = None
+            if isinstance(equivalence, Mapping):
+                equivalence_projection = {
+                    key: value
+                    for key, value in equivalence.items()
+                    if key != "equivalence_sha256"
+                }
+                proof_id = _string(equivalence.get("proof_receipt_id"))
+                proof = causal_proofs.get(proof_id or "")
+                source_root = (
+                    proof.get("source_root") if isinstance(proof, Mapping) else None
+                )
+                replay_inputs = (
+                    proof.get("replay_inputs") if isinstance(proof, Mapping) else None
+                )
+                replay_observation = (
+                    proof.get("replay_observation")
+                    if isinstance(proof, Mapping)
+                    else None
+                )
+                origin_atom_ids = (
+                    sorted(
+                        {
+                            atom_id
+                            for atom_id in (
+                                source_root.get("origin_atom_ids", [])
+                                if isinstance(source_root, Mapping)
+                                else []
+                            )
+                            if isinstance(atom_id, str) and atom_id
+                        }
+                    )
+                    if isinstance(source_root, Mapping)
+                    else []
+                )
+                experiment = experiments[experiment_id]
+                authorization = attested_authorization(experiment)
+                authorization_atom_id = (
+                    str(authorization.get("origin_atom_id"))
+                    if isinstance(authorization, Mapping)
+                    else ""
+                )
+                authorization_atom_receipt = atom_receipts_by_id.get(
+                    authorization_atom_id
+                )
+                authorization_atom_snapshot = (
+                    authorization_atom_receipt.get("atom_snapshot")
+                    if isinstance(authorization_atom_receipt, Mapping)
+                    else None
+                )
+                command_identity = bool(
+                    isinstance(authorization, Mapping)
+                    and authorization.get("origin_atom_id") in origin_atom_ids
+                    and authorization.get("origin_atom_field_path") == "$.command"
+                    and authorization.get("origin_atom_sha256")
+                    == atom_sha256_by_id.get(str(authorization.get("origin_atom_id")))
+                    and isinstance(authorization_atom_snapshot, Mapping)
+                    and _string(authorization_atom_snapshot.get("command")) is not None
+                    and authorization.get("origin_command_value_sha256")
+                    == _canonical_sha256(authorization_atom_snapshot.get("command"))
+                )
+                predicate_bindings = [
+                    binding
+                    for binding in (
+                        source_root.get("atom_field_predicate_bindings", [])
+                        if isinstance(source_root, Mapping)
+                        else []
+                    )
+                    if isinstance(binding, Mapping)
+                    and binding.get("runner_attested") is True
+                    and binding.get("baseline_experiment_id") == experiment_id
+                    and binding.get("atom_id") in origin_atom_ids
+                    and binding.get("origin_atom_sha256")
+                    == atom_sha256_by_id.get(str(binding.get("atom_id")))
+                    and binding.get("atom_field_binding_sha256")
+                    == _canonical_sha256(
+                        {
+                            key: value
+                            for key, value in binding.items()
+                            if key != "atom_field_binding_sha256"
+                        }
+                    )
+                ]
+                expected_identity_refs = (
+                    [f"command_authorization:{authorization.get('authorization_sha256')}"]
+                    if command_identity and isinstance(authorization, Mapping)
+                    else sorted(
+                        f"atom_field_binding:{binding['atom_field_binding_sha256']}"
+                        for binding in predicate_bindings
+                    )
+                )
+                oracle_id = _string(equivalence.get("outcome_oracle_id"))
+                oracle = outcome_oracles.get(oracle_id or "")
+                execution = (
+                    oracle.get("execution") if isinstance(oracle, Mapping) else None
+                )
+                equivalence_valid = bool(
+                    equivalence.get("schema_version") == 1
+                    and equivalence.get("equivalence_mode")
+                    == "causal_proof_source_identity"
+                    and set(equivalence)
+                    == {
+                        "schema_version",
+                        "equivalence_mode",
+                        "source_experiment_id",
+                        "origin_atom_ids",
+                        "source_root_sha256",
+                        "source_identity_refs",
+                        "proof_receipt_id",
+                        "replay_inputs_sha256",
+                        "replay_observation_sha256",
+                        "selected_mechanism_evidence_ids",
+                        "outcome_oracle_id",
+                        "runner_attested",
+                        "equivalence_sha256",
+                    }
+                    and equivalence.get("runner_attested") is True
+                    and equivalence.get("equivalence_sha256")
+                    == _canonical_sha256(equivalence_projection)
+                    and equivalence.get("source_experiment_id") == experiment_id
+                    and origin_atom_ids
+                    and equivalence.get("origin_atom_ids") == origin_atom_ids
+                    and isinstance(source_root, Mapping)
+                    and equivalence.get("source_root_sha256")
+                    == source_root.get("source_root_sha256")
+                    and expected_identity_refs
+                    and equivalence.get("source_identity_refs")
+                    == expected_identity_refs
+                    and proof_id in proof_ids
+                    and isinstance(replay_inputs, Mapping)
+                    and equivalence.get("replay_inputs_sha256")
+                    == replay_inputs.get("replay_inputs_sha256")
+                    and isinstance(replay_observation, Mapping)
+                    and equivalence.get("replay_observation_sha256")
+                    == replay_observation.get("replay_observation_sha256")
+                    and selected_for_experiment
+                    and equivalence.get("selected_mechanism_evidence_ids")
+                    == selected_for_experiment
+                    and oracle_id in oracle_ids
+                    and isinstance(oracle, Mapping)
+                    and proof_id in (oracle.get("proof_receipt_ids") or [])
+                    and isinstance(execution, Mapping)
+                    and execution.get("replay_inputs") == replay_inputs
+                    and execution.get("replay_observation") == replay_observation
+                )
+                if (
+                    not equivalence_valid
+                    and equivalence.get("equivalence_mode")
+                    == "exact_origin_scenario_identity"
+                ):
+                    replay_inputs = experiment.get("replay_inputs")
+                    replay_input_projection = (
+                        {
+                            key: value
+                            for key, value in replay_inputs.items()
+                            if key != "replay_inputs_sha256"
+                        }
+                        if isinstance(replay_inputs, Mapping)
+                        else {}
+                    )
+                    source_identity = equivalence.get("source_identity")
+                    origin_atom_id = (
+                        _string(source_identity.get("origin_atom_id"))
+                        if isinstance(source_identity, Mapping)
+                        else None
+                    )
+                    atom_receipt = atom_receipts_by_id.get(origin_atom_id or "")
+                    atom_snapshot = (
+                        atom_receipt.get("atom_snapshot")
+                        if isinstance(atom_receipt, Mapping)
+                        else None
+                    )
+                    source_identity_projection = (
+                        {
+                            key: value
+                            for key, value in source_identity.items()
+                            if key != "source_identity_sha256"
+                        }
+                        if isinstance(source_identity, Mapping)
+                        else {}
+                    )
+                    source_identity_valid = bool(
+                        isinstance(source_identity, Mapping)
+                        and set(source_identity)
+                        == {
+                            "schema_version",
+                            "origin_atom_id",
+                            "origin_atom_sha256",
+                            "origin_atom_field_path",
+                            "origin_command_value_sha256",
+                            "executed_argv_sha256",
+                            "command_authorization_sha256",
+                            "runner_attested",
+                            "source_identity_sha256",
+                        }
+                        and source_identity.get("schema_version") == 1
+                        and source_identity.get("runner_attested") is True
+                        and source_identity.get("source_identity_sha256")
+                        == _canonical_sha256(source_identity_projection)
+                        and isinstance(authorization, Mapping)
+                        and source_identity.get("origin_atom_id")
+                        == authorization.get("origin_atom_id")
+                        and source_identity.get("origin_atom_sha256")
+                        == authorization.get("origin_atom_sha256")
+                        == atom_sha256_by_id.get(origin_atom_id or "")
+                        and source_identity.get("origin_atom_field_path")
+                        == authorization.get("origin_atom_field_path")
+                        == "$.command"
+                        and isinstance(atom_snapshot, Mapping)
+                        and _string(atom_snapshot.get("command")) is not None
+                        and source_identity.get("origin_command_value_sha256")
+                        == authorization.get("origin_command_value_sha256")
+                        == _canonical_sha256(atom_snapshot.get("command"))
+                        and source_identity.get("executed_argv_sha256")
+                        == authorization.get("executed_argv_sha256")
+                        == _canonical_sha256(experiment.get("executed_argv"))
+                        and source_identity.get("command_authorization_sha256")
+                        == authorization.get("authorization_sha256")
+                    )
+                    selected_origin_atom_ids = {
+                        atom_id
+                        for evidence_id in selected_for_experiment
+                        for atom_id in (
+                            _string_list(mechanisms[evidence_id].get("origin_atom_ids"))
+                            or []
+                        )
+                    }
+                    positive_contracts = (
+                        _verified_positive_outcome_contracts(
+                            oracle,
+                            causal_proofs=causal_proofs,
+                        )
+                        if isinstance(oracle, Mapping)
+                        else []
+                    )
+                    positive_contract_ids = sorted(
+                        str(contract["positive_outcome_contract_id"])
+                        for contract in positive_contracts
+                        if _string(contract.get("positive_outcome_contract_id"))
+                        is not None
+                    )
+                    command_exit_postconditions = [
+                        postcondition
+                        for contract in positive_contracts
+                        for postcondition in contract.get("postconditions", [])
+                        if isinstance(postcondition, Mapping)
+                        and postcondition.get("type") == "command_exit_code"
+                        and postcondition.get("command_index") == 0
+                        and isinstance(postcondition.get("equals"), int)
+                        and not isinstance(postcondition.get("equals"), bool)
+                    ]
+                    oracle_observation = (
+                        execution.get("replay_observation")
+                        if isinstance(execution, Mapping)
+                        else None
+                    )
+                    oracle_observation_projection = (
+                        {
+                            key: value
+                            for key, value in oracle_observation.items()
+                            if key != "replay_observation_sha256"
+                        }
+                        if isinstance(oracle_observation, Mapping)
+                        else {}
+                    )
+                    oracle_observation_valid = bool(
+                        isinstance(oracle_observation, Mapping)
+                        and set(oracle_observation)
+                        == {
+                            "schema_version",
+                            "source_experiment_id",
+                            "selector",
+                            "source_observation_sha256",
+                            "predicate_input_mode",
+                            "positive_outcome_contract_ids",
+                            "runner_attested",
+                            "replay_observation_sha256",
+                        }
+                        and oracle_observation.get("schema_version") == 1
+                        and oracle_observation.get("source_experiment_id")
+                        == experiment_id
+                        and oracle_observation.get("selector")
+                        == {"source": "exit_code"}
+                        and oracle_observation.get("source_observation_sha256")
+                        == _canonical_sha256(
+                            {
+                                "exit_code": experiment.get("exit_code"),
+                                "stdout_sha256": experiment.get("stdout_sha256"),
+                                "stderr_sha256": experiment.get("stderr_sha256"),
+                            }
+                        )
+                        and oracle_observation.get("predicate_input_mode")
+                        == "post_change_observation"
+                        and oracle_observation.get("positive_outcome_contract_ids")
+                        == positive_contract_ids
+                        and oracle_observation.get("runner_attested") is True
+                        and oracle_observation.get("replay_observation_sha256")
+                        == _canonical_sha256(oracle_observation_projection)
+                        and len(command_exit_postconditions) == 1
+                    )
+                    equivalence_valid = bool(
+                        set(equivalence)
+                        == {
+                            "schema_version",
+                            "equivalence_mode",
+                            "source_experiment_id",
+                            "origin_atom_ids",
+                            "source_identity",
+                            "source_identity_refs",
+                            "replay_inputs_sha256",
+                            "replay_observation_sha256",
+                            "positive_outcome_contract_ids",
+                            "selected_mechanism_evidence_ids",
+                            "outcome_oracle_id",
+                            "runner_attested",
+                            "equivalence_sha256",
+                        }
+                        and equivalence.get("schema_version") == 1
+                        and equivalence.get("runner_attested") is True
+                        and equivalence.get("equivalence_sha256")
+                        == _canonical_sha256(equivalence_projection)
+                        and equivalence.get("source_experiment_id")
+                        == experiment_id
+                        and source_identity_valid
+                        and origin_atom_id in selected_origin_atom_ids
+                        and equivalence.get("origin_atom_ids") == [origin_atom_id]
+                        and equivalence.get("source_identity_refs")
+                        == [
+                            "origin_command_identity:"
+                            f"{source_identity.get('source_identity_sha256')}"
+                        ]
+                        and isinstance(replay_inputs, Mapping)
+                        and replay_inputs.get("schema_version") == 1
+                        and replay_inputs.get("source_experiment_id")
+                        == experiment_id
+                        and replay_inputs.get("runner_approved") is True
+                        and replay_inputs.get("replay_inputs_sha256")
+                        == _canonical_sha256(replay_input_projection)
+                        and equivalence.get("replay_inputs_sha256")
+                        == replay_inputs.get("replay_inputs_sha256")
+                        and oracle_observation_valid
+                        and equivalence.get("replay_observation_sha256")
+                        == oracle_observation.get("replay_observation_sha256")
+                        and positive_contract_ids
+                        and equivalence.get("positive_outcome_contract_ids")
+                        == positive_contract_ids
+                        and selected_for_experiment
+                        and equivalence.get("selected_mechanism_evidence_ids")
+                        == selected_for_experiment
+                        and oracle_id in oracle_ids
+                        and isinstance(oracle, Mapping)
+                        and oracle.get("kind") == "staged_replay"
+                        and isinstance(execution, Mapping)
+                        and execution.get("argv") == experiment.get("executed_argv")
+                        and execution.get("command_authorization") == authorization
+                        and execution.get("replay_inputs") == replay_inputs
+                    )
+                if equivalence_valid:
+                    equivalence_ref = (
+                        f"equivalence_proof:{equivalence['equivalence_sha256']}"
+                    )
+            if faithful and not equivalence_valid:
+                continue
+            if requires_live is False and (faithful is not True or not equivalence_valid):
+                continue
+            if equivalence is not None and not equivalence_valid:
+                continue
+
+            expected_refs = sorted(
+                {
+                    f"research_experiment:{experiment_id}",
+                    clean_replay_refs[experiment_id],
+                    *selected_for_experiment,
+                    *proof_ids,
+                    *oracle_ids,
+                    *([equivalence_ref] if equivalence_ref is not None else []),
+                }
+            )
+            if refs != expected_refs:
+                continue
+            receipts.append(boundary)
+            covered_evidence_ids.update(
+                set(selected_for_experiment) & member_required_evidence_ids
+            )
+    coverage_complete = bool(receipts and required_resolution_evidence_ids) and (
+        covered_evidence_ids == required_resolution_evidence_ids
+    )
+    return receipts, coverage_complete
+
+
 def infer_live_verification_requirement(
     problem: Mapping[str, Any] | None,
     research: Mapping[str, Any] | None,
@@ -2161,6 +3600,15 @@ def infer_live_verification_requirement(
     reasons: list[str] = []
     research_map = research if isinstance(research, Mapping) else {}
     problem_map = problem if isinstance(problem, Mapping) else {}
+    boundaries, boundary_coverage_complete = _verified_verification_boundaries(research_map)
+    if boundaries and boundary_coverage_complete:
+        if any(boundary.get("requires_live_verification") is True for boundary in boundaries):
+            return True, ["runner_verified_external_verification_boundary"]
+        if all(boundary.get("faithful_equivalence") is True for boundary in boundaries):
+            return False, ["runner_verified_local_faithful_equivalence"]
+        reasons.append("verification_boundary_equivalence_unverified")
+    else:
+        reasons.append("verification_boundary_unverified_legacy")
     research_members = _research_dossier_members(research_map)
     verified_mechanism_evidence = list(_verified_mechanism_evidence(research_map).values())
     verified_experiments = [
@@ -2238,7 +3686,15 @@ def infer_live_verification_requirement(
         reasons.append("problem_narrative_identifies_runtime_boundary")
     if _EXTERNAL_PROVIDER_RUNTIME_RE.search(narrative):
         reasons.append("problem_narrative_identifies_external_provider_boundary")
-    return bool(reasons), list(dict.fromkeys(reasons))
+    lexical_or_legacy_live = any(
+        reason
+        not in {
+            "verification_boundary_unverified_legacy",
+            "verification_boundary_equivalence_unverified",
+        }
+        for reason in reasons
+    )
+    return lexical_or_legacy_live, list(dict.fromkeys(reasons))
 
 
 def assess_solution_option_readiness(
@@ -2257,7 +3713,6 @@ def assess_solution_option_readiness(
     for field in (
         "option_id",
         "problem_id",
-        "family_id",
         "summary",
         "tradeoffs",
         "recurrence_prevention",
@@ -2358,13 +3813,9 @@ def assess_solution_option_readiness(
             if len(bound_path_receipts) < 2 or len(cited_path_ids) < 2:
                 reasons.append("solution_option_broad_scope_requires_two_paths")
             else:
-                consumer_kinds = [
-                    _string(path.get("consumer_identity", {}).get("kind"))
+                if any(
+                    not _runner_attested_consumer_identity(path.get("consumer_identity"))
                     for path in bound_path_receipts
-                    if isinstance(path.get("consumer_identity"), Mapping)
-                ]
-                if len(consumer_kinds) != len(bound_path_receipts) or any(
-                    kind not in _BREADTH_CONSUMER_KINDS for kind in consumer_kinds
                 ):
                     reasons.append("solution_option_broad_scope_requires_production_consumers")
                 independence_keys = {
@@ -2402,7 +3853,6 @@ def assess_selection_readiness(
     for field in (
         "problem_id",
         "selected_option_id",
-        "selected_family_id",
         "selection_rationale",
         "repo_intent_alignment",
         "why_other_options_were_not_selected",
@@ -2422,8 +3872,10 @@ def assess_selection_readiness(
     )
     if not option_ready:
         reasons.extend(option_reasons)
-    if isinstance(selected_option, Mapping) and (
-        _string(selected_option.get("family_id")) != selected_family_id
+    if (
+        selected_family_id is not None
+        and isinstance(selected_option, Mapping)
+        and _string(selected_option.get("family_id")) != selected_family_id
     ):
         reasons.append("selection_family_mismatch")
     if isinstance(selected_option, Mapping) and (
@@ -2518,7 +3970,7 @@ def assess_selection_readiness(
                 if (
                     not isinstance(finding, Mapping)
                     or _string(finding.get("finding")) is None
-                    or finding.get("affects") not in {"root_cause", "interface", "change_surface"}
+                    or _string(finding.get("affects")) is None
                     or _string_list(finding.get("evidence_refs"), nonempty=True) is None
                     or any(
                         ref not in allowed_evidence
@@ -2541,6 +3993,15 @@ def assess_selection_readiness(
                     material_risks.update(_string_list(coverage.get(field)) or [])
         for field in ("unsupported_assumptions", "residual_risks"):
             material_risks.update(_string_list(falsification.get(field)) or [])
+        for contract_review in (
+            falsification.get("outcome_contract_reviews")
+            if isinstance(falsification.get("outcome_contract_reviews"), list)
+            else []
+        ):
+            if isinstance(contract_review, Mapping):
+                material_risks.update(
+                    _string_list(contract_review.get("residual_untested_paths")) or []
+                )
         dispositions = falsification.get("material_risk_dispositions")
         if not isinstance(dispositions, list):
             reasons.append("selection_falsification_risk_dispositions_invalid")
@@ -2736,10 +4197,17 @@ def assess_change_plan_readiness(
                 continue
             if _string(target.get("path")) is None or _string(target.get("change")) is None:
                 reasons.append(f"change_plan_target_incomplete:{index}")
-            if _string(target.get("action")) not in {"modify", "create"}:
+            action = _string(target.get("action"))
+            if action not in {"modify", "create", "delete", "rename", "move"}:
                 reasons.append(f"change_plan_target_action_invalid:{index}")
-            if _string_list(target.get("symbols"), nonempty=True) is None:
+            symbols_raw = target.get("symbols", [])
+            if symbols_raw is not None and _string_list(symbols_raw) is None:
                 reasons.append(f"change_plan_target_symbols_invalid:{index}")
+            destination = _string(target.get("destination_path"))
+            if action in {"rename", "move"} and destination is None:
+                reasons.append(f"change_plan_target_destination_missing:{index}")
+            elif action not in {"rename", "move"} and destination is not None:
+                reasons.append(f"change_plan_target_destination_unexpected:{index}")
 
     reproduction = plan.get("before_after_reproduction")
     if not isinstance(reproduction, Mapping):
@@ -2749,10 +4217,6 @@ def assess_change_plan_readiness(
             reasons.append("change_plan_original_scenario_missing")
         limitation = _string(reproduction.get("proof_limitation"))
         if limitation is not None:
-            # Every evidence-sufficient dossier already carries a runner-verified
-            # original or faithful replay. A model-authored prose boundary cannot
-            # waive that proof at planning time.
-            reasons.append("change_plan_proof_limitation_not_runner_verified")
             if _string(reproduction.get("alternate_verification")) is None:
                 reasons.append("change_plan_alternate_verification_missing")
             else:
@@ -2770,6 +4234,30 @@ def assess_change_plan_readiness(
                 reasons.append("change_plan_proof_limitation_refs_missing")
             elif any(ref not in allowed_limitations for ref in limitation_refs):
                 reasons.append("change_plan_proof_limitation_refs_unbound")
+            else:
+                matching_unknowns = [
+                    unknown
+                    for unknown in (
+                        research.get("material_unknowns", [])
+                        if isinstance(research, Mapping)
+                        else []
+                    )
+                    if isinstance(unknown, Mapping)
+                    and any(
+                        ref
+                        in {
+                            _string(unknown.get("unknown_id")) or "",
+                            _string(unknown.get("unknown")) or "",
+                        }
+                        for ref in limitation_refs
+                    )
+                ]
+                if matching_unknowns and material_unknowns_block_advancement(
+                    matching_unknowns
+                ):
+                    reasons.append("change_plan_material_limitation_requires_research")
+            if reproduction.get("expected_outcome_state") != "unverified":
+                reasons.append("change_plan_limited_outcome_must_remain_unverified")
         else:
             limitation_refs = reproduction.get("proof_limitation_refs")
             if limitation_refs not in (None, []):
@@ -2807,6 +4295,13 @@ def assess_change_plan_readiness(
                 and bound_oracle.get("proof_scope") == "configuration_state"
                 and _string(bound_oracle.get("research_experiment_id")) == research_experiment_id
             )
+            causal_oracle = (
+                isinstance(bound_oracle, Mapping)
+                and bound_oracle.get("kind") == "causal_proof_replay"
+                and bound_oracle.get("proof_scope") == "adapter_causal_behavior"
+                and _string(bound_oracle.get("research_experiment_id"))
+                == research_experiment_id
+            )
             multi_scenario_oracle = (
                 isinstance(bound_oracle, Mapping)
                 and bound_oracle.get("kind") == "multi_scenario"
@@ -2814,6 +4309,26 @@ def assess_change_plan_readiness(
             )
             if research_experiment_id is None or research_experiment is None:
                 reasons.append("change_plan_research_experiment_unbound")
+            elif causal_oracle:
+                proof_ids = {
+                    value
+                    for value in bound_oracle.get("proof_receipt_ids", [])
+                    if isinstance(value, str) and value
+                }
+                verified_proofs = _verified_causal_proof_receipts(research)
+                if not proof_ids or any(
+                    proof_id not in verified_proofs
+                    or not isinstance(
+                        verified_proofs[proof_id].get("intervention"),
+                        Mapping,
+                    )
+                    or verified_proofs[proof_id]["intervention"].get(
+                        "baseline_experiment_id"
+                    )
+                    != research_experiment_id
+                    for proof_id in proof_ids
+                ) or research_experiment.get("outcome") != "supports":
+                    reasons.append("change_plan_causal_replay_proof_unbound")
             elif research_experiment.get("scenario_kind") == "static_trace":
                 if not config_oracle or research_experiment.get("outcome") != "supports":
                     reasons.append("change_plan_static_trace_cannot_prove_behavioral_outcome")
@@ -2838,6 +4353,10 @@ def assess_change_plan_readiness(
                         or len(scenarios) < 2
                     ):
                         reasons.append("change_plan_after_multi_scenario_expectations_invalid")
+                elif phase == "after_change" and causal_oracle:
+                    expectations = value.get("causal_proof_expectations")
+                    if not isinstance(expectations, list) or not expectations:
+                        reasons.append("change_plan_after_causal_expectations_invalid")
                 elif (
                     _string(value.get("command")) is None
                     or _string(value.get("expected_result")) is None
@@ -2850,10 +4369,14 @@ def assess_change_plan_readiness(
                         expected_exit_code, int
                     ):
                         reasons.append(f"change_plan_{phase}_expected_exit_code_missing")
-            if multi_scenario_oracle and reproduction.get("expected_outcome_state") not in {
+            if (
+                (multi_scenario_oracle or causal_oracle)
+                and reproduction.get("expected_outcome_state")
+                not in {
                 "resolved",
                 "mitigated",
-            }:
+                }
+            ):
                 reasons.append("change_plan_expected_outcome_state_invalid")
             before = phase_mappings.get("before_change")
             after = phase_mappings.get("after_change")
@@ -2930,6 +4453,7 @@ def assess_change_plan_readiness(
                 if isinstance(plan.get("requires_live_verification"), bool)
                 else None
             ),
+            research=research,
         )
     )
 
@@ -2987,7 +4511,8 @@ def assess_change_plan_readiness(
             {
                 "action": target.get("action"),
                 "path": target.get("path"),
-                "symbols": target.get("symbols"),
+                "destination_path": target.get("destination_path"),
+                "symbols": target.get("symbols") or [],
                 "change": target.get("change"),
             }
             for target in contract_targets
@@ -2997,7 +4522,8 @@ def assess_change_plan_readiness(
             {
                 "action": target.get("action"),
                 "path": target.get("path"),
-                "symbols": target.get("symbols"),
+                "destination_path": target.get("destination_path"),
+                "symbols": target.get("symbols") or [],
                 "change": target.get("change"),
             }
             for target in (targets if isinstance(targets, list) else [])
@@ -3021,11 +4547,36 @@ def assess_change_plan_readiness(
         "scope_evidence"
     ):
         reasons.append("change_plan_scope_evidence_linkage_mismatch")
+    falsification = (
+        selection.get("falsification_review")
+        if isinstance(selection, Mapping)
+        else None
+    )
+    reproduction_for_claim = plan.get("before_after_reproduction")
+    reproduction_for_claim = (
+        reproduction_for_claim
+        if isinstance(reproduction_for_claim, Mapping)
+        else {}
+    )
+    falsification_outcome_state = (
+        _string(falsification.get("outcome_claim_status"))
+        if isinstance(falsification, Mapping)
+        else None
+    )
+    planned_outcome_state = _string(
+        reproduction_for_claim.get("expected_outcome_state")
+    )
+    if (
+        falsification_outcome_state == "mitigated"
+        and planned_outcome_state == "resolved"
+    ):
+        reasons.append("change_plan_outcome_overclaims_falsification_bound")
     reasons.extend(
         _broad_scope_outcome_coverage_reasons(
             plan,
             selected_option=selected_option,
             research=research,
+            selection=selection,
         )
     )
     if selected_option is not None:
@@ -3033,25 +4584,24 @@ def assess_change_plan_readiness(
         option_coverage = option_coverage if isinstance(option_coverage, Mapping) else {}
         binding_raw = option_coverage.get("research_binding")
         binding = binding_raw if isinstance(binding_raw, Mapping) else {}
-        points_raw = binding.get("intervention_points")
-        points = points_raw if isinstance(points_raw, list) else []
-        required_target_interventions = {
-            (path, symbol): intervention
-            for point in points
-            if isinstance(point, Mapping)
-            for path in [_string(point.get("target_path"))]
-            for symbol in [_string(point.get("target_symbol"))]
-            for intervention in [_string(point.get("intervention"))]
-            if path is not None and symbol is not None and intervention is not None
-        }
+        required_target_interventions = _required_plan_intervention_targets(
+            binding,
+            research=research,
+        )
         required_target_pairs = set(required_target_interventions)
         actual_target_pairs = {
-            (path, symbol)
+            pair
             for target in (targets if isinstance(targets, list) else [])
             if isinstance(target, Mapping)
             for path in [_string(target.get("path"))]
-            for symbol in (_string_list(target.get("symbols")) or [])
             if path is not None
+            for pair in (
+                {(path, None)}
+                | {
+                    (path, symbol)
+                    for symbol in (_string_list(target.get("symbols")) or [])
+                }
+            )
         }
         if not required_target_pairs.issubset(actual_target_pairs):
             reasons.append("change_plan_intervention_targets_missing")
@@ -3063,11 +4613,14 @@ def assess_change_plan_readiness(
                 continue
             path = _string(target.get("path"))
             symbols = _string_list(target.get("symbols")) or []
-            extra_pairs = {
+            target_pairs = {
                 (path, symbol)
                 for symbol in symbols
-                if path is not None and (path, symbol) not in required_target_pairs
+                if path is not None
             }
+            if path is not None and not symbols:
+                target_pairs.add((path, None))
+            extra_pairs = target_pairs - required_target_pairs
             if not extra_pairs or (path is not None and _verification_only_target(path)):
                 continue
             rationale_kind = _string(target.get("rationale_kind"))
@@ -3101,16 +4654,32 @@ def assess_change_plan_readiness(
                 continue
             path = _string(target.get("path"))
             change = _string(target.get("change"))
-            for symbol in _string_list(target.get("symbols")) or []:
-                expected_intervention = required_target_interventions.get((path, symbol))
+            target_symbols = _string_list(target.get("symbols")) or []
+            target_keys = (
+                [(path, symbol) for symbol in target_symbols]
+                if target_symbols
+                else [(path, None)]
+            )
+            for target_key in target_keys:
+                expected_intervention = required_target_interventions.get(target_key)
                 if expected_intervention is not None and change != expected_intervention:
                     reasons.append(
-                        f"change_plan_intervention_effect_mismatch:{index}:{path}:{symbol}"
+                        f"change_plan_intervention_effect_mismatch:{index}:"
+                        f"{target_key[0]}:{target_key[1] or '<file>'}"
                     )
 
-    requires_live, _ = infer_live_verification_requirement(problem, research)
+    requires_live, live_boundary_reasons = infer_live_verification_requirement(
+        problem,
+        research,
+    )
     if plan.get("requires_live_verification") is not requires_live:
         reasons.append("change_plan_live_verification_inference_mismatch")
+    if (
+        any("verification_boundary_" in reason for reason in live_boundary_reasons)
+        and isinstance(reproduction, Mapping)
+        and reproduction.get("expected_outcome_state") == "resolved"
+    ):
+        reasons.append("change_plan_resolution_requires_verified_boundary")
     return not reasons, list(dict.fromkeys(reasons))
 
 

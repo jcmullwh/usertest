@@ -111,6 +111,10 @@ def _make_dummy_codex_retry_binary(tmp_path: Path) -> str:
                 "        sys.stderr.flush()",
                 "",
                 (
+                    "    print(json.dumps({'type': 'thread.started', "
+                    "'thread_id': '019f2cca-9011-7e32-88ae-6c25af578b49'}))"
+                ),
+                (
                     "    print(json.dumps({'id': str(attempt), 'msg': {'type': 'agent_message', "
                     "'message': f'attempt-{attempt}'}}))"
                 ),

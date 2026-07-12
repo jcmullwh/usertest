@@ -12,4 +12,8 @@ falsification pass then tries to disprove the selection. It may cite only exact 
 control, harness, static, and live evidence. The server content-addresses the review.
 Critical causal/interface/change-surface findings cannot be accepted; residual compatibility
 risk requires evidence, rationale, and verification.
-`reject` and `insufficient_evidence` stop planning.
+Valid `reject` and `insufficient_evidence` findings return content-addressed feedback to the
+original selector session. The selector may choose another existing option or request a
+revised zero-to-three option set from the original optioner session; every new selection gets
+a fresh independent falsifier. Structural errors return only to their authoring role. A
+stalled ancillary labeler uses a neutral server-owned label and cannot invalidate selection.

@@ -854,6 +854,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="Exact atom action ledger shared by shadows and export.",
     )
     tickets_run_next_p.add_argument(
+        "--backlog-shadow-state",
+        type=Path,
+        help=(
+            "External release-qualified shadow state shared by operational refresh and export."
+        ),
+    )
+    tickets_run_next_p.add_argument(
         "--review-agent",
         choices=["claude", "codex", "gemini"],
         help="Compatibility alias; when set it must equal --backlog-agent.",

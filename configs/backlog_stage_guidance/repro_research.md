@@ -1,211 +1,208 @@
-# Stage 3 guidance: evidence-gated reproduce and research
+# Stage 3: evidence-gated causal research
 
-## Goal
+## Objective
 
-Establish the failure mechanism and its boundaries at an exact repository revision. This
-stage produces a research proof, not a proposed fix. A written report is not evidence by
-itself.
+Establish whether an assigned, still-unresolved problem is real; identify its causal mechanism;
+challenge plausible alternatives; and define an executable positive outcome. Do not implement the
+product change. A detailed report is not sufficient unless retained runner evidence supports it.
 
-## Workspace contract
+## Evidence and workspace rules
 
-The mission runs in an isolated writable workspace. Research-only files must stay under
-`.usertest_research/`; modifying tracked source, existing tests/config/scripts/tools, or
-adding files elsewhere makes the proof suspicious and non-advancing. Do not change
-production behavior, implement a solution, add user-visible surface, or write documentation
-as if a change shipped. `implementation_performed` must be false.
+- Treat assigned source atoms as immutable problem evidence. Research/implementation atoms are
+  derived evidence for their parent case unless they expose a distinct failure.
+- Use the pinned repository revision and retained artifacts. Inspect the actual change surface.
+- Commands are direct argv with `shell=false`. Use a tracked repository entrypoint or an attested
+  research harness. The language/runtime is not prescribed; inline interpreter commands and shell
+  control syntax are forbidden. If a repository-native runner has no repository path in argv
+  (for example a build tool), declare `repository_bindings` with exact inspected tracked paths and
+  an open-language `relationship`; the runner independently binds every path and blob.
+- Research-only files belong under `.usertest_research/`. Do not implement the fix or mutate tracked
+  files. A replay may mutate only declared `replay_setup.disposable_state_paths` in its isolated
+  clone. Undeclared/tracked mutation is rejected.
+- `replay_setup.environment` applies only to the child replay. Never request credential, provider,
+  Codex/OpenAI, auth, token, PATH, or host-control variables. Values are hash-attested and redacted.
+- Missing evidence, unavailable platforms, blocked execution, and malformed artifacts are honest
+  limits. Do not convert them into support.
 
-Do not invent sleeps, polling, retries, or timeout values. Use a value already configured
-in the repository or document the limitation. Record the exact Git revision inspected.
+## Experiments
 
-## Evidence methods
+Each experiment has a stable `experiment_id`, nonempty descriptive `scenario_kind`, optional
+runner-supported `platform_requirement`, assigned `addresses_atom_ids`, direct command, result,
+outcome, exit code, observable assertion, and artifact references. Scenario/platform labels are
+open values; they describe the actual experiment and do not determine whether it advances.
 
-- `reproduction`: execute the original or faithful scenario and capture command/result
-  evidence. `evidence_sufficient` requires `reproduction_status="reproduced"`.
-- `static_trace`: use when the original runtime cannot execute but a retained input or
-  artifact can be evaluated through an exact deterministic code/config path. It may
-  advance with a complete static-trace contract, no environment dependencies, and either
-  a runner-derived inspected call chain, a data-linked retained harness, or an exact
-  deterministic config-pointer trace.
+Collectively, supporting experiments must cover the assigned source atoms. Bind an experiment to
+the exact source symptom or expected-behavior field where possible. A high-confidence opinion does
+not replace a controlled observation.
 
-Record every experiment with its exact command, result, outcome (`supports`, `refutes`,
-or `inconclusive`), integer exit code, and artifact IDs. Give every artifact a unique
-`artifact_id`. Record inspected files and symbols. The first root-cause hypothesis is the
-implementation-driving mechanism and must cite an observed supporting experiment plus
-one honest causal proof route. Prefer an explicit falsification attempt when a credible
-counterfactual exists: it copies the exact hypothesis ID and claim, names a distinct
-supporting baseline and challenge experiment, states a machine-checkable disproof condition,
-and reports `survived`, `disproved`, or `inconclusive`. The runner binds its exact
-command/result, one changed causal input, and observed hashes. When the mechanism is a fully
-deterministic static/config path and no honest counterfactual exists, leave
-`falsification_attempts` empty. The runner may mint a deterministic-closure receipt only when
-the exact symbol/path chain is complete, every evidence-backed alternative is refuted, and no
-material root-cause unknown remains. Never invent an alternative or challenge to satisfy a
-count. Genuine
-counterevidence remains valuable and may be empty; an unrelated `refutes` label is not a
-falsification attempt. Investigate credible alternatives, but do not invent one merely to
-fill a count. Every actual alternative needs an explicit disposition; a plausible unresolved
-alternative is a material unknown. Free-form prose is not evidence.
+`origin_evidence_bindings` may bind a structured symptom field with `observation_predicate` using
+any registered deterministic predicate. The runner first evaluates it against the immutable atom
+value, then against the adapter's baseline observation, and retains both in one content-addressed
+source-root receipt. Do not stringify numbers, booleans, JSON objects, state, or events merely to
+fit a text assertion.
 
-Inspected Python symbols may name functions/classes, exact import bindings, or exact
-assignment/constant bindings. Structured JSON, TOML, and YAML keys use only
-`config:/<RFC-6901-pointer>` (for example `config:/tool/pytest/ini_options/addopts`),
-with `~0` for `~`, `~1` for `/`, and numeric segments for array indexes. Bare dotted
-config names are ambiguous and do not verify.
+For the primary hypothesis, attempt to falsify it. State the disproof condition before interpreting
+the result. A survived challenge must retain the baseline, intervention/challenge, observations,
+and shared mechanism. Alternatives and counterevidence remain in the dossier even when refuted.
 
-Each experiment also records `scenario_kind`, `addresses_atom_ids`, and an
-`observable_assertion`. `scenario_kind` is exactly `original_replay`, `faithful_replay`,
-`control`, `static_trace`, or `live_runtime`; `platform_requirement` is exactly lowercase
-`any`, `windows`, `linux`, or `darwin`. Experiments collectively cover every assigned atom.
-Commands with `platform_requirement="any"` must use portable forward-slash relative paths;
-commands that require platform-specific path syntax must name that platform instead.
-A supporting experiment uses `original_replay`, `faithful_replay`, deterministic
-`static_trace`, or a platform-bound `live_runtime`; a refuting experiment may use a distinct
-`control`. Every static trace includes
-`{"deterministic":true,"environment_dependencies":[],"code_path":[{"path":"...","symbol":"...","observation":"..."}]}`
-under its `static_trace` key. The runner
-repeats allowlisted tests, safe retained harnesses, and evidence-bound practical repository
-CLIs/scripts in independent clean clones,
-captures stdout/stderr hashes, and verifies the assertion. Agent-workspace results alone are
-not proof. Each hypothesis must name exact inspected mechanism symbols and link its supporting
-experiment to the inspected source artifact. A causal challenge must address the same source
-atoms as its baseline, share typed evidence for the selected mechanism, use a distinct command,
-and record the observable condition that would disprove the claim before interpreting the
-result. Use `disposition="primary"` on the first
-hypothesis. Do not invent a second hypothesis merely to fill the schema. Mark every
-alternative that the evidence actually makes plausible `refuted`, `plausible`, or
-`unresolved`; refuted alternatives cite an actual `outcome="refutes"` experiment, while plausible/unresolved
-alternatives are material unknowns keyed by `hypothesis_id`.
+## Open causal proof adapters
 
-A refuting control is causal evidence only when `control_relationship` names the supporting
-experiment, copies the hypothesis mechanism symbols, addresses the same origin atoms, and
-cites the same inspected mechanism-source artifact. Record the controlled variable and the
-observable difference predicted by the hypothesis. An unrelated passing test is not a control.
-Controls change one declared causal condition: an input/fixture, configuration, environment,
-platform, filesystem state, completion marker, or explicit call argument. The runner requires
-a complementary observable result, but does not require every real failure to fit one Python
-AST argument delta. Exact pytest/AST controls remain a strong optional evidence mode.
+Use `experiment.proof_adapter` when a controlled pair establishes a mechanism. The core contract
+requires only authenticated source lineage, distinct runner observations, a stable intervention,
+a connected runner-attested mechanism graph, and a problem-bound positive predicate. Adapter-owned
+types and `state_inputs` are open; do not force an environment/config/runtime failure into a Python
+call-chain shape.
 
-Use explicit origin bindings when an experiment addresses corroborating/context atoms or a
-short exact symptom. Bind each atom to its immutable `$.field[index]` path and exact JSON value;
-the runner records the source-atom and value hashes. At least one binding must directly carry the
-observed symptom or exact originating command. A causal control can distinguish mechanisms, but
-its output is not automatically the correct output for the original input. Do not transpose a
-control value into the success contract without a separately verified equivalence invariant.
+Built-in adapters currently include:
 
-Research must also establish what post-change success means. There are three usable routes:
+- `structured_replay.v1` and `command_trace.v1` for command/output/event differences;
+- `environment.v1` for runner-attested child-environment deltas;
+- `filesystem_state.v1` and `config_repository_state.v1` for declared isolated state;
+- `platform.v1` for platform-routed observations;
+- `python_call_chain.v1` and `pytest_controlled_difference.v1` as optional specialized adapters.
 
-1. An exact repository pytest node already fails at a semantic assertion whose value is
-   data-dependent on the inspected mechanism. The runner binds that assertion and its relevant
-   helper/import closure; an unrelated green test is not positive proof.
-2. An assigned source-observation atom has an exact structured expected-behavior field
-   (`expected_*`, `desired_*`, `correct_*`, `intended_*`, `required_*`,
-   `expected_behavior`, or `success_criteria`). Declare `contract_kind="origin_atom_exact_value"`
-   and add the matching `origin_evidence_bindings` entry with `role="expected_behavior"`.
-3. For the normal novel-bug case, write a fail-first Python harness under
-   `.usertest_research/` whose `assert` compares a value or typed property produced by the
-   inspected mechanism with an explicit JSON scalar. The clean baseline must fail at that exact
-   assertion. Declare this experiment contract:
+Other registered adapters are valid. If an adapter or predicate is unavailable, correct the claim
+in the same author session or report insufficient evidence; do not invent a receipt.
 
-   ```json
-   {
-     "contract_kind": "retained_harness_semantic_assertion",
-     "expected_value": true,
-     "semantic_relation": "required_operational_property",
-     "semantic_rationale": "The source failure says the materialized path is unreadable; this assertion exercises that same path and requires it to be readable.",
-     "semantic_basis": {
-       "kind": "source_atom_quote",
-       "atom_id": "exact assigned source atom ID",
-       "field_path": "$.text",
-       "exact_quote": "exact source passage that establishes the failure or required behavior"
-     },
-     "adversarial_review_reference": "exact falsification attempt_id when a bound attempt targets this experiment"
-   }
-   ```
+Keep the causal locator separate from the repository change surface. When research establishes the
+connected production target, add `proof_adapter.implementation_touchpoints` entries with the exact
+`causal_locator`, inspected repository `path`, zero or more inspected `symbols`, and an open-language
+`relationship` explaining how that file consumes or governs the causal target. The runner retains a
+touchpoint only when the locator equals the attested intervention target and the path/symbols match
+its read receipts. Never use `env:...`, `fs:...`, platform labels, or a research harness as a fake
+repository path. If no connected production touchpoint is established, report that material change-
+surface unknown; optioning must return the case to research.
 
-   `semantic_relation` is one of `exact_expected_value`,
-   `logical_correction_of_source_failure`, `required_operational_property`, or
-   `repository_contract_requirement`. Instead of `source_atom_quote`, a researched repository
-   contract may use:
+`inspected_symbols` may be empty when the mechanism is genuinely file/config/schema/template/asset
+or platform-oriented and the runner can bind a symbol-less implementation touchpoint to an observed
+repository file and the causal proof. Do not invent a symbol merely to satisfy a code-shaped format.
+Conversely, a code-symbol route still requires exact inspected-symbol receipts; a file read alone
+does not establish a code path.
 
-   ```json
-   {
-     "kind": "repository_contract_quote",
-     "contract_type": "api_contract",
-     "path": "exact/inspected/repository/path.py",
-     "symbol": "exact inspected mechanism symbol for api_contract",
-     "json_pointer": "/exact/schema/value for schema",
-     "contract_subject": "exact mechanism subject named in a documentation quote",
-     "exact_quote": "exact inspected API, documentation, or schema passage"
-   }
-   ```
+Example adapter claim:
 
-   `contract_type` is `api_contract`, `documentation`, or `schema`, and the file must appear in
-   `inspected_files` at the researched revision. Supply only the locator appropriate to the
-   type: `symbol` for `api_contract`, `json_pointer` for `schema`, or `contract_subject` for
-   `documentation`. The symbol must be inspected and mechanism-bound; the pointer value and
-   documentation subject are content-addressed. The quote proves provenance, not semantic
-   sufficiency. Stage 5 independently reviews whether the assertion is the logical correction,
-   covers the full source problem, and proves intended operation. It must reject a swallowed
-   exception, renamed marker, classifier-only mitigation, or invented success value.
-   `adversarial_review_reference` is required when a runner-bound falsification attempt targets
-   this experiment and must equal that attempt's exact `attempt_id`; it may be omitted only when
-   no relevant intervention exists, such as a deterministic-closure proof route.
+```json
+{
+  "adapter_id": "environment.v1",
+  "hypothesis_id": "hypothesis:child-environment",
+  "baseline_experiment_id": "experiment:mode-absent",
+  "challenge_experiment_id": "experiment:mode-present",
+  "intervention": {
+    "kind": "child_environment_variable",
+    "target": "env:APPLICATION_MODE",
+    "predicted_polarity": "absent_to_ready",
+    "before": null,
+    "after": "ready"
+  },
+  "observations": {
+    "baseline": {"source": "stdout_json", "json_pointer": "/mode"},
+    "challenge": {"source": "stdout_json", "json_pointer": "/mode"}
+  },
+  "positive_outcome": {
+    "predicate": {"kind": "equals", "expected": "ready"},
+    "semantic_basis": {
+      "kind": "origin_exact_value",
+      "atom_id": "atom:assigned-source",
+      "field_path": "$.expected_mode"
+    }
+  }
+}
+```
 
-Harnesses under `.usertest_research/` may establish faithful or static evidence when the
-runner retains and hashes them, executes safe argv at clean HEAD, and verifies their asserted
-output/exception/artifact is data-dependent on every callable production mechanism symbol.
-A call-and-discard harness followed by a hard-coded print cannot advance. For a positive
-contract, the exact mechanism-dependent scalar assertion must fail before the change and the
-retained, content-addressed harness must replay unchanged after it. State all differences from
-the original scenario in `fidelity_mapping`. It is required for `faithful_replay` and
-`live_runtime`, optional but encouraged for `static_trace`, and omitted for
-`original_replay` and `control`. Runtime evidence must name its required platform enum;
-Docker/Linux evidence cannot prove a Windows-only failure.
+Observation sources include runner-retained exit code, stdout/stderr text or JSON, event lines/JSON,
+executed argv, platform, and adapter-specific isolated state. Use the narrowest observation that
+tests the claimed mechanism.
 
-The runner emits typed `mechanism_evidence`: `exception_trace`, `observed_output`,
-`controlled_scenario`, `temporary_harness`, `static_trace`, or `live_runtime`. A wrong value,
-missing artifact, or bad classification is valid observed evidence even when production code
-does not throw and therefore has no traceback, but `observed_output` still needs a
-runner-derived production call chain plus a complementary causal control. Reading a nearby
-symbol and replaying the symptom is insufficient.
+## Positive outcome
 
-The assigned source atoms are the immutable problem evidence. Derived research,
-implementation, and verification atoms are context for hypotheses and recurrence checks;
-they are not mandatory symptoms to reproduce and cannot bootstrap a new problem case.
+A failure disappearing is not automatically success. Bind the desired result to one runner-minted
+semantic basis:
 
-## Status gate
+- `origin_exact_value`: an exact structured expected/desired/required field from a source atom;
+- `repository_fail_first_command`: a pre-existing, hash-bound repository command that fails before
+  and passes under the controlled challenge;
+- `authenticated_semantic_citation`: an exact authenticated source field plus rationale/relation.
+  This proves authenticity only and sets `semantic_review_required`; Stage 5 judges its meaning.
 
-- `evidence_sufficient`: confidence is at least `0.75`,
-  artifact and experiment evidence is present, exact files and symbols were inspected,
-  and no material unknown affects root cause, interface, or change surface.
-- `insufficient_evidence`: investigation ran but evidence cannot support an implementation
-  decision. State material unknowns and the evidence needed.
-- `blocked`: required artifacts, workspace capability, policy, or execution access was
-  unavailable. State blocking reasons.
+Use a registered deterministic predicate. Built-ins include `equals`, `membership`, `range`,
+`schema`, `existence`, `state_transition`, and `event_sequence`; registered domain predicates are
+also valid. The runner evaluates the predicate against retained observations. Do not choose an
+observed value first and retroactively label it correct.
 
-Partial reproduction, suspicious implementation diffs, runner failures, missing artifacts,
-or malformed reports cannot be `evidence_sufficient`.
+The resulting positive contract must remain executable after implementation using the original
+baseline command/setup, the registered adapter observation, and the same predicate. Keep code/test
+proof separate from live-runtime proof.
 
-The outer troubleshoot report `status` is not the research conclusion. `partial` and `failure`
-preserve an honest `insufficient_evidence` or `blocked` extension; only a contradictory
-`evidence_sufficient` claim is rejected when the outer report is not `success`. Runner exit,
-schema, and evidence receipts remain authoritative for execution integrity.
+## Verification boundary
 
-A missing/malformed report, missing extension, or genuine model JSON-schema error receives at
-most one complete retry in a distinct workspace at the same pinned revision. The retry rereads
-the full assignment and reruns claimed experiments; it is not a JSON-repair pass. Evidence
-verification failures, suspicious implementation diffs, nonzero execution, and implementation
-violations do not consume that retry. Never strengthen an evidence status merely to pass shape.
+When an experiment will be the original-scenario oracle, add a structured
+`verification_boundary` with an open nonempty `boundary_kind`, boolean
+`requires_live_verification`, boolean `faithful_equivalence`, and a concrete `rationale`. Requiring
+live proof is always allowed when the replay is attested. Waiving it requires
+`faithful_equivalence=true`; the runner will retain that waiver only when the experiment is bound
+to both the selected mechanism evidence and an executable outcome oracle. The runner mints
+provenance references and the boundary hash. Provider names, scenario-label vocabulary, and prose
+keyword matching do not establish or waive live verification.
 
-## Strict output
+## Root cause and sufficiency
 
-The model-authored `extensions.backlog_repro_research` object must include: `case_id`,
-`problem_id`, `research_method`, `reproduction_status`,
-`research_status`, `writes_used`, `writes_purpose`, `implementation_performed`,
-`root_cause_hypotheses`, `root_cause_confidence`, `broader_class_assessment`,
-`material_unknowns`, `artifact_refs`, `experiments`, `inspected_files`,
-`inspected_symbols`, `blocking_reasons`, and `evidence_boundaries`. Copy the assigned
-`case_id` and `problem_id` exactly. The runner supplies schema version 3, the acquired repository
-revision, the final diff classification, a clean revision-pinned planning workspace, and an
-`evidence_verification` receipt. Readiness requires that receipt to bind commands to
-normalized events, files and symbols to the acquired revision, and artifacts to hashes.
+`root_cause_hypotheses[0]` is the primary hypothesis. Name exact mechanism locators appropriate to
+the adapter: code symbols/paths, `env:...`, `fs:...`, `config:/...`, platform routes, commands, or
+registered domain locators. Explain the causal chain, evidence for and against it, boundaries, and
+residual recurrence paths.
+
+Use `research_status="evidence_sufficient"` only when runner evidence establishes the primary
+mechanism, a meaningful falsification survives (or an authenticated deterministic closure exists),
+the positive outcome is bound, and no material unknown affects the root cause, interface choice,
+or change surface. `root_cause_confidence` is telemetry, not a threshold. Otherwise use
+`insufficient_evidence` or `blocked` and state exactly what evidence is needed.
+
+Every `material_unknowns` item says what is unknown, what it affects, evidence needed, and whether
+it is material. Material unknowns block implementation planning; explicit nonmaterial observations
+may remain without blocking.
+
+When `problem_record.case_identity_status` is `provisional_same_cause`, relation review has formed
+a research hypothesis, not a durable merge. Treat every entry in
+`problem_record.provisional_same_cause_group.member_facets` as an independent symptom facet. One
+advancing dossier must directly bind every member's source evidence and show that the established
+mechanism explains all of them. Evidence for only a subset, a different mechanism for any member,
+or a material unknown about the shared mechanism remains blocked. Do not claim that the member
+cases are aliases; the runner preserves their original IDs until the combined proof passes.
+
+## Output
+
+Return one complete `troubleshoot_v1` report. Its `extensions.backlog_repro_research` object contains:
+
+```json
+{
+  "case_id": "case:exact-assigned-id",
+  "problem_id": "problem:exact-assigned-id",
+  "research_method": "short accurate method label",
+  "reproduction_status": "reproduced | reproduction_failed | partial | blocked",
+  "research_status": "evidence_sufficient | insufficient_evidence | blocked",
+  "writes_used": false,
+  "writes_purpose": ["none"],
+  "implementation_performed": false,
+  "artifact_refs": [],
+  "experiments": [],
+  "inspected_files": [],
+  "inspected_symbols": [],
+  "root_cause_hypotheses": [],
+  "root_cause_confidence": 0.0,
+  "broader_class_assessment": "isolated_instance | repeated_variant | unknown",
+  "material_unknowns": [],
+  "blocking_reasons": [],
+  "evidence_boundaries": []
+}
+```
+
+The runner adds schema version, repository revision, evidence assignment, diff classification, and
+verification receipts. Do not emit those runner-owned fields.
+
+## Correction behavior
+
+If output structure/reference interpretation is wrong, correct the complete dossier in the exact
+author session. If the runner verifier discovers an evidence gap, continue research in that same
+session and workspace with research capabilities, run the needed experiment, and return the full
+dossier. Do not restart at the first defect. Restart only after repeated nonprogress, lost immutable
+provenance/session/workspace, or correction cost equivalent to a fresh investigation.

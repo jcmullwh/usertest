@@ -10,12 +10,19 @@ architecture, interface, target, or verification decision to the implementer.
 - Record the stable case, model-authored change-plan, and repository-revision IDs.
 - The server assigns the plan-revision ID from canonical plan content; the planner must
   not emit, invent, or increment it.
-- Name exact repository-relative files or modules and symbols, with the concrete behavior,
-  interface, schema, or data-flow change at each target.
-- Mark every target `modify` or `create` and name the intended anchor symbols.
+- Name exact repository-relative files or modules and meaningful anchor symbols/configuration
+  pointers, with the concrete behavior, interface, schema, content, or data-flow change at each
+  target. File-level assets and schemas do not need fictional symbols.
+- Mark every target `modify`, `create`, `delete`, `rename`, or `move`. A rename or move must
+  name `destination_path`; other actions must not. Preserve an exact path and change intent even
+  when no symbol applies.
 - Preserve the selected option's causal coverage.
-- Copy its `scope_evidence` exactly and map every verified intervention point to the same
-  `change_targets` path and symbol. Copy the verified intervention text exactly as that
+- Copy its `scope_evidence` exactly and map every code-backed intervention point to the same
+  `change_targets` path and symbol. For an adapter-backed point, resolve its selected
+  `implementation_touchpoint_ids` to the exact runner-attested repository paths and optional
+  symbols. Keep the `causal_locator` as evidence identity; never use an `env:`, `fs:`, platform,
+  or state locator as a repository path. If no connected production touchpoint exists, return
+  to research. Copy the verified intervention text exactly as that
   production target's `change`. Enumerate the production symbols/import/config keys that
   explain the intervention. Additional inspected callers/compatibility targets are allowed
   only with `causal_propagation`/`compatibility` rationale and bound mechanism evidence. A
@@ -50,27 +57,38 @@ architecture, interface, target, or verification decision to the implementer.
   When a `wrong_value_corrected` causal control establishes the correct output, bind the
   post-change assertion to that exact runner-observed value, preferably with equality. A
   planner-invented success string that the patch could merely emit is not outcome proof.
-  A plan preserving `multiple_independent_paths` or `shared_abstraction` scope must bind
-  post-change outcome evidence for every selected runner independence key. One oracle may
-  cover several keys only when its typed mechanism evidence actually spans those paths;
-  otherwise return to research for separate path-specific oracles. Do not impose this breadth
-  requirement on a genuine `single_path` problem.
+  A plan claiming `resolved` for `multiple_independent_paths` or `shared_abstraction` scope
+  must bind post-change outcome evidence for every selected runner independence key. A plan
+  bound by Stage 5 to `mitigated` may leave an explicitly dispositioned noncritical path
+  unexercised, but must prove intended operation on at least one retained path and preserve
+  that bound. Do not impose this breadth requirement on a genuine `single_path` problem.
 - Define runner-owned `outcome_verification_roles` for the exact original replay, the
   recurrence check, every required live probe, and any effect that could support a
-  `mitigated` outcome. Original/live/mitigation commands need machine predicates. Recurrence
+  `mitigated` outcome. Original/live/mitigation commands need machine predicates. Every
+  non-original role command also needs an exact runner-verified research-experiment binding;
+  executable-name allowlists do not establish operational meaning. Recurrence
   should normally rely on the centralized refresh's two later canonical-case shadow snapshots
   (empty commands/predicates), not an invented bespoke probe. Generic tests cannot stand in
   for operational proof, and a timeout remains blocked.
-- Do not waive an available runner-verified replay with a planner-authored proof
-  limitation. If that replay is no longer faithful or executable, return the case to
-  research rather than substituting a generic command.
+- Do not waive an available runner-verified replay with a planner-authored proof limitation.
+  A separate runner-recorded runtime/live boundary may be carried as an honest limitation only
+  with bound references, an executable alternate, and `expected_outcome_state="unverified"`;
+  retain every replay that remains available. If the limitation prevents choosing the root
+  cause, interface, or change surface, return to research rather than guessing.
 - State preserved behavior, intentional changes, migrations, and credible failure modes.
 - Preserve the pipeline-inferred live-verification requirement and explain it from the
   cited provenance.
 
-If faithful before/after proof is impossible, state the exact limitation and an executable
-alternate, and cite an exact material unknown or evidence boundary from research. Keep
-code/test confidence distinct from live-runtime confidence.
+If faithful runtime/live proof is impossible despite a decision-complete mechanism, state the
+exact limitation and an executable alternate, and cite an exact evidence boundary from research.
+Keep code/test confidence distinct from live-runtime confidence and leave the outcome unverified.
+
+If read-only inspection exposes a material decision that the supplied evidence cannot support,
+return the case to `repro_research` with the exact unresolved question, the evidence needed,
+and bound references from the dossier. Describe the blocked decision in open language; do not
+force it into a fixed category vocabulary. Do not substitute an invented interface, target,
+compatibility promise, or outcome value. Ordinary structural or plan-quality errors remain
+repairable in the same planner conversation and are not a reason to request new research.
 
 ## Rejection rules
 

@@ -58,6 +58,8 @@ You may inspect source to check claims. Do not modify files or mutate the checko
   problem, reject options that omit a retained facet or rely only on the representative
   dossier's scenario. Preserve verification for every bundled oracle.
 - Do not reward canonical/shared/centralized language by itself.
+- If no supplied option adequately addresses the evidenced mechanism, request revision from
+  the original optioner instead of choosing the least-bad option.
 
 ## Output contract
 
@@ -74,5 +76,16 @@ Return ONLY a JSON array with exactly one object containing `problem_id`, matchi
     "accepted_residual_risks": [],
     "class_level_evidence_sufficient": false
   }
+}
+```
+
+When the current options are causally inadequate, return ONLY:
+
+```json
+{
+  "problem_id": "problem:...",
+  "selection_status": "option_revision_requested",
+  "revision_rationale": "why none of the existing options is adequate",
+  "option_gaps": ["specific evidenced gap for option revision"]
 }
 ```

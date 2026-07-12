@@ -18,6 +18,7 @@ from backlog_miner.pipeline import (
 
 import usertest_backlog.workflows.depth_contracts as depth_contracts
 from usertest_backlog.workflows.depth_contracts import (
+    _command_quality_errors,
     assess_repo_grounding,
     change_plan_quality_errors,
     falsification_review_errors,
@@ -207,9 +208,21 @@ def _valid_option_research() -> dict[str, object]:
         control,
         "control_verification_id",
     )
-    consumer_identity = {
-        "kind": "production_entrypoint",
+    consumer_projection = {
+        "kind": "runner_observed_entrypoint",
         "entrypoint": "runner.build_report",
+        "attestation_basis": "runner_mechanism_link",
+        "runner_attested": True,
+    }
+    consumer_identity = {
+        **consumer_projection,
+        "consumer_identity_sha256": sha256(
+            json.dumps(
+                consumer_projection,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
     }
     independence_key = sha256(
         json.dumps(
@@ -418,11 +431,36 @@ def _add_positive_outcome_contract(research: dict[str, object]) -> str:
     verification = research["evidence_verification"]
     assert isinstance(verification, dict)
     evidence_id = str(verification["mechanism_evidence"][0]["mechanism_evidence_id"])
+    verified_mechanism = {
+        "schema_version": 3,
+        "mechanism_symbols": ["runner.build_report"],
+        "code_paths": [
+            {
+                "symbol": "runner.build_report",
+                "path": "packages/runner_core/src/runner_core/runner.py",
+            }
+        ],
+    }
+    verified_provenance = {
+        "schema_version": 2,
+        "primary_hypothesis_id": "h1",
+        "mechanism_evidence_ids": [evidence_id],
+        "causal_root_evidence_ids": [evidence_id],
+    }
+    mechanism_sha256 = _canonical_sha256(verified_mechanism)
+    provenance_sha256 = _canonical_sha256(verified_provenance)
+    verification["verified_mechanism"] = verified_mechanism
+    verification["verified_mechanism_sha256"] = mechanism_sha256
+    verification["verified_mechanism_provenance"] = verified_provenance
+    verification["verified_mechanism_provenance_sha256"] = provenance_sha256
     contract: dict[str, object] = {
         "schema_version": 1,
         "kind": "repository_test_assertion",
         "research_experiment_id": "exp-1",
         "mechanism_evidence_ids": [evidence_id],
+        "primary_hypothesis_id": "h1",
+        "primary_verified_mechanism_sha256": mechanism_sha256,
+        "primary_verified_mechanism_provenance_sha256": provenance_sha256,
         "postconditions": [{"type": "command_exit_code", "command_index": 0, "equals": 0}],
     }
     contract["positive_outcome_contract_id"] = _test_content_id(
@@ -434,6 +472,9 @@ def _add_positive_outcome_contract(research: dict[str, object]) -> str:
         "schema_version": 1,
         "case_id": "case:case",
         "repo_revision": "abc123",
+        "primary_hypothesis_id": "h1",
+        "primary_verified_mechanism_sha256": mechanism_sha256,
+        "primary_verified_mechanism_provenance_sha256": provenance_sha256,
         "research_experiment_id": "exp-1",
         "scenario_kind": "original_replay",
         "origin_atom_ids": ["atom:runner-report"],
@@ -728,6 +769,40 @@ def test_selection_requires_causal_evaluation_and_matching_option() -> None:
     )
 
 
+def test_selection_is_valid_without_family_telemetry() -> None:
+    option = _valid_option()
+    option.pop("family_id")
+    decision = {
+        "problem_id": "problem:case",
+        "selected_option_id": option["option_id"],
+        "causal_coverage_evaluation": {
+            "mechanism_fit": "The traced boundary matches the established mechanism.",
+            "accepted_unsupported_assumptions": [],
+            "accepted_residual_risks": [],
+            "class_level_evidence_sufficient": False,
+        },
+    }
+
+    assert (
+        selection_quality_errors(
+            decision,
+            expected_problem_id="problem:case",
+            options_by_id={str(option["option_id"]): option},
+        )
+        == []
+    )
+
+
+def test_optioning_and_selection_prompts_treat_family_as_optional_telemetry() -> None:
+    config_root = Path(__file__).resolve().parents[3] / "configs" / "backlog_prompts"
+    optioner = (config_root / "solution_optioner.md").read_text(encoding="utf-8")
+    selector = (config_root / "solution_selector.md").read_text(encoding="utf-8")
+
+    assert "`family_id` is optional compatibility telemetry" in optioner
+    assert "`selected_family_id` is optional" in selector
+    assert "causal coverage, not a family label" in selector
+
+
 def test_selection_cannot_accept_broad_option_without_class_level_evidence() -> None:
     option = _valid_option(
         scope_level="shared_abstraction",
@@ -811,6 +886,51 @@ def test_falsification_review_can_explicitly_reject_without_being_malformed() ->
         )
         == []
     )
+
+
+def test_falsification_critical_finding_accepts_open_effect_description() -> None:
+    research = _valid_option_research()
+    control_id = _control_id(research)
+    option = _valid_option()
+    review = bind_falsification_review(
+        {
+            "problem_id": "problem:case",
+            "selected_option_id": "option:case:most_direct",
+            "verdict": "reject",
+            "strongest_counterargument": "A provider-version boundary remains untested.",
+            "evidence_refs": [
+                {
+                    "ref": control_id,
+                    "finding": "The provider-version control exposes an untested boundary.",
+                    "effect": "challenges_selection",
+                }
+            ],
+            "unsupported_assumptions": [],
+            "residual_risks": [],
+            "critical_findings": [
+                {
+                    "finding": "The compatibility behavior differs by provider version.",
+                    "affects": "cross-version provider compatibility and fallback behavior",
+                    "evidence_refs": [control_id],
+                }
+            ],
+            "evidence_that_would_change_verdict": "A controlled replay for both versions.",
+            "material_risk_dispositions": [],
+        },
+        problem_id="problem:case",
+        selected_option=option,
+        research=research,
+    )
+
+    errors = falsification_review_errors(
+        review,
+        expected_problem_id="problem:case",
+        expected_option_id="option:case:most_direct",
+        research_dossier=research,
+        selected_option=option,
+    )
+
+    assert not any("invalid_critical_finding" in error for error in errors)
 
 
 def test_falsification_must_dispose_every_material_risk_with_bound_evidence() -> None:
@@ -1037,6 +1157,62 @@ def test_change_plan_rejects_verification_commands_that_can_mask_failure(
     assert any("change_plan_unsafe_verification_command" in error for error in errors)
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "node --test",
+        "deno test",
+        "bun test",
+        "ruby bin/rspec",
+        "swift test",
+        "vendor/bin/phpunit",
+        "tools/verify-repository",
+    ],
+)
+def test_verification_commands_accept_safe_repo_specific_tools(
+    tmp_path: Path,
+    command: str,
+) -> None:
+    for relative_path in ("bin/rspec", "vendor/bin/phpunit", "tools/verify-repository"):
+        path = tmp_path / relative_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("repository verification harness\n", encoding="utf-8")
+
+    assert (
+        _command_quality_errors(
+            command,
+            plan_id="plan:custom-tool",
+            repo_root=tmp_path,
+            label="verification_command",
+        )
+        == []
+    )
+
+
+def test_verification_command_can_bind_an_unlisted_runner_to_a_planned_create_target(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "tests").mkdir()
+    command = "dotnet test tests/New.Tests.csproj"
+
+    assert _command_quality_errors(
+        command,
+        plan_id="plan:planned-test-project",
+        repo_root=tmp_path,
+        label="verification_command",
+        planned_create_paths={"tests/New.Tests.csproj"},
+    ) == []
+    assert any(
+        "command_path_missing" in error
+        for error in _command_quality_errors(
+            command,
+            plan_id="plan:unbound-test-project",
+            repo_root=tmp_path,
+            label="verification_command",
+        )
+    )
+
+
 def test_change_plan_revision_is_server_owned_and_content_addressed() -> None:
     plan = _valid_change_plan()
     original_revision = plan["plan_revision_id"]
@@ -1066,7 +1242,7 @@ def test_change_plan_contract_rejects_discovery_first_steps() -> None:
     assert any("discovery_first_step" in error for error in errors)
 
 
-def test_planner_cannot_waive_runner_replay_with_prose_limitation() -> None:
+def test_proof_limitation_must_be_bound_and_use_an_executable_alternate() -> None:
     plan = _valid_change_plan()
     reproduction = plan["before_after_reproduction"]
     assert isinstance(reproduction, dict)
@@ -1076,7 +1252,8 @@ def test_planner_cannot_waive_runner_replay_with_prose_limitation() -> None:
             "after_change": None,
             "proof_limitation": "Live replay is unavailable.",
             "proof_limitation_refs": ["invented limitation"],
-            "alternate_verification": "pytest -q",
+            "alternate_verification": plan["verification_commands"][0],
+            "expected_outcome_state": "unverified",
         }
     )
     plan = assign_plan_revision_id(plan)
@@ -1087,8 +1264,7 @@ def test_planner_cannot_waive_runner_replay_with_prose_limitation() -> None:
         research_dossier={"evidence_boundaries": ["No live service credentials"]},
     )
     assert any("unbound_proof_limitation" in error for error in errors)
-    assert any("unverified_proof_limitation" in error for error in errors)
-    assert any("alternate_not_in_verification_commands" in error for error in errors)
+    assert not any("unverified_proof_limitation" in error for error in errors)
 
     reproduction["proof_limitation_refs"] = ["No live service credentials"]
     plan = assign_plan_revision_id(plan)
@@ -1098,7 +1274,117 @@ def test_planner_cannot_waive_runner_replay_with_prose_limitation() -> None:
         expected_case_id="case:case",
         research_dossier={"evidence_boundaries": ["No live service credentials"]},
     )
-    assert any("unverified_proof_limitation" in error for error in errors)
+    assert not any("proof_limitation" in error for error in errors)
+    assert not any("limited_outcome" in error for error in errors)
+
+
+def test_material_change_surface_limitation_returns_plan_to_research() -> None:
+    plan = _valid_change_plan()
+    reproduction = plan["before_after_reproduction"]
+    assert isinstance(reproduction, dict)
+    alternate = plan["verification_commands"][0]
+    reproduction.update(
+        {
+            "before_change": None,
+            "after_change": None,
+            "proof_limitation": "The controlling boundary is not yet established.",
+            "proof_limitation_refs": ["unknown:control-boundary"],
+            "alternate_verification": alternate,
+            "expected_outcome_state": "unverified",
+        }
+    )
+    plan = assign_plan_revision_id(plan)
+
+    errors = change_plan_quality_errors(
+        plan,
+        expected_revision="abc123",
+        expected_case_id="case:case",
+        research_dossier={
+            "material_unknowns": [
+                {
+                    "unknown_id": "unknown:control-boundary",
+                    "unknown": "The controlling boundary is not yet established.",
+                    "affects": ["change_surface"],
+                }
+            ]
+        },
+    )
+
+    assert any("material_limitation_requires_research" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    ("target", "source_paths"),
+    [
+        (
+            {
+                "action": "modify",
+                "path": "config/runtime.json",
+                "change": "Change the selected provider value.",
+            },
+            ["config/runtime.json"],
+        ),
+        (
+            {
+                "action": "delete",
+                "path": "assets/obsolete.json",
+                "change": "Remove the superseded asset.",
+            },
+            ["assets/obsolete.json"],
+        ),
+        (
+            {
+                "action": "rename",
+                "path": "schemas/old.json",
+                "destination_path": "schemas/current.json",
+                "change": "Rename the schema while preserving its contents.",
+            },
+            ["schemas/old.json"],
+        ),
+        (
+            {
+                "action": "move",
+                "path": "assets/schema.json",
+                "destination_path": "schemas/schema.json",
+                "change": "Move the schema to the runtime-consumed location.",
+            },
+            ["assets/schema.json"],
+        ),
+        (
+            {
+                "action": "create",
+                "path": "schemas/new.json",
+                "change": "Create the selected schema contract.",
+            },
+            [],
+        ),
+    ],
+)
+def test_change_targets_support_file_level_and_relocation_work(
+    tmp_path: Path,
+    target: dict[str, object],
+    source_paths: list[str],
+) -> None:
+    for relative_path in source_paths:
+        source = tmp_path / relative_path
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_text("{}\n", encoding="utf-8")
+    (tmp_path / "schemas").mkdir(exist_ok=True)
+    plan = _valid_change_plan()
+    plan["change_targets"] = [target]
+    plan = assign_plan_revision_id(plan)
+
+    errors = change_plan_quality_errors(
+        plan,
+        expected_revision="abc123",
+        expected_case_id="case:case",
+        repo_root=tmp_path,
+    )
+
+    assert not any("target_action" in error for error in errors)
+    assert not any("target_symbols" in error for error in errors)
+    assert not any("target_destination" in error for error in errors)
+    assert not any("target_path_missing" in error for error in errors)
 
 
 def test_change_plan_create_target_requires_new_path_under_existing_parent(

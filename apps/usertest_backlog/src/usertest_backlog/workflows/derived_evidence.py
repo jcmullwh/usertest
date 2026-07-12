@@ -296,7 +296,7 @@ def _target_contract_errors(
     if not isinstance(target_contract, Mapping):
         return ["ticket_provenance_target_contract_missing"]
     contract = dict(target_contract)
-    if contract.get("schema_version") != 2:
+    if contract.get("schema_version") not in {2, 3}:
         return ["ticket_provenance_target_contract_schema_invalid"]
     supplied_sha256 = contract.get("contract_sha256")
     payload = {key: value for key, value in contract.items() if key != "contract_sha256"}

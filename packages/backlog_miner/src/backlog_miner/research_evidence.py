@@ -26,6 +26,15 @@ from typing import Any, Protocol
 
 import yaml
 from agent_adapters.read_attestation import observed_read_attestation
+from backlog_core.causal_proof import (
+    command_authorization_errors,
+    command_authorization_identity,
+    content_bound_payload,
+    evaluate_proof_predicate,
+    proof_predicate_contract_errors,
+    proof_receipt_id_for,
+    validate_causal_proof_receipt,
+)
 from backlog_core.stage_contracts import (
     evidence_assignment_sha256,
     evidence_verification_sha256,
@@ -40,24 +49,20 @@ from backlog_miner.origin_evidence import (
     origin_attachment_requirements,
     verify_materialized_origin_attachments,
 )
+from backlog_miner.proof_adapters import (
+    PositiveBasisContext,
+    ProofAdapterContext,
+    builtin_positive_basis_registry,
+    builtin_proof_adapter_registry,
+)
+from backlog_miner.proof_adapters.base import (
+    environment_attestation,
+    replay_environment_attestation,
+)
 
 _VERIFICATION_METHOD = "runner_artifact_binding_v1"
-_REPLAY_ARGV_PREFIXES: tuple[tuple[str, ...], ...] = (
-    ("pytest",),
-    ("python", "-m", "pytest"),
-    ("pdm", "run", "pytest"),
-    ("pdm", "run", "python", "-m", "pytest"),
-    ("npm", "test"),
-    ("npm", "run", "test"),
-    ("pnpm", "test"),
-    ("pnpm", "run", "test"),
-    ("yarn", "test"),
-    ("yarn", "run", "test"),
-    ("cargo", "test"),
-    ("go", "test"),
-    ("dotnet", "test"),
-    ("python",),
-    ("pdm", "run", "python"),
+_REPLAY_INLINE_CODE_FLAGS = frozenset(
+    {"-c", "--command", "-e", "--eval", "--execute", "/c", "-command"}
 )
 _PYTEST_ARGV_PREFIXES: tuple[tuple[str, ...], ...] = (
     ("pytest",),
@@ -98,6 +103,31 @@ _SENSITIVE_ENVIRONMENT_RE = re.compile(
     r"(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|COOKIE|SESSION|"
     r"^AWS_|^AZURE_|^GOOGLE_|^GCP_|^GH_|^GITHUB_|^SSH_)",
     re.IGNORECASE,
+)
+_REPLAY_ENVIRONMENT_KEY_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_REPLAY_FORBIDDEN_ENVIRONMENT_KEYS = frozenset(
+    {
+        "COMSPEC",
+        "HOME",
+        "PATH",
+        "PATHEXT",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "SHELL",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "USERPROFILE",
+    }
+)
+_REPLAY_FORBIDDEN_ENVIRONMENT_PREFIXES = (
+    "ANTHROPIC_",
+    "AWS_",
+    "AZURE_",
+    "CODEX_",
+    "GITHUB_",
+    "GOOGLE_",
+    "OPENAI_",
 )
 _IGNORED_WORKSPACE_DIRS = frozenset(
     {".git", ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache__"}
@@ -311,7 +341,6 @@ def _workspace_head(workspace: Path) -> str | None:
             encoding="utf-8",
             errors="replace",
             check=False,
-            timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -327,7 +356,6 @@ def _workspace_clean(workspace: Path) -> bool | None:
             encoding="utf-8",
             errors="replace",
             check=False,
-            timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -372,7 +400,6 @@ def _git_output_bytes(workspace: Path, *args: str) -> bytes | None:
             ["git", "-C", str(workspace), *args],
             capture_output=True,
             check=False,
-            timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -440,6 +467,100 @@ def _canonical_workspace_state(workspace: Path) -> dict[str, Any]:
             sha256(index_flags).hexdigest() if index_flags is not None else None
         ),
     }
+
+
+def _declared_disposable_state_paths(
+    experiment: Mapping[str, Any],
+    *,
+    workspace: Path,
+    experiment_id: str,
+    errors: list[str],
+) -> list[str]:
+    setup = experiment.get("replay_setup")
+    raw = setup.get("disposable_state_paths") if isinstance(setup, Mapping) else None
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not raw or len(raw) > 32:
+        errors.append(f"experiment_replay_state_paths_invalid:{experiment_id}")
+        return []
+    paths: list[str] = []
+    root = workspace.resolve()
+    for item in raw:
+        normalized = str(item).replace("\\", "/") if isinstance(item, str) else ""
+        relative = PurePosixPath(normalized)
+        if (
+            not normalized
+            or relative.is_absolute()
+            or ".." in relative.parts
+            or relative.parts[0].casefold() == ".git"
+        ):
+            errors.append(f"experiment_replay_state_path_forbidden:{experiment_id}:{item}")
+            continue
+        resolved = (root / Path(*relative.parts)).resolve()
+        if not _within(resolved, root):
+            errors.append(f"experiment_replay_state_path_forbidden:{experiment_id}:{item}")
+            continue
+        parent = resolved
+        symlink_parent = False
+        while parent != root:
+            if parent.exists() and parent.is_symlink():
+                symlink_parent = True
+                break
+            parent = parent.parent
+        tracked = _git_output_bytes(workspace, "ls-files", "-z", "--", relative.as_posix())
+        if symlink_parent or (tracked is not None and bool(tracked)):
+            errors.append(f"experiment_replay_state_path_not_disposable:{experiment_id}:{item}")
+            continue
+        paths.append(relative.as_posix())
+    return list(dict.fromkeys(paths))
+
+
+def _state_entry_is_declared(relative: str, declared: Sequence[str]) -> bool:
+    path = PurePosixPath(relative)
+    return any(
+        path == PurePosixPath(root) or PurePosixPath(root) in path.parents
+        for root in declared
+    )
+
+
+def _declared_state_transition_receipts(
+    *,
+    before: Mapping[str, Any],
+    after: Mapping[str, Any],
+    declared: Sequence[str],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    before_entries = before.get("entries") if isinstance(before.get("entries"), Mapping) else {}
+    after_entries = after.get("entries") if isinstance(after.get("entries"), Mapping) else {}
+    changed = sorted(
+        path
+        for path in set(before_entries) | set(after_entries)
+        if before_entries.get(path) != after_entries.get(path)
+    )
+    receipts: list[dict[str, Any]] = []
+    for root in declared:
+        root_before = {
+            path: value
+            for path, value in before_entries.items()
+            if _state_entry_is_declared(path, [root])
+        }
+        root_after = {
+            path: value
+            for path, value in after_entries.items()
+            if _state_entry_is_declared(path, [root])
+        }
+        receipt = {
+            "path": root,
+            "runner_attested": True,
+            "before_entries": root_before,
+            "after_entries": root_after,
+            "changed_entries": [
+                path for path in changed if _state_entry_is_declared(path, [root])
+            ],
+        }
+        receipt["transition_sha256"] = _canonical_json_sha256(receipt)
+        receipts.append(receipt)
+    undeclared = [path for path in changed if not _state_entry_is_declared(path, declared)]
+    return undeclared, receipts
 
 
 def _workspace_overlay_errors(
@@ -602,7 +723,7 @@ def _portable_replay_path_argv(argv: list[str]) -> tuple[list[str], bool]:
 
 
 def _parse_replay_argv(command: str) -> list[str] | None:
-    """Parse one normally allowlisted test/harness command without a shell.
+    """Parse one direct-argv command without a shell or inline-code escape hatch.
 
     The research report is model-authored.  Normalizing whitespace before an
     allowlist check is unsafe because PowerShell and POSIX shells treat newlines
@@ -614,33 +735,12 @@ def _parse_replay_argv(command: str) -> list[str] | None:
         return None
     argv, _portable_path_changed = _portable_replay_path_argv(argv)
     normalized = tuple(token.casefold() for token in argv)
-    if not any(normalized[: len(prefix)] == prefix for prefix in _REPLAY_ARGV_PREFIXES):
+    if any(token in _REPLAY_INLINE_CODE_FLAGS for token in normalized[1:]):
         return None
-    # ``python`` is accepted only for a retained research harness.  Arbitrary
-    # interpreter payloads (notably ``-c``/``-m``) would turn this argv-only
-    # replay boundary back into model-authored code execution outside the
-    # attested overlay.  Pytest module invocations were matched above and are
-    # the sole ``-m`` exception.
-    harness_index: int | None = None
-    if normalized[:2] == ("pdm", "run") and normalized[2:3] == ("python",):
-        if normalized[3:5] != ("-m", "pytest"):
-            harness_index = 3
-    elif normalized[:1] == ("python",) and normalized[1:3] != ("-m", "pytest"):
-        harness_index = 1
-    if harness_index is not None:
-        if harness_index >= len(argv):
-            return None
-        harness = argv[harness_index].replace("\\", "/")
-        harness_path = PurePosixPath(harness)
-        if (
-            harness_path.is_absolute()
-            or ".." in harness_path.parts
-            or len(harness_path.parts) < 2
-            or harness_path.parts[0] != ".usertest_research"
-            or harness_path.suffix.casefold() != ".py"
-        ):
-            return None
-        argv[harness_index] = harness_path.as_posix()
+    # Executable and language policy is intentionally not encoded here. The
+    # authorization step below must bind at least one argv entrypoint to the
+    # immutable repository or to an attested research overlay. Inline command
+    # flags remain forbidden for every runtime.
     return argv
 
 
@@ -715,15 +815,14 @@ def _resolve_repository_entrypoint(argv: list[str], *, workspace: Path) -> dict[
     receipt: dict[str, Any] | None = None
     if executable in python_names:
         if len(effective) >= 3 and effective[1] == "-m":
-            if effective[2].casefold() == "pytest":
-                return None
-            source = _python_module_entrypoint(workspace, effective[2])
-            if source is not None:
-                receipt = {
-                    "entrypoint_kind": "python_module",
-                    "entrypoint_path": source.relative_to(workspace).as_posix(),
-                    "module": effective[2],
-                }
+            if effective[2].casefold() != "pytest":
+                source = _python_module_entrypoint(workspace, effective[2])
+                if source is not None:
+                    receipt = {
+                        "entrypoint_kind": "python_module",
+                        "entrypoint_path": source.relative_to(workspace).as_posix(),
+                        "module": effective[2],
+                    }
         elif len(effective) >= 2 and not effective[1].startswith("-"):
             source = _repo_file(workspace, effective[1])
             if source is not None and source.suffix.casefold() == ".py":
@@ -761,22 +860,117 @@ def _resolve_repository_entrypoint(argv: list[str], *, workspace: Path) -> dict[
             receipt = project_script
         else:
             source = _repo_file(workspace, effective[0])
-            if source is not None and source.suffix.casefold() in {
-                ".py",
-                ".js",
-                ".cjs",
-                ".mjs",
-            }:
+            if source is not None:
                 receipt = {
                     "entrypoint_kind": "repository_executable",
                     "entrypoint_path": source.relative_to(workspace).as_posix(),
                 }
     if receipt is None:
+        for index, token in enumerate(effective):
+            if token.startswith("-") and "=" not in token:
+                continue
+            candidate = token.split("=", 1)[-1].partition("::")[0]
+            source = _repo_file(workspace, candidate)
+            if source is None:
+                continue
+            receipt = {
+                "entrypoint_kind": "repository_argv_entrypoint",
+                "entrypoint_path": source.relative_to(workspace).as_posix(),
+                "entrypoint_argv_index": index,
+                "runtime_executable": Path(effective[0]).name,
+            }
+            break
+    if receipt is None:
         return None
     entrypoint_path = workspace / str(receipt["entrypoint_path"])
     receipt["entrypoint_sha256"] = _sha256_path(entrypoint_path)
+    receipt["entrypoint_git_blob_sha"] = _git_blob_sha(
+        workspace,
+        str(receipt["entrypoint_path"]),
+    )
     receipt["project_runner"] = "pdm" if used_project_runner else None
     return receipt
+
+
+def _command_authorization_receipt(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Content-bind one runner authorization without constraining its vocabulary."""
+
+    return content_bound_payload(
+        {**dict(value), "runner_attested": True},
+        hash_field="authorization_sha256",
+    )
+
+
+def _declared_repository_binding_receipts(
+    *,
+    experiment: Mapping[str, Any],
+    dossier: Mapping[str, Any],
+    workspace: Path,
+) -> tuple[bool, list[dict[str, Any]]]:
+    """Attest model-declared tracked inputs that govern a shell-free command.
+
+    Some repository-native runners (for example Cargo, Go, Maven, Gradle, and
+    dotnet) do not put a repository path in argv.  The declaration is therefore
+    an open relationship statement, while the runner independently proves that
+    every exact path was inspected, exists in the researched revision, and is
+    content-bound.  A present but malformed declaration never falls through to a
+    weaker authorization route.
+    """
+
+    raw = experiment.get("repository_bindings")
+    if raw is None:
+        return False, []
+    if not isinstance(raw, list) or not raw or len(raw) > 32:
+        return True, []
+    inspected_raw = dossier.get("inspected_files")
+    inspected = {
+        _normalize_path(path)
+        for path in inspected_raw
+        if isinstance(path, str) and path.strip()
+    } if isinstance(inspected_raw, list) else set()
+    receipts: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            return True, []
+        path_raw = _text(item.get("path"))
+        relationship = _text(item.get("relationship"))
+        if path_raw is None or relationship is None:
+            return True, []
+        declared = PurePosixPath(path_raw.replace("\\", "/"))
+        if declared.is_absolute() or ".." in declared.parts:
+            return True, []
+        source = _repo_file(workspace, declared.as_posix())
+        if source is None or (workspace / Path(*declared.parts)).is_symlink():
+            return True, []
+        relative = source.relative_to(workspace.resolve()).as_posix()
+        if _normalize_path(relative) not in inspected:
+            return True, []
+        git_blob_sha = _git_blob_sha(workspace, relative)
+        if git_blob_sha is None:
+            return True, []
+        receipts.append(
+            content_bound_payload(
+                {
+                    "path": relative,
+                    "relationship": relationship,
+                    "file_sha256": _sha256_path(source),
+                    "git_blob_sha": git_blob_sha,
+                    "runner_attested": True,
+                },
+                hash_field="repository_binding_sha256",
+            )
+        )
+    receipts.sort(key=lambda item: (str(item["path"]), str(item["relationship"])))
+    return True, receipts
+
+
+def _command_authorization_attested(
+    authorization: Any,
+    *,
+    argv: Sequence[str],
+) -> bool:
+    """Validate authorization properties and immutable anchors, not kind names."""
+    return not command_authorization_errors(authorization, argv=argv)
 
 
 def _practical_command_authorization(
@@ -788,13 +982,25 @@ def _practical_command_authorization(
     workspace: Path,
 ) -> dict[str, Any] | None:
     """Authorize one practical CLI only from immutable evidence or an inspected entrypoint."""
-    if experiment.get("scenario_kind") not in {
-        "original_replay",
-        "faithful_replay",
-        "control",
-        "live_runtime",
-    }:
+    if _text(experiment.get("scenario_kind")) is None:
         return None
+    bindings_declared, repository_bindings = _declared_repository_binding_receipts(
+        experiment=experiment,
+        dossier=dossier,
+        workspace=workspace,
+    )
+    if bindings_declared:
+        if not repository_bindings:
+            return None
+        return _command_authorization_receipt(
+            {
+                "authorization_kind": "declared_repository_bindings",
+                "executed_argv_sha256": _canonical_json_sha256(argv),
+                "shell": False,
+                "workspace_confined": True,
+                "repository_bindings": repository_bindings,
+            }
+        )
     entrypoint = _resolve_repository_entrypoint(argv, workspace=workspace)
     if entrypoint is None:
         return None
@@ -814,7 +1020,7 @@ def _practical_command_authorization(
             _parse_argv_without_shell(atom_command) if isinstance(atom_command, str) else None
         )
         if atom_argv == argv:
-            return {
+            return _command_authorization_receipt({
                 "authorization_kind": "immutable_source_command",
                 "executed_argv_sha256": _canonical_json_sha256(argv),
                 "shell": False,
@@ -824,7 +1030,7 @@ def _practical_command_authorization(
                 "origin_atom_field_path": "$.command",
                 "origin_command_value_sha256": _canonical_json_sha256(atom_command),
                 **entrypoint,
-            }
+            })
     inspected_raw = dossier.get("inspected_files")
     inspected = (
         {_normalize_path(path) for path in inspected_raw if isinstance(path, str) and path.strip()}
@@ -835,16 +1041,49 @@ def _practical_command_authorization(
         _normalize_path(str(entrypoint["entrypoint_path"])),
         _normalize_path(str(entrypoint.get("declaration_path") or "")),
     }
+    artifacts_raw = dossier.get("artifact_refs")
+    artifact = next(
+        (
+            item
+            for item in artifacts_raw
+            if isinstance(item, dict)
+            and _normalize_path(str(item.get("path") or ""))
+            == _normalize_path(str(entrypoint["entrypoint_path"]))
+        ),
+        None,
+    ) if isinstance(artifacts_raw, list) else None
+    if (
+        _normalize_path(str(entrypoint["entrypoint_path"])).startswith(
+            ".usertest_research/"
+        )
+        and isinstance(artifact, dict)
+    ):
+        return _command_authorization_receipt({
+            "authorization_kind": "attested_research_harness",
+            "executed_argv_sha256": _canonical_json_sha256(argv),
+            "shell": False,
+            "workspace_confined": True,
+            "artifact_id": artifact.get("artifact_id"),
+            **entrypoint,
+        })
     matched = sorted((possible_paths - {""}) & inspected)
     if matched:
-        return {
+        return _command_authorization_receipt({
             "authorization_kind": "declared_inspected_repository_entrypoint",
             "executed_argv_sha256": _canonical_json_sha256(argv),
             "shell": False,
             "workspace_confined": True,
             "inspected_entrypoint_path": matched[0],
             **entrypoint,
-        }
+        })
+    if _text(entrypoint.get("entrypoint_git_blob_sha")) is not None:
+        return _command_authorization_receipt({
+            "authorization_kind": "immutable_repository_entrypoint",
+            "executed_argv_sha256": _canonical_json_sha256(argv),
+            "shell": False,
+            "workspace_confined": True,
+            **entrypoint,
+        })
     return None
 
 
@@ -877,35 +1116,36 @@ def _authorized_replay_invocation(
 ) -> tuple[list[str], dict[str, Any]] | None:
     """Derive one replay argv and its complete runner-owned authorization.
 
-    Standard test and retained-harness commands keep the narrow static allowlist.
-    Practical repository commands are accepted only when the shell-free argv is
-    workspace-confined and resolves back to immutable source evidence or a declared,
-    inspected repository entrypoint.  Reusing this derivation during persisted receipt
-    validation prevents a practical command from becoming unverifiable after JSON
-    serialization while preserving the original safety boundary.
+    Commands are accepted only when the shell-free argv is workspace-confined and resolves
+    back to immutable source evidence, an attested research harness, or a declared and inspected
+    repository entrypoint. Runtime and file extensions are not centrally enumerated. Reusing this
+    derivation during persisted receipt validation prevents a practical command from becoming
+    unverifiable after JSON serialization while preserving the original safety boundary.
     """
 
     argv = _parse_replay_argv(command)
-    if argv is not None:
-        authorization = {
-            "authorization_kind": "standard_test_or_research_harness",
-            "executed_argv_sha256": _canonical_json_sha256(argv),
-            "shell": False,
-            "workspace_confined": True,
-        }
-    else:
+    if argv is None:
         argv = _parse_argv_without_shell(command)
-        if argv is None or not _replay_argv_is_workspace_confined(argv):
-            return None
-        authorization = _practical_command_authorization(
-            argv=argv,
-            experiment=experiment,
-            dossier=dossier,
-            assignment=assignment,
-            workspace=workspace,
+        if argv is not None:
+            argv, _portable_path_changed = _portable_replay_path_argv(argv)
+    if (
+        argv is None
+        or any(
+            token.casefold() in _REPLAY_INLINE_CODE_FLAGS
+            for token in argv[1:]
         )
-        if authorization is None:
-            return None
+        or not _replay_argv_is_workspace_confined(argv)
+    ):
+        return None
+    authorization = _practical_command_authorization(
+        argv=argv,
+        experiment=experiment,
+        dossier=dossier,
+        assignment=assignment,
+        workspace=workspace,
+    )
+    if authorization is None:
+        return None
     if not _replay_argv_is_workspace_confined(argv):
         return None
     return argv, authorization
@@ -917,6 +1157,127 @@ def _sanitized_replay_environment() -> dict[str, str]:
         for key, value in os.environ.items()
         if _SENSITIVE_ENVIRONMENT_RE.search(key) is None
     } | {"CI": "1"}
+
+
+def _replay_environment_overrides(
+    experiment: Mapping[str, Any],
+    *,
+    experiment_id: str,
+    errors: list[str],
+) -> dict[str, str | None]:
+    setup = experiment.get("replay_setup")
+    raw = setup.get("environment") if isinstance(setup, Mapping) else None
+    if raw is None:
+        return {}
+    if not isinstance(raw, Mapping) or len(raw) > 32:
+        errors.append(f"experiment_replay_environment_invalid:{experiment_id}")
+        return {}
+    overrides: dict[str, str | None] = {}
+    for key, value in raw.items():
+        normalized = str(key).upper() if isinstance(key, str) else ""
+        forbidden = (
+            not isinstance(key, str)
+            or _REPLAY_ENVIRONMENT_KEY_RE.fullmatch(key) is None
+            or normalized in _REPLAY_FORBIDDEN_ENVIRONMENT_KEYS
+            or normalized.startswith(_REPLAY_FORBIDDEN_ENVIRONMENT_PREFIXES)
+            or _SENSITIVE_ENVIRONMENT_RE.search(key) is not None
+        )
+        if (
+            forbidden
+            or (value is not None and not isinstance(value, str))
+            or (isinstance(value, str) and (len(value) > 4096 or "\x00" in value))
+        ):
+            errors.append(f"experiment_replay_environment_forbidden:{experiment_id}:{key}")
+            continue
+        overrides[key] = value
+    return overrides
+
+
+def _replay_setup_receipt(
+    *,
+    environment_overrides: Mapping[str, str | None],
+    disposable_state_paths: Sequence[str],
+) -> dict[str, Any]:
+    receipt = {
+        "runner_applied": True,
+        "environment": {
+            key: (
+                {"present": False}
+                if value is None
+                else {
+                    "present": True,
+                    "value_sha256": sha256(value.encode("utf-8")).hexdigest(),
+                }
+            )
+            for key, value in sorted(environment_overrides.items())
+        },
+        "disposable_state_paths": list(disposable_state_paths),
+    }
+    receipt["replay_setup_sha256"] = _canonical_json_sha256(receipt)
+    return receipt
+
+
+def _replay_inputs_receipt(
+    *,
+    source_experiment_id: str,
+    environment_overrides: Mapping[str, str | None],
+    disposable_state_paths: Sequence[str],
+) -> dict[str, Any]:
+    """Retain the exact, already-sanitized inputs needed to replay the source case.
+
+    The public setup receipt remains value-redacted.  This runner-owned receipt is
+    carried only as executable oracle data so post-change verification can recreate
+    the researched scenario instead of silently dropping the controlled inputs.
+    """
+
+    return content_bound_payload(
+        {
+            "schema_version": 1,
+            "source_experiment_id": source_experiment_id,
+            "environment": {
+                key: value for key, value in sorted(environment_overrides.items())
+            },
+            "disposable_state_paths": list(disposable_state_paths),
+            "runner_approved": True,
+        },
+        hash_field="replay_inputs_sha256",
+    )
+
+
+def _replay_inputs_attested(value: Any, *, experiment_id: str) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    projection = {key: item for key, item in value.items() if key != "replay_inputs_sha256"}
+    environment = value.get("environment")
+    paths = value.get("disposable_state_paths")
+    if (
+        value.get("schema_version") != 1
+        or value.get("source_experiment_id") != experiment_id
+        or value.get("runner_approved") is not True
+        or value.get("replay_inputs_sha256") != _canonical_json_sha256(projection)
+        or not isinstance(environment, Mapping)
+        or not isinstance(paths, list)
+    ):
+        return False
+    if any(
+        not isinstance(key, str)
+        or _REPLAY_ENVIRONMENT_KEY_RE.fullmatch(key) is None
+        or _SENSITIVE_ENVIRONMENT_RE.search(key) is not None
+        or key.upper() in _REPLAY_FORBIDDEN_ENVIRONMENT_KEYS
+        or key.upper().startswith(_REPLAY_FORBIDDEN_ENVIRONMENT_PREFIXES)
+        or (item is not None and not isinstance(item, str))
+        for key, item in environment.items()
+    ):
+        return False
+    return all(
+        isinstance(path, str)
+        and bool(path)
+        and not PurePosixPath(path.replace("\\", "/")).is_absolute()
+        and not PureWindowsPath(path).anchor
+        and ".." not in PurePosixPath(path.replace("\\", "/")).parts
+        and ".." not in PureWindowsPath(path).parts
+        for path in paths
+    )
 
 
 @dataclass(frozen=True)
@@ -939,6 +1300,7 @@ class ReplayExecutor(Protocol):
         cwd: Path,
         source_workspace: Path,
         timeout_seconds: float | None,
+        environment_overrides: Mapping[str, str | None] | None = None,
     ) -> ReplayExecutionResult: ...
 
 
@@ -998,8 +1360,9 @@ class PlatformRoutingReplayExecutor:
         cwd: Path,
         source_workspace: Path,
         timeout_seconds: float | None,
+        environment_overrides: Mapping[str, str | None] | None = None,
     ) -> ReplayExecutionResult:
-        del argv, cwd, source_workspace, timeout_seconds
+        del argv, cwd, source_workspace, timeout_seconds, environment_overrides
         raise RuntimeError("platform_router_requires_declared_platform_selection")
 
 
@@ -1027,8 +1390,9 @@ class BlockedReplayExecutor:
         cwd: Path,
         source_workspace: Path,
         timeout_seconds: float | None,
+        environment_overrides: Mapping[str, str | None] | None = None,
     ) -> ReplayExecutionResult:
-        del argv, cwd, source_workspace, timeout_seconds
+        del argv, cwd, source_workspace, timeout_seconds, environment_overrides
         raise RuntimeError(self.reason)
 
 
@@ -1072,9 +1436,18 @@ class TrustedHostReplayExecutor:
         cwd: Path,
         source_workspace: Path,
         timeout_seconds: float | None,
+        environment_overrides: Mapping[str, str | None] | None = None,
     ) -> ReplayExecutionResult:
         if self._approved_root(source_workspace) is None:
             raise PermissionError("source_outside_approved_roots")
+        environment = _sanitized_replay_environment()
+        absent_keys: list[str] = []
+        for key, value in (environment_overrides or {}).items():
+            if value is None:
+                environment.pop(key, None)
+                absent_keys.append(key)
+            else:
+                environment[key] = value
         completed = subprocess.run(
             argv,
             cwd=cwd,
@@ -1084,7 +1457,7 @@ class TrustedHostReplayExecutor:
             errors="replace",
             check=False,
             timeout=timeout_seconds,
-            env=_sanitized_replay_environment(),
+            env=environment,
         )
         return ReplayExecutionResult(
             returncode=completed.returncode,
@@ -1094,6 +1467,10 @@ class TrustedHostReplayExecutor:
                 "executor": "trusted_host",
                 "os_sandbox": False,
                 "network": "not_enforced",
+                "environment_attestation": environment_attestation(
+                    environment,
+                    absent_keys=absent_keys,
+                ),
             },
         )
 
@@ -1128,17 +1505,24 @@ class DockerReplayExecutor:
         cwd: Path,
         source_workspace: Path,
         timeout_seconds: float | None,
+        environment_overrides: Mapping[str, str | None] | None = None,
     ) -> ReplayExecutionResult:
         del source_workspace
         image = self.image_ref.strip()
         if not image:
             raise PermissionError("docker_image_missing")
         sandbox_artifacts = cwd.parent / f".{cwd.name}.docker_replay"
+        overrides = dict(environment_overrides or {})
+        applied_environment = {
+            "CI": "1",
+            **{key: value for key, value in overrides.items() if value is not None},
+        }
+        absent_keys = [key for key, value in overrides.items() if value is None]
         spec = SandboxSpec(
             backend="docker",
             image_ref=image,
             network_mode="none",
-            env_overrides={"CI": "1"},
+            env_overrides=applied_environment,
             docker_timeout_seconds=timeout_seconds,
         )
         instance = DockerSandbox(cwd, sandbox_artifacts, spec).start()
@@ -1170,7 +1554,15 @@ class DockerReplayExecutor:
             image_id = None
         try:
             completed = subprocess.run(
-                [*instance.command_prefix, *argv],
+                [
+                    *instance.command_prefix,
+                    *(
+                        ["env", *[part for key in absent_keys for part in ("-u", key)]]
+                        if absent_keys
+                        else []
+                    ),
+                    *argv,
+                ],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",
@@ -1207,6 +1599,10 @@ class DockerReplayExecutor:
                 "container_name": instance.container_name,
                 "cleanup_attempted": True,
                 "cleanup_confirmed": cleanup_confirmed,
+                "environment_attestation": environment_attestation(
+                    applied_environment,
+                    absent_keys=absent_keys,
+                ),
             },
         )
 
@@ -1406,15 +1802,23 @@ def _clean_replay_receipts(
         command = _text(experiment.get("command"))
         if experiment_id is None or command is None:
             continue
+        setup_error_count = len(errors)
+        environment_overrides = _replay_environment_overrides(
+            experiment,
+            experiment_id=experiment_id,
+            errors=errors,
+        )
+        if len(errors) != setup_error_count:
+            continue
         authorized = _authorized_replay_invocation(
             command=command,
             experiment=experiment,
             dossier=dossier,
             assignment=assignment,
-            workspace=baseline_workspace,
+            workspace=research_workspace,
         )
         if authorized is None:
-            errors.append(f"experiment_command_not_replay_allowlisted:{experiment_id}")
+            errors.append(f"experiment_command_not_authorized:{experiment_id}")
             continue
         replay_argv, command_authorization = authorized
         required_platform = _text(experiment.get("platform_requirement")) or "any"
@@ -1465,6 +1869,24 @@ def _clean_replay_receipts(
                 f"experiment_replay_overlay:{experiment_id}:{error}" for error in overlay_errors
             )
             continue
+        setup_error_count = len(errors)
+        disposable_state_paths = _declared_disposable_state_paths(
+            experiment,
+            workspace=acquired,
+            experiment_id=experiment_id,
+            errors=errors,
+        )
+        if len(errors) != setup_error_count:
+            continue
+        replay_setup_receipt = _replay_setup_receipt(
+            environment_overrides=environment_overrides,
+            disposable_state_paths=disposable_state_paths,
+        )
+        replay_inputs = _replay_inputs_receipt(
+            source_experiment_id=experiment_id,
+            environment_overrides=environment_overrides,
+            disposable_state_paths=disposable_state_paths,
+        )
         pre_replay_state = _canonical_workspace_state(acquired)
         try:
             completed = selected_executor.execute(
@@ -1472,6 +1894,7 @@ def _clean_replay_receipts(
                 cwd=acquired,
                 source_workspace=research_workspace,
                 timeout_seconds=timeout_seconds,
+                environment_overrides=environment_overrides,
             )
         except (OSError, subprocess.SubprocessError) as exc:
             errors.append(f"experiment_replay_failed:{experiment_id}:{type(exc).__name__}")
@@ -1481,12 +1904,31 @@ def _clean_replay_receipts(
             continue
         post_replay_state = _canonical_workspace_state(acquired)
         post_replay_mutations = pre_replay_state != post_replay_state
-        if post_replay_mutations:
+        undeclared_mutations, state_transition_receipts = (
+            _declared_state_transition_receipts(
+                before=pre_replay_state,
+                after=post_replay_state,
+                declared=disposable_state_paths,
+            )
+        )
+        index_or_head_changed = any(
+            pre_replay_state.get(field) != post_replay_state.get(field)
+            for field in (
+                "head",
+                "git_index_stage_sha256",
+                "git_index_flags_sha256",
+            )
+        )
+        if undeclared_mutations or index_or_head_changed:
             errors.append(f"experiment_replay_workspace_mutated:{experiment_id}")
         metadata_errors = _execution_metadata_errors(
             completed.execution_metadata,
             isolation=isolation,
         )
+        if environment_overrides and replay_environment_attestation(
+            {"execution_metadata": completed.execution_metadata}
+        ) is None:
+            metadata_errors.append("replay_environment_attestation_unverifiable")
         errors.extend(
             f"experiment_replay_isolation:{experiment_id}:{error}" for error in metadata_errors
         )
@@ -1555,6 +1997,10 @@ def _clean_replay_receipts(
             "pre_replay_state_sha256": _canonical_json_sha256(pre_replay_state),
             "post_replay_state_sha256": _canonical_json_sha256(post_replay_state),
             "post_replay_mutations": post_replay_mutations,
+            "undeclared_post_replay_mutations": undeclared_mutations,
+            "declared_state_transitions": state_transition_receipts,
+            "replay_setup_receipt": replay_setup_receipt,
+            "replay_inputs": replay_inputs,
             "overlay_manifest_sha256": _canonical_json_sha256(overlay_manifest),
             "execution_isolation": isolation,
             "execution_metadata": completed.execution_metadata,
@@ -1563,6 +2009,7 @@ def _clean_replay_receipts(
             "stdout_sha256": _sha256_path(stdout_path),
             "stderr_sha256": _sha256_path(stderr_path),
             "observable_assertion": assertion,
+            "verification_boundary": experiment.get("verification_boundary"),
             "assertion_passed": assertion_passed,
             "artifact_refs": list(experiment["artifact_refs"]),
         }
@@ -2052,7 +2499,6 @@ def _git_blob_sha(workspace: Path, relative_path: str) -> str | None:
             encoding="utf-8",
             errors="replace",
             check=False,
-            timeout=30,
         )
     except (OSError, subprocess.SubprocessError):
         return None
@@ -2870,6 +3316,8 @@ def _verified_declared_mechanism_link(
         visitor.visit(node)
         aliases = {**module_aliases, **visitor.aliases}
         targets = _mechanism_call_targets(symbol=callee["symbol"], source_path=callee["path"])
+        if caller["path"] == callee["path"] and symbol_node(tree, callee["symbol"]) is not None:
+            targets.add(callee["symbol"].replace(":", ".").replace("#", ".").rsplit(".", 1)[-1])
         matched_call: ast.Call | None = None
         matched_expression: str | None = None
         for call in visitor.calls:
@@ -2911,22 +3359,30 @@ def _experiment_consumer_identity(
     replay: dict[str, Any],
     mechanism_link: dict[str, Any] | None,
     harness_path: str | None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     """Derive breadth identity from a consumer/entrypoint, never command count."""
 
+    # A retained research harness is the consumer that was actually executed.  A
+    # runner-verified observation that the harness reaches production code is
+    # useful causal evidence, but it does not turn the harness into a production
+    # entrypoint.  Keeping those identities distinct prevents breadth claims from
+    # being manufactured by adding more temporary probes.
+    if harness_path is not None:
+        return {"kind": "research_harness", "entrypoint": harness_path}
     if isinstance(mechanism_link, dict):
         entrypoint = _text(mechanism_link.get("entrypoint"))
         if entrypoint is not None:
-            return {
-                "kind": (
-                    "config_consumer"
-                    if entrypoint.startswith("config:")
-                    else "production_entrypoint"
-                ),
-                "entrypoint": entrypoint,
-            }
-    if harness_path is not None:
-        return {"kind": "research_harness", "entrypoint": harness_path}
+            if entrypoint.replace("\\", "/").startswith(".usertest_research/"):
+                return {"kind": "research_harness", "entrypoint": entrypoint}
+            return content_bound_payload(
+                {
+                    "kind": "runner_observed_entrypoint",
+                    "entrypoint": entrypoint,
+                    "attestation_basis": "runner_mechanism_link",
+                    "runner_attested": True,
+                },
+                hash_field="consumer_identity_sha256",
+            )
     selection = _exact_pytest_selector(replay.get("executed_argv", []))
     if selection is not None:
         test_path, selector_parts = selection
@@ -3353,6 +3809,106 @@ def _structural_controlled_difference(
     }
 
 
+def _declared_mechanism_subset(
+    value: Any,
+    *,
+    hypothesis_symbols: list[str],
+) -> list[str] | None:
+    """Normalize one non-empty declared subset in hypothesis-path order."""
+
+    if not isinstance(value, list):
+        return None
+    declared = [symbol.strip() for symbol in value if isinstance(symbol, str) and symbol.strip()]
+    if not declared or len(declared) != len(value) or len(set(declared)) != len(declared):
+        return None
+    hypothesis_set = set(hypothesis_symbols)
+    if not set(declared).issubset(hypothesis_set):
+        return None
+    return [symbol for symbol in hypothesis_symbols if symbol in set(declared)]
+
+
+def _selection_verified_symbols(
+    selection: dict[str, Any] | None,
+    *,
+    requested_symbols: list[str],
+) -> list[str]:
+    if not isinstance(selection, dict):
+        return []
+    touched = {
+        str(touch.get("symbol"))
+        for touch in selection.get("mechanism_touches", [])
+        if isinstance(touch, dict) and _text(touch.get("symbol")) is not None
+    }
+    return [symbol for symbol in requested_symbols if symbol in touched]
+
+
+def _non_pytest_mechanism_proof_modes(
+    *,
+    experiment: dict[str, Any],
+    replay: dict[str, Any],
+    mechanism_symbols: list[str],
+    symbol_paths: dict[str, str],
+) -> set[str]:
+    """Return independently observed proof modes covering every requested symbol.
+
+    This helper is used only after the normal clean-replay and assertion gates.  It
+    prevents an argv-level intervention from being promoted when the two commands
+    merely switch execution modes while model prose claims they share a mechanism.
+    """
+
+    required = set(mechanism_symbols)
+    if not required:
+        return set()
+    modes: set[str] = set()
+    _harness_path, touched, _harness_link = _harness_mechanism_touches(
+        replay=replay,
+        mechanism_symbols=mechanism_symbols,
+        symbol_paths=symbol_paths,
+        observable_assertion=(
+            experiment.get("observable_assertion")
+            if isinstance(experiment.get("observable_assertion"), dict)
+            else {}
+        ),
+    )
+    if required.issubset(set(touched)):
+        modes.add("retained_harness_observable_dataflow")
+
+    workspace_raw = _text(replay.get("workspace_dir"))
+    declared_link = _verified_declared_mechanism_link(
+        experiment=experiment,
+        mechanism_symbols=mechanism_symbols,
+        symbol_paths=symbol_paths,
+        workspace=Path(workspace_raw) if workspace_raw is not None else None,
+    )
+    if isinstance(declared_link, dict):
+        modes.add("declared_python_call_chain")
+
+    traced: set[str] = set()
+    for symbol in mechanism_symbols:
+        relative_path = symbol_paths.get(symbol)
+        if relative_path is None:
+            continue
+        for stream in ("stderr", "stdout"):
+            output_path_raw = _text(replay.get(f"{stream}_path"))
+            output_path = Path(output_path_raw) if output_path_raw is not None else None
+            if output_path is None or not output_path.is_file():
+                continue
+            output = output_path.read_text(encoding="utf-8", errors="replace")
+            if (
+                _causal_trace_match(
+                    output=output,
+                    relative_path=relative_path,
+                    symbol=symbol,
+                )
+                is not None
+            ):
+                traced.add(symbol)
+                break
+    if required.issubset(traced):
+        modes.add("runner_exception_symbol_trace")
+    return modes
+
+
 def _replay_observed_value(
     replay: dict[str, Any],
     *,
@@ -3626,6 +4182,10 @@ def _structured_argv_intervention_difference(
         or not challenge_path.is_file()
         or baseline_path.is_symlink()
         or challenge_path.is_symlink()
+        or baseline_path.suffix.casefold()
+        not in {".json", ".toml", ".yaml", ".yml", ".txt", ".csv"}
+        or challenge_path.suffix.casefold()
+        not in {".json", ".toml", ".yaml", ".yml", ".txt", ".csv"}
     ):
         return None
     baseline_hash = _sha256_path(baseline_path)
@@ -3645,6 +4205,164 @@ def _structured_argv_intervention_difference(
                 if baseline_hash == challenge_hash
                 else "different_content"
             ),
+        },
+    }
+
+
+def _retained_harness_scalar_argv_difference(
+    *,
+    baseline_replay: dict[str, Any],
+    challenge_replay: dict[str, Any],
+    mechanism_symbols: list[str],
+    symbol_paths: dict[str, str],
+) -> dict[str, Any] | None:
+    """Prove one changed scalar argv value flows into the retained mechanism call."""
+
+    baseline_argv = baseline_replay.get("executed_argv")
+    challenge_argv = challenge_replay.get("executed_argv")
+    baseline_harness = _research_harness_relative_path(baseline_argv)
+    challenge_harness = _research_harness_relative_path(challenge_argv)
+    if (
+        baseline_harness is None
+        or challenge_harness != baseline_harness
+        or not isinstance(baseline_argv, list)
+        or not isinstance(challenge_argv, list)
+        or len(baseline_argv) != len(challenge_argv)
+    ):
+        return None
+    changed = [
+        index
+        for index, (baseline, challenge) in enumerate(
+            zip(baseline_argv, challenge_argv, strict=True)
+        )
+        if baseline != challenge
+    ]
+    if len(changed) != 1:
+        return None
+    changed_index = changed[0]
+    normalized_harness = baseline_harness.replace("\\", "/")
+    script_indices = [
+        index
+        for index, token in enumerate(baseline_argv)
+        if isinstance(token, str) and token.replace("\\", "/") == normalized_harness
+    ]
+    if len(script_indices) != 1 or changed_index <= script_indices[0]:
+        return None
+    runtime_argv_index = changed_index - script_indices[0]
+    baseline_value = baseline_argv[changed_index]
+    challenge_value = challenge_argv[changed_index]
+    if (
+        not isinstance(baseline_value, str)
+        or not isinstance(challenge_value, str)
+        or not baseline_value
+        or not challenge_value
+        or len(baseline_value) > 256
+        or len(challenge_value) > 256
+        or any(character in baseline_value + challenge_value for character in ("/", "\\", "\n"))
+    ):
+        return None
+    workspace_raw = _text(baseline_replay.get("workspace_dir"))
+    if workspace_raw is None or workspace_raw != _text(challenge_replay.get("workspace_dir")):
+        return None
+    workspace = Path(workspace_raw).resolve()
+    harness_path = (workspace / baseline_harness).resolve()
+    if (
+        not _within(harness_path, workspace)
+        or not harness_path.is_file()
+        or harness_path.is_symlink()
+    ):
+        return None
+    try:
+        content = harness_path.read_text(encoding="utf-8", errors="strict")
+        tree = ast.parse(content)
+    except (OSError, UnicodeDecodeError, SyntaxError):
+        return None
+    aliases = _module_import_aliases(tree)
+
+    def reads_runtime_argv(node: ast.AST, derived_names: set[str]) -> bool:
+        for candidate in ast.walk(node):
+            if isinstance(candidate, ast.Subscript):
+                value = _dotted_expression(candidate.value)
+                index_node = candidate.slice
+                if (
+                    value == "sys.argv"
+                    and isinstance(index_node, ast.Constant)
+                    and index_node.value == runtime_argv_index
+                ):
+                    return True
+            if (
+                isinstance(candidate, ast.Name)
+                and isinstance(candidate.ctx, ast.Load)
+                and candidate.id in derived_names
+            ):
+                return True
+        return False
+
+    derived_names: set[str] = set()
+    assignments = [node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))]
+    while True:
+        added: set[str] = set()
+        for assignment in assignments:
+            value = assignment.value
+            if value is None or not reads_runtime_argv(value, derived_names):
+                continue
+            targets = (
+                assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+            )
+            added.update(
+                target.id
+                for target in targets
+                for target in ast.walk(target)
+                if isinstance(target, ast.Name) and isinstance(target.ctx, ast.Store)
+            )
+        if added.issubset(derived_names):
+            break
+        derived_names.update(added)
+
+    bindings: list[dict[str, Any]] = []
+    for symbol in mechanism_symbols:
+        source_path = symbol_paths.get(symbol)
+        if source_path is None:
+            return None
+        targets = _mechanism_call_targets(symbol=symbol, source_path=source_path)
+        symbol_bindings: list[dict[str, Any]] = []
+        for call in (node for node in ast.walk(tree) if isinstance(node, ast.Call)):
+            expression = _dotted_expression(call.func)
+            resolved = _resolved_call_expression(expression, aliases) if expression else None
+            if expression not in targets and resolved not in targets:
+                continue
+            values = [*call.args, *(keyword.value for keyword in call.keywords)]
+            for argument_index, value in enumerate(values):
+                if reads_runtime_argv(value, derived_names):
+                    symbol_bindings.append(
+                        {
+                            "symbol": symbol,
+                            "line": call.lineno,
+                            "argument_index": argument_index,
+                            "argument_ast_sha256": sha256(
+                                ast.dump(
+                                    value,
+                                    annotate_fields=True,
+                                    include_attributes=False,
+                                ).encode("utf-8")
+                            ).hexdigest(),
+                        }
+                    )
+        if not symbol_bindings:
+            return None
+        bindings.extend(symbol_bindings)
+    return {
+        "verification_method": "retained_harness_scalar_argv_delta_v1",
+        "difference_count": 1,
+        "difference": {
+            "slot": f"argv:{changed_index}",
+            "difference_kind": "scalar_argument_changed",
+            "runtime_argv_index": runtime_argv_index,
+            "baseline_value_sha256": _canonical_json_sha256(baseline_value),
+            "challenge_value_sha256": _canonical_json_sha256(challenge_value),
+            "harness_path": baseline_harness,
+            "harness_sha256": _sha256_path(harness_path),
+            "mechanism_argument_bindings": bindings,
         },
     }
 
@@ -3685,7 +4403,11 @@ def _falsification_intervention_receipts(
         hypothesis_id = _text(hypothesis.get("hypothesis_id"))
         mechanism_raw = hypothesis.get("mechanism_symbols")
         mechanism_symbols = (
-            [symbol for symbol in mechanism_raw if isinstance(symbol, str) and symbol.strip()]
+            [
+                symbol.strip()
+                for symbol in mechanism_raw
+                if isinstance(symbol, str) and symbol.strip()
+            ]
             if isinstance(mechanism_raw, list)
             else []
         )
@@ -3718,10 +4440,14 @@ def _falsification_intervention_receipts(
                 continue
             relationship_raw = challenge.get("control_relationship")
             relationship = relationship_raw if isinstance(relationship_raw, dict) else {}
+            relationship_symbols = _declared_mechanism_subset(
+                relationship.get("mechanism_symbols"),
+                hypothesis_symbols=mechanism_symbols,
+            )
             if (
                 challenge.get("scenario_kind") != "control"
                 or relationship.get("supports_experiment_id") != baseline_id
-                or relationship.get("mechanism_symbols") != mechanism_symbols
+                or relationship_symbols is None
             ):
                 errors.append(f"falsification_intervention_relationship_unbound:{label}")
                 continue
@@ -3731,7 +4457,7 @@ def _falsification_intervention_receipts(
                 experiment_id=baseline_id,
                 experiment=baseline,
                 replay=baseline_replay,
-                mechanism_symbols=mechanism_symbols,
+                mechanism_symbols=relationship_symbols,
                 symbol_paths=symbol_paths,
                 planning_workspace=planning_workspace,
                 errors=selection_errors,
@@ -3741,7 +4467,7 @@ def _falsification_intervention_receipts(
                 experiment_id=challenge_id,
                 experiment=challenge,
                 replay=challenge_replay,
-                mechanism_symbols=mechanism_symbols,
+                mechanism_symbols=relationship_symbols,
                 symbol_paths=symbol_paths,
                 planning_workspace=planning_workspace,
                 errors=selection_errors,
@@ -3750,7 +4476,7 @@ def _falsification_intervention_receipts(
                 _structural_controlled_difference(
                     hypothesis_id=hypothesis_id,
                     control_id=challenge_id,
-                    mechanism_symbols=mechanism_symbols,
+                    mechanism_symbols=relationship_symbols,
                     support_selection=baseline_selection,
                     control_selection=challenge_selection,
                     errors=selection_errors,
@@ -3759,6 +4485,7 @@ def _falsification_intervention_receipts(
                 else None
             )
             verification_method = "pytest_ast_falsification_intervention_v1"
+            mechanism_verification_mode: str | None = None
             baseline_selection_id = (
                 baseline_selection.get("selection_id")
                 if isinstance(baseline_selection, dict)
@@ -3775,14 +4502,61 @@ def _falsification_intervention_receipts(
                     challenge_replay=challenge_replay,
                     planning_workspace=planning_workspace,
                 )
+                if structural is None:
+                    structural = _retained_harness_scalar_argv_difference(
+                        baseline_replay=baseline_replay,
+                        challenge_replay=challenge_replay,
+                        mechanism_symbols=relationship_symbols,
+                        symbol_paths=symbol_paths,
+                    )
                 if structural is not None:
-                    verification_method = "runner_argv_falsification_intervention_v1"
-                    baseline_selection_id = "argv_selection:" + _canonical_json_sha256(
-                        baseline_replay.get("executed_argv")
+                    baseline_modes = _non_pytest_mechanism_proof_modes(
+                        experiment=baseline,
+                        replay=baseline_replay,
+                        mechanism_symbols=relationship_symbols,
+                        symbol_paths=symbol_paths,
                     )
-                    challenge_selection_id = "argv_selection:" + _canonical_json_sha256(
-                        challenge_replay.get("executed_argv")
+                    challenge_modes = _non_pytest_mechanism_proof_modes(
+                        experiment=challenge,
+                        replay=challenge_replay,
+                        mechanism_symbols=relationship_symbols,
+                        symbol_paths=symbol_paths,
                     )
+                    shared_modes = sorted(baseline_modes & challenge_modes)
+                    if not shared_modes:
+                        reason = (
+                            "mode_switch"
+                            if baseline_modes and challenge_modes
+                            else "shared_mechanism_missing"
+                        )
+                        errors.append(f"falsification_intervention_{reason}:{label}")
+                        structural = None
+                    else:
+                        verification_method = "runner_argv_falsification_intervention_v2"
+                        mechanism_verification_mode = shared_modes[0]
+                        baseline_selection_id = "argv_selection:" + _canonical_json_sha256(
+                            baseline_replay.get("executed_argv")
+                        )
+                        challenge_selection_id = "argv_selection:" + _canonical_json_sha256(
+                            challenge_replay.get("executed_argv")
+                        )
+            else:
+                baseline_verified = _selection_verified_symbols(
+                    baseline_selection,
+                    requested_symbols=relationship_symbols,
+                )
+                challenge_verified = _selection_verified_symbols(
+                    challenge_selection,
+                    requested_symbols=relationship_symbols,
+                )
+                if (
+                    baseline_verified != relationship_symbols
+                    or challenge_verified != relationship_symbols
+                ):
+                    errors.append(f"falsification_intervention_shared_mechanism_missing:{label}")
+                    structural = None
+                else:
+                    mechanism_verification_mode = "pytest_ast_selection"
             disproof = attempt.get("disproof_condition")
             challenge_assertion = challenge.get("observable_assertion")
             assertions_verified = (
@@ -3824,7 +4598,11 @@ def _falsification_intervention_receipts(
                 "attempt_id": attempt_id,
                 "baseline_experiment_id": baseline_id,
                 "challenge_experiment_id": challenge_id,
-                "mechanism_symbols": mechanism_symbols,
+                "mechanism_symbols": relationship_symbols,
+                "baseline_verified_mechanism_symbols": relationship_symbols,
+                "challenge_verified_mechanism_symbols": relationship_symbols,
+                "shared_verified_mechanism_symbols": relationship_symbols,
+                "mechanism_verification_mode": mechanism_verification_mode,
                 "baseline_selection_id": baseline_selection_id,
                 "challenge_selection_id": challenge_selection_id,
                 "controlled_input_difference": structural,
@@ -3833,7 +4611,7 @@ def _falsification_intervention_receipts(
                     {
                         "controlled_variable": relationship.get("controlled_variable"),
                         "expected_difference": relationship.get("expected_difference"),
-                        "mechanism_symbols": relationship.get("mechanism_symbols"),
+                        "mechanism_symbols": relationship_symbols,
                     }
                 ),
             }
@@ -3877,7 +4655,7 @@ def _causal_control_receipts(
         hypothesis_id = _text(hypothesis.get("hypothesis_id"))
         symbols_raw = hypothesis.get("mechanism_symbols")
         mechanism_symbols = (
-            [symbol for symbol in symbols_raw if isinstance(symbol, str)]
+            [symbol.strip() for symbol in symbols_raw if isinstance(symbol, str) and symbol.strip()]
             if isinstance(symbols_raw, list)
             else []
         )
@@ -3897,6 +4675,15 @@ def _causal_control_receipts(
                 continue
             relationship_raw = control.get("control_relationship")
             relationship = relationship_raw if isinstance(relationship_raw, dict) else {}
+            relationship_symbols = _declared_mechanism_subset(
+                relationship.get("mechanism_symbols"),
+                hypothesis_symbols=mechanism_symbols,
+            )
+            if relationship_symbols is None:
+                errors.append(
+                    f"causal_control_mechanism_subset_invalid:{hypothesis_id}:{control_id}"
+                )
+                continue
             support_id = _text(relationship.get("supports_experiment_id"))
             support = experiments.get(support_id or "")
             if support_id is None or not isinstance(support, dict):
@@ -3918,7 +4705,7 @@ def _causal_control_receipts(
                     experiment_id=experiment_id,
                     experiment=experiment,
                     replay=replay,
-                    mechanism_symbols=mechanism_symbols,
+                    mechanism_symbols=relationship_symbols,
                     symbol_paths=symbol_paths,
                     planning_workspace=planning_workspace,
                     errors=errors,
@@ -3953,10 +4740,10 @@ def _causal_control_receipts(
             }
             shared_symbols = [
                 symbol
-                for symbol in mechanism_symbols
+                for symbol in relationship_symbols
                 if symbol in support_symbols and symbol in control_symbols
             ]
-            if shared_symbols != mechanism_symbols:
+            if shared_symbols != relationship_symbols:
                 errors.append(
                     f"causal_control_mechanism_coverage_missing:{hypothesis_id}:{control_id}"
                 )
@@ -3964,7 +4751,7 @@ def _causal_control_receipts(
             structural_difference = _structural_controlled_difference(
                 hypothesis_id=hypothesis_id,
                 control_id=control_id,
-                mechanism_symbols=mechanism_symbols,
+                mechanism_symbols=shared_symbols,
                 support_selection=support_selection,
                 control_selection=control_selection,
                 errors=errors,
@@ -3989,7 +4776,7 @@ def _causal_control_receipts(
             relationship_projection = {
                 "controlled_variable": relationship.get("controlled_variable"),
                 "expected_difference": relationship.get("expected_difference"),
-                "mechanism_symbols": relationship.get("mechanism_symbols"),
+                "mechanism_symbols": relationship_symbols,
             }
             control_receipt: dict[str, Any] = {
                 "verification_method": "pytest_ast_controlled_difference_v2",
@@ -3998,8 +4785,11 @@ def _causal_control_receipts(
                 "control_experiment_id": control_id,
                 "support_selection_id": support_selection["selection_id"],
                 "control_selection_id": control_selection["selection_id"],
-                "mechanism_symbols": mechanism_symbols,
+                "mechanism_symbols": shared_symbols,
+                "support_verified_mechanism_symbols": shared_symbols,
+                "control_verified_mechanism_symbols": shared_symbols,
                 "shared_verified_mechanism_symbols": shared_symbols,
+                "mechanism_verification_mode": "pytest_ast_selection",
                 "same_test_file": support_selection.get("test_path")
                 == control_selection.get("test_path"),
                 "controlled_input_difference": structural_difference,
@@ -4031,8 +4821,7 @@ def _deterministic_mechanism_closure_receipts(
     *,
     clean_replays: dict[str, dict[str, Any]],
     symbol_receipts: list[dict[str, str]],
-    causal_links: list[dict[str, Any]],
-    planning_workspace: Path,
+    mechanism_evidence: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
     """Mint a non-counterfactual closure only for complete deterministic evidence.
 
@@ -4066,7 +4855,7 @@ def _deterministic_mechanism_closure_receipts(
     hypothesis_id = _text(primary.get("hypothesis_id"))
     mechanism_raw = primary.get("mechanism_symbols")
     mechanism_symbols = (
-        [symbol for symbol in mechanism_raw if isinstance(symbol, str) and symbol.strip()]
+        [symbol.strip() for symbol in mechanism_raw if isinstance(symbol, str) and symbol.strip()]
         if isinstance(mechanism_raw, list)
         else []
     )
@@ -4078,7 +4867,7 @@ def _deterministic_mechanism_closure_receipts(
     if (
         hypothesis_id is None
         or not mechanism_symbols
-        or any(symbol not in symbol_paths for symbol in mechanism_symbols)
+        or len(set(mechanism_symbols)) != len(mechanism_symbols)
     ):
         return []
     experiments_raw = dossier.get("experiments")
@@ -4087,14 +4876,35 @@ def _deterministic_mechanism_closure_receipts(
         for experiment in (experiments_raw if isinstance(experiments_raw, list) else [])
         if isinstance(experiment, dict) and _text(experiment.get("experiment_id")) is not None
     }
-    trace_by_symbol = {
-        str(link.get("symbol")): link
-        for link in causal_links
-        if isinstance(link, dict) and link.get("hypothesis_id") == hypothesis_id
+    candidate_evidence = [
+        value
+        for value in mechanism_evidence
+        if isinstance(value, dict)
+        and value.get("hypothesis_id") == hypothesis_id
+        and value.get("adversarial_effect") == "supports_selection"
+    ]
+    connected, covered_symbols, support_connectivity, disconnected = _rooted_support_connectivity(
+        candidate_evidence,
+        hypothesis_symbols=mechanism_symbols,
+    )
+    if disconnected or covered_symbols != set(mechanism_symbols) or not connected:
+        return []
+    support_ids = sorted(
+        {
+            experiment_id
+            for evidence in connected
+            for experiment_id in evidence.get("experiment_ids", [])
+            if isinstance(experiment_id, str)
+        }
+    )
+    declared_support_ids = {
+        value for value in primary.get("supporting_evidence", []) if isinstance(value, str)
     }
-    for support_id in primary.get("supporting_evidence", []):
-        if not isinstance(support_id, str):
-            continue
+    if not support_ids or not set(support_ids).issubset(declared_support_ids):
+        return []
+    observed_results: list[dict[str, Any]] = []
+    origin_atom_ids: set[str] = set()
+    for support_id in support_ids:
         experiment = experiments.get(support_id)
         replay = clean_replays.get(support_id)
         if (
@@ -4103,81 +4913,839 @@ def _deterministic_mechanism_closure_receipts(
             or experiment.get("outcome") != "supports"
             or replay.get("assertion_passed") is not True
         ):
-            continue
-        scenario_kind = str(experiment.get("scenario_kind") or "")
-        code_path: list[dict[str, Any]]
-        if scenario_kind == "static_trace":
-            static_raw = experiment.get("static_trace")
-            static = static_raw if isinstance(static_raw, dict) else {}
-            code_path_raw = static.get("code_path")
-            code_path = (
-                [dict(step) for step in code_path_raw if isinstance(step, dict)]
-                if isinstance(code_path_raw, list)
-                else []
-            )
-            if (
-                static.get("deterministic") is not True
-                or static.get("environment_dependencies") != []
-                or {(step.get("symbol"), step.get("path")) for step in code_path}
-                != {(symbol, symbol_paths[symbol]) for symbol in mechanism_symbols}
-            ):
-                continue
-            closure_basis = "deterministic_static_trace"
-        else:
-            declared = _verified_declared_mechanism_link(
-                experiment=experiment,
-                mechanism_symbols=mechanism_symbols,
-                symbol_paths=symbol_paths,
-                workspace=planning_workspace,
-            )
-            if isinstance(declared, dict):
-                code_path = [
-                    dict(step) for step in declared.get("code_path", []) if isinstance(step, dict)
-                ]
-            elif all(symbol in trace_by_symbol for symbol in mechanism_symbols):
-                code_path = [
-                    {
-                        "symbol": symbol,
-                        "path": symbol_paths[symbol],
-                        "trace_excerpt_sha256": trace_by_symbol[symbol].get("trace_excerpt_sha256"),
-                    }
-                    for symbol in mechanism_symbols
-                ]
-            else:
-                continue
-            if not all(
-                any(
-                    step.get("symbol") == symbol and step.get("path") == symbol_paths[symbol]
-                    for step in code_path
-                )
-                for symbol in mechanism_symbols
-            ):
-                continue
-            closure_basis = "complete_runner_dataflow"
-        receipt: dict[str, Any] = {
-            "verification_method": "runner_deterministic_mechanism_closure_v1",
-            "hypothesis_id": hypothesis_id,
-            "support_experiment_id": support_id,
-            "scenario_kind": scenario_kind,
-            "mechanism_symbols": mechanism_symbols,
-            "code_path": code_path,
-            "closure_basis": closure_basis,
-            "alternatives_disposed": [str(value.get("hypothesis_id")) for value in alternatives],
-            "origin_atom_ids": sorted(set(experiment.get("addresses_atom_ids", []))),
-            "observed_result": {
+            return []
+        origin_atom_ids.update(
+            value for value in experiment.get("addresses_atom_ids", []) if isinstance(value, str)
+        )
+        observed_results.append(
+            {
+                "experiment_id": support_id,
+                "scenario_kind": experiment.get("scenario_kind"),
                 "exit_code": replay.get("exit_code"),
                 "stdout_sha256": replay.get("stdout_sha256"),
                 "stderr_sha256": replay.get("stderr_sha256"),
                 "assertion": experiment.get("observable_assertion"),
-            },
-        }
-        receipt["closure_receipt_id"] = _content_addressed_receipt_id(
-            "deterministic_mechanism_closure",
-            receipt,
-            "closure_receipt_id",
+            }
         )
-        return [receipt]
-    return []
+    code_path = [
+        {"symbol": symbol, "path": symbol_paths[symbol]}
+        for symbol in mechanism_symbols
+        if symbol in symbol_paths
+    ]
+    if len(code_path) != len(mechanism_symbols):
+        return []
+    receipt: dict[str, Any] = {
+        "verification_method": "runner_deterministic_mechanism_closure_v2",
+        "hypothesis_id": hypothesis_id,
+        "support_experiment_ids": support_ids,
+        "mechanism_evidence_ids": sorted(
+            str(value["mechanism_evidence_id"]) for value in connected
+        ),
+        "causal_root_evidence_ids": sorted(
+            str(value["mechanism_evidence_id"])
+            for value in connected
+            if value.get("causal_root_bindings")
+        ),
+        "mechanism_symbols": mechanism_symbols,
+        "code_path": code_path,
+        "closure_basis": "rooted_connected_support_component",
+        "support_connectivity": support_connectivity,
+        "alternatives_disposed": [str(value.get("hypothesis_id")) for value in alternatives],
+        "origin_atom_ids": sorted(origin_atom_ids),
+        "observed_results": observed_results,
+    }
+    receipt["closure_receipt_id"] = _content_addressed_receipt_id(
+        "deterministic_mechanism_closure",
+        receipt,
+        "closure_receipt_id",
+    )
+    return [receipt]
+
+
+def _runner_observed_root_mechanism_symbol(
+    *,
+    mechanism_symbols: list[str],
+    mechanism_link: dict[str, Any] | None,
+) -> str | None:
+    """Select one runner-observed production symbol as the causal graph root."""
+
+    if not isinstance(mechanism_link, dict):
+        return None
+    verification_method = _text(mechanism_link.get("verification_method"))
+    if verification_method is None or not verification_method.startswith("runner_"):
+        return None
+    declared = set(mechanism_symbols)
+    entrypoint = _text(mechanism_link.get("entrypoint"))
+    if entrypoint in declared:
+        return entrypoint
+    if verification_method == "runner_python_call_chain_v1":
+        code_path_raw = mechanism_link.get("code_path")
+        code_path = code_path_raw if isinstance(code_path_raw, list) else []
+        path_symbols = [
+            str(item.get("symbol"))
+            for item in code_path
+            if isinstance(item, dict) and _text(item.get("symbol")) in declared
+        ]
+        if path_symbols:
+            return path_symbols[0]
+    sinks_raw = mechanism_link.get("symbol_sinks")
+    sink_symbols = sorted(
+        {
+            str(item.get("symbol"))
+            for item in (sinks_raw if isinstance(sinks_raw, list) else [])
+            if isinstance(item, dict) and _text(item.get("symbol")) in declared
+        }
+    )
+    return sink_symbols[0] if len(sink_symbols) == 1 else None
+
+
+def _derived_causal_root_bindings(
+    *,
+    experiment_ids: list[str],
+    origin_atom_ids: list[str],
+    origin_symptom_bindings: list[dict[str, Any]],
+    mechanism_symbols: list[str],
+    mechanism_link: dict[str, Any] | None,
+    executed_argv: list[str] | None,
+    command_authorization: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Derive roots only from runner-attested symptom or immutable-command facts."""
+
+    roots: list[dict[str, Any]] = []
+    experiment_set = set(experiment_ids)
+    origin_atom_set = set(origin_atom_ids)
+    link_method = (
+        _text(mechanism_link.get("verification_method"))
+        if isinstance(mechanism_link, dict)
+        else None
+    )
+    link_entrypoint = (
+        _text(mechanism_link.get("entrypoint")) if isinstance(mechanism_link, dict) else None
+    )
+    root_mechanism_symbol = _runner_observed_root_mechanism_symbol(
+        mechanism_symbols=mechanism_symbols,
+        mechanism_link=mechanism_link,
+    )
+    valid_symptom_bindings: list[dict[str, Any]] = []
+    symptom_match_kinds = {
+        "command_and_exit_code",
+        "command_and_atom_evidence_symptom",
+        "faithful_atom_evidence_symptom",
+        "command_and_artifact_symptom_text",
+        "faithful_artifact_symptom_text",
+        "explicit_symptom_field_binding",
+    }
+    for binding in origin_symptom_bindings:
+        experiment_id = _text(binding.get("experiment_id")) or _text(
+            binding.get("baseline_experiment_id")
+        )
+        atom_id = _text(binding.get("atom_id"))
+        match_kind = _text(binding.get("match_kind"))
+        atom_sha256 = _text(binding.get("origin_atom_sha256"))
+        predicate_binding = bool(
+            binding.get("runner_attested") is True
+            and binding.get("atom_field_binding_sha256")
+            == _canonical_json_sha256(
+                {
+                    key: value
+                    for key, value in binding.items()
+                    if key != "atom_field_binding_sha256"
+                }
+            )
+            and isinstance(binding.get("observation_predicate"), Mapping)
+            and not proof_predicate_contract_errors(binding.get("observation_predicate"))
+        )
+        if (
+            experiment_id not in experiment_set
+            or atom_id not in origin_atom_set
+            or (match_kind not in symptom_match_kinds and not predicate_binding)
+            or atom_sha256 is None
+            or re.fullmatch(r"[0-9a-f]{64}", atom_sha256) is None
+        ):
+            continue
+        valid_symptom_bindings.append(dict(binding))
+    valid_symptom_bindings.sort(
+        key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":"))
+    )
+    if (
+        valid_symptom_bindings
+        and link_method is not None
+        and link_method.startswith("runner_")
+        and link_entrypoint is not None
+        and root_mechanism_symbol is not None
+        and isinstance(mechanism_link, dict)
+    ):
+        roots.append(
+            {
+                "kind": "origin_symptom_observation",
+                "experiment_ids": sorted(experiment_set),
+                "origin_atom_ids": sorted(
+                    {
+                        str(binding["atom_id"])
+                        for binding in valid_symptom_bindings
+                        if isinstance(binding.get("atom_id"), str)
+                    }
+                ),
+                "origin_bindings_sha256": _canonical_json_sha256(valid_symptom_bindings),
+                "mechanism_link_sha256": _canonical_json_sha256(mechanism_link),
+                "root_mechanism_symbol": root_mechanism_symbol,
+            }
+        )
+
+    authorization = command_authorization if isinstance(command_authorization, dict) else {}
+    argv = executed_argv if isinstance(executed_argv, list) else []
+    origin_atom_id = _text(authorization.get("origin_atom_id"))
+    origin_atom_sha256 = _text(authorization.get("origin_atom_sha256"))
+    origin_command_sha256 = _text(authorization.get("origin_command_value_sha256"))
+    if (
+        argv
+        and all(isinstance(token, str) and token for token in argv)
+        and _command_authorization_attested(authorization, argv=argv)
+        and origin_atom_id in origin_atom_set
+        and authorization.get("origin_atom_field_path") == "$.command"
+        and origin_atom_sha256 is not None
+        and re.fullmatch(r"[0-9a-f]{64}", origin_atom_sha256) is not None
+        and origin_command_sha256 is not None
+        and re.fullmatch(r"[0-9a-f]{64}", origin_command_sha256) is not None
+        and root_mechanism_symbol is not None
+    ):
+        roots.append(
+            {
+                "kind": "immutable_source_command",
+                "experiment_ids": sorted(experiment_set),
+                "origin_atom_ids": [origin_atom_id],
+                "origin_atom_sha256": origin_atom_sha256,
+                "origin_atom_field_path": "$.command",
+                "origin_command_value_sha256": origin_command_sha256,
+                "executed_argv_sha256": authorization["executed_argv_sha256"],
+                "root_mechanism_symbol": root_mechanism_symbol,
+            }
+        )
+    return sorted(
+        roots,
+        key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+    )
+
+
+def _runner_verified_support_edges(
+    supports: list[dict[str, Any]],
+    *,
+    hypothesis_symbols: list[str],
+) -> list[dict[str, Any]]:
+    """Return only source/AST-attested call edges already minted by the runner."""
+
+    allowed_symbols = set(hypothesis_symbols)
+    edges: dict[str, dict[str, Any]] = {}
+    for support in supports:
+        source_evidence_id = _text(support.get("mechanism_evidence_id"))
+        if source_evidence_id is None:
+            continue
+        link_raw = support.get("mechanism_link")
+        link = link_raw if isinstance(link_raw, dict) else {}
+        supplied_link_hash = _text(link.get("mechanism_link_sha256"))
+        link_projection = {
+            key: value for key, value in link.items() if key != "mechanism_link_sha256"
+        }
+        if supplied_link_hash != _canonical_json_sha256(link_projection):
+            continue
+        code_path_raw = link.get("code_path")
+        code_path = code_path_raw if isinstance(code_path_raw, list) else []
+        verified_points = {
+            (str(point.get("symbol")), str(point.get("path")))
+            for point in code_path
+            if isinstance(point, dict)
+            and _text(point.get("symbol")) is not None
+            and _text(point.get("path")) is not None
+        }
+        directed_edges = link.get("verified_directed_edges")
+        for raw_edge in directed_edges if isinstance(directed_edges, list) else []:
+            if not isinstance(raw_edge, dict):
+                continue
+            caller_symbol = _text(raw_edge.get("from_locator"))
+            callee_symbol = _text(raw_edge.get("to_locator"))
+            evidence_sha256 = _text(raw_edge.get("evidence_sha256"))
+            if (
+                caller_symbol not in allowed_symbols
+                or callee_symbol not in allowed_symbols
+                or evidence_sha256 is None
+                or re.fullmatch(r"[0-9a-f]{64}", evidence_sha256) is None
+                or raw_edge.get("runner_attested") is not True
+            ):
+                continue
+            edge = {
+                "caller_symbol": caller_symbol,
+                "caller_path": caller_symbol,
+                "callee_symbol": callee_symbol,
+                "callee_path": callee_symbol,
+                "edge_kind": raw_edge.get("kind"),
+                "edge_evidence_sha256": evidence_sha256,
+                "mechanism_link_sha256": supplied_link_hash,
+                "source_mechanism_evidence_id": source_evidence_id,
+            }
+            edge["causal_edge_sha256"] = _canonical_json_sha256(edge)
+            edges[str(edge["causal_edge_sha256"])] = edge
+        raw_edges = link.get("verified_call_edges")
+        for raw_edge in raw_edges if isinstance(raw_edges, list) else []:
+            if not isinstance(raw_edge, dict):
+                continue
+            caller_symbol = _text(raw_edge.get("caller_symbol"))
+            caller_path = _text(raw_edge.get("caller_path"))
+            callee_symbol = _text(raw_edge.get("callee_symbol"))
+            callee_path = _text(raw_edge.get("callee_path"))
+            resolved_call = _text(raw_edge.get("resolved_call"))
+            call_ast_sha256 = _text(raw_edge.get("call_ast_sha256"))
+            line = raw_edge.get("line")
+            if (
+                caller_symbol not in allowed_symbols
+                or callee_symbol not in allowed_symbols
+                or caller_path is None
+                or callee_path is None
+                or (caller_symbol, caller_path) not in verified_points
+                or (callee_symbol, callee_path) not in verified_points
+                or resolved_call is None
+                or not isinstance(line, int)
+                or isinstance(line, bool)
+                or line < 1
+                or call_ast_sha256 is None
+                or re.fullmatch(r"[0-9a-f]{64}", call_ast_sha256) is None
+            ):
+                continue
+            edge = {
+                "caller_symbol": caller_symbol,
+                "caller_path": caller_path,
+                "callee_symbol": callee_symbol,
+                "callee_path": callee_path,
+                "line": line,
+                "resolved_call": resolved_call,
+                "call_ast_sha256": call_ast_sha256,
+                "mechanism_link_sha256": supplied_link_hash,
+                "source_mechanism_evidence_id": source_evidence_id,
+            }
+            edge["causal_edge_sha256"] = _canonical_json_sha256(edge)
+            edges[str(edge["causal_edge_sha256"])] = edge
+    return [edges[key] for key in sorted(edges)]
+
+
+def _rooted_support_connectivity(
+    supports: list[dict[str, Any]],
+    *,
+    hypothesis_symbols: list[str],
+) -> tuple[list[dict[str, Any]], set[str], list[dict[str, Any]], list[str]]:
+    """Connect support receipts to an immutable symptom/command evidence root.
+
+    Exactly one runner-observed mechanism symbol seeds a candidate component.
+    Shared symbols may attach redundant evidence, but they never expand coverage.
+    A receipt introduces every new symbol through its own forward AST-attested
+    caller-to-callee edges.  The root whose component covers the most hypothesis
+    symbols wins; ties prefer more connected receipts and then the lexically first
+    evidence ID.  This prevents model-authored pair probes from manufacturing a
+    causal chain while preserving aggregate evidence across real production edges.
+    """
+
+    records: dict[str, dict[str, Any]] = {}
+    record_symbols: dict[str, set[str]] = {}
+    for support in supports:
+        evidence_id = _text(support.get("mechanism_evidence_id"))
+        item_symbols = _declared_mechanism_subset(
+            support.get("mechanism_symbols"),
+            hypothesis_symbols=hypothesis_symbols,
+        )
+        if evidence_id is None or item_symbols is None or evidence_id in records:
+            continue
+        records[evidence_id] = support
+        record_symbols[evidence_id] = set(item_symbols)
+    edges = _runner_verified_support_edges(
+        list(records.values()),
+        hypothesis_symbols=hypothesis_symbols,
+    )
+    edges_by_source: dict[str, list[dict[str, Any]]] = {}
+    for edge in edges:
+        edges_by_source.setdefault(str(edge["source_mechanism_evidence_id"]), []).append(edge)
+
+    def receipt_forward_closure(
+        evidence_id: str,
+        *,
+        starting_symbols: set[str],
+        externally_reachable: set[str],
+    ) -> tuple[set[str], list[dict[str, Any]]]:
+        support_symbols = record_symbols[evidence_id]
+        closure = support_symbols & starting_symbols
+        used_edges: list[dict[str, Any]] = []
+        remaining_edges = list(edges_by_source.get(evidence_id, []))
+        while remaining_edges:
+            progressed = False
+            for edge in list(remaining_edges):
+                caller = str(edge["caller_symbol"])
+                callee = str(edge["callee_symbol"])
+                if callee not in support_symbols or callee in closure:
+                    remaining_edges.remove(edge)
+                    continue
+                if caller not in externally_reachable and caller not in closure:
+                    continue
+                closure.add(callee)
+                used_edges.append(edge)
+                remaining_edges.remove(edge)
+                progressed = True
+            if not progressed:
+                break
+        return closure, used_edges
+
+    root_ids = [
+        evidence_id
+        for evidence_id in sorted(records)
+        if isinstance(records[evidence_id].get("causal_root_bindings"), list)
+        and records[evidence_id]["causal_root_bindings"]
+    ]
+
+    def expand_from_root(
+        root_id: str,
+    ) -> tuple[set[str], set[str], dict[str, dict[str, Any]]]:
+        root = records[root_id]
+        roots = root["causal_root_bindings"]
+        root_symbols = {
+            str(binding.get("root_mechanism_symbol"))
+            for binding in roots
+            if isinstance(binding, dict)
+            and _text(binding.get("root_mechanism_symbol")) in record_symbols[root_id]
+        }
+        if len(root_symbols) != 1:
+            return set(), set(), {}
+        root_symbol = next(iter(root_symbols))
+        root_reachable, root_edges = receipt_forward_closure(
+            root_id,
+            starting_symbols={root_symbol},
+            externally_reachable=set(),
+        )
+        if root_reachable != record_symbols[root_id]:
+            return set(), set(), {}
+        connected = {root_id}
+        reachable_symbols = set(root_reachable)
+        trace_by_id: dict[str, dict[str, Any]] = {
+            root_id: {
+                "mechanism_evidence_id": root_id,
+                "experiment_ids": sorted(
+                    value for value in root.get("experiment_ids", []) if isinstance(value, str)
+                ),
+                "connection_kind": "causal_root",
+                "connected_from_mechanism_evidence_id": None,
+                "shared_verified_symbols": [],
+                "verified_causal_edge": None,
+                "verified_causal_edges": root_edges,
+                "causal_root_kinds": sorted(
+                    {
+                        str(binding.get("kind"))
+                        for binding in roots
+                        if isinstance(binding, dict) and _text(binding.get("kind")) is not None
+                    }
+                ),
+            }
+        }
+        remaining = set(records) - connected
+        while remaining:
+            progressed = False
+            for evidence_id in sorted(remaining):
+                support = records[evidence_id]
+                support_symbols = record_symbols[evidence_id]
+                shared_candidates: list[tuple[str, list[str]]] = []
+                for connected_id in sorted(connected):
+                    shared = sorted(support_symbols & record_symbols[connected_id])
+                    if shared:
+                        shared_candidates.append((connected_id, shared))
+                predecessor_id: str | None = None
+                shared_symbols: list[str] = []
+                causal_edge: dict[str, Any] | None = None
+                causal_edges: list[dict[str, Any]] = []
+                connection_kind: str | None = None
+                if support_symbols.issubset(reachable_symbols) and shared_candidates:
+                    predecessor_id, shared_symbols = shared_candidates[0]
+                    connection_kind = "shared_verified_symbol"
+                else:
+                    receipt_reachable, causal_edges = receipt_forward_closure(
+                        evidence_id,
+                        starting_symbols=support_symbols & reachable_symbols,
+                        externally_reachable=reachable_symbols,
+                    )
+                    if receipt_reachable == support_symbols and causal_edges:
+                        boundary_edge = next(
+                            (
+                                edge
+                                for edge in causal_edges
+                                if str(edge["caller_symbol"]) in reachable_symbols
+                            ),
+                            None,
+                        )
+                        caller = (
+                            str(boundary_edge["caller_symbol"])
+                            if isinstance(boundary_edge, dict)
+                            else None
+                        )
+                        predecessor_ids = [
+                            candidate_id
+                            for candidate_id in sorted(connected)
+                            if caller in record_symbols[candidate_id]
+                        ]
+                        if predecessor_ids and boundary_edge is not None:
+                            predecessor_id = predecessor_ids[0]
+                            causal_edge = boundary_edge
+                        connection_kind = "runner_verified_causal_edge"
+                if predecessor_id is None or connection_kind is None:
+                    continue
+                connected.add(evidence_id)
+                remaining.remove(evidence_id)
+                reachable_symbols.update(support_symbols)
+                trace_by_id[evidence_id] = {
+                    "mechanism_evidence_id": evidence_id,
+                    "experiment_ids": sorted(
+                        value
+                        for value in support.get("experiment_ids", [])
+                        if isinstance(value, str)
+                    ),
+                    "connection_kind": connection_kind,
+                    "connected_from_mechanism_evidence_id": predecessor_id,
+                    "shared_verified_symbols": shared_symbols,
+                    "verified_causal_edge": causal_edge,
+                    "verified_causal_edges": causal_edges,
+                    "causal_root_kinds": [],
+                }
+                progressed = True
+            if not progressed:
+                break
+        return connected, reachable_symbols, trace_by_id
+
+    best_connected: set[str] = set()
+    best_symbols: set[str] = set()
+    best_trace: dict[str, dict[str, Any]] = {}
+    best_score = (-1, -1)
+    for root_id in root_ids:
+        connected, reachable_symbols, trace = expand_from_root(root_id)
+        score = (len(reachable_symbols), len(connected))
+        if score > best_score:
+            best_connected = connected
+            best_symbols = reachable_symbols
+            best_trace = trace
+            best_score = score
+
+    connected_supports = [records[evidence_id] for evidence_id in sorted(best_connected)]
+    support_connectivity = [best_trace[evidence_id] for evidence_id in sorted(best_trace)]
+    disconnected = sorted(set(records) - best_connected)
+    return connected_supports, best_symbols, support_connectivity, disconnected
+
+
+def _adapter_executed_consumer_receipt(
+    proof: Mapping[str, Any],
+    *,
+    clean_replays: Mapping[str, Mapping[str, Any]],
+    implementation_touchpoints: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Bind one adapter proof to an executed repository consumer and change surface.
+
+    Intervention values are intentionally excluded from the consumer identity.  Two
+    observations of the same tracked entrypoint/change surface therefore collapse to
+    one breadth key, while independently executed entrypoints remain distinct even
+    when they consume the same causal target.
+    """
+
+    observations = proof.get("observations")
+    experiment_ids = [
+        _text(observation.get("experiment_id"))
+        for observation in (
+            observations.get("baseline"),
+            observations.get("challenge"),
+        )
+        if isinstance(observations, Mapping) and isinstance(observation, Mapping)
+    ]
+    if len(experiment_ids) != 2 or any(experiment_id is None for experiment_id in experiment_ids):
+        return None
+
+    authorization_identity: dict[str, Any] | None = None
+    invocations: list[dict[str, Any]] = []
+    for experiment_id in experiment_ids:
+        replay = clean_replays.get(str(experiment_id))
+        argv = replay.get("executed_argv") if isinstance(replay, Mapping) else None
+        authorization = (
+            replay.get("command_authorization") if isinstance(replay, Mapping) else None
+        )
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or any(not isinstance(argument, str) or not argument for argument in argv)
+            or not isinstance(authorization, Mapping)
+            or command_authorization_errors(authorization, argv=argv)
+            or authorization.get("authorization_kind") == "attested_research_harness"
+        ):
+            return None
+        current_identity = command_authorization_identity(authorization)
+        entrypoint_path = _text(authorization.get("entrypoint_path"))
+        if (
+            not isinstance(current_identity, dict)
+            or (
+                entrypoint_path is not None
+                and entrypoint_path.replace("\\", "/").startswith(".usertest_research/")
+            )
+        ):
+            return None
+        if authorization_identity is None:
+            authorization_identity = current_identity
+        elif current_identity != authorization_identity:
+            return None
+        invocations.append(
+            {
+                "experiment_id": experiment_id,
+                "executed_argv_sha256": authorization.get("executed_argv_sha256"),
+                "command_authorization_sha256": authorization.get("authorization_sha256"),
+            }
+        )
+
+    change_surfaces = sorted(
+        [
+            {
+                "path": str(touchpoint.get("path")).replace("\\", "/"),
+                "symbols": sorted(
+                    str(symbol)
+                    for symbol in (
+                        touchpoint.get("symbols")
+                        if isinstance(touchpoint.get("symbols"), list)
+                        else []
+                    )
+                ),
+                "inspected_content_sha256": touchpoint.get("inspected_content_sha256"),
+            }
+            for touchpoint in implementation_touchpoints
+            if isinstance(touchpoint, Mapping)
+            and _text(touchpoint.get("touchpoint_id")) is not None
+            and _text(touchpoint.get("path")) is not None
+            and touchpoint.get("runner_attested") is True
+        ],
+        key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+    )
+    if authorization_identity is None or not change_surfaces:
+        return None
+    entrypoint = _text(authorization_identity.get("entrypoint_path")) or (
+        "command_authorization:" + _canonical_json_sha256(authorization_identity)
+    )
+    consumer_identity = content_bound_payload(
+        {
+            "kind": "runner_observed_repository_consumer",
+            "entrypoint": entrypoint,
+            "command_authorization_identity": authorization_identity,
+            "change_surfaces": change_surfaces,
+            "attestation_basis": "executed_entrypoint_and_inspected_change_surface",
+            "runner_attested": True,
+        },
+        hash_field="consumer_identity_sha256",
+    )
+    intervention = proof.get("intervention")
+    causal_target = (
+        _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
+    )
+    return content_bound_payload(
+        {
+            "verification_method": "runner_adapter_consumer_binding_v1",
+            "consumer_identity": consumer_identity,
+            "invocations": sorted(invocations, key=lambda value: str(value["experiment_id"])),
+            "implementation_touchpoint_ids": sorted(
+                str(touchpoint["touchpoint_id"])
+                for touchpoint in implementation_touchpoints
+                if isinstance(touchpoint, Mapping)
+                and _text(touchpoint.get("touchpoint_id")) is not None
+            ),
+            "causal_target": causal_target,
+            "runner_attested": True,
+        },
+        hash_field="executed_consumer_sha256",
+    )
+
+
+def _adapter_mechanism_evidence_receipt(
+    proof: Mapping[str, Any],
+    *,
+    hypothesis_symbols: list[str],
+    atom_bindings: Sequence[Mapping[str, Any]],
+    clean_replays: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    graph = proof.get("mechanism_graph")
+    nodes_raw = graph.get("nodes") if isinstance(graph, Mapping) else None
+    edges_raw = graph.get("edges") if isinstance(graph, Mapping) else None
+    root_node_id = graph.get("root_node_id") if isinstance(graph, Mapping) else None
+    outcome_node_id = graph.get("outcome_node_id") if isinstance(graph, Mapping) else None
+    mechanism_nodes = [
+        dict(node)
+        for node in (nodes_raw if isinstance(nodes_raw, list) else [])
+        if isinstance(node, Mapping)
+        and node.get("node_id") not in {root_node_id, outcome_node_id}
+        and _text(node.get("locator")) is not None
+    ]
+    locators = [str(node["locator"]) for node in mechanism_nodes]
+    if not locators or set(locators) != set(hypothesis_symbols):
+        return None
+    locator_by_node = {
+        str(node["node_id"]): str(node["locator"])
+        for node in mechanism_nodes
+        if _text(node.get("node_id")) is not None
+    }
+    directed_edges = [
+        {
+            "from_locator": locator_by_node[str(edge["from_node_id"])],
+            "to_locator": locator_by_node[str(edge["to_node_id"])],
+            "kind": edge.get("kind"),
+            "runner_attested": edge.get("runner_attested"),
+            "evidence_sha256": edge.get("evidence_sha256"),
+        }
+        for edge in (edges_raw if isinstance(edges_raw, list) else [])
+        if isinstance(edge, Mapping)
+        and str(edge.get("from_node_id")) in locator_by_node
+        and str(edge.get("to_node_id")) in locator_by_node
+    ]
+    link: dict[str, Any] = {
+        "verification_method": "runner_causal_proof_adapter_v1",
+        "adapter_id": proof.get("adapter_id"),
+        "adapter_version": proof.get("adapter_version"),
+        "proof_receipt_id": proof.get("proof_receipt_id"),
+        "intervention_id": proof.get("intervention_id"),
+        "entrypoint": locators[0],
+        "code_path": [
+            {
+                "symbol": str(node["locator"]),
+                "path": str(node["locator"]),
+                "node_id": node.get("node_id"),
+                "node_kind": node.get("kind"),
+                "evidence_sha256": node.get("evidence_sha256"),
+            }
+            for node in mechanism_nodes
+        ],
+        "verified_directed_edges": directed_edges,
+    }
+    link["mechanism_link_sha256"] = _canonical_json_sha256(link)
+    observations = proof.get("observations")
+    experiment_ids = [
+        str(observation.get("experiment_id"))
+        for observation in (
+            observations.get("baseline"),
+            observations.get("challenge"),
+        )
+        if isinstance(observation, Mapping) and _text(observation.get("experiment_id")) is not None
+    ] if isinstance(observations, Mapping) else []
+    source_root = proof.get("source_root")
+    origin_atom_ids = [
+        atom_id
+        for atom_id in (
+            source_root.get("origin_atom_ids", [])
+            if isinstance(source_root, Mapping)
+            else []
+        )
+        if isinstance(atom_id, str)
+    ]
+    origin_symptom_bindings = [
+        dict(binding)
+        for binding in atom_bindings
+        if isinstance(binding, Mapping)
+        and binding.get("experiment_id") in experiment_ids
+        and binding.get("atom_id") in origin_atom_ids
+        and (
+            (
+                binding.get("binding_role") == "symptom"
+                and not isinstance(binding.get("observation_predicate"), Mapping)
+            )
+            or (
+                binding.get("binding_role") is None
+                and _text(binding.get("match_kind")) is not None
+            )
+        )
+    ]
+    attested_predicate_bindings = (
+        source_root.get("atom_field_predicate_bindings")
+        if isinstance(source_root, Mapping)
+        else None
+    )
+    if isinstance(attested_predicate_bindings, list):
+        origin_symptom_bindings.extend(
+            dict(binding)
+            for binding in attested_predicate_bindings
+            if isinstance(binding, Mapping)
+            and binding.get("atom_id") in origin_atom_ids
+        )
+    if not experiment_ids or not origin_atom_ids or not origin_symptom_bindings:
+        return None
+    intervention = proof.get("intervention")
+    target = _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
+    if target is None:
+        return None
+    adapter_evidence = proof.get("adapter_evidence")
+    implementation_touchpoints = (
+        adapter_evidence.get("implementation_touchpoints")
+        if isinstance(adapter_evidence, Mapping)
+        and isinstance(adapter_evidence.get("implementation_touchpoints"), list)
+        else []
+    )
+    executed_consumer = _adapter_executed_consumer_receipt(
+        proof,
+        clean_replays=clean_replays,
+        implementation_touchpoints=[
+            touchpoint
+            for touchpoint in implementation_touchpoints
+            if isinstance(touchpoint, Mapping)
+        ],
+    )
+    consumer_identity = (
+        executed_consumer["consumer_identity"]
+        if isinstance(executed_consumer, Mapping)
+        else {"kind": "unresolved_consumer", "entrypoint": locators[0]}
+    )
+    receipt: dict[str, Any] = {
+        "evidence_type": "adapter_proof",
+        "hypothesis_id": proof.get("hypothesis_id"),
+        "mechanism_symbols": locators,
+        "mechanism_targets": mechanism_nodes,
+        "code_paths": link["code_path"],
+        "experiment_ids": experiment_ids,
+        "artifact_refs": [
+            artifact.get("artifact_id")
+            for artifact in proof.get("artifacts", [])
+            if isinstance(artifact, Mapping) and _text(artifact.get("artifact_id")) is not None
+        ],
+        "origin_atom_ids": sorted(set(origin_atom_ids)),
+        "origin_symptom_bindings": origin_symptom_bindings,
+        "path_name": locators[0],
+        "consumer_identity": consumer_identity,
+        "independence_key": _canonical_json_sha256(consumer_identity),
+        "causal_target": target,
+        "observed_result": proof.get("positive_outcome"),
+        "mechanism_link": link,
+        "causal_root_bindings": [
+            {
+                "kind": source_root.get("root_kind"),
+                "origin_atom_ids": sorted(set(origin_atom_ids)),
+                "source_root_sha256": source_root.get("source_root_sha256"),
+                "root_mechanism_symbol": locators[0],
+                "runner_attested": True,
+            }
+        ],
+        "intervention_targets": [
+            {
+                "intervention_id": proof.get("intervention_id"),
+                "kind": intervention.get("kind") if isinstance(intervention, Mapping) else None,
+                "target": target,
+            }
+        ],
+        "proof_receipt_id": proof.get("proof_receipt_id"),
+        "adapter_id": proof.get("adapter_id"),
+        "adversarial_effect": "supports_selection",
+    }
+    if isinstance(executed_consumer, Mapping):
+        receipt["path_name"] = consumer_identity["entrypoint"]
+        receipt["executed_consumer"] = dict(executed_consumer)
+    if isinstance(implementation_touchpoints, list) and implementation_touchpoints:
+        receipt["implementation_touchpoints"] = [
+            dict(touchpoint)
+            for touchpoint in implementation_touchpoints
+            if isinstance(touchpoint, Mapping)
+        ]
+    receipt["mechanism_evidence_id"] = _content_addressed_receipt_id(
+        "mechanism_evidence",
+        receipt,
+        "mechanism_evidence_id",
+    )
+    return receipt
 
 
 def _typed_mechanism_evidence_receipts(
@@ -4189,7 +5757,9 @@ def _typed_mechanism_evidence_receipts(
     strong_controls: list[dict[str, Any]],
     falsification_interventions: list[dict[str, Any]],
     deterministic_closures: list[dict[str, Any]],
+    atom_bindings: list[dict[str, Any]],
     errors: list[str],
+    proof_adapter_receipts: Sequence[Mapping[str, Any]] = (),
 ) -> list[dict[str, Any]]:
     """Build practical, runner-bound evidence for researched mechanisms.
 
@@ -4213,8 +5783,12 @@ def _typed_mechanism_evidence_receipts(
     }
     hypotheses_raw = dossier.get("root_cause_hypotheses")
     hypotheses = hypotheses_raw if isinstance(hypotheses_raw, list) else []
-    links_by_pair = {
-        (str(link.get("hypothesis_id")), str(link.get("symbol"))): link
+    links_by_experiment_symbol = {
+        (
+            str(link.get("hypothesis_id")),
+            str(link.get("experiment_id")),
+            str(link.get("symbol")),
+        ): link
         for link in causal_links
         if isinstance(link, dict)
     }
@@ -4223,35 +5797,60 @@ def _typed_mechanism_evidence_receipts(
         for control in strong_controls
         if isinstance(control, dict)
     }
-    intervention_support = {
-        (str(receipt.get("hypothesis_id")), str(experiment_id))
-        for receipt in falsification_interventions
-        if isinstance(receipt, dict)
+    intervention_support: dict[tuple[str, str], set[str]] = {}
+    for receipt in falsification_interventions:
+        if not isinstance(receipt, dict):
+            continue
+        receipt_symbols = {
+            symbol for symbol in receipt.get("mechanism_symbols", []) if isinstance(symbol, str)
+        }
         for experiment_id in (
             receipt.get("baseline_experiment_id"),
             receipt.get("challenge_experiment_id"),
+        ):
+            if isinstance(experiment_id, str):
+                intervention_support.setdefault(
+                    (str(receipt.get("hypothesis_id")), experiment_id), set()
+                ).update(receipt_symbols)
+    deterministic_support: dict[tuple[str, str], set[str]] = {}
+    for receipt in deterministic_closures:
+        if not isinstance(receipt, dict):
+            continue
+        experiment_id = receipt.get("support_experiment_id")
+        if not isinstance(experiment_id, str):
+            continue
+        deterministic_support.setdefault(
+            (str(receipt.get("hypothesis_id")), experiment_id), set()
+        ).update(
+            symbol for symbol in receipt.get("mechanism_symbols", []) if isinstance(symbol, str)
         )
-        if isinstance(experiment_id, str)
-    }
-    deterministic_support = {
-        (str(receipt.get("hypothesis_id")), str(receipt.get("support_experiment_id")))
-        for receipt in deterministic_closures
-        if isinstance(receipt, dict)
-    }
+    symptom_bindings_by_experiment: dict[str, list[dict[str, Any]]] = {}
+    for binding in atom_bindings:
+        if not isinstance(binding, dict):
+            continue
+        experiment_id = _text(binding.get("experiment_id"))
+        match_kind = _text(binding.get("match_kind")) or ""
+        is_symptom = binding.get("binding_role") == "symptom" or (
+            "explicit_" not in match_kind and match_kind != ""
+        )
+        if experiment_id is not None and is_symptom:
+            symptom_bindings_by_experiment.setdefault(experiment_id, []).append(dict(binding))
     receipts: list[dict[str, Any]] = []
     support_links: dict[tuple[str, str], dict[str, Any]] = {}
     support_consumers: dict[tuple[str, str], dict[str, str]] = {}
+    support_verified_symbols: dict[tuple[str, str], set[str]] = {}
 
     def has_complementary_control(
         hypothesis: dict[str, Any],
         *,
         support_id: str,
         mechanism_symbols: list[str],
-    ) -> bool:
+    ) -> list[str]:
         support = experiments.get(support_id)
         support_replay = clean_replays.get(support_id)
         if not isinstance(support, dict) or not isinstance(support_replay, dict):
-            return False
+            return []
+        controlled: set[str] = set()
         counter_raw = hypothesis.get("counterevidence")
         for raw_counter_id in counter_raw if isinstance(counter_raw, list) else []:
             counter_id = _text(raw_counter_id)
@@ -4270,21 +5869,27 @@ def _typed_mechanism_evidence_receipts(
                 or control.get("scenario_kind") != "control"
                 or control.get("outcome") != "refutes"
                 or relationship.get("supports_experiment_id") != support_id
-                or relationship.get("mechanism_symbols") != mechanism_symbols
             ):
                 continue
-            if (
-                strong_by_pair.get((str(hypothesis.get("hypothesis_id") or "unknown"), counter_id))
-                is not None
-            ):
-                return True
-        return (
-            str(hypothesis.get("hypothesis_id") or "unknown"),
-            support_id,
-        ) in intervention_support or (
-            str(hypothesis.get("hypothesis_id") or "unknown"),
-            support_id,
-        ) in deterministic_support
+            relationship_symbols = _declared_mechanism_subset(
+                relationship.get("mechanism_symbols"),
+                hypothesis_symbols=mechanism_symbols,
+            )
+            if relationship_symbols is None:
+                continue
+            strong = strong_by_pair.get(
+                (str(hypothesis.get("hypothesis_id") or "unknown"), counter_id)
+            )
+            if isinstance(strong, dict):
+                controlled.update(
+                    symbol
+                    for symbol in strong.get("shared_verified_mechanism_symbols", [])
+                    if symbol in relationship_symbols
+                )
+        pair = (str(hypothesis.get("hypothesis_id") or "unknown"), support_id)
+        controlled.update(intervention_support.get(pair, set()))
+        controlled.update(deterministic_support.get(pair, set()))
+        return [symbol for symbol in mechanism_symbols if symbol in controlled]
 
     for hypothesis_index, hypothesis in enumerate(hypotheses):
         if not isinstance(hypothesis, dict):
@@ -4292,20 +5897,49 @@ def _typed_mechanism_evidence_receipts(
         hypothesis_id = _text(hypothesis.get("hypothesis_id")) or f"index-{hypothesis_index}"
         mechanism_raw = hypothesis.get("mechanism_symbols")
         mechanism_symbols = (
-            [symbol for symbol in mechanism_raw if isinstance(symbol, str) and symbol.strip()]
+            [
+                symbol.strip()
+                for symbol in mechanism_raw
+                if isinstance(symbol, str) and symbol.strip()
+            ]
             if isinstance(mechanism_raw, list)
             else []
         )
-        code_paths = [
-            {"symbol": symbol, "path": symbols_to_paths[symbol]}
-            for symbol in mechanism_symbols
-            if symbol in symbols_to_paths
-        ]
+        duplicate_symbols = sorted(
+            {symbol for symbol in mechanism_symbols if mechanism_symbols.count(symbol) > 1}
+        )
+        if duplicate_symbols:
+            errors.append(
+                f"hypothesis_mechanism_symbols_duplicate:{hypothesis_id}:"
+                + ",".join(duplicate_symbols)
+            )
+            continue
         support_raw = hypothesis.get("supporting_evidence")
-        support_ids = support_raw if isinstance(support_raw, list) else []
+        support_ids: list[Any] = []
+        for support_ref in support_raw if isinstance(support_raw, list) else []:
+            if support_ref not in support_ids:
+                support_ids.append(support_ref)
         hypothesis_receipt_count = 0
+        aggregate_verified_symbols: set[str] = set()
+        hypothesis_support_receipts: list[dict[str, Any]] = []
 
-        for raw_support_id in support_ids:
+        for proof in proof_adapter_receipts:
+            if not isinstance(proof, Mapping) or proof.get("hypothesis_id") != hypothesis_id:
+                continue
+            adapter_receipt = _adapter_mechanism_evidence_receipt(
+                proof,
+                hypothesis_symbols=mechanism_symbols,
+                atom_bindings=atom_bindings,
+                clean_replays=clean_replays,
+            )
+            if adapter_receipt is None or not set(
+                adapter_receipt.get("experiment_ids", [])
+            ).intersection(str(value) for value in support_ids):
+                continue
+            hypothesis_support_receipts.append(adapter_receipt)
+
+        adapter_evidence_present = bool(hypothesis_support_receipts)
+        for raw_support_id in ([] if adapter_evidence_present else support_ids):
             support_id = _text(raw_support_id)
             experiment = experiments.get(support_id or "")
             replay = clean_replays.get(support_id or "")
@@ -4317,6 +5951,8 @@ def _typed_mechanism_evidence_receipts(
                 or replay.get("assertion_passed") is not True
             ):
                 continue
+            if isinstance(experiment.get("proof_adapter"), Mapping):
+                continue
             scenario_kind = str(experiment.get("scenario_kind") or "")
             assertion_raw = experiment.get("observable_assertion")
             observable_assertion = assertion_raw if isinstance(assertion_raw, dict) else {}
@@ -4326,23 +5962,69 @@ def _typed_mechanism_evidence_receipts(
                 symbol_paths=symbols_to_paths,
                 observable_assertion=observable_assertion,
             )
-            declared_link = _verified_declared_mechanism_link(
-                experiment=experiment,
-                mechanism_symbols=mechanism_symbols,
-                symbol_paths=symbols_to_paths,
-                workspace=(
-                    Path(str(replay["workspace_dir"]))
-                    if _text(replay.get("workspace_dir")) is not None
-                    else None
-                ),
+            harness_symbols = [symbol for symbol in mechanism_symbols if symbol in touched_symbols]
+            declared_raw = experiment.get("mechanism_link")
+            declared_steps = (
+                declared_raw.get("code_path")
+                if isinstance(declared_raw, dict)
+                and isinstance(declared_raw.get("code_path"), list)
+                else []
             )
-            trace_complete = bool(mechanism_symbols) and all(
-                (hypothesis_id, symbol) in links_by_pair for symbol in mechanism_symbols
+            declared_step_symbols = {
+                str(step.get("symbol")) for step in declared_steps if isinstance(step, dict)
+            }
+            declared_symbols = [
+                symbol for symbol in mechanism_symbols if symbol in declared_step_symbols
+            ]
+            declared_link = (
+                _verified_declared_mechanism_link(
+                    experiment=experiment,
+                    mechanism_symbols=declared_symbols,
+                    symbol_paths=symbols_to_paths,
+                    workspace=(
+                        Path(str(replay["workspace_dir"]))
+                        if _text(replay.get("workspace_dir")) is not None
+                        else None
+                    ),
+                )
+                if declared_symbols
+                else None
             )
+            if declared_link is None:
+                declared_symbols = []
+            declared_entrypoint = (
+                _text(declared_link.get("entrypoint")) if isinstance(declared_link, dict) else None
+            )
+            declared_link_reached = isinstance(declared_link, dict) and (
+                harness_path is None or declared_entrypoint in set(harness_symbols)
+            )
+            trace_symbols = [
+                symbol
+                for symbol in mechanism_symbols
+                if (hypothesis_id, support_id, symbol) in links_by_experiment_symbol
+            ]
+            trace_link = None
+            if trace_symbols:
+                trace_link = {
+                    "verification_method": "runner_exception_symbol_trace_v1",
+                    "entrypoint": trace_symbols[0],
+                    "code_path": [
+                        {
+                            "symbol": symbol,
+                            "path": symbols_to_paths[symbol],
+                            "trace_excerpt_sha256": links_by_experiment_symbol[
+                                (hypothesis_id, support_id, symbol)
+                            ].get("trace_excerpt_sha256"),
+                        }
+                        for symbol in trace_symbols
+                    ],
+                }
             required_platform = _text(experiment.get("platform_requirement")) or "any"
             isolation_raw = replay.get("execution_isolation")
             isolation = isolation_raw if isinstance(isolation_raw, dict) else {}
             actual_platform = _text(isolation.get("platform")) or "unknown"
+            verified_symbols: list[str] = []
+            mechanism_link: dict[str, Any] | None = None
 
             if scenario_kind == "live_runtime":
                 if (
@@ -4354,11 +6036,28 @@ def _typed_mechanism_evidence_receipts(
                         f"required={required_platform}:actual={actual_platform}"
                     )
                     continue
-                if declared_link is None and harness_link is None and not trace_complete:
-                    errors.append(
-                        f"live_runtime_mechanism_link_missing:{hypothesis_id}:{support_id}"
+                candidates = [
+                    (harness_symbols, harness_link),
+                    (trace_symbols, trace_link),
+                ]
+                candidates = [
+                    (symbols, link)
+                    for symbols, link in candidates
+                    if symbols and isinstance(link, dict)
+                ]
+                if not candidates:
+                    if not declared_link_reached:
+                        errors.append(
+                            f"live_runtime_mechanism_link_missing:{hypothesis_id}:{support_id}"
+                        )
+                        continue
+                if declared_link_reached:
+                    verified_symbols, mechanism_link = declared_symbols, declared_link
+                else:
+                    verified_symbols, mechanism_link = max(
+                        candidates,
+                        key=lambda item: len(item[0]),
                     )
-                    continue
                 evidence_type = "live_runtime"
             elif scenario_kind == "static_trace":
                 static_raw = experiment.get("static_trace")
@@ -4373,8 +6072,13 @@ def _typed_mechanism_evidence_receipts(
                 expected_pairs = {
                     (symbol, symbols_to_paths.get(symbol)) for symbol in mechanism_symbols
                 }
+                static_symbols = [
+                    symbol
+                    for symbol in mechanism_symbols
+                    if (symbol, symbols_to_paths.get(symbol)) in traced_pairs
+                ]
                 callable_symbols = [
-                    symbol for symbol in mechanism_symbols if not symbol.startswith("config:")
+                    symbol for symbol in static_symbols if not symbol.startswith("config:")
                 ]
                 if (
                     static_trace.get("deterministic") is not True
@@ -4382,7 +6086,8 @@ def _typed_mechanism_evidence_receipts(
                     or dependencies
                     or not isinstance(trace_steps, list)
                     or not trace_steps
-                    or traced_pairs != expected_pairs
+                    or not traced_pairs.issubset(expected_pairs)
+                    or not static_symbols
                     or (
                         callable_symbols
                         and (
@@ -4390,7 +6095,7 @@ def _typed_mechanism_evidence_receipts(
                                 harness_path is None
                                 or not set(callable_symbols).issubset(set(touched_symbols))
                             )
-                            and declared_link is None
+                            and not set(callable_symbols).issubset(set(declared_symbols))
                         )
                     )
                 ):
@@ -4398,66 +6103,96 @@ def _typed_mechanism_evidence_receipts(
                         f"static_trace_not_deterministic_or_unbound:{hypothesis_id}:{support_id}"
                     )
                     continue
+                verified_symbols = static_symbols
+                mechanism_link = {
+                    "verification_method": "runner_deterministic_static_trace_v1",
+                    "entrypoint": static_symbols[0],
+                    "code_path": trace_steps,
+                    "environment_dependencies": dependencies,
+                }
+                mechanism_link["static_trace_sha256"] = _canonical_json_sha256(mechanism_link)
                 evidence_type = "static_trace"
             elif harness_path is not None:
-                if set(touched_symbols) != set(mechanism_symbols):
+                if not harness_symbols or harness_link is None:
                     errors.append(
                         f"temporary_harness_mechanism_call_missing:{hypothesis_id}:{support_id}"
                     )
                     continue
+                if declared_link_reached:
+                    verified_symbols = declared_symbols
+                    mechanism_link = declared_link
+                else:
+                    verified_symbols = harness_symbols
+                    mechanism_link = harness_link
                 evidence_type = "temporary_harness"
-            elif trace_complete:
+            elif trace_symbols and trace_link is not None:
+                verified_symbols = trace_symbols
+                mechanism_link = trace_link
                 evidence_type = "exception_trace"
             else:
                 # A wrong value, omitted artifact, or bad classification normally
                 # fails at the assertion boundary, not inside the mechanism.  The
                 # verified replay plus exact inspected code path is the relevant
                 # evidence; absence of a production traceback is not a defect.
-                if declared_link is None:
+                pair = (hypothesis_id, support_id)
+                intervention_symbols = [
+                    symbol
+                    for symbol in mechanism_symbols
+                    if symbol in intervention_support.get(pair, set())
+                ]
+                if declared_link is None and intervention_symbols:
+                    verified_symbols = intervention_symbols
+                    intervention_ids = sorted(
+                        str(item.get("intervention_receipt_id"))
+                        for item in falsification_interventions
+                        if isinstance(item, dict)
+                        and item.get("hypothesis_id") == hypothesis_id
+                        and support_id
+                        in {
+                            item.get("baseline_experiment_id"),
+                            item.get("challenge_experiment_id"),
+                        }
+                        and set(intervention_symbols).issubset(
+                            set(item.get("shared_verified_mechanism_symbols", []))
+                        )
+                    )
+                    mechanism_link = {
+                        "verification_method": "runner_falsification_shared_mechanism_v1",
+                        "entrypoint": intervention_symbols[0],
+                        "code_path": [
+                            {"symbol": symbol, "path": symbols_to_paths[symbol]}
+                            for symbol in intervention_symbols
+                            if symbol in symbols_to_paths
+                        ],
+                        "intervention_receipt_ids": intervention_ids,
+                    }
+                    evidence_type = "observed_output"
+                elif declared_link is None:
                     errors.append(
                         f"observed_output_mechanism_link_missing:{hypothesis_id}:{support_id}"
                     )
                     continue
-                if not has_complementary_control(
-                    hypothesis,
-                    support_id=support_id,
-                    mechanism_symbols=mechanism_symbols,
-                ):
-                    errors.append(
-                        f"observed_output_complementary_control_missing:"
-                        f"{hypothesis_id}:{support_id}"
+                else:
+                    controlled_symbols = has_complementary_control(
+                        hypothesis,
+                        support_id=support_id,
+                        mechanism_symbols=declared_symbols,
                     )
-                    continue
-                evidence_type = "observed_output"
+                    if not controlled_symbols:
+                        errors.append(
+                            f"observed_output_complementary_control_missing:"
+                            f"{hypothesis_id}:{support_id}"
+                        )
+                        continue
+                    verified_symbols = controlled_symbols
+                    mechanism_link = declared_link
+                    evidence_type = "observed_output"
 
-            trace_link = None
-            if trace_complete:
-                trace_link = {
-                    "verification_method": "runner_exception_symbol_trace_v1",
-                    "entrypoint": mechanism_symbols[0] if mechanism_symbols else "unknown",
-                    "code_path": [
-                        {
-                            "symbol": symbol,
-                            "path": symbols_to_paths[symbol],
-                            "trace_excerpt_sha256": links_by_pair[(hypothesis_id, symbol)].get(
-                                "trace_excerpt_sha256"
-                            ),
-                        }
-                        for symbol in mechanism_symbols
-                    ],
-                }
-            static_link = None
-            if evidence_type == "static_trace":
-                static_raw = experiment.get("static_trace")
-                static_trace = static_raw if isinstance(static_raw, dict) else {}
-                static_link = {
-                    "verification_method": "runner_deterministic_static_trace_v1",
-                    "entrypoint": mechanism_symbols[0] if mechanism_symbols else "unknown",
-                    "code_path": static_trace.get("code_path", []),
-                    "environment_dependencies": static_trace.get("environment_dependencies", []),
-                }
-                static_link["static_trace_sha256"] = _canonical_json_sha256(static_link)
-            mechanism_link = harness_link or trace_link or declared_link or static_link
+            code_paths = [
+                {"symbol": symbol, "path": symbols_to_paths[symbol]}
+                for symbol in verified_symbols
+                if symbol in symbols_to_paths
+            ]
             consumer_identity = _experiment_consumer_identity(
                 experiment=experiment,
                 replay=replay,
@@ -4466,15 +6201,23 @@ def _typed_mechanism_evidence_receipts(
             )
             support_links[(hypothesis_id, support_id)] = mechanism_link or {}
             support_consumers[(hypothesis_id, support_id)] = consumer_identity
+            support_verified_symbols[(hypothesis_id, support_id)] = set(verified_symbols)
+            origin_symptom_bindings = sorted(
+                symptom_bindings_by_experiment.get(support_id, []),
+                key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+            )
 
             receipt: dict[str, Any] = {
                 "evidence_type": evidence_type,
                 "hypothesis_id": hypothesis_id,
-                "mechanism_symbols": mechanism_symbols,
+                "mechanism_symbols": verified_symbols,
                 "code_paths": code_paths,
                 "experiment_ids": [support_id],
                 "artifact_refs": experiment.get("artifact_refs", []),
                 "origin_atom_ids": sorted(set(experiment.get("addresses_atom_ids", []))),
+                "origin_symptom_bindings": origin_symptom_bindings,
+                "executed_argv": replay.get("executed_argv"),
+                "command_authorization": replay.get("command_authorization"),
                 "path_name": consumer_identity["entrypoint"],
                 "consumer_identity": consumer_identity,
                 "independence_key": _canonical_json_sha256(consumer_identity),
@@ -4490,16 +6233,63 @@ def _typed_mechanism_evidence_receipts(
                 "observed_platform": actual_platform,
                 "adversarial_effect": "supports_selection",
             }
+            receipt["causal_root_bindings"] = _derived_causal_root_bindings(
+                experiment_ids=[support_id],
+                origin_atom_ids=list(receipt["origin_atom_ids"]),
+                origin_symptom_bindings=origin_symptom_bindings,
+                mechanism_symbols=verified_symbols,
+                mechanism_link=mechanism_link,
+                executed_argv=(
+                    list(replay["executed_argv"])
+                    if isinstance(replay.get("executed_argv"), list)
+                    else None
+                ),
+                command_authorization=(
+                    dict(replay["command_authorization"])
+                    if isinstance(replay.get("command_authorization"), dict)
+                    else None
+                ),
+            )
             receipt["mechanism_evidence_id"] = _content_addressed_receipt_id(
                 "mechanism_evidence",
                 receipt,
                 "mechanism_evidence_id",
             )
-            receipts.append(receipt)
-            hypothesis_receipt_count += 1
+            hypothesis_support_receipts.append(receipt)
+
+        (
+            connected_supports,
+            aggregate_verified_symbols,
+            _support_connectivity,
+            disconnected_support_ids,
+        ) = _rooted_support_connectivity(
+            hypothesis_support_receipts,
+            hypothesis_symbols=mechanism_symbols,
+        )
+        receipts.extend(connected_supports)
+        hypothesis_receipt_count = len(connected_supports)
+        support_by_id = {
+            str(item.get("mechanism_evidence_id")): item
+            for item in hypothesis_support_receipts
+            if _text(item.get("mechanism_evidence_id")) is not None
+        }
+        if hypothesis_index == 0:
+            for evidence_id in disconnected_support_ids:
+                disconnected = support_by_id.get(evidence_id, {})
+                experiment_ids = [
+                    value
+                    for value in disconnected.get("experiment_ids", [])
+                    if isinstance(value, str)
+                ]
+                label = experiment_ids[0] if experiment_ids else evidence_id
+                errors.append(f"primary_hypothesis_support_disconnected:{hypothesis_id}:{label}")
 
         counter_raw = hypothesis.get("counterevidence")
-        counter_ids = counter_raw if isinstance(counter_raw, list) else []
+        counter_ids = (
+            []
+            if adapter_evidence_present
+            else counter_raw if isinstance(counter_raw, list) else []
+        )
         for raw_control_id in counter_ids:
             control_id = _text(raw_control_id)
             control = experiments.get(control_id or "")
@@ -4512,6 +6302,10 @@ def _typed_mechanism_evidence_receipts(
                 continue
             relationship_raw = control.get("control_relationship")
             relationship = relationship_raw if isinstance(relationship_raw, dict) else {}
+            relationship_symbols = _declared_mechanism_subset(
+                relationship.get("mechanism_symbols"),
+                hypothesis_symbols=mechanism_symbols,
+            )
             support_id = _text(relationship.get("supports_experiment_id"))
             support = experiments.get(support_id or "")
             support_replay = clean_replays.get(support_id or "")
@@ -4521,7 +6315,7 @@ def _typed_mechanism_evidence_receipts(
                 or not isinstance(support, dict)
                 or not isinstance(support_replay, dict)
                 or not isinstance(control_replay, dict)
-                or relationship.get("mechanism_symbols") != mechanism_symbols
+                or relationship_symbols is None
             ):
                 continue
             observable_errors: list[str] = []
@@ -4537,9 +6331,56 @@ def _typed_mechanism_evidence_receipts(
             if observable is None:
                 continue
             strong = strong_by_pair.get((hypothesis_id, control_id))
+            intervention = next(
+                (
+                    item
+                    for item in falsification_interventions
+                    if isinstance(item, dict)
+                    and item.get("hypothesis_id") == hypothesis_id
+                    and item.get("baseline_experiment_id") == support_id
+                    and item.get("challenge_experiment_id") == control_id
+                    and item.get("shared_verified_mechanism_symbols") == relationship_symbols
+                ),
+                None,
+            )
+            if isinstance(strong, dict):
+                independently_verified = (
+                    strong.get("shared_verified_mechanism_symbols") == relationship_symbols
+                )
+            else:
+                independently_verified = isinstance(intervention, dict)
             support_link = support_links.get((hypothesis_id, support_id))
+            support_symbols = support_verified_symbols.get((hypothesis_id, support_id), set())
+            control_link: dict[str, Any] | None = None
+            if not independently_verified and set(relationship_symbols).issubset(support_symbols):
+                control_link = _verified_declared_mechanism_link(
+                    experiment=control,
+                    mechanism_symbols=relationship_symbols,
+                    symbol_paths=symbols_to_paths,
+                    workspace=(
+                        Path(str(control_replay["workspace_dir"]))
+                        if _text(control_replay.get("workspace_dir")) is not None
+                        else None
+                    ),
+                )
+                support_method = (
+                    _text(support_link.get("verification_method"))
+                    if isinstance(support_link, dict)
+                    else None
+                )
+                control_method = (
+                    _text(control_link.get("verification_method"))
+                    if isinstance(control_link, dict)
+                    else None
+                )
+                if support_method is not None and support_method == control_method:
+                    independently_verified = True
+                elif support_method is not None and control_method is not None:
+                    errors.append(
+                        f"controlled_scenario_mechanism_mode_switch:{hypothesis_id}:{control_id}"
+                    )
             support_consumer = support_consumers.get((hypothesis_id, support_id))
-            if strong is None and not support_link:
+            if not independently_verified or (strong is None and not support_link):
                 errors.append(
                     f"controlled_scenario_mechanism_link_missing:{hypothesis_id}:{control_id}"
                 )
@@ -4551,11 +6392,16 @@ def _typed_mechanism_evidence_receipts(
                     mechanism_link=support_link,
                     harness_path=None,
                 )
+            relationship_code_paths = [
+                {"symbol": symbol, "path": symbols_to_paths[symbol]}
+                for symbol in relationship_symbols
+                if symbol in symbols_to_paths
+            ]
             receipt = {
                 "evidence_type": "controlled_scenario",
                 "hypothesis_id": hypothesis_id,
-                "mechanism_symbols": mechanism_symbols,
-                "code_paths": code_paths,
+                "mechanism_symbols": relationship_symbols,
+                "code_paths": relationship_code_paths,
                 "experiment_ids": [support_id, control_id],
                 "artifact_refs": sorted(
                     set(support.get("artifact_refs", [])) | set(control.get("artifact_refs", []))
@@ -4572,7 +6418,13 @@ def _typed_mechanism_evidence_receipts(
                 "strong_pytest_control_id": (
                     strong.get("control_verification_id") if isinstance(strong, dict) else None
                 ),
+                "falsification_intervention_id": (
+                    intervention.get("intervention_receipt_id")
+                    if isinstance(intervention, dict)
+                    else None
+                ),
                 "mechanism_link": support_link,
+                "control_mechanism_link": control_link,
                 "adversarial_effect": "limits_scope",
             }
             receipt["mechanism_evidence_id"] = _content_addressed_receipt_id(
@@ -4587,6 +6439,19 @@ def _typed_mechanism_evidence_receipts(
         # artifacts/counterevidence rather than their own reproduction.
         if hypothesis_index == 0 and hypothesis_receipt_count == 0:
             errors.append(f"primary_hypothesis_mechanism_evidence_missing:{hypothesis_id}")
+        if hypothesis_index == 0:
+            missing_symbols = [
+                symbol for symbol in mechanism_symbols if symbol not in aggregate_verified_symbols
+            ]
+            if missing_symbols:
+                errors.append(
+                    f"primary_hypothesis_mechanism_coverage_incomplete:{hypothesis_id}:"
+                    + ",".join(missing_symbols)
+                )
+            if not any(
+                item.get("connection_kind") == "causal_root" for item in _support_connectivity
+            ):
+                errors.append(f"primary_hypothesis_causal_root_missing:{hypothesis_id}")
 
     receipts.sort(
         key=lambda receipt: (
@@ -4630,18 +6495,94 @@ def _verified_mechanism_projection(
     hypothesis_id = _text(primary.get("hypothesis_id"))
     symbols_raw = primary.get("mechanism_symbols")
     symbols = (
-        [symbol for symbol in symbols_raw if isinstance(symbol, str) and symbol.strip()]
+        [symbol.strip() for symbol in symbols_raw if isinstance(symbol, str) and symbol.strip()]
         if isinstance(symbols_raw, list)
         else []
     )
-    evidence = [
-        item
-        for item in mechanism_evidence
-        if isinstance(item, dict)
-        and item.get("hypothesis_id") == hypothesis_id
-        and item.get("mechanism_symbols") == symbols
-        and _text(item.get("mechanism_evidence_id")) is not None
-    ]
+    if len(symbols) != len(set(symbols)):
+        return None, None, None, None
+    candidate_evidence: list[dict[str, Any]] = []
+    for item in mechanism_evidence:
+        if (
+            not isinstance(item, dict)
+            or item.get("hypothesis_id") != hypothesis_id
+            or item.get("adversarial_effect") != "supports_selection"
+            or _text(item.get("mechanism_evidence_id")) is None
+        ):
+            continue
+        item_symbols = _declared_mechanism_subset(
+            item.get("mechanism_symbols"),
+            hypothesis_symbols=symbols,
+        )
+        if item_symbols is None:
+            continue
+        points_raw = item.get("code_paths")
+        points = points_raw if isinstance(points_raw, list) else []
+        point_symbols = {
+            str(point.get("symbol"))
+            for point in points
+            if isinstance(point, dict)
+            and _text(point.get("symbol")) is not None
+            and _text(point.get("path")) is not None
+        }
+        if point_symbols != set(item_symbols):
+            continue
+        symptom_raw = item.get("origin_symptom_bindings")
+        origin_raw = item.get("origin_atom_ids")
+        experiments_raw = item.get("experiment_ids")
+        argv_raw = item.get("executed_argv")
+        authorization_raw = item.get("command_authorization")
+        declared_roots = item.get("causal_root_bindings")
+        derived_roots = (
+            [dict(value) for value in declared_roots if isinstance(value, dict)]
+            if item.get("evidence_type") == "adapter_proof"
+            and isinstance(declared_roots, list)
+            else _derived_causal_root_bindings(
+                experiment_ids=(
+                    [value for value in experiments_raw if isinstance(value, str)]
+                    if isinstance(experiments_raw, list)
+                    else []
+                ),
+                origin_atom_ids=(
+                    [value for value in origin_raw if isinstance(value, str)]
+                    if isinstance(origin_raw, list)
+                    else []
+                ),
+                origin_symptom_bindings=(
+                    [dict(value) for value in symptom_raw if isinstance(value, dict)]
+                    if isinstance(symptom_raw, list)
+                    else []
+                ),
+                mechanism_symbols=item_symbols,
+                mechanism_link=(
+                    dict(item["mechanism_link"])
+                    if isinstance(item.get("mechanism_link"), dict)
+                    else None
+                ),
+                executed_argv=(
+                    [value for value in argv_raw if isinstance(value, str)]
+                    if isinstance(argv_raw, list)
+                    else None
+                ),
+                command_authorization=(
+                    dict(authorization_raw) if isinstance(authorization_raw, dict) else None
+                ),
+            )
+        )
+        if declared_roots is not None and declared_roots != derived_roots:
+            continue
+        projected_item = dict(item)
+        projected_item["causal_root_bindings"] = derived_roots
+        candidate_evidence.append(projected_item)
+    (
+        evidence,
+        covered_symbols,
+        support_connectivity,
+        _disconnected_support_ids,
+    ) = _rooted_support_connectivity(
+        candidate_evidence,
+        hypothesis_symbols=symbols,
+    )
     paths = sorted(
         {
             (
@@ -4663,7 +6604,9 @@ def _verified_mechanism_projection(
     if (
         hypothesis_id is None
         or not normalized_symbols
+        or covered_symbols != set(normalized_symbols)
         or {symbol for symbol, _ in paths} != set(normalized_symbols)
+        or not any(item.get("connection_kind") == "causal_root" for item in support_connectivity)
     ):
         return None, None, None, None
     control_points: list[dict[str, Any]] = []
@@ -4674,14 +6617,11 @@ def _verified_mechanism_projection(
         ):
             continue
         receipt_symbols_raw = causal_receipt.get("mechanism_symbols")
-        receipt_symbols = sorted(
-            {
-                symbol.strip()
-                for symbol in (receipt_symbols_raw if isinstance(receipt_symbols_raw, list) else [])
-                if isinstance(symbol, str) and symbol.strip()
-            }
+        receipt_symbols = _declared_mechanism_subset(
+            receipt_symbols_raw,
+            hypothesis_symbols=symbols,
         )
-        if receipt_symbols != normalized_symbols:
+        if receipt_symbols is None:
             continue
         controlled = causal_receipt.get("controlled_input_difference")
         difference = controlled.get("difference") if isinstance(controlled, dict) else None
@@ -4693,7 +6633,7 @@ def _verified_mechanism_projection(
             continue
         descriptor: dict[str, Any] = {
             "verification_method": method,
-            "mechanism_symbols": normalized_symbols,
+            "mechanism_symbols": receipt_symbols,
             "slot": slot,
         }
         mechanism_symbol = (
@@ -4709,15 +6649,50 @@ def _verified_mechanism_projection(
         }.values(),
         key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
     )
+    mechanism_targets = sorted(
+        {
+            json.dumps(target, sort_keys=True, separators=(",", ":")): target
+            for item in evidence
+            for target in (
+                item.get("mechanism_targets")
+                if isinstance(item.get("mechanism_targets"), list)
+                else []
+            )
+            if isinstance(target, dict)
+        }.values(),
+        key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+    )
     projection = {
-        "schema_version": 2,
+        "schema_version": 3,
         "mechanism_symbols": normalized_symbols,
         "code_paths": [{"symbol": symbol, "path": path} for symbol, path in paths],
     }
+    if mechanism_targets:
+        projection["mechanism_targets"] = mechanism_targets
     provenance = {
-        "schema_version": 1,
+        "schema_version": 2,
         "primary_hypothesis_id": hypothesis_id,
         "mechanism_evidence_ids": sorted(str(item["mechanism_evidence_id"]) for item in evidence),
+        "causal_root_evidence_ids": sorted(
+            str(item["mechanism_evidence_id"])
+            for item in evidence
+            if item.get("causal_root_bindings")
+        ),
+        "support_connectivity": support_connectivity,
+        "support_symbol_coverage": sorted(
+            (
+                {
+                    "experiment_ids": sorted(
+                        experiment_id
+                        for experiment_id in item.get("experiment_ids", [])
+                        if isinstance(experiment_id, str)
+                    ),
+                    "mechanism_symbols": item.get("mechanism_symbols"),
+                }
+                for item in evidence
+            ),
+            key=lambda item: json.dumps(item, sort_keys=True, separators=(",", ":")),
+        ),
         "causal_control_ids": sorted(
             str(item["control_verification_id"])
             for item in control_verifications
@@ -4741,6 +6716,21 @@ def _verified_mechanism_projection(
         ),
         "research_probe_control_points": unique_control_points,
     }
+    intervention_targets = sorted(
+        {
+            json.dumps(target, sort_keys=True, separators=(",", ":")): target
+            for item in evidence
+            for target in (
+                item.get("intervention_targets")
+                if isinstance(item.get("intervention_targets"), list)
+                else []
+            )
+            if isinstance(target, dict)
+        }.values(),
+        key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
+    )
+    if intervention_targets:
+        provenance["intervention_targets"] = intervention_targets
     return (
         projection,
         _canonical_json_sha256(projection),
@@ -5642,6 +7632,88 @@ def _origin_semantic_positive_contract(
     return contract
 
 
+def _causal_proof_positive_contract(
+    *,
+    experiment_id: str,
+    evidence: Sequence[Mapping[str, Any]],
+    proof_receipt: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Retain an adapter-neutral, executable definition of a positive result."""
+
+    if validate_causal_proof_receipt(proof_receipt):
+        return None
+    intervention = proof_receipt.get("intervention")
+    observations = proof_receipt.get("observations")
+    baseline = observations.get("baseline") if isinstance(observations, Mapping) else None
+    challenge = observations.get("challenge") if isinstance(observations, Mapping) else None
+    positive = proof_receipt.get("positive_outcome")
+    source_root = proof_receipt.get("source_root")
+    positive_basis = (
+        source_root.get("positive_basis") if isinstance(source_root, Mapping) else None
+    )
+    if (
+        not isinstance(intervention, Mapping)
+        or intervention.get("baseline_experiment_id") != experiment_id
+        or not isinstance(baseline, Mapping)
+        or not isinstance(challenge, Mapping)
+        or not isinstance(positive, Mapping)
+        or not isinstance(positive_basis, Mapping)
+    ):
+        return None
+    proof_id = _text(proof_receipt.get("proof_receipt_id"))
+    intervention_id = _text(proof_receipt.get("intervention_id"))
+    adapter_id = _text(proof_receipt.get("adapter_id"))
+    adapter_version = _text(proof_receipt.get("adapter_version"))
+    if None in {proof_id, intervention_id, adapter_id, adapter_version}:
+        return None
+    mechanism_ids = sorted(
+        {
+            str(item["mechanism_evidence_id"])
+            for item in evidence
+            if item.get("proof_receipt_id") == proof_id
+            and _text(item.get("mechanism_evidence_id")) is not None
+        }
+    )
+    if not mechanism_ids:
+        return None
+    postcondition = {
+        "type": "causal_proof_predicate",
+        "proof_receipt_id": proof_id,
+        "intervention_id": intervention_id,
+        "adapter_id": adapter_id,
+        "adapter_version": adapter_version,
+        "predicate": positive.get("predicate"),
+        "observation_source": positive.get("observation_source"),
+        "positive_basis_sha256": positive_basis.get("basis_sha256"),
+    }
+    contract: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "causal_proof_predicate",
+        "research_experiment_id": experiment_id,
+        "mechanism_evidence_ids": mechanism_ids,
+        "proof_receipt_id": proof_id,
+        "intervention_id": intervention_id,
+        "adapter_contract": {
+            "adapter_id": adapter_id,
+            "adapter_version": adapter_version,
+            "baseline_observation_sha256": baseline.get("observation_sha256"),
+            "challenge_observation_sha256": challenge.get("observation_sha256"),
+            "adapter_evidence_sha256": _canonical_json_sha256(
+                proof_receipt.get("adapter_evidence")
+            ),
+        },
+        "positive_basis": dict(positive_basis),
+        "semantic_review_required": positive_basis.get("semantic_review_required") is True,
+        "postconditions": [postcondition],
+    }
+    contract["positive_outcome_contract_id"] = _content_addressed_receipt_id(
+        "positive_outcome_contract",
+        contract,
+        "positive_outcome_contract_id",
+    )
+    return contract
+
+
 def _positive_outcome_contracts(
     *,
     experiment_id: str,
@@ -5659,9 +7731,21 @@ def _positive_outcome_contracts(
     planning_workspace: Path | None,
     oracle_kind: str,
     state_targets: list[dict[str, Any]],
+    proof_adapter_receipts: Sequence[Mapping[str, Any]] = (),
+    primary_hypothesis_id: str,
+    primary_verified_mechanism_sha256: str,
+    primary_verified_mechanism_provenance_sha256: str,
     errors: list[str],
 ) -> list[dict[str, Any]]:
     contracts: list[dict[str, Any]] = []
+    for proof_receipt in proof_adapter_receipts:
+        generic_contract = _causal_proof_positive_contract(
+            experiment_id=experiment_id,
+            evidence=evidence,
+            proof_receipt=proof_receipt,
+        )
+        if generic_contract is not None:
+            contracts.append(generic_contract)
     repository_contract = _repository_test_positive_contract(
         experiment_id=experiment_id,
         experiment=experiment,
@@ -5703,8 +7787,77 @@ def _positive_outcome_contracts(
     )
     if semantic_contract is not None:
         contracts.append(semantic_contract)
+    for contract in contracts:
+        contract["primary_hypothesis_id"] = primary_hypothesis_id
+        contract["primary_verified_mechanism_sha256"] = primary_verified_mechanism_sha256
+        contract["primary_verified_mechanism_provenance_sha256"] = (
+            primary_verified_mechanism_provenance_sha256
+        )
+        contract["positive_outcome_contract_id"] = _content_addressed_receipt_id(
+            "positive_outcome_contract",
+            contract,
+            "positive_outcome_contract_id",
+        )
     by_id = {str(contract["positive_outcome_contract_id"]): contract for contract in contracts}
     return [by_id[key] for key in sorted(by_id)]
+
+
+def _exact_original_replay_observation(
+    *,
+    experiment_id: str,
+    replay: Mapping[str, Any],
+    positive_outcome_contracts: Sequence[Mapping[str, Any]],
+) -> dict[str, Any] | None:
+    """Mint a portable post-change selector for an exact original command oracle."""
+
+    matching_postconditions = [
+        postcondition
+        for contract in positive_outcome_contracts
+        for postcondition in (
+            contract.get("postconditions", [])
+            if isinstance(contract.get("postconditions"), list)
+            else []
+        )
+        if isinstance(postcondition, Mapping)
+        and postcondition.get("type") == "command_exit_code"
+        and postcondition.get("command_index") == 0
+        and isinstance(postcondition.get("equals"), int)
+        and not isinstance(postcondition.get("equals"), bool)
+    ]
+    exit_code = replay.get("exit_code")
+    if (
+        len(matching_postconditions) != 1
+        or not isinstance(exit_code, int)
+        or isinstance(exit_code, bool)
+    ):
+        return None
+    contract_ids = sorted(
+        {
+            str(contract.get("positive_outcome_contract_id"))
+            for contract in positive_outcome_contracts
+            if _text(contract.get("positive_outcome_contract_id")) is not None
+        }
+    )
+    if not contract_ids:
+        return None
+    return content_bound_payload(
+        {
+            "schema_version": 1,
+            "source_experiment_id": experiment_id,
+            "selector": {"source": "exit_code"},
+            "source_observation_sha256": _canonical_json_sha256(
+                {
+                    "exit_code": exit_code,
+                    "stdout_sha256": replay.get("stdout_sha256"),
+                    "stderr_sha256": replay.get("stderr_sha256"),
+                }
+            ),
+            "predicate_input_mode": "post_change_observation",
+            "positive_outcome_contract_ids": contract_ids,
+            "runner_attested": True,
+        },
+        hash_field="replay_observation_sha256",
+    )
 
 
 def _outcome_oracle_receipts(
@@ -5712,6 +7865,11 @@ def _outcome_oracle_receipts(
     *,
     clean_replays: dict[str, dict[str, Any]],
     mechanism_evidence: list[dict[str, Any]],
+    proof_adapter_receipts: Sequence[Mapping[str, Any]] = (),
+    verified_mechanism: dict[str, Any] | None,
+    verified_mechanism_sha256: str | None,
+    verified_mechanism_provenance: dict[str, Any] | None,
+    verified_mechanism_provenance_sha256: str | None,
     control_verifications: list[dict[str, Any]],
     falsification_interventions: list[dict[str, Any]],
     inspected_file_receipts: list[dict[str, Any]],
@@ -5732,6 +7890,31 @@ def _outcome_oracle_receipts(
     inspection into behavior.
     """
 
+    hypotheses_raw = dossier.get("root_cause_hypotheses")
+    hypotheses = hypotheses_raw if isinstance(hypotheses_raw, list) else []
+    primary = hypotheses[0] if hypotheses and isinstance(hypotheses[0], dict) else {}
+    primary_hypothesis_id = _text(primary.get("hypothesis_id"))
+    selected_evidence_ids = (
+        {
+            value
+            for value in verified_mechanism_provenance.get("mechanism_evidence_ids", [])
+            if isinstance(value, str) and value
+        }
+        if isinstance(verified_mechanism_provenance, dict)
+        else set()
+    )
+    if (
+        primary_hypothesis_id is None
+        or not isinstance(verified_mechanism, dict)
+        or verified_mechanism_sha256 != _canonical_json_sha256(verified_mechanism)
+        or not isinstance(verified_mechanism_provenance, dict)
+        or verified_mechanism_provenance_sha256
+        != _canonical_json_sha256(verified_mechanism_provenance)
+        or verified_mechanism_provenance.get("primary_hypothesis_id") != primary_hypothesis_id
+        or not selected_evidence_ids
+    ):
+        return []
+
     experiments_raw = dossier.get("experiments")
     experiments = {
         str(item.get("experiment_id")): item
@@ -5740,13 +7923,30 @@ def _outcome_oracle_receipts(
     }
     evidence_by_experiment: dict[str, list[dict[str, Any]]] = {}
     for evidence in mechanism_evidence:
-        if not isinstance(evidence, dict) or evidence.get("adversarial_effect") != (
-            "supports_selection"
+        if not isinstance(evidence, dict):
+            continue
+        evidence_id = _text(evidence.get("mechanism_evidence_id"))
+        if (
+            evidence.get("hypothesis_id") != primary_hypothesis_id
+            or evidence.get("adversarial_effect") != "supports_selection"
+            or evidence_id not in selected_evidence_ids
         ):
             continue
         for experiment_id in evidence.get("experiment_ids", []):
             if isinstance(experiment_id, str):
                 evidence_by_experiment.setdefault(experiment_id, []).append(evidence)
+    proofs_by_baseline: dict[str, list[Mapping[str, Any]]] = {}
+    for proof in proof_adapter_receipts:
+        if validate_causal_proof_receipt(proof):
+            continue
+        intervention = proof.get("intervention")
+        baseline_id = (
+            _text(intervention.get("baseline_experiment_id"))
+            if isinstance(intervention, Mapping)
+            else None
+        )
+        if baseline_id is not None:
+            proofs_by_baseline.setdefault(baseline_id, []).append(proof)
 
     retained_asset: dict[str, Any] | None = None
     receipts: list[dict[str, Any]] = []
@@ -5762,6 +7962,7 @@ def _outcome_oracle_receipts(
         ):
             continue
         scenario_kind = str(experiment.get("scenario_kind") or "")
+        experiment_proofs = proofs_by_baseline.get(experiment_id, [])
         mechanism_ids = sorted(
             {
                 str(item["mechanism_evidence_id"])
@@ -5781,6 +7982,9 @@ def _outcome_oracle_receipts(
             "schema_version": 1,
             "case_id": dossier.get("case_id"),
             "repo_revision": repo_revision,
+            "primary_hypothesis_id": primary_hypothesis_id,
+            "primary_verified_mechanism_sha256": verified_mechanism_sha256,
+            "primary_verified_mechanism_provenance_sha256": (verified_mechanism_provenance_sha256),
             "research_experiment_id": experiment_id,
             "scenario_kind": scenario_kind,
             "origin_atom_ids": origin_atom_ids,
@@ -5792,7 +7996,90 @@ def _outcome_oracle_receipts(
                 "stderr_sha256": replay.get("stderr_sha256"),
             },
         }
-        if scenario_kind == "static_trace":
+        if experiment_proofs:
+            argv = replay.get("executed_argv")
+            authorization = replay.get("command_authorization")
+            setup_receipt = replay.get("replay_setup_receipt")
+            replay_inputs = replay.get("replay_inputs")
+            proof_replay_observations = [
+                proof.get("replay_observation")
+                for proof in experiment_proofs
+                if isinstance(proof, Mapping)
+            ]
+            replay_observation = (
+                proof_replay_observations[0] if proof_replay_observations else None
+            )
+            if (
+                not isinstance(argv, list)
+                or not argv
+                or any(not isinstance(token, str) or not token for token in argv)
+                or not _command_authorization_attested(authorization, argv=argv)
+                or not isinstance(setup_receipt, dict)
+                or setup_receipt.get("runner_applied") is not True
+                or setup_receipt.get("replay_setup_sha256")
+                != _canonical_json_sha256(
+                    {
+                        key: value
+                        for key, value in setup_receipt.items()
+                        if key != "replay_setup_sha256"
+                    }
+                )
+                or not _replay_inputs_attested(
+                    replay_inputs,
+                    experiment_id=experiment_id,
+                )
+                or not isinstance(replay_observation, Mapping)
+                or any(
+                    observation != replay_observation
+                    for observation in proof_replay_observations
+                )
+            ):
+                continue
+            proof_ids = sorted(
+                str(proof["proof_receipt_id"])
+                for proof in experiment_proofs
+                if _text(proof.get("proof_receipt_id")) is not None
+            )
+            needs_asset = any(
+                token.replace("\\", "/").startswith(".usertest_research/")
+                for token in argv
+            )
+            asset: dict[str, Any] | None = None
+            if needs_asset:
+                if retained_asset is None and research_workspace is not None:
+                    retained_asset = _persist_outcome_overlay_asset(
+                        run_dir=run_dir,
+                        research_workspace=research_workspace,
+                        overlay_manifest=overlay_manifest,
+                        errors=errors,
+                    )
+                asset = retained_asset
+                if asset is None:
+                    continue
+            receipt = {
+                **common,
+                "kind": "causal_proof_replay",
+                "proof_scope": "adapter_causal_behavior",
+                "proof_receipt_ids": proof_ids,
+                "execution": {
+                    "argv": list(argv),
+                    "command_authorization": dict(authorization),
+                    "platform_requirement": experiment.get("platform_requirement", "any"),
+                    "shell": False,
+                    "replay_setup_receipt": dict(setup_receipt),
+                    "replay_inputs": dict(replay_inputs),
+                    "replay_observation": dict(replay_observation),
+                    "replay_setup_reference": {
+                        "source": "research_experiment",
+                        "experiment_id": experiment_id,
+                        "replay_setup_sha256": _canonical_json_sha256(
+                            experiment.get("replay_setup", {})
+                        ),
+                    },
+                },
+                "asset": asset,
+            }
+        elif scenario_kind == "static_trace":
             config_evidence = [
                 item
                 for item in evidence
@@ -5860,20 +8147,12 @@ def _outcome_oracle_receipts(
         elif scenario_kind in {"original_replay", "faithful_replay", "live_runtime"}:
             argv = replay.get("executed_argv")
             authorization = replay.get("command_authorization")
+            replay_inputs = replay.get("replay_inputs")
             if (
                 not isinstance(argv, list)
                 or not argv
                 or any(not isinstance(token, str) or not token for token in argv)
-                or not isinstance(authorization, dict)
-                or authorization.get("authorization_kind")
-                not in {
-                    "standard_test_or_research_harness",
-                    "immutable_source_command",
-                    "declared_inspected_repository_entrypoint",
-                }
-                or authorization.get("executed_argv_sha256") != _canonical_json_sha256(argv)
-                or authorization.get("shell") is not False
-                or authorization.get("workspace_confined") is not True
+                or not _command_authorization_attested(authorization, argv=argv)
             ):
                 continue
             needs_asset = any(
@@ -5900,12 +8179,20 @@ def _outcome_oracle_receipts(
                     "command_authorization": dict(authorization),
                     "platform_requirement": experiment.get("platform_requirement", "any"),
                     "shell": False,
+                    **(
+                        {"replay_inputs": dict(replay_inputs)}
+                        if _replay_inputs_attested(
+                            replay_inputs,
+                            experiment_id=experiment_id,
+                        )
+                        else {}
+                    ),
                 },
                 "asset": asset,
             }
         else:
             continue
-        receipt["positive_outcome_contracts"] = _positive_outcome_contracts(
+        positive_contracts = _positive_outcome_contracts(
             experiment_id=experiment_id,
             experiment=experiment,
             replay=replay,
@@ -5929,8 +8216,22 @@ def _outcome_oracle_receipts(
                 )
                 if isinstance(item, dict)
             ],
+            proof_adapter_receipts=experiment_proofs,
+            primary_hypothesis_id=primary_hypothesis_id,
+            primary_verified_mechanism_sha256=verified_mechanism_sha256,
+            primary_verified_mechanism_provenance_sha256=(verified_mechanism_provenance_sha256),
             errors=errors,
         )
+        receipt["positive_outcome_contracts"] = positive_contracts
+        if receipt.get("kind") == "staged_replay":
+            replay_observation = _exact_original_replay_observation(
+                experiment_id=experiment_id,
+                replay=replay,
+                positive_outcome_contracts=positive_contracts,
+            )
+            execution = receipt.get("execution")
+            if replay_observation is not None and isinstance(execution, dict):
+                execution["replay_observation"] = replay_observation
         receipt["outcome_oracle_id"] = _content_addressed_receipt_id(
             "outcome_oracle",
             receipt,
@@ -5941,6 +8242,391 @@ def _outcome_oracle_receipts(
     return receipts
 
 
+def _verification_boundary_receipts(
+    *,
+    experiments: Mapping[str, Mapping[str, Any]],
+    clean_replays: Mapping[str, Mapping[str, Any]],
+    mechanism_evidence: Sequence[Mapping[str, Any]],
+    proof_adapter_receipts: Sequence[Mapping[str, Any]],
+    outcome_oracles: Sequence[Mapping[str, Any]],
+    verified_mechanism_provenance: Mapping[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Bind model-authored verification scope to runner-owned evidence.
+
+    The semantic labels remain open.  A model may conservatively require live
+    verification from any attested replay; it may waive live verification only
+    when it explicitly claims faithful equivalence and the runner can bind that
+    claim to both the selected mechanism and an executable outcome oracle.
+    """
+
+    selected_ids = {
+        str(item)
+        for item in (
+            verified_mechanism_provenance.get("mechanism_evidence_ids", [])
+            if isinstance(verified_mechanism_provenance, Mapping)
+            else []
+        )
+        if isinstance(item, str) and item
+    }
+    receipts: list[dict[str, Any]] = []
+    errors: list[str] = []
+    for experiment_id, experiment in experiments.items():
+        declaration = experiment.get("verification_boundary")
+        if declaration is None:
+            continue
+        label = f"verification_boundary_invalid:{experiment_id}"
+        if not isinstance(declaration, Mapping):
+            errors.append(label)
+            continue
+        boundary_kind = _text(declaration.get("boundary_kind"))
+        rationale = _text(declaration.get("rationale"))
+        requires_live = declaration.get("requires_live_verification")
+        faithful = declaration.get("faithful_equivalence")
+        replay = clean_replays.get(experiment_id)
+        authorization = (
+            replay.get("command_authorization") if isinstance(replay, Mapping) else None
+        )
+        argv = replay.get("executed_argv") if isinstance(replay, Mapping) else None
+        if (
+            boundary_kind is None
+            or rationale is None
+            or not isinstance(requires_live, bool)
+            or not isinstance(faithful, bool)
+            or not isinstance(replay, Mapping)
+            or not isinstance(argv, list)
+            or not _command_authorization_attested(authorization, argv=argv)
+            or replay.get("assertion_passed") is not True
+        ):
+            errors.append(label)
+            continue
+        selected_mechanism_ids = sorted(
+            {
+                str(item.get("mechanism_evidence_id"))
+                for item in mechanism_evidence
+                if _text(item.get("mechanism_evidence_id")) is not None
+                and item.get("mechanism_evidence_id") in selected_ids
+                and experiment_id in item.get("experiment_ids", [])
+            }
+        )
+        oracle_ids = sorted(
+            {
+                str(oracle.get("outcome_oracle_id"))
+                for oracle in outcome_oracles
+                if oracle.get("research_experiment_id") == experiment_id
+                and _text(oracle.get("outcome_oracle_id")) is not None
+                and oracle.get("outcome_oracle_id")
+                == _content_addressed_receipt_id(
+                    "outcome_oracle",
+                    oracle,
+                    "outcome_oracle_id",
+                )
+            }
+        )
+        proof_ids = sorted(
+            {
+                str(proof.get("proof_receipt_id"))
+                for proof in proof_adapter_receipts
+                if _text(proof.get("proof_receipt_id")) is not None
+                and isinstance(proof.get("replay_observation"), Mapping)
+                and proof["replay_observation"].get("source_experiment_id")
+                == experiment_id
+            }
+        )
+        matching_proofs = [
+            proof
+            for proof in proof_adapter_receipts
+            if _text(proof.get("proof_receipt_id")) in proof_ids
+        ]
+        matching_oracles = [
+            oracle
+            for oracle in outcome_oracles
+            if oracle.get("research_experiment_id") == experiment_id
+            and _text(oracle.get("outcome_oracle_id")) in oracle_ids
+            and oracle.get("outcome_oracle_id")
+            == _content_addressed_receipt_id(
+                "outcome_oracle",
+                oracle,
+                "outcome_oracle_id",
+            )
+        ]
+        equivalence_proof: dict[str, Any] | None = None
+        for proof in matching_proofs:
+            source_root = proof.get("source_root")
+            proof_inputs = proof.get("replay_inputs")
+            proof_observation = proof.get("replay_observation")
+            origin_atom_ids = sorted(
+                {
+                    str(atom_id)
+                    for atom_id in (
+                        source_root.get("origin_atom_ids", [])
+                        if isinstance(source_root, Mapping)
+                        else []
+                    )
+                    if isinstance(atom_id, str) and atom_id
+                }
+            )
+            command_identity = bool(
+                authorization.get("origin_atom_id") in origin_atom_ids
+                and authorization.get("origin_atom_field_path") == "$.command"
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(authorization.get("origin_atom_sha256") or ""),
+                )
+                is not None
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(authorization.get("origin_command_value_sha256") or ""),
+                )
+                is not None
+            )
+            predicate_bindings = [
+                binding
+                for binding in (
+                    source_root.get("atom_field_predicate_bindings", [])
+                    if isinstance(source_root, Mapping)
+                    else []
+                )
+                if isinstance(binding, Mapping)
+                and binding.get("runner_attested") is True
+                and binding.get("baseline_experiment_id") == experiment_id
+                and binding.get("atom_id") in origin_atom_ids
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(binding.get("atom_field_binding_sha256") or ""),
+                )
+                is not None
+            ]
+            source_identity_refs = (
+                [f"command_authorization:{authorization.get('authorization_sha256')}"]
+                if command_identity
+                else sorted(
+                    f"atom_field_binding:{binding['atom_field_binding_sha256']}"
+                    for binding in predicate_bindings
+                )
+            )
+            proof_id = _text(proof.get("proof_receipt_id"))
+            replay_inputs = replay.get("replay_inputs")
+            bound_oracle = next(
+                (
+                    oracle
+                    for oracle in matching_oracles
+                    if proof_id in oracle.get("proof_receipt_ids", [])
+                    and isinstance(oracle.get("execution"), Mapping)
+                    and oracle["execution"].get("replay_inputs") == proof_inputs
+                    and oracle["execution"].get("replay_observation")
+                    == proof_observation
+                ),
+                None,
+            )
+            if (
+                not origin_atom_ids
+                or not source_identity_refs
+                or not selected_mechanism_ids
+                or bound_oracle is None
+                or not isinstance(source_root, Mapping)
+                or not isinstance(proof_inputs, Mapping)
+                or not isinstance(proof_observation, Mapping)
+                or not isinstance(replay_inputs, Mapping)
+                or proof_inputs.get("replay_inputs_sha256")
+                != replay_inputs.get("replay_inputs_sha256")
+                or proof_observation.get("source_experiment_id") != experiment_id
+            ):
+                continue
+            equivalence_proof = content_bound_payload(
+                {
+                    "schema_version": 1,
+                    "equivalence_mode": "causal_proof_source_identity",
+                    "source_experiment_id": experiment_id,
+                    "origin_atom_ids": origin_atom_ids,
+                    "source_root_sha256": source_root.get("source_root_sha256"),
+                    "source_identity_refs": source_identity_refs,
+                    "proof_receipt_id": proof_id,
+                    "replay_inputs_sha256": proof_inputs.get("replay_inputs_sha256"),
+                    "replay_observation_sha256": proof_observation.get(
+                        "replay_observation_sha256"
+                    ),
+                    "selected_mechanism_evidence_ids": selected_mechanism_ids,
+                    "outcome_oracle_id": bound_oracle.get("outcome_oracle_id"),
+                    "runner_attested": True,
+                },
+                hash_field="equivalence_sha256",
+            )
+            break
+        if equivalence_proof is None:
+            origin_atom_id = _text(authorization.get("origin_atom_id"))
+            selected_origin_atom_ids = {
+                str(atom_id)
+                for item in mechanism_evidence
+                if item.get("mechanism_evidence_id") in selected_mechanism_ids
+                and experiment_id in item.get("experiment_ids", [])
+                for atom_id in item.get("origin_atom_ids", [])
+                if isinstance(atom_id, str) and atom_id
+            }
+            exact_source_identity = bool(
+                origin_atom_id in selected_origin_atom_ids
+                and authorization.get("origin_atom_field_path") == "$.command"
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(authorization.get("origin_atom_sha256") or ""),
+                )
+                is not None
+                and re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(authorization.get("origin_command_value_sha256") or ""),
+                )
+                is not None
+            )
+            replay_inputs = replay.get("replay_inputs")
+            source_identity = (
+                content_bound_payload(
+                    {
+                        "schema_version": 1,
+                        "origin_atom_id": origin_atom_id,
+                        "origin_atom_sha256": authorization.get("origin_atom_sha256"),
+                        "origin_atom_field_path": "$.command",
+                        "origin_command_value_sha256": authorization.get(
+                            "origin_command_value_sha256"
+                        ),
+                        "executed_argv_sha256": authorization.get(
+                            "executed_argv_sha256"
+                        ),
+                        "command_authorization_sha256": authorization.get(
+                            "authorization_sha256"
+                        ),
+                        "runner_attested": True,
+                    },
+                    hash_field="source_identity_sha256",
+                )
+                if exact_source_identity
+                else None
+            )
+            for oracle in matching_oracles:
+                execution = oracle.get("execution")
+                oracle_observation = (
+                    execution.get("replay_observation")
+                    if isinstance(execution, Mapping)
+                    else None
+                )
+                positive_contracts = oracle.get("positive_outcome_contracts")
+                positive_contract_ids = sorted(
+                    {
+                        str(contract.get("positive_outcome_contract_id"))
+                        for contract in (
+                            positive_contracts
+                            if isinstance(positive_contracts, list)
+                            else []
+                        )
+                        if isinstance(contract, Mapping)
+                        and _text(contract.get("positive_outcome_contract_id"))
+                        is not None
+                    }
+                )
+                if (
+                    source_identity is None
+                    or not selected_mechanism_ids
+                    or not isinstance(replay_inputs, Mapping)
+                    or not isinstance(execution, Mapping)
+                    or execution.get("argv") != argv
+                    or execution.get("command_authorization") != authorization
+                    or execution.get("replay_inputs") != replay_inputs
+                    or not isinstance(oracle_observation, Mapping)
+                    or oracle_observation.get("source_experiment_id") != experiment_id
+                    or oracle_observation.get("runner_attested") is not True
+                    or oracle_observation.get("replay_observation_sha256")
+                    != _canonical_json_sha256(
+                        {
+                            key: value
+                            for key, value in oracle_observation.items()
+                            if key != "replay_observation_sha256"
+                        }
+                    )
+                    or oracle_observation.get("positive_outcome_contract_ids")
+                    != positive_contract_ids
+                    or not positive_contract_ids
+                ):
+                    continue
+                equivalence_proof = content_bound_payload(
+                    {
+                        "schema_version": 1,
+                        "equivalence_mode": "exact_origin_scenario_identity",
+                        "source_experiment_id": experiment_id,
+                        "origin_atom_ids": [origin_atom_id],
+                        "source_identity": source_identity,
+                        "source_identity_refs": [
+                            "origin_command_identity:"
+                            f"{source_identity['source_identity_sha256']}"
+                        ],
+                        "replay_inputs_sha256": replay_inputs.get(
+                            "replay_inputs_sha256"
+                        ),
+                        "replay_observation_sha256": oracle_observation.get(
+                            "replay_observation_sha256"
+                        ),
+                        "positive_outcome_contract_ids": positive_contract_ids,
+                        "selected_mechanism_evidence_ids": selected_mechanism_ids,
+                        "outcome_oracle_id": oracle.get("outcome_oracle_id"),
+                        "runner_attested": True,
+                    },
+                    hash_field="equivalence_sha256",
+                )
+                break
+        if faithful and equivalence_proof is None:
+            errors.append(f"{label}:faithful_equivalence_unattested")
+            continue
+        if not requires_live and (not faithful or equivalence_proof is None):
+            errors.append(f"{label}:live_waiver_unattested")
+            continue
+        replay_projection = {
+            "experiment_id": experiment_id,
+            "executed_argv_sha256": _canonical_json_sha256(argv),
+            "command_authorization_sha256": authorization.get("authorization_sha256"),
+            "stdout_sha256": replay.get("stdout_sha256"),
+            "stderr_sha256": replay.get("stderr_sha256"),
+            "replay_inputs_sha256": (
+                replay.get("replay_inputs", {}).get("replay_inputs_sha256")
+                if isinstance(replay.get("replay_inputs"), Mapping)
+                else None
+            ),
+            "execution_isolation_sha256": _canonical_json_sha256(
+                replay.get("execution_isolation")
+            ),
+        }
+        provenance_refs = sorted(
+            {
+                f"research_experiment:{experiment_id}",
+                f"clean_replay:{_canonical_json_sha256(replay_projection)}",
+                *selected_mechanism_ids,
+                *oracle_ids,
+                *proof_ids,
+                *(
+                    [f"equivalence_proof:{equivalence_proof['equivalence_sha256']}"]
+                    if equivalence_proof is not None
+                    else []
+                ),
+            }
+        )
+        boundary_projection: dict[str, Any] = {
+                    "schema_version": 1,
+                    "experiment_id": experiment_id,
+                    "boundary_kind": boundary_kind,
+                    "requires_live_verification": requires_live,
+                    "faithful_equivalence": faithful,
+                    "provenance_refs": provenance_refs,
+                    "rationale_sha256": sha256(rationale.encode("utf-8")).hexdigest(),
+                    "runner_attested": True,
+        }
+        if equivalence_proof is not None:
+            boundary_projection["equivalence_proof"] = equivalence_proof
+        receipts.append(
+            content_bound_payload(
+                boundary_projection,
+                hash_field="boundary_sha256",
+            )
+        )
+    receipts.sort(key=lambda item: (str(item["experiment_id"]), str(item["boundary_sha256"])))
+    return receipts, list(dict.fromkeys(errors))
+
+
 def _falsification_attempt_receipts(
     dossier: dict[str, Any],
     *,
@@ -5948,6 +8634,7 @@ def _falsification_attempt_receipts(
     mechanism_evidence: list[dict[str, Any]],
     falsification_interventions: list[dict[str, Any]],
     deterministic_closures: list[dict[str, Any]],
+    proof_adapter_receipts: Sequence[Mapping[str, Any]] = (),
     errors: list[str],
 ) -> dict[str, list[dict[str, Any]]]:
     """Bind hypothesis challenges to exact replay and typed-mechanism receipts."""
@@ -5959,12 +8646,18 @@ def _falsification_attempt_receipts(
         if isinstance(experiment, dict) and _text(experiment.get("experiment_id")) is not None
     }
     evidence_by_hypothesis_experiment: dict[tuple[str, str], set[str]] = {}
+    symbols_by_hypothesis_experiment: dict[tuple[str, str], set[str]] = {}
     for evidence in mechanism_evidence:
         if not isinstance(evidence, dict):
             continue
         hypothesis_id = _text(evidence.get("hypothesis_id"))
         evidence_id = _text(evidence.get("mechanism_evidence_id"))
         experiment_ids = evidence.get("experiment_ids")
+        evidence_symbols = {
+            symbol
+            for symbol in evidence.get("mechanism_symbols", [])
+            if isinstance(symbol, str) and symbol.strip()
+        }
         if hypothesis_id is None or evidence_id is None or not isinstance(experiment_ids, list):
             continue
         for experiment_id in experiment_ids:
@@ -5972,12 +8665,26 @@ def _falsification_attempt_receipts(
                 evidence_by_hypothesis_experiment.setdefault(
                     (hypothesis_id, experiment_id), set()
                 ).add(evidence_id)
+                symbols_by_hypothesis_experiment.setdefault(
+                    (hypothesis_id, experiment_id), set()
+                ).update(evidence_symbols)
     intervention_by_attempt = {
         (str(receipt.get("hypothesis_id")), str(receipt.get("attempt_id"))): receipt
         for receipt in falsification_interventions
         if isinstance(receipt, dict)
         and _text(receipt.get("hypothesis_id")) is not None
         and _text(receipt.get("attempt_id")) is not None
+    }
+    proof_by_pair = {
+        (
+            str(proof.get("hypothesis_id")),
+            str(proof.get("intervention", {}).get("baseline_experiment_id")),
+            str(proof.get("intervention", {}).get("challenge_experiment_id")),
+        ): proof
+        for proof in proof_adapter_receipts
+        if isinstance(proof, Mapping)
+        and isinstance(proof.get("intervention"), Mapping)
+        and not validate_causal_proof_receipt(proof)
     }
 
     hypotheses_raw = dossier.get("root_cause_hypotheses")
@@ -5992,7 +8699,16 @@ def _falsification_attempt_receipts(
         if not isinstance(hypothesis, dict):
             continue
         hypothesis_id = _text(hypothesis.get("hypothesis_id")) or f"index-{hypothesis_index}"
-        mechanism_symbols = hypothesis.get("mechanism_symbols")
+        mechanism_raw = hypothesis.get("mechanism_symbols")
+        mechanism_symbols = (
+            [
+                symbol.strip()
+                for symbol in mechanism_raw
+                if isinstance(symbol, str) and symbol.strip()
+            ]
+            if isinstance(mechanism_raw, list)
+            else []
+        )
         support_refs = {
             ref for ref in hypothesis.get("supporting_evidence", []) if isinstance(ref, str)
         }
@@ -6023,10 +8739,14 @@ def _falsification_attempt_receipts(
             outcome = _text(attempt.get("outcome"))
             disproof_condition = attempt.get("disproof_condition")
             intervention_receipt = intervention_by_attempt.get((hypothesis_id, attempt_id or ""))
+            proof_receipt = proof_by_pair.get(
+                (hypothesis_id, baseline_id or "", challenge_id or "")
+            )
             baseline = experiments.get(baseline_id or "")
             challenge = experiments.get(challenge_id or "")
             baseline_replay = clean_replays.get(baseline_id or "")
             challenge_replay = clean_replays.get(challenge_id or "")
+            relationship_symbols: list[str] | None = None
             if baseline_id is None or challenge_id is None or baseline_id == challenge_id:
                 reasons.append("experiment_identity_invalid")
             if not isinstance(baseline, dict) or not isinstance(challenge, dict):
@@ -6037,7 +8757,11 @@ def _falsification_attempt_receipts(
                 reasons.append("outcome_invalid")
             if not isinstance(disproof_condition, dict):
                 reasons.append("disproof_condition_invalid")
-            if outcome in {"survived", "disproved"} and not isinstance(intervention_receipt, dict):
+            if (
+                outcome in {"survived", "disproved"}
+                and not isinstance(intervention_receipt, dict)
+                and not isinstance(proof_receipt, Mapping)
+            ):
                 reasons.append("causal_intervention_unverified")
 
             expected_experiment_outcome = {
@@ -6052,7 +8776,10 @@ def _falsification_attempt_receipts(
             if isinstance(challenge, dict):
                 if challenge.get("outcome") != expected_experiment_outcome:
                     reasons.append("challenge_outcome_mismatch")
-                if challenge.get("scenario_kind") not in _FALSIFICATION_REPLAY_SCENARIOS:
+                if (
+                    not isinstance(proof_receipt, Mapping)
+                    and challenge.get("scenario_kind") not in _FALSIFICATION_REPLAY_SCENARIOS
+                ):
                     reasons.append("challenge_scenario_invalid")
                 if outcome == "survived" and challenge_id not in support_refs:
                     reasons.append("survived_challenge_not_supporting")
@@ -6083,16 +8810,30 @@ def _falsification_attempt_receipts(
                     )
                     if isinstance(value, str)
                 }
-                if not baseline_artifacts.intersection(challenge_artifacts):
+                if (
+                    not isinstance(proof_receipt, Mapping)
+                    and not baseline_artifacts.intersection(challenge_artifacts)
+                ):
                     reasons.append("shared_artifact_missing")
-                if baseline.get("command") == challenge.get("command"):
+                if (
+                    not isinstance(proof_receipt, Mapping)
+                    and baseline.get("command") == challenge.get("command")
+                ):
                     reasons.append("challenge_reuses_baseline_command")
                 if challenge.get("scenario_kind") == "control":
                     relationship = challenge.get("control_relationship")
+                    relationship_symbols = (
+                        _declared_mechanism_subset(
+                            relationship.get("mechanism_symbols"),
+                            hypothesis_symbols=mechanism_symbols,
+                        )
+                        if isinstance(relationship, dict)
+                        else None
+                    )
                     if (
                         not isinstance(relationship, dict)
                         or relationship.get("supports_experiment_id") != baseline_id
-                        or relationship.get("mechanism_symbols") != mechanism_symbols
+                        or relationship_symbols is None
                     ):
                         reasons.append("control_relationship_unbound")
                 observed_assertion = challenge.get("observable_assertion")
@@ -6138,11 +8879,43 @@ def _falsification_attempt_receipts(
             challenge_mechanism_ids = evidence_by_hypothesis_experiment.get(
                 (hypothesis_id, challenge_id or ""), set()
             )
+            baseline_symbols = symbols_by_hypothesis_experiment.get(
+                (hypothesis_id, baseline_id or ""), set()
+            )
+            challenge_symbols = symbols_by_hypothesis_experiment.get(
+                (hypothesis_id, challenge_id or ""), set()
+            )
+            intervention_symbols = (
+                _declared_mechanism_subset(
+                    intervention_receipt.get("shared_verified_mechanism_symbols"),
+                    hypothesis_symbols=mechanism_symbols,
+                )
+                if isinstance(intervention_receipt, dict)
+                else None
+            )
+            proof_symbols = (
+                list(mechanism_symbols)
+                if isinstance(proof_receipt, Mapping)
+                and proof_receipt.get("hypothesis_id") == hypothesis_id
+                else None
+            )
+            verified_intervention_symbols = intervention_symbols or proof_symbols
+            required_relationship_symbols = (
+                relationship_symbols or verified_intervention_symbols
+            )
             if hypothesis_index == 0:
                 if not baseline_mechanism_ids:
                     reasons.append("baseline_mechanism_unbound")
                 if not challenge_mechanism_ids:
                     reasons.append("challenge_mechanism_unbound")
+                if not required_relationship_symbols:
+                    reasons.append("shared_mechanism_subset_missing")
+                elif (
+                    not set(required_relationship_symbols).issubset(baseline_symbols)
+                    or not set(required_relationship_symbols).issubset(challenge_symbols)
+                    or verified_intervention_symbols != required_relationship_symbols
+                ):
+                    reasons.append("shared_mechanism_subset_unverified")
             if reasons:
                 errors.append(
                     f"falsification_attempt_unbound:{hypothesis_id}:{label}:"
@@ -6165,10 +8938,18 @@ def _falsification_attempt_receipts(
                     "exit_code": challenge_replay.get("exit_code"),
                     "stdout_sha256": challenge_replay.get("stdout_sha256"),
                     "stderr_sha256": challenge_replay.get("stderr_sha256"),
+                    "mechanism_symbols": required_relationship_symbols,
                     "mechanism_evidence_ids": sorted(challenge_mechanism_ids),
                     "intervention_receipt_id": (
                         intervention_receipt.get("intervention_receipt_id")
                         if isinstance(intervention_receipt, dict)
+                        else proof_receipt.get("intervention_id")
+                        if isinstance(proof_receipt, Mapping)
+                        else None
+                    ),
+                    "proof_receipt_id": (
+                        proof_receipt.get("proof_receipt_id")
+                        if isinstance(proof_receipt, Mapping)
                         else None
                     ),
                 }
@@ -6246,7 +9027,20 @@ def _hypothesis_receipts(
             relationship = relationship_raw if isinstance(relationship_raw, dict) else {}
             support_id = _text(relationship.get("supports_experiment_id"))
             support = experiments.get(support_id or "", {})
-            mechanism_symbols = hypothesis.get("mechanism_symbols")
+            hypothesis_symbols_raw = hypothesis.get("mechanism_symbols")
+            hypothesis_symbols = (
+                [
+                    symbol.strip()
+                    for symbol in hypothesis_symbols_raw
+                    if isinstance(symbol, str) and symbol.strip()
+                ]
+                if isinstance(hypothesis_symbols_raw, list)
+                else []
+            )
+            mechanism_symbols = _declared_mechanism_subset(
+                relationship.get("mechanism_symbols"),
+                hypothesis_symbols=hypothesis_symbols,
+            )
             shared_atom_ids = sorted(
                 set(control.get("addresses_atom_ids", []))
                 & set(support.get("addresses_atom_ids", []))
@@ -6257,7 +9051,7 @@ def _hypothesis_receipts(
             valid = (
                 support_id in support_refs
                 and experiment_outcomes.get(support_id or "") == "supports"
-                and relationship.get("mechanism_symbols") == mechanism_symbols
+                and mechanism_symbols is not None
                 and control.get("addresses_atom_ids") == support.get("addresses_atom_ids")
                 and control.get("command") != support.get("command")
                 and bool(shared_artifact_refs)
@@ -6427,7 +9221,24 @@ def _explicit_atom_binding_receipts(
             errors.append(f"{prefix}:snapshot_value")
             continue
         binding_is_direct = False
-        if role == "command":
+        observation_predicate = declaration.get("observation_predicate")
+        generic_predicate_binding = role == "symptom" and isinstance(
+            observation_predicate, Mapping
+        )
+        if observation_predicate is not None and not generic_predicate_binding:
+            errors.append(f"{prefix}:observation_predicate_role")
+            continue
+        if generic_predicate_binding:
+            predicate_errors = proof_predicate_contract_errors(observation_predicate)
+            predicate_passed, evaluation_errors = evaluate_proof_predicate(
+                observation_predicate,
+                actual_value,
+            )
+            if predicate_errors or evaluation_errors or not predicate_passed:
+                errors.append(f"{prefix}:observation_predicate_not_bound_to_atom")
+                continue
+            binding_is_direct = True
+        elif role == "command":
             binding_is_direct = (
                 field_path == "$.command"
                 and isinstance(actual_value, str)
@@ -6461,16 +9272,34 @@ def _explicit_atom_binding_receipts(
             errors.append(f"{prefix}:not_bound_to_observation")
             continue
         direct = direct or binding_is_direct
-        verified.append(
-            {
+        projection: dict[str, Any] = {
                 "experiment_id": experiment_id,
                 "atom_id": atom_id,
-                "match_kind": f"explicit_{role}_field_binding",
+                "match_kind": (
+                    "explicit_symptom_field_predicate_declaration"
+                    if generic_predicate_binding
+                    else f"explicit_{role}_field_binding"
+                ),
                 "binding_role": role,
                 "origin_atom_sha256": atom_receipt.get("atom_sha256"),
                 "origin_atom_field_path": field_path,
                 "origin_atom_value_sha256": expected_hash,
-            }
+        }
+        if generic_predicate_binding:
+            projection.update(
+                {
+                    "origin_atom_value": actual_value,
+                    "observation_predicate": dict(observation_predicate),
+                    "observation_predicate_sha256": _canonical_json_sha256(
+                        observation_predicate
+                    ),
+                }
+            )
+        verified.append(
+            content_bound_payload(
+                projection,
+                hash_field="declared_binding_sha256",
+            )
         )
     return verified, direct
 
@@ -6543,12 +9372,10 @@ def _experiment_atom_bindings(
         if not isinstance(experiment, dict) or experiment.get("outcome") != "supports":
             continue
         scenario_kind = experiment.get("scenario_kind")
-        if scenario_kind not in {
-            "original_replay",
-            "faithful_replay",
-            "static_trace",
-            "live_runtime",
-        }:
+        adapter_claim = experiment.get("proof_adapter")
+        if scenario_kind == "control" or (
+            not isinstance(scenario_kind, str) and not isinstance(adapter_claim, Mapping)
+        ):
             continue
         experiment_id = str(experiment.get("experiment_id") or "")
         command = _normalize_command(str(experiment.get("command") or ""))
@@ -6608,6 +9435,7 @@ def _experiment_atom_bindings(
                     and (
                         command_matches
                         or scenario_kind in {"faithful_replay", "static_trace", "live_runtime"}
+                        or isinstance(adapter_claim, Mapping)
                     )
                 ):
                     matched_snapshot_field = snapshot_text_match(snapshot, expected)
@@ -6677,6 +9505,422 @@ def _experiment_atom_bindings(
     ):
         errors.append("supporting_experiments_have_no_direct_symptom_binding")
     return bindings
+
+
+def _implementation_touchpoint_receipts(
+    claim: Mapping[str, Any],
+    *,
+    proof_receipt: Mapping[str, Any],
+    inspected_file_receipts: Sequence[Mapping[str, Any]],
+    inspected_symbol_receipts: Sequence[Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Bind optional model-described change surfaces to runner-observed repository reads.
+
+    A causal locator such as ``env:MODE`` or ``fs:state.json`` explains the intervention, but it
+    is not a repository path.  The model may name a connected production touchpoint; the runner
+    projects it only when the exact file (and every supplied symbol) was actually inspected.
+    Invalid ancillary touchpoints are omitted without discarding an otherwise valid causal proof.
+    """
+
+    raw_touchpoints = claim.get("implementation_touchpoints")
+    if raw_touchpoints is None:
+        return [], []
+    if not isinstance(raw_touchpoints, list) or not raw_touchpoints or len(raw_touchpoints) > 32:
+        return [], ["proof_adapter_implementation_touchpoints_invalid"]
+
+    intervention = proof_receipt.get("intervention")
+    causal_target = (
+        _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
+    )
+    if causal_target is None:
+        return [], ["proof_adapter_implementation_touchpoint_causal_target_unavailable"]
+
+    files_by_path = {
+        str(receipt["path"]).replace("\\", "/").removeprefix("./"): receipt
+        for receipt in inspected_file_receipts
+        if isinstance(receipt, Mapping) and _text(receipt.get("path")) is not None
+    }
+    inspected_symbols = {
+        (
+            str(receipt["path"]).replace("\\", "/").removeprefix("./"),
+            str(receipt["symbol"]),
+        )
+        for receipt in inspected_symbol_receipts
+        if isinstance(receipt, Mapping)
+        and _text(receipt.get("path")) is not None
+        and _text(receipt.get("symbol")) is not None
+    }
+    receipts: dict[str, dict[str, Any]] = {}
+    diagnostics: list[str] = []
+    for index, raw in enumerate(raw_touchpoints):
+        label = f"proof_adapter_implementation_touchpoint_invalid:{index}"
+        if not isinstance(raw, Mapping):
+            diagnostics.append(label)
+            continue
+        path_raw = _text(raw.get("path"))
+        path = (
+            path_raw.replace("\\", "/").removeprefix("./")
+            if path_raw is not None
+            else None
+        )
+        causal_locator = _text(raw.get("causal_locator")) or causal_target
+        symbols_raw = raw.get("symbols", [])
+        relationship = _text(raw.get("relationship"))
+        if (
+            path is None
+            or path.startswith(".usertest_research/")
+            or PurePosixPath(path).is_absolute()
+            or ".." in PurePosixPath(path).parts
+            or causal_locator != causal_target
+            or not isinstance(symbols_raw, list)
+            or any(_text(symbol) is None for symbol in symbols_raw)
+            or relationship is None
+        ):
+            diagnostics.append(label)
+            continue
+        symbols = sorted({str(symbol).strip() for symbol in symbols_raw})
+        file_receipt = files_by_path.get(path)
+        if file_receipt is None or any(
+            (path, symbol) not in inspected_symbols for symbol in symbols
+        ):
+            diagnostics.append(label)
+            continue
+        observed_sha = _text(file_receipt.get("observed_content_sha256"))
+        if observed_sha is None or re.fullmatch(r"[0-9a-f]{64}", observed_sha) is None:
+            observed_sha = (
+                _text(file_receipt.get("sha256"))
+                if file_receipt.get("whole_file_observed") is True
+                else None
+            )
+        if observed_sha is None or re.fullmatch(r"[0-9a-f]{64}", observed_sha) is None:
+            diagnostics.append(label)
+            continue
+        projection = {
+            "causal_locator": causal_locator,
+            "path": path,
+            "symbols": symbols,
+            "relationship": relationship,
+            "runner_attested": True,
+            "inspected_content_sha256": observed_sha,
+        }
+        evidence_sha256 = _canonical_json_sha256(projection)
+        receipt = {
+            "touchpoint_id": f"implementation_touchpoint:{evidence_sha256}",
+            **projection,
+            "evidence_sha256": evidence_sha256,
+        }
+        receipts[receipt["touchpoint_id"]] = receipt
+    return [receipts[key] for key in sorted(receipts)], list(dict.fromkeys(diagnostics))
+
+
+def _proof_adapter_receipts(
+    dossier: Mapping[str, Any],
+    *,
+    case_id: str,
+    problem_id: str,
+    experiments: Mapping[str, Mapping[str, Any]],
+    clean_replays: Mapping[str, Mapping[str, Any]],
+    evidence_assignment: Mapping[str, Any],
+    atom_bindings: Sequence[Mapping[str, Any]],
+    planning_workspace: Path | None,
+    symbol_receipts: Sequence[Mapping[str, Any]],
+    artifact_receipts: Sequence[Mapping[str, Any]],
+    inspected_file_receipts: Sequence[Mapping[str, Any]] = (),
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    registry = builtin_proof_adapter_registry()
+    basis_registry = builtin_positive_basis_registry()
+    hypotheses_raw = dossier.get("root_cause_hypotheses")
+    hypothesis_ids = {
+        str(item.get("hypothesis_id"))
+        for item in hypotheses_raw if isinstance(item, Mapping)
+    } if isinstance(hypotheses_raw, list) else set()
+    receipts: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+    for experiment_id, experiment in experiments.items():
+        claim = experiment.get("proof_adapter")
+        if not isinstance(claim, Mapping):
+            continue
+        unit_errors: list[str] = []
+        hypothesis_id = _text(claim.get("hypothesis_id"))
+        baseline_id = _text(claim.get("baseline_experiment_id"))
+        challenge_id = _text(claim.get("challenge_experiment_id"))
+        if (
+            hypothesis_id is None
+            or hypothesis_id not in hypothesis_ids
+            or baseline_id is None
+            or challenge_id is None
+        ):
+            unit_errors.append("proof_adapter_unresolved_identity")
+            diagnostics.append(
+                {
+                    "experiment_id": experiment_id,
+                    "adapter_id": claim.get("adapter_id"),
+                    "claim_sha256": _canonical_json_sha256(claim),
+                    "diagnostics": unit_errors,
+                }
+            )
+            continue
+        pair_ids = {baseline_id, challenge_id}
+        pair_bindings = [
+            dict(binding)
+            for binding in atom_bindings
+            if isinstance(binding, Mapping)
+            and binding.get("experiment_id") in pair_ids
+            and _text(binding.get("atom_id")) is not None
+        ]
+        predicate_candidates = [
+            binding
+            for binding in pair_bindings
+            if binding.get("binding_role") == "symptom"
+            and isinstance(binding.get("observation_predicate"), Mapping)
+        ]
+        legacy_source_atom_ids = {
+            str(binding["atom_id"])
+            for binding in pair_bindings
+            if (
+                binding.get("binding_role") == "symptom"
+                and not isinstance(binding.get("observation_predicate"), Mapping)
+            )
+            or (
+                binding.get("binding_role") is None
+                and _text(binding.get("match_kind")) is not None
+            )
+        }
+        provisional_source_atom_ids = legacy_source_atom_ids | {
+            str(binding["atom_id"]) for binding in predicate_candidates
+        }
+        if not provisional_source_atom_ids:
+            unit_errors.append("proof_adapter_source_root_unbound")
+            diagnostics.append(
+                {
+                    "experiment_id": experiment_id,
+                    "adapter_id": claim.get("adapter_id"),
+                    "claim_sha256": _canonical_json_sha256(claim),
+                    "diagnostics": unit_errors,
+                }
+            )
+            continue
+        positive = claim.get("positive_outcome")
+        semantic = positive.get("semantic_basis") if isinstance(positive, Mapping) else None
+        predicate = positive.get("predicate") if isinstance(positive, Mapping) else None
+
+        def evaluate_adapter(
+            source_atom_ids: set[str],
+            *,
+            attested_predicate_bindings: Sequence[Mapping[str, Any]] = (),
+            semantic_claim: Mapping[str, Any] = (
+                semantic if isinstance(semantic, Mapping) else {}
+            ),
+            positive_predicate: Mapping[str, Any] = (
+                predicate if isinstance(predicate, Mapping) else {}
+            ),
+            source_pair_ids: frozenset[str] = frozenset(pair_ids),
+            source_pair_bindings: tuple[dict[str, Any], ...] = tuple(pair_bindings),
+            resolved_hypothesis_id: str = hypothesis_id,
+            adapter_claim: Mapping[str, Any] = claim,
+        ) -> tuple[Any, Any]:
+            basis = basis_registry.evaluate(
+                PositiveBasisContext(
+                    semantic_claim=semantic_claim,
+                    predicate=positive_predicate,
+                    source_atom_ids=frozenset(source_atom_ids),
+                    evidence_assignment=evidence_assignment,
+                    experiments=experiments,
+                    clean_replays=clean_replays,
+                    planning_workspace=planning_workspace,
+                    artifact_receipts=artifact_receipts,
+                    symbol_receipts=symbol_receipts,
+                )
+            )
+            if basis.basis is None:
+                return basis, None
+            source_projection: dict[str, Any] = {
+                "root_kind": "origin_symptom",
+                "origin_atom_ids": sorted(source_atom_ids),
+                "source_experiment_ids": sorted(source_pair_ids),
+                "symptom_bindings_sha256": _canonical_json_sha256(source_pair_bindings),
+                "positive_basis": basis.basis,
+                "runner_attested": True,
+            }
+            if attested_predicate_bindings:
+                source_projection["atom_field_predicate_bindings"] = sorted(
+                    (dict(binding) for binding in attested_predicate_bindings),
+                    key=lambda binding: (
+                        str(binding.get("atom_id")),
+                        str(binding.get("origin_atom_field_path")),
+                    ),
+                )
+            source_root = content_bound_payload(
+                source_projection,
+                hash_field="source_root_sha256",
+            )
+            adapter_result = registry.evaluate(
+                ProofAdapterContext(
+                    case_id=case_id,
+                    problem_id=problem_id,
+                    hypothesis_id=resolved_hypothesis_id,
+                    claim=adapter_claim,
+                    experiments=experiments,
+                    clean_replays=clean_replays,
+                    source_root=source_root,
+                    planning_workspace=planning_workspace,
+                    atom_bindings=atom_bindings,
+                    symbol_receipts=symbol_receipts,
+                    artifact_receipts=artifact_receipts,
+                    services={},
+                )
+            )
+            return basis, adapter_result
+
+        basis_result, result = evaluate_adapter(provisional_source_atom_ids)
+        unit_errors.extend(basis_result.diagnostics)
+        if basis_result.basis is None or result is None:
+            diagnostics.append(
+                {
+                    "experiment_id": experiment_id,
+                    "adapter_id": claim.get("adapter_id"),
+                    "claim_sha256": _canonical_json_sha256(claim),
+                    "diagnostics": list(dict.fromkeys(unit_errors)),
+                }
+            )
+            continue
+        unit_errors.extend(result.diagnostics)
+
+        if predicate_candidates:
+            provisional_proof = result.receipts[0] if result.receipts else None
+            observations = (
+                provisional_proof.get("observations")
+                if isinstance(provisional_proof, Mapping)
+                else None
+            )
+            baseline_observation = (
+                observations.get("baseline") if isinstance(observations, Mapping) else None
+            )
+            attested_predicate_bindings: list[dict[str, Any]] = []
+            for binding in predicate_candidates:
+                declared_projection = {
+                    key: value
+                    for key, value in binding.items()
+                    if key != "declared_binding_sha256"
+                }
+                predicate_contract = binding.get("observation_predicate")
+                baseline_value = (
+                    baseline_observation.get("observed")
+                    if isinstance(baseline_observation, Mapping)
+                    else None
+                )
+                predicate_passed, predicate_errors = evaluate_proof_predicate(
+                    predicate_contract,
+                    baseline_value,
+                )
+                if (
+                    binding.get("experiment_id") != baseline_id
+                    or binding.get("declared_binding_sha256")
+                    != _canonical_json_sha256(declared_projection)
+                    or not isinstance(baseline_observation, Mapping)
+                    or predicate_errors
+                    or not predicate_passed
+                ):
+                    unit_errors.append(
+                        "proof_adapter_atom_predicate_not_bound_to_baseline:"
+                        f"{binding.get('atom_id')}"
+                    )
+                    continue
+                attested_predicate_bindings.append(
+                    content_bound_payload(
+                        {
+                            "atom_id": binding.get("atom_id"),
+                            "origin_atom_sha256": binding.get("origin_atom_sha256"),
+                            "origin_atom_field_path": binding.get(
+                                "origin_atom_field_path"
+                            ),
+                            "origin_atom_value": binding.get("origin_atom_value"),
+                            "origin_atom_value_sha256": binding.get(
+                                "origin_atom_value_sha256"
+                            ),
+                            "observation_predicate": dict(predicate_contract),
+                            "observation_predicate_sha256": binding.get(
+                                "observation_predicate_sha256"
+                            ),
+                            "baseline_experiment_id": baseline_id,
+                            "baseline_observation_sha256": baseline_observation.get(
+                                "observation_sha256"
+                            ),
+                            "adapter_id": provisional_proof.get("adapter_id"),
+                            "adapter_version": provisional_proof.get("adapter_version"),
+                            "runner_attested": True,
+                        },
+                        hash_field="atom_field_binding_sha256",
+                    )
+                )
+            final_source_atom_ids = legacy_source_atom_ids | {
+                str(binding["atom_id"]) for binding in attested_predicate_bindings
+            }
+            if not final_source_atom_ids:
+                result = None
+                unit_errors.append("proof_adapter_source_root_unbound")
+            else:
+                final_basis, final_result = evaluate_adapter(
+                    final_source_atom_ids,
+                    attested_predicate_bindings=attested_predicate_bindings,
+                )
+                unit_errors.extend(final_basis.diagnostics)
+                result = final_result
+                if result is not None:
+                    unit_errors.extend(result.diagnostics)
+        if result is None:
+            diagnostics.append(
+                {
+                    "experiment_id": experiment_id,
+                    "adapter_id": claim.get("adapter_id"),
+                    "claim_sha256": _canonical_json_sha256(claim),
+                    "diagnostics": list(dict.fromkeys(unit_errors)),
+                }
+            )
+            continue
+        bound_receipts: list[dict[str, Any]] = []
+        for proof_receipt in result.receipts:
+            touchpoints, touchpoint_diagnostics = _implementation_touchpoint_receipts(
+                claim,
+                proof_receipt=proof_receipt,
+                inspected_file_receipts=inspected_file_receipts,
+                inspected_symbol_receipts=symbol_receipts,
+            )
+            unit_errors.extend(touchpoint_diagnostics)
+            if not touchpoints:
+                bound_receipts.append(proof_receipt)
+                continue
+            bound = dict(proof_receipt)
+            adapter_evidence_raw = bound.get("adapter_evidence")
+            adapter_evidence = (
+                dict(adapter_evidence_raw)
+                if isinstance(adapter_evidence_raw, Mapping)
+                else {}
+            )
+            adapter_evidence["implementation_touchpoints"] = touchpoints
+            bound["adapter_evidence"] = adapter_evidence
+            bound["proof_receipt_id"] = proof_receipt_id_for(bound)
+            bound_errors = validate_causal_proof_receipt(bound)
+            if bound_errors:
+                unit_errors.extend(
+                    f"proof_adapter_implementation_touchpoint_receipt_invalid:{error}"
+                    for error in bound_errors
+                )
+                bound_receipts.append(proof_receipt)
+            else:
+                bound_receipts.append(bound)
+        if unit_errors:
+            diagnostics.append(
+                {
+                    "experiment_id": experiment_id,
+                    "adapter_id": claim.get("adapter_id"),
+                    "claim_sha256": _canonical_json_sha256(claim),
+                    "diagnostics": list(dict.fromkeys(unit_errors)),
+                }
+            )
+        receipts.extend(bound_receipts)
+    by_id = {str(receipt["proof_receipt_id"]): receipt for receipt in receipts}
+    return [by_id[key] for key in sorted(by_id)], diagnostics
 
 
 def verify_research_evidence(
@@ -6820,6 +10064,27 @@ def verify_research_evidence(
         events=events,
         errors=errors,
     )
+    declared_experiments_raw = dossier.get("experiments")
+    declared_experiments = {
+        str(experiment.get("experiment_id")): experiment
+        for experiment in (
+            declared_experiments_raw if isinstance(declared_experiments_raw, list) else []
+        )
+        if isinstance(experiment, dict) and _text(experiment.get("experiment_id")) is not None
+    }
+    proof_adapter_receipts, proof_adapter_diagnostics = _proof_adapter_receipts(
+        dossier,
+        case_id=case_id,
+        problem_id=problem_id,
+        experiments=declared_experiments,
+        clean_replays=clean_replays,
+        evidence_assignment=evidence_assignment,
+        atom_bindings=atom_bindings,
+        planning_workspace=planning_workspace,
+        symbol_receipts=symbol_receipts,
+        artifact_receipts=artifact_receipts,
+        inspected_file_receipts=file_receipts,
+    )
     # Exception traces and exact pytest AST controls are strong optional proof
     # modes.  Their absence is expected for non-throwing and runtime/config
     # failures, so collect their receipts without making their shape universal.
@@ -6835,8 +10100,9 @@ def verify_research_evidence(
     failure_paths: list[dict[str, Any]] = []
     falsification_interventions: list[dict[str, Any]] = []
     deterministic_closures: list[dict[str, Any]] = []
+    optional_control_errors: list[str] = []
+    optional_falsification_intervention_errors: list[str] = []
     if planning_workspace is not None:
-        optional_control_errors: list[str] = []
         test_selections, control_verifications = _causal_control_receipts(
             dossier,
             clean_replays=clean_replays,
@@ -6858,15 +10124,28 @@ def verify_research_evidence(
             clean_replays=clean_replays,
             planning_workspace=planning_workspace,
             symbol_receipts=symbol_receipts,
-            errors=errors,
+            errors=optional_falsification_intervention_errors,
         )
-        deterministic_closures = _deterministic_mechanism_closure_receipts(
-            dossier,
-            clean_replays=clean_replays,
-            symbol_receipts=symbol_receipts,
-            causal_links=causal_links,
-            planning_workspace=planning_workspace,
-        )
+        if optional_falsification_intervention_errors and not proof_adapter_receipts:
+            errors.extend(optional_falsification_intervention_errors)
+    preliminary_mechanism_errors: list[str] = []
+    preliminary_mechanism_evidence = _typed_mechanism_evidence_receipts(
+        dossier,
+        clean_replays=clean_replays,
+        symbol_receipts=symbol_receipts,
+        causal_links=causal_links,
+        strong_controls=control_verifications,
+        falsification_interventions=falsification_interventions,
+        deterministic_closures=[],
+        atom_bindings=atom_bindings,
+        errors=preliminary_mechanism_errors,
+    )
+    deterministic_closures = _deterministic_mechanism_closure_receipts(
+        dossier,
+        clean_replays=clean_replays,
+        symbol_receipts=symbol_receipts,
+        mechanism_evidence=preliminary_mechanism_evidence,
+    )
     mechanism_evidence = _typed_mechanism_evidence_receipts(
         dossier,
         clean_replays=clean_replays,
@@ -6875,6 +10154,8 @@ def verify_research_evidence(
         strong_controls=control_verifications,
         falsification_interventions=falsification_interventions,
         deterministic_closures=deterministic_closures,
+        proof_adapter_receipts=proof_adapter_receipts,
+        atom_bindings=atom_bindings,
         errors=errors,
     )
     (
@@ -6893,6 +10174,11 @@ def verify_research_evidence(
         dossier,
         clean_replays=clean_replays,
         mechanism_evidence=mechanism_evidence,
+        proof_adapter_receipts=proof_adapter_receipts,
+        verified_mechanism=verified_mechanism,
+        verified_mechanism_sha256=verified_mechanism_sha256,
+        verified_mechanism_provenance=verified_mechanism_provenance,
+        verified_mechanism_provenance_sha256=verified_mechanism_provenance_sha256,
         control_verifications=control_verifications,
         falsification_interventions=falsification_interventions,
         inspected_file_receipts=file_receipts,
@@ -6910,12 +10196,24 @@ def verify_research_evidence(
         repo_revision=repo_revision,
         errors=errors,
     )
+    verification_boundaries, verification_boundary_errors = (
+        _verification_boundary_receipts(
+            experiments=declared_experiments,
+            clean_replays=clean_replays,
+            mechanism_evidence=mechanism_evidence,
+            proof_adapter_receipts=proof_adapter_receipts,
+            outcome_oracles=outcome_oracles,
+            verified_mechanism_provenance=verified_mechanism_provenance,
+        )
+    )
+    errors.extend(verification_boundary_errors)
     falsification_attempts = _falsification_attempt_receipts(
         dossier,
         clean_replays=clean_replays,
         mechanism_evidence=mechanism_evidence,
         falsification_interventions=falsification_interventions,
         deterministic_closures=deterministic_closures,
+        proof_adapter_receipts=proof_adapter_receipts,
         errors=errors,
     )
     hypothesis_receipts = _hypothesis_receipts(
@@ -6928,6 +10226,24 @@ def verify_research_evidence(
 
     report_path = run_dir / "report.json"
     unique_errors = list(dict.fromkeys(errors))
+    quarantined_diagnostics = [
+        {
+            "component": component,
+            "diagnostics": list(dict.fromkeys(component_errors)),
+        }
+        for component, component_errors in (
+            ("optional_causal_trace", optional_trace_errors),
+            ("optional_control", optional_control_errors),
+            (
+                "optional_falsification_intervention",
+                optional_falsification_intervention_errors
+                if proof_adapter_receipts
+                else [],
+            ),
+            ("preliminary_mechanism_projection", preliminary_mechanism_errors),
+        )
+        if component_errors
+    ]
     receipt = {
         "verification_method": _VERIFICATION_METHOD,
         "status": "verified" if not unique_errors else "failed",
@@ -6962,11 +10278,15 @@ def verify_research_evidence(
         "hypothesis_refs": hypothesis_receipts,
         "causal_links": causal_links,
         "mechanism_evidence": mechanism_evidence,
+        "proof_adapter_receipts": proof_adapter_receipts,
+        "proof_adapter_diagnostics": proof_adapter_diagnostics,
+        "quarantined_diagnostics": quarantined_diagnostics,
         "verified_mechanism": verified_mechanism,
         "verified_mechanism_sha256": verified_mechanism_sha256,
         "verified_mechanism_provenance": verified_mechanism_provenance,
         "verified_mechanism_provenance_sha256": (verified_mechanism_provenance_sha256),
         "outcome_oracles": outcome_oracles,
+        "verification_boundaries": verification_boundaries,
         "test_selections": test_selections,
         "control_verifications": control_verifications,
         "falsification_interventions": falsification_interventions,
@@ -7075,7 +10395,7 @@ def _persisted_origin_attachment_errors(
 
 
 def _persisted_research_attempt_errors(dossier: dict[str, Any]) -> list[str]:
-    """Rehash retained model-output attempts without trusting their file paths."""
+    """Rehash retained attempts and reverify each Codex subscription/session contract."""
     attempts_raw = dossier.get("research_attempts")
     attempts = attempts_raw if isinstance(attempts_raw, list) else []
     errors: list[str] = []
@@ -7091,6 +10411,11 @@ def _persisted_research_attempt_errors(dossier: dict[str, Any]) -> list[str]:
         run_dir = Path(run_dir_raw).resolve()
         artifacts_raw = attempt.get("attempt_artifacts")
         artifacts = artifacts_raw if isinstance(artifacts_raw, list) else []
+        artifacts_by_kind = {
+            str(artifact.get("kind")): artifact
+            for artifact in artifacts
+            if isinstance(artifact, dict) and _text(artifact.get("kind")) is not None
+        }
         for artifact in artifacts:
             if not isinstance(artifact, dict):
                 continue
@@ -7128,6 +10453,65 @@ def _persisted_research_attempt_errors(dossier: dict[str, Any]) -> list[str]:
             "report_path"
         ):
             errors.append(f"research_attempt_report_path_changed:{attempt_index}")
+
+        target_artifact = artifacts_by_kind.get("target_ref")
+        target_path_raw = (
+            _text(target_artifact.get("path")) if isinstance(target_artifact, dict) else None
+        )
+        target_path = Path(target_path_raw) if target_path_raw is not None else None
+        target_ref: dict[str, Any] | None = None
+        if target_path is not None and target_path.is_file():
+            try:
+                target_raw = json.loads(target_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                target_raw = None
+            if isinstance(target_raw, dict):
+                target_ref = target_raw
+            else:
+                errors.append(f"research_attempt_target_ref_invalid:{attempt_index}")
+
+        target_agent = (
+            _text(target_ref.get("agent")).casefold() if isinstance(target_ref, dict) else None
+        )
+        attempt_kind = _text(attempt.get("attempt_kind"))
+        if attempt_kind == "model_output_repair":
+            if target_agent != "codex":
+                errors.append(f"research_attempt_repair_agent_not_codex:{attempt_index}")
+            expected_session = _text(attempt.get("agent_session_id"))
+            resumed_session = _text(attempt.get("resumed_from_session_id"))
+            requested_session = (
+                _text(target_ref.get("requested_codex_resume_session_id"))
+                if isinstance(target_ref, dict)
+                else None
+            )
+            if (
+                expected_session is None
+                or resumed_session != expected_session
+                or requested_session != expected_session
+            ):
+                errors.append(f"research_attempt_repair_session_provenance_invalid:{attempt_index}")
+
+        if (
+            target_agent == "codex"
+            and attempt_kind in {"full_research", "model_output_repair", "fresh_research_retry"}
+        ) or attempt_kind == "model_output_repair":
+            auth_artifact = artifacts_by_kind.get("codex_subscription_auth")
+            auth_path_raw = (
+                _text(auth_artifact.get("path")) if isinstance(auth_artifact, dict) else None
+            )
+            auth_path = Path(auth_path_raw) if auth_path_raw is not None else None
+            if (
+                not isinstance(auth_artifact, dict)
+                or auth_artifact.get("exists") is not True
+                or auth_path is None
+                or not auth_path.is_file()
+            ):
+                errors.append(f"research_attempt_codex_subscription_receipt_missing:{attempt_index}")
+            else:
+                errors.extend(
+                    f"research_attempt_{attempt_index}_{error}"
+                    for error in verify_controlled_codex_execpolicy_receipt(auth_path)
+                )
     return errors
 
 
@@ -7322,6 +10706,7 @@ def verify_persisted_research_evidence(
             "outcome",
             "observable_assertion",
             "artifact_refs",
+            "verification_boundary",
         ):
             if experiment_receipt.get(field) != declared.get(field):
                 errors.append(f"research_experiment_receipt_changed:{experiment_id}:{field}")
@@ -7395,11 +10780,37 @@ def verify_persisted_research_evidence(
             seen_replay_workspaces.add(str(replay_workspace_raw))
             current_replay_state = _canonical_workspace_state(replay_workspace)
             current_replay_state_sha = _canonical_json_sha256(current_replay_state)
+            replay_mutated = experiment_receipt.get("post_replay_mutations")
+            transitions_raw = experiment_receipt.get("declared_state_transitions", [])
+            transitions = transitions_raw if isinstance(transitions_raw, list) else []
+            mutation_contract_valid = (
+                isinstance(replay_mutated, bool)
+                and experiment_receipt.get("undeclared_post_replay_mutations", []) == []
+                and (
+                    (
+                        replay_mutated is False
+                        and experiment_receipt.get("pre_replay_state_sha256")
+                        == experiment_receipt.get("post_replay_state_sha256")
+                    )
+                    or (replay_mutated is True and bool(transitions))
+                )
+                and all(
+                    isinstance(transition, dict)
+                    and transition.get("runner_attested") is True
+                    and transition.get("transition_sha256")
+                    == _canonical_json_sha256(
+                        {
+                            key: value
+                            for key, value in transition.items()
+                            if key != "transition_sha256"
+                        }
+                    )
+                    for transition in transitions
+                )
+            )
             if (
                 experiment_receipt.get("post_replay_state_sha256") != current_replay_state_sha
-                or experiment_receipt.get("pre_replay_state_sha256")
-                != experiment_receipt.get("post_replay_state_sha256")
-                or experiment_receipt.get("post_replay_mutations") is not False
+                or not mutation_contract_valid
                 or experiment_receipt.get("execution_isolation") != replay_isolation
             ):
                 errors.append(f"research_replay_workspace_state_changed:{experiment_id}")
@@ -7629,15 +11040,64 @@ def verify_persisted_research_evidence(
             symbol_receipts=[symbol for symbol in symbols if isinstance(symbol, dict)],
             errors=intervention_errors,
         )
-        errors.extend(intervention_errors)
         if receipt.get("falsification_interventions") != recomputed_falsification_interventions:
             errors.append("research_falsification_interventions_changed")
-        recomputed_deterministic_closures = _deterministic_mechanism_closure_receipts(
+        declared_experiments_raw = dossier.get("experiments")
+        declared_experiments = {
+            str(experiment.get("experiment_id")): experiment
+            for experiment in (
+                declared_experiments_raw
+                if isinstance(declared_experiments_raw, list)
+                else []
+            )
+            if isinstance(experiment, dict)
+            and _text(experiment.get("experiment_id")) is not None
+        }
+        recomputed_adapter_receipts, recomputed_adapter_diagnostics = (
+            _proof_adapter_receipts(
+                dossier,
+                case_id=str(dossier.get("case_id") or ""),
+                problem_id=str(dossier.get("problem_id") or ""),
+                experiments=declared_experiments,
+                clean_replays=persisted_replays,
+                evidence_assignment=assignment,
+                atom_bindings=recomputed_bindings,
+                planning_workspace=planning_workspace,
+                symbol_receipts=[symbol for symbol in symbols if isinstance(symbol, dict)],
+                artifact_receipts=[
+                    artifact
+                    for artifact in receipt.get("artifacts", [])
+                    if isinstance(artifact, dict)
+                ],
+                inspected_file_receipts=[
+                    file_receipt for file_receipt in files if isinstance(file_receipt, dict)
+                ],
+            )
+        )
+        if receipt.get("proof_adapter_receipts", []) != recomputed_adapter_receipts:
+            errors.append("research_proof_adapter_receipts_changed")
+        if receipt.get("proof_adapter_diagnostics", []) != recomputed_adapter_diagnostics:
+            errors.append("research_proof_adapter_diagnostics_changed")
+        if intervention_errors and not recomputed_adapter_receipts:
+            errors.extend(intervention_errors)
+        preliminary_mechanism_errors: list[str] = []
+        preliminary_mechanism_evidence = _typed_mechanism_evidence_receipts(
             dossier,
             clean_replays=persisted_replays,
             symbol_receipts=[symbol for symbol in symbols if isinstance(symbol, dict)],
             causal_links=recomputed_causal_links,
-            planning_workspace=planning_workspace,
+            strong_controls=recomputed_control_verifications,
+            falsification_interventions=recomputed_falsification_interventions,
+            deterministic_closures=[],
+            atom_bindings=recomputed_bindings,
+            errors=preliminary_mechanism_errors,
+            proof_adapter_receipts=recomputed_adapter_receipts,
+        )
+        recomputed_deterministic_closures = _deterministic_mechanism_closure_receipts(
+            dossier,
+            clean_replays=persisted_replays,
+            symbol_receipts=[symbol for symbol in symbols if isinstance(symbol, dict)],
+            mechanism_evidence=preliminary_mechanism_evidence,
         )
         if receipt.get("deterministic_mechanism_closures") != recomputed_deterministic_closures:
             errors.append("research_deterministic_mechanism_closures_changed")
@@ -7650,6 +11110,8 @@ def verify_persisted_research_evidence(
             strong_controls=recomputed_control_verifications,
             falsification_interventions=recomputed_falsification_interventions,
             deterministic_closures=recomputed_deterministic_closures,
+            proof_adapter_receipts=recomputed_adapter_receipts,
+            atom_bindings=recomputed_bindings,
             errors=mechanism_errors,
         )
         errors.extend(mechanism_errors)
@@ -7686,6 +11148,11 @@ def verify_persisted_research_evidence(
             dossier,
             clean_replays=persisted_replays,
             mechanism_evidence=recomputed_mechanism_evidence,
+            proof_adapter_receipts=recomputed_adapter_receipts,
+            verified_mechanism=recomputed_verified_mechanism,
+            verified_mechanism_sha256=recomputed_verified_mechanism_sha256,
+            verified_mechanism_provenance=recomputed_verified_mechanism_provenance,
+            verified_mechanism_provenance_sha256=(recomputed_verified_mechanism_provenance_sha256),
             control_verifications=recomputed_control_verifications,
             falsification_interventions=recomputed_falsification_interventions,
             inspected_file_receipts=[
@@ -7710,6 +11177,21 @@ def verify_persisted_research_evidence(
         errors.extend(oracle_errors)
         if receipt.get("outcome_oracles") != recomputed_outcome_oracles:
             errors.append("research_outcome_oracles_changed")
+        recomputed_verification_boundaries, boundary_errors = (
+            _verification_boundary_receipts(
+                experiments=declared_experiments,
+                clean_replays=persisted_replays,
+                mechanism_evidence=recomputed_mechanism_evidence,
+                proof_adapter_receipts=recomputed_adapter_receipts,
+                outcome_oracles=recomputed_outcome_oracles,
+                verified_mechanism_provenance=(
+                    recomputed_verified_mechanism_provenance
+                ),
+            )
+        )
+        errors.extend(boundary_errors)
+        if receipt.get("verification_boundaries", []) != recomputed_verification_boundaries:
+            errors.append("research_verification_boundaries_changed")
         falsification_errors: list[str] = []
         recomputed_falsification_attempts = _falsification_attempt_receipts(
             dossier,
@@ -7717,6 +11199,7 @@ def verify_persisted_research_evidence(
             mechanism_evidence=recomputed_mechanism_evidence,
             falsification_interventions=recomputed_falsification_interventions,
             deterministic_closures=recomputed_deterministic_closures,
+            proof_adapter_receipts=recomputed_adapter_receipts,
             errors=falsification_errors,
         )
         errors.extend(falsification_errors)

@@ -86,7 +86,8 @@ Top-level exports:
 
 - `load_prompt_manifest(path)`
 - `run_backlog_prompt(...)`
-- `run_backlog_ensemble(...)`
+- `run_backlog_ensemble(...)` (legacy one-pass analysis only; its output is not
+  eligible for automated ticket export)
 - `run_labeler_jobs(...)`
 - `load_pipeline_prompt_manifest(prompts_dir)` (six-stage pipeline manifest v2)
 - `run_stage_prompt_json(...)` (generic stage prompt runner)

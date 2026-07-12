@@ -1,10 +1,22 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+import time as _time
+from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from uuid import uuid4
 
-from backlog_core.case_lineage import verified_mechanism_identities_from_case_registry
+from backlog_core.case_lineage import (
+    verified_causal_identities_from_case_registry,
+    verified_mechanism_identities_from_case_registry,
+)
 from backlog_miner.origin_evidence import materialize_origin_attachments
+from backlog_miner.pipeline import model_invocation_manifest_ref
+from backlog_miner.prompt_correction import (
+    CorrectionRunResult,
+    acquire_author_session,
+    correction_metrics_with_session_acquisition,
+)
 from backlog_repo import validate_case_relation_receipt, write_case_relation_receipt
 
 from usertest_backlog.shared import *
@@ -261,7 +273,13 @@ def _atoms_for_problem_mining_prompt(
 
         linked_raw = atom.get("linked_atom_ids")
         linked = (
-            [x for x in linked_raw if isinstance(x, str) and x.strip()][:3]
+            list(
+                dict.fromkeys(
+                    value.strip()
+                    for value in linked_raw
+                    if isinstance(value, str) and value.strip()
+                )
+            )
             if isinstance(linked_raw, list)
             else []
         )
@@ -804,6 +822,144 @@ def _reconcile_problem_mining_reviews(
     return records, final_decisions
 
 
+def _coverage_depth_review_prompt(
+    *,
+    primary_records: Sequence[Mapping[str, Any]],
+    primary_decisions: Sequence[Mapping[str, Any]],
+    template_text: str,
+    stage_guidance_text: str,
+    atoms_placeholder: str,
+    max_records_per_miner: int,
+    bound_feedback: Mapping[str, Any] | None = None,
+) -> str:
+    """Build the independent Stage-1 claim audit for an exact primary frontier.
+
+    The optional feedback is not a request to agree with another model.  It tells the
+    independent reviewer why the primary frontier changed while retaining the same
+    evidence-first review contract used by an ordinary Stage-1 run.
+    """
+
+    import json as _json
+
+    feedback_section = (
+        "\n\nBOUND INDEPENDENT QUALIFICATION FEEDBACK (a finding to evaluate, not "
+        "ground truth):\n"
+        + _json.dumps(dict(bound_feedback), ensure_ascii=False, indent=2, sort_keys=True)
+        if isinstance(bound_feedback, Mapping)
+        else ""
+    )
+    return (
+        "INDEPENDENT FULL COVERAGE AND DEPTH REVIEW\n\n"
+        "Review every assigned atom from the evidence files, including atoms that the "
+        "primary pass attached to a problem and atoms it did not attach. Do not trust "
+        "the primary pass merely because it cited an atom. For every primary "
+        "supports_case claim, decide whether the complete observed evidence directly "
+        "establishes that exact problem. To confirm it, emit the corresponding primary "
+        "problem record verbatim (including its problem_id and evidence_atom_ids) and "
+        "reference that same problem_id from the atom decision. Changed wording or a "
+        "different ID is a different claim, not confirmation. If a primary claim is "
+        "surface-level or unsupported, do not copy it; use unresolved or another "
+        "evidence-backed non-support disposition. Independently recover any concrete, "
+        "unactioned observed problem the primary pass missed. Consider behavior, "
+        "infrastructure, schema/output, and usability without forcing a problem that "
+        "the evidence does not establish. Return the same strict response contract "
+        "with exactly one decision per assigned atom."
+        + feedback_section
+        + "\n\nPRIMARY PROBLEM RECORDS AND DECISIONS (claims to audit, not evidence):\n"
+        + _json.dumps(
+            {
+                "problem_records": [dict(item) for item in primary_records],
+                "atom_decisions": [dict(item) for item in primary_decisions],
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n\n"
+        + template_text.replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
+        .replace("{{ATOMS_JSON}}", atoms_placeholder)
+        .replace("{{MAX_RECORDS_PER_MINER}}", str(max_records_per_miner))
+    )
+
+
+def _build_composite_miner_receipt(
+    *,
+    tag: str,
+    template_name: str,
+    assigned_atom_ids: Sequence[str],
+    eligible_atom_ids: Sequence[str],
+    primary_records: Sequence[Mapping[str, Any]],
+    primary_decisions: Sequence[Mapping[str, Any]],
+    primary_receipt: Mapping[str, Any],
+    review_records: Sequence[Mapping[str, Any]],
+    review_decisions: Sequence[Mapping[str, Any]],
+    review_receipt: Mapping[str, Any],
+    primary_normalized_events_path: Path,
+    primary_workspace_dir: Path,
+    primary_workspace_manifest: Mapping[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Reconcile and retain both authored Stage-1 component frontiers.
+
+    A composite receipt is deliberately more than the latest model receipt.  It keeps
+    the primary claim set, the independent review claim set, and the aggregate decision
+    that downstream relation review consumed.  Qualification repair can therefore
+    replace one exact author without fabricating or discarding the other author.
+    """
+
+    import json as _json
+
+    primary_records_copy = [dict(item) for item in primary_records]
+    primary_decisions_copy = [dict(item) for item in primary_decisions]
+    review_records_copy = [dict(item) for item in review_records]
+    review_decisions_copy = [dict(item) for item in review_decisions]
+    final_records, final_decisions = _reconcile_problem_mining_reviews(
+        primary_records=primary_records_copy,
+        primary_decisions=primary_decisions_copy,
+        review_records=review_records_copy,
+        review_decisions=review_decisions_copy,
+    )
+    component_projection = {
+        "primary_response_sha256": primary_receipt.get("response_sha256"),
+        "coverage_depth_review_response_sha256": review_receipt.get("response_sha256"),
+        "primary_problem_records": primary_records_copy,
+        "primary_atom_decisions": primary_decisions_copy,
+        "coverage_depth_review_problem_records": review_records_copy,
+        "coverage_depth_review_atom_decisions": review_decisions_copy,
+    }
+    composite = build_live_miner_receipt(
+        tag=tag,
+        template_name=template_name,
+        assigned_atom_ids=list(assigned_atom_ids),
+        eligible_atom_ids=list(eligible_atom_ids),
+        records=final_records,
+        decisions=final_decisions,
+        response_text=_json.dumps(
+            component_projection,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        normalized_events_path=primary_normalized_events_path,
+        workspace_dir=primary_workspace_dir,
+        workspace_manifest=primary_workspace_manifest,
+    )
+    composite.update(
+        {
+            "primary_pass": dict(primary_receipt),
+            "non_support_review": dict(review_receipt),
+            "review_scope": "all_assigned_atoms_positive_and_non_support",
+            "primary_problem_records": primary_records_copy,
+            "primary_atom_decisions": primary_decisions_copy,
+            "coverage_depth_review_problem_records": review_records_copy,
+            "coverage_depth_review_atom_decisions": review_decisions_copy,
+            "reconciled_problem_records": [dict(item) for item in final_records],
+            "reconciled_atom_decisions": [dict(item) for item in final_decisions],
+        }
+    )
+    composite["attempt_history"] = list(primary_receipt.get("attempt_history", []))
+    composite["successful_attempt_tag"] = primary_receipt.get("successful_attempt_tag")
+    return composite, final_records, final_decisions
+
+
 def _preserve_primary_after_coverage_review_failure(
     *,
     primary_receipt: dict[str, Any],
@@ -1141,6 +1297,9 @@ def _problem_mining_attempt_artifacts(
         "response": out_dir / f"{attempt_tag}.response.txt",
         "raw_events": out_dir / f"{attempt_tag}.raw_events.jsonl",
         "normalized_events": out_dir / f"{attempt_tag}.normalized_events.jsonl",
+        "cumulative_normalized_events": (
+            out_dir / f"{attempt_tag}.cumulative_normalized_events.jsonl"
+        ),
         "model_invocation": out_dir / f"{attempt_tag}.model_invocation.json",
         "workspace_manifest": workspace_dir / "atoms.json",
     }
@@ -1151,22 +1310,104 @@ def _problem_mining_attempt_artifacts(
     }
 
 
-def _problem_mining_format_retry_prompt(
+def _problem_mining_correction_prompt(
     *,
     original_prompt: str,
-    failure: Exception,
+    response: str,
+    validation_errors: list[str],
+    valid_item_keys: list[str],
+    progress_feedback: dict[str, Any] | None = None,
 ) -> str:
-    failure_text = f"{type(failure).__name__}: {failure}"[:2000]
-    return (
-        "RESPONSE CONTRACT RETRY - COMPLETE NEW EVIDENCE PASS\n\n"
-        f"The previous attempt was rejected by the response contract: {failure_text}\n\n"
-        "Repeat the complete task from the evidence workspace. Previous reads do not count: "
-        "read atoms.json, the index, every listed text chunk, and every required origin "
-        "attachment chunk again before deciding. Do not copy, patch, or mechanically repair "
-        "the previous response; perform a fresh evidence review and return a fresh response. "
-        "Return exactly one JSON object with no prose or markdown. Encode every literal "
-        "Windows path backslash inside a JSON string as `\\\\`.\n\n" + original_prompt
+    error_text = "\n".join(f"- {error}" for error in validation_errors)
+    valid_text = "\n".join(f"- {key}" for key in valid_item_keys) or "- none verified yet"
+    original_prompt_sha256 = sha256(original_prompt.encode("utf-8")).hexdigest()
+    prior_response_sha256 = sha256(response.encode("utf-8")).hexdigest()
+    progress_text = (
+        json.dumps(progress_feedback, ensure_ascii=False, indent=2, sort_keys=True)
+        if isinstance(progress_feedback, dict)
+        else "null"
     )
+    return (
+        "SAME-AUTHOR RESPONSE CORRECTION\n\n"
+        "Continue this exact mining session in the same evidence workspace. Do not restart the "
+        "assignment and do not discard correct findings merely because another field failed. "
+        "Your prior full-file reads remain content-bound to this session. Use the existing "
+        "read-only tools only if a validator error shows that another evidence read is genuinely "
+        "needed. Revise your immediately prior complete response and return the complete corrected "
+        "response, not a patch. Unknown validator errors "
+        "are still correction feedback.\n\n"
+        f"Original assignment prompt SHA-256: {original_prompt_sha256}\n"
+        f"Immediately prior response SHA-256: {prior_response_sha256}\n\n"
+        "Deterministic validation errors:\n"
+        f"{error_text}\n\n"
+        "Correction progress feedback from the immediately prior turn:\n"
+        f"{progress_text}\n\n"
+        "Currently valid keyed items (preserve unless a correlated correction requires change):\n"
+        f"{valid_text}\n\n"
+        "Return exactly one JSON object with only `problem_records` and `atom_decisions`. "
+        "Encode every literal Windows path backslash inside a JSON string as `\\\\`."
+    )
+
+
+def _problem_mining_valid_item_keys(
+    response: str,
+    *,
+    assigned_atom_ids: list[str],
+) -> list[str]:
+    """Return independently parse-valid stable keys without treating them as a full envelope."""
+
+    import json as _json
+
+    try:
+        raw = _json.loads(response)
+    except (TypeError, _json.JSONDecodeError):
+        return []
+    if not isinstance(raw, dict):
+        return []
+    assigned = set(assigned_atom_ids)
+    keys: list[str] = []
+    records_raw = raw.get("problem_records")
+    for record in records_raw if isinstance(records_raw, list) else []:
+        if not isinstance(record, dict):
+            continue
+        parsed, warnings = parse_problem_record_list(
+            _json.dumps([record], ensure_ascii=False)
+        )
+        problem_id = _coerce_string(record.get("problem_id"))
+        evidence_ids = {
+            value
+            for value in (
+                record.get("evidence_atom_ids")
+                if isinstance(record.get("evidence_atom_ids"), list)
+                else []
+            )
+            if isinstance(value, str) and value.strip()
+        }
+        if parsed and not warnings and problem_id is not None and evidence_ids and evidence_ids <= assigned:
+            keys.append("problem_record:" + problem_id)
+    expected_decision_fields = {
+        "atom_id",
+        "disposition",
+        "problem_ids",
+        "rationale",
+        "revisit_when",
+    }
+    decisions_raw = raw.get("atom_decisions")
+    for decision in decisions_raw if isinstance(decisions_raw, list) else []:
+        if not isinstance(decision, dict) or set(decision) != expected_decision_fields:
+            continue
+        atom_id = _coerce_string(decision.get("atom_id"))
+        rationale = _coerce_string(decision.get("rationale"))
+        problem_ids = decision.get("problem_ids")
+        if (
+            atom_id in assigned
+            and rationale is not None
+            and isinstance(decision.get("disposition"), str)
+            and isinstance(problem_ids, list)
+            and all(isinstance(value, str) and value.strip() for value in problem_ids)
+        ):
+            keys.append("atom_decision:" + str(atom_id))
+    return sorted(set(keys))
 
 
 _PROBLEM_MINING_RESPONSE_FAILURE_PREFIXES = (
@@ -1243,6 +1484,8 @@ def _run_problem_mining_attempt(
     initial_workspace_dir: Path | None = None,
     initial_manifest: dict[str, Any] | None = None,
     expected_manifest_sha256: str | None = None,
+    resume_session_id: str | None = None,
+    prior_normalized_events_paths: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
     # Attempt tags are stable logical identities, but a forced regeneration may reuse
     # the same artifacts root.  Put every execution in a fresh content-addressed
@@ -1261,12 +1504,16 @@ def _run_problem_mining_attempt(
     )
     manifest_sha256 = _problem_mining_attempt_manifest_sha256(manifest)
     attempt_record: dict[str, Any] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "attempt_number": attempt_number,
         "attempt_tag": attempt_tag,
         "status": "started",
         "workspace_dir": str(workspace_dir.resolve()),
         "workspace_manifest_sha256": manifest_sha256,
+        "agent_session_id": None,
+        "resumed_from_session_id": resume_session_id,
+        "attempt_elapsed_seconds": 0.0,
+        "valid_item_keys": [],
         "artifacts": {},
     }
     if expected_manifest_sha256 is not None and manifest_sha256 != expected_manifest_sha256:
@@ -1283,14 +1530,23 @@ def _run_problem_mining_attempt(
         )
         return {
             "failure": failure,
+            "validation_errors": [f"{type(failure).__name__}: {failure}"],
             "attempt_record": attempt_record,
             "workspace_dir": workspace_dir,
             "manifest": manifest,
         }
 
     normalized_events_path = out_dir / f"{attempt_tag}.normalized_events.jsonl"
+    cumulative_normalized_events_path = (
+        out_dir / f"{attempt_tag}.cumulative_normalized_events.jsonl"
+    )
+    response = ""
+    agent_session_id: str | None = None
+    attempt_elapsed_seconds = 0.0
+    validation_errors: list[str] = []
+    attempt_started = _time.monotonic()
     try:
-        response = run_stage_prompt_json(
+        prompt_run = run_stage_prompt_json(
             stage="problem_mining",
             prompt=prompt,
             out_dir=out_dir,
@@ -1303,6 +1559,28 @@ def _run_problem_mining_attempt(
                 ["Read"] if agent == "claude" else ["read_file"] if agent == "gemini" else []
             ),
             include_directories=([str(workspace_dir)] if agent == "gemini" else []),
+            resume_session_id=resume_session_id,
+            allow_empty=True,
+            structured=True,
+        )
+        if isinstance(prompt_run, str):
+            # Test/backward-compatible prompt shims may still return raw text.
+            response = prompt_run
+        else:
+            response = str(prompt_run.response)
+            agent_session_id = _coerce_string(prompt_run.agent_session_id)
+            attempt_elapsed_seconds = max(0.0, float(prompt_run.elapsed_seconds))
+        attempt_record["agent_session_id"] = agent_session_id
+        attempt_record["attempt_elapsed_seconds"] = attempt_elapsed_seconds
+        attempt_record["valid_item_keys"] = _problem_mining_valid_item_keys(
+            response,
+            assigned_atom_ids=assigned_atom_ids,
+        )
+        normalize_problem_mining_events(
+            agent=agent,
+            raw_events_path=out_dir / f"{attempt_tag}.raw_events.jsonl",
+            normalized_events_path=normalized_events_path,
+            workspace_dir=workspace_dir,
         )
         envelope = parse_problem_mining_response_envelope(response)
         import json as _json
@@ -1311,15 +1589,19 @@ def _run_problem_mining_attempt(
             _json.dumps(envelope["problem_records"], ensure_ascii=False)
         )
         if warnings:
+            validation_errors = [
+                record_contract_error_prefix + ":" + str(warning) for warning in warnings
+            ]
             raise ProblemMiningResponseContractError(
-                record_contract_error_prefix + ":" + ";".join(warnings)
+                ";".join(validation_errors)
             )
-        normalize_problem_mining_events(
-            agent=agent,
-            raw_events_path=out_dir / f"{attempt_tag}.raw_events.jsonl",
-            normalized_events_path=normalized_events_path,
-            workspace_dir=workspace_dir,
-        )
+        with cumulative_normalized_events_path.open("wb") as cumulative_stream:
+            for event_path in (*prior_normalized_events_paths, normalized_events_path):
+                if event_path.is_file():
+                    payload = event_path.read_bytes()
+                    cumulative_stream.write(payload)
+                    if payload and not payload.endswith(b"\n"):
+                        cumulative_stream.write(b"\n")
         receipt = build_live_miner_receipt(
             tag=base_tag,
             template_name=template_name,
@@ -1328,11 +1610,16 @@ def _run_problem_mining_attempt(
             records=records,
             decisions=envelope["atom_decisions"],
             response_text=response,
-            normalized_events_path=normalized_events_path,
+            normalized_events_path=cumulative_normalized_events_path,
             workspace_dir=workspace_dir,
             workspace_manifest=manifest,
         )
     except Exception as exc:  # noqa: BLE001
+        if attempt_elapsed_seconds <= 0.0:
+            attempt_elapsed_seconds = max(0.0, _time.monotonic() - attempt_started)
+            attempt_record["attempt_elapsed_seconds"] = attempt_elapsed_seconds
+        if not validation_errors:
+            validation_errors = [f"{type(exc).__name__}: {exc}"]
         _retain_explicit_empty_problem_mining_response(
             out_dir=out_dir,
             attempt_tag=attempt_tag,
@@ -1354,6 +1641,14 @@ def _run_problem_mining_attempt(
             "attempt_record": attempt_record,
             "workspace_dir": workspace_dir,
             "manifest": manifest,
+            "response": response,
+            "agent_session_id": agent_session_id,
+            "attempt_elapsed_seconds": attempt_elapsed_seconds,
+            "valid_item_keys": list(attempt_record["valid_item_keys"]),
+            "validation_errors": list(validation_errors),
+            "normalized_events_path": (
+                normalized_events_path if normalized_events_path.is_file() else None
+            ),
         }
 
     attempt_record["status"] = "verified"
@@ -1374,6 +1669,11 @@ def _run_problem_mining_attempt(
         "records": records,
         "warnings": warnings,
         "normalized_events_path": normalized_events_path,
+        "cumulative_normalized_events_path": cumulative_normalized_events_path,
+        "agent_session_id": agent_session_id,
+        "attempt_elapsed_seconds": attempt_elapsed_seconds,
+        "valid_item_keys": list(attempt_record["valid_item_keys"]),
+        "validation_errors": [],
         "receipt": receipt,
     }
 
@@ -1395,28 +1695,168 @@ def _run_problem_mining_job_with_response_retry(
     cfg: RunnerConfig,
     initial_workspace_dir: Path,
     initial_manifest: dict[str, Any],
+    resume_session_id: str | None = None,
+    attempt_number_base: int = 0,
+    prior_normalized_events_paths: tuple[Path, ...] = (),
 ) -> dict[str, Any]:
-    attempts: list[dict[str, Any]] = []
-    previous_failure: Exception | None = None
     expected_manifest_sha256 = _problem_mining_attempt_manifest_sha256(initial_manifest)
-    result: dict[str, Any] = {}
-    for attempt_number in (1, 2):
-        attempt_tag = base_tag if attempt_number == 1 else f"{base_tag}_format_retry_001"
-        attempt_prompt = (
-            prompt
-            if previous_failure is None
-            else _problem_mining_format_retry_prompt(
-                original_prompt=prompt,
-                failure=previous_failure,
+    def observation(result: dict[str, Any]) -> CorrectionObservation[dict[str, Any]]:
+        errors = tuple(
+            str(value)
+            for value in result.get("validation_errors", [])
+            if isinstance(value, str) and value.strip()
+        )
+        response = str(result.get("response") or "")
+        valid_item_keys = tuple(
+            sorted(
+                set(
+                    str(value)
+                    for value in result.get("valid_item_keys", [])
+                    if isinstance(value, str) and value.strip()
+                )
             )
         )
-        result = _run_problem_mining_attempt(
+        manifest = result.get("manifest")
+        workspace = result.get("workspace_dir")
+        observed_continuity = sha256(
+            json.dumps(
+                {
+                    "workspace_dir": str(Path(workspace).resolve()) if workspace is not None else None,
+                    "workspace_manifest_sha256": (
+                        _problem_mining_attempt_manifest_sha256(manifest)
+                        if isinstance(manifest, dict)
+                        else None
+                    ),
+                    "assigned_atom_ids": sorted(assigned_atom_ids),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        return CorrectionObservation(
+            payload=result,
+            validation_errors=errors,
+            state_sha256=correction_state_sha256(
+                candidate=response,
+                validation_errors=list(errors),
+                valid_item_keys=list(valid_item_keys),
+            ),
+            valid_item_keys=valid_item_keys,
+            agent_session_id=_coerce_string(result.get("agent_session_id")),
+            continuity_key=observed_continuity,
+            cost_seconds=max(0.0, float(result.get("attempt_elapsed_seconds") or 0.0)),
+        )
+
+    initial_result = _run_problem_mining_attempt(
+        repo_root=repo_root,
+        stage_artifacts_dir=stage_artifacts_dir,
+        base_tag=base_tag,
+        attempt_tag=base_tag,
+        attempt_number=attempt_number_base + 1,
+        prompt=prompt,
+        prompt_atoms=prompt_atoms,
+        assigned_atom_ids=assigned_atom_ids,
+        max_records_per_miner=max_records_per_miner,
+        eligible_atom_ids=eligible_atom_ids,
+        template_name=template_name,
+        record_contract_error_prefix=record_contract_error_prefix,
+        agent=agent,
+        model=model,
+        cfg=cfg,
+        initial_workspace_dir=initial_workspace_dir,
+        initial_manifest=initial_manifest,
+        expected_manifest_sha256=expected_manifest_sha256,
+        resume_session_id=resume_session_id,
+        prior_normalized_events_paths=prior_normalized_events_paths,
+    )
+    initial = observation(initial_result)
+    acquisition_attempts: tuple[CorrectionObservation[dict[str, Any]], ...] = ()
+    acquisition_status = "not_required"
+    if (
+        resume_session_id is None
+        and agent.strip().lower() == "codex"
+        and initial.agent_session_id is None
+    ):
+        acquisition = acquire_author_session(
+            initial=initial,
+            invoke_fresh=lambda attempt_number: observation(
+                _run_problem_mining_attempt(
+                    repo_root=repo_root,
+                    stage_artifacts_dir=stage_artifacts_dir,
+                    base_tag=base_tag,
+                    attempt_tag=(
+                        f"{base_tag}_session_acquisition_{attempt_number - 1:03d}"
+                    ),
+                    attempt_number=attempt_number_base + attempt_number,
+                    prompt=prompt,
+                    prompt_atoms=prompt_atoms,
+                    assigned_atom_ids=assigned_atom_ids,
+                    max_records_per_miner=max_records_per_miner,
+                    eligible_atom_ids=eligible_atom_ids,
+                    template_name=template_name,
+                    record_contract_error_prefix=record_contract_error_prefix,
+                    agent=agent,
+                    model=model,
+                    cfg=cfg,
+                    initial_workspace_dir=initial_workspace_dir,
+                    initial_manifest=initial_manifest,
+                    expected_manifest_sha256=expected_manifest_sha256,
+                )
+            ),
+        )
+        acquisition_status = acquisition.status
+        acquisition_attempts = acquisition.attempts
+        initial = acquisition.current
+        initial_result = initial.payload
+    normalized_event_paths: list[Path] = []
+    normalized_event_paths.extend(
+        path for path in prior_normalized_events_paths if path.is_file()
+    )
+    initial_events = initial_result.get("normalized_events_path")
+    if isinstance(initial_events, Path) and initial_events.is_file():
+        normalized_event_paths.append(initial_events)
+
+    def invoke_correction(
+        current: CorrectionObservation[dict[str, Any]],
+        attempt_number: int,
+        prior_assessment: Any,
+    ) -> CorrectionObservation[dict[str, Any]]:
+        current_result = current.payload
+        correction_prompt = _problem_mining_correction_prompt(
+            original_prompt=prompt,
+            response=str(current_result.get("response") or ""),
+            validation_errors=list(current.validation_errors),
+            valid_item_keys=list(current.valid_item_keys),
+            progress_feedback=(
+                {
+                    "decision": prior_assessment.decision,
+                    "reason": prior_assessment.reason,
+                    "resolved_error_identities": list(
+                        prior_assessment.resolved_error_identities
+                    ),
+                    "introduced_error_identities": list(
+                        prior_assessment.introduced_error_identities
+                    ),
+                    "repeated_state": prior_assessment.repeated_state,
+                    "safe_frontier_updated": prior_assessment.safe_frontier_updated,
+                    "global_best_updated": prior_assessment.global_best_updated,
+                }
+                if prior_assessment is not None
+                else None
+            ),
+        )
+        corrected = _run_problem_mining_attempt(
             repo_root=repo_root,
             stage_artifacts_dir=stage_artifacts_dir,
             base_tag=base_tag,
-            attempt_tag=attempt_tag,
-            attempt_number=attempt_number,
-            prompt=attempt_prompt,
+            attempt_tag=f"{base_tag}_correction_{attempt_number - 1:03d}",
+            attempt_number=(
+                attempt_number_base
+                + attempt_number
+                + max(0, len(acquisition_attempts) - 1)
+            ),
+            prompt=correction_prompt,
             prompt_atoms=prompt_atoms,
             assigned_atom_ids=assigned_atom_ids,
             max_records_per_miner=max_records_per_miner,
@@ -1426,26 +1866,154 @@ def _run_problem_mining_job_with_response_retry(
             agent=agent,
             model=model,
             cfg=cfg,
-            initial_workspace_dir=(initial_workspace_dir if attempt_number == 1 else None),
-            initial_manifest=(initial_manifest if attempt_number == 1 else None),
+            initial_workspace_dir=initial_workspace_dir,
+            initial_manifest=initial_manifest,
             expected_manifest_sha256=expected_manifest_sha256,
+            resume_session_id=resume_session_id or initial.agent_session_id,
+            prior_normalized_events_paths=tuple(normalized_event_paths),
         )
-        attempts.append(dict(result["attempt_record"]))
-        failure = result.get("failure")
-        if not isinstance(failure, Exception):
-            receipt = dict(result["receipt"])
-            receipt["attempt_history"] = attempts
-            receipt["successful_attempt_tag"] = attempt_tag
-            result["receipt"] = receipt
-            result["attempt_history"] = attempts
-            result["successful_attempt_tag"] = attempt_tag
-            return result
-        previous_failure = failure
-        if attempt_number == 1 and _retryable_problem_mining_response_failure(failure):
-            continue
-        break
-    result["attempt_history"] = attempts
-    result["successful_attempt_tag"] = None
+        correction_failure = corrected.get("failure")
+        if (
+            isinstance(correction_failure, Exception)
+            and _coerce_string(corrected.get("agent_session_id")) is None
+        ):
+            # The exact-session invocation failed before returning author state. The
+            # shared frontier retains the failure and retries this same UUID.
+            raise correction_failure
+        corrected_events = corrected.get("normalized_events_path")
+        if isinstance(corrected_events, Path) and corrected_events.is_file():
+            normalized_event_paths.append(corrected_events)
+        return observation(corrected)
+
+    original_author_cost = initial.cost_seconds
+
+    def pause_policy(
+        _current: CorrectionObservation[dict[str, Any]],
+        _assessment: Any,
+        correction_cost_since_progress: float,
+        _total_correction_cost: float,
+    ) -> str | None:
+        if (
+            _assessment is not None
+            and _assessment.reason == "first_noop_receives_feedback"
+        ):
+            # One exact no-op is not clear nonprogress; the author has now received
+            # validator feedback and must get the distinguishing follow-up turn.
+            return None
+        if (
+            original_author_cost > 0.0
+            and correction_cost_since_progress >= original_author_cost
+        ):
+            return "correction_cost_reached_original"
+        return None
+
+    if acquisition_status.startswith("repairable_paused:"):
+        correction = CorrectionRunResult(
+            status=acquisition_status,
+            current=initial,
+            best=initial,
+            attempts=acquisition_attempts,
+            assessments=(),
+            correction_cost_since_progress=acquisition.cost_since_progress,
+            total_correction_cost=max(
+                0.0,
+                acquisition.total_cost
+                - max(0.0, float(acquisition_attempts[0].cost_seconds)),
+            ),
+        )
+    else:
+        correction = run_progressive_correction(
+            initial=initial,
+            invoke_correction=invoke_correction,
+            pause_policy=pause_policy,
+        )
+    correction_metrics = correction_run_metrics(correction, expected_quality=None)
+    if acquisition_attempts:
+        correction_metrics = correction_metrics_with_session_acquisition(
+            correction_metrics,
+            acquisition,
+        )
+    retained = correction.current if correction.status in {"accepted", "corrected"} else correction.best
+    result = retained.payload
+    attempt_history = [dict(item.payload["attempt_record"]) for item in correction.attempts]
+    for index, assessment in enumerate(correction.assessments, start=1):
+        attempt_history[index]["correction_progress"] = {
+            "decision": assessment.decision,
+            "reason": assessment.reason,
+            "before_error_count": assessment.before_error_count,
+            "after_error_count": assessment.after_error_count,
+            "resolved_error_identities": list(assessment.resolved_error_identities),
+            "introduced_error_identities": list(assessment.introduced_error_identities),
+            "repeated_state": assessment.repeated_state,
+            "safe_frontier_updated": assessment.safe_frontier_updated,
+            "global_best_updated": assessment.global_best_updated,
+            "reset_progress_clock": assessment.reset_progress_clock,
+        }
+    attempt_history.extend(
+        {
+            "schema_version": 2,
+            "attempt_number": (
+                failure.attempt_number + max(0, len(acquisition_attempts) - 1)
+            ),
+            "attempt_tag": (
+                f"{base_tag}_correction_{failure.attempt_number - 1:03d}"
+            ),
+            "status": "invocation_failed",
+            "agent_session_id": failure.agent_session_id,
+            "resumed_from_session_id": failure.agent_session_id,
+            "attempt_elapsed_seconds": failure.cost_seconds,
+            "validation_errors": [
+                f"{failure.error_type}: {failure.error_message}"
+            ],
+            "failure_identity": failure.failure_identity,
+            "artifacts": {},
+        }
+        for failure in correction.invocation_failures
+    )
+    attempt_history.sort(key=lambda record: int(record["attempt_number"]))
+    if acquisition_status == "acquired" and len(acquisition_attempts) > 1:
+        pre_author_attempts = acquisition_attempts[:-1]
+        attempt_history = [
+            dict(attempt.payload["attempt_record"])
+            for attempt in pre_author_attempts
+        ] + attempt_history
+    exact_resume_preserved = bool(
+        resume_session_id is None
+        or _coerce_string(result.get("agent_session_id")) == resume_session_id
+    )
+    successful = (
+        correction.status in {"accepted", "corrected"}
+        and not isinstance(result.get("failure"), Exception)
+        and exact_resume_preserved
+    )
+    if successful:
+        receipt = dict(result["receipt"])
+        receipt["attempt_history"] = attempt_history
+        receipt["successful_attempt_tag"] = result["attempt_record"]["attempt_tag"]
+        receipt["correction_status"] = correction.status
+        receipt["correction_cost_since_progress"] = correction.correction_cost_since_progress
+        receipt["total_correction_cost"] = correction.total_correction_cost
+        receipt["correction_metrics"] = correction_metrics
+        result["receipt"] = receipt
+        result["successful_attempt_tag"] = result["attempt_record"]["attempt_tag"]
+    else:
+        result["successful_attempt_tag"] = None
+    result["attempt_history"] = attempt_history
+    result["correction_status"] = correction.status
+    result["correction_cost_since_progress"] = correction.correction_cost_since_progress
+    result["total_correction_cost"] = correction.total_correction_cost
+    result["correction_metrics"] = correction_metrics
+    if not exact_resume_preserved:
+        result["failure"] = ValueError(
+            "problem_mining_exact_author_session_changed:"
+            f"expected={resume_session_id}:observed={result.get('agent_session_id')}"
+        )
+        result["validation_errors"] = [
+            "problem_mining_exact_author_session_changed"
+        ]
+        result["correction_status"] = "repairable_paused:exact_author_session_changed"
+    if correction.operational_error is not None:
+        result["correction_operational_error"] = correction.operational_error
     return result
 
 
@@ -2598,10 +3166,12 @@ def _run_problem_mining_stage(
             meta["attempt_history"] = primary_attempt_history
             meta["successful_attempt_tag"] = primary_run.get("successful_attempt_tag")
             meta["format_retry_count"] = max(0, len(primary_attempt_history) - 1)
+            meta["same_session_correction_count"] = max(
+                0, len(primary_attempt_history) - 1
+            )
             failure = primary_run.get("failure")
             if isinstance(failure, Exception):
                 raise failure
-            response = str(primary_run["response"])
             envelope = dict(primary_run["envelope"])
             records = list(primary_run["records"])
             warnings = list(primary_run["warnings"])
@@ -2638,35 +3208,13 @@ def _run_problem_mining_stage(
                 assigned_atom_ids=review_atom_ids,
                 source_root=repo_root,
             )
-            review_prompt = (
-                "INDEPENDENT FULL COVERAGE AND DEPTH REVIEW\n\n"
-                "Review every assigned atom from the evidence files, including atoms that the "
-                "primary pass attached to a problem and atoms it did not attach. Do not trust "
-                "the primary pass merely because it cited an atom. For every primary "
-                "supports_case claim, decide whether the complete observed evidence directly "
-                "establishes that exact problem. To confirm it, emit the corresponding primary "
-                "problem record verbatim (including its problem_id and evidence_atom_ids) and "
-                "reference that same problem_id from the atom decision. Changed wording or a "
-                "different ID is a different claim, not confirmation. If a primary claim is "
-                "surface-level or unsupported, do not copy it; use unresolved or another "
-                "evidence-backed non-support disposition. Independently recover any concrete, "
-                "unactioned observed problem the primary pass missed. Consider behavior, "
-                "infrastructure, schema/output, and usability without forcing a problem that "
-                "the evidence does not establish. Return the same strict response contract "
-                "with exactly one decision per assigned atom.\n\n"
-                "PRIMARY PROBLEM RECORDS AND DECISIONS (claims to audit, not evidence):\n"
-                + _json.dumps(
-                    {
-                        "problem_records": records,
-                        "atom_decisions": final_decisions,
-                    },
-                    ensure_ascii=False,
-                    indent=2,
-                )
-                + "\n\n"
-                + template_text.replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
-                .replace("{{ATOMS_JSON}}", atoms_placeholder)
-                .replace("{{MAX_RECORDS_PER_MINER}}", str(max_records_per_miner))
+            review_prompt = _coverage_depth_review_prompt(
+                primary_records=records,
+                primary_decisions=final_decisions,
+                template_text=template_text,
+                stage_guidance_text=stage_guidance_text,
+                atoms_placeholder=atoms_placeholder,
+                max_records_per_miner=max_records_per_miner,
             )
             review_receipt: dict[str, Any]
             review_failed = False
@@ -2698,47 +3246,33 @@ def _run_problem_mining_stage(
                 review_run_failure = review_run.get("failure")
                 if isinstance(review_run_failure, Exception):
                     raise review_run_failure
-                review_response = str(review_run["response"])
-                review_envelope = dict(review_run["envelope"])
                 review_records = list(review_run["records"])
                 review_warnings = list(review_run["warnings"])
                 review_receipt = dict(review_run["receipt"])
-                final_records, final_decisions = _reconcile_problem_mining_reviews(
-                    primary_records=records,
-                    primary_decisions=final_decisions,
-                    review_records=review_records,
-                    review_decisions=[
-                        dict(decision)
-                        for decision in review_envelope["atom_decisions"]
-                        if isinstance(decision, dict)
-                    ],
-                )
-                combined_response = _json.dumps(
-                    {
-                        "primary_response": response,
-                        "coverage_depth_review_response": review_response,
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                )
-                miner_receipt = build_live_miner_receipt(
-                    tag=tag,
-                    template_name=template_path.name,
-                    assigned_atom_ids=assigned_atom_ids,
-                    eligible_atom_ids=evidence_draft["eligible_atom_ids"],
-                    records=final_records,
-                    decisions=final_decisions,
-                    response_text=combined_response,
-                    normalized_events_path=normalized_events_path,
-                    workspace_dir=workspace_dir,
-                    workspace_manifest=manifest,
-                )
-                miner_receipt["primary_pass"] = primary_receipt
-                miner_receipt["non_support_review"] = review_receipt
-                miner_receipt["review_scope"] = "all_assigned_atoms_positive_and_non_support"
-                miner_receipt["attempt_history"] = list(primary_receipt.get("attempt_history", []))
-                miner_receipt["successful_attempt_tag"] = primary_receipt.get(
-                    "successful_attempt_tag"
+                miner_receipt, final_records, final_decisions = (
+                    _build_composite_miner_receipt(
+                        tag=tag,
+                        template_name=template_path.name,
+                        assigned_atom_ids=assigned_atom_ids,
+                        eligible_atom_ids=evidence_draft["eligible_atom_ids"],
+                        primary_records=records,
+                        primary_decisions=[
+                            dict(decision)
+                            for decision in primary_receipt["atom_decisions"]
+                            if isinstance(decision, dict)
+                        ],
+                        primary_receipt=primary_receipt,
+                        review_records=review_records,
+                        review_decisions=[
+                            dict(decision)
+                            for decision in review_receipt["atom_decisions"]
+                            if isinstance(decision, dict)
+                        ],
+                        review_receipt=review_receipt,
+                        primary_normalized_events_path=normalized_events_path,
+                        primary_workspace_dir=workspace_dir,
+                        primary_workspace_manifest=manifest,
+                    )
                 )
             except Exception as review_exc:  # noqa: BLE001
                 # The primary pass has already been read-attested and contract-validated.
@@ -2769,6 +3303,9 @@ def _run_problem_mining_stage(
             meta["coverage_depth_review_format_retry_count"] = max(
                 0, len(review_attempt_history) - 1
             )
+            meta["coverage_depth_review_same_session_correction_count"] = max(
+                0, len(review_attempt_history) - 1
+            )
             meta["status"] = "partial_review_failure" if review_failed else "ok"
             if review_failure is not None:
                 meta["review_error"] = review_failure
@@ -2796,6 +3333,9 @@ def _run_problem_mining_stage(
             meta["attempt_history"] = primary_attempt_history
             meta["successful_attempt_tag"] = None
             meta["format_retry_count"] = max(0, len(primary_attempt_history) - 1)
+            meta["same_session_correction_count"] = max(
+                0, len(primary_attempt_history) - 1
+            )
             live_failures.append(f"{tag}:{failure_text}")
             failed_receipt = build_failed_miner_receipt(
                 tag=tag,
@@ -2986,6 +3526,16 @@ def _relation_case_preview(item: dict[str, Any]) -> dict[str, Any]:
         "evidence_atom_ids": item.get("evidence_atom_ids") or [],
         "root_cause_status": item.get("root_cause_status") or "unestablished",
         "verified_mechanism_sha256": item.get("verified_mechanism_sha256"),
+        "verified_causal_signature_sha256": item.get(
+            "verified_causal_signature_sha256"
+        ),
+        "case_identity_status": item.get("case_identity_status"),
+        "case_identity_candidate_ids": item.get("case_identity_candidate_ids") or [],
+        "provisional_same_cause_group": item.get("provisional_same_cause_group"),
+        "provisional_same_cause_integrity_errors": item.get(
+            "provisional_same_cause_integrity_errors"
+        )
+        or [],
         "case_state": item.get("case_state") or "active",
         "carried_forward": bool(item.get("_carried_forward_case")),
         "candidate_only": bool(item.get("_relation_candidate_only")),
@@ -3137,6 +3687,141 @@ def _relation_review_payload(
     }
 
 
+def _relation_decision_item_errors(
+    decision: dict[str, Any],
+    *,
+    focus_problem_ids: set[str],
+    known_problem_ids: set[str],
+    known_evidence_atom_ids: set[str],
+    allowed_actions: set[str],
+) -> list[str]:
+    """Return model-correctable structure/reference errors for one relation decision."""
+
+    errors: list[str] = []
+    allowed_fields = {
+        "focus_id",
+        "action",
+        "target_ids",
+        "group_id",
+        "member_ids",
+        "alias_target_id",
+        "split_groups",
+        "evidence_atom_ids",
+        "rationale",
+        "review_confidence",
+    }
+    unknown_fields = sorted(set(decision) - allowed_fields)
+    if unknown_fields:
+        errors.append("relation_decision_unknown_fields:" + ",".join(unknown_fields))
+    focus_id = _coerce_string(decision.get("focus_id"))
+    action = _coerce_string(decision.get("action"))
+    rationale = _coerce_string(decision.get("rationale"))
+    confidence = decision.get("review_confidence")
+    if focus_id is None or focus_id not in focus_problem_ids:
+        errors.append("relation_decision_focus_invalid:" + (focus_id or "(missing)"))
+    if action not in allowed_actions:
+        errors.append("relation_decision_action_invalid:" + (action or "(missing)"))
+    if rationale is None:
+        errors.append("relation_decision_rationale_missing:" + (focus_id or "(missing)"))
+    if (
+        isinstance(confidence, bool)
+        or not isinstance(confidence, (int, float))
+        or not 0.0 <= float(confidence) <= 1.0
+    ):
+        errors.append("relation_decision_confidence_invalid:" + (focus_id or "(missing)"))
+
+    def string_list(field: str) -> list[str] | None:
+        raw = decision.get(field)
+        if not isinstance(raw, list) or not raw or not all(
+            isinstance(value, str) and value.strip() for value in raw
+        ):
+            return None
+        values = [str(value).strip() for value in raw]
+        return values if len(values) == len(set(values)) else None
+
+    evidence_ids = string_list("evidence_atom_ids")
+    collapse_action = action in {"merge", "alias", "same_cause_group"}
+    if collapse_action:
+        if evidence_ids is None or not set(evidence_ids) <= known_evidence_atom_ids:
+            errors.append("relation_decision_evidence_refs_invalid:" + str(focus_id))
+
+    if action == "merge":
+        target_ids = string_list("target_ids")
+        if (
+            target_ids is None
+            or focus_id in set(target_ids)
+            or not set(target_ids) <= known_problem_ids
+        ):
+            errors.append("relation_decision_merge_targets_invalid:" + str(focus_id))
+    elif action == "alias":
+        target = _coerce_string(decision.get("alias_target_id"))
+        if target is None or target == focus_id or target not in known_problem_ids:
+            errors.append("relation_decision_alias_target_invalid:" + str(focus_id))
+    elif action == "same_cause_group":
+        group_id = _coerce_string(decision.get("group_id"))
+        member_ids = string_list("member_ids")
+        if group_id is None:
+            errors.append("relation_decision_group_id_missing:" + str(focus_id))
+        if (
+            member_ids is None
+            or focus_id not in set(member_ids)
+            or len(member_ids) < 2
+            or not set(member_ids) <= known_problem_ids
+        ):
+            errors.append("relation_decision_group_members_invalid:" + str(focus_id))
+    elif action == "split":
+        split_groups = decision.get("split_groups")
+        if not isinstance(split_groups, list) or len(split_groups) < 2:
+            errors.append("relation_decision_split_groups_invalid:" + str(focus_id))
+        else:
+            for index, group in enumerate(split_groups):
+                refs = group.get("evidence_atom_ids") if isinstance(group, dict) else None
+                if (
+                    not isinstance(refs, list)
+                    or not refs
+                    or not all(isinstance(value, str) and value.strip() for value in refs)
+                    or not set(refs) <= known_evidence_atom_ids
+                ):
+                    errors.append(
+                        f"relation_decision_split_group_evidence_invalid:{focus_id}:{index}"
+                    )
+    return list(dict.fromkeys(errors))
+
+
+def _relation_review_response_errors(
+    decisions: list[dict[str, Any]],
+    *,
+    focus_problem_ids: set[str],
+    known_problem_ids: set[str],
+    known_evidence_atom_ids: set[str],
+    allowed_actions: set[str],
+) -> tuple[list[str], set[str]]:
+    errors: list[str] = []
+    valid_focus_ids: list[str] = []
+    for index, decision in enumerate(decisions):
+        item_errors = _relation_decision_item_errors(
+            decision,
+            focus_problem_ids=focus_problem_ids,
+            known_problem_ids=known_problem_ids,
+            known_evidence_atom_ids=known_evidence_atom_ids,
+            allowed_actions=allowed_actions,
+        )
+        errors.extend(f"relation_decision_index={index}:{error}" for error in item_errors)
+        focus_id = _coerce_string(decision.get("focus_id"))
+        if not item_errors and focus_id is not None:
+            valid_focus_ids.append(focus_id)
+    counts = {focus_id: valid_focus_ids.count(focus_id) for focus_id in set(valid_focus_ids)}
+    duplicates = sorted(focus_id for focus_id, count in counts.items() if count != 1)
+    missing = sorted(focus_problem_ids - set(valid_focus_ids))
+    if duplicates:
+        errors.append("problem_mining_relation_reviewer_duplicate_focus:" + ",".join(duplicates))
+    if missing:
+        errors.append("problem_mining_relation_reviewer_missing_focus:" + ",".join(missing))
+    return list(dict.fromkeys(errors)), {
+        focus_id for focus_id, count in counts.items() if count == 1
+    }
+
+
 def _validate_relation_decision_focuses(
     decisions: list[dict[str, Any]],
     *,
@@ -3208,6 +3893,20 @@ def _failed_relation_review_batch_decisions(
     ]
 
 
+def _failed_relation_review_batch_count(batches: Sequence[Mapping[str, Any]]) -> int:
+    """Count fully and partially failed relation batches."""
+
+    return sum(
+        1
+        for batch in batches
+        if batch.get("status")
+        in {
+            "failed_provisional_keep_separate",
+            "failed_partial_provisional_keep_separate",
+        }
+    )
+
+
 def _write_relation_review_checkpoint(
     *,
     review_dir: Path,
@@ -3269,6 +3968,24 @@ def _run_relation_review_batches(
             neighborhoods=neighborhoods,
             focus_problem_ids=set(batch_focus_ids),
         )
+        known_problem_ids = {
+            problem_id
+            for item in batch_payload.get("case_index", [])
+            if isinstance(item, dict)
+            for problem_id in [_coerce_string(item.get("problem_id"))]
+            if problem_id is not None
+        }
+        known_evidence_atom_ids = {
+            atom_id
+            for item in batch_payload.get("case_index", [])
+            if isinstance(item, dict)
+            for atom_id in (
+                item.get("evidence_atom_ids")
+                if isinstance(item.get("evidence_atom_ids"), list)
+                else []
+            )
+            if isinstance(atom_id, str) and atom_id.strip()
+        }
         prompt = (
             template.replace("{{STAGE_GUIDANCE}}", stage_guidance_text)
             .replace(
@@ -3283,6 +4000,20 @@ def _run_relation_review_batches(
         prompt_path = review_dir / f"{batch_tag}.prompt.txt"
         response_path = review_dir / f"{batch_tag}.response.txt"
         prompt_path.write_text(prompt, encoding="utf-8")
+        workspace_dir = review_dir / f"{batch_tag}.workspace"
+        workspace_dir.mkdir(parents=True, exist_ok=True)
+        continuity_key = sha256(
+            _json.dumps(
+                {
+                    "workspace_dir": str(workspace_dir.resolve()),
+                    "prompt_sha256": sha256(prompt.encode("utf-8")).hexdigest(),
+                    "focus_ids": sorted(batch_focus_ids),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
         meta: dict[str, Any] = {
             "batch_index": batch_index,
             "tag": batch_tag,
@@ -3292,29 +4023,305 @@ def _run_relation_review_batches(
             "prompt_path": str(prompt_path),
             "response_path": str(response_path),
         }
+
+        def relation_attempt(
+            *,
+            attempt_prompt: str,
+            attempt_tag: str,
+            attempt_number: int,
+            resume_session_id: str | None,
+            _workspace_dir: Path = workspace_dir,
+            _batch_focus_ids: tuple[str, ...] = tuple(batch_focus_ids),
+            _known_problem_ids: frozenset[str] = frozenset(known_problem_ids),
+            _known_evidence_atom_ids: frozenset[str] = frozenset(known_evidence_atom_ids),
+            _continuity_key: str = continuity_key,
+        ) -> CorrectionObservation[dict[str, Any]]:
+            transport_error: str | None = None
+            attempt_started = _time.monotonic()
+            try:
+                run = run_stage_prompt_json(
+                    stage="problem_mining",
+                    prompt=attempt_prompt,
+                    out_dir=review_dir,
+                    tag=attempt_tag,
+                    agent=agent,
+                    model=model,
+                    cfg=cfg,
+                    workspace_dir=_workspace_dir,
+                    resume_session_id=resume_session_id,
+                    allow_empty=True,
+                    structured=True,
+                )
+                if isinstance(run, str):
+                    response = run
+                    session_id = None
+                    elapsed_seconds = 0.0
+                    attempt_response_path = review_dir / f"{attempt_tag}.response.txt"
+                else:
+                    response = str(run.response)
+                    session_id = _coerce_string(run.agent_session_id)
+                    elapsed_seconds = max(0.0, float(run.elapsed_seconds))
+                    attempt_response_path = run.response_path
+            except Exception as exc:  # noqa: BLE001 - pre-session retry remains possible
+                if resume_session_id is not None:
+                    raise
+                response = ""
+                session_id = None
+                elapsed_seconds = max(0.0, _time.monotonic() - attempt_started)
+                attempt_response_path = review_dir / f"{attempt_tag}.response.txt"
+                transport_error = f"{type(exc).__name__}: {exc}"
+            errors: list[str] = []
+            batch_decisions: list[dict[str, Any]] = []
+            valid_focus_ids: set[str] = set()
+            try:
+                parsed = _json.loads(response)
+                if not isinstance(parsed, list) or not all(
+                    isinstance(item, dict) for item in parsed
+                ):
+                    raise ValueError(
+                        "problem_mining_relation_reviewer_response_not_a_list_of_objects"
+                    )
+                batch_decisions = [dict(item) for item in parsed]
+                errors, valid_focus_ids = _relation_review_response_errors(
+                    batch_decisions,
+                    focus_problem_ids=set(_batch_focus_ids),
+                    known_problem_ids=set(_known_problem_ids),
+                    known_evidence_atom_ids=set(_known_evidence_atom_ids),
+                    allowed_actions=set(allowed_actions),
+                )
+            except Exception as exc:  # noqa: BLE001 - exact validator feedback
+                errors.append(f"{type(exc).__name__}: {exc}")
+            if transport_error is not None:
+                errors.insert(0, transport_error)
+            valid_keys = tuple(
+                sorted(
+                    "relation_focus:" + focus_id
+                    for focus_id in valid_focus_ids
+                )
+            )
+            payload = {
+                "response": response,
+                "response_path": str(attempt_response_path.resolve()),
+                "prompt_path": str((review_dir / f"{attempt_tag}.prompt.txt").resolve()),
+                "tag": attempt_tag,
+                "attempt_number": attempt_number,
+                "decisions": batch_decisions,
+                "validation_errors": list(errors),
+                "agent_session_id": session_id,
+                "elapsed_seconds": elapsed_seconds,
+            }
+            return CorrectionObservation(
+                payload=payload,
+                validation_errors=tuple(errors),
+                state_sha256=correction_state_sha256(
+                    candidate=response,
+                    validation_errors=errors,
+                    valid_item_keys=list(valid_keys),
+                ),
+                valid_item_keys=valid_keys,
+                agent_session_id=session_id,
+                continuity_key=_continuity_key,
+                cost_seconds=elapsed_seconds,
+            )
+
+        retained_observation: CorrectionObservation[dict[str, Any]] | None = None
         try:
-            response = run_stage_prompt_json(
-                stage="problem_mining",
-                prompt=prompt,
-                out_dir=review_dir,
-                tag=batch_tag,
-                agent=agent,
-                model=model,
-                cfg=cfg,
+            initial = relation_attempt(
+                attempt_prompt=prompt,
+                attempt_tag=batch_tag,
+                attempt_number=1,
+                resume_session_id=None,
             )
-            if not response_path.exists():
-                response_path.write_text(response, encoding="utf-8")
-            parsed = _json.loads(response)
-            if not isinstance(parsed, list) or not all(isinstance(item, dict) for item in parsed):
-                raise ValueError("problem_mining_relation_reviewer_response_not_a_list_of_objects")
-            batch_decisions = [dict(item) for item in parsed]
-            _validate_relation_decision_focuses(
-                batch_decisions,
-                work_unit_problem_ids=set(batch_focus_ids),
+            acquisition_attempts: tuple[CorrectionObservation[dict[str, Any]], ...] = ()
+            acquisition_status = "not_required"
+            if agent.strip().lower() == "codex" and initial.agent_session_id is None:
+                acquisition = acquire_author_session(
+                    initial=initial,
+                    invoke_fresh=lambda attempt_number, _prompt=prompt, _batch_tag=batch_tag: relation_attempt(
+                        attempt_prompt=_prompt,
+                        attempt_tag=(
+                            f"{_batch_tag}_session_acquisition_"
+                            f"{attempt_number - 1:03d}"
+                        ),
+                        attempt_number=attempt_number,
+                        resume_session_id=None,
+                    ),
+                )
+                acquisition_status = acquisition.status
+                acquisition_attempts = acquisition.attempts
+                initial = acquisition.current
+            original_cost = initial.cost_seconds
+            prompt_sha256 = sha256(prompt.encode("utf-8")).hexdigest()
+
+            def invoke_relation_correction(
+                current: CorrectionObservation[dict[str, Any]],
+                attempt_number: int,
+                prior_assessment: Any,
+                _prompt_sha256: str = prompt_sha256,
+                _batch_tag: str = batch_tag,
+                _session_id: str | None = initial.agent_session_id,
+                _relation_attempt: Any = relation_attempt,
+                _attempt_number_offset: int = max(
+                    0, len(acquisition_attempts) - 1
+                ),
+            ) -> CorrectionObservation[dict[str, Any]]:
+                progress = (
+                    {
+                        "decision": prior_assessment.decision,
+                        "reason": prior_assessment.reason,
+                        "resolved_error_identities": list(
+                            prior_assessment.resolved_error_identities
+                        ),
+                        "introduced_error_identities": list(
+                            prior_assessment.introduced_error_identities
+                        ),
+                        "repeated_state": prior_assessment.repeated_state,
+                        "safe_frontier_updated": prior_assessment.safe_frontier_updated,
+                    }
+                    if prior_assessment is not None
+                    else None
+                )
+                correction_prompt = (
+                    "SAME-AUTHOR RELATION-REVIEW RESPONSE CORRECTION\n\n"
+                    "Revise your immediately prior complete JSON response in this exact session. "
+                    "Do not rerun the review from scratch. Preserve valid focus decisions unless "
+                    "a correlated correction requires changing them. Return the complete JSON "
+                    "list and no prose. Unknown validator errors are valid feedback.\n\n"
+                    f"Original prompt SHA-256: {_prompt_sha256}\n"
+                    "Immediately prior response SHA-256: "
+                    f"{sha256(str(current.payload.get('response') or '').encode('utf-8')).hexdigest()}\n\n"
+                    "Validation errors:\n"
+                    + "\n".join(f"- {error}" for error in current.validation_errors)
+                    + "\n\nValid keyed focus decisions:\n"
+                    + (
+                        "\n".join(f"- {key}" for key in current.valid_item_keys)
+                        or "- none verified yet"
+                    )
+                    + "\n\nPrior correction progress:\n"
+                    + _json.dumps(progress, ensure_ascii=False, indent=2, sort_keys=True)
+                )
+                return _relation_attempt(
+                    attempt_prompt=correction_prompt,
+                    attempt_tag=f"{_batch_tag}_correction_{attempt_number - 1:03d}",
+                    attempt_number=(
+                        attempt_number + _attempt_number_offset
+                    ),
+                    resume_session_id=_session_id,
+                )
+
+            if acquisition_status.startswith("repairable_paused:"):
+                correction = CorrectionRunResult(
+                    status=acquisition_status,
+                    current=initial,
+                    best=initial,
+                    attempts=acquisition_attempts,
+                    assessments=(),
+                    correction_cost_since_progress=acquisition.cost_since_progress,
+                    total_correction_cost=max(
+                        0.0,
+                        acquisition.total_cost
+                        - max(0.0, float(acquisition_attempts[0].cost_seconds)),
+                    ),
+                )
+            else:
+                correction = run_progressive_correction(
+                    initial=initial,
+                    invoke_correction=invoke_relation_correction,
+                    pause_policy=lambda _current, _assessment, since_progress, _total, original_cost=original_cost: (
+                        "correction_cost_reached_original"
+                        if original_cost > 0.0 and since_progress >= original_cost
+                        else None
+                    ),
+                )
+            correction_metrics = correction_run_metrics(correction, expected_quality=None)
+            if acquisition_attempts:
+                correction_metrics = correction_metrics_with_session_acquisition(
+                    correction_metrics,
+                    acquisition,
+                )
+            retained = (
+                correction.current
+                if correction.status in {"accepted", "corrected"}
+                else correction.best
             )
+            retained_observation = retained
+            meta["correction_status"] = correction.status
+            meta["correction_metrics"] = correction_metrics
+            meta["attempt_history"] = [
+                {
+                    "attempt_number": int(
+                        attempt.payload.get("attempt_number") or index
+                    ),
+                    "tag": attempt.payload.get("tag"),
+                    "status": (
+                        "invalid" if attempt.validation_errors else "verified"
+                    ),
+                    "prompt_path": attempt.payload.get("prompt_path"),
+                    "response_path": attempt.payload.get("response_path"),
+                    "validation_errors": list(attempt.validation_errors),
+                    "valid_item_keys": list(attempt.valid_item_keys),
+                    "agent_session_id": attempt.agent_session_id,
+                    "workspace_dir": str(workspace_dir.resolve()),
+                    "elapsed_seconds": attempt.cost_seconds,
+                }
+                for index, attempt in enumerate(correction.attempts, start=1)
+            ]
+            meta["attempt_history"].extend(
+                {
+                    "attempt_number": failure.attempt_number
+                    + max(0, len(acquisition_attempts) - 1),
+                    "tag": (
+                        f"{batch_tag}_correction_"
+                        f"{failure.attempt_number - 1:03d}"
+                    ),
+                    "status": "invocation_failed",
+                    "prompt_path": None,
+                    "response_path": None,
+                    "validation_errors": [
+                        f"{failure.error_type}: {failure.error_message}"
+                    ],
+                    "valid_item_keys": [],
+                    "agent_session_id": failure.agent_session_id,
+                    "workspace_dir": str(workspace_dir.resolve()),
+                    "elapsed_seconds": failure.cost_seconds,
+                    "failure_identity": failure.failure_identity,
+                }
+                for failure in correction.invocation_failures
+            )
+            meta["attempt_history"].sort(
+                key=lambda record: int(record["attempt_number"])
+            )
+            if acquisition_status == "acquired" and len(acquisition_attempts) > 1:
+                pre_author_attempts = acquisition_attempts[:-1]
+                meta["attempt_history"] = [
+                    {
+                        "attempt_number": index,
+                        "tag": attempt.payload.get("tag"),
+                        "status": (
+                            "invalid" if attempt.validation_errors else "verified"
+                        ),
+                        "prompt_path": attempt.payload.get("prompt_path"),
+                        "response_path": attempt.payload.get("response_path"),
+                        "validation_errors": list(attempt.validation_errors),
+                        "valid_item_keys": list(attempt.valid_item_keys),
+                        "agent_session_id": attempt.agent_session_id,
+                        "workspace_dir": str(workspace_dir.resolve()),
+                        "elapsed_seconds": attempt.cost_seconds,
+                    }
+                    for index, attempt in enumerate(pre_author_attempts, start=1)
+                ] + meta["attempt_history"]
+                meta["correction_metrics"] = correction_metrics
+            if correction.status not in {"accepted", "corrected"}:
+                raise ValueError(
+                    "problem_mining_relation_reviewer_correction_incomplete:"
+                    + correction.status
+                )
+            batch_decisions = [dict(item) for item in retained.payload["decisions"]]
             decisions.extend(batch_decisions)
             meta["status"] = "completed"
             meta["decision_count"] = len(batch_decisions)
+            meta["successful_attempt_tag"] = retained.payload.get("tag")
+            meta["response_path"] = retained.payload.get("response_path")
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
             if not response_path.exists():
@@ -3330,14 +4337,42 @@ def _run_relation_review_batches(
                     + "\n",
                     encoding="utf-8",
                 )
-            fallback = _failed_relation_review_batch_decisions(
-                batch_focus_ids,
-                error=error,
+            partial: list[dict[str, Any]] = []
+            if retained_observation is not None:
+                candidates = retained_observation.payload.get("decisions")
+                candidate_list = candidates if isinstance(candidates, list) else []
+                _, valid_focus_ids = _relation_review_response_errors(
+                    [dict(candidate) for candidate in candidate_list if isinstance(candidate, dict)],
+                    focus_problem_ids=set(batch_focus_ids),
+                    known_problem_ids=known_problem_ids,
+                    known_evidence_atom_ids=known_evidence_atom_ids,
+                    allowed_actions=set(allowed_actions),
+                )
+                partial = [
+                    dict(candidate)
+                    for candidate in candidate_list
+                    if isinstance(candidate, dict)
+                    and (focus_id := _coerce_string(candidate.get("focus_id"))) is not None
+                    and focus_id in valid_focus_ids
+                ]
+            retained_focus_ids = {
+                str(item["focus_id"])
+                for item in partial
+                if isinstance(item.get("focus_id"), str)
+            }
+            missing_focus_ids = [
+                focus_id for focus_id in batch_focus_ids if focus_id not in retained_focus_ids
+            ]
+            fallback = _failed_relation_review_batch_decisions(missing_focus_ids, error=error)
+            decisions.extend([*partial, *fallback])
+            meta["status"] = (
+                "failed_partial_provisional_keep_separate"
+                if partial
+                else "failed_provisional_keep_separate"
             )
-            decisions.extend(fallback)
-            meta["status"] = "failed_provisional_keep_separate"
             meta["error"] = error
-            meta["decision_count"] = len(fallback)
+            meta["retained_valid_decision_count"] = len(partial)
+            meta["decision_count"] = len(partial) + len(fallback)
         batch_meta.append(meta)
         _write_relation_review_checkpoint(
             review_dir=review_dir,
@@ -3489,6 +4524,9 @@ def _run_problem_case_relation_review(
     cfg: RunnerConfig,
     dry_run: bool,
     stage_guidance_text: str,
+    relation_decisions_override: list[dict[str, Any]] | None = None,
+    relation_review_batches_override: list[dict[str, Any]] | None = None,
+    relation_manifest_refs: list[Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """Operationalize explicit case relations before prioritization and research.
 
@@ -3505,6 +4543,9 @@ def _run_problem_case_relation_review(
     relation_config = relation_config_raw if isinstance(relation_config_raw, dict) else {}
     verified_mechanism_sha256_by_case = verified_mechanism_identities_from_case_registry(
         previous_case_registry
+    )
+    verified_causal_signature_sha256_by_case = (
+        verified_causal_identities_from_case_registry(previous_case_registry)
     )
     verified_relation_edges = _verified_relation_edges_from_case_registry(previous_case_registry)
     problem_records = attach_supporting_atoms_to_problem_cases(problem_records, atoms)
@@ -3523,6 +4564,13 @@ def _run_problem_case_relation_review(
         for problem_id in [_coerce_string(record.get("problem_id"))]
         if problem_id is not None
     ]
+    historical_case_records = problem_case_records_from_registry(previous_case_registry)
+    historical_context_by_case = {
+        case_id: record
+        for record in historical_case_records
+        for case_id in [_coerce_string(record.get("case_id"))]
+        if case_id is not None
+    }
     relation_items = [dict(record) for record in problem_records]
     for relation_item in relation_items:
         relation_item.pop("verified_mechanism_sha256", None)
@@ -3532,6 +4580,35 @@ def _run_problem_case_relation_review(
         if verified_mechanism_sha256 is not None:
             relation_item["verified_mechanism_sha256"] = verified_mechanism_sha256
             relation_item["verified_mechanism_source"] = "runner_research_evidence_verification_v1"
+        verified_causal_signature = verified_causal_signature_sha256_by_case.get(
+            case_id or ""
+        )
+        if verified_causal_signature is not None:
+            relation_item["verified_causal_signature_sha256"] = verified_causal_signature
+            relation_item["verified_causal_signature_source"] = (
+                "runner_verified_causal_signature_v1"
+            )
+        historical_context = historical_context_by_case.get(case_id or "")
+        historical_provisional = (
+            historical_context.get("provisional_same_cause_group")
+            if isinstance(historical_context, Mapping)
+            else None
+        )
+        if isinstance(historical_provisional, Mapping):
+            relation_item["provisional_same_cause_group"] = deepcopy(
+                dict(historical_provisional)
+            )
+            relation_item["case_identity_status"] = historical_context.get(
+                "case_identity_status"
+            )
+            relation_item["case_identity_candidate_ids"] = _coerce_string_list(
+                historical_context.get("case_identity_candidate_ids")
+            )
+            integrity_errors = _coerce_string_list(
+                historical_context.get("provisional_same_cause_integrity_errors")
+            )
+            if integrity_errors:
+                relation_item["provisional_same_cause_integrity_errors"] = integrity_errors
     represented_case_ids = {
         case_id
         for record in relation_items
@@ -3547,7 +4624,7 @@ def _run_problem_case_relation_review(
         ]
         if problem_id is not None
     }
-    for historical_case in problem_case_records_from_registry(previous_case_registry):
+    for historical_case in historical_case_records:
         historical_case_id = _coerce_string(historical_case.get("case_id"))
         historical_problem_ids = {
             problem_id
@@ -3583,7 +4660,18 @@ def _run_problem_case_relation_review(
     relation_invocation_tracker = ModelInvocationTracker(review_dir)
     decisions: list[dict[str, Any]] = []
     relation_review_batches: list[dict[str, Any]] = []
-    if not problem_records:
+    if relation_decisions_override is not None:
+        decisions = [dict(item) for item in relation_decisions_override]
+        relation_review_batches = [
+            dict(item) for item in (relation_review_batches_override or [])
+        ]
+        _write_relation_review_checkpoint(
+            review_dir=review_dir,
+            tag=tag,
+            decisions=decisions,
+            batches=relation_review_batches,
+        )
+    elif not problem_records:
         (review_dir / f"{tag}.prompt.txt").write_text(
             "[no active or newly mined cases] no relation-review batches created.\n",
             encoding="utf-8",
@@ -3637,6 +4725,9 @@ def _run_problem_case_relation_review(
         stage="problem_mining",
         strict_review=not dry_run,
         verified_mechanism_sha256_by_case=verified_mechanism_sha256_by_case,
+        verified_causal_signature_sha256_by_case=(
+            verified_causal_signature_sha256_by_case
+        ),
         verified_relation_edges=verified_relation_edges,
     )
     canonical_records: list[dict[str, Any]] = []
@@ -3664,21 +4755,178 @@ def _run_problem_case_relation_review(
     evidence_draft_raw = stage_input_meta.get("problem_mining_evidence_draft")
     if not isinstance(evidence_draft_raw, dict):
         raise ValueError("problem_mining_evidence_draft_missing")
+    original_records_by_case = {
+        case_id: dict(record)
+        for record in problem_records
+        for case_id in [_coerce_string(record.get("case_id"))]
+        if case_id is not None
+    }
+    historical_records_by_case = {
+        case_id: dict(record)
+        for record in historical_case_records
+        for case_id in [_coerce_string(record.get("case_id"))]
+        if case_id is not None
+    }
+    atoms_by_id = {
+        atom_id: atom
+        for atom in atoms
+        for atom_id in [_coerce_string(atom.get("atom_id"))]
+        if atom_id is not None
+    }
+
+    disposition_records_by_case: dict[str, dict[str, Any]] = {}
+    registry_records_by_case: dict[str, dict[str, Any]] = {}
+
+    def preserve_record(
+        target: dict[str, dict[str, Any]],
+        record: Mapping[str, Any],
+        *,
+        evidence_atom_ids: Sequence[str] | None = None,
+    ) -> None:
+        case_id = _coerce_string(record.get("case_id"))
+        if case_id is None:
+            return
+        preserved = dict(record)
+        if evidence_atom_ids is not None:
+            preserved["evidence_atom_ids"] = list(dict.fromkeys(evidence_atom_ids))
+            derived = set(_coerce_string_list(record.get("derived_evidence_atom_ids")))
+            preserved["derived_evidence_atom_ids"] = [
+                atom_id for atom_id in preserved["evidence_atom_ids"] if atom_id in derived
+            ]
+            preserved["source_evidence_atom_ids"] = [
+                atom_id for atom_id in preserved["evidence_atom_ids"] if atom_id not in derived
+            ]
+        existing = target.get(case_id)
+        if existing is None:
+            target[case_id] = preserved
+            return
+        for field in (
+            "evidence_atom_ids",
+            "source_evidence_atom_ids",
+            "derived_evidence_atom_ids",
+            "case_member_problem_ids",
+        ):
+            existing[field] = list(
+                dict.fromkeys(
+                    _coerce_string_list(existing.get(field))
+                    + _coerce_string_list(preserved.get(field))
+                )
+            )
+
+    for candidate in canonical_records:
+        identity_status = _coerce_string(candidate.get("case_identity_status"))
+        candidate_case_ids = _coerce_string_list(
+            candidate.get("case_identity_candidate_ids")
+        )
+        if identity_status == "provisional_same_cause" and candidate_case_ids:
+            # One provisional research packet must not prematurely rewrite durable
+            # case identity.  Disposition and registry updates retain every original
+            # member until the combined research proof establishes one mechanism.
+            for member_case_id in candidate_case_ids:
+                source = original_records_by_case.get(
+                    member_case_id
+                ) or historical_records_by_case.get(member_case_id)
+                if source is None:
+                    raise ValueError(
+                        "problem_mining_provisional_member_record_missing:"
+                        + member_case_id
+                    )
+                preserve_record(disposition_records_by_case, source)
+                preserve_record(registry_records_by_case, source)
+            continue
+        if identity_status == "pending_relation" and len(candidate_case_ids) > 1:
+            # Ambiguous multi-case evidence remains attached only to identities it
+            # already had.  The combined model record is visible to relation review,
+            # but it cannot contaminate either case or mint a third one.
+            pending_evidence = _coerce_string_list(candidate.get("evidence_atom_ids"))
+            for member_case_id in candidate_case_ids:
+                source = historical_records_by_case.get(member_case_id)
+                matching_atom_ids = [
+                    atom_id
+                    for atom_id in pending_evidence
+                    if member_case_id
+                    in {
+                        *_coerce_string_list(
+                            (atoms_by_id.get(atom_id) or {}).get("supporting_case_ids")
+                        ),
+                        *(
+                            [_coerce_string((atoms_by_id.get(atom_id) or {}).get("case_id"))]
+                            if _coerce_string(
+                                (atoms_by_id.get(atom_id) or {}).get("case_id")
+                            )
+                            is not None
+                            else []
+                        ),
+                    }
+                ]
+                if source is None:
+                    source = {
+                        "problem_id": f"identity-pending:{member_case_id}",
+                        "canonical_problem_id": f"identity-pending:{member_case_id}",
+                        "case_id": member_case_id,
+                        "case_member_problem_ids": [],
+                        "evidence_atom_ids": matching_atom_ids,
+                    }
+                preserve_record(
+                    disposition_records_by_case,
+                    source,
+                    evidence_atom_ids=list(
+                        dict.fromkeys(
+                            _coerce_string_list(source.get("evidence_atom_ids"))
+                            + matching_atom_ids
+                        )
+                    ),
+                )
+            continue
+        preserve_record(disposition_records_by_case, candidate)
+        preserve_record(registry_records_by_case, candidate)
+
+    disposition_records = list(disposition_records_by_case.values())
+    registry_records = list(registry_records_by_case.values())
     partitioned_atoms = apply_problem_mining_decision_partition(
         atoms=atoms,
         canonical_records=canonical_records,
         draft=evidence_draft_raw,
     )
-    updated_atoms = apply_atom_dispositions(partitioned_atoms, canonical_records)
+    updated_atoms = apply_atom_dispositions(partitioned_atoms, disposition_records)
     canonical_records = attach_supporting_atoms_to_problem_cases(
         canonical_records,
         updated_atoms,
     )
     registry = build_case_registry(
-        canonical_records,
+        registry_records,
         previous=previous_case_registry,
         supporting_atoms=updated_atoms,
     )
+    registry_cases_raw = registry.get("cases")
+    registry_cases = registry_cases_raw if isinstance(registry_cases_raw, dict) else {}
+    for candidate in canonical_records:
+        clearance = candidate.get("provisional_same_cause_clearance")
+        if not isinstance(clearance, Mapping):
+            continue
+        for member_case_id in _coerce_string_list(clearance.get("member_case_ids")):
+            entry = registry_cases.get(member_case_id)
+            if not isinstance(entry, dict):
+                continue
+            entry["case_identity_status"] = "resolved"
+            entry.pop("case_identity_candidate_ids", None)
+            entry.pop("provisional_same_cause_group", None)
+            entry.pop("provisional_same_cause_integrity_errors", None)
+    for candidate in canonical_records:
+        provisional = candidate.get("provisional_same_cause_group")
+        if not isinstance(provisional, Mapping):
+            continue
+        member_case_ids = _coerce_string_list(provisional.get("member_case_ids"))
+        for member_case_id in member_case_ids:
+            entry = registry_cases.get(member_case_id)
+            if not isinstance(entry, dict):
+                continue
+            entry["case_identity_status"] = "provisional_same_cause"
+            entry["case_identity_candidate_ids"] = member_case_ids
+            persisted_provisional = deepcopy(dict(provisional))
+            persisted_provisional["research_unit_case_id"] = candidate.get("case_id")
+            entry["provisional_same_cause_group"] = persisted_provisional
+            entry.pop("provisional_same_cause_integrity_errors", None)
     relation_receipt_path = review_dir / f"{tag}.relations.json"
     _, immutable_relation_receipt_path = _persist_canonical_relation_receipts(
         canonical_records=canonical_records,
@@ -3710,12 +4958,12 @@ def _run_problem_case_relation_review(
             "canonical_case_count": len(canonical_records),
             "relation_review_decision_count": len(decisions),
             "relation_review_batch_count": len(relation_review_batches),
-            "relation_review_failed_batch_count": sum(
-                1
-                for batch in relation_review_batches
-                if batch.get("status") == "failed_provisional_keep_separate"
+            "relation_review_failed_batch_count": _failed_relation_review_batch_count(
+                relation_review_batches
             ),
             "relation_review_batches": relation_review_batches,
+            "relation_review_decisions": decisions,
+            "pre_relation_problem_records": problem_records,
             "atom_dispositions": atom_disposition_summary(updated_atoms),
             "problem_mining_evidence_receipt": evidence_receipt_ref,
         }
@@ -3735,7 +4983,10 @@ def _run_problem_case_relation_review(
     updated_doc["artifacts"] = artifact_refs
     updated_doc = merge_stage_model_invocation_contract(
         updated_doc,
-        manifest_refs=relation_invocation_tracker.collect(),
+        manifest_refs=[
+            *relation_invocation_tracker.collect(),
+            *(relation_manifest_refs or []),
+        ],
         invocation_expected=bool(problem_records),
     )
 
@@ -3752,6 +5003,1069 @@ def _run_problem_case_relation_review(
         encoding="utf-8",
     )
     return updated_doc, canonical_records, updated_atoms, registry
+
+
+def continue_problem_relation_review_from_independent_feedback(
+    *,
+    stage_doc: dict[str, Any],
+    atoms: list[dict[str, Any]],
+    feedback: Mapping[str, Any],
+    author_provenance: Mapping[str, Any],
+    pipeline_manifest: PipelinePromptManifest,
+    stage_guidance_text: str,
+    artifacts_dir: Path,
+    out_json: Path,
+    out_md: Path,
+    case_registry_path: Path,
+    previous_case_registry: dict[str, Any],
+    repo_root: Path,
+    agent: str,
+    model: str | None,
+    cfg: RunnerConfig,
+    prior_correction_attempts: list[dict[str, Any]] | None = None,
+    prior_correction_errors: list[str] | None = None,
+    correction_attempt_number: int = 1,
+) -> dict[str, Any]:
+    """Resume the exact relation-review batch and rematerialize its case graph."""
+
+    meta_raw = stage_doc.get("input_meta")
+    meta = dict(meta_raw) if isinstance(meta_raw, Mapping) else {}
+    pre_relation_raw = meta.get("pre_relation_problem_records")
+    pre_relation_records = (
+        [dict(item) for item in pre_relation_raw if isinstance(item, Mapping)]
+        if isinstance(pre_relation_raw, list)
+        else []
+    )
+    batches_raw = meta.get("relation_review_batches")
+    batches = (
+        [dict(item) for item in batches_raw if isinstance(item, Mapping)]
+        if isinstance(batches_raw, list)
+        else []
+    )
+    batch_tag = _coerce_string(author_provenance.get("relation_review_batch_tag"))
+    batch = next(
+        (item for item in batches if _coerce_string(item.get("tag")) == batch_tag),
+        None,
+    )
+    if not pre_relation_records or batch is None:
+        return {
+            "status": "repairable_paused:relation_review_source_frontier_unavailable",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": [
+                "stage1_relation_review_pre_relation_frontier_unavailable"
+            ],
+        }
+    attempts_raw = batch.get("attempt_history")
+    attempts = (
+        [dict(item) for item in attempts_raw if isinstance(item, Mapping)]
+        if isinstance(attempts_raw, list)
+        else []
+    )
+    retained = next(
+        (item for item in reversed(attempts) if item.get("status") == "verified"),
+        attempts[-1] if attempts else None,
+    )
+    expected_session = _coerce_string(author_provenance.get("agent_session_id"))
+    expected_workspace_raw = _coerce_string(author_provenance.get("workspace_dir"))
+    if (
+        retained is None
+        or expected_session is None
+        or expected_workspace_raw is None
+        or _coerce_string(retained.get("agent_session_id")) != expected_session
+        or _coerce_string(retained.get("workspace_dir")) != expected_workspace_raw
+    ):
+        return {
+            "status": "repairable_paused:relation_review_exact_author_unavailable",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": ["stage1_relation_review_exact_author_unavailable"],
+        }
+    expected_workspace = Path(expected_workspace_raw).resolve()
+    focus_ids = set(_coerce_string_list(batch.get("focus_ids")))
+    known_problem_ids = {
+        value
+        for record in pre_relation_records
+        for value in [
+            _coerce_string(record.get("problem_id")),
+            *_coerce_string_list(record.get("case_member_problem_ids")),
+        ]
+        if value is not None
+    }
+    known_evidence_ids = {
+        value
+        for record in pre_relation_records
+        for value in _coerce_string_list(record.get("evidence_atom_ids"))
+    }
+    existing_decisions_raw = meta.get("relation_review_decisions")
+    existing_decisions = (
+        [dict(item) for item in existing_decisions_raw if isinstance(item, Mapping)]
+        if isinstance(existing_decisions_raw, list)
+        else []
+    )
+    if not existing_decisions:
+        response_path_raw = _coerce_string(
+            stage_doc.get("artifacts", {}).get("relation_review_response")
+            if isinstance(stage_doc.get("artifacts"), Mapping)
+            else None
+        )
+        try:
+            response_loaded = json.loads(
+                Path(response_path_raw or "").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            response_loaded = None
+        if isinstance(response_loaded, list):
+            existing_decisions = [
+                dict(item) for item in response_loaded if isinstance(item, Mapping)
+            ]
+    prompt = (
+        "INDEPENDENT QUALIFICATION CORRECTION FOR STAGE-1 RELATION REVIEW\n\n"
+        "Continue the exact relation-review author session and workspace. Revise the "
+        "complete decisions for this retained batch in response to every bound finding. "
+        "Preserve unrelated valid focus decisions. Return one JSON list and no prose. "
+        "Do not self-certify resolution; fresh independent adjudication remains required.\n\n"
+        "BOUND FEEDBACK:\n"
+        + json.dumps(feedback, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n\nBATCH FOCUS IDS:\n"
+        + json.dumps(sorted(focus_ids), ensure_ascii=False, indent=2)
+        + "\n\nCURRENT BATCH DECISIONS:\n"
+        + json.dumps(
+            [
+                item
+                for item in existing_decisions
+                if _coerce_string(item.get("focus_id")) in focus_ids
+            ],
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n\nPRIOR CORRECTION VALIDATION ERRORS:\n"
+        + json.dumps(prior_correction_errors or [], ensure_ascii=False, indent=2)
+    )
+    tag = (
+        "qualification_relation_"
+        + sha256(str(feedback.get("content_sha256")).encode()).hexdigest()[:12]
+        + f"_{max(1, correction_attempt_number):03d}"
+    )
+    run = run_stage_prompt_json(
+        stage="problem_mining",
+        prompt=prompt,
+        out_dir=artifacts_dir,
+        tag=tag,
+        agent=agent,
+        model=model,
+        cfg=cfg,
+        workspace_dir=expected_workspace,
+        resume_session_id=expected_session,
+        allow_empty=True,
+        structured=True,
+    )
+    if isinstance(run, str):
+        response = run
+        actual_session = None
+        actual_workspace = expected_workspace
+        elapsed = 0.0
+        invocation_path = None
+    else:
+        response = str(run.response)
+        actual_session = _coerce_string(run.agent_session_id)
+        actual_workspace = Path(run.workspace_dir or expected_workspace).resolve()
+        elapsed = max(0.0, float(run.elapsed_seconds))
+        invocation_path = Path(run.invocation_manifest_path)
+    errors: list[str] = []
+    decisions: list[dict[str, Any]] = []
+    try:
+        parsed = json.loads(response)
+        if not isinstance(parsed, list) or not all(
+            isinstance(item, dict) for item in parsed
+        ):
+            raise ValueError("relation_correction_response_not_list")
+        decisions = [dict(item) for item in parsed]
+        validation_errors, _ = _relation_review_response_errors(
+            decisions,
+            focus_problem_ids=focus_ids,
+            known_problem_ids=known_problem_ids,
+            known_evidence_atom_ids=known_evidence_ids,
+            allowed_actions={
+                "merge",
+                "alias",
+                "split",
+                "same_cause_group",
+                "keep_separate",
+            },
+        )
+        errors.extend(validation_errors)
+    except Exception as exc:  # noqa: BLE001 - exact validator feedback
+        errors.append(f"{type(exc).__name__}: {exc}")
+    if actual_session != expected_session:
+        errors.append("stage1_relation_review_exact_session_changed")
+    if actual_workspace != expected_workspace:
+        errors.append("stage1_relation_review_workspace_changed")
+    attempt_record = {
+        "attempt_number": len(attempts) + len(prior_correction_attempts or []) + 1,
+        "tag": tag,
+        "status": "verified" if not errors else "invalid",
+        "agent_session_id": actual_session,
+        "workspace_dir": str(actual_workspace),
+        "elapsed_seconds": elapsed,
+        "validation_errors": list(errors),
+    }
+    if errors:
+        return {
+            "status": "repairable_paused:relation_review_correction_invalid",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": errors,
+            "attempt_record": attempt_record,
+            "agent_session_id": actual_session,
+            "workspace_dir": str(actual_workspace),
+        }
+    corrected_by_focus = {
+        str(item["focus_id"]): item
+        for item in decisions
+        if _coerce_string(item.get("focus_id")) is not None
+    }
+    merged_decisions = [
+        item
+        for item in existing_decisions
+        if _coerce_string(item.get("focus_id")) not in focus_ids
+    ] + [corrected_by_focus[focus_id] for focus_id in sorted(focus_ids)]
+    corrected_batches = [dict(item) for item in batches]
+    for corrected_batch in corrected_batches:
+        if _coerce_string(corrected_batch.get("tag")) != batch_tag:
+            continue
+        corrected_batch["status"] = "qualification_corrected"
+        corrected_batch["attempt_history"] = [
+            *attempts,
+            *[dict(item) for item in (prior_correction_attempts or [])],
+            attempt_record,
+        ]
+    draft_raw = meta.get("problem_mining_evidence_draft")
+    if not isinstance(draft_raw, dict):
+        receipt_ref = meta.get("problem_mining_evidence_receipt")
+        receipt_path_raw = (
+            _coerce_string(receipt_ref.get("path"))
+            if isinstance(receipt_ref, Mapping)
+            else None
+        )
+        try:
+            draft_loaded = json.loads(
+                Path(receipt_path_raw or "").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            draft_loaded = None
+        draft_raw = draft_loaded if isinstance(draft_loaded, dict) else None
+    if not isinstance(draft_raw, dict):
+        return {
+            "status": "repairable_paused:relation_review_evidence_receipt_unavailable",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": ["stage1_relation_review_evidence_receipt_unavailable"],
+            "attempt_record": attempt_record,
+            "agent_session_id": actual_session,
+            "workspace_dir": str(actual_workspace),
+        }
+    patched = dict(stage_doc)
+    patched["items"] = pre_relation_records
+    patched_meta = dict(meta)
+    patched_meta["problem_mining_evidence_draft"] = json.loads(
+        json.dumps(draft_raw, ensure_ascii=False)
+    )
+    patched["input_meta"] = patched_meta
+    manifest_refs = (
+        [model_invocation_manifest_ref(invocation_path)]
+        if invocation_path is not None
+        else []
+    )
+    updated, records, updated_atoms, registry = _run_problem_case_relation_review(
+        stage_doc=patched,
+        problem_records=pre_relation_records,
+        atoms=atoms,
+        pipeline_manifest=pipeline_manifest,
+        artifacts_dir=artifacts_dir,
+        out_json=out_json,
+        out_md=out_md,
+        case_registry_path=case_registry_path,
+        previous_case_registry=previous_case_registry,
+        agent=agent,
+        model=model,
+        cfg=cfg,
+        dry_run=False,
+        stage_guidance_text=stage_guidance_text,
+        relation_decisions_override=merged_decisions,
+        relation_review_batches_override=corrected_batches,
+        relation_manifest_refs=manifest_refs,
+    )
+    return {
+        "status": "corrected",
+        "stage_doc": updated,
+        "problem_records": records,
+        "atoms": updated_atoms,
+        "case_registry": registry,
+        "validation_errors": [],
+        "attempt_record": attempt_record,
+        "agent_session_id": actual_session,
+        "workspace_dir": str(actual_workspace),
+    }
+
+
+def continue_problem_mining_from_independent_feedback(
+    *,
+    stage_doc: dict[str, Any],
+    atoms: list[dict[str, Any]],
+    actionable_atom_ids: list[str],
+    feedback: Mapping[str, Any],
+    pipeline_manifest: PipelinePromptManifest,
+    stage_guidance_text: str,
+    artifacts_dir: Path,
+    out_json: Path,
+    out_md: Path,
+    case_registry_path: Path,
+    previous_case_registry: dict[str, Any],
+    repo_root: Path,
+    agent: str,
+    model: str | None,
+    cfg: RunnerConfig,
+    prior_correction_attempts: list[dict[str, Any]] | None = None,
+    prior_correction_errors: list[str] | None = None,
+    correction_attempt_number: int = 1,
+    author_component: str | None = None,
+    author_provenance: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Resume the exact Stage 1 assignment reviewer for a miss or bad mined claim."""
+
+    meta_raw = stage_doc.get("input_meta")
+    meta = dict(meta_raw) if isinstance(meta_raw, dict) else {}
+    draft_raw = meta.get("problem_mining_evidence_draft")
+    if not isinstance(draft_raw, dict):
+        receipt_ref_raw = meta.get("problem_mining_evidence_receipt")
+        receipt_path_raw = (
+            _coerce_string(receipt_ref_raw.get("path"))
+            if isinstance(receipt_ref_raw, dict)
+            else None
+        )
+        if receipt_path_raw is not None:
+            try:
+                loaded_receipt = json.loads(
+                    Path(receipt_path_raw).read_text(encoding="utf-8")
+                )
+            except (OSError, UnicodeError, json.JSONDecodeError):
+                loaded_receipt = None
+            if isinstance(loaded_receipt, dict):
+                draft_raw = loaded_receipt
+    miners_raw = meta.get("miner_results")
+    miners = (
+        [dict(item) for item in miners_raw if isinstance(item, dict)]
+        if isinstance(miners_raw, list)
+        else []
+    )
+    target_atoms = {item for item in actionable_atom_ids if isinstance(item, str) and item}
+    expected_miner_tag = (
+        _coerce_string(author_provenance.get("miner_tag"))
+        if isinstance(author_provenance, Mapping)
+        else None
+    )
+    miner = next(
+        (
+            item
+            for item in miners
+            if expected_miner_tag is None
+            or _coerce_string(item.get("tag")) == expected_miner_tag
+            if target_atoms.intersection(
+                set(_coerce_string_list(item.get("assigned_atom_ids")))
+            )
+        ),
+        None,
+    )
+    if miner is None:
+        overlapping_assignment_exists = any(
+            target_atoms.intersection(
+                set(_coerce_string_list(item.get("assigned_atom_ids")))
+            )
+            for item in miners
+        )
+        return {
+            "status": (
+                "repairable_paused:stage1_author_binding_mismatch"
+                if expected_miner_tag is not None and overlapping_assignment_exists
+                else "repairable_paused:stage1_assignment_not_found"
+            ),
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": [
+                (
+                    "stage1_author_miner_tag_binding_mismatch"
+                    if expected_miner_tag is not None and overlapping_assignment_exists
+                    else "stage1_actionable_assignment_not_found"
+                )
+            ],
+        }
+    if not isinstance(draft_raw, dict):
+        return {
+            "status": "repairable_paused:stage1_composite_receipt_unavailable",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": ["stage1_composite_evidence_receipt_unavailable"],
+        }
+    original_tag = str(miner.get("tag") or "")
+    source_receipts_raw = draft_raw.get("miners")
+    source_receipts = (
+        [dict(item) for item in source_receipts_raw if isinstance(item, Mapping)]
+        if isinstance(source_receipts_raw, list)
+        else []
+    )
+    source_composite_receipt = next(
+        (
+            item
+            for item in source_receipts
+            if _coerce_string(item.get("tag")) == original_tag
+        ),
+        None,
+    )
+    if not isinstance(source_composite_receipt, dict):
+        return {
+            "status": "repairable_paused:stage1_composite_receipt_unavailable",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": ["stage1_composite_miner_receipt_unavailable"],
+        }
+    review_attempts_raw = miner.get("coverage_depth_review_attempt_history")
+    primary_attempts_raw = miner.get("attempt_history")
+    if author_component not in {None, "problem_miner", "coverage_review"}:
+        return {
+            "status": "repairable_paused:stage1_author_component_invalid",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": [
+                f"stage1_author_component_invalid:{author_component}"
+            ],
+        }
+    if author_component == "problem_miner":
+        attempts_raw = primary_attempts_raw
+    elif author_component == "coverage_review":
+        attempts_raw = review_attempts_raw
+    else:
+        attempts_raw = (
+            review_attempts_raw
+            if isinstance(review_attempts_raw, list) and review_attempts_raw
+            else primary_attempts_raw
+        )
+    attempts = (
+        [dict(item) for item in attempts_raw if isinstance(item, dict)]
+        if isinstance(attempts_raw, list)
+        else []
+    )
+    correction_attempts = [
+        dict(item)
+        for item in (prior_correction_attempts or [])
+        if isinstance(item, dict)
+    ]
+    retained = next(
+        (item for item in reversed(attempts) if item.get("status") == "verified"),
+        attempts[-1] if attempts else None,
+    )
+    if retained is None:
+        return {
+            "status": "repairable_paused:stage1_author_attempt_missing",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": ["stage1_author_attempt_missing"],
+        }
+    session_id = _coerce_string(retained.get("agent_session_id"))
+    workspace_raw = _coerce_string(retained.get("workspace_dir"))
+    assigned_atom_ids = _coerce_string_list(miner.get("assigned_atom_ids"))
+    if session_id is None or workspace_raw is None:
+        return {
+            "status": "repairable_paused:stage1_author_continuation_unavailable",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": ["stage1_author_session_or_workspace_missing"],
+        }
+    expected_session_id = (
+        _coerce_string(author_provenance.get("agent_session_id"))
+        if isinstance(author_provenance, Mapping)
+        else None
+    )
+    expected_workspace_raw = (
+        _coerce_string(author_provenance.get("workspace_dir"))
+        if isinstance(author_provenance, Mapping)
+        else None
+    )
+    binding_errors: list[str] = []
+    if expected_miner_tag is not None and original_tag != expected_miner_tag:
+        binding_errors.append("stage1_author_miner_tag_binding_mismatch")
+    if expected_session_id is not None and session_id != expected_session_id:
+        binding_errors.append("stage1_author_session_binding_mismatch")
+    if (
+        expected_workspace_raw is not None
+        and Path(workspace_raw).resolve() != Path(expected_workspace_raw).resolve()
+    ):
+        binding_errors.append("stage1_author_workspace_binding_mismatch")
+    if binding_errors:
+        return {
+            "status": "repairable_paused:stage1_author_binding_mismatch",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": binding_errors,
+            "agent_session_id": session_id,
+            "workspace_dir": workspace_raw,
+        }
+    workspace = Path(workspace_raw).resolve()
+    manifest_path = workspace / "atoms.json"
+    try:
+        manifest_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return {
+            "status": "repairable_paused:stage1_workspace_manifest_unavailable",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": [
+                f"stage1_workspace_manifest_unavailable:{type(exc).__name__}"
+            ],
+        }
+    if not isinstance(manifest_raw, dict):
+        raise ValueError("stage1_workspace_manifest_invalid")
+    manifest = dict(manifest_raw)
+    expected_manifest = _coerce_string(retained.get("workspace_manifest_sha256"))
+    observed_manifest = _problem_mining_attempt_manifest_sha256(manifest)
+    if expected_manifest is not None and observed_manifest != expected_manifest:
+        raise ValueError("stage1_workspace_manifest_changed_before_qualification_repair")
+    atoms_by_id = {
+        str(atom["atom_id"]): atom
+        for atom in atoms
+        if isinstance(atom.get("atom_id"), str)
+    }
+    assigned_atoms = [atoms_by_id[item] for item in assigned_atom_ids if item in atoms_by_id]
+    assignment_atom_ids = set(assigned_atom_ids)
+    prior_records = [
+        dict(item)
+        for item in stage_doc.get("items", [])
+        if isinstance(item, dict)
+        and assignment_atom_ids.intersection(
+            set(_coerce_string_list(item.get("evidence_atom_ids")))
+        )
+    ]
+    feedback_kind = _coerce_string(feedback.get("feedback_kind"))
+    correction_prompt = (
+        "INDEPENDENT QUALIFICATION CORRECTION FOR STAGE 1\n\n"
+        "Continue this exact coverage/depth-review conversation in its retained evidence "
+        "workspace. The independent post-run adjudicator found either a missed source group "
+        "or a mined claim that is shallow, unsupported, or incorrectly retained. Re-read "
+        "retained atom files as needed. It is valid to support a corrected case, retract the "
+        "bad case with an evidence-backed non-support disposition, or leave genuinely "
+        "unresolved evidence unresolved. Return the complete "
+        "strict problem-mining response for every atom in this assignment, preserving valid "
+        "unrelated decisions and correcting every bound finding. This turn does not "
+        "self-certify success; "
+        "a new independent adjudication remains authoritative.\n\nBOUND FEEDBACK:\n"
+        + json.dumps(feedback, ensure_ascii=False, indent=2, sort_keys=True)
+        + "\n\nBOUND TARGET ATOM IDS:\n"
+        + json.dumps(sorted(target_atoms), ensure_ascii=False, indent=2)
+        + "\n\nCURRENT RECORDS FROM THIS ASSIGNMENT:\n"
+        + json.dumps(prior_records, ensure_ascii=False, indent=2)
+        + "\n\nPRIOR QUALIFICATION-CORRECTION VALIDATION ERRORS:\n"
+        + json.dumps(prior_correction_errors or [], ensure_ascii=False, indent=2)
+    )
+    tag = (
+        f"qualification_stage1_{sha256(str(feedback.get('content_sha256')).encode()).hexdigest()[:12]}"
+        f"_{max(1, correction_attempt_number):03d}"
+    )
+    result = _run_problem_mining_attempt(
+        repo_root=repo_root,
+        stage_artifacts_dir=artifacts_dir,
+        base_tag=str(miner.get("tag") or "problem_mining_qualification"),
+        attempt_tag=tag,
+        attempt_number=len(attempts) + len(correction_attempts) + 1,
+        prompt=correction_prompt,
+        prompt_atoms=assigned_atoms,
+        assigned_atom_ids=assigned_atom_ids,
+        max_records_per_miner=max(1, len(assigned_atom_ids)),
+        eligible_atom_ids=_coerce_string_list(
+            draft_raw.get("eligible_atom_ids")
+            if isinstance(draft_raw, dict)
+            else []
+        ),
+        template_name=str(miner.get("template") or "problem_miner_default.md"),
+        record_contract_error_prefix="qualification_stage1_contract_invalid",
+        agent=agent,
+        model=model,
+        cfg=cfg,
+        initial_workspace_dir=workspace,
+        initial_manifest=manifest,
+        expected_manifest_sha256=observed_manifest,
+        resume_session_id=session_id,
+    )
+    failure = result.get("failure")
+    if isinstance(failure, Exception):
+        failed_attempt = result.get("attempt_record")
+        failed_attempt_map = (
+            failed_attempt if isinstance(failed_attempt, Mapping) else {}
+        )
+        return {
+            "status": "repairable_paused:stage1_correction_invalid",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": list(result.get("validation_errors") or [str(failure)]),
+            "attempt_record": result.get("attempt_record"),
+            "agent_session_id": _coerce_string(
+                failed_attempt_map.get("agent_session_id")
+            )
+            or session_id,
+            "workspace_dir": _coerce_string(
+                failed_attempt_map.get("workspace_dir")
+            )
+            or str(workspace),
+        }
+    envelope = result.get("envelope")
+    decisions = (
+        [dict(item) for item in envelope.get("atom_decisions", []) if isinstance(item, dict)]
+        if isinstance(envelope, dict)
+        else []
+    )
+    supporting_targets = {
+        _coerce_string(decision.get("atom_id"))
+        for decision in decisions
+        if decision.get("disposition") == "supports_case"
+    } & target_atoms
+    if feedback_kind == "false_rejection" and not supporting_targets:
+        incomplete_attempt = result.get("attempt_record")
+        incomplete_attempt_map = (
+            incomplete_attempt if isinstance(incomplete_attempt, Mapping) else {}
+        )
+        return {
+            "status": "repairable_paused:stage1_false_rejection_not_corrected",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": ["stage1_actionable_group_still_not_supported"],
+            "attempt_record": result.get("attempt_record"),
+            "agent_session_id": _coerce_string(
+                incomplete_attempt_map.get("agent_session_id")
+            )
+            or session_id,
+            "workspace_dir": _coerce_string(
+                incomplete_attempt_map.get("workspace_dir")
+            )
+            or str(workspace),
+        }
+    direct_records = [
+        dict(item) for item in result.get("records", []) if isinstance(item, dict)
+    ]
+    direct_receipt = dict(result["receipt"])
+    direct_decisions = [
+        dict(item)
+        for item in direct_receipt.get("atom_decisions", [])
+        if isinstance(item, Mapping)
+    ]
+    complete_attempt_history = [
+        *attempts,
+        *correction_attempts,
+        dict(result["attempt_record"]),
+    ]
+    eligible_atom_ids = _coerce_string_list(draft_raw.get("eligible_atom_ids"))
+    primary_attempt_history = [
+        dict(item) for item in primary_attempts_raw if isinstance(item, Mapping)
+    ] if isinstance(primary_attempts_raw, list) else []
+    review_attempt_history = [
+        dict(item) for item in review_attempts_raw if isinstance(item, Mapping)
+    ] if isinstance(review_attempts_raw, list) else []
+    dependent_review_run: dict[str, Any] | None = None
+
+    if attempts_raw is primary_attempts_raw:
+        primary_records = direct_records
+        primary_decisions = direct_decisions
+        primary_receipt = direct_receipt
+        primary_receipt["attempt_history"] = complete_attempt_history
+        primary_normalized_raw = _coerce_string(
+            primary_receipt.get("normalized_events_path")
+        )
+        primary_normalized_path = (
+            Path(primary_normalized_raw)
+            if primary_normalized_raw is not None
+            else None
+        )
+        retained_review = next(
+            (
+                item
+                for item in reversed(review_attempt_history)
+                if item.get("status") == "verified"
+            ),
+            review_attempt_history[-1] if review_attempt_history else None,
+        )
+        review_session = (
+            _coerce_string(retained_review.get("agent_session_id"))
+            if isinstance(retained_review, Mapping)
+            else None
+        )
+        review_workspace_raw = (
+            _coerce_string(retained_review.get("workspace_dir"))
+            if isinstance(retained_review, Mapping)
+            else None
+        )
+        if (
+            primary_normalized_path is None
+            or not primary_normalized_path.is_file()
+            or review_session is None
+            or review_workspace_raw is None
+        ):
+            return {
+                "status": "repairable_paused:stage1_coverage_rereview_frontier_unavailable",
+                "stage_doc": stage_doc,
+                "atoms": atoms,
+                "validation_errors": [
+                    "stage1_primary_correction_requires_retained_coverage_reviewer"
+                ],
+                "attempt_record": result.get("attempt_record"),
+                "agent_session_id": session_id,
+                "workspace_dir": str(workspace),
+            }
+        review_workspace = Path(review_workspace_raw).resolve()
+        try:
+            review_manifest_raw = json.loads(
+                (review_workspace / "atoms.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            return {
+                "status": "repairable_paused:stage1_coverage_rereview_manifest_unavailable",
+                "stage_doc": stage_doc,
+                "atoms": atoms,
+                "validation_errors": [
+                    "stage1_coverage_rereview_manifest_unavailable:"
+                    + type(exc).__name__
+                ],
+                "attempt_record": result.get("attempt_record"),
+                "agent_session_id": session_id,
+                "workspace_dir": str(workspace),
+            }
+        if not isinstance(review_manifest_raw, dict):
+            raise ValueError("stage1_coverage_rereview_manifest_invalid")
+        template_name = str(miner.get("template") or "problem_miner_default.md")
+        template_paths = list(
+            getattr(pipeline_manifest, "problem_miner_templates", ()) or ()
+        )
+        template_path = next(
+            (path for path in template_paths if Path(path).name == template_name),
+            None,
+        )
+        template_text = (
+            Path(template_path).read_text(encoding="utf-8")
+            if template_path is not None and Path(template_path).is_file()
+            else (
+                "{{STAGE_GUIDANCE}}\nRead the retained evidence workspace named by "
+                "{{ATOMS_JSON}} and return the strict problem-mining response."
+            )
+        )
+        review_prompt = _coverage_depth_review_prompt(
+            primary_records=primary_records,
+            primary_decisions=primary_decisions,
+            template_text=template_text,
+            stage_guidance_text=stage_guidance_text,
+            atoms_placeholder=json.dumps(
+                {"atoms_file": "atoms.json"},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            max_records_per_miner=max(1, len(assigned_atom_ids)),
+            bound_feedback=feedback,
+        )
+        dependent_review_run = _run_problem_mining_job_with_response_retry(
+            repo_root=repo_root,
+            stage_artifacts_dir=artifacts_dir,
+            base_tag=f"{original_tag}_coverage_depth_review",
+            prompt=review_prompt,
+            prompt_atoms=assigned_atoms,
+            assigned_atom_ids=assigned_atom_ids,
+            max_records_per_miner=max(1, len(assigned_atom_ids)),
+            eligible_atom_ids=eligible_atom_ids,
+            template_name=f"adversarial:{template_name}",
+            record_contract_error_prefix=(
+                "qualification_stage1_coverage_rereview_contract_invalid"
+            ),
+            agent=agent,
+            model=model,
+            cfg=cfg,
+            initial_workspace_dir=review_workspace,
+            initial_manifest=dict(review_manifest_raw),
+            resume_session_id=review_session,
+            attempt_number_base=len(review_attempt_history),
+        )
+        dependent_failure = dependent_review_run.get("failure")
+        if isinstance(dependent_failure, Exception):
+            return {
+                "status": "repairable_paused:stage1_coverage_rereview_invalid",
+                "stage_doc": stage_doc,
+                "atoms": atoms,
+                "validation_errors": list(
+                    dependent_review_run.get("validation_errors")
+                    or [str(dependent_failure)]
+                ),
+                "attempt_record": {
+                    **dict(result["attempt_record"]),
+                    "dependent_coverage_review_attempt_history": list(
+                        dependent_review_run.get("attempt_history") or []
+                    ),
+                },
+                "agent_session_id": session_id,
+                "workspace_dir": str(workspace),
+            }
+        review_records = [
+            dict(item)
+            for item in dependent_review_run.get("records", [])
+            if isinstance(item, Mapping)
+        ]
+        review_receipt = dict(dependent_review_run["receipt"])
+        new_review_attempts = [
+            dict(item)
+            for item in dependent_review_run.get("attempt_history", [])
+            if isinstance(item, Mapping)
+        ]
+        review_attempt_history = [*review_attempt_history, *new_review_attempts]
+        review_receipt["attempt_history"] = review_attempt_history
+        review_decisions = [
+            dict(item)
+            for item in review_receipt.get("atom_decisions", [])
+            if isinstance(item, Mapping)
+        ]
+        primary_workspace = workspace
+        primary_manifest = manifest
+    else:
+        primary_records_raw = source_composite_receipt.get(
+            "primary_problem_records"
+        )
+        primary_decisions_raw = source_composite_receipt.get(
+            "primary_atom_decisions"
+        )
+        primary_receipt_raw = source_composite_receipt.get("primary_pass")
+        if not (
+            isinstance(primary_records_raw, list)
+            and isinstance(primary_decisions_raw, list)
+            and isinstance(primary_receipt_raw, Mapping)
+        ):
+            return {
+                "status": "repairable_paused:stage1_primary_frontier_unavailable",
+                "stage_doc": stage_doc,
+                "atoms": atoms,
+                "validation_errors": [
+                    "stage1_coverage_correction_primary_component_unavailable"
+                ],
+                "attempt_record": result.get("attempt_record"),
+                "agent_session_id": session_id,
+                "workspace_dir": str(workspace),
+            }
+        primary_records = [
+            dict(item) for item in primary_records_raw if isinstance(item, Mapping)
+        ]
+        primary_decisions = [
+            dict(item) for item in primary_decisions_raw if isinstance(item, Mapping)
+        ]
+        primary_receipt = dict(primary_receipt_raw)
+        primary_workspace_raw = _coerce_string(primary_receipt.get("workspace_dir"))
+        primary_normalized_raw = _coerce_string(
+            primary_receipt.get("normalized_events_path")
+        )
+        if primary_workspace_raw is None or primary_normalized_raw is None:
+            return {
+                "status": "repairable_paused:stage1_primary_frontier_unavailable",
+                "stage_doc": stage_doc,
+                "atoms": atoms,
+                "validation_errors": [
+                    "stage1_coverage_correction_primary_evidence_unavailable"
+                ],
+                "attempt_record": result.get("attempt_record"),
+                "agent_session_id": session_id,
+                "workspace_dir": str(workspace),
+            }
+        primary_workspace = Path(primary_workspace_raw).resolve()
+        primary_normalized_path = Path(primary_normalized_raw)
+        try:
+            primary_manifest_raw = json.loads(
+                (primary_workspace / "atoms.json").read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            return {
+                "status": "repairable_paused:stage1_primary_frontier_unavailable",
+                "stage_doc": stage_doc,
+                "atoms": atoms,
+                "validation_errors": [
+                    "stage1_coverage_correction_primary_manifest_unavailable:"
+                    + type(exc).__name__
+                ],
+                "attempt_record": result.get("attempt_record"),
+                "agent_session_id": session_id,
+                "workspace_dir": str(workspace),
+            }
+        if not isinstance(primary_manifest_raw, dict):
+            raise ValueError("stage1_primary_component_manifest_invalid")
+        primary_manifest = dict(primary_manifest_raw)
+        review_records = direct_records
+        review_decisions = direct_decisions
+        review_receipt = direct_receipt
+        review_receipt["attempt_history"] = complete_attempt_history
+        review_attempt_history = complete_attempt_history
+
+    replacement, candidate_records, candidate_decisions = (
+        _build_composite_miner_receipt(
+            tag=original_tag,
+            template_name=str(
+                miner.get("template") or "problem_miner_default.md"
+            ),
+            assigned_atom_ids=assigned_atom_ids,
+            eligible_atom_ids=eligible_atom_ids,
+            primary_records=primary_records,
+            primary_decisions=primary_decisions,
+            primary_receipt=primary_receipt,
+            review_records=review_records,
+            review_decisions=review_decisions,
+            review_receipt=review_receipt,
+            primary_normalized_events_path=primary_normalized_path,
+            primary_workspace_dir=primary_workspace,
+            primary_workspace_manifest=primary_manifest,
+        )
+    )
+    final_supporting_targets = {
+        _coerce_string(decision.get("atom_id"))
+        for decision in candidate_decisions
+        if decision.get("disposition") == "supports_case"
+    } & target_atoms
+    if feedback_kind == "false_rejection" and not final_supporting_targets:
+        return {
+            "status": "repairable_paused:stage1_false_rejection_not_confirmed",
+            "stage_doc": stage_doc,
+            "atoms": atoms,
+            "validation_errors": [
+                "stage1_actionable_group_not_confirmed_by_independent_review"
+            ],
+            "attempt_record": {
+                **dict(result["attempt_record"]),
+                "dependent_coverage_review_attempt_history": (
+                    list(dependent_review_run.get("attempt_history") or [])
+                    if isinstance(dependent_review_run, Mapping)
+                    else []
+                ),
+            },
+            "agent_session_id": session_id,
+            "workspace_dir": str(workspace),
+        }
+    assigned_case_records = assign_problem_case_ids(
+        candidate_records,
+        atoms,
+        case_registry=previous_case_registry,
+        strict_new_output=True,
+    )
+    existing_records = [
+        dict(item)
+        for item in stage_doc.get("items", [])
+        if isinstance(item, dict)
+        and not assignment_atom_ids.intersection(
+            set(_coerce_string_list(item.get("evidence_atom_ids")))
+        )
+    ]
+    combined_records = [*existing_records, *assigned_case_records]
+    draft = json.loads(json.dumps(draft_raw, ensure_ascii=False))
+    receipts_raw = draft.get("miners")
+    receipts = (
+        [dict(item) for item in receipts_raw if isinstance(item, dict)]
+        if isinstance(receipts_raw, list)
+        else []
+    )
+    replacement["attempt_history"] = (
+        complete_attempt_history
+        if attempts_raw is primary_attempts_raw
+        else primary_attempt_history
+    )
+    receipts = [
+        replacement if _coerce_string(receipt.get("tag")) == original_tag else receipt
+        for receipt in receipts
+    ]
+    if not any(_coerce_string(receipt.get("tag")) == original_tag for receipt in receipts):
+        receipts.append(replacement)
+    draft["miners"] = receipts
+    patched = dict(stage_doc)
+    patched["items"] = combined_records
+    patched_meta = dict(meta)
+    updated_miner_result = dict(miner)
+    if attempts_raw is review_attempts_raw:
+        updated_miner_result["coverage_depth_review_attempt_history"] = (
+            complete_attempt_history
+        )
+    else:
+        updated_miner_result["attempt_history"] = complete_attempt_history
+        updated_miner_result["coverage_depth_review_attempt_history"] = (
+            review_attempt_history
+        )
+    updated_miner_result["status"] = "qualification_corrected"
+    patched_meta["miner_results"] = [
+        updated_miner_result
+        if _coerce_string(item.get("tag")) == original_tag
+        else item
+        for item in miners
+    ]
+    patched_meta["problem_mining_evidence_draft"] = draft
+    correction_attempt_record = {
+        **dict(result["attempt_record"]),
+        "dependent_coverage_review_attempt_history": (
+            list(dependent_review_run.get("attempt_history") or [])
+            if isinstance(dependent_review_run, Mapping)
+            else []
+        ),
+    }
+    patched_meta["qualification_stage1_correction"] = {
+        "feedback_sha256": feedback.get("content_sha256"),
+        "author_session_id": session_id,
+        "workspace_dir": str(workspace),
+        "target_atom_ids": sorted(target_atoms),
+        "feedback_kind": feedback_kind,
+        "replaced_assignment_atom_ids": sorted(assignment_atom_ids),
+        "attempt_record": correction_attempt_record,
+    }
+    patched["input_meta"] = patched_meta
+    invocation_raw = result.get("attempt_record", {}).get("artifacts")
+    invocation_ref_raw = (
+        invocation_raw.get("model_invocation")
+        if isinstance(invocation_raw, dict)
+        else None
+    )
+    invocation_path = (
+        Path(invocation_ref_raw["path"])
+        if isinstance(invocation_ref_raw, dict)
+        and isinstance(invocation_ref_raw.get("path"), str)
+        else None
+    )
+    if invocation_path is not None:
+        patched = merge_stage_model_invocation_contract(
+            patched,
+            manifest_refs=[model_invocation_manifest_ref(invocation_path)],
+            invocation_expected=True,
+        )
+    updated, records, updated_atoms, registry = _run_problem_case_relation_review(
+        stage_doc=patched,
+        problem_records=combined_records,
+        atoms=atoms,
+        pipeline_manifest=pipeline_manifest,
+        artifacts_dir=artifacts_dir,
+        out_json=out_json,
+        out_md=out_md,
+        case_registry_path=case_registry_path,
+        previous_case_registry=previous_case_registry,
+        agent=agent,
+        model=model,
+        cfg=cfg,
+        dry_run=False,
+        stage_guidance_text=stage_guidance_text,
+    )
+    return {
+        "status": "corrected",
+        "stage_doc": updated,
+        "problem_records": records,
+        "atoms": updated_atoms,
+        "case_registry": registry,
+        "validation_errors": [],
+        "attempt_record": correction_attempt_record,
+        "agent_session_id": _coerce_string(
+            result.get("attempt_record", {}).get("agent_session_id")
+        )
+        or session_id,
+        "workspace_dir": str(workspace),
+    }
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

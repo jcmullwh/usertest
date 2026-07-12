@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 
@@ -194,6 +195,221 @@ def test_same_verified_mechanism_becomes_one_optioning_unit_without_losing_facet
         "case:b",
     }
     assert len(bundle["bundle_sha256"]) == 64
+
+
+def _provisional_inputs() -> dict[str, object]:
+    inputs = _inputs()
+    first_problem = dict(inputs["problem_records"][0])
+    facets = [
+        {
+            "case_id": item["case_id"],
+            "problem_id": item["problem_id"],
+            "title": item["title"],
+            "problem": item["problem"],
+            "user_impact": item["user_impact"],
+            "canonical_symptoms": item["canonical_symptoms"],
+            "evidence_atom_ids": item["evidence_atom_ids"],
+            "source_evidence_atom_ids": item["source_evidence_atom_ids"],
+        }
+        for item in inputs["problem_records"]
+    ]
+    first_problem.update(
+        {
+            "case_identity_status": "provisional_same_cause",
+            "case_identity_candidate_ids": ["case:a", "case:b"],
+            "case_member_problem_ids": ["problem:a", "problem:b"],
+            "evidence_atom_ids": ["atom:a", "atom:b"],
+            "source_evidence_atom_ids": ["atom:a", "atom:b"],
+            "provisional_same_cause_group": {
+                "schema_version": 1,
+                "status": "research_hypothesis",
+                "group_id": "cause:provisional",
+                "member_case_ids": ["case:a", "case:b"],
+                "member_problem_ids": ["problem:a", "problem:b"],
+                "member_facets": facets,
+            },
+        }
+    )
+    dossier = dict(inputs["research_dossiers"][0])
+    dossier["research_status"] = "evidence_sufficient"
+    dossier["evidence_assignment"] = {
+        "status": "complete",
+        "expected_atom_ids": ["atom:a", "atom:b"],
+    }
+    dossier["evidence_verification"] = deepcopy(dossier["evidence_verification"])
+    dossier["evidence_verification"]["mechanism_evidence"] = [
+        {
+            "mechanism_evidence_id": "mechanism:one",
+            "hypothesis_id": "h1",
+            "adversarial_effect": "supports_selection",
+            "origin_atom_ids": ["atom:a", "atom:b"],
+        }
+    ]
+    return {
+        "problem_records": [first_problem],
+        "priority_decisions": [inputs["priority_decisions"][0]],
+        "research_dossiers": [dossier],
+        "case_registry": inputs["case_registry"],
+    }
+
+
+def test_verified_provisional_group_finalizes_only_after_all_member_evidence() -> None:
+    inputs = _provisional_inputs()
+    for entry in inputs["case_registry"]["cases"].values():
+        entry["case_identity_status"] = "provisional_same_cause"
+        entry["case_identity_candidate_ids"] = ["case:a", "case:b"]
+        entry["provisional_same_cause_group"] = {
+            "status": "research_hypothesis",
+            "group_id": "cause:provisional",
+        }
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+        assess_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {"case:b": "case:a"}
+    assert len(result["groups"]) == 1
+    assert result["groups"][0]["relation_kind"] == "verified_provisional_same_cause"
+    problem = result["problem_records"][0]
+    assert problem["case_identity_status"] == "resolved"
+    assert problem["absorbed_case_ids"] == ["case:b"]
+    assert "provisional_same_cause_group" not in problem
+    assert {facet["case_id"] for facet in problem["symptom_facets"]} == {
+        "case:a",
+        "case:b",
+    }
+    registry = build_case_registry(
+        result["problem_records"],
+        previous=inputs["case_registry"],
+    )
+    assert registry["cases"]["case:b"]["alias_of"] == "case:a"
+    assert "provisional_same_cause_group" not in registry["cases"]["case:a"]
+    assert "provisional_same_cause_group" not in registry["cases"]["case:b"]
+
+
+def test_partial_provisional_group_preserves_original_ids_and_blocks_alias() -> None:
+    inputs = _provisional_inputs()
+    inputs["research_dossiers"][0]["evidence_assignment"]["expected_atom_ids"] = [
+        "atom:a"
+    ]
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+        assess_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {}
+    assert result["groups"] == []
+    assert result["problem_records"][0]["case_identity_status"] == (
+        "provisional_same_cause"
+    )
+    assert "absorbed_case_ids" not in result["problem_records"][0]
+
+
+def test_provisional_group_requires_evidence_sufficient_readiness() -> None:
+    inputs = _provisional_inputs()
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+        assess_dossier=lambda _dossier: (False, ["research_blocked"]),
+    )
+
+    assert result["case_aliases"] == {}
+    assert result["problem_records"][0]["case_identity_status"] == (
+        "provisional_same_cause"
+    )
+
+
+def test_provisional_group_assignment_must_equal_member_source_evidence() -> None:
+    inputs = _provisional_inputs()
+    problem = inputs["problem_records"][0]
+    problem["evidence_atom_ids"].append("atom:derived")
+    problem["derived_evidence_atom_ids"] = ["atom:derived"]
+    problem["provisional_same_cause_group"]["member_facets"][0][
+        "evidence_atom_ids"
+    ].append("atom:derived")
+    inputs["research_dossiers"][0]["evidence_assignment"]["expected_atom_ids"].append(
+        "atom:derived"
+    )
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+        assess_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {}
+    assert result["groups"] == []
+
+
+def test_provisional_group_requires_primary_mechanism_coverage_for_every_source_atom() -> None:
+    inputs = _provisional_inputs()
+    inputs["research_dossiers"][0]["evidence_verification"]["mechanism_evidence"][0][
+        "origin_atom_ids"
+    ] = ["atom:a"]
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+        assess_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {}
+    assert result["groups"] == []
+
+
+def test_provisional_group_and_independent_verified_case_collapse_transitively() -> None:
+    inputs = _provisional_inputs()
+    registry, _identity = _registry(["case:a", "case:b", "case:c"])
+    independent = _inputs()["research_dossiers"][1]
+    independent["case_id"] = "case:c"
+    independent["problem_id"] = "problem:c"
+    independent_problem = {
+        "case_id": "case:c",
+        "problem_id": "problem:c",
+        "title": "Worker symptom",
+        "problem": "The worker drops the same request.",
+        "user_impact": "Worker work fails.",
+        "evidence_atom_ids": ["atom:c"],
+        "source_evidence_atom_ids": ["atom:c"],
+        "canonical_symptoms": ["Worker request disappears"],
+    }
+    independent_priority = {
+        "case_id": "case:c",
+        "problem_id": "problem:c",
+        "priority_bucket": "p0",
+        "selected_for_research": True,
+        "priority_status": "prioritized",
+        "priority_rationale": "Research this observed failure.",
+    }
+    inputs["problem_records"].append(independent_problem)
+    inputs["priority_decisions"].append(independent_priority)
+    inputs["research_dossiers"].append(independent)
+    inputs["case_registry"] = registry
+
+    result = collapse_post_research_verified_mechanisms(
+        **inputs,
+        verify_dossier=lambda _dossier: (True, []),
+        assess_dossier=lambda _dossier: (True, []),
+    )
+
+    assert result["case_aliases"] == {"case:b": "case:a", "case:c": "case:a"}
+    assert len(result["problem_records"]) == 1
+    problem = result["problem_records"][0]
+    assert problem["absorbed_case_ids"] == ["case:b", "case:c"]
+    assert {facet["case_id"] for facet in problem["symptom_facets"]} == {
+        "case:a",
+        "case:b",
+        "case:c",
+    }
+    bundle = result["research_dossiers"][0]["post_research_same_mechanism_bundle"]
+    assert bundle["member_case_ids"] == ["case:a", "case:b", "case:c"]
+    rebuilt = build_case_registry(result["problem_records"], previous=registry)
+    assert rebuilt["cases"]["case:b"]["alias_of"] == "case:a"
+    assert rebuilt["cases"]["case:c"]["alias_of"] == "case:a"
 
 
 def test_same_symbol_with_different_controlled_branch_does_not_collapse() -> None:

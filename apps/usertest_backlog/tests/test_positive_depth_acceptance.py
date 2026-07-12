@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from collections.abc import Mapping
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -64,6 +65,143 @@ def _canonical_sha256(value: object) -> str:
 def _content_id(prefix: str, value: dict[str, Any], id_field: str) -> str:
     projection = {key: item for key, item in value.items() if key != id_field}
     return f"{prefix}:{_canonical_sha256(projection)}"
+
+
+def _attach_exact_origin_boundary(
+    *,
+    research: dict[str, Any],
+    verification: dict[str, Any],
+    oracle: dict[str, Any],
+    positive_contract: dict[str, Any],
+    mechanism_evidence_ids: list[str],
+    atom_id: str,
+) -> None:
+    experiment_id = str(oracle["research_experiment_id"])
+    replay = next(
+        value
+        for value in verification["experiments"]
+        if value["experiment_id"] == experiment_id
+    )
+    atom_receipt = next(
+        value
+        for value in research["evidence_assignment"]["atom_receipts"]
+        if value["atom_id"] == atom_id
+    )
+    atom_snapshot = atom_receipt["atom_snapshot"]
+    command = str(atom_snapshot["command"])
+    argv = list(replay["executed_argv"])
+    authorization = {
+        "authorization_kind": "fixture_exact_origin_command",
+        "executed_argv_sha256": _canonical_sha256(argv),
+        "shell": False,
+        "workspace_confined": True,
+        "origin_atom_id": atom_id,
+        "origin_atom_sha256": atom_receipt["atom_sha256"],
+        "origin_atom_field_path": "$.command",
+        "origin_command_value_sha256": _canonical_sha256(command),
+        "runner_attested": True,
+    }
+    authorization["authorization_sha256"] = _canonical_sha256(authorization)
+    replay_inputs = {
+        "schema_version": 1,
+        "source_experiment_id": experiment_id,
+        "environment": {},
+        "disposable_state_paths": [],
+        "runner_approved": True,
+    }
+    replay_inputs["replay_inputs_sha256"] = _canonical_sha256(replay_inputs)
+    contract_id = str(positive_contract["positive_outcome_contract_id"])
+    replay_observation = {
+        "schema_version": 1,
+        "source_experiment_id": experiment_id,
+        "selector": {"source": "exit_code"},
+        "source_observation_sha256": _canonical_sha256(
+            {
+                "exit_code": replay["exit_code"],
+                "stdout_sha256": replay["stdout_sha256"],
+                "stderr_sha256": replay["stderr_sha256"],
+            }
+        ),
+        "predicate_input_mode": "post_change_observation",
+        "positive_outcome_contract_ids": [contract_id],
+        "runner_attested": True,
+    }
+    replay_observation["replay_observation_sha256"] = _canonical_sha256(
+        replay_observation
+    )
+    replay["command_authorization"] = authorization
+    replay["replay_inputs"] = replay_inputs
+    oracle["execution"] = {
+        "argv": argv,
+        "command_authorization": authorization,
+        "platform_requirement": "any",
+        "shell": False,
+        "replay_inputs": replay_inputs,
+        "replay_observation": replay_observation,
+    }
+    oracle["outcome_oracle_id"] = _content_id(
+        "outcome_oracle", oracle, "outcome_oracle_id"
+    )
+    source_identity = {
+        "schema_version": 1,
+        "origin_atom_id": atom_id,
+        "origin_atom_sha256": atom_receipt["atom_sha256"],
+        "origin_atom_field_path": "$.command",
+        "origin_command_value_sha256": _canonical_sha256(command),
+        "executed_argv_sha256": authorization["executed_argv_sha256"],
+        "command_authorization_sha256": authorization["authorization_sha256"],
+        "runner_attested": True,
+    }
+    source_identity["source_identity_sha256"] = _canonical_sha256(source_identity)
+    equivalence = {
+        "schema_version": 1,
+        "equivalence_mode": "exact_origin_scenario_identity",
+        "source_experiment_id": experiment_id,
+        "origin_atom_ids": [atom_id],
+        "source_identity": source_identity,
+        "source_identity_refs": [
+            f"origin_command_identity:{source_identity['source_identity_sha256']}"
+        ],
+        "replay_inputs_sha256": replay_inputs["replay_inputs_sha256"],
+        "replay_observation_sha256": replay_observation[
+            "replay_observation_sha256"
+        ],
+        "positive_outcome_contract_ids": [contract_id],
+        "selected_mechanism_evidence_ids": sorted(mechanism_evidence_ids),
+        "outcome_oracle_id": oracle["outcome_oracle_id"],
+        "runner_attested": True,
+    }
+    equivalence["equivalence_sha256"] = _canonical_sha256(equivalence)
+    replay_projection = {
+        "experiment_id": experiment_id,
+        "executed_argv_sha256": authorization["executed_argv_sha256"],
+        "command_authorization_sha256": authorization["authorization_sha256"],
+        "stdout_sha256": replay["stdout_sha256"],
+        "stderr_sha256": replay["stderr_sha256"],
+        "replay_inputs_sha256": replay_inputs["replay_inputs_sha256"],
+        "execution_isolation_sha256": _canonical_sha256(replay["execution_isolation"]),
+    }
+    boundary = {
+        "schema_version": 1,
+        "experiment_id": experiment_id,
+        "boundary_kind": "fixture/repository-original-scenario",
+        "requires_live_verification": False,
+        "faithful_equivalence": True,
+        "provenance_refs": sorted(
+            {
+                f"research_experiment:{experiment_id}",
+                f"clean_replay:{_canonical_sha256(replay_projection)}",
+                *mechanism_evidence_ids,
+                str(oracle["outcome_oracle_id"]),
+                f"equivalence_proof:{equivalence['equivalence_sha256']}",
+            }
+        ),
+        "rationale_sha256": _canonical_sha256("exact original fixture identity"),
+        "runner_attested": True,
+        "equivalence_proof": equivalence,
+    }
+    boundary["boundary_sha256"] = _canonical_sha256(boundary)
+    verification["verification_boundaries"] = [boundary]
 
 
 def _trusted_host_isolation() -> dict[str, object]:
@@ -162,7 +300,16 @@ def _mechanism_evidence(
     harness_path: str | None,
     consumer_kind: str = "production_entrypoint",
 ) -> dict[str, object]:
-    consumer_identity = {"kind": consumer_kind, "entrypoint": symbol}
+    consumer_projection = {
+        "kind": consumer_kind,
+        "entrypoint": symbol,
+        "attestation_basis": "runner_mechanism_link",
+        "runner_attested": True,
+    }
+    consumer_identity = {
+        **consumer_projection,
+        "consumer_identity_sha256": _canonical_sha256(consumer_projection),
+    }
     receipt: dict[str, object] = {
         "evidence_type": evidence_type,
         "hypothesis_id": "h1",
@@ -184,8 +331,7 @@ def _mechanism_evidence(
         "mechanism_link": mechanism_link,
         "platform_requirement": "any",
         "observed_platform": "windows",
-        # A successful counter-scenario limits the fix to the evidenced boundary.
-        "adversarial_effect": "limits_scope",
+        "adversarial_effect": "supports_selection",
     }
     receipt["mechanism_evidence_id"] = _content_id(
         "mechanism_evidence", receipt, "mechanism_evidence_id"
@@ -423,6 +569,23 @@ def _verified_research_proof(
         consumer_kind=consumer_kind,
     )
     mechanism["experiment_ids"] = ["exp-support", "exp-counter"]
+    symptom_binding = {
+        "experiment_id": "exp-support",
+        "atom_id": atom_id,
+        "match_kind": "command_and_exit_code",
+        "origin_atom_sha256": assignment["atom_receipts"][0]["atom_sha256"],
+    }
+    mechanism["origin_symptom_bindings"] = [symptom_binding]
+    mechanism["causal_root_bindings"] = [
+        {
+            "kind": "origin_symptom_observation",
+            "experiment_ids": sorted(mechanism["experiment_ids"]),
+            "origin_atom_ids": [atom_id],
+            "origin_bindings_sha256": _canonical_sha256([symptom_binding]),
+            "mechanism_link_sha256": _canonical_sha256(link),
+            "root_mechanism_symbol": symbol,
+        }
+    ]
     mechanism["mechanism_evidence_id"] = _content_id(
         "mechanism_evidence", mechanism, "mechanism_evidence_id"
     )
@@ -562,11 +725,7 @@ def _verified_research_proof(
         "deterministic_mechanism_closures": [],
         "failure_paths": [],
         "atom_bindings": [
-            {
-                "experiment_id": "exp-support",
-                "atom_id": atom_id,
-                "match_kind": "command_and_exit_code",
-            },
+            symptom_binding,
             {
                 "experiment_id": "exp-support",
                 "atom_id": atom_id,
@@ -582,22 +741,48 @@ def _verified_research_proof(
     replay_by_id = {replay["experiment_id"]: replay for replay in receipt["experiments"]}
     primary = proof["root_cause_hypotheses"][0]
     if research_method == "static_trace":
+        support_ids = sorted(mechanism["experiment_ids"])
+        support_connectivity = {
+            "mechanism_evidence_id": mechanism["mechanism_evidence_id"],
+            "experiment_ids": support_ids,
+            "connection_kind": "causal_root",
+            "connected_from_mechanism_evidence_id": None,
+            "shared_verified_symbols": [],
+            "verified_causal_edge": None,
+            "verified_causal_edges": [],
+            "causal_root_kinds": ["origin_symptom_observation"],
+        }
         closure = {
-            "verification_method": "runner_deterministic_mechanism_closure_v1",
+            "verification_method": "runner_deterministic_mechanism_closure_v2",
             "hypothesis_id": "h1",
-            "support_experiment_id": "exp-support",
-            "scenario_kind": "static_trace",
+            "support_experiment_ids": support_ids,
+            "mechanism_evidence_ids": [mechanism["mechanism_evidence_id"]],
+            "causal_root_evidence_ids": [mechanism["mechanism_evidence_id"]],
             "mechanism_symbols": [symbol],
-            "code_path": list(static_trace["code_path"] if static_trace else []),
-            "closure_basis": "deterministic_static_trace",
+            "code_path": [{"symbol": symbol, "path": path}],
+            "closure_basis": "rooted_connected_support_component",
+            "support_connectivity": [support_connectivity],
             "alternatives_disposed": [],
             "origin_atom_ids": [atom_id],
-            "observed_result": {
-                "exit_code": replay_by_id["exp-support"]["exit_code"],
-                "stdout_sha256": replay_by_id["exp-support"]["stdout_sha256"],
-                "stderr_sha256": replay_by_id["exp-support"]["stderr_sha256"],
-                "assertion": experiments[0]["observable_assertion"],
-            },
+            "observed_results": [
+                {
+                    "experiment_id": experiment_id,
+                    "scenario_kind": next(
+                        value["scenario_kind"]
+                        for value in experiments
+                        if value["experiment_id"] == experiment_id
+                    ),
+                    "exit_code": replay_by_id[experiment_id]["exit_code"],
+                    "stdout_sha256": replay_by_id[experiment_id]["stdout_sha256"],
+                    "stderr_sha256": replay_by_id[experiment_id]["stderr_sha256"],
+                    "assertion": next(
+                        value["observable_assertion"]
+                        for value in experiments
+                        if value["experiment_id"] == experiment_id
+                    ),
+                }
+                for experiment_id in support_ids
+            ],
         }
         closure["closure_receipt_id"] = _content_id(
             "deterministic_mechanism_closure",
@@ -681,7 +866,7 @@ def _verified_research_proof(
             }
         ]
     receipt["verified_mechanism"] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "mechanism_symbols": [symbol],
         "code_paths": [{"symbol": symbol, "path": path}],
     }
@@ -697,9 +882,22 @@ def _verified_research_proof(
             }
         )
     receipt["verified_mechanism_provenance"] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "primary_hypothesis_id": "h1",
         "mechanism_evidence_ids": [mechanism["mechanism_evidence_id"]],
+        "causal_root_evidence_ids": [mechanism["mechanism_evidence_id"]],
+        "support_connectivity": [
+            {
+                "mechanism_evidence_id": mechanism["mechanism_evidence_id"],
+                "experiment_ids": sorted(mechanism["experiment_ids"]),
+                "connection_kind": "causal_root",
+                "connected_from_mechanism_evidence_id": None,
+                "shared_verified_symbols": [],
+                "verified_causal_edge": None,
+                "verified_causal_edges": [],
+                "causal_root_kinds": ["origin_symptom_observation"],
+            }
+        ],
         "causal_control_ids": [],
         "falsification_intervention_ids": [
             value["intervention_receipt_id"] for value in receipt["falsification_interventions"]
@@ -708,6 +906,12 @@ def _verified_research_proof(
             value["closure_receipt_id"] for value in receipt["deterministic_mechanism_closures"]
         ],
         "research_probe_control_points": probe_points,
+        "support_symbol_coverage": [
+            {
+                "experiment_ids": sorted(mechanism["experiment_ids"]),
+                "mechanism_symbols": [symbol],
+            }
+        ],
     }
     receipt["verified_mechanism_sha256"] = _canonical_sha256(receipt["verified_mechanism"])
     receipt["verified_mechanism_provenance_sha256"] = _canonical_sha256(
@@ -717,6 +921,11 @@ def _verified_research_proof(
         "schema_version": 1,
         "case_id": case_id,
         "repo_revision": _REVISION,
+        "primary_hypothesis_id": "h1",
+        "primary_verified_mechanism_sha256": receipt["verified_mechanism_sha256"],
+        "primary_verified_mechanism_provenance_sha256": receipt[
+            "verified_mechanism_provenance_sha256"
+        ],
         "research_experiment_id": "exp-support",
         "scenario_kind": scenario_kind,
         "origin_atom_ids": [atom_id],
@@ -789,6 +998,11 @@ def _verified_research_proof(
         "kind": "origin_evidence_semantic_contract",
         "research_experiment_id": "exp-support",
         "mechanism_evidence_ids": [mechanism["mechanism_evidence_id"]],
+        "primary_hypothesis_id": "h1",
+        "primary_verified_mechanism_sha256": receipt["verified_mechanism_sha256"],
+        "primary_verified_mechanism_provenance_sha256": receipt[
+            "verified_mechanism_provenance_sha256"
+        ],
         "origin_evidence": {
             "atom_id": atom_id,
             "atom_sha256": assignment["atom_receipts"][0]["atom_sha256"],
@@ -803,7 +1017,14 @@ def _verified_research_proof(
         "positive_outcome_contract_id",
     )
     oracle["positive_outcome_contracts"] = [positive_contract]
-    oracle["outcome_oracle_id"] = _content_id("outcome_oracle", oracle, "outcome_oracle_id")
+    _attach_exact_origin_boundary(
+        research=proof,
+        verification=receipt,
+        oracle=oracle,
+        positive_contract=positive_contract,
+        mechanism_evidence_ids=[str(mechanism["mechanism_evidence_id"])],
+        atom_id=atom_id,
+    )
     receipt["outcome_oracles"] = [oracle]
     receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
     proof["evidence_verification"] = receipt
@@ -1423,6 +1644,7 @@ def _run_production_research_acceptance(
             cwd: Path,
             source_workspace: Path,
             timeout_seconds: float | None,
+            environment_overrides: Mapping[str, str | None] | None = None,
         ) -> object:
             self.timeouts.append(timeout_seconds)
             assert timeout_seconds is None
@@ -1431,6 +1653,7 @@ def _run_production_research_acceptance(
                 cwd=cwd,
                 source_workspace=source_workspace,
                 timeout_seconds=timeout_seconds,
+                environment_overrides=environment_overrides,
             )
 
     executor = RecordingUnboundedExecutor()

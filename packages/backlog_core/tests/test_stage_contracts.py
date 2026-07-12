@@ -478,10 +478,25 @@ def _fixture_mechanism_evidence(dossier: dict, controls: list[dict]) -> list[dic
             for symbol in mechanism_symbols
         ],
     }
-    consumer_identity = {
-        "kind": "production_entrypoint",
+    consumer_projection = {
+        "kind": "runner_observed_entrypoint",
         "entrypoint": entrypoint,
+        "attestation_basis": "runner_mechanism_link",
+        "runner_attested": True,
     }
+    consumer_identity = {
+        **consumer_projection,
+        "consumer_identity_sha256": _fixture_json_sha256(consumer_projection),
+    }
+    origin_atom_sha256 = dossier["evidence_assignment"]["atom_receipts"][0]["atom_sha256"]
+    origin_symptom_bindings = [
+        {
+            "experiment_id": support["experiment_id"],
+            "atom_id": support["addresses_atom_ids"][0],
+            "match_kind": "command_and_exit_code",
+            "origin_atom_sha256": origin_atom_sha256,
+        }
+    ]
     base = {
         "evidence_type": "exception_trace",
         "hypothesis_id": hypothesis["hypothesis_id"],
@@ -493,6 +508,7 @@ def _fixture_mechanism_evidence(dossier: dict, controls: list[dict]) -> list[dic
         "experiment_ids": [support["experiment_id"], *falsification_experiment_ids],
         "artifact_refs": support["artifact_refs"],
         "origin_atom_ids": support["addresses_atom_ids"],
+        "origin_symptom_bindings": origin_symptom_bindings,
         "path_name": entrypoint,
         "consumer_identity": consumer_identity,
         "independence_key": _fixture_json_sha256(consumer_identity),
@@ -508,6 +524,16 @@ def _fixture_mechanism_evidence(dossier: dict, controls: list[dict]) -> list[dic
         "observed_platform": "windows",
         "adversarial_effect": "supports_selection",
     }
+    base["causal_root_bindings"] = [
+        {
+            "kind": "origin_symptom_observation",
+            "experiment_ids": sorted(base["experiment_ids"]),
+            "origin_atom_ids": sorted(base["origin_atom_ids"]),
+            "origin_bindings_sha256": _fixture_json_sha256(origin_symptom_bindings),
+            "mechanism_link_sha256": _fixture_json_sha256(mechanism_link),
+            "root_mechanism_symbol": entrypoint,
+        }
+    ]
     base["mechanism_evidence_id"] = "mechanism_evidence:" + _fixture_json_sha256(base)
     evidence = [base]
     if controls:
@@ -783,6 +809,9 @@ def _verified_receipt(dossier: dict) -> dict:
                 "experiment_id": "exp-support",
                 "atom_id": "atom:test",
                 "match_kind": "command_and_exit_code",
+                "origin_atom_sha256": dossier["evidence_assignment"]["atom_receipts"][0][
+                    "atom_sha256"
+                ],
             }
         ],
         "errors": [],
@@ -842,9 +871,10 @@ def _verified_receipt(dossier: dict) -> dict:
         value
         for value in receipt["mechanism_evidence"]
         if value["hypothesis_id"] == primary["hypothesis_id"]
+        and value["adversarial_effect"] == "supports_selection"
     ]
     receipt["verified_mechanism"] = {
-        "schema_version": 2,
+        "schema_version": 3,
         "mechanism_symbols": sorted(primary.get("mechanism_symbols", [])),
         "code_paths": sorted(
             {
@@ -855,11 +885,35 @@ def _verified_receipt(dossier: dict) -> dict:
         ),
     }
     receipt["verified_mechanism_provenance"] = {
-        "schema_version": 1,
+        "schema_version": 2,
         "primary_hypothesis_id": primary["hypothesis_id"],
         "mechanism_evidence_ids": sorted(
             value["mechanism_evidence_id"] for value in primary_evidence
         ),
+        "causal_root_evidence_ids": sorted(
+            value["mechanism_evidence_id"]
+            for value in primary_evidence
+            if value.get("causal_root_bindings")
+        ),
+        "support_connectivity": [
+            {
+                "mechanism_evidence_id": value["mechanism_evidence_id"],
+                "experiment_ids": sorted(value["experiment_ids"]),
+                "connection_kind": "causal_root",
+                "connected_from_mechanism_evidence_id": None,
+                "shared_verified_symbols": [],
+                "verified_causal_edge": None,
+                "verified_causal_edges": [],
+                "causal_root_kinds": sorted(
+                    root["kind"] for root in value.get("causal_root_bindings", [])
+                ),
+            }
+            for value in sorted(
+                primary_evidence,
+                key=lambda item: item["mechanism_evidence_id"],
+            )
+            if value.get("causal_root_bindings")
+        ],
         "causal_control_ids": sorted(
             value["control_verification_id"]
             for value in receipt["control_verifications"]
@@ -919,6 +973,20 @@ def _verified_receipt(dossier: dict) -> dict:
                 separators=(",", ":"),
             ),
         ),
+        "support_symbol_coverage": sorted(
+            (
+                {
+                    "experiment_ids": sorted(value["experiment_ids"]),
+                    "mechanism_symbols": value["mechanism_symbols"],
+                }
+                for value in primary_evidence
+            ),
+            key=lambda value: json.dumps(
+                value,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+        ),
     }
     receipt["verified_mechanism"]["code_paths"] = [
         {"symbol": symbol, "path": path}
@@ -933,12 +1001,19 @@ def _verified_receipt(dossier: dict) -> dict:
     support_evidence_ids = sorted(
         value["mechanism_evidence_id"]
         for value in receipt["mechanism_evidence"]
-        if support["experiment_id"] in value["experiment_ids"]
+        if value["hypothesis_id"] == primary["hypothesis_id"]
+        and value["adversarial_effect"] == "supports_selection"
+        and support["experiment_id"] in value["experiment_ids"]
     )
     oracle = {
         "schema_version": 1,
         "case_id": dossier["case_id"],
         "repo_revision": dossier["repo_revision"],
+        "primary_hypothesis_id": primary["hypothesis_id"],
+        "primary_verified_mechanism_sha256": receipt["verified_mechanism_sha256"],
+        "primary_verified_mechanism_provenance_sha256": receipt[
+            "verified_mechanism_provenance_sha256"
+        ],
         "research_experiment_id": support["experiment_id"],
         "scenario_kind": support["scenario_kind"],
         "origin_atom_ids": support["addresses_atom_ids"],
@@ -969,6 +1044,11 @@ def _verified_receipt(dossier: dict) -> dict:
         "kind": "repository_test_assertion",
         "research_experiment_id": support["experiment_id"],
         "mechanism_evidence_ids": support_evidence_ids,
+        "primary_hypothesis_id": primary["hypothesis_id"],
+        "primary_verified_mechanism_sha256": receipt["verified_mechanism_sha256"],
+        "primary_verified_mechanism_provenance_sha256": receipt[
+            "verified_mechanism_provenance_sha256"
+        ],
         "repository_contract": {
             "runner": "pytest",
             "test_path": "tests/test_parser.py",
@@ -1412,7 +1492,9 @@ def test_stage_contract_accepts_immutable_explicit_atom_field_bindings(
     assignment_receipt = dossier["evidence_assignment"]["atom_receipts"][0]
     snapshot = assignment_receipt["atom_snapshot"]
     field_name = field_path.removeprefix("$.")
+    existing_symptom_binding = dossier["evidence_verification"]["atom_bindings"][0]
     dossier["evidence_verification"]["atom_bindings"] = [
+        existing_symptom_binding,
         {
             "experiment_id": "exp-support",
             "atom_id": "atom:test",
@@ -1421,7 +1503,7 @@ def test_stage_contract_accepts_immutable_explicit_atom_field_bindings(
             "origin_atom_sha256": assignment_receipt["atom_sha256"],
             "origin_atom_field_path": field_path,
             "origin_atom_value_sha256": _fixture_json_sha256(snapshot[field_name]),
-        }
+        },
     ]
     _refresh_receipt_hashes(dossier)
 
@@ -1429,6 +1511,72 @@ def test_stage_contract_accepts_immutable_explicit_atom_field_bindings(
 
     assert len(parsed) == 1
     assert warnings == []
+
+
+def test_causal_roots_accept_content_bound_unlisted_source_identity_contracts() -> None:
+    predicate = {"kind": "equals", "expected": "observed failure"}
+    predicate_binding = {
+        "baseline_experiment_id": "experiment:future-adapter",
+        "atom_id": "atom:future",
+        "origin_atom_sha256": "a" * 64,
+        "origin_atom_field_path": "$.observed_state",
+        "observation_predicate": predicate,
+        "runner_attested": True,
+    }
+    predicate_binding["atom_field_binding_sha256"] = _fixture_json_sha256(
+        predicate_binding
+    )
+    argv = ["future-runner", "probe"]
+    authorization = {
+        "authorization_kind": "future_repository_source_identity_v9",
+        "executed_argv_sha256": _fixture_json_sha256(argv),
+        "shell": False,
+        "workspace_confined": True,
+        "origin_atom_id": "atom:future",
+        "origin_atom_sha256": "a" * 64,
+        "origin_atom_field_path": "$.command",
+        "origin_command_value_sha256": "b" * 64,
+        "runner_attested": True,
+    }
+    authorization["authorization_sha256"] = _fixture_json_sha256(authorization)
+    support = {
+        "experiment_ids": ["experiment:future-adapter"],
+        "origin_atom_ids": ["atom:future"],
+        "origin_symptom_bindings": [predicate_binding],
+        "mechanism_symbols": ["future.adapter.observe"],
+        "mechanism_link": {
+            "verification_method": "runner_future_adapter_trace_v9",
+            "entrypoint": "future.adapter.observe",
+        },
+        "executed_argv": argv,
+        "command_authorization": authorization,
+    }
+
+    roots = contracts._derived_causal_root_bindings(support)
+
+    assert {root["kind"] for root in roots} == {
+        "origin_symptom_observation",
+        "immutable_source_command",
+    }
+
+    tampered_binding = json.loads(json.dumps(support))
+    tampered_binding["origin_symptom_bindings"][0]["observation_predicate"] = {
+        "kind": "equals",
+        "expected": "different",
+    }
+    assert {
+        root["kind"]
+        for root in contracts._derived_causal_root_bindings(tampered_binding)
+    } == {"immutable_source_command"}
+
+    tampered_authorization = json.loads(json.dumps(support))
+    tampered_authorization["command_authorization"]["authorization_kind"] = (
+        "changed-after-attestation"
+    )
+    assert {
+        root["kind"]
+        for root in contracts._derived_causal_root_bindings(tampered_authorization)
+    } == {"origin_symptom_observation"}
 
 
 @pytest.mark.parametrize("tamper", ["role", "atom_hash", "value_hash", "field_path"])
@@ -1671,6 +1819,7 @@ def test_failed_evidence_receipt_is_valid_but_cannot_advance() -> None:
     receipt["verified_mechanism_sha256"] = None
     receipt["verified_mechanism_provenance"] = None
     receipt["verified_mechanism_provenance_sha256"] = None
+    receipt["outcome_oracles"] = []
     receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
 
     parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
@@ -1679,6 +1828,240 @@ def test_failed_evidence_receipt_is_valid_but_cannot_advance() -> None:
     assert warnings == []
     assert ready is False
     assert "research_evidence_unverified" in reasons
+
+
+def test_current_research_proof_rejects_hash_recomputed_legacy_projection_downgrade() -> None:
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    original_receipt_sha256 = receipt["receipt_sha256"]
+    downgraded_projection = dict(receipt["verified_mechanism"])
+    downgraded_projection["schema_version"] = 2
+    downgraded_provenance = dict(receipt["verified_mechanism_provenance"])
+    downgraded_provenance["schema_version"] = 1
+    downgraded_provenance.pop("support_symbol_coverage")
+    receipt["verified_mechanism"] = downgraded_projection
+    receipt["verified_mechanism_sha256"] = _fixture_json_sha256(downgraded_projection)
+    receipt["verified_mechanism_provenance"] = downgraded_provenance
+    receipt["verified_mechanism_provenance_sha256"] = _fixture_json_sha256(downgraded_provenance)
+    receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
+
+    assert receipt["receipt_sha256"] != original_receipt_sha256
+    with pytest.raises(
+        ValueError,
+        match=(
+            "research_verified_mechanism_current_schema_required.*"
+            "research_verified_mechanism_current_provenance_required"
+        ),
+    ):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
+def test_current_research_proof_round_trips_rooted_support_provenance() -> None:
+    dossier = _valid_dossier()
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+
+    assert warnings == []
+    provenance = parsed[0]["evidence_verification"]["verified_mechanism_provenance"]
+    support = parsed[0]["evidence_verification"]["mechanism_evidence"][0]
+    assert provenance["schema_version"] == 2
+    assert provenance["causal_root_evidence_ids"] == [support["mechanism_evidence_id"]]
+    assert provenance["support_connectivity"] == [
+        {
+            "mechanism_evidence_id": support["mechanism_evidence_id"],
+            "experiment_ids": sorted(support["experiment_ids"]),
+            "connection_kind": "causal_root",
+            "connected_from_mechanism_evidence_id": None,
+            "shared_verified_symbols": [],
+            "verified_causal_edge": None,
+            "verified_causal_edges": [],
+            "causal_root_kinds": ["origin_symptom_observation"],
+        }
+    ]
+
+
+def test_stage_connectivity_does_not_union_disconnected_root_receipts() -> None:
+    supports = [
+        {
+            "mechanism_evidence_id": "mechanism_evidence:a-root",
+            "mechanism_symbols": ["core.enter"],
+            "experiment_ids": ["exp-entry"],
+            "causal_root_bindings": [
+                {
+                    "kind": "origin_symptom_observation",
+                    "root_mechanism_symbol": "core.enter",
+                }
+            ],
+        },
+        {
+            "mechanism_evidence_id": "mechanism_evidence:b-root",
+            "mechanism_symbols": ["core.resolve"],
+            "experiment_ids": ["exp-resolve"],
+            "causal_root_bindings": [
+                {
+                    "kind": "origin_symptom_observation",
+                    "root_mechanism_symbol": "core.resolve",
+                }
+            ],
+        },
+    ]
+
+    connected, symbols, trace, disconnected = contracts._rooted_support_connectivity(
+        supports,
+        hypothesis_symbols=["core.enter", "core.resolve"],
+    )
+
+    assert [item["mechanism_evidence_id"] for item in connected] == ["mechanism_evidence:a-root"]
+    assert symbols == {"core.enter"}
+    assert [item["connection_kind"] for item in trace] == ["causal_root"]
+    assert disconnected == ["mechanism_evidence:b-root"]
+
+
+def test_stage_connectivity_rejects_reverse_causal_edge_traversal() -> None:
+    link = {
+        "verification_method": "runner_python_call_chain_v1",
+        "entrypoint": "core.enter",
+        "code_path": [
+            {"symbol": "core.enter", "path": "src/core.py"},
+            {"symbol": "core.resolve", "path": "src/core.py"},
+        ],
+        "verified_call_edges": [
+            {
+                "caller_symbol": "core.enter",
+                "caller_path": "src/core.py",
+                "callee_symbol": "core.resolve",
+                "callee_path": "src/core.py",
+                "line": 12,
+                "resolved_call": "core.resolve",
+                "call_ast_sha256": "a" * 64,
+            }
+        ],
+    }
+    link["mechanism_link_sha256"] = _fixture_json_sha256(link)
+    supports = [
+        {
+            "mechanism_evidence_id": "mechanism_evidence:root-tail",
+            "mechanism_symbols": ["core.resolve"],
+            "experiment_ids": ["exp-tail"],
+            "causal_root_bindings": [
+                {
+                    "kind": "origin_symptom_observation",
+                    "root_mechanism_symbol": "core.resolve",
+                }
+            ],
+            "mechanism_link": link,
+        },
+        {
+            "mechanism_evidence_id": "mechanism_evidence:entry",
+            "mechanism_symbols": ["core.enter"],
+            "experiment_ids": ["exp-entry"],
+            "causal_root_bindings": [],
+            "mechanism_link": link,
+        },
+    ]
+
+    connected, symbols, trace, disconnected = contracts._rooted_support_connectivity(
+        supports,
+        hypothesis_symbols=["core.enter", "core.resolve"],
+    )
+
+    assert [item["mechanism_evidence_id"] for item in connected] == ["mechanism_evidence:root-tail"]
+    assert symbols == {"core.resolve"}
+    assert [item["connection_kind"] for item in trace] == ["causal_root"]
+    assert disconnected == ["mechanism_evidence:entry"]
+
+
+def test_stage_connectivity_does_not_borrow_edge_from_unrelated_receipt() -> None:
+    link = {
+        "verification_method": "runner_python_call_chain_v1",
+        "entrypoint": "core.enter",
+        "code_path": [
+            {"symbol": "core.enter", "path": "src/core.py"},
+            {"symbol": "core.resolve", "path": "src/core.py"},
+        ],
+        "verified_call_edges": [
+            {
+                "caller_symbol": "core.enter",
+                "caller_path": "src/core.py",
+                "callee_symbol": "core.resolve",
+                "callee_path": "src/core.py",
+                "line": 12,
+                "resolved_call": "core.resolve",
+                "call_ast_sha256": "a" * 64,
+            }
+        ],
+    }
+    link["mechanism_link_sha256"] = _fixture_json_sha256(link)
+    supports = [
+        {
+            "mechanism_evidence_id": "mechanism_evidence:root",
+            "mechanism_symbols": ["core.enter"],
+            "experiment_ids": ["exp-root"],
+            "causal_root_bindings": [
+                {
+                    "kind": "origin_symptom_observation",
+                    "root_mechanism_symbol": "core.enter",
+                }
+            ],
+            "mechanism_link": None,
+        },
+        {
+            "mechanism_evidence_id": "mechanism_evidence:tail",
+            "mechanism_symbols": ["core.resolve"],
+            "experiment_ids": ["exp-tail"],
+            "causal_root_bindings": [],
+            "mechanism_link": None,
+        },
+        {
+            "mechanism_evidence_id": "mechanism_evidence:edge-owner",
+            "mechanism_symbols": ["core.other"],
+            "experiment_ids": ["exp-edge-owner"],
+            "causal_root_bindings": [],
+            "mechanism_link": link,
+        },
+    ]
+
+    connected, symbols, trace, disconnected = contracts._rooted_support_connectivity(
+        supports,
+        hypothesis_symbols=["core.enter", "core.resolve", "core.other"],
+    )
+
+    assert [item["mechanism_evidence_id"] for item in connected] == ["mechanism_evidence:root"]
+    assert symbols == {"core.enter"}
+    assert [item["connection_kind"] for item in trace] == ["causal_root"]
+    assert disconnected == ["mechanism_evidence:edge-owner", "mechanism_evidence:tail"]
+
+
+@pytest.mark.parametrize(
+    "field",
+    ["causal_root_evidence_ids", "support_connectivity", "support_symbol_coverage"],
+)
+def test_current_research_proof_rejects_hash_recomputed_causal_provenance_tamper(
+    field: str,
+) -> None:
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    provenance = dict(receipt["verified_mechanism_provenance"])
+    provenance[field] = []
+    receipt["verified_mechanism_provenance"] = provenance
+    receipt["verified_mechanism_provenance_sha256"] = _fixture_json_sha256(provenance)
+    receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
+
+    with pytest.raises(ValueError, match="research_verified_mechanism_projection_invalid"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
+@pytest.mark.parametrize("missing_field", ["verified_mechanism", "verified_mechanism_provenance"])
+def test_current_evidence_sufficient_research_requires_complete_current_projection(
+    missing_field: str,
+) -> None:
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    receipt[missing_field] = None
+    receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
+
+    with pytest.raises(ValueError, match="research_verified_mechanism_current_.*required"):
+        parse_research_dossier_list(json.dumps([dossier]))
 
 
 def test_research_proof_rejects_unresolved_hypothesis_evidence_reference() -> None:
@@ -1727,6 +2110,56 @@ def test_parse_research_dossier_list_explicit_legacy_mode_preserves_missing_stat
     assert warnings == []
     assert "research_status" not in result[0]
     ready, reasons = assess_research_readiness(result[0])
+    assert ready is False
+    assert "research_proof_invalid" in reasons
+
+
+def test_explicit_legacy_projection_is_inspectable_but_cannot_advance() -> None:
+    projection = {
+        "schema_version": 2,
+        "mechanism_symbols": ["legacy.parse"],
+        "code_paths": [{"symbol": "legacy.parse", "path": "src/legacy.py"}],
+    }
+    provenance = {
+        "schema_version": 1,
+        "primary_hypothesis_id": "h1",
+        "mechanism_evidence_ids": ["mechanism_evidence:legacy"],
+        "causal_control_ids": [],
+        "falsification_intervention_ids": [],
+        "deterministic_closure_ids": [],
+        "research_probe_control_points": [],
+    }
+    legacy = {
+        "research_schema_version": 2,
+        "problem_id": "problem:legacy-projection",
+        "research_status": "evidence_sufficient",
+        "reproduction_status": "reproduced",
+        "writes_used": False,
+        "writes_purpose": ["none"],
+        "implementation_performed": False,
+        "root_cause_hypotheses": ["Historical root-cause claim"],
+        "broader_class_assessment": "unknown",
+        "unknowns": [],
+        "evidence_verification": {
+            "status": "verified",
+            "verified_mechanism": projection,
+            "verified_mechanism_sha256": _fixture_json_sha256(projection),
+            "verified_mechanism_provenance": provenance,
+            "verified_mechanism_provenance_sha256": _fixture_json_sha256(provenance),
+        },
+    }
+
+    with pytest.raises(ValueError, match="research_dossier_invalid_schema_version"):
+        parse_research_dossier_list(json.dumps([legacy]))
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([legacy]), legacy=True)
+    ready, reasons = assess_research_readiness(parsed[0])
+
+    assert warnings == []
+    assert parsed[0]["evidence_verification"]["verified_mechanism"]["schema_version"] == 2
+    assert (
+        parsed[0]["evidence_verification"]["verified_mechanism_provenance"]["schema_version"] == 1
+    )
     assert ready is False
     assert "research_proof_invalid" in reasons
 
@@ -1842,6 +2275,15 @@ def test_research_readiness_allows_sufficient_static_trace_with_exact_symbols() 
     assert reasons == []
 
 
+def test_research_readiness_treats_confidence_as_telemetry_not_gate() -> None:
+    dossier = _valid_dossier(root_cause_confidence=0.05)
+
+    ready, reasons = assess_research_readiness(dossier)
+
+    assert ready is True
+    assert reasons == []
+
+
 def test_static_trace_output_contract_accepts_honest_fidelity_mapping() -> None:
     dossier = _valid_dossier(
         research_method="static_trace",
@@ -1872,6 +2314,50 @@ def test_static_trace_output_contract_accepts_honest_fidelity_mapping() -> None:
     }
 
     assert contracts.research_dossier_output_contract_errors(dossier) == []
+
+
+def test_output_contract_accepts_control_for_verified_hypothesis_symbol_subset() -> None:
+    dossier = _valid_dossier()
+    dossier.pop("evidence_verification")
+    dossier["inspected_symbols"].append("parser.calling_entrypoint")
+    primary = dossier["root_cause_hypotheses"][0]
+    primary["mechanism_symbols"] = [
+        "parser.calling_entrypoint",
+        "parser.parse_record",
+    ]
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert errors == []
+
+
+def test_output_contract_rejects_control_symbols_outside_hypothesis() -> None:
+    dossier = _valid_dossier()
+    dossier["inspected_symbols"].append("parser.unrelated_helper")
+    challenge = dossier["experiments"][2]
+    challenge["control_relationship"]["mechanism_symbols"] = ["parser.unrelated_helper"]
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert any("falsification_control_relationship_unbound" in error for error in errors)
+
+
+def test_output_contract_reports_all_deterministic_falsification_link_errors() -> None:
+    dossier = _valid_dossier()
+    primary = dossier["root_cause_hypotheses"][0]
+    baseline = dossier["experiments"][0]
+    challenge = dossier["experiments"][2]
+    challenge["addresses_atom_ids"] = []
+    challenge["command"] = baseline["command"]
+    challenge["control_relationship"]["supports_experiment_id"] = "exp-refute"
+    challenge["observable_assertion"] = primary["falsification_attempts"][0]["disproof_condition"]
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert any("falsification_source_atoms_mismatch" in error for error in errors)
+    assert any("falsification_challenge_reuses_baseline_command" in error for error in errors)
+    assert any("falsification_control_relationship_unbound" in error for error in errors)
+    assert any("falsification_result_mismatch" in error for error in errors)
 
 
 def _historical_rich_partial_output_dossier() -> dict:
@@ -2079,6 +2565,205 @@ def test_research_attempt_history_is_bounded_and_content_addressed() -> None:
         parse_research_dossier_list(json.dumps([dossier]))
 
 
+def test_current_research_attempt_history_allows_adaptive_same_session_corrections() -> None:
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+
+    def artifacts(attempt_number: int) -> list[dict[str, object]]:
+        return [
+            {
+                "kind": kind,
+                "path": f"C:/retained/run-{attempt_number}/{filename}",
+                "exists": False,
+                "sha256": None,
+                "size_bytes": None,
+            }
+            for kind, filename in (
+                ("report", "report.json"),
+                ("workspace_ref", "workspace_ref.json"),
+                ("target_ref", "target_ref.json"),
+                ("normalized_events", "normalized_events.jsonl"),
+                ("codex_subscription_auth", "codex_execpolicy_overlay.json"),
+            )
+        ]
+
+    initial_dossier = {"phase": 1}
+    initial: dict[str, object] = {
+        "attempt_number": 1,
+        "attempt_kind": "full_research",
+        "outcome": "output_contract_invalid",
+        "run_dir": "C:/retained/run-1",
+        "report_path": "C:/retained/run-1/report.json",
+        "validation_errors": ["error:one", "error:two"],
+        "validation_errors_before": [],
+        "validation_errors_after": ["error:one", "error:two"],
+        "attempted_dossier": initial_dossier,
+        "attempted_dossier_sha256": _fixture_json_sha256(initial_dossier),
+        "source_attempt_sha256": None,
+        "authorized_paths": [],
+        "baseline_dossier_sha256": None,
+        "baseline_projection_sha256": None,
+        "repair_contract_sha256": None,
+        "agent_session_id": session_id,
+        "resumed_from_session_id": None,
+        "attempt_wall_seconds": 600.0,
+        "repair_progress": None,
+        "attempt_artifacts": artifacts(1),
+    }
+    initial["attempt_sha256"] = contracts.research_attempt_sha256(initial)
+    attempts: list[dict[str, object]] = [initial]
+    previous = initial
+    for attempt_number in range(2, 6):
+        candidate = {"phase": attempt_number}
+        errors_after = [] if attempt_number == 5 else [f"unseen:error:{attempt_number}"]
+        attempt: dict[str, object] = {
+            "attempt_number": attempt_number,
+            "attempt_kind": "model_output_repair",
+            "outcome": ("repair_contract_valid" if not errors_after else "repair_contract_invalid"),
+            "run_dir": f"C:/retained/run-{attempt_number}",
+            "report_path": f"C:/retained/run-{attempt_number}/report.json",
+            "validation_errors": errors_after,
+            "validation_errors_before": previous["validation_errors_after"],
+            "validation_errors_after": errors_after,
+            "attempted_dossier": candidate,
+            "attempted_dossier_sha256": _fixture_json_sha256(candidate),
+            "source_attempt_sha256": previous["attempt_sha256"],
+            "authorized_paths": ["extensions.backlog_repro_research"],
+            "baseline_dossier_sha256": previous["attempted_dossier_sha256"],
+            "baseline_projection_sha256": "a" * 64,
+            "repair_contract_sha256": "b" * 64,
+            "agent_session_id": session_id,
+            "resumed_from_session_id": session_id,
+            "attempt_wall_seconds": 1.0,
+            "repair_progress": {
+                "decision": "accepted" if not errors_after else "continue",
+                "reason": "model_output_contract_satisfied" if not errors_after else "reworked",
+            },
+            "attempt_artifacts": artifacts(attempt_number),
+        }
+        attempt["attempt_sha256"] = contracts.research_attempt_sha256(attempt)
+        attempts.append(attempt)
+        previous = attempt
+
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+    assert warnings == []
+    assert len(parsed[0]["research_attempts"]) == 5
+
+    dossier["research_attempts"][1]["agent_session_id"] = "not-a-session"
+    dossier["research_attempts"][1]["resumed_from_session_id"] = "not-a-session"
+    dossier["research_attempts"][1]["attempt_sha256"] = contracts.research_attempt_sha256(
+        dossier["research_attempts"][1]
+    )
+    _refresh_receipt_hashes(dossier)
+    with pytest.raises(ValueError, match="session_id_invalid"):
+        parse_research_dossier_list(json.dumps([dossier]))
+
+
+def test_current_research_attempt_history_allows_multiple_progress_gated_fresh_cycles() -> None:
+    sessions = [
+        "019f2cca-9011-7e32-88ae-6c25af578b49",
+        "019f2cca-9011-7e32-88ae-6c25af578b50",
+        "019f2cca-9011-7e32-88ae-6c25af578b51",
+    ]
+
+    def artifacts(attempt_number: int) -> list[dict[str, object]]:
+        return [
+            {
+                "kind": kind,
+                "path": f"C:/retained/cycle-{attempt_number}/{filename}",
+                "exists": False,
+                "sha256": None,
+                "size_bytes": None,
+            }
+            for kind, filename in (
+                ("report", "report.json"),
+                ("workspace_ref", "workspace_ref.json"),
+                ("target_ref", "target_ref.json"),
+                ("normalized_events", "normalized_events.jsonl"),
+                ("codex_subscription_auth", "codex_execpolicy_overlay.json"),
+            )
+        ]
+
+    attempts: list[dict[str, object]] = []
+    specs = [
+        ("full_research", sessions[0], ["a", "b", "c"]),
+        ("fresh_research_retry", sessions[1], ["d", "e"]),
+        ("model_output_repair", sessions[1], ["d", "e"]),
+        ("fresh_research_retry", sessions[2], ["f"]),
+        ("model_output_repair", sessions[2], ["f"]),
+    ]
+    for index, (kind, session_id, errors_after) in enumerate(specs, start=1):
+        previous = attempts[-1] if attempts else None
+        dossier_projection = {"cycle_attempt": index}
+        is_repair = kind == "model_output_repair"
+        progress: dict[str, object] | None = (
+            {"decision": "continue", "reason": "cycle_progress"} if is_repair else None
+        )
+        if kind == "fresh_research_retry" and previous is not None:
+            progress = {
+                "schema_version": 1,
+                "decision": "fresh_investigation",
+                "reason": "fresh_cycle_net_error_reduction",
+                "trigger_status": (
+                    "same_session_continuation_unavailable"
+                    if previous["attempt_kind"] != "model_output_repair"
+                    else "restart:correction_cost_reached_investigation_cost"
+                ),
+                "source_attempt_sha256": previous["attempt_sha256"],
+                "source_projection_sha256": "a" * 64,
+                "correction_frontiers_sha256": "c" * 64,
+                "expected_session_id": None,
+                "observed_session_id": None,
+                "continuation_failure": None,
+            }
+            progress["provenance_sha256"] = _fixture_json_sha256(progress)
+        attempt: dict[str, object] = {
+            "attempt_number": index,
+            "attempt_kind": kind,
+            "outcome": (
+                "repair_contract_invalid" if is_repair else "output_contract_invalid"
+            ),
+            "run_dir": f"C:/retained/cycle-{index}",
+            "report_path": f"C:/retained/cycle-{index}/report.json",
+            "validation_errors": errors_after,
+            "validation_errors_before": (
+                previous["validation_errors_after"] if previous is not None else []
+            ),
+            "validation_errors_after": errors_after,
+            "attempted_dossier": dossier_projection,
+            "attempted_dossier_sha256": _fixture_json_sha256(dossier_projection),
+            "source_attempt_sha256": (
+                previous["attempt_sha256"] if previous is not None else None
+            ),
+            "authorized_paths": (["extensions.backlog_repro_research"] if is_repair else []),
+            "baseline_dossier_sha256": (
+                previous["attempted_dossier_sha256"] if previous is not None else None
+            ),
+            "baseline_projection_sha256": ("a" * 64 if previous is not None else None),
+            "repair_contract_sha256": ("b" * 64 if is_repair else None),
+            "agent_session_id": session_id,
+            "resumed_from_session_id": (session_id if is_repair else None),
+            "attempt_wall_seconds": 1.0,
+            "repair_progress": progress,
+            "attempt_artifacts": artifacts(index),
+        }
+        attempt["attempt_sha256"] = contracts.research_attempt_sha256(attempt)
+        attempts.append(attempt)
+
+    dossier = _valid_dossier()
+    dossier["research_attempts"] = attempts
+    _refresh_receipt_hashes(dossier)
+
+    parsed, warnings = parse_research_dossier_list(json.dumps([dossier]))
+    assert warnings == []
+    assert [attempt["attempt_kind"] for attempt in parsed[0]["research_attempts"]].count(
+        "fresh_research_retry"
+    ) == 2
+
+
 def test_source_only_static_trace_without_post_change_oracle_stays_insufficient() -> None:
     dossier = _valid_dossier(
         research_method="static_trace",
@@ -2092,6 +2777,56 @@ def test_source_only_static_trace_without_post_change_oracle_stays_insufficient(
 
     assert ready is False
     assert "research_post_change_outcome_oracle_missing" in reasons
+
+
+def test_primary_root_requires_its_own_positive_outcome_contract() -> None:
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    oracle = receipt["outcome_oracles"][0]
+    oracle["positive_outcome_contracts"] = []
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _fixture_json_sha256(
+        {key: value for key, value in oracle.items() if key != "outcome_oracle_id"}
+    )
+    receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
+
+    errors = contracts._validate_outcome_oracles(
+        dossier,
+        receipt,
+        pid=dossier["problem_id"],
+    )
+    ready, reasons = assess_research_readiness(dossier)
+
+    # Absence is a readiness gap, not a malformed receipt. Keeping that distinction lets the
+    # authoring session add the missing contract without discarding otherwise valid evidence.
+    assert "research_primary_root_outcome_contract_missing: problem:test-issue" not in errors
+    assert ready is False
+    assert "research_positive_outcome_contract_missing" in reasons
+
+
+def test_rejected_alternative_positive_contract_cannot_qualify_primary() -> None:
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    oracle = receipt["outcome_oracles"][0]
+    contract = oracle["positive_outcome_contracts"][0]
+    contract["primary_hypothesis_id"] = dossier["root_cause_hypotheses"][1]["hypothesis_id"]
+    contract["positive_outcome_contract_id"] = "positive_outcome_contract:" + _fixture_json_sha256(
+        {key: value for key, value in contract.items() if key != "positive_outcome_contract_id"}
+    )
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _fixture_json_sha256(
+        {key: value for key, value in oracle.items() if key != "outcome_oracle_id"}
+    )
+    receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
+
+    errors = contracts._validate_outcome_oracles(
+        dossier,
+        receipt,
+        pid=dossier["problem_id"],
+    )
+    ready, reasons = assess_research_readiness(dossier)
+
+    assert "research_positive_outcome_contract_invalid: problem:test-issue: 0:0" in errors
+    assert ready is False
+    assert "research_positive_outcome_contract_invalid: problem:test-issue: 0:0" in reasons
 
 
 def test_research_readiness_requires_causal_falsification_and_exact_code_path() -> None:
@@ -2112,6 +2847,19 @@ def test_research_readiness_requires_causal_falsification_and_exact_code_path() 
     assert ready is False
     assert "research_proof_invalid" in reasons
     assert any("falsification_attempt" in reason for reason in reasons)
+
+
+def test_research_readiness_does_not_relax_missing_code_symbol_inspection() -> None:
+    dossier = _valid_dossier()
+    dossier["inspected_symbols"] = []
+    dossier["evidence_verification"]["inspected_symbols"] = []
+    _refresh_receipt_hashes(dossier)
+
+    ready, reasons = assess_research_readiness(dossier)
+
+    assert ready is False
+    assert "research_proof_invalid" in reasons
+    assert any("hypothesis_symbol_uninspected" in reason for reason in reasons)
 
 
 # ---------------------------------------------------------------------------
@@ -2140,6 +2888,19 @@ def test_parse_solution_option_sets_accepts_valid() -> None:
     text = json.dumps([_valid_option()])
     result, warnings = parse_solution_option_sets(text)
     assert len(result) == 1
+    assert warnings == []
+
+
+def test_parse_solution_option_sets_accepts_option_without_family_label() -> None:
+    option = _valid_option()
+    option.pop("family_id")
+
+    result, warnings = parse_solution_option_sets(
+        json.dumps([option]),
+        known_family_ids={"most_direct", "most_robust", "most_comprehensive"},
+    )
+
+    assert result == [option]
     assert warnings == []
 
 
@@ -2195,6 +2956,16 @@ def test_parse_selection_decisions_accepts_valid() -> None:
     text = json.dumps([_valid_selection()])
     result, warnings = parse_selection_decisions(text)
     assert len(result) == 1
+    assert warnings == []
+
+
+def test_parse_selection_decisions_accepts_selection_without_family_label() -> None:
+    selection = _valid_selection()
+    selection.pop("selected_family_id")
+
+    result, warnings = parse_selection_decisions(json.dumps([selection]))
+
+    assert result == [selection]
     assert warnings == []
 
 
@@ -2310,6 +3081,21 @@ def test_change_plan_target_contract_is_required_and_must_match_targets() -> Non
         allow_pending_target_contract=True,
     )
     assert not any("target_contract" in warning for warning in pending_warnings)
+
+
+def test_change_plan_target_contract_projection_preserves_destination_path() -> None:
+    target = {
+        "action": "move",
+        "path": "docs/old.md",
+        "destination_path": "docs/new.md",
+        "change": "Move the retained document to its canonical location.",
+    }
+    plan = _valid_change_plan(change_targets=[target])
+
+    result, warnings = parse_change_plan_list(json.dumps([plan]))
+
+    assert warnings == []
+    assert result[0]["target_contract"]["targets"] == [target]
 
 
 def test_parse_change_plan_list_warns_empty_implementation_steps() -> None:

@@ -415,6 +415,52 @@ def test_run_codex_exec_can_ignore_rules_for_isolated_runs(tmp_path: Path) -> No
     assert "--ignore-rules" in argv
 
 
+def test_run_codex_exec_resumes_exact_session_and_never_uses_last(tmp_path: Path) -> None:
+    dummy_binary = _make_argv_dump_dummy_codex(tmp_path)
+    argv_path = tmp_path / "resume-argv.json"
+    thread_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+
+    result = run_codex_exec(
+        workspace_dir=tmp_path,
+        prompt="correct the retained dossier",
+        raw_events_path=tmp_path / "resume-events.jsonl",
+        last_message_path=tmp_path / "resume-last.txt",
+        stderr_path=tmp_path / "resume-stderr.txt",
+        sandbox="read-only",
+        ask_for_approval="never",
+        binary=dummy_binary,
+        ignore_rules=True,
+        env_overrides={"CODEX_ARGV_OUT": str(argv_path)},
+        resume_session_id=thread_id,
+    )
+
+    assert result.exit_code == 0
+    assert result.thread_id == thread_id
+    argv = json.loads(argv_path.read_text(encoding="utf-8"))
+    assert argv[argv.index("exec") + 1] == "resume"
+    assert thread_id in argv
+    assert argv[-1] == "-"
+    assert "--last" not in argv
+    assert "--cd" not in argv
+    assert "--sandbox" not in argv
+    assert "--ignore-user-config" in argv
+    assert "--ignore-rules" in argv
+
+
+def test_run_codex_exec_rejects_noncanonical_resume_session(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="codex_resume_session_id_invalid"):
+        run_codex_exec(
+            workspace_dir=tmp_path,
+            prompt="do not start a fresh session",
+            raw_events_path=tmp_path / "events.jsonl",
+            last_message_path=tmp_path / "last.txt",
+            stderr_path=tmp_path / "stderr.txt",
+            sandbox="read-only",
+            binary="codex",
+            resume_session_id="last",
+        )
+
+
 def test_validate_codex_personality_config_overrides_requires_model_messages() -> None:
     for key in ("model_personality", "personality"):
         issue = validate_codex_personality_config_overrides(

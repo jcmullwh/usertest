@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import subprocess
 from pathlib import Path
 
@@ -85,7 +87,7 @@ def test_target_contract_binds_case_option_revision_paths_symbols_and_interventi
     contract = build_plan_target_contract(_plan(revision), repo_root=repo)
 
     assert validate_plan_target_contract(contract) == contract
-    assert contract["schema_version"] == 2
+    assert contract["schema_version"] == 3
     assert contract["repo_revision"] == revision
     assert contract["case_id"] == "case:test"
     assert contract["selected_option_id"] == "option:test"
@@ -98,6 +100,101 @@ def test_target_contract_binds_case_option_revision_paths_symbols_and_interventi
     assert parse_plan_target_contract_markdown(markdown) == contract
     with pytest.raises(ValueError, match="hash_mismatch"):
         parse_plan_target_contract_markdown(markdown.replace(revision, "f" * 40))
+
+
+def test_version_two_target_contract_remains_readable(tmp_path: Path) -> None:
+    repo, revision = _repo(tmp_path)
+    current = build_plan_target_contract(_plan(revision), repo_root=repo)
+    payload = {
+        **{key: value for key, value in current.items() if key != "contract_sha256"},
+        "schema_version": 2,
+        "contract_source": "runner_stage6_target_intent_v2",
+        "targets": [
+            {key: value for key, value in target.items() if key != "destination_path"}
+            for target in current["targets"]
+        ],
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    legacy = {
+        **payload,
+        "contract_sha256": hashlib.sha256(encoded.encode("utf-8")).hexdigest(),
+    }
+
+    assert validate_plan_target_contract(legacy) == legacy
+
+
+def test_target_contract_supports_file_level_and_relocation_actions(tmp_path: Path) -> None:
+    repo, revision = _repo(tmp_path)
+    plan = _plan(revision)
+    plan["change_targets"] = [
+        {
+            "action": "modify",
+            "path": "config/runtime.json",
+            "change": "Change the provider boundary configuration value.",
+        },
+        {
+            "action": "delete",
+            "path": "assets/obsolete-schema.json",
+            "symbols": [],
+            "change": "Remove the superseded schema asset.",
+        },
+        {
+            "action": "rename",
+            "path": "docs/old-name.md",
+            "destination_path": "docs/new-name.md",
+            "change": "Rename the retained compatibility document.",
+        },
+        {
+            "action": "move",
+            "path": "assets/source.json",
+            "destination_path": "schemas/source.json",
+            "change": "Move the schema to the runtime-consumed location.",
+        },
+        {
+            "action": "create",
+            "path": "schemas/new.json",
+            "change": "Add the newly selected schema contract.",
+        },
+    ]
+
+    contract = build_plan_target_contract(plan, repo_root=repo)
+
+    assert [target["action"] for target in contract["targets"]] == [
+        "modify",
+        "delete",
+        "rename",
+        "move",
+        "create",
+    ]
+    assert all(target["symbols"] == [] for target in contract["targets"])
+    assert contract["targets"][2]["destination_path"] == "docs/new-name.md"
+    assert contract["targets"][3]["destination_path"] == "schemas/source.json"
+    assert validate_plan_target_contract(contract) == contract
+
+
+def test_relocation_target_is_touched_by_its_destination_path(tmp_path: Path) -> None:
+    repo, revision = _repo(tmp_path)
+    plan = _plan(revision)
+    plan["change_targets"] = [
+        {
+            "action": "move",
+            "path": "src/core.py",
+            "destination_path": "src/runtime/core.py",
+            "change": "Move the verified implementation boundary without changing behavior.",
+        }
+    ]
+    contract = build_plan_target_contract(plan, repo_root=repo)
+
+    receipt = _assess(contract, ["src/runtime/core.py"])
+
+    assert receipt["status"] == "verified"
+    assert receipt["target_receipts"][0]["path_touched"] is True
+    assert receipt["target_receipts"][0]["destination_path"] == "src/runtime/core.py"
 
 
 def test_contract_requires_exact_researched_revision_but_not_ast_or_file_grounding(

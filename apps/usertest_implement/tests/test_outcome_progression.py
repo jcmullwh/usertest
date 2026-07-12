@@ -534,7 +534,7 @@ def test_refresh_continues_unrelated_work_when_merged_outcome_is_unverified(
             outcome_progressor=lambda **_: [result],
         )
 
-    assert executed == ["preliminary shadow"]
+    assert executed == ["operational shadow materialization"]
 
 
 @pytest.mark.parametrize(

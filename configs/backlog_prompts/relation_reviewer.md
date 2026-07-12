@@ -29,14 +29,20 @@ candidate neighborhoods provided. You receive:
   atom on the focus item. Do not split merely because observations came from different
   runs; repeated runs can be repeated evidence for one cause.
 - If same_cause_group, list all member IDs including the focus ID and provide a group_id.
-- If keep_separate, state briefly why the items are distinct.
+- If `keep_separate`, state briefly why the items are distinct. When the focus carries a
+  `provisional_same_cause_group`, cite every member facet's `source_evidence_atom_ids`;
+  without that evidence-complete falsification the runner retains the prior hypothesis.
 - Base decisions on evidence, not on surface-level title similarity alone.
 - At this pre-research stage, model judgment and cross-case citations do not establish
   causal identity. Use `merge` or `alias` only when the packets expose an objective
   identity edge: the cases share an exact source atom, or a persisted registry
-  relation already links them. Use `same_cause_group` only when both packets carry
-  the same runner-verified mechanism hash from completed causal research. Otherwise
-  keep the cases separate; you may explain the suspected relation in the rationale.
+  relation already links them. `same_cause_group` may express a concrete shared-mechanism
+  hypothesis before research when reciprocal decisions cite both packets and explain the
+  specific suspected mechanism or boundary. The runner treats that as one provisional
+  research unit, retains every original case ID and symptom facet, and creates no alias
+  unless research binds every member to one verified causal path. A shared mechanism
+  surface hash is still provisional; only a runner-verified full causal signature or a
+  persisted relation edge is conclusive. Title similarity or generic wording is not.
 - Every collapse action (`merge`, `alias`, or `same_cause_group`) must cite exact
   `evidence_atom_ids` containing at least one atom from the focus and at least one from
   every target/member. Active focus items must make reciprocal compatible decisions;
@@ -64,7 +70,7 @@ Return ONLY JSON:
       {"evidence_atom_ids": ["..."]},
       {"evidence_atom_ids": ["..."]}
     ],
-    "evidence_atom_ids": ["exact focus and target atom IDs for collapse actions"],
+    "evidence_atom_ids": ["exact focus and target atom IDs for collapse actions, or all provisional member source atoms when clearing a provisional group"],
     "rationale": "...",
     "review_confidence": 0.0
   }

@@ -1,7 +1,14 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from backlog_core import assess_research_readiness
+from backlog_miner.prompt_correction import (
+    CorrectionRunResult,
+    acquire_author_session,
+    correction_metrics_with_session_acquisition,
+)
 
 from usertest_backlog.shared import *
 from usertest_backlog.workflows.depth_contracts import (
@@ -11,6 +18,509 @@ from usertest_backlog.workflows.depth_contracts import (
     read_repo_revision,
     stage_include_directories,
 )
+
+
+def _optioning_json_value(response: str) -> Any:
+    """Return strict plain or single-fenced JSON for partial item validation."""
+
+    text = response.strip()
+    if text.startswith("```") and text.endswith("```"):
+        first_newline = text.find("\n")
+        if first_newline != -1:
+            text = text[first_newline + 1 : -3].strip()
+    try:
+        return json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def _optioning_response_projection(
+    response: str,
+    *,
+    expected_problem_id: str,
+    known_family_ids: set[str],
+    research_dossier: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[str], list[str]]:
+    """Retain valid options while exposing every deterministic envelope/item error.
+
+    A malformed envelope must be corrected, but it does not make an independently valid
+    option cease to exist.  The salvage pass validates options incrementally against the
+    same causal contract, including cross-option duplicate-mechanism checks, and never
+    fabricates a successful zero-option decision.
+    """
+
+    try:
+        outcome, options, warnings = parse_optioning_response(
+            response,
+            expected_problem_id=expected_problem_id,
+            known_family_ids=known_family_ids,
+            research_dossier=research_dossier,
+        )
+        errors = [str(warning) for warning in warnings if str(warning).strip()]
+        if outcome.get("optioning_status") == "invalid_output" and not errors:
+            errors.append(
+                f"solution_optioner_invalid_output_no_valid_options:{expected_problem_id}"
+            )
+        valid_keys = sorted(
+            {
+                "solution_option:" + str(option.get("option_id"))
+                for option in options
+                if _coerce_string(option.get("option_id")) is not None
+            }
+        )
+        return outcome, options, list(dict.fromkeys(errors)), valid_keys
+    except Exception as exc:  # noqa: BLE001 - exact parser feedback is repair input
+        errors = [f"{type(exc).__name__}: {exc}"]
+
+    raw = _optioning_json_value(response)
+    raw_options = raw.get("options") if isinstance(raw, dict) else raw if isinstance(raw, list) else None
+    valid: list[dict[str, Any]] = []
+    rejected = 0
+    if isinstance(raw_options, list):
+        for index, candidate in enumerate(raw_options):
+            if len(valid) >= 3:
+                errors.append(
+                    f"solution_optioner_too_many_options: expected<=3 got={len(raw_options)}"
+                )
+                rejected += 1
+                continue
+            synthetic = {
+                "problem_id": expected_problem_id,
+                "optioning_status": "options_produced",
+                "decision_rationale": "partial item validation only",
+                "options": [*valid, candidate],
+            }
+            try:
+                _, candidate_options, candidate_warnings = parse_optioning_response(
+                    json.dumps(synthetic, ensure_ascii=False),
+                    expected_problem_id=expected_problem_id,
+                    known_family_ids=known_family_ids,
+                    research_dossier=research_dossier,
+                )
+            except Exception as candidate_exc:  # noqa: BLE001 - retain exact item error
+                errors.append(
+                    "solution_optioner_partial_option_invalid:"
+                    f"index={index}:{type(candidate_exc).__name__}: {candidate_exc}"
+                )
+                rejected += 1
+                continue
+            if candidate_warnings or len(candidate_options) != len(valid) + 1:
+                errors.extend(str(warning) for warning in candidate_warnings)
+                rejected += 1
+                continue
+            valid = [dict(option) for option in candidate_options]
+
+    rationale = (
+        _coerce_string(raw.get("decision_rationale"))
+        if isinstance(raw, dict)
+        else None
+    )
+    outcome = {
+        "problem_id": expected_problem_id,
+        "optioning_status": "invalid_output",
+        "decision_rationale": rationale or "The optioning response envelope is invalid.",
+        "option_count": len(valid),
+        "rejected_option_count": rejected,
+    }
+    valid_keys = sorted(
+        {
+            "solution_option:" + str(option.get("option_id"))
+            for option in valid
+            if _coerce_string(option.get("option_id")) is not None
+        }
+    )
+    return outcome, valid, list(dict.fromkeys(errors)), valid_keys
+
+
+def _optioning_correction_progress(assessment: Any) -> dict[str, Any] | None:
+    if assessment is None:
+        return None
+    return {
+        "decision": assessment.decision,
+        "reason": assessment.reason,
+        "resolved_error_identities": list(assessment.resolved_error_identities),
+        "introduced_error_identities": list(assessment.introduced_error_identities),
+        "repeated_state": assessment.repeated_state,
+        "safe_frontier_updated": assessment.safe_frontier_updated,
+        "global_best_updated": assessment.global_best_updated,
+    }
+
+
+def _optioning_correction_prompt(
+    *,
+    original_prompt: str,
+    prior_response: str,
+    validation_errors: tuple[str, ...],
+    valid_item_keys: tuple[str, ...],
+    prior_assessment: Any,
+) -> str:
+    return (
+        "SAME-AUTHOR SOLUTION-OPTIONING RESPONSE CORRECTION\n\n"
+        "Revise your immediately prior complete response in this exact author session and "
+        "exact repository workspace. Your prior repository reads remain content-bound to this "
+        "session; use read-only tools again only when a validator error requires more evidence. "
+        "Do not restart optioning or invent support. Preserve valid keyed options unless a "
+        "correlated correction requires changing them. Unknown validator errors are valid "
+        "feedback. Return the complete corrected JSON object, not a patch and no prose. Zero "
+        "options remains valid only with an honest `insufficient_evidence` or `no_safe_option` "
+        "outcome.\n\n"
+        "Original assignment prompt SHA-256: "
+        f"{sha256(original_prompt.encode('utf-8')).hexdigest()}\n"
+        "Immediately prior response SHA-256: "
+        f"{sha256(prior_response.encode('utf-8')).hexdigest()}\n\n"
+        "Deterministic parse and quality errors:\n"
+        + "\n".join(f"- {error}" for error in validation_errors)
+        + "\n\nValid keyed options to preserve:\n"
+        + ("\n".join(f"- {key}" for key in valid_item_keys) or "- none verified yet")
+        + "\n\nPrior correction progress:\n"
+        + json.dumps(
+            _optioning_correction_progress(prior_assessment),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    )
+
+
+def _optioning_attempt_history(
+    correction: Any,
+    *,
+    base_tag: str,
+    attempt_number_offset: int = 0,
+) -> list[dict[str, Any]]:
+    history = [dict(attempt.payload["attempt_record"]) for attempt in correction.attempts]
+    for index, assessment in enumerate(correction.assessments, start=1):
+        history[index]["correction_progress"] = {
+            "decision": assessment.decision,
+            "reason": assessment.reason,
+            "before_error_count": assessment.before_error_count,
+            "after_error_count": assessment.after_error_count,
+            "resolved_error_identities": list(assessment.resolved_error_identities),
+            "introduced_error_identities": list(assessment.introduced_error_identities),
+            "repeated_state": assessment.repeated_state,
+            "safe_frontier_updated": assessment.safe_frontier_updated,
+            "global_best_updated": assessment.global_best_updated,
+            "reset_progress_clock": assessment.reset_progress_clock,
+        }
+    history.extend(
+        {
+            "schema_version": 2,
+            "attempt_number": failure.attempt_number + attempt_number_offset,
+            "attempt_tag": f"{base_tag}_correction_{failure.attempt_number - 1:03d}",
+            "status": "invocation_failed",
+            "agent_session_id": failure.agent_session_id,
+            "resumed_from_session_id": failure.agent_session_id,
+            "elapsed_seconds": failure.cost_seconds,
+            "validation_errors": [f"{failure.error_type}: {failure.error_message}"],
+            "failure_identity": failure.failure_identity,
+        }
+        for failure in correction.invocation_failures
+    )
+    return sorted(history, key=lambda record: int(record["attempt_number"]))
+
+
+def _run_optioning_prompt_with_correction(
+    *,
+    stage: str,
+    prompt: str,
+    out_dir: Path,
+    tag: str,
+    agent: str,
+    model: str | None,
+    cfg: RunnerConfig,
+    workspace_dir: Path,
+    expected_problem_id: str,
+    repo_revision: str,
+    known_family_ids: set[str],
+    research_dossier: dict[str, Any],
+    initial_resume_session_id: str | None = None,
+    author_cost_seconds: float | None = None,
+    external_feedback: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run one optional 0-3 option conversation and preserve its repair frontier."""
+
+    import time as _time
+
+    origin_prompt = prompt
+    if external_feedback is not None:
+        prompt = (
+            "INDEPENDENT QUALIFICATION CORRECTION\n\n"
+            "Continue this exact optioner conversation and return the complete Stage 4 "
+            "response. Preserve valid mechanisms while correcting the bound independent "
+            "finding. A separate adjudicator remains authoritative.\n\nBOUND FEEDBACK:\n"
+            + json.dumps(external_feedback, ensure_ascii=False, indent=2, sort_keys=True)
+            + "\n\nCURRENT FULL OPTIONING INPUT AND RESPONSE CONTRACT:\n"
+            + origin_prompt
+        )
+    prompt_sha256 = sha256(origin_prompt.encode("utf-8")).hexdigest()
+
+    def run_attempt(
+        *,
+        attempt_prompt: str,
+        attempt_tag: str,
+        attempt_number: int,
+        resume_session_id: str | None,
+    ) -> CorrectionObservation[dict[str, Any]]:
+        started = _time.monotonic()
+        response = ""
+        session_id: str | None = None
+        observed_workspace = workspace_dir.resolve()
+        resumed_from = resume_session_id
+        prompt_path = out_dir / f"{attempt_tag}.prompt.txt"
+        response_path = out_dir / f"{attempt_tag}.response.txt"
+        invocation_path = out_dir / f"{attempt_tag}.model_invocation.json"
+        transport_error: str | None = None
+        try:
+            run = run_stage_prompt_json(
+                stage=stage,
+                prompt=attempt_prompt,
+                out_dir=out_dir,
+                tag=attempt_tag,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                workspace_dir=workspace_dir,
+                allowed_tools=read_only_stage_tools(agent),
+                include_directories=stage_include_directories(agent, workspace_dir),
+                resume_session_id=resume_session_id,
+                allow_empty=True,
+                structured=True,
+            )
+            if isinstance(run, str):
+                response = run
+                elapsed_seconds = max(0.0, _time.monotonic() - started)
+            else:
+                response = str(run.response)
+                session_id = _coerce_string(run.agent_session_id)
+                elapsed_seconds = max(0.0, float(run.elapsed_seconds))
+                if run.workspace_dir is not None:
+                    observed_workspace = Path(run.workspace_dir).resolve()
+                resumed_from = _coerce_string(run.resumed_from_session_id)
+                prompt_path = Path(run.prompt_path)
+                response_path = Path(run.response_path)
+                invocation_path = Path(run.invocation_manifest_path)
+        except Exception as exc:  # noqa: BLE001 - preserve a nonblocking frontier
+            if resume_session_id is not None:
+                raise
+            elapsed_seconds = max(0.0, _time.monotonic() - started)
+            transport_error = f"{type(exc).__name__}: {exc}"
+
+        outcome, options, errors, valid_item_keys = _optioning_response_projection(
+            response,
+            expected_problem_id=expected_problem_id,
+            known_family_ids=known_family_ids,
+            research_dossier=research_dossier,
+        )
+        if transport_error is not None:
+            errors.insert(0, transport_error)
+        errors = list(dict.fromkeys(errors))
+        continuity_key = sha256(
+            json.dumps(
+                {
+                    "workspace_dir": str(observed_workspace),
+                    "repo_revision": repo_revision,
+                    "original_prompt_sha256": prompt_sha256,
+                    "problem_id": expected_problem_id,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        attempt_record = {
+            "schema_version": 2,
+            "attempt_number": attempt_number,
+            "attempt_tag": attempt_tag,
+            "status": "verified" if not errors else "invalid",
+            "agent_session_id": session_id,
+            "resumed_from_session_id": resumed_from,
+            "workspace_dir": str(observed_workspace),
+            "repo_revision": repo_revision,
+            "elapsed_seconds": elapsed_seconds,
+            "prompt_sha256": sha256(attempt_prompt.encode("utf-8")).hexdigest(),
+            "response_sha256": sha256(response.encode("utf-8")).hexdigest(),
+            "validation_errors": errors,
+            "valid_item_keys": valid_item_keys,
+            "artifacts": {
+                "prompt": str(prompt_path.resolve()),
+                "response": str(response_path.resolve()),
+                "model_invocation": str(invocation_path.resolve()),
+            },
+        }
+        payload = {
+            "response": response,
+            "outcome": outcome,
+            "options": options,
+            "attempt_record": attempt_record,
+        }
+        return CorrectionObservation(
+            payload=payload,
+            validation_errors=tuple(errors),
+            state_sha256=correction_state_sha256(
+                candidate=response,
+                validation_errors=errors,
+                valid_item_keys=valid_item_keys,
+            ),
+            valid_item_keys=tuple(valid_item_keys),
+            agent_session_id=session_id,
+            continuity_key=continuity_key,
+            cost_seconds=elapsed_seconds,
+        )
+
+    initial = run_attempt(
+        attempt_prompt=prompt,
+        attempt_tag=tag,
+        attempt_number=1,
+        resume_session_id=initial_resume_session_id,
+    )
+    acquisition_attempts: tuple[CorrectionObservation[dict[str, Any]], ...] = ()
+    acquisition_status = "not_required"
+    if (
+        initial_resume_session_id is None
+        and agent.strip().lower() == "codex"
+        and initial.agent_session_id is None
+    ):
+        acquisition = acquire_author_session(
+            initial=initial,
+            invoke_fresh=lambda attempt_number: run_attempt(
+                attempt_prompt=prompt,
+                attempt_tag=f"{tag}_session_acquisition_{attempt_number - 1:03d}",
+                attempt_number=attempt_number,
+                resume_session_id=None,
+            ),
+        )
+        acquisition_status = acquisition.status
+        acquisition_attempts = acquisition.attempts
+        initial = acquisition.current
+
+    def invoke_correction(
+        current: CorrectionObservation[dict[str, Any]],
+        attempt_number: int,
+        prior_assessment: Any,
+    ) -> CorrectionObservation[dict[str, Any]]:
+        correction_prompt = _optioning_correction_prompt(
+            original_prompt=prompt,
+            prior_response=str(current.payload.get("response") or ""),
+            validation_errors=current.validation_errors,
+            valid_item_keys=current.valid_item_keys,
+            prior_assessment=prior_assessment,
+        )
+        return run_attempt(
+            attempt_prompt=correction_prompt,
+            attempt_tag=f"{tag}_correction_{attempt_number - 1:03d}",
+            attempt_number=attempt_number + max(0, len(acquisition_attempts) - 1),
+            resume_session_id=initial.agent_session_id,
+        )
+
+    original_author_cost = (
+        float(author_cost_seconds)
+        if isinstance(author_cost_seconds, (int, float))
+        and not isinstance(author_cost_seconds, bool)
+        and float(author_cost_seconds) > 0.0
+        else initial.cost_seconds
+    )
+    if acquisition_status.startswith("repairable_paused:"):
+        correction = CorrectionRunResult(
+            status=acquisition_status,
+            current=initial,
+            best=initial,
+            attempts=acquisition_attempts,
+            assessments=(),
+            correction_cost_since_progress=acquisition.cost_since_progress,
+            total_correction_cost=max(
+                0.0,
+                acquisition.total_cost
+                - max(0.0, float(acquisition_attempts[0].cost_seconds)),
+            ),
+        )
+    else:
+        correction = run_progressive_correction(
+            initial=initial,
+            invoke_correction=invoke_correction,
+            pause_policy=lambda _current, _assessment, since_progress, _total: (
+                "correction_cost_reached_original"
+                if original_author_cost > 0.0 and since_progress >= original_author_cost
+                else None
+            ),
+        )
+    retained = (
+        correction.current
+        if correction.status in {"accepted", "corrected"}
+        else correction.best
+    )
+    options = [
+        dict(option)
+        for option in retained.payload.get("options", [])
+        if isinstance(option, dict)
+    ]
+    outcome_raw = retained.payload.get("outcome")
+    outcome = dict(outcome_raw) if isinstance(outcome_raw, dict) else {}
+    if correction.status not in {"accepted", "corrected"}:
+        if options and outcome.get("optioning_status") == "options_produced":
+            outcome.update(
+                {
+                    "problem_id": expected_problem_id,
+                    "optioning_status": "options_produced",
+                    "decision_rationale": (
+                        _coerce_string(outcome.get("decision_rationale"))
+                        or "Independently valid options were retained from an incomplete "
+                        "same-author correction conversation."
+                    ),
+                    "option_count": len(options),
+                }
+            )
+        else:
+            retained_valid_option_count = len(options)
+            options = []
+            outcome = {
+                "problem_id": expected_problem_id,
+                "optioning_status": "insufficient_evidence",
+                "decision_rationale": (
+                    "The same-author correction frontier did not establish a valid optioning "
+                    f"decision ({correction.status}); do not infer a safe mechanism from a "
+                    "malformed or contradictory envelope."
+                ),
+                "option_count": 0,
+                "rejected_option_count": int(outcome.get("rejected_option_count") or 0),
+                "retained_valid_option_count": retained_valid_option_count,
+                "research_readiness_blockers": [
+                    "optioning_author_correction_incomplete:" + correction.status
+                ],
+            }
+    metrics = correction_run_metrics(correction, expected_quality=None)
+    if acquisition_attempts:
+        metrics = correction_metrics_with_session_acquisition(metrics, acquisition)
+    history = _optioning_attempt_history(
+        correction,
+        base_tag=tag,
+        attempt_number_offset=max(0, len(acquisition_attempts) - 1),
+    )
+    if acquisition_status == "acquired" and len(acquisition_attempts) > 1:
+        pre_author_attempts = acquisition_attempts[:-1]
+        history = [
+            dict(attempt.payload["attempt_record"])
+            for attempt in pre_author_attempts
+        ] + history
+    outcome["correction_status"] = correction.status
+    outcome["correction_metrics"] = metrics
+    outcome["attempt_history"] = history
+    outcome["correction_cost_since_progress"] = correction.correction_cost_since_progress
+    outcome["total_correction_cost"] = correction.total_correction_cost
+    outcome["valid_item_keys"] = list(retained.valid_item_keys)
+    if correction.operational_error is not None:
+        outcome["correction_operational_error"] = correction.operational_error
+    return {
+        "outcome": outcome,
+        "options": options,
+        "warnings": list(retained.validation_errors),
+        "correction_status": correction.status,
+        "correction_metrics": metrics,
+        "attempt_history": history,
+        "correction_cost_since_progress": correction.correction_cost_since_progress,
+        "total_correction_cost": correction.total_correction_cost,
+        "operational_error": correction.operational_error,
+    }
 
 
 def _render_solution_options_markdown(
@@ -65,11 +575,13 @@ def _render_solution_options_markdown(
             continue
 
         for opt in opts:
-            fid = str(opt.get("family_id") or "unknown")
-            label = family_labels_by_id.get(fid, fid)
-            lines.append(f"### {label} (`{fid}`)")
-
             oid = opt.get("option_id") or "(no option_id)"
+            fid = _coerce_string(opt.get("family_id"))
+            if fid is None:
+                lines.append(f"### Evidence-backed mechanism (`{oid}`)")
+            else:
+                label = family_labels_by_id.get(fid, fid)
+                lines.append(f"### {label} (`{fid}`)")
             lines.append(f"- Option ID: `{oid}`")
             summary = opt.get("summary") or ""
             if summary:
@@ -128,6 +640,7 @@ def _run_solution_optioning_stage(
     dry_run: bool,
     breadth_profile: str,
     stage_guidance_text: str,
+    external_corrections_by_problem: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Run stage 4 using orchestrator prompts and per-problem target workspaces."""
     import json as _json
@@ -154,11 +667,6 @@ def _run_solution_optioning_stage(
                 label.strip() if isinstance(label, str) and label.strip() else fid.strip()
             )
     known_family_ids = set(family_order)
-    if not known_family_ids:
-        raise ValueError(
-            "solution_optioning: taxonomy.solution_families is empty; "
-            f"check {pipeline_manifest.taxonomy_path}"
-        )
 
     repo_intent_path = repo_root / "configs" / "repo_intent.md"
     if not repo_intent_path.exists():
@@ -197,6 +705,7 @@ def _run_solution_optioning_stage(
 
     all_options: list[dict[str, Any]] = []
     optioning_outcomes: list[dict[str, Any]] = []
+    optioning_correction_runs: list[dict[str, Any]] = []
     warnings_list: list[str] = []
     status: str = "ok"
 
@@ -368,42 +877,68 @@ def _run_solution_optioning_stage(
             warnings_list.extend(parse_warnings)
         else:
             live_prompt_expected_count += 1
-            try:
-                response = run_stage_prompt_json(
-                    stage=stage,
-                    prompt=prompt,
-                    out_dir=run_out_dir,
-                    tag=tag,
-                    agent=agent,
-                    model=model,
-                    cfg=cfg,
-                    workspace_dir=target_repo_root,
-                    allowed_tools=read_only_stage_tools(agent),
-                    include_directories=stage_include_directories(agent, target_repo_root),
+            external_correction = (
+                external_corrections_by_problem.get(pid)
+                if external_corrections_by_problem is not None
+                else None
+            )
+            optioning_run = _run_optioning_prompt_with_correction(
+                stage=stage,
+                prompt=prompt,
+                out_dir=run_out_dir,
+                tag=tag,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                workspace_dir=target_repo_root,
+                expected_problem_id=pid,
+                repo_revision=research_revision,
+                known_family_ids=known_family_ids,
+                research_dossier=dossier,
+                initial_resume_session_id=(
+                    _coerce_string(external_correction.get("agent_session_id"))
+                    if isinstance(external_correction, Mapping)
+                    else None
+                ),
+                author_cost_seconds=(
+                    external_correction.get("original_author_cost_seconds")
+                    if isinstance(external_correction, Mapping)
+                    else None
+                ),
+                external_feedback=(
+                    external_correction.get("feedback")
+                    if isinstance(external_correction, Mapping)
+                    and isinstance(external_correction.get("feedback"), Mapping)
+                    else None
+                ),
+            )
+            outcome = dict(optioning_run["outcome"])
+            options = [
+                dict(option)
+                for option in optioning_run["options"]
+                if isinstance(option, dict)
+            ]
+            optioning_outcomes.append(outcome)
+            warnings_list.extend(optioning_run["warnings"])
+            optioning_correction_runs.append(
+                {
+                    "problem_id": pid,
+                    "correction_status": optioning_run["correction_status"],
+                    "correction_metrics": optioning_run["correction_metrics"],
+                    "attempt_history": optioning_run["attempt_history"],
+                    "correction_cost_since_progress": optioning_run[
+                        "correction_cost_since_progress"
+                    ],
+                    "total_correction_cost": optioning_run["total_correction_cost"],
+                    "operational_error": optioning_run["operational_error"],
+                }
+            )
+            if optioning_run["correction_status"] not in {"accepted", "corrected"}:
+                status = "completed_with_nonblocking_fallback"
+                warnings_list.append(
+                    "solution_optioner_correction_incomplete:"
+                    f"{pid}:{optioning_run['correction_status']}"
                 )
-                outcome, options, parse_warnings = parse_optioning_response(
-                    response,
-                    expected_problem_id=pid,
-                    known_family_ids=known_family_ids,
-                    research_dossier=dossier,
-                )
-                optioning_outcomes.append(outcome)
-                warnings_list.extend(parse_warnings)
-                if outcome.get("optioning_status") == "invalid_output":
-                    status = "error"
-            except Exception as exc:  # noqa: BLE001
-                status = "error"
-                warnings_list.append(f"solution_optioner_error: {pid}: {exc}")
-                optioning_outcomes.append(
-                    {
-                        "problem_id": pid,
-                        "optioning_status": "invalid_output",
-                        "decision_rationale": str(exc),
-                        "option_count": 0,
-                        "rejected_option_count": 0,
-                    }
-                )
-                continue
 
         # Attach pid for any malformed options that forgot it.
         for opt in options:
@@ -429,6 +964,37 @@ def _run_solution_optioning_stage(
             else 0,
             "repo_access": "read_only",
             "optioning_outcomes": optioning_outcomes,
+            "optioning_correction_runs": optioning_correction_runs,
+            "optioning_correction_summary": {
+                "run_count": len(optioning_correction_runs),
+                "accepted_count": sum(
+                    1
+                    for run in optioning_correction_runs
+                    if run.get("correction_status") in {"accepted", "corrected"}
+                ),
+                "repaired_count": sum(
+                    1
+                    for run in optioning_correction_runs
+                    if run.get("correction_status") == "corrected"
+                ),
+                "nonblocking_fallback_count": sum(
+                    1
+                    for run in optioning_correction_runs
+                    if run.get("correction_status") not in {"accepted", "corrected"}
+                ),
+                "attempt_count": sum(
+                    len(run.get("attempt_history", []))
+                    for run in optioning_correction_runs
+                ),
+                "correction_turn_count": sum(
+                    max(0, len(run.get("attempt_history", [])) - 1)
+                    for run in optioning_correction_runs
+                ),
+                "total_correction_cost_seconds": sum(
+                    float(run.get("total_correction_cost") or 0.0)
+                    for run in optioning_correction_runs
+                ),
+            },
             "dry_run": dry_run,
             "breadth_profile": breadth_profile,
             "batch_breadth": batch_breadth,
