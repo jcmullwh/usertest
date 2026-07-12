@@ -215,9 +215,11 @@ def controlled_codex_execpolicy_receipt_errors(
         "chatgpt_subscription_auth_verified",
         "api_key_auth_environment_disabled",
         "host_auth_cache_preserved",
-        "host_global_rules_unchanged",
         "canonical_subscription_route_verified",
     ]
+    # Host-global rules are shared, externally owned state and controlled runs ignore them.
+    # Their before/after manifests remain in the receipt for audit, but a concurrent approval in
+    # another Codex task is not evidence that this run lost subscription provenance or isolation.
     if activation_probe_required:
         true_fields.extend(
             [

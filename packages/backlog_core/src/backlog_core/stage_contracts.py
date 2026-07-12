@@ -1965,14 +1965,32 @@ def _validate_research_evidence_links(item: dict[str, Any], *, pid: str) -> list
             continue
         hypothesis_id = str(hypothesis.get("hypothesis_id") or index)
         supporting = hypothesis.get("supporting_evidence")
-        support_refs = supporting if isinstance(supporting, list) else []
+        support_refs = [
+            ref
+            for ref in (supporting if isinstance(supporting, list) else [])
+            if isinstance(ref, str) and ref.strip()
+        ]
         counter = hypothesis.get("counterevidence")
-        counter_refs = counter if isinstance(counter, list) else []
+        counter_refs = [
+            ref
+            for ref in (counter if isinstance(counter, list) else [])
+            if isinstance(ref, str) and ref.strip()
+        ]
         mechanism_symbols_raw = hypothesis.get("mechanism_symbols")
-        mechanism_symbols = mechanism_symbols_raw if isinstance(mechanism_symbols_raw, list) else []
+        mechanism_symbols = [
+            symbol
+            for symbol in (
+                mechanism_symbols_raw if isinstance(mechanism_symbols_raw, list) else []
+            )
+            if isinstance(symbol, str) and symbol.strip()
+        ]
         disposition = hypothesis.get("disposition")
         disposition_raw = hypothesis.get("disposition_evidence")
-        disposition_refs = disposition_raw if isinstance(disposition_raw, list) else []
+        disposition_refs = [
+            ref
+            for ref in (disposition_raw if isinstance(disposition_raw, list) else [])
+            if isinstance(ref, str) and ref.strip()
+        ]
         # Code symbols must still be observed exactly.  A causal locator that is
         # not a code symbol may instead name a declared repository touchpoint;
         # the runner-owned connection is a readiness requirement, never inferred

@@ -2360,6 +2360,32 @@ def test_output_contract_reports_all_deterministic_falsification_link_errors() -
     assert any("falsification_result_mismatch" in error for error in errors)
 
 
+def test_output_contract_reports_structured_support_ref_instead_of_crashing() -> None:
+    dossier = _valid_dossier()
+    dossier["root_cause_hypotheses"][0]["supporting_evidence"] = [
+        {
+            "experiment_id": "exp-support",
+            "summary": "Model-authored prose must not replace the declared evidence ID.",
+        }
+    ]
+    dossier["root_cause_hypotheses"][0]["mechanism_symbols"] = [
+        {"symbol": "parser.parse_record"}
+    ]
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert any(
+        "research_dossier_invalid_hypotheses_0_supporting_evidence_entry" in error
+        and "type=dict" in error
+        for error in errors
+    )
+    assert any(
+        "research_dossier_invalid_hypotheses_0_mechanism_symbols_entry" in error
+        and "type=dict" in error
+        for error in errors
+    )
+
+
 def _historical_rich_partial_output_dossier() -> dict:
     """Model output that investigated one facet but cannot yet explain the whole case."""
 

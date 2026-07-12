@@ -448,6 +448,26 @@ def test_subscription_verification_requires_login_status_and_activation_probe(
     )
     assert execpolicy_mod.controlled_codex_execpolicy_receipt_errors(unrelated_change_receipt) == []
 
+    concurrent_host_rule_receipt = json.loads(json.dumps(current_receipt))
+    concurrent_host_rule_receipt["host_global_rules_unchanged"] = False
+    concurrent_host_rule_receipt["host_global_rules_manifest_after"] = [
+        {
+            "path": "default.rules",
+            "kind": "file",
+            "sha256": "f" * 64,
+            "size_bytes": 134,
+        }
+    ]
+    concurrent_host_rule_receipt["receipt_sha256"] = codex_execpolicy_receipt_sha256(
+        concurrent_host_rule_receipt
+    )
+    assert (
+        execpolicy_mod.controlled_codex_execpolicy_receipt_errors(
+            concurrent_host_rule_receipt
+        )
+        == []
+    )
+
     legacy_receipt = json.loads(json.dumps(current_receipt))
     legacy_receipt["schema_version"] = 2
     legacy_receipt.pop("canonical_project_trust_path")
