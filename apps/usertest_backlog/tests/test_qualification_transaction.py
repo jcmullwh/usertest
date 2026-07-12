@@ -248,6 +248,34 @@ def test_bundle_rejects_source_change_during_extraction(tmp_path: Path) -> None:
         _build_bundle(inputs, source_input_snapshot=snapshot)
 
 
+def test_source_snapshot_excludes_maintenance_virtualenv_copies(tmp_path: Path) -> None:
+    inputs = _bundle_inputs(tmp_path)
+    source_runs = inputs["source_runs_dir"]
+    assert isinstance(source_runs, Path)
+    implementation_runs = source_runs.parent / "usertest_implement"
+    cached_python = (
+        implementation_runs
+        / "run"
+        / "sandbox"
+        / "maintenance_venv_copies"
+        / "agent_adapters"
+        / "fingerprint"
+        / "venv"
+        / "bin"
+        / "python"
+    )
+    cached_python.parent.mkdir(parents=True)
+    cached_python.write_bytes(b"not evidence\n")
+
+    snapshot = capture_qualification_source_snapshot(source_runs)
+    implementation = snapshot["implementation_runs"]
+    paths = [entry["path"] for entry in implementation["entries"]]
+
+    assert implementation["ignored_directory_names"] == ["maintenance_venv_copies"]
+    assert "run/report.json" in paths
+    assert not any("maintenance_venv_copies" in path for path in paths)
+
+
 def test_bundle_detects_pipeline_ledger_and_full_plan_tree_mutation(
     tmp_path: Path,
 ) -> None:

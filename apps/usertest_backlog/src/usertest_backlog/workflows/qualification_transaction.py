@@ -99,13 +99,26 @@ def _file_receipt(path: Path, *, name: str) -> dict[str, Any]:
     }
 
 
-def _tree_manifest(path: Path, *, name: str) -> dict[str, Any]:
+def _tree_manifest(
+    path: Path,
+    *,
+    name: str,
+    ignored_directory_names: Iterable[str] = (),
+) -> dict[str, Any]:
     root = path.expanduser().resolve()
     if not root.is_dir():
         raise ValueError(f"qualification_input_tree_missing:{name}:{root}")
+    ignored = {
+        item.strip().casefold()
+        for item in ignored_directory_names
+        if isinstance(item, str) and item.strip()
+    }
     entries: list[dict[str, Any]] = []
     for candidate in sorted(root.rglob("*"), key=lambda item: item.as_posix()):
-        relative = candidate.relative_to(root).as_posix()
+        relative_path = candidate.relative_to(root)
+        if any(part.casefold() in ignored for part in relative_path.parts):
+            continue
+        relative = relative_path.as_posix()
         if candidate.is_symlink():
             entries.append(
                 {
@@ -126,6 +139,7 @@ def _tree_manifest(path: Path, *, name: str) -> dict[str, Any]:
     return {
         "name": name,
         "root": str(root),
+        "ignored_directory_names": sorted(ignored),
         "entries": entries,
         "entries_sha256": _canonical_hash(entries),
     }
@@ -138,10 +152,15 @@ def capture_qualification_source_snapshot(
 
     source_runs_dir = source_runs_dir.expanduser().resolve()
     return {
-        "source_runs": _tree_manifest(source_runs_dir, name="source_runs"),
+        "source_runs": _tree_manifest(
+            source_runs_dir,
+            name="source_runs",
+            ignored_directory_names={"maintenance_venv_copies"},
+        ),
         "implementation_runs": _tree_manifest(
             source_runs_dir.parent / "usertest_implement",
             name="implementation_runs",
+            ignored_directory_names={"maintenance_venv_copies"},
         ),
     }
 
@@ -856,7 +875,13 @@ def _verify_tree_manifest(manifest: Mapping[str, Any], *, name: str) -> list[str
     if root_raw is None:
         return [f"qualification_input_tree_root_missing:{name}"]
     try:
-        observed = _tree_manifest(Path(root_raw), name=str(manifest.get("name") or name))
+        ignored_raw = manifest.get("ignored_directory_names")
+        ignored = ignored_raw if isinstance(ignored_raw, list) else []
+        observed = _tree_manifest(
+            Path(root_raw),
+            name=str(manifest.get("name") or name),
+            ignored_directory_names=ignored,
+        )
     except ValueError as exc:
         return [str(exc)]
     expected = {key: value for key, value in manifest.items() if key != "kind"}
