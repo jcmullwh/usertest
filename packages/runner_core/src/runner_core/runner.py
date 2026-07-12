@@ -4502,6 +4502,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     run_dir=run_dir,
                     allow_prefixes=controlled_allow_prefixes,
                     agent_workspace_path=workspace_dir_for_agent,
+                    activation_probe_required=bool(resolved_inputs.mission.requires_shell),
                 )
             if codex_execpolicy_overlay is not None:
                 agent_env_overrides = dict(agent_env_overrides or {})

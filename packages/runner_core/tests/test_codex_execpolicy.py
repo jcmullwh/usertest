@@ -457,6 +457,42 @@ def test_subscription_verification_requires_login_status_and_activation_probe(
     assert execpolicy_mod.controlled_codex_execpolicy_receipt_errors(legacy_receipt) == []
 
 
+def test_prompt_only_continuation_verifies_subscription_without_shell_activation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    overlay = install_controlled_codex_execpolicy(
+        workspace_dir=workspace,
+        run_dir=run_dir,
+        allow_prefixes=(("Write-Output",),),
+        activation_probe_required=False,
+    )
+    _bind_default_config(overlay)
+
+    login_status = {
+        "ok": True,
+        "chatgpt_status_exact": True,
+        "status_kind": "chatgpt",
+        "auth_env_vars_blank": _blank_subscription_environment(),
+    }
+    overlay.record_login_status(login_status)
+    overlay.record_post_login_status(login_status)
+    assert overlay.restore() == []
+
+    receipt = json.loads(overlay.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["activation_probe_required"] is False
+    assert "activation_probe" not in receipt
+    assert receipt["chatgpt_subscription_activation_probe_verified"] is False
+    assert receipt["chatgpt_subscription_login_status_verified"] is True
+    assert receipt["chatgpt_subscription_post_login_status_verified"] is True
+    assert receipt["chatgpt_subscription_auth_verified"] is True
+    assert receipt["auth_verification_status"] == "verified"
+    assert verify_controlled_codex_execpolicy_receipt(overlay.receipt_path) == []
+
+
 def test_failed_activation_probe_never_verifies_subscription(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     workspace.mkdir()

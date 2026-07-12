@@ -379,6 +379,20 @@ def materialize_clean_revision_view(
                 ref=repo_revision,
             )
             destination = acquired.workspace_dir.resolve()
+        except FileExistsError as exc:
+            # On Windows ``acquire_target`` may relocate a long destination into the
+            # shared temp workspace root.  The caller's requested path can therefore
+            # remain absent while the effective relocated path already exists from an
+            # earlier verification.  Reuse that path and verify its revision/cleanliness
+            # below instead of misclassifying deterministic reuse as an acquisition
+            # failure.
+            existing_raw = exc.filename or (exc.args[0] if exc.args else None)
+            existing = Path(existing_raw).resolve() if existing_raw is not None else None
+            if existing is None or not existing.is_dir():
+                return None, None, None, [
+                    "planning_revision_view_acquire_failed:FileExistsError"
+                ]
+            destination = existing
         except (OSError, RuntimeError, ValueError) as exc:
             return None, None, None, [f"planning_revision_view_acquire_failed:{type(exc).__name__}"]
     if not destination.is_dir():

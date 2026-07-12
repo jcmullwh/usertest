@@ -21,6 +21,36 @@ from backlog_miner.origin_evidence import (
 )
 
 
+def test_clean_revision_view_reuses_effective_relocated_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    requested = tmp_path / "requested" / "revision-view"
+    relocated = tmp_path / "windows-temp" / "revision-view"
+    relocated.mkdir(parents=True)
+    revision = "a" * 40
+
+    def collide_with_relocated_workspace(**_kwargs: object) -> object:
+        raise FileExistsError(relocated)
+
+    monkeypatch.setattr(mod, "acquire_target", collide_with_relocated_workspace)
+    monkeypatch.setattr(mod, "_workspace_head", lambda workspace: revision)
+    monkeypatch.setattr(mod, "_workspace_clean", lambda workspace: True)
+
+    workspace, head, clean, errors = mod.materialize_clean_revision_view(
+        source_workspace=source,
+        destination=requested,
+        repo_revision=revision,
+    )
+
+    assert workspace == relocated.resolve()
+    assert head == revision
+    assert clean is True
+    assert errors == []
+
+
 def _falsification_replay(experiment: dict[str, object]) -> dict[str, object]:
     return {
         "experiment_id": experiment["experiment_id"],

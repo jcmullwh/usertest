@@ -206,19 +206,25 @@ def controlled_codex_execpolicy_receipt_errors(
     for field, expected in exact_fields.items():
         if receipt.get(field) != expected:
             errors.append(f"codex_execpolicy_{field}_invalid")
+    activation_probe_required = receipt.get("activation_probe_required") is not False
     true_fields = [
         "host_user_config_ignored",
         "target_project_config_isolated",
         "chatgpt_subscription_login_status_verified",
-        "chatgpt_subscription_activation_probe_verified",
         "chatgpt_subscription_post_login_status_verified",
         "chatgpt_subscription_auth_verified",
         "api_key_auth_environment_disabled",
         "host_auth_cache_preserved",
         "host_global_rules_unchanged",
         "canonical_subscription_route_verified",
-        "controlled_execution_mode_verified",
     ]
+    if activation_probe_required:
+        true_fields.extend(
+            [
+                "chatgpt_subscription_activation_probe_verified",
+                "controlled_execution_mode_verified",
+            ]
+        )
     if schema_version == 2:
         true_fields.append("global_config_unchanged")
     for field in true_fields:
@@ -289,19 +295,23 @@ def controlled_codex_execpolicy_receipt_errors(
         if not all(blank.get(name) is True for name in CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS):
             errors.append(f"codex_execpolicy_{status_field}_environment_not_blank")
 
-    activation_raw = receipt.get("activation_probe")
-    activation = activation_raw if isinstance(activation_raw, dict) else {}
-    if (
-        activation.get("ok") is not True
-        or activation.get("marker_seen") is not True
-        or activation.get("workspace_unchanged") is not True
-        or activation.get("controlled_execution_mode_verified") is not True
-    ):
-        errors.append("codex_execpolicy_activation_probe_invalid")
-    if activation.get("rules_ignored_observed") is not (platform_os_name == "nt"):
-        errors.append("codex_execpolicy_activation_rules_mode_invalid")
-    if platform_os_name == "nt" and activation.get("sandbox_mode_observed") != "workspace-write":
-        errors.append("codex_execpolicy_activation_windows_sandbox_mode_invalid")
+    if activation_probe_required:
+        activation_raw = receipt.get("activation_probe")
+        activation = activation_raw if isinstance(activation_raw, dict) else {}
+        if (
+            activation.get("ok") is not True
+            or activation.get("marker_seen") is not True
+            or activation.get("workspace_unchanged") is not True
+            or activation.get("controlled_execution_mode_verified") is not True
+        ):
+            errors.append("codex_execpolicy_activation_probe_invalid")
+        if activation.get("rules_ignored_observed") is not (platform_os_name == "nt"):
+            errors.append("codex_execpolicy_activation_rules_mode_invalid")
+        if (
+            platform_os_name == "nt"
+            and activation.get("sandbox_mode_observed") != "workspace-write"
+        ):
+            errors.append("codex_execpolicy_activation_windows_sandbox_mode_invalid")
 
     overrides_raw = receipt.get("controlled_config_overrides")
     overrides = overrides_raw if isinstance(overrides_raw, list) else []
@@ -1038,9 +1048,13 @@ class ControlledCodexExecpolicyOverlay:
         )
         self.receipt["post_login_status"] = status
         self.receipt["chatgpt_subscription_post_login_status_verified"] = post_verified
+        activation_verified = (
+            self.receipt.get("chatgpt_subscription_activation_probe_verified") is True
+            or self.receipt.get("activation_probe_required") is False
+        )
         verified = (
             self.receipt.get("chatgpt_subscription_login_status_verified") is True
-            and self.receipt.get("chatgpt_subscription_activation_probe_verified") is True
+            and activation_verified
             and post_verified
         )
         self.receipt["chatgpt_subscription_auth_verified"] = verified
@@ -1214,6 +1228,7 @@ def install_controlled_codex_execpolicy(
     run_dir: Path,
     allow_prefixes: Sequence[Sequence[str]],
     agent_workspace_path: str | Path | None = None,
+    activation_probe_required: bool = True,
 ) -> ControlledCodexExecpolicyOverlay:
     """Install target rules while retaining the host's managed ChatGPT credential cache.
 
@@ -1395,6 +1410,7 @@ def install_controlled_codex_execpolicy(
         "host_auth_identity_sha256_before": host_auth_sha_before,
         "host_auth_shape_before": host_auth_shape,
         "chatgpt_subscription_auth_declared": False,
+        "activation_probe_required": bool(activation_probe_required),
         "chatgpt_subscription_login_status_verified": False,
         "chatgpt_subscription_activation_probe_verified": False,
         "chatgpt_subscription_post_login_status_verified": False,
