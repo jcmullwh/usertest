@@ -939,6 +939,118 @@ def test_experiment_addition_is_protected_but_pruning_is_allowed() -> None:
     assert prune_mutation_changes == ["experiments[exp-retained].command"]
 
 
+def test_same_author_retains_improving_unverified_draft_as_next_correction_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "authorized-draft-repair-workspace"
+    revision = _init_workspace(workspace)
+    initial_run = tmp_path / "authorized-draft-repair-initial"
+    initial_run.mkdir()
+    _write_json(initial_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=initial_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+    )
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    baseline = {
+        "case_id": "case:test-1",
+        "problem_id": "problem:test-1",
+        "experiments": [
+            {
+                "experiment_id": "experiment:malformed-draft",
+                "command": {"argv": ["python", "probe.py"]},
+                "result": "observed",
+                "exit_code": 0,
+                "artifact_refs": [],
+            }
+        ],
+    }
+    improved = json.loads(json.dumps(baseline))
+    improved["experiments"][0]["command"] = "python probe.py"
+    improved["experiments"][0]["result"] = "draft result still malformed"
+    improved["experiments"][0]["artifact_refs"] = ["artifact:probe"]
+    improved["experiments"].append(
+        {
+            "experiment_id": "experiment:correlated-draft-claim",
+            "command": "python control.py",
+            "result": "control observed",
+            "exit_code": 0,
+            "artifact_refs": ["artifact:control"],
+        }
+    )
+    corrected = json.loads(json.dumps(improved))
+    corrected["experiments"][0]["result"] = "observed"
+    command_error = (
+        "research_dossier_invalid_experiment_command: problem:test-1: index=0"
+    )
+    result_error = "research_dossier_invalid_experiment_result: problem:test-1: index=0"
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="output_contract_invalid",
+        run_dir=initial_run,
+        report_path=initial_run / "report.json",
+        validation_errors=[command_error, result_error],
+        attempted_dossier=baseline,
+        agent_session_id=session_id,
+        attempt_wall_seconds=600.0,
+    )
+    requests: list[RunRequest] = []
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        requests.append(request)
+        run_dir = tmp_path / f"authorized-draft-repair-correction-{len(requests)}"
+        run_dir.mkdir()
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    candidates = [(improved, [result_error]), (corrected, [])]
+    monkeypatch.setattr(mod, "_repair_candidate_from_run", lambda **kwargs: candidates.pop(0))
+
+    result = mod._run_targeted_dossier_repairs(
+        repo_input=str(workspace),
+        repo_revision=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        case_id="case:test-1",
+        problem_id="problem:test-1",
+        evidence_assignment={},
+        source_attempt=source_attempt,
+        validation_errors=[command_error, result_error],
+        first_attempt_number=2,
+    )
+
+    assert result["status"] == "corrected"
+    assert result["dossier"] == corrected
+    assert len(requests) == 2
+    assert [request.codex_resume_session_id for request in requests] == [session_id, session_id]
+    assert _dossier_repair_payload(requests[0].agent_append_system_prompt or "")[
+        "immutable_evidence_paths"
+    ] == []
+    assert _dossier_repair_payload(requests[1].agent_append_system_prompt or "")[
+        "baseline_dossier"
+    ] == improved
+    assert [attempt["outcome"] for attempt in result["attempts"]] == [
+        "repair_contract_invalid",
+        "repair_contract_valid",
+    ]
+    assert result["attempts"][0]["repair_progress"]["reason"] == (
+        "best_error_count_decreased"
+    )
+    assert all(
+        attempt["repair_progress"].get("fundamental_change_paths", []) == []
+        for attempt in result["attempts"]
+    )
+
+
 def test_adaptive_correction_resumes_one_session_beyond_three_turns(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1203,6 +1315,101 @@ def test_post_verifier_gap_resumes_same_author_with_research_capabilities(
     assert result["attempts"][0]["attempt_kind"] == (
         "evidence_verification_research_continuation"
     )
+
+
+def test_research_capable_correction_cannot_advance_when_candidate_verifier_rejects_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "verifier-rejection-workspace"
+    revision = _init_workspace(workspace)
+    initial_run = tmp_path / "verifier-rejection-initial"
+    initial_run.mkdir()
+    _write_json(initial_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=initial_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+    )
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    baseline = {
+        "case_id": "case:test-1",
+        "problem_id": "problem:test-1",
+        "experiments": [],
+    }
+    unsupported = {
+        **baseline,
+        "experiments": [
+            {
+                "experiment_id": "experiment:unsupported",
+                "command": "python unsupported.py",
+                "result": "claimed",
+                "exit_code": 0,
+                "artifact_refs": [],
+            }
+        ],
+    }
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="evidence_verification_invalid",
+        run_dir=initial_run,
+        report_path=initial_run / "report.json",
+        validation_errors=["future_verifier_requires_new_domain_observation"],
+        attempted_dossier=baseline,
+        agent_session_id=session_id,
+        attempt_wall_seconds=600.0,
+    )
+    requests: list[RunRequest] = []
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        requests.append(request)
+        run_dir = tmp_path / f"verifier-rejection-correction-{len(requests)}"
+        run_dir.mkdir()
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        mod,
+        "_repair_candidate_from_run",
+        lambda **kwargs: (dict(unsupported), []),
+    )
+    verifier_calls: list[Path] = []
+
+    def reject_candidate(candidate: dict[str, Any], result: RunResult) -> list[str]:
+        assert candidate == unsupported
+        verifier_calls.append(result.run_dir)
+        return ["experiment_command_not_observed:experiment:unsupported"]
+
+    result = mod._run_targeted_dossier_repairs(
+        repo_input=str(workspace),
+        repo_revision=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        case_id="case:test-1",
+        problem_id="problem:test-1",
+        evidence_assignment={},
+        source_attempt=source_attempt,
+        validation_errors=["future_verifier_requires_new_domain_observation"],
+        first_attempt_number=2,
+        candidate_validator=reject_candidate,
+        research_capabilities=True,
+        attempt_kind="evidence_verification_research_continuation",
+    )
+
+    assert result["status"] == "restart:exact_state_repeated_after_feedback"
+    assert len(requests) == 2
+    assert len(verifier_calls) == 2
+    assert result["validation_errors"] == [
+        "experiment_command_not_observed:experiment:unsupported"
+    ]
+    assert all(attempt["outcome"] != "repair_contract_valid" for attempt in result["attempts"])
 
 
 def test_every_post_verifier_error_defaults_to_research_capable_continuation() -> None:

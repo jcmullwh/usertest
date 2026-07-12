@@ -1530,7 +1530,9 @@ def _repair_contract(
         ],
         "remediation_hints": _research_retry_remediation_hints(validation_errors),
         "authorized_paths": list(authorized_paths),
-        "immutable_evidence_paths": list(_IMMUTABLE_RESEARCH_EVIDENCE_PATHS),
+        "immutable_evidence_paths": (
+            list(_IMMUTABLE_RESEARCH_EVIDENCE_PATHS) if research_capabilities else []
+        ),
         "previous_correction_feedback": (
             json.loads(json.dumps(previous_correction_feedback, ensure_ascii=False))
             if isinstance(previous_correction_feedback, dict)
@@ -1545,11 +1547,12 @@ def _repair_contract(
             "dossier. Do not implement a product fix or fabricate a result."
             if research_capabilities
             else (
-                "Return the complete dossier. The validation hints identify likely fields, but you "
-                "may make correlated model-owned structure/reference corrections. Retained "
-                "commands, results, exit codes, inspected source facts, and artifact references "
-                "remain immutable unless an exact hint names that field. Do not run tools, invent "
-                "evidence, or repeat research."
+                "Return the complete dossier. The baseline dossier is an unverified draft, and the "
+                "validation hints identify likely fields rather than a closed edit whitelist. You "
+                "may make correlated corrections to any model-authored draft claim. Preserve the "
+                "retained run's actual observations: do not run tools, invent observations, or "
+                "repeat research. The runner will verify every corrected evidence claim against "
+                "the retained run before the dossier can advance."
             )
         ),
     }
@@ -1587,8 +1590,10 @@ def _append_prompt_for_targeted_repair(contract: dict[str, Any]) -> str:
         "complete troubleshoot_v1 report whose backlog_repro_research extension is the complete "
         "baseline dossier with the listed errors corrected. Field hints are guidance rather than "
         "a closed whitelist: correlated model-owned structure and interpretation corrections are "
-        "allowed. Preserve retained evidence exactly. An honest downgrade to "
-        "insufficient_evidence is allowed; never upgrade or fabricate support.\n\n"
+        "allowed. The baseline's model-authored evidence fields are unverified draft claims, not "
+        "immutable observations: correct malformed or unsupported claims while preserving what "
+        "the retained run actually established. An honest downgrade to insufficient_evidence is "
+        "allowed; never upgrade or fabricate support.\n\n"
         "## Dossier repair payload (JSON)\n"
         f"{payload}\n"
     )
@@ -1784,6 +1789,7 @@ def _run_targeted_dossier_repairs(
         else {}
     )
     current_errors = _dedupe_validation_errors(validation_errors)
+    baseline_is_unverified_draft = source_attempt.get("outcome") == "output_contract_invalid"
     accepted_source = source_attempt
     best_dossier = json.loads(json.dumps(baseline, ensure_ascii=False))
     best_errors = list(current_errors)
@@ -2005,7 +2011,7 @@ def _run_targeted_dossier_repairs(
         changed_paths = _json_changed_paths(baseline, candidate)
         fundamental_changes = (
             []
-            if not baseline or research_capabilities
+            if not baseline or research_capabilities or baseline_is_unverified_draft
             else _fundamental_evidence_changes(
                 changed_paths,
                 explicitly_authorized_paths=authorized_paths,
