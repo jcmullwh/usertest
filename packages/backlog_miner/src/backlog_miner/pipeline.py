@@ -891,7 +891,7 @@ def run_stage_prompt_json_result(
     RuntimeError
         When the agent backend returns an empty response.
     """
-    from backlog_miner.agent import run_backlog_prompt_result
+    from backlog_miner.agent import BacklogProviderExternalWait, run_backlog_prompt_result
 
     out_dir.mkdir(parents=True, exist_ok=True)
     prompt_path = out_dir / f"{tag}.prompt.txt"
@@ -940,6 +940,26 @@ def run_stage_prompt_json_result(
                 "run_stage_prompt_json: model invocation provenance invalid: "
                 + ", ".join(invocation_errors)
             )
+    except BacklogProviderExternalWait as exc:
+        _write_model_invocation_manifest(
+            stage=stage,
+            tag=tag,
+            agent=agent,
+            out_dir=out_dir,
+            prompt=prompt,
+            response=response,
+            error_kind="BacklogProviderExternalWait",
+            agent_session_id=(
+                str(exc.external_wait.get("agent_session_id") or "").strip() or None
+            ),
+            resumed_from_session_id=resume_session_id,
+            workspace_dir=(
+                Path(str(exc.external_wait["workspace_dir"]))
+                if exc.external_wait.get("workspace_dir")
+                else workspace_dir
+            ),
+        )
+        raise
     except Exception as exc:
         _write_model_invocation_manifest(
             stage=stage,

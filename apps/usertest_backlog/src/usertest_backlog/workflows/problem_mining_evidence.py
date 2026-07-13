@@ -616,6 +616,25 @@ def build_live_miner_receipt(
     assigned = sorted(set(assigned_atom_ids))
     if assigned != sorted(assigned_atom_ids):
         raise ValueError(f"problem_mining_assignment_invalid:{tag}")
+    manifest_assigned_raw = workspace_manifest.get("assigned_atom_ids")
+    manifest_assigned = _string_list(manifest_assigned_raw)
+    if (
+        not isinstance(manifest_assigned_raw, list)
+        or len(manifest_assigned) != len(manifest_assigned_raw)
+        or manifest_assigned != assigned
+    ):
+        raise ValueError(f"problem_mining_workspace_assignment_mismatch:{tag}")
+    context_raw = workspace_manifest.get("context_atom_ids", [])
+    context_atom_ids = _string_list(context_raw)
+    if (
+        not isinstance(context_raw, list)
+        or len(context_atom_ids) != len(context_raw)
+        or context_atom_ids != sorted(context_atom_ids)
+    ):
+        raise ValueError(f"problem_mining_workspace_context_invalid:{tag}")
+    if set(assigned) & set(context_atom_ids):
+        raise ValueError(f"problem_mining_workspace_assignment_context_overlap:{tag}")
+    workspace_atom_ids = set(assigned) | set(context_atom_ids)
     eligible = set(eligible_atom_ids)
     if not set(assigned).issubset(eligible):
         raise ValueError(f"problem_mining_assignment_outside_eligible_corpus:{tag}")
@@ -628,7 +647,7 @@ def build_live_miner_receipt(
         atom_id = _text(raw.get("atom_id"))
         if atom_id is not None:
             atom_files[atom_id] = dict(raw)
-    if set(atom_files) != set(assigned):
+    if len(atom_files) != len(atom_files_list) or set(atom_files) != workspace_atom_ids:
         raise ValueError(f"problem_mining_workspace_atom_partition_mismatch:{tag}")
     chunks_raw = workspace_manifest.get("chunks")
     chunks = (
@@ -639,13 +658,15 @@ def build_live_miner_receipt(
     chunk_atom_ids = [
         atom_id for chunk in chunks for atom_id in _string_list(chunk.get("atom_ids"))
     ]
-    if sorted(chunk_atom_ids) != assigned or len(chunk_atom_ids) != len(set(chunk_atom_ids)):
+    if set(chunk_atom_ids) != workspace_atom_ids or len(chunk_atom_ids) != len(
+        set(chunk_atom_ids)
+    ):
         raise ValueError(f"problem_mining_workspace_chunk_partition_mismatch:{tag}")
     workspace_atoms = _workspace_atoms_by_id(
         workspace_manifest=workspace_manifest,
         workspace_dir=workspace_dir,
     )
-    if set(workspace_atoms) != set(assigned):
+    if set(workspace_atoms) != workspace_atom_ids:
         raise ValueError(f"problem_mining_workspace_payload_partition_mismatch:{tag}")
     if not normalized_events_path.is_file():
         raise ValueError(f"problem_mining_normalized_events_missing:{tag}")
@@ -677,7 +698,7 @@ def build_live_miner_receipt(
         events=events,
         manifest=origin_manifest,
         workspace_dir=workspace_dir,
-        assigned_atom_ids=assigned,
+        assigned_atom_ids=sorted(workspace_atom_ids),
     )
     if missing_attachment_reads:
         raise ValueError(
@@ -813,6 +834,11 @@ def build_live_miner_receipt(
         raise ValueError(
             f"problem_mining_assigned_atom_not_read_in_full:{tag}:" + ",".join(unread_assigned)
         )
+    unread_context = sorted(set(context_atom_ids) - set(reads))
+    if unread_context:
+        raise ValueError(
+            f"problem_mining_context_atom_not_read_in_full:{tag}:" + ",".join(unread_context)
+        )
 
     required_read_ids = sorted(set(assigned) | cited_ids)
     return {
@@ -820,6 +846,7 @@ def build_live_miner_receipt(
         "template": template_name,
         "status": "verified",
         "assigned_atom_ids": assigned,
+        "context_atom_ids": context_atom_ids,
         "cited_atom_ids": sorted(cited_ids),
         "response_sha256": sha256(response_text.encode("utf-8")).hexdigest(),
         "workspace_dir": str(workspace_dir.resolve()),
@@ -828,6 +855,7 @@ def build_live_miner_receipt(
         "normalized_events_sha256": _file_sha256(normalized_events_path),
         "required_workspace_read_attestations": required_workspace_reads,
         "read_attestations": [reads[atom_id] for atom_id in required_read_ids],
+        "context_read_attestations": [reads[atom_id] for atom_id in context_atom_ids],
         "origin_attachment_evidence": origin_manifest,
         "origin_attachment_read_attestations": attachment_reads,
         "atom_decisions": sorted(normalized_decisions, key=lambda item: item["atom_id"]),
@@ -880,6 +908,7 @@ def build_dry_run_miner_receipt(
         "template": template_name,
         "status": "dry_run_not_attested",
         "assigned_atom_ids": sorted(assigned_atom_ids),
+        "context_atom_ids": [],
         "cited_atom_ids": sorted(cited_by),
         "response_sha256": None,
         "workspace_dir": None,
@@ -887,6 +916,7 @@ def build_dry_run_miner_receipt(
         "normalized_events_path": None,
         "normalized_events_sha256": None,
         "read_attestations": [],
+        "context_read_attestations": [],
         "origin_attachment_evidence": {},
         "origin_attachment_read_attestations": [],
         "atom_decisions": decisions,
@@ -910,6 +940,7 @@ def build_failed_miner_receipt(
     """
 
     assigned = sorted(set(assigned_atom_ids))
+    context_atom_ids = _string_list(workspace_manifest.get("context_atom_ids", []))
     decisions = [
         {
             "atom_id": atom_id,
@@ -926,6 +957,7 @@ def build_failed_miner_receipt(
         "status": "failed_unresolved",
         "error": error,
         "assigned_atom_ids": assigned,
+        "context_atom_ids": context_atom_ids,
         "cited_atom_ids": [],
         "response_sha256": None,
         "workspace_dir": str(workspace_dir.resolve()),
@@ -933,6 +965,7 @@ def build_failed_miner_receipt(
         "normalized_events_path": None,
         "normalized_events_sha256": None,
         "read_attestations": [],
+        "context_read_attestations": [],
         "origin_attachment_evidence": workspace_manifest.get("origin_attachment_evidence", {}),
         "origin_attachment_read_attestations": [],
         "atom_decisions": decisions,
@@ -1238,6 +1271,78 @@ def _required_workspace_read_errors(
     return errors
 
 
+def _workspace_atom_partition_errors(
+    *,
+    workspace: Path,
+    assigned_atom_ids: Sequence[str],
+    context_atom_ids: Sequence[str],
+    tag: str,
+) -> list[str]:
+    """Rebind a retained receipt's decision/context split to its exact workspace."""
+
+    manifest_path = workspace / "atoms.json"
+    try:
+        manifest_raw = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return [f"problem_mining_workspace_manifest_unreadable:{tag}"]
+    if not isinstance(manifest_raw, Mapping):
+        return [f"problem_mining_workspace_manifest_invalid:{tag}"]
+    manifest = dict(manifest_raw)
+    assigned = list(assigned_atom_ids)
+    context = list(context_atom_ids)
+    manifest_assigned_raw = manifest.get("assigned_atom_ids")
+    manifest_context_raw = manifest.get("context_atom_ids", [])
+    manifest_assigned = _string_list(manifest_assigned_raw)
+    manifest_context = _string_list(manifest_context_raw)
+    if (
+        not isinstance(manifest_assigned_raw, list)
+        or len(manifest_assigned) != len(manifest_assigned_raw)
+        or manifest_assigned != assigned
+    ):
+        return [f"problem_mining_workspace_assignment_mismatch:{tag}"]
+    if (
+        not isinstance(manifest_context_raw, list)
+        or len(manifest_context) != len(manifest_context_raw)
+        or manifest_context != context
+        or set(manifest_assigned) & set(manifest_context)
+    ):
+        return [f"problem_mining_workspace_context_mismatch:{tag}"]
+    expected_ids = set(assigned) | set(context)
+
+    atom_files_raw = manifest.get("atom_files")
+    atom_files = atom_files_raw if isinstance(atom_files_raw, list) else []
+    atom_file_ids = [
+        atom_id
+        for raw in atom_files
+        if isinstance(raw, Mapping)
+        for atom_id in [_text(raw.get("atom_id"))]
+        if atom_id is not None
+    ]
+    if set(atom_file_ids) != expected_ids or len(atom_file_ids) != len(set(atom_file_ids)):
+        return [f"problem_mining_workspace_atom_partition_mismatch:{tag}"]
+
+    chunks_raw = manifest.get("chunks")
+    chunks = chunks_raw if isinstance(chunks_raw, list) else []
+    chunk_atom_ids = [
+        atom_id
+        for raw in chunks
+        if isinstance(raw, Mapping)
+        for atom_id in _string_list(raw.get("atom_ids"))
+    ]
+    if set(chunk_atom_ids) != expected_ids or len(chunk_atom_ids) != len(set(chunk_atom_ids)):
+        return [f"problem_mining_workspace_chunk_partition_mismatch:{tag}"]
+    try:
+        workspace_atoms = _workspace_atoms_by_id(
+            workspace_manifest=manifest,
+            workspace_dir=workspace,
+        )
+    except ValueError:
+        return [f"problem_mining_workspace_payload_changed:{tag}"]
+    if set(workspace_atoms) != expected_ids:
+        return [f"problem_mining_workspace_payload_partition_mismatch:{tag}"]
+    return []
+
+
 def _attempt_history_errors(miner: Mapping[str, Any], *, tag: str) -> list[str]:
     raw_history = miner.get("attempt_history")
     if raw_history is None:
@@ -1360,7 +1465,32 @@ def _miner_receipt_errors(
 ) -> list[str]:
     tag = _text(miner.get("tag")) or "(missing)"
     errors: list[str] = []
-    assigned = _string_list(miner.get("assigned_atom_ids"))
+    assigned_raw = miner.get("assigned_atom_ids")
+    assigned = _string_list(assigned_raw)
+    if (
+        not isinstance(assigned_raw, list)
+        or len(assigned) != len(assigned_raw)
+        or assigned != sorted(assigned)
+    ):
+        errors.append(f"problem_mining_miner_assignment_invalid:{tag}")
+    context_raw = miner.get("context_atom_ids", [])
+    context_atom_ids = _string_list(context_raw)
+    if (
+        not isinstance(context_raw, list)
+        or len(context_atom_ids) != len(context_raw)
+        or context_atom_ids != sorted(context_atom_ids)
+    ):
+        errors.append(f"problem_mining_miner_context_invalid:{tag}")
+    if set(assigned) & set(context_atom_ids):
+        errors.append(f"problem_mining_miner_assignment_context_overlap:{tag}")
+    cited_raw = miner.get("cited_atom_ids")
+    cited_atom_ids = _string_list(cited_raw)
+    if (
+        not isinstance(cited_raw, list)
+        or len(cited_atom_ids) != len(cited_raw)
+        or not set(cited_atom_ids).issubset(set(assigned))
+    ):
+        errors.append(f"problem_mining_miner_citation_outside_assignment:{tag}")
     decisions_raw = miner.get("atom_decisions")
     decisions = decisions_raw if isinstance(decisions_raw, list) else []
     decision_ids = [
@@ -1380,7 +1510,7 @@ def _miner_receipt_errors(
     if miner.get("status") != "verified":
         errors.append(f"problem_mining_miner_not_verified:{tag}")
         return errors
-    if not assigned and not _string_list(miner.get("cited_atom_ids")):
+    if not assigned and not cited_atom_ids and not context_atom_ids:
         return errors
     workspace_raw = _text(miner.get("workspace_dir"))
     normalized_raw = _text(miner.get("normalized_events_path"))
@@ -1402,6 +1532,14 @@ def _miner_receipt_errors(
         return errors
     if workspace is not None:
         errors.extend(
+            _workspace_atom_partition_errors(
+                workspace=workspace,
+                assigned_atom_ids=assigned,
+                context_atom_ids=context_atom_ids,
+                tag=tag,
+            )
+        )
+        errors.extend(
             _required_workspace_read_errors(
                 miner,
                 workspace=workspace,
@@ -1409,45 +1547,65 @@ def _miner_receipt_errors(
                 tag=tag,
             )
         )
-    read_ids: set[str] = set()
-    for raw_attestation in miner.get("read_attestations", []):
-        if not isinstance(raw_attestation, Mapping):
-            errors.append(f"problem_mining_read_attestation_invalid:{tag}")
-            continue
-        atom_id = _text(raw_attestation.get("atom_id"))
-        rel_path = _text(raw_attestation.get("atom_file"))
-        event_index = raw_attestation.get("event_index")
-        if (
-            atom_id is None
-            or rel_path is None
-            or workspace is None
-            or isinstance(event_index, bool)
-            or not isinstance(event_index, int)
-            or event_index < 0
-            or event_index >= len(events)
-        ):
-            errors.append(f"problem_mining_read_attestation_fields_invalid:{tag}")
-            continue
-        atom_file = workspace / Path(rel_path)
-        event = events[event_index]
-        data_raw = event.get("data")
-        data = data_raw if isinstance(data_raw, Mapping) else {}
-        if (
-            not atom_file.is_file()
-            or raw_attestation.get("atom_file_sha256") != _file_sha256(atom_file)
-            or event.get("type") != "read_file"
-            or data.get("content_observed") is not True
-            or data.get("whole_file_observed") is not True
-            or data.get("source_exit_code") != 0
-            or data.get("file_sha256") != raw_attestation.get("atom_file_sha256")
-            or raw_attestation.get("event_sha256") != _canonical_hash(event)
-        ):
-            errors.append(f"problem_mining_read_attestation_changed:{tag}:{atom_id}")
-            continue
-        read_ids.add(atom_id)
-    required_reads = set(assigned) | set(_string_list(miner.get("cited_atom_ids")))
-    if read_ids != required_reads:
-        errors.append(f"problem_mining_full_read_coverage_mismatch:{tag}")
+    for attestation_field, expected_ids, error_stem, coverage_error in (
+        (
+            "read_attestations",
+            set(assigned),
+            "problem_mining_read_attestation",
+            "problem_mining_full_read_coverage_mismatch",
+        ),
+        (
+            "context_read_attestations",
+            set(context_atom_ids),
+            "problem_mining_context_read_attestation",
+            "problem_mining_context_full_read_coverage_mismatch",
+        ),
+    ):
+        raw_attestations = miner.get(attestation_field, [])
+        attestations = raw_attestations if isinstance(raw_attestations, list) else []
+        if not isinstance(raw_attestations, list):
+            errors.append(f"{error_stem}_invalid:{tag}")
+        read_ids: set[str] = set()
+        for raw_attestation in attestations:
+            if not isinstance(raw_attestation, Mapping):
+                errors.append(f"{error_stem}_invalid:{tag}")
+                continue
+            atom_id = _text(raw_attestation.get("atom_id"))
+            rel_path = _text(raw_attestation.get("atom_file"))
+            event_index = raw_attestation.get("event_index")
+            if (
+                atom_id is None
+                or rel_path is None
+                or workspace is None
+                or isinstance(event_index, bool)
+                or not isinstance(event_index, int)
+                or event_index < 0
+                or event_index >= len(events)
+            ):
+                errors.append(f"{error_stem}_fields_invalid:{tag}")
+                continue
+            atom_file = workspace / Path(rel_path)
+            event = events[event_index]
+            data_raw = event.get("data")
+            data = data_raw if isinstance(data_raw, Mapping) else {}
+            if (
+                not atom_file.is_file()
+                or raw_attestation.get("atom_file_sha256") != _file_sha256(atom_file)
+                or event.get("type") != "read_file"
+                or data.get("content_observed") is not True
+                or data.get("whole_file_observed") is not True
+                or data.get("source_exit_code") != 0
+                or data.get("file_sha256") != raw_attestation.get("atom_file_sha256")
+                or raw_attestation.get("event_sha256") != _canonical_hash(event)
+            ):
+                errors.append(f"{error_stem}_changed:{tag}:{atom_id}")
+                continue
+            if atom_id in read_ids:
+                errors.append(f"{error_stem}_duplicate:{tag}:{atom_id}")
+                continue
+            read_ids.add(atom_id)
+        if read_ids != expected_ids:
+            errors.append(f"{coverage_error}:{tag}")
     origin_manifest_raw = miner.get("origin_attachment_evidence")
     origin_manifest = dict(origin_manifest_raw) if isinstance(origin_manifest_raw, Mapping) else {}
     if workspace is not None:
@@ -1458,7 +1616,10 @@ def _miner_receipt_errors(
                 manifest=origin_manifest,
             )
         )
-    requirements = origin_attachment_requirements(origin_manifest, atom_ids=assigned)
+    requirements = origin_attachment_requirements(
+        origin_manifest,
+        atom_ids=sorted(set(assigned) | set(context_atom_ids)),
+    )
     expected_attachment_files = {str(item["file"]): item for item in requirements}
     attachment_attestations_raw = miner.get("origin_attachment_read_attestations")
     attachment_attestations = (

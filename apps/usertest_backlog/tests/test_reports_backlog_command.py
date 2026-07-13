@@ -2496,6 +2496,229 @@ def test_reports_backlog_dry_run_writes_outputs(tmp_path: Path) -> None:
     assert "Untriaged Tail" in markdown
 
 
+def test_stage3_subscription_wait_stops_later_model_stages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    runs_dir = tmp_path / "runs" / "usertest"
+    _seed_runs_fixture(runs_dir)
+    atom_actions_path = tmp_path / "backlog_atom_actions.yaml"
+    later_stage_calls: list[str] = []
+
+    wait = {
+        "code": "codex_chatgpt_subscription_usage_limit",
+        "provider": "codex",
+        "phase": "agent_execution",
+        "route": "chatgpt_subscription",
+        "api_fallback_allowed": False,
+        "state": "parked",
+        "retry_mode": "resume_same_session",
+        "retry_disposition": "resume_after_provider_reset",
+        "resume_after": {
+            "raw": "Jul 18th, 2026 2:33 AM",
+            "timezone": "provider_account_local_unspecified",
+        },
+        "run_dir": str(tmp_path / "retained-run"),
+        "error_artifact": str(tmp_path / "retained-run" / "error.json"),
+        "error_artifact_sha256": "e" * 64,
+        "error_artifact_size_bytes": 123,
+    }
+    checkpoint: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "parked_external_wait",
+        "scope": "repro_research_stage",
+        "reason": "codex_chatgpt_subscription_usage_limit",
+        "trigger_case_id": "case:provider-wait",
+        "trigger_problem_id": "problem:provider-wait",
+        "expected_session_id": "019f2cca-9011-7e32-88ae-6c25af578b49",
+        "observed_session_id": "019f2cca-9011-7e32-88ae-6c25af578b49",
+        "authored_work_disposition": "retained",
+        "resume_status": "checkpoint_persisted_same_author_resume_supported",
+        "next_action": "resume_same_author_from_checkpoint_after_provider_reset",
+        "route": "chatgpt_subscription",
+        "api_fallback_allowed": False,
+        "external_wait": wait,
+    }
+    checkpoint["checkpoint_sha256"] = staged_module._qualification_canonical_sha256(
+        checkpoint
+    )
+
+    def parked_stage3(**kwargs: Any) -> dict[str, Any]:
+        stage_doc = {
+            "stage": "repro_research",
+            "generated_at": "2026-07-12T00:00:00Z",
+            "item_count": 0,
+            "warning_count": 0,
+            "warnings": [],
+            "input_meta": {
+                "stage_status": "parked_external_wait",
+                "external_wait": checkpoint,
+            },
+            "artifacts": {},
+            "items": [],
+        }
+        Path(kwargs["out_json"]).write_text(
+            json.dumps(stage_doc, indent=2) + "\n", encoding="utf-8"
+        )
+        Path(kwargs["out_md"]).write_text("# Parked\n", encoding="utf-8")
+        return stage_doc
+
+    def forbidden_later_stage(*_args: Any, **kwargs: Any) -> dict[str, Any]:
+        later_stage_calls.append(str(kwargs.get("out_json") or "unknown"))
+        raise AssertionError("Stages 4-6 must not run while Stage 3 is provider-parked")
+
+    monkeypatch.setattr(staged_module, "_run_repro_research_stage", parked_stage3)
+    monkeypatch.setattr(staged_module, "_run_solution_optioning_stage", forbidden_later_stage)
+    monkeypatch.setattr(staged_module, "_run_solution_selection_stage", forbidden_later_stage)
+    monkeypatch.setattr(staged_module, "_run_implementation_planning_stage", forbidden_later_stage)
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--miners",
+                "0",
+                "--sample-size",
+                "8",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+
+    assert exc.value.code == 2
+    assert later_stage_calls == []
+    compiled = runs_dir / "target_a" / "_compiled"
+    research = json.loads((compiled / "target_a.research.json").read_text(encoding="utf-8"))
+    assert research["input_meta"]["external_wait"]["checkpoint_sha256"] == (
+        checkpoint["checkpoint_sha256"]
+    )
+    assert not (compiled / "target_a.solution_options.json").exists()
+    assert not (compiled / "target_a.solution_selection.json").exists()
+    assert not (compiled / "target_a.change_plans.json").exists()
+
+    retained_paths = [
+        compiled / "target_a.backlog.atoms.jsonl",
+        compiled / "target_a.problem_records.json",
+        compiled / "target_a.problem_records.evidence_receipt.json",
+        compiled / "target_a.prioritized_problems.json",
+        compiled / "target_a.case_registry.json",
+    ]
+    retained_bytes = {path: path.read_bytes() for path in retained_paths}
+    retained_stage2 = json.loads(
+        (compiled / "target_a.prioritized_problems.json").read_text(encoding="utf-8")
+    )
+    retained_selected_ids = [
+        item["problem_id"]
+        for item in retained_stage2["items"]
+        if item.get("selected_for_research") is True
+    ]
+    resumed_stage3_calls: list[dict[str, Any]] = []
+
+    upstream_calls: list[str] = []
+
+    def forbidden_upstream(*_args: Any, **_kwargs: Any) -> dict[str, Any]:
+        upstream_calls.append("invoked")
+        raise AssertionError("A provider-wait resume must not rerun Stages 1 or 2")
+
+    def reached_resumed_stage3(**kwargs: Any) -> dict[str, Any]:
+        resumed_stage3_calls.append(kwargs)
+        raise RuntimeError("stop_after_proving_retained_stage3_resume")
+
+    monkeypatch.setattr(staged_module, "_run_problem_mining_stage", forbidden_upstream)
+    monkeypatch.setattr(
+        staged_module,
+        "_run_problem_case_relation_review",
+        forbidden_upstream,
+    )
+    monkeypatch.setattr(
+        staged_module,
+        "_run_problem_prioritization_stage",
+        forbidden_upstream,
+    )
+    monkeypatch.setattr(staged_module, "_run_repro_research_stage", reached_resumed_stage3)
+
+    with pytest.raises(SystemExit) as resumed_exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--resume",
+                "--miners",
+                "0",
+                "--sample-size",
+                "8",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+
+    assert resumed_exc.value.code == 2
+    assert len(resumed_stage3_calls) == 1
+    resume_call = resumed_stage3_calls[0]
+    assert resume_call["resume_stage_document"]["input_meta"]["external_wait"][
+        "checkpoint_sha256"
+    ] == checkpoint["checkpoint_sha256"]
+    assert [
+        item["problem_id"] for item in resume_call["selected_priority_decisions"]
+    ] == retained_selected_ids
+    assert all(path.read_bytes() == retained_bytes[path] for path in retained_paths)
+    assert upstream_calls == []
+
+    tampered_research = json.loads(
+        (compiled / "target_a.research.json").read_text(encoding="utf-8")
+    )
+    tampered_research["input_meta"]["external_wait"]["checkpoint_sha256"] = "0" * 64
+    tampered_bytes = (json.dumps(tampered_research, indent=2) + "\n").encode("utf-8")
+    (compiled / "target_a.research.json").write_bytes(tampered_bytes)
+    resumed_stage3_calls.clear()
+
+    with pytest.raises(SystemExit) as tampered_exc:
+        main(
+            [
+                "reports",
+                "backlog",
+                "--repo-root",
+                str(repo_root),
+                "--runs-dir",
+                str(runs_dir),
+                "--target",
+                "target_a",
+                "--dry-run",
+                "--resume",
+                "--miners",
+                "0",
+                "--sample-size",
+                "8",
+                "--atom-actions-yaml",
+                str(atom_actions_path),
+                "--skip-plan-folder-sync",
+            ]
+        )
+
+    assert tampered_exc.value.code == 2
+    assert upstream_calls == []
+    assert resumed_stage3_calls == []
+    assert (compiled / "target_a.research.json").read_bytes() == tampered_bytes
+
+
 def test_two_shadow_cycles_retain_open_cases_and_add_new_evidence_without_export(
     tmp_path: Path,
 ) -> None:

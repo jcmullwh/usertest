@@ -402,6 +402,181 @@ def test_reciprocal_disjoint_same_cause_is_one_provisional_research_unit() -> No
     assert "same_cause_group_id" not in unit
 
 
+def test_reciprocal_provisional_group_normalizes_nondeterministic_group_names() -> None:
+    """Equivalent members survive different names from independent model batches."""
+
+    items = [
+        _case("problem:a", "case:a", ["atom:a"]),
+        _case("problem:b", "case:b", ["atom:b"]),
+        _case("problem:c", "case:c", ["atom:c"]),
+    ]
+    decisions = []
+    for index, problem_id in enumerate(("problem:a", "problem:b", "problem:c"), 1):
+        decisions.append(
+            {
+                "focus_id": problem_id,
+                "action": "same_cause_group",
+                "group_id": f"model-authored-name-{index}",
+                "member_ids": ["problem:a", "problem:b", "problem:c"],
+                "evidence_atom_ids": ["atom:a", "atom:b", "atom:c"],
+                "rationale": "All three facets warrant one shared-mechanism investigation.",
+                "review_confidence": 0.8,
+            }
+        )
+
+    result = canonicalize_problem_cases(items, decisions, strict_review=True)
+    reversed_result = canonicalize_problem_cases(
+        items,
+        list(reversed(decisions)),
+        strict_review=True,
+    )
+
+    assert len(result) == 1
+    assert reversed_result == result
+    unit = result[0]
+    assert unit["case_identity_status"] == "provisional_same_cause"
+    assert unit["case_identity_candidate_ids"] == ["case:a", "case:b", "case:c"]
+    group = unit["provisional_same_cause_group"]
+    assert group["group_id"].startswith("cause:provisional:")
+    assert group["member_case_ids"] == ["case:a", "case:b", "case:c"]
+    actions = unit["case_relation_actions"]
+    assert {
+        action.get("submitted_group_id")
+        for action in actions
+        if action.get("action") == "same_cause_group"
+    } == {
+        "model-authored-name-1",
+        "model-authored-name-2",
+        "model-authored-name-3",
+    }
+    assert all(
+        action.get("canonical_group_id") == group["group_id"]
+        for action in actions
+        if action.get("action") == "same_cause_group"
+    )
+
+
+def test_reciprocal_shared_evidence_group_normalizes_group_names() -> None:
+    """Stronger identity evidence cannot make model-authored labels authoritative."""
+
+    items = [
+        _case("problem:a", "case:a", ["atom:shared"]),
+        _case("problem:b", "case:b", ["atom:shared"]),
+    ]
+    decisions = [
+        {
+            "focus_id": "problem:a",
+            "action": "same_cause_group",
+            "group_id": "model-name-a",
+            "member_ids": ["problem:a", "problem:b"],
+            "evidence_atom_ids": ["atom:shared"],
+            "rationale": "The same source observation supports both facets.",
+            "review_confidence": 0.8,
+        },
+        {
+            "focus_id": "problem:b",
+            "action": "same_cause_group",
+            "group_id": "model-name-b",
+            "member_ids": ["problem:a", "problem:b"],
+            "evidence_atom_ids": ["atom:shared"],
+            "rationale": "The same source observation supports both facets.",
+            "review_confidence": 0.8,
+        },
+    ]
+
+    result = canonicalize_problem_cases(items, decisions, strict_review=True)
+
+    assert len(result) == 1
+    unit = result[0]
+    assert unit["case_id"] == "case:a"
+    assert unit["same_cause_group_id"].startswith("cause:canonical:")
+    assert unit.get("case_identity_status") != "provisional_same_cause"
+    assert {
+        action.get("submitted_group_id") for action in unit["case_relation_actions"]
+    } == {"model-name-a", "model-name-b"}
+
+
+def test_reciprocal_disjoint_alias_cycle_becomes_provisional_research_group() -> None:
+    """Opposite alias directions retain the hypothesis without inventing a durable owner."""
+
+    items = [
+        _case("problem:a", "case:a", ["atom:a"]),
+        _case("problem:b", "case:b", ["atom:b"]),
+    ]
+    decisions = [
+        {
+            "focus_id": "problem:a",
+            "action": "alias",
+            "alias_target_id": "problem:b",
+            "evidence_atom_ids": ["atom:a", "atom:b"],
+            "rationale": "Both facets describe the same suspected startup failure.",
+            "review_confidence": 0.8,
+        },
+        {
+            "focus_id": "problem:b",
+            "action": "alias",
+            "alias_target_id": "problem:a",
+            "evidence_atom_ids": ["atom:a", "atom:b"],
+            "rationale": "Both facets describe the same suspected startup failure.",
+            "review_confidence": 0.8,
+        },
+    ]
+
+    result = canonicalize_problem_cases(items, decisions, strict_review=True)
+
+    assert len(result) == 1
+    unit = result[0]
+    assert unit["case_identity_status"] == "provisional_same_cause"
+    assert unit["case_identity_candidate_ids"] == ["case:a", "case:b"]
+    assert "absorbed_case_ids" not in unit
+    actions = unit["case_relation_actions"]
+    assert {action.get("submitted_action") for action in actions} == {"alias"}
+    assert {action.get("submitted_alias_target_id") for action in actions} == {
+        "problem:a",
+        "problem:b",
+    }
+    assert all("submitted_group_id" not in action for action in actions)
+    assert all(
+        str(action.get("canonical_group_id", "")).startswith("cause:provisional:")
+        for action in actions
+    )
+
+
+def test_reciprocal_alias_cycle_with_shared_evidence_remains_one_provisional_group() -> None:
+    """Adding an objective evidence edge cannot reduce relation recall."""
+
+    items = [
+        _case("problem:a", "case:a", ["atom:shared"]),
+        _case("problem:b", "case:b", ["atom:shared"]),
+    ]
+    decisions = [
+        {
+            "focus_id": "problem:a",
+            "action": "alias",
+            "alias_target_id": "problem:b",
+            "evidence_atom_ids": ["atom:shared"],
+            "rationale": "Both facets cite the same source observation.",
+            "review_confidence": 0.8,
+        },
+        {
+            "focus_id": "problem:b",
+            "action": "alias",
+            "alias_target_id": "problem:a",
+            "evidence_atom_ids": ["atom:shared"],
+            "rationale": "Both facets cite the same source observation.",
+            "review_confidence": 0.8,
+        },
+    ]
+
+    result = canonicalize_problem_cases(items, decisions, strict_review=True)
+
+    assert len(result) == 1
+    assert result[0]["case_identity_status"] == "provisional_same_cause"
+    assert result[0]["provisional_same_cause_group"]["group_id"].startswith(
+        "cause:provisional:"
+    )
+
+
 def test_one_sided_disjoint_same_cause_stays_separate() -> None:
     items = [
         _case("problem:a", "case:a", ["atom:a"]),
@@ -588,7 +763,7 @@ def test_full_runner_verified_causal_identity_allows_durable_grouping() -> None:
     )
 
     assert len(result) == 1
-    assert result[0]["same_cause_group_id"] == "cause:verified"
+    assert result[0]["same_cause_group_id"].startswith("cause:canonical:")
     assert result[0].get("case_identity_status") != "provisional_same_cause"
 
 

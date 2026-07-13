@@ -167,8 +167,11 @@ from runner_core.stderr_diagnostics import (
     _classify_failure_subtype,
     _codex_metadata_capture_from_stderr,
     _extract_claude_quota_exhaustion,
+    _extract_codex_subscription_usage_limit,
+    _extract_raw_events_error_messages,
     _extract_raw_events_plaintext_excerpt,
     _format_claude_quota_exhaustion_stderr,
+    _format_codex_subscription_usage_limit_stderr,
     _is_retryable_provider_capacity_failure,
     _is_retryable_tool_use_id_collision_failure,
     _is_retryable_transient_network_failure,
@@ -207,6 +210,29 @@ from runner_core.workspace_state_hash import WorkspaceStateHash, compute_workspa
 
 def _is_windows() -> bool:
     return os.name == "nt"
+
+
+def _codex_subscription_external_wait(text: str) -> dict[str, Any] | None:
+    """Project a provider usage-limit message into a resumable, non-API wait state."""
+    usage_limit = _extract_codex_subscription_usage_limit(text)
+    if usage_limit is None:
+        return None
+    return {
+        "schema_version": 1,
+        "state": "parked",
+        "reason": "codex_chatgpt_subscription_usage_limit",
+        "retryable": True,
+        "retry_disposition": "resume_after_provider_reset",
+        "retry_mode": "resume_same_session",
+        "resume_after": {
+            "raw": usage_limit.get("resume_after_raw"),
+            "timezone": usage_limit.get("resume_after_timezone"),
+        },
+        "provider": "codex",
+        "route": "chatgpt_subscription",
+        "api_fallback_allowed": False,
+        "settings_url": usage_limit.get("settings_url"),
+    }
 
 
 @dataclass(frozen=True)
@@ -4708,6 +4734,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             shell_status = "unknown"
             shell_reason = ""
             allowed_tools: list[str] | None = None
+            preflight_external_wait: dict[str, Any] | None = None
+            preflight_external_wait_message = ""
             if request.agent == "claude":
                 raw_allowed = claude_policy.get("allowed_tools")
                 if isinstance(raw_allowed, list):
@@ -4832,6 +4860,23 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     ),
                 )
                 agent_shell_probe_payload = agent_shell_probe.to_dict()
+                if request.agent == "codex":
+                    preflight_external_wait_message = "\n".join(
+                        str(agent_shell_probe_payload.get(key) or "").strip()
+                        for key in (
+                            "stdout_excerpt",
+                            "stderr_excerpt",
+                            "last_message_excerpt",
+                            "reason",
+                        )
+                        if str(agent_shell_probe_payload.get(key) or "").strip()
+                    )
+                    preflight_external_wait = _codex_subscription_external_wait(
+                        preflight_external_wait_message
+                    )
+                    if preflight_external_wait is not None:
+                        agent_shell_probe_payload["external_wait"] = dict(preflight_external_wait)
+                        preflight_meta["external_wait"] = dict(preflight_external_wait)
                 if probe_workspace_before is not None:
                     probe_workspace_after = capture_probe_workspace_state(acquired.workspace_dir)
                     workspace_unchanged = probe_workspace_after == probe_workspace_before
@@ -5157,6 +5202,42 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "workspace_root_snapshot": preflight_workspace_snapshot,
                 },
             )
+
+            if preflight_external_wait is not None:
+                message = (
+                    "Codex ChatGPT subscription usage is exhausted; mission dispatch is parked "
+                    "until the provider reset. The signed-in subscription route remains required."
+                )
+                hint = (
+                    "Resume this retained workflow after the recorded reset using the same "
+                    "ChatGPT login; do not switch to API billing."
+                )
+                _write_json(
+                    run_dir / "error.json",
+                    {
+                        "type": "AgentExternalWait",
+                        "subtype": "provider_subscription_usage_limit",
+                        "code": "codex_chatgpt_subscription_usage_limit",
+                        "agent": request.agent,
+                        "provider": "codex",
+                        "phase": "agent_shell_probe",
+                        "message": message,
+                        "hint": hint,
+                        "provider_message": preflight_external_wait_message,
+                        "route": "chatgpt_subscription",
+                        "api_fallback_allowed": False,
+                        "external_wait": preflight_external_wait,
+                    },
+                )
+                return RunResult(
+                    run_dir=run_dir,
+                    exit_code=1,
+                    report_validation_errors=[
+                        message,
+                        "code=codex_chatgpt_subscription_usage_limit",
+                        f"hint={hint}",
+                    ],
+                )
 
             if python_validation_required and not python_validation_enabled:
                 probe_remediation = (
@@ -6199,6 +6280,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             report_json = None
             report_validation_errors = []
             forced_exit_code: int | None = None
+            parked_external_wait: dict[str, Any] | None = None
 
             while True:
                 attempt_number = len(attempts_meta) + 1
@@ -6385,6 +6467,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         attempt_last_text = last_message_attempt_path.read_text(encoding="utf-8")
                     except OSError:
                         attempt_last_text = ""
+                attempt_raw_error_text = (
+                    _extract_raw_events_error_messages(raw_events_attempt_path)
+                    if agent_exit_code != 0 and raw_events_attempt_path.exists()
+                    else ""
+                )
                 if agent_exit_code == 0:
                     try:
                         attempt_report_json = _extract_json_object(attempt_last_text)
@@ -6818,11 +6905,19 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         for value in (
                             attempt_stderr_text,
                             attempt_last_text.strip() if attempt_last_text else "",
+                            attempt_raw_error_text,
                         )
                         if value
                     ]
                 )
                 failure_subtype = _classify_failure_subtype(failure_text)
+                attempt_external_wait = (
+                    _codex_subscription_external_wait(failure_text)
+                    if request.agent == "codex" and agent_exit_code != 0
+                    else None
+                )
+                if attempt_external_wait is not None:
+                    parked_external_wait = dict(attempt_external_wait)
                 if codex_personality_warning_detected:
                     failure_subtype = "invalid_agent_config"
                 attempt_finished_utc = _utc_now_z()
@@ -6919,6 +7014,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                             attempt_number=attempt_number,
                         )
                 attempts_meta.append(attempt_meta)
+                if attempt_external_wait is not None:
+                    attempt_meta["external_wait"] = dict(attempt_external_wait)
+                    attempt_meta["retry_reason"] = "provider_subscription_usage_limit"
+                    attempt_meta["retry_scheduled"] = False
+                    attempt_meta["retry_disposition"] = "parked_until_resume_after"
 
                 if codex_personality_warning_detected:
                     message = (
@@ -7104,6 +7204,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     "rate_limit_retries_used": rate_limit_retry_count,
                     "followup_attempts_configured": followup_attempts,
                     "followup_attempts_used": followup_count,
+                    **(
+                        {"external_wait": parked_external_wait}
+                        if parked_external_wait is not None
+                        else {}
+                    ),
                 },
             )
 
@@ -7353,6 +7458,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 raw_events_plaintext_excerpt = _extract_raw_events_plaintext_excerpt(
                     raw_events_path
                 )
+            raw_events_error_text = (
+                _extract_raw_events_error_messages(raw_events_path)
+                if raw_events_path.exists()
+                else ""
+            )
 
             last_message_excerpt = last_message_text
             last_message_truncated = False
@@ -7361,11 +7471,18 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 last_message_truncated = True
 
             provider_message_text = last_message_text
+            if not provider_message_text.strip() and raw_events_error_text.strip():
+                provider_message_text = raw_events_error_text.strip()
             if not provider_message_text.strip() and raw_events_plaintext_excerpt.strip():
                 provider_message_text = raw_events_plaintext_excerpt.strip()
 
             combined_text = "\n".join([x for x in (stderr_text, provider_message_text) if x])
             failure_subtype = _classify_failure_subtype(combined_text)
+            codex_subscription_limit = (
+                _extract_codex_subscription_usage_limit(combined_text)
+                if request.agent == "codex"
+                else None
+            )
             if (
                 stderr_text
                 and failure_subtype
@@ -7431,6 +7548,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             quota_exhaustion: dict[str, Any] | None = None
             if request.agent == "claude":
                 quota_exhaustion = _extract_claude_quota_exhaustion(combined_text)
+
+            if codex_subscription_limit is not None:
+                external_wait_stderr = _format_codex_subscription_usage_limit_stderr(
+                    provider_message=provider_message_text,
+                    resume_after_raw=codex_subscription_limit.get("resume_after_raw"),
+                )
+                stderr_text = external_wait_stderr
+                try:
+                    stderr_path.write_text(stderr_text.rstrip() + "\n", encoding="utf-8")
+                except OSError:
+                    pass
 
             if not stderr_text and quota_exhaustion is not None and provider_message_text.strip():
                 stderr_text = _format_claude_quota_exhaustion_stderr(
@@ -7508,6 +7636,20 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                         "raw": quota_exhaustion.get("reset_raw"),
                         "timezone": quota_exhaustion.get("reset_timezone"),
                     },
+                }
+            if codex_subscription_limit is not None:
+                external_wait = _codex_subscription_external_wait(combined_text)
+                assert external_wait is not None
+                error_payload = {
+                    **error_payload,
+                    "type": "AgentExternalWait",
+                    "subtype": "provider_subscription_usage_limit",
+                    "code": "codex_chatgpt_subscription_usage_limit",
+                    "provider": "codex",
+                    "provider_message": provider_message_text.strip(),
+                    "route": "chatgpt_subscription",
+                    "api_fallback_allowed": False,
+                    "external_wait": external_wait,
                 }
 
             if not (run_dir / "error.json").exists():

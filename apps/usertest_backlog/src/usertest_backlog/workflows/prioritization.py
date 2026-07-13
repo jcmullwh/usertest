@@ -10,6 +10,10 @@ from backlog_miner.prompt_correction import (
 )
 
 from usertest_backlog.shared import *
+from usertest_backlog.workflows.downstream_hydration import (
+    hydrate_retained_downstream_chain,
+)
+from usertest_backlog.workflows.research_hydration import hydrate_retained_research_proof
 
 _PRIORITY_FORBIDDEN_SOLUTION_FIELDS = frozenset(
     {
@@ -20,6 +24,268 @@ _PRIORITY_FORBIDDEN_SOLUTION_FIELDS = frozenset(
         "implementation_steps",
     }
 )
+
+_RESEARCH_ROUTE_REVISION = "runner_research_route_v2"
+_RESEARCH_DISPATCH_ROUTES = frozenset(
+    {"research_new", "research_update", "resume_prior", "reassess_actionability"}
+)
+_DOWNSTREAM_ELIGIBLE_ROUTES = frozenset(
+    {*_RESEARCH_DISPATCH_ROUTES, "continue_downstream", "await_outcome"}
+)
+_RESEARCH_ROUTE_ORDER = {
+    "research_update": 0,
+    "research_new": 1,
+    "resume_prior": 2,
+    "reassess_actionability": 3,
+    "await_evidence": 4,
+    "continue_downstream": 5,
+    "await_outcome": 6,
+}
+_PRIORITY_BUCKET_ORDER = {"p0": 0, "p1": 1, "p2": 2, "p3": 3, "watch": 4}
+
+
+def _prior_research_summary(record: Mapping[str, Any]) -> dict[str, Any] | None:
+    prior_raw = record.get("prior_stage_context")
+    prior = prior_raw if isinstance(prior_raw, Mapping) else {}
+    research_raw = prior.get("research")
+    research = research_raw if isinstance(research_raw, Mapping) else {}
+    current = research.get("current")
+    return dict(current) if isinstance(current, Mapping) else None
+
+
+def _prior_priority_route_reference(record: Mapping[str, Any]) -> dict[str, Any] | None:
+    prior_raw = record.get("prior_stage_context")
+    prior = prior_raw if isinstance(prior_raw, Mapping) else {}
+    refs_raw = prior.get("artifact_refs")
+    refs = refs_raw if isinstance(refs_raw, Mapping) else {}
+    stage_raw = refs.get("problem_prioritization")
+    stage = stage_raw if isinstance(stage_raw, Mapping) else {}
+    item_refs = stage.get("item_refs")
+    if not isinstance(item_refs, list):
+        return None
+    case_id = _coerce_string(record.get("case_id"))
+    problem_id = _coerce_string(record.get("problem_id"))
+    for raw in reversed(item_refs):
+        if not isinstance(raw, Mapping):
+            continue
+        if case_id is not None and _coerce_string(raw.get("case_id")) == case_id:
+            return dict(raw)
+        if problem_id is not None and _coerce_string(raw.get("problem_id")) == problem_id:
+            return dict(raw)
+    return None
+
+
+def _research_frontier_sha256(record: Mapping[str, Any]) -> str:
+    """Hash the evidence/research frontier, excluding mutable artifact paths and prose."""
+
+    current = _prior_research_summary(record) or {}
+    revision_raw = record.get("case_revision")
+    try:
+        case_revision = max(1, int(revision_raw or 1))
+    except (TypeError, ValueError):
+        case_revision = 1
+    projection = {
+        "case_id": _coerce_string(record.get("case_id")),
+        "case_revision": case_revision,
+        "source_evidence_atom_ids": sorted(
+            {
+                value.strip()
+                for value in (
+                    record.get("source_evidence_atom_ids")
+                    if isinstance(record.get("source_evidence_atom_ids"), list)
+                    else record.get("evidence_atom_ids")
+                    if isinstance(record.get("evidence_atom_ids"), list)
+                    else []
+                )
+                if isinstance(value, str) and value.strip()
+            }
+        ),
+        "source_evidence_snapshot_complete": record.get(
+            "source_evidence_snapshot_complete"
+        )
+        is True,
+        "source_evidence_snapshot_sha256": _coerce_string(
+            record.get("source_evidence_snapshot_sha256")
+        ),
+        "research": {
+            key: current.get(key)
+            for key in (
+                "repo_revision",
+                "research_schema_version",
+                "research_status",
+                "reproduction_status",
+                "root_cause_status",
+                "root_cause_confidence",
+                "blocking_reasons",
+                "material_unknown_summary",
+                "verified_mechanism_sha256",
+            )
+        },
+    }
+    return sha256(
+        json.dumps(
+            projection,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def _runner_research_route(record: Mapping[str, Any]) -> dict[str, Any]:
+    """Choose whether this cycle should spend a Stage-3 research invocation.
+
+    The route never terminates or deletes a case.  It separates durable case identity from
+    immediate scheduling and gives every parked case a concrete reconsideration trigger.
+    """
+
+    frontier_sha256 = _research_frontier_sha256(record)
+    current = _prior_research_summary(record)
+    previous = _prior_priority_route_reference(record) or {}
+    previous_route = _coerce_string(previous.get("research_route"))
+    previous_revision = _coerce_string(previous.get("research_route_revision"))
+    previous_frontier = _coerce_string(previous.get("research_frontier_sha256"))
+    previous_snapshot_id = _coerce_string(previous.get("research_snapshot_id"))
+    current_snapshot_id = (
+        _coerce_string(current.get("stage_snapshot_id")) if current is not None else None
+    )
+
+    route: str
+    reason: str
+    reconsider_when: str | None = None
+    if current is None:
+        route = "research_new"
+        reason = (
+            "The canonical case has no retained research proof; current-cycle discovery and "
+            "historical carry-forward both enter the same first-research path."
+        )
+    else:
+        blocking_reasons = [
+            value.casefold()
+            for value in (
+                current.get("blocking_reasons")
+                if isinstance(current.get("blocking_reasons"), list)
+                else []
+            )
+            if isinstance(value, str) and value.strip()
+        ]
+        external_wait = any(
+            marker in value
+            for value in blocking_reasons
+            for marker in ("provider_external_wait", "usage_limit", "subscription_wait")
+        )
+        malformed_legacy = any(
+            marker in value
+            for value in blocking_reasons
+            for marker in ("malformed", "schema_invalid", "contract_invalid")
+        )
+        reassessment_completed_without_frontier_change = bool(
+            previous_revision == _RESEARCH_ROUTE_REVISION
+            and previous_route == "reassess_actionability"
+            and previous_frontier == frontier_sha256
+            and previous_snapshot_id is not None
+            and current_snapshot_id is not None
+            and previous_snapshot_id != current_snapshot_id
+        )
+        stable_wait = bool(
+            previous_revision == _RESEARCH_ROUTE_REVISION
+            and previous_route == "await_evidence"
+            and previous_frontier == frontier_sha256
+            and previous_snapshot_id == current_snapshot_id
+        )
+        research_status = _coerce_string(current.get("research_status")) or "unknown"
+        root_cause_status = _coerce_string(current.get("root_cause_status")) or "unknown"
+        if external_wait:
+            route = "resume_prior"
+            reason = "A retained provider-wait frontier must resume rather than restart."
+        elif research_status in {"blocked", "partial"} or root_cause_status == "blocked":
+            if reassessment_completed_without_frontier_change or stable_wait:
+                route = "await_evidence"
+                reason = (
+                    "A runner-versioned reassessment completed and left the exact same blocked "
+                    "frontier; identity is retained without immediately repeating that mission."
+                )
+                reconsider_when = (
+                    "A new source-evidence atom, explicit blocker-recheck receipt, or resumable "
+                    "same-author checkpoint changes the recorded frontier."
+                )
+            else:
+                route = "reassess_actionability"
+                reason = (
+                    "The retained blocked proof must receive a current runner-versioned "
+                    "reassessment before it may wait."
+                    if not malformed_legacy
+                    else "A legacy malformed proof must receive a current runner-versioned "
+                    "actionability reassessment under the self-healing research contract."
+                )
+        else:
+            hydrated, hydration_errors = hydrate_retained_research_proof(record)
+            if hydrated is not None and not hydration_errors:
+                downstream_chain, downstream_errors = hydrate_retained_downstream_chain(
+                    record,
+                    research_dossier=hydrated,
+                )
+                if downstream_chain is not None and not downstream_errors:
+                    route = "await_outcome"
+                    reason = (
+                        "The exact retained research, option, selection, and plan chain is "
+                        "content-bound, currently ready, and unchanged; no Stage 3-6 model "
+                        "work is needed until outcome or source evidence changes."
+                    )
+                else:
+                    route = "continue_downstream"
+                    reason = (
+                        "The complete retained Stage-3 dossier is currently ready, but the "
+                        "full downstream chain is absent, stale, or unverified and will "
+                        "self-heal through the normal downstream path. First chain result: "
+                        + (
+                            downstream_errors[0]
+                            if downstream_errors
+                            else "downstream_chain_unavailable"
+                        )
+                        + "."
+                    )
+            else:
+                route = "research_update"
+                reason = (
+                    "The retained nonblocked summary could not hydrate a complete currently-ready "
+                    "proof, so the case requires fresh revalidation rather than a checkpoint "
+                    "resume. First hydration result: "
+                    + (hydration_errors[0] if hydration_errors else "proof_unavailable")
+                    + "."
+                )
+
+    return {
+        "research_route": route,
+        "research_route_revision": _RESEARCH_ROUTE_REVISION,
+        "research_frontier_sha256": frontier_sha256,
+        "research_snapshot_id": current_snapshot_id,
+        "route_reason": reason,
+        "reconsider_when": reconsider_when,
+        "selected_for_research": route in _RESEARCH_DISPATCH_ROUTES,
+        "eligible_for_downstream": route in _DOWNSTREAM_ELIGIBLE_ROUTES,
+    }
+
+
+def _research_dispatch_sort_key(decision: Mapping[str, Any]) -> tuple[Any, ...]:
+    """Return deterministic Stage-3 order from route, urgency, score, and identity."""
+
+    score_raw = decision.get("pre_score")
+    score = (
+        float(score_raw)
+        if isinstance(score_raw, (int, float)) and not isinstance(score_raw, bool)
+        else 0.0
+    )
+    return (
+        _RESEARCH_ROUTE_ORDER.get(_coerce_string(decision.get("research_route")) or "", 99),
+        _PRIORITY_BUCKET_ORDER.get(
+            _coerce_string(decision.get("priority_bucket")) or "watch", 99
+        ),
+        -score,
+        _coerce_string(decision.get("case_id"))
+        or _coerce_string(decision.get("problem_id"))
+        or "",
+    )
 
 
 def _priority_response_projection(
@@ -76,8 +342,6 @@ def _priority_response_projection(
             item_errors.append(f"prioritizer_invalid_problem_decision:{problem_id}")
         if decision.get("priority_bucket") not in valid_buckets:
             item_errors.append(f"prioritizer_invalid_priority_bucket:{problem_id}")
-        if decision.get("selected_for_research") is not True:
-            item_errors.append(f"prioritizer_problem_not_selected_for_research:{problem_id}")
         if _coerce_string(decision.get("priority_rationale")) is None:
             item_errors.append(f"prioritizer_missing_priority_rationale:{problem_id}")
         if decision.get("priority_status") != "prioritized":
@@ -198,16 +462,22 @@ def _priority_attempt_history(
     return sorted(history, key=lambda record: int(record["attempt_number"]))
 
 
-def _enforce_full_drain_research_policy(decisions: list[dict[str, Any]]) -> None:
-    """Make urgency a research-order decision, never a permanent case filter."""
+def _enforce_research_routing_policy(decisions: list[dict[str, Any]]) -> None:
+    """Apply runner-owned per-cycle routes without terminating or deleting cases."""
 
     for decision in decisions:
         if isinstance(decision.get("problem_id"), str) and not decision.get("_parse_warning"):
-            # Eligibility is runner-owned. ``priority_status`` is model output and
-            # therefore cannot be allowed to turn a real canonical case into a
-            # permanent watch/defer bucket.
-            decision["selected_for_research"] = True
+            route = _coerce_string(decision.get("research_route")) or "research_new"
+            decision["research_route"] = route
+            decision["selected_for_research"] = route in _RESEARCH_DISPATCH_ROUTES
+            decision["eligible_for_downstream"] = route in _DOWNSTREAM_ELIGIBLE_ROUTES
             decision["priority_status"] = "prioritized"
+
+
+def _enforce_full_drain_research_policy(decisions: list[dict[str, Any]]) -> None:
+    """Compatibility wrapper for callers; routing now replaces unconditional full drain."""
+
+    _enforce_research_routing_policy(decisions)
 
 
 def _server_normalize_priority_decisions(
@@ -215,6 +485,7 @@ def _server_normalize_priority_decisions(
     decisions: list[dict[str, Any]],
     problem_records: list[dict[str, Any]],
     signals_by_problem_id: dict[str, dict[str, Any]],
+    research_routes_by_problem_id: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Return one research-eligible decision for every canonical problem.
 
@@ -285,16 +556,20 @@ def _server_normalize_priority_decisions(
         if not cited:
             cited = sorted(record_evidence)
         candidate.pop("_parse_warning", None)
+        route = dict((research_routes_by_problem_id or {}).get(problem_id, {}))
+        if not route:
+            route = _runner_research_route(record)
         candidate.update(
             {
                 "problem_id": problem_id,
                 "priority_bucket": bucket,
-                "selected_for_research": True,
+                "selected_for_research": route["selected_for_research"],
                 "priority_rationale": rationale,
                 "evidence_atom_ids_used": cited,
                 "priority_status": "prioritized",
-                "selection_authority": "runner_full_drain_v1",
+                "selection_authority": _RESEARCH_ROUTE_REVISION,
                 "model_priority_accepted": use_model,
+                **route,
             }
         )
         normalized.append(candidate)
@@ -383,6 +658,18 @@ def _run_problem_prioritization_stage(
         embedder=None,
     )
     priority_signals = compute_problem_priority_signals(problem_records, atoms)
+    research_routes_by_problem_id = {
+        str(record["problem_id"]): _runner_research_route(record)
+        for record in problem_records
+        if isinstance(record, Mapping)
+        and isinstance(record.get("problem_id"), str)
+        and str(record["problem_id"]).strip()
+    }
+    for item in priority_signals:
+        problem_id = _coerce_string(item.get("problem_id"))
+        route = research_routes_by_problem_id.get(problem_id or "")
+        if route is not None:
+            item.update(route)
     signals_by_problem_id: dict[str, dict[str, Any]] = {
         str(item.get("problem_id")): item
         for item in priority_signals
@@ -429,10 +716,8 @@ def _run_problem_prioritization_stage(
             signals = signals_by_problem_id.get(pid, {})
             bucket = signals.get("bucket_candidate") if isinstance(signals, dict) else None
             bucket_s = bucket if isinstance(bucket, str) else "watch"
-            # Every canonical stage-1 problem is real enough to merit causal research.
-            # Priority controls ordering, never permanent eligibility; otherwise a
-            # single-run p2/p3/watch case can remain unresearched forever.
-            selected = True
+            route = research_routes_by_problem_id.get(pid) or _runner_research_route(rec)
+            selected = route["selected_for_research"]
             pre_score = signals.get("pre_score") if isinstance(signals, dict) else None
             score_breakdown = signals.get("score_breakdown") if isinstance(signals, dict) else None
             cited = (
@@ -455,6 +740,7 @@ def _run_problem_prioritization_stage(
                     "pre_score": pre_score,
                     "bucket_candidate": bucket_s,
                     "score_breakdown": score_breakdown,
+                    **route,
                     "_dry_run_synthesized": True,
                 }
             )
@@ -748,6 +1034,7 @@ def _run_problem_prioritization_stage(
         decisions=decisions,
         problem_records=problem_records,
         signals_by_problem_id=signals_by_problem_id,
+        research_routes_by_problem_id=research_routes_by_problem_id,
     )
     warnings_list.extend(normalization_warnings)
 
@@ -765,11 +1052,11 @@ def _run_problem_prioritization_stage(
             if "score_breakdown" not in dec:
                 dec["score_breakdown"] = signals.get("score_breakdown")
 
-    # Stage 1 has already excluded noise, proposals, and duplicates. Once a canonical
-    # problem reaches prioritization it must enter research; the bucket determines
-    # urgency/order only. Keep this runner-owned so model conservatism cannot silently
-    # strand lower-frequency but legitimate problems.
-    _enforce_full_drain_research_policy(decisions)
+    # Persistent case identity is not the same thing as an instruction to spend another
+    # research mission this cycle. Runner-owned routes retain every case and its explicit
+    # retry trigger while selecting only new, updated, resumable, or one-time reassessment work.
+    _enforce_research_routing_policy(decisions)
+    decisions.sort(key=_research_dispatch_sort_key)
 
     # Guardrail: stage 2 must not contain solution fields.
     for dec in decisions:

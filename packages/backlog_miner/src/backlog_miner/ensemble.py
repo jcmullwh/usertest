@@ -33,6 +33,10 @@ from backlog_core import (
     parse_ticket_list,
 )
 from runner_core import RunnerConfig
+from runner_core.stderr_diagnostics import (
+    _extract_codex_subscription_usage_limit,
+    _extract_raw_events_error_messages,
+)
 
 _PROMPT_MANIFEST_FILENAME = "manifest.json"
 
@@ -156,6 +160,7 @@ def _write_codex_auth_receipt(
     raw_events_path: Path,
     last_message_path: Path,
     stderr_path: Path,
+    external_wait_detected: bool = False,
 ) -> None:
     """Persist a self-hashed, secret-free proof for one Codex prompt invocation."""
 
@@ -181,17 +186,30 @@ def _write_codex_auth_receipt(
             or (canonical_resumed_id is not None and canonical_session_id == canonical_resumed_id)
         )
     )
-    fully_verified = bool(
+    route_verified = bool(
         preflight.ok
-        and model_succeeded
         and postcheck.ok
         and environment_verified
         and routing_config_verified
         and session_continuity_verified
     )
+    external_wait_verified = bool(
+        external_wait_detected
+        and model_attempted
+        and model_exit_code is not None
+        and model_exit_code != 0
+        and route_verified
+    )
+    fully_verified = bool(route_verified and model_succeeded)
     payload: dict[str, Any] = {
         "schema_version": 2,
-        "status": "verified" if fully_verified else "failed",
+        "status": (
+            "verified"
+            if fully_verified
+            else "external_wait_verified"
+            if external_wait_verified
+            else "failed"
+        ),
         "auth_mode": "canonical_host_chatgpt_subscription_cache",
         "chatgpt_base_url": CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
         "openai_base_url": CODEX_OPENAI_SUBSCRIPTION_BASE_URL,
@@ -229,7 +247,8 @@ def _write_codex_auth_receipt(
             },
         },
         "postcheck": _redacted_login_status(postcheck),
-        "chatgpt_subscription_auth_verified": fully_verified,
+        "chatgpt_subscription_auth_verified": fully_verified or external_wait_verified,
+        "external_wait_attested": external_wait_verified,
     }
     payload["receipt_sha256"] = _json_digest(payload)
     _write_json_atomic(receipt_path, payload)
@@ -242,6 +261,7 @@ def verify_codex_auth_receipt(
     raw_events_path: Path,
     last_message_path: Path,
     stderr_path: Path,
+    allow_external_wait: bool = False,
 ) -> list[str]:
     """Verify one finalized generic Codex subscription receipt and its artifacts."""
 
@@ -261,7 +281,7 @@ def verify_codex_auth_receipt(
     if schema_version not in {1, 2}:
         errors.append("codex_auth_receipt_schema_version_invalid")
     exact_fields = {
-        "status": "verified",
+        "status": "external_wait_verified" if allow_external_wait else "verified",
         "auth_mode": "canonical_host_chatgpt_subscription_cache",
         "chatgpt_base_url": CODEX_CHATGPT_SUBSCRIPTION_BASE_URL,
         "openai_base_url": CODEX_OPENAI_SUBSCRIPTION_BASE_URL,
@@ -307,7 +327,19 @@ def verify_codex_auth_receipt(
             errors.append(f"codex_auth_receipt_{status_field}_environment_not_blank")
     activation_raw = raw.get("model_activation")
     activation = activation_raw if isinstance(activation_raw, dict) else {}
-    if (
+    if allow_external_wait:
+        exit_code = activation.get("exit_code")
+        if (
+            raw.get("external_wait_attested") is not True
+            or activation.get("attempted") is not True
+            or isinstance(exit_code, bool)
+            or not isinstance(exit_code, int)
+            or exit_code == 0
+            or activation.get("succeeded") is not False
+            or _codex_subscription_wait_from_raw_events(raw_events_path) is None
+        ):
+            errors.append("codex_auth_receipt_external_wait_activation_invalid")
+    elif (
         activation.get("attempted") is not True
         or activation.get("exit_code") != 0
         or activation.get("succeeded") is not True
@@ -371,6 +403,50 @@ class BacklogPromptResult:
     stderr_path: Path
     auth_receipt_path: Path | None
     elapsed_seconds: float
+
+
+class BacklogProviderExternalWait(BaseException):
+    """Control-flow signal for one adapter-attested provider-global subscription wait.
+
+    This deliberately does not inherit from ``Exception``: model-output correction loops catch
+    ordinary invocation failures as repairable author errors. A provider-global wait is neither
+    model output nor case-local, so it must cross those loops unchanged until orchestration parks.
+    """
+
+    def __init__(self, external_wait: dict[str, Any]) -> None:
+        self.external_wait = json.loads(json.dumps(external_wait, ensure_ascii=False))
+        super().__init__("codex_chatgpt_subscription_usage_limit")
+
+
+def _codex_external_wait_artifact_path(raw_events_path: Path) -> Path:
+    filename = raw_events_path.name
+    suffix = ".raw_events.jsonl"
+    tag = filename[: -len(suffix)] if filename.endswith(suffix) else raw_events_path.stem
+    return raw_events_path.with_name(f"{tag}.external_wait.json")
+
+
+def _codex_subscription_wait_from_raw_events(raw_events_path: Path) -> dict[str, Any] | None:
+    error_text = _extract_raw_events_error_messages(raw_events_path)
+    usage_limit = _extract_codex_subscription_usage_limit(error_text)
+    if usage_limit is None:
+        return None
+    return {
+        "schema_version": 1,
+        "status": "parked_external_wait",
+        "scope": "backlog_model_pipeline",
+        "reason": "codex_chatgpt_subscription_usage_limit",
+        "provider": "codex",
+        "state": "parked",
+        "retry_mode": "resume_same_session",
+        "retry_disposition": "resume_after_provider_reset",
+        "resume_after": {
+            "raw": usage_limit.get("resume_after_raw"),
+            "timezone": usage_limit.get("resume_after_timezone"),
+        },
+        "settings_url": usage_limit.get("settings_url"),
+        "route": "chatgpt_subscription",
+        "api_fallback_allowed": False,
+    }
 
 
 _CHANGE_SURFACE_KIND_ENUM = {
@@ -1715,7 +1791,8 @@ def _run_agent_in_workspace(
         )
         result: Any | None = None
         model_attempted = False
-        primary_error: Exception | None = None
+        primary_error: BaseException | None = None
+        provider_external_wait: dict[str, Any] | None = None
         postcheck: CodexLoginStatusResult
         try:
             if not preflight.ok:
@@ -1747,11 +1824,15 @@ def _run_agent_in_workspace(
                     primary_error = exc
                 else:
                     if getattr(result, "exit_code", 0) != 0:
-                        excerpt = _stderr_excerpt(stderr_path)
-                        detail = f": {excerpt}" if excerpt else ""
-                        primary_error = RuntimeError(
-                            f"Codex backlog prompt failed exit_code={result.exit_code}{detail}"
+                        provider_external_wait = _codex_subscription_wait_from_raw_events(
+                            raw_events_path
                         )
+                        if provider_external_wait is None:
+                            excerpt = _stderr_excerpt(stderr_path)
+                            detail = f": {excerpt}" if excerpt else ""
+                            primary_error = RuntimeError(
+                                f"Codex backlog prompt failed exit_code={result.exit_code}{detail}"
+                            )
         finally:
             postcheck = probe_codex_login_status(
                 binary=binary,
@@ -1782,7 +1863,49 @@ def _run_agent_in_workspace(
                 raw_events_path=raw_events_path,
                 last_message_path=last_message_path,
                 stderr_path=stderr_path,
+                external_wait_detected=provider_external_wait is not None,
             )
+        if provider_external_wait is not None:
+            external_wait_receipt_errors = verify_codex_auth_receipt(
+                receipt_path=receipt_path,
+                prompt=prompt,
+                raw_events_path=raw_events_path,
+                last_message_path=last_message_path,
+                stderr_path=stderr_path,
+                allow_external_wait=True,
+            )
+            if not external_wait_receipt_errors:
+                external_wait_path = _codex_external_wait_artifact_path(raw_events_path)
+                provider_external_wait.update(
+                    {
+                        "agent_session_id": (
+                            str(getattr(result, "thread_id", "")).strip() or None
+                            if result is not None
+                            else None
+                        ),
+                        "resumed_from_session_id": resume_session_id,
+                        "workspace_dir": str(workspace.resolve()),
+                        "raw_events_path": str(raw_events_path.resolve()),
+                        "auth_receipt_path": str(receipt_path.resolve()),
+                        "external_wait_artifact": str(external_wait_path.resolve()),
+                        "auth_attestation": {
+                            "preflight_chatgpt_login_verified": True,
+                            "postcheck_chatgpt_login_verified": True,
+                            "subscription_route_verified": True,
+                            "api_billing_environment_disabled": True,
+                        },
+                    }
+                )
+                provider_external_wait["checkpoint_sha256"] = _json_digest(
+                    provider_external_wait
+                )
+                _write_json_atomic(external_wait_path, provider_external_wait)
+                primary_error = BacklogProviderExternalWait(provider_external_wait)
+            else:
+                primary_error = RuntimeError(
+                    "Codex backlog prompt external-wait subscription receipt invalid: "
+                    + ", ".join(external_wait_receipt_errors)
+                )
         if primary_error is None:
             receipt_errors = verify_codex_auth_receipt(
                 receipt_path=receipt_path,

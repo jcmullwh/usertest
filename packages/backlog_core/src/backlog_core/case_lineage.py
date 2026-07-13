@@ -19,6 +19,8 @@ from typing import Any
 from backlog_core.ticket_readiness import plan_revision_id_for
 
 CASE_REGISTRY_SCHEMA_VERSION = 1
+DOWNSTREAM_CHAIN_CONTRACT_REVISION = "runner_downstream_chain_v2"
+SOURCE_EVIDENCE_PROJECTION_VERSION = 1
 ATOM_DISPOSITION_RECEIPT_SCHEMA_VERSION = 1
 
 ATOM_DISPOSITIONS: frozenset[str] = frozenset(
@@ -63,6 +65,11 @@ _SERVER_OWNED_PROBLEM_CASE_FIELDS = frozenset(
         "absorbed_case_ids",
         "identity_coalesced_problem_ids",
         "source_evidence_atom_ids",
+        "source_evidence_projection_version",
+        "source_evidence_atom_sha256_by_id",
+        "source_evidence_snapshot_complete",
+        "source_evidence_snapshot_missing_atom_ids",
+        "source_evidence_snapshot_sha256",
         "derived_evidence_atom_ids",
         "case_identity_status",
         "case_identity_candidate_ids",
@@ -94,6 +101,31 @@ _RUNNER_ORIGIN_PRECEDENCE = {
     "verification": 3,
 }
 
+_SOURCE_EVIDENCE_DECISION_FIELDS = frozenset(
+    {
+        "links",
+        "artifact_links",
+        "case_id",
+        "supporting_case_ids",
+        "disposition",
+        "disposition_status",
+        "disposition_receipt",
+        "disposition_revisit_when",
+        "evidence_role",
+        "origin_stage",
+        "parent_case_id",
+        "parent_problem_id",
+        "parent_ticket_fingerprint",
+        "derived_from_atom_ids",
+        "lineage_authorities",
+        "lineage_validation_errors",
+        "lineage_mining_blocker",
+        "legacy_report_lineage_claims",
+        "legacy_parent_problem_id",
+        "novel_case_rationale",
+    }
+)
+
 
 def _clean_string(value: Any) -> str | None:
     if not isinstance(value, str):
@@ -108,6 +140,89 @@ def _clean_string_list(value: Any) -> list[str]:
     return list(
         dict.fromkeys(item.strip() for item in value if isinstance(item, str) and item.strip())
     )
+
+
+def source_evidence_atom_projection(atom: Mapping[str, Any]) -> dict[str, Any]:
+    """Return the exact runner-owned source projection consumed by Stage 3."""
+
+    return {
+        str(key): value
+        for key, value in atom.items()
+        if key not in _SOURCE_EVIDENCE_DECISION_FIELDS
+        and not str(key).startswith(("case_", "disposition_", "lineage_", "parent_"))
+    }
+
+
+def source_evidence_atom_sha256(atom: Mapping[str, Any]) -> str:
+    """Hash one atom using the shared Stage-3 source-evidence projection."""
+
+    return sha256(
+        json.dumps(
+            source_evidence_atom_projection(atom),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def source_evidence_snapshot_sha256(atom_sha256_by_id: Mapping[str, str]) -> str:
+    """Content-address a complete per-case mapping of source atom IDs to bytes."""
+
+    return sha256(
+        json.dumps(
+            {
+                "source_projection_version": SOURCE_EVIDENCE_PROJECTION_VERSION,
+                "atom_sha256_by_id": {
+                    str(atom_id): str(atom_sha256).casefold()
+                    for atom_id, atom_sha256 in sorted(atom_sha256_by_id.items())
+                },
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+
+
+def build_source_evidence_snapshot(
+    source_evidence_atom_ids: Sequence[str],
+    supporting_atoms: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Build the complete current source frontier or an explicit incomplete receipt."""
+
+    expected_atom_ids = sorted(
+        {
+            atom_id.strip()
+            for atom_id in source_evidence_atom_ids
+            if isinstance(atom_id, str) and atom_id.strip()
+        }
+    )
+    atoms_by_id = {
+        atom_id: atom
+        for atom in supporting_atoms
+        for atom_id in [_clean_string(atom.get("atom_id"))]
+        if atom_id is not None
+    }
+    atom_sha256_by_id = {
+        atom_id: source_evidence_atom_sha256(atoms_by_id[atom_id])
+        for atom_id in expected_atom_ids
+        if atom_id in atoms_by_id
+    }
+    missing_atom_ids = [
+        atom_id for atom_id in expected_atom_ids if atom_id not in atom_sha256_by_id
+    ]
+    complete = bool(expected_atom_ids) and not missing_atom_ids
+    return {
+        "source_projection_version": SOURCE_EVIDENCE_PROJECTION_VERSION,
+        "expected_atom_ids": expected_atom_ids,
+        "atom_sha256_by_id": atom_sha256_by_id,
+        "missing_atom_ids": missing_atom_ids,
+        "complete": complete,
+        "snapshot_sha256": (
+            source_evidence_snapshot_sha256(atom_sha256_by_id) if complete else None
+        ),
+    }
 
 
 def provisional_same_cause_group_errors(
@@ -1779,10 +1894,36 @@ def build_case_registry(
                 + [atom_id for atom_id in evidence_ids if atom_id not in set(derived_evidence_ids)]
             )
         )
+        source_snapshot = build_source_evidence_snapshot(
+            source_evidence_ids,
+            supporting_atoms,
+        )
+        previous_source_hashes_raw = previous_entry.get(
+            "source_evidence_atom_sha256_by_id"
+        )
+        previous_source_hashes = (
+            {
+                str(atom_id): str(atom_sha256).casefold()
+                for atom_id, atom_sha256 in previous_source_hashes_raw.items()
+                if _clean_string(atom_id) is not None and _valid_sha256(atom_sha256)
+            }
+            if isinstance(previous_source_hashes_raw, Mapping)
+            else {}
+        )
+        current_source_hashes = dict(source_snapshot["atom_sha256_by_id"])
         requested_revision = max(1, int(record.get("case_revision") or 1))
         previous_revision = max(0, int(previous_entry.get("case_revision") or 0))
-        evidence_changed = bool(previous_entry) and bool(
-            set(evidence_ids) - set(previous_evidence_list)
+        source_content_changed = bool(
+            previous_entry
+            and previous_entry.get("source_evidence_snapshot_complete") is True
+            and source_snapshot["complete"] is True
+            and previous_source_hashes
+            and set(previous_source_hashes) == set(current_source_hashes)
+            and previous_source_hashes != current_source_hashes
+        )
+        evidence_changed = bool(previous_entry) and (
+            bool(set(evidence_ids) - set(previous_evidence_list))
+            or source_content_changed
         )
         case_revision = max(requested_revision, previous_revision)
         if evidence_changed:
@@ -1804,6 +1945,15 @@ def build_case_registry(
             "problem_ids": member_problem_ids,
             "evidence_atom_ids": evidence_ids,
             "source_evidence_atom_ids": source_evidence_ids,
+            "source_evidence_projection_version": source_snapshot[
+                "source_projection_version"
+            ],
+            "source_evidence_atom_sha256_by_id": current_source_hashes,
+            "source_evidence_snapshot_complete": source_snapshot["complete"],
+            "source_evidence_snapshot_missing_atom_ids": source_snapshot[
+                "missing_atom_ids"
+            ],
+            "source_evidence_snapshot_sha256": source_snapshot["snapshot_sha256"],
             "case_revision": case_revision,
             "same_cause_group_id": _clean_string(record.get("same_cause_group_id"))
             or _clean_string(previous_entry.get("same_cause_group_id")),
@@ -2248,6 +2398,12 @@ _STAGE_ITEM_REFERENCE_FIELDS: tuple[str, ...] = (
     "case_id",
     "priority_bucket",
     "selected_for_research",
+    "eligible_for_downstream",
+    "research_route",
+    "research_route_revision",
+    "research_frontier_sha256",
+    "research_snapshot_id",
+    "reconsider_when",
     "research_schema_version",
     "repo_revision",
     "research_status",
@@ -2423,6 +2579,59 @@ def _canonical_content_sha256(value: Any) -> str:
     ).hexdigest()
 
 
+def downstream_chain_input_sha256(
+    *,
+    stage: str,
+    case_id: str | None,
+    case_revision: int,
+    source_evidence_atom_ids: Sequence[str],
+    research_dossier_sha256: str | None,
+    source_evidence_snapshot_sha256: str | None = None,
+    option_records_sha256: str | None = None,
+    selection_records_sha256: str | None = None,
+) -> str:
+    """Bind a downstream artifact to the exact causal inputs it consumed."""
+
+    return _canonical_content_sha256(
+        {
+            "contract_revision": DOWNSTREAM_CHAIN_CONTRACT_REVISION,
+            "stage": stage,
+            "case_id": case_id,
+            "case_revision": max(1, int(case_revision or 1)),
+            "source_evidence_atom_ids": sorted(
+                {
+                    value.strip()
+                    for value in source_evidence_atom_ids
+                    if isinstance(value, str) and value.strip()
+                }
+            ),
+            "source_evidence_snapshot_sha256": source_evidence_snapshot_sha256,
+            "research_dossier_sha256": research_dossier_sha256,
+            "option_records_sha256": option_records_sha256,
+            "selection_records_sha256": selection_records_sha256,
+        }
+    )
+
+
+def _exact_stage_json_ref(
+    snapshot: Mapping[str, Any],
+    *,
+    allowed_names: set[str],
+) -> dict[str, str] | None:
+    refs = [
+        deepcopy(dict(ref))
+        for ref in (
+            snapshot.get("artifact_refs")
+            if isinstance(snapshot.get("artifact_refs"), list)
+            else []
+        )
+        if isinstance(ref, Mapping)
+        and _clean_string(ref.get("path")) is not None
+        and _clean_string(ref.get("name")) in allowed_names
+    ]
+    return refs[0] if len(refs) == 1 else None
+
+
 def _verified_research_mechanism_summary(
     record: Mapping[str, Any],
 ) -> dict[str, Any] | None:
@@ -2471,15 +2680,42 @@ def _verified_research_mechanism_summary(
 
 
 def _research_proof_summary(
-    record: Mapping[str, Any], snapshot: Mapping[str, Any]
+    record: Mapping[str, Any],
+    snapshot: Mapping[str, Any],
+    *,
+    entry: Mapping[str, Any],
 ) -> dict[str, Any]:
     """Build a bounded proof summary that points back to the full research artifact."""
 
+    research_json_refs = [
+        deepcopy(dict(ref))
+        for ref in (
+            snapshot.get("artifact_refs")
+            if isinstance(snapshot.get("artifact_refs"), list)
+            else []
+        )
+        if isinstance(ref, Mapping)
+        and _clean_string(ref.get("path")) is not None
+        and _clean_string(ref.get("name"))
+        in {"research_json", "repro_research_json"}
+    ]
     summary: dict[str, Any] = {
         "stage_snapshot_id": snapshot.get("stage_snapshot_id"),
         "artifact_refs": deepcopy(snapshot.get("artifact_refs", [])),
+        # The registry intentionally retains only a digest and an exact pointer.  The
+        # complete proof remains in the immutable stage artifact and must be re-read and
+        # revalidated before it can advance in a later cycle.
+        "full_dossier_sha256": _canonical_content_sha256(record),
+        "research_stage_artifact_ref": (
+            research_json_refs[0] if len(research_json_refs) == 1 else None
+        ),
         "research_schema_version": record.get("research_schema_version"),
+        "case_id": _clean_string(record.get("case_id")),
         "problem_id": _clean_string(record.get("problem_id")),
+        "case_revision": max(1, int(entry.get("case_revision") or 1)),
+        "source_evidence_snapshot_sha256": _clean_string(
+            entry.get("source_evidence_snapshot_sha256")
+        ),
         "repo_revision": _clean_string(record.get("repo_revision")),
         "research_method": _clean_string(record.get("research_method")),
         "reproduction_status": _clean_string(record.get("reproduction_status")),
@@ -2669,7 +2905,7 @@ def _update_research_stage_summary(
     if not records:
         return
     record = records[-1]
-    summary = _research_proof_summary(record, snapshot)
+    summary = _research_proof_summary(record, snapshot, entry=entry)
     _append_snapshot_history(
         entry,
         history_field="research_proof_history",
@@ -2709,9 +2945,34 @@ def _update_optioning_stage_summary(
     status = _clean_string(outcome.get("optioning_status"))
     if status is None:
         status = "options_produced" if records else "not_produced"
+    current_research_raw = entry.get("current_research_proof")
+    current_research = (
+        current_research_raw if isinstance(current_research_raw, Mapping) else {}
+    )
+    option_records_sha256 = _canonical_content_sha256([dict(record) for record in records])
+    source_evidence_atom_ids = _clean_string_list(entry.get("source_evidence_atom_ids"))
     summary: dict[str, Any] = {
         "stage_snapshot_id": snapshot.get("stage_snapshot_id"),
         "artifact_refs": deepcopy(snapshot.get("artifact_refs", [])),
+        "downstream_contract_revision": DOWNSTREAM_CHAIN_CONTRACT_REVISION,
+        "full_records_sha256": option_records_sha256,
+        "stage_artifact_ref": _exact_stage_json_ref(
+            snapshot,
+            allowed_names={"solution_options_json"},
+        ),
+        "input_chain_sha256": downstream_chain_input_sha256(
+            stage="solution_optioning",
+            case_id=_clean_string(entry.get("case_id")),
+            case_revision=max(1, int(entry.get("case_revision") or 1)),
+            source_evidence_atom_ids=source_evidence_atom_ids,
+            source_evidence_snapshot_sha256=_clean_string(
+                entry.get("source_evidence_snapshot_sha256")
+            ),
+            research_dossier_sha256=_clean_string(
+                current_research.get("full_dossier_sha256")
+            ),
+        ),
+        "problem_id": _clean_string(records[0].get("problem_id")) if records else None,
         "optioning_status": status,
         "option_ids": [
             option_id
@@ -2751,6 +3012,8 @@ def _selection_summary(
     record: Mapping[str, Any],
     outcome: Mapping[str, Any],
     snapshot: Mapping[str, Any],
+    *,
+    entry: Mapping[str, Any],
 ) -> dict[str, Any]:
     review_raw = record.get("falsification_review")
     review = review_raw if isinstance(review_raw, Mapping) else {}
@@ -2765,9 +3028,39 @@ def _selection_summary(
         "compatibility_risks",
     ):
         material_risks.extend(_clean_string_list(coverage.get(risk_field)))
+    current_research_raw = entry.get("current_research_proof")
+    current_research = (
+        current_research_raw if isinstance(current_research_raw, Mapping) else {}
+    )
+    current_options_raw = entry.get("current_option_set")
+    current_options = current_options_raw if isinstance(current_options_raw, Mapping) else {}
+    selection_records = [dict(record)] if record else []
     summary: dict[str, Any] = {
         "stage_snapshot_id": snapshot.get("stage_snapshot_id"),
         "artifact_refs": deepcopy(snapshot.get("artifact_refs", [])),
+        "downstream_contract_revision": DOWNSTREAM_CHAIN_CONTRACT_REVISION,
+        "full_records_sha256": _canonical_content_sha256(selection_records),
+        "stage_artifact_ref": _exact_stage_json_ref(
+            snapshot,
+            allowed_names={"solution_selection_json"},
+        ),
+        "input_chain_sha256": downstream_chain_input_sha256(
+            stage="solution_selection",
+            case_id=_clean_string(entry.get("case_id")),
+            case_revision=max(1, int(entry.get("case_revision") or 1)),
+            source_evidence_atom_ids=_clean_string_list(
+                entry.get("source_evidence_atom_ids")
+            ),
+            source_evidence_snapshot_sha256=_clean_string(
+                entry.get("source_evidence_snapshot_sha256")
+            ),
+            research_dossier_sha256=_clean_string(
+                current_research.get("full_dossier_sha256")
+            ),
+            option_records_sha256=_clean_string(
+                current_options.get("full_records_sha256")
+            ),
+        ),
         "problem_id": _clean_string(record.get("problem_id"))
         or _clean_string(outcome.get("problem_id")),
         "selection_status": _clean_string(outcome.get("selection_status"))
@@ -2801,7 +3094,7 @@ def _update_selection_stage_summary(
 ) -> None:
     record = records[-1] if records else {}
     outcome = auxiliary_records[-1] if auxiliary_records else {}
-    summary = _selection_summary(record, outcome, snapshot)
+    summary = _selection_summary(record, outcome, snapshot, entry=entry)
     _append_snapshot_history(
         entry,
         history_field="selection_history",
@@ -2891,9 +3184,48 @@ def _update_planning_stage_summary(
     entry["plan_revisions"] = revisions
     entry["plan_revision_ids"] = sorted(revisions)
     entry["current_plan_revision_ids"] = list(dict.fromkeys(current_revision_ids))
+    current_research_raw = entry.get("current_research_proof")
+    current_research = (
+        current_research_raw if isinstance(current_research_raw, Mapping) else {}
+    )
+    current_options_raw = entry.get("current_option_set")
+    current_options = current_options_raw if isinstance(current_options_raw, Mapping) else {}
+    current_selection_raw = entry.get("current_selection")
+    current_selection = (
+        current_selection_raw if isinstance(current_selection_raw, Mapping) else {}
+    )
     planning_summary = {
         "stage_snapshot_id": snapshot.get("stage_snapshot_id"),
         "artifact_refs": deepcopy(snapshot.get("artifact_refs", [])),
+        "downstream_contract_revision": DOWNSTREAM_CHAIN_CONTRACT_REVISION,
+        "full_records_sha256": _canonical_content_sha256(
+            [dict(record) for record in records]
+        ),
+        "stage_artifact_ref": _exact_stage_json_ref(
+            snapshot,
+            allowed_names={"change_plans_json"},
+        ),
+        "input_chain_sha256": downstream_chain_input_sha256(
+            stage="implementation_planning",
+            case_id=_clean_string(entry.get("case_id")),
+            case_revision=max(1, int(entry.get("case_revision") or 1)),
+            source_evidence_atom_ids=_clean_string_list(
+                entry.get("source_evidence_atom_ids")
+            ),
+            source_evidence_snapshot_sha256=_clean_string(
+                entry.get("source_evidence_snapshot_sha256")
+            ),
+            research_dossier_sha256=_clean_string(
+                current_research.get("full_dossier_sha256")
+            ),
+            option_records_sha256=_clean_string(
+                current_options.get("full_records_sha256")
+            ),
+            selection_records_sha256=_clean_string(
+                current_selection.get("full_records_sha256")
+            ),
+        ),
+        "problem_id": _clean_string(records[0].get("problem_id")) if records else None,
         "plan_revision_ids": list(dict.fromkeys(current_revision_ids)),
         "rejected_plans": [_compact_stage_item_reference(record) for record in auxiliary_records],
     }
@@ -3176,6 +3508,24 @@ def problem_case_records_from_registry(
             or [problem_id],
             "evidence_atom_ids": evidence_atom_ids,
             "source_evidence_atom_ids": source_evidence_atom_ids,
+            "source_evidence_projection_version": raw_entry.get(
+                "source_evidence_projection_version"
+            ),
+            "source_evidence_atom_sha256_by_id": deepcopy(
+                dict(raw_entry.get("source_evidence_atom_sha256_by_id"))
+            )
+            if isinstance(raw_entry.get("source_evidence_atom_sha256_by_id"), Mapping)
+            else {},
+            "source_evidence_snapshot_complete": raw_entry.get(
+                "source_evidence_snapshot_complete"
+            )
+            is True,
+            "source_evidence_snapshot_missing_atom_ids": _clean_string_list(
+                raw_entry.get("source_evidence_snapshot_missing_atom_ids")
+            ),
+            "source_evidence_snapshot_sha256": _clean_string(
+                raw_entry.get("source_evidence_snapshot_sha256")
+            ),
             "derived_evidence_atom_ids": derived_evidence_atom_ids,
             "case_revision": max(1, int(raw_entry.get("case_revision") or 1)),
             "case_state": state,
@@ -3387,6 +3737,8 @@ __all__ = [
     "ATOM_DISPOSITION_SOURCES",
     "ATOM_DISPOSITION_STATUSES",
     "CASE_REGISTRY_SCHEMA_VERSION",
+    "DOWNSTREAM_CHAIN_CONTRACT_REVISION",
+    "SOURCE_EVIDENCE_PROJECTION_VERSION",
     "EVIDENCE_ROLES",
     "TERMINAL_CASE_STATES",
     "apply_atom_dispositions",
@@ -3398,6 +3750,8 @@ __all__ = [
     "atom_is_independent_problem_evidence",
     "atom_is_idea_originated",
     "build_case_registry",
+    "build_source_evidence_snapshot",
+    "downstream_chain_input_sha256",
     "eligible_problem_mining_atoms",
     "empty_case_registry",
     "load_case_registry",
@@ -3406,6 +3760,9 @@ __all__ = [
     "normalize_atom_lineage",
     "propagate_case_lineage",
     "problem_case_records_from_registry",
+    "source_evidence_atom_projection",
+    "source_evidence_atom_sha256",
+    "source_evidence_snapshot_sha256",
     "provisional_same_cause_clearance_errors",
     "provisional_same_cause_group_errors",
     "record_lineage_context",

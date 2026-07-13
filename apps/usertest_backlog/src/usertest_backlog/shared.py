@@ -178,6 +178,7 @@ except ModuleNotFoundError as exc:
 
 try:
     from backlog_miner import (
+        BacklogProviderExternalWait,
         run_backlog_prompt,
         run_repro_research_stage,
     )

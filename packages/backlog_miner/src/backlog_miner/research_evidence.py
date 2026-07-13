@@ -10484,14 +10484,24 @@ def _persisted_research_attempt_errors(dossier: dict[str, Any]) -> list[str]:
             else:
                 errors.append(f"research_attempt_target_ref_invalid:{attempt_index}")
 
+        target_agent_raw = (
+            _text(target_ref.get("agent")) if isinstance(target_ref, dict) else None
+        )
         target_agent = (
-            _text(target_ref.get("agent")).casefold() if isinstance(target_ref, dict) else None
+            target_agent_raw.casefold() if target_agent_raw is not None else None
         )
         attempt_kind = _text(attempt.get("attempt_kind"))
-        if attempt_kind == "model_output_repair":
+        continuation_attempt_kinds = {
+            "model_output_repair",
+            "evidence_verification_dossier_repair",
+            "evidence_verification_research_continuation",
+            "independent_qualification_research_continuation",
+        }
+        if attempt_kind in continuation_attempt_kinds:
             if target_agent != "codex":
                 errors.append(f"research_attempt_repair_agent_not_codex:{attempt_index}")
             expected_session = _text(attempt.get("agent_session_id"))
+            observed_session = _text(attempt.get("observed_agent_session_id"))
             resumed_session = _text(attempt.get("resumed_from_session_id"))
             requested_session = (
                 _text(target_ref.get("requested_codex_resume_session_id"))
@@ -10500,15 +10510,13 @@ def _persisted_research_attempt_errors(dossier: dict[str, Any]) -> list[str]:
             )
             if (
                 expected_session is None
+                or observed_session != expected_session
                 or resumed_session != expected_session
                 or requested_session != expected_session
             ):
                 errors.append(f"research_attempt_repair_session_provenance_invalid:{attempt_index}")
 
-        if (
-            target_agent == "codex"
-            and attempt_kind in {"full_research", "model_output_repair", "fresh_research_retry"}
-        ) or attempt_kind == "model_output_repair":
+        if target_agent == "codex":
             auth_artifact = artifacts_by_kind.get("codex_subscription_auth")
             auth_path_raw = (
                 _text(auth_artifact.get("path")) if isinstance(auth_artifact, dict) else None

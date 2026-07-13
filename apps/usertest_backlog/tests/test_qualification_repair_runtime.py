@@ -1950,6 +1950,90 @@ def test_stage1_failure_blocks_same_case_authors_but_advances_disjoint_work(
     )
 
 
+def test_provider_wait_stops_all_qualification_groups_after_one_invocation(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    first = _causal_route(
+        stage="problem_mining",
+        problem_id="problem:one",
+        case_id="case:one",
+        session="miner-one",
+        adapter="problem_miner",
+    )
+    second = _causal_route(
+        stage="problem_mining",
+        problem_id="problem:two",
+        case_id="case:two",
+        session="miner-two",
+        adapter="problem_miner",
+    )
+    invocations: list[list[str]] = []
+    wait = {
+        "schema_version": 1,
+        "status": "parked_external_wait",
+        "scope": "backlog_model_pipeline",
+        "reason": "codex_chatgpt_subscription_usage_limit",
+        "provider": "codex",
+        "state": "parked",
+        "retry_mode": "resume_same_session",
+        "route": "chatgpt_subscription",
+        "api_fallback_allowed": False,
+    }
+
+    def park(**kwargs: Any) -> dict[str, Any]:
+        invocations.append(
+            [str(route["route_sha256"]) for route in kwargs["routes"]]
+        )
+        raise runtime.BacklogProviderExternalWait(wait)
+
+    monkeypatch.setattr(runtime, "consume_qualification_corrections", park)
+    monkeypatch.setattr(runtime, "assemble_backlog_tickets", lambda **_kwargs: [])
+    result = runtime.run_stage456_qualification_repairs(
+        routes=[first, second],
+        source_pending_run_sha256="d" * 64,
+        source_adjudication_sha256="e" * 64,
+        repo_root=tmp_path,
+        atoms=[],
+        stage1=_doc(
+            "problem_mining",
+            [
+                {"problem_id": "problem:one", "case_id": "case:one"},
+                {"problem_id": "problem:two", "case_id": "case:two"},
+            ],
+        ),
+        stage2=_doc("problem_prioritization", []),
+        stage3=_doc("repro_research", []),
+        stage4=_doc("solution_optioning", []),
+        stage5=_doc("solution_selection", []),
+        stage6=_doc("implementation_planning", []),
+        pipeline_manifest=type(
+            "Manifest",
+            (),
+            {"load_stage_guidance": lambda _self, stage: f"guidance:{stage}"},
+        )(),
+        repair_artifacts_dir=tmp_path / "provider-global-stop",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        breadth_profile="standard",
+        case_registry={"cases": {}},
+    )
+
+    assert len(invocations) == 1
+    assert len(invocations[0]) == 1
+    assert result.consumption["status"] == "parked_external_wait"
+    assert result.consumption["external_wait"] == wait
+    assert result.consumption["accepted_repair_count"] == 0
+    assert result.consumption["pending_not_invoked_group_count"] == 2
+    assert result.consumption["pending_not_invoked_route_count"] == 2
+    assert all(
+        receipt["status"] == "retained_pending_not_invoked"
+        and receipt["attempts"] == []
+        for receipt in result.consumption["route_receipts"]
+    )
+
+
 @pytest.mark.parametrize("lineage_field", ["alias_of", "duplicate_of"])
 def test_causal_plan_resolves_old_registry_lineage_without_labels(
     lineage_field: str,

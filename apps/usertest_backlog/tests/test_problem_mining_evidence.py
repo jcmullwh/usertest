@@ -11,7 +11,7 @@ from agent_adapters import (
     CODEX_SUBSCRIPTION_BLOCKED_ENV_VARS,
     CodexLoginStatusResult,
 )
-from backlog_core import build_operational_failure_candidates
+from backlog_core import build_operational_failure_candidates, extract_backlog_atoms
 from backlog_core.case_lineage import (
     apply_atom_dispositions,
     atom_disposition_receipt_errors,
@@ -34,6 +34,7 @@ from usertest_backlog.workflows.problem_mining import (
     _preserve_primary_after_coverage_review_failure,
     _problem_mining_attempt_manifest_sha256,
     _problem_mining_job_batches,
+    _problem_mining_jobs_with_terminal_context,
     _problem_mining_routing_decision_errors,
     _recall_bearing_cross_job_groups,
     _reconcile_problem_mining_reviews,
@@ -51,6 +52,7 @@ from usertest_backlog.workflows.problem_mining_evidence import (
     ProblemMiningResponseContractError,
     _attempt_history_errors,
     _cross_job_synthesis_errors,
+    _miner_receipt_errors,
     apply_problem_mining_decision_partition,
     build_dry_run_miner_receipt,
     build_failed_miner_receipt,
@@ -420,6 +422,20 @@ def test_problem_miner_prompt_requires_valid_windows_path_json_escaping() -> Non
     assert "complete, valid JSON with no prose or markdown" in prompt
     assert "literal Windows path" in prompt
     assert "`\\\\`" in prompt
+
+
+def test_problem_miner_prompt_requires_context_attachment_reads() -> None:
+    prompt_path = (
+        Path(__file__).resolve().parents[3]
+        / "configs"
+        / "backlog_prompts"
+        / "problem_miner_default.md"
+    )
+    prompt = prompt_path.read_text(encoding="utf-8")
+
+    assert "assigned or context" in prompt
+    assert "Context attachments are required interpretation evidence" in prompt
+    assert "cannot receive decisions or citations" in prompt
 
 
 def test_primary_response_correction_resumes_same_session_and_retains_first_attempt(
@@ -2829,6 +2845,182 @@ def test_single_workspace_chunk_is_split_to_job_byte_limit(tmp_path: Path) -> No
         assert manifest["total_text_chunk_bytes"] <= max_bytes
 
 
+def test_stage1_job_includes_same_run_terminal_context_without_assigning_it(
+    tmp_path: Path,
+) -> None:
+    assigned = _atom("atom:failed-probe")
+    assigned["run_id"] = "run:success"
+    assigned["run_rel"] = "runs/success"
+    assigned["origin_run_id"] = "run:success"
+    terminal = _atom("atom:terminal-success")
+    terminal.update(
+        {
+            "run_id": "run:success",
+            "run_rel": "runs/success",
+            "origin_run_id": "run:success",
+            "source": "agent_last_message_artifact",
+            "text": json.dumps(
+                {
+                    "kind": "task_run_v1",
+                    "status": "success",
+                    "summary": "The intended workflow recovered and verification passed.",
+                    "verification": [{"check": "original scenario", "result": "passed"}],
+                    "issues": [],
+                }
+            ),
+        }
+    )
+    unrelated = _atom("atom:other-terminal")
+    unrelated.update(
+        {
+            "run_id": "run:other",
+            "run_rel": "runs/other",
+            "origin_run_id": "run:other",
+            "source": "run_failure_event",
+            "text": "A different run failed.",
+        }
+    )
+
+    jobs = _problem_mining_jobs_with_terminal_context(
+        eligible_prompt_atoms=_atoms_for_problem_mining_prompt([assigned]),
+        all_prompt_atoms=_atoms_for_problem_mining_prompt([assigned, terminal, unrelated]),
+    )
+
+    assert len(jobs) == 1
+    assert jobs[0]["assigned_atom_ids"] == ["atom:failed-probe"]
+    assert jobs[0]["context_atom_ids"] == ["atom:terminal-success"]
+    context = jobs[0]["context_atoms"][0]
+    assert context["problem_mining_context_role"] == "origin_run_terminal"
+    assert context["decision_eligible"] is False
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=tmp_path / "context-workspace",
+        prompt_atoms=jobs[0]["prompt_atoms"],
+        max_records_per_miner=20,
+        assigned_atom_ids=jobs[0]["assigned_atom_ids"],
+    )
+    assert manifest["decision_eligible_atom_ids"] == ["atom:failed-probe"]
+    assert manifest["context_atom_ids"] == ["atom:terminal-success"]
+    assert manifest["context_atom_count"] == 1
+    assert {
+        entry["atom_id"]: (entry["assigned"], entry["context_only"])
+        for entry in manifest["atom_files"]
+    } == {
+        "atom:failed-probe": (True, False),
+        "atom:terminal-success": (False, True),
+    }
+
+
+def test_extracted_success_report_is_terminal_context_when_agent_message_is_absent(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target" / "run" / "codex" / "0"
+    run_dir.mkdir(parents=True)
+    atoms = extract_backlog_atoms(
+        [
+            {
+                "run_dir": str(run_dir),
+                "run_rel": "target/run/codex/0",
+                "agent": "codex",
+                "status": "ok",
+                "metrics": {
+                    "commands_failed": 1,
+                    "failed_commands": [
+                        {"command": "python -m package doctor", "exit_code": 1}
+                    ],
+                },
+                "report": {
+                    "schema_version": 1,
+                    "kind": "task_run_v1",
+                    "status": "success",
+                    "goal": "Complete the intended workflow",
+                    "summary": "Dependencies were installed and final verification passed.",
+                    "steps": [
+                        {
+                            "name": "workflow",
+                            "attempts": [{"action": "run"}],
+                            "outcome": "complete",
+                        }
+                    ],
+                    "outputs": [],
+                    "verification": [{"check": "scenario", "result": "passed"}],
+                    "next_actions": ["None."],
+                },
+            }
+        ],
+        repo_root=tmp_path,
+    )["atoms"]
+    eligible = eligible_problem_mining_atoms(atoms)
+    jobs = _problem_mining_jobs_with_terminal_context(
+        eligible_prompt_atoms=_atoms_for_problem_mining_prompt(eligible),
+        all_prompt_atoms=_atoms_for_problem_mining_prompt(atoms),
+    )
+
+    command_id = next(
+        str(atom["atom_id"]) for atom in atoms if atom.get("source") == "command_failure"
+    )
+    job = next(job for job in jobs if command_id in job["assigned_atom_ids"])
+    context = next(
+        atom for atom in job["context_atoms"] if atom.get("source") == "run_outcome_context"
+    )
+    assert context["report_status"] == "success"
+    assert context["verification_result_values"] == ["passed"]
+    assert context["decision_eligible"] is False
+
+
+def test_terminal_context_counts_against_job_budget_without_losing_assignments() -> None:
+    assigned_atoms = [_atom(f"atom:assigned-{index}") for index in range(6)]
+    terminal_atoms: list[dict[str, object]] = []
+    for index, atom in enumerate(assigned_atoms):
+        run_id = f"run:{index}"
+        atom.update(
+            {
+                "run_id": run_id,
+                "run_rel": f"runs/{index}",
+                "origin_run_id": run_id,
+                "text": "A diagnostic command failed before recovery. " * 8,
+            }
+        )
+        terminal = _atom(f"atom:terminal-{index}")
+        terminal.update(
+            {
+                "run_id": run_id,
+                "run_rel": f"runs/{index}",
+                "origin_run_id": run_id,
+                "source": "agent_last_message_artifact",
+                "text": "Terminal outcome and exact verification evidence. " * 18,
+            }
+        )
+        terminal_atoms.append(terminal)
+    eligible = _atoms_for_problem_mining_prompt(assigned_atoms)
+    all_atoms = _atoms_for_problem_mining_prompt([*assigned_atoms, *terminal_atoms])
+    max_bytes = 8_000
+
+    jobs = _problem_mining_jobs_with_terminal_context(
+        eligible_prompt_atoms=eligible,
+        all_prompt_atoms=all_atoms,
+        chunk_max_bytes=55_000,
+        max_chunks=3,
+        max_atoms=100,
+        max_bytes=max_bytes,
+    )
+
+    assert len(jobs) > 1
+    assert [
+        atom_id for job in jobs for atom_id in job["assigned_atom_ids"]
+    ] == [str(atom["atom_id"]) for atom in assigned_atoms]
+    for job in jobs:
+        assert set(job["assigned_atom_ids"]).isdisjoint(job["context_atom_ids"])
+        assert len(
+            _problem_mining_job_batches(
+                job["prompt_atoms"],
+                chunk_max_bytes=55_000,
+                max_chunks=3,
+                max_atoms=100,
+                max_bytes=max_bytes,
+            )
+        ) == 1
+
+
 def test_many_operational_occurrences_use_bounded_explicit_stage1_projection() -> None:
     records: list[dict[str, object]] = []
     atoms: list[dict[str, object]] = []
@@ -5010,3 +5202,246 @@ def test_primary_miner_correction_requires_retained_independent_rereview(
     ]["miners"][0]
     assert repaired_miner["primary_pass"]["attempt_history"][-1]["status"] == "verified"
     assert repaired_miner["non_support_review"]["attempt_history"][-1]["status"] == "verified"
+
+
+# Context-only receipt validation
+
+
+def _verified_context_only_miner_receipt(tmp_path: Path) -> dict[str, object]:
+    assigned = _atom("atom:assigned")
+    context = _atom("atom:terminal-context")
+    context.update(
+        {
+            "source": "agent_last_message_artifact",
+            "text": "The run completed successfully and original-scenario verification passed.",
+            "problem_mining_context_role": "origin_run_terminal",
+            "decision_eligible": False,
+        }
+    )
+    workspace = tmp_path / "context-receipt-workspace"
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=workspace,
+        prompt_atoms=_atoms_for_problem_mining_prompt([assigned, context]),
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:assigned"],
+    )
+    normalized = tmp_path / "context-receipt-events.jsonl"
+    _write_required_workspace_read_events(
+        normalized,
+        workspace=workspace,
+        manifest=manifest,
+    )
+    problem = _problem("atom:assigned")
+    return build_live_miner_receipt(
+        tag="problem_mining_context_001",
+        template_name="problem_miner_default.md",
+        assigned_atom_ids=["atom:assigned"],
+        eligible_atom_ids=["atom:assigned"],
+        records=[problem],
+        decisions=[
+            {
+                "atom_id": "atom:assigned",
+                "disposition": "supports_case",
+                "problem_ids": ["problem:one"],
+                "rationale": "The assigned atom records the observed failure.",
+            }
+        ],
+        response_text="{}",
+        normalized_events_path=normalized,
+        workspace_dir=workspace,
+        workspace_manifest=manifest,
+    )
+
+
+def test_live_receipt_attests_context_without_making_it_decision_eligible(
+    tmp_path: Path,
+) -> None:
+    receipt = _verified_context_only_miner_receipt(tmp_path)
+
+    assert receipt["assigned_atom_ids"] == ["atom:assigned"]
+    assert receipt["context_atom_ids"] == ["atom:terminal-context"]
+    assert [row["atom_id"] for row in receipt["read_attestations"]] == ["atom:assigned"]
+    assert [row["atom_id"] for row in receipt["context_read_attestations"]] == [
+        "atom:terminal-context"
+    ]
+    assert [decision["atom_id"] for decision in receipt["atom_decisions"]] == [
+        "atom:assigned"
+    ]
+    assert (
+        _miner_receipt_errors(
+            receipt,
+            eligible_ids={"atom:assigned"},
+            require_live=True,
+        )
+        == []
+    )
+
+
+def test_context_read_attestation_is_required_during_receipt_revalidation(
+    tmp_path: Path,
+) -> None:
+    receipt = _verified_context_only_miner_receipt(tmp_path)
+    receipt["context_read_attestations"] = []
+
+    assert "problem_mining_context_full_read_coverage_mismatch:problem_mining_context_001" in (
+        _miner_receipt_errors(
+            receipt,
+            eligible_ids={"atom:assigned"},
+            require_live=True,
+        )
+    )
+
+
+def test_receipt_cannot_omit_context_retained_by_workspace_manifest(tmp_path: Path) -> None:
+    receipt = _verified_context_only_miner_receipt(tmp_path)
+    receipt["context_atom_ids"] = []
+    receipt["context_read_attestations"] = []
+
+    assert "problem_mining_workspace_context_mismatch:problem_mining_context_001" in (
+        _miner_receipt_errors(
+            receipt,
+            eligible_ids={"atom:assigned"},
+            require_live=True,
+        )
+    )
+
+
+def test_context_atom_cannot_be_used_as_problem_citation(tmp_path: Path) -> None:
+    assigned = _atom("atom:assigned")
+    context = _atom("atom:terminal-context")
+    workspace = tmp_path / "context-citation-workspace"
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=workspace,
+        prompt_atoms=_atoms_for_problem_mining_prompt([assigned, context]),
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:assigned"],
+    )
+    normalized = tmp_path / "context-citation-events.jsonl"
+    _write_required_workspace_read_events(
+        normalized,
+        workspace=workspace,
+        manifest=manifest,
+    )
+
+    with pytest.raises(ValueError, match="problem_mining_citation_outside_eligible_corpus"):
+        build_live_miner_receipt(
+            tag="problem_mining_context_001",
+            template_name="problem_miner_default.md",
+            assigned_atom_ids=["atom:assigned"],
+            eligible_atom_ids=["atom:assigned"],
+            records=[_problem("atom:terminal-context")],
+            decisions=[
+                {
+                    "atom_id": "atom:assigned",
+                    "disposition": "unresolved",
+                    "problem_ids": [],
+                    "rationale": "The assigned evidence is insufficient by itself.",
+                }
+            ],
+            response_text="{}",
+            normalized_events_path=normalized,
+            workspace_dir=workspace,
+            workspace_manifest=manifest,
+        )
+
+
+def test_assigned_and_context_manifest_ids_must_be_disjoint(tmp_path: Path) -> None:
+    workspace = tmp_path / "overlap-workspace"
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=workspace,
+        prompt_atoms=_atoms_for_problem_mining_prompt([_atom("atom:assigned")]),
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:assigned"],
+    )
+    manifest["context_atom_ids"] = ["atom:assigned"]
+    normalized = tmp_path / "overlap-events.jsonl"
+    _write_required_workspace_read_events(
+        normalized,
+        workspace=workspace,
+        manifest=manifest,
+    )
+
+    with pytest.raises(ValueError, match="problem_mining_workspace_assignment_context_overlap"):
+        build_live_miner_receipt(
+            tag="problem_mining_context_001",
+            template_name="problem_miner_default.md",
+            assigned_atom_ids=["atom:assigned"],
+            eligible_atom_ids=["atom:assigned"],
+            records=[],
+            decisions=[
+                {
+                    "atom_id": "atom:assigned",
+                    "disposition": "unresolved",
+                    "problem_ids": [],
+                    "rationale": "The evidence is inconclusive.",
+                }
+            ],
+            response_text="{}",
+            normalized_events_path=normalized,
+            workspace_dir=workspace,
+            workspace_manifest=manifest,
+        )
+
+
+def test_context_origin_attachment_requires_a_full_read(tmp_path: Path) -> None:
+    run_dir = tmp_path / "runs" / "context"
+    run_dir.mkdir(parents=True)
+    artifact = run_dir / "terminal_report.json"
+    artifact.write_text('{"status":"success","verification":"passed"}\n', encoding="utf-8")
+    assigned = _atom("atom:assigned")
+    context = _atom("atom:terminal-context")
+    context.update(
+        {
+            "run_dir": str(run_dir),
+            "source": "agent_last_message_artifact",
+            "attachments": [
+                {
+                    "kind": "terminal_report",
+                    "artifact_ref": {
+                        "path": artifact.name,
+                        "sha256": sha256(artifact.read_bytes()).hexdigest(),
+                        "size_bytes": artifact.stat().st_size,
+                    },
+                }
+            ],
+        }
+    )
+    workspace = tmp_path / "context-attachment-workspace"
+    manifest = _write_chunked_problem_mining_atoms_workspace(
+        workspace_dir=workspace,
+        prompt_atoms=_atoms_for_problem_mining_prompt([assigned, context]),
+        max_records_per_miner=20,
+        assigned_atom_ids=["atom:assigned"],
+        source_root=tmp_path,
+    )
+    assert origin_attachment_requirements(
+        manifest["origin_attachment_evidence"],
+        atom_ids=["atom:terminal-context"],
+    )
+    normalized = tmp_path / "context-attachment-events.jsonl"
+    _write_required_workspace_read_events(
+        normalized,
+        workspace=workspace,
+        manifest=manifest,
+    )
+
+    with pytest.raises(ValueError, match="problem_mining_origin_attachment_not_read_in_full"):
+        build_live_miner_receipt(
+            tag="problem_mining_context_001",
+            template_name="problem_miner_default.md",
+            assigned_atom_ids=["atom:assigned"],
+            eligible_atom_ids=["atom:assigned"],
+            records=[],
+            decisions=[
+                {
+                    "atom_id": "atom:assigned",
+                    "disposition": "unresolved",
+                    "problem_ids": [],
+                    "rationale": "The assigned evidence is inconclusive.",
+                }
+            ],
+            response_text="{}",
+            normalized_events_path=normalized,
+            workspace_dir=workspace,
+            workspace_manifest=manifest,
+        )

@@ -33,6 +33,9 @@ from runner_core.shell_capability import _resolve_shell_capability
 from usertest_backlog.workflows.depth_contracts import change_plan_quality_errors
 from usertest_backlog.workflows.prioritization import (
     _enforce_full_drain_research_policy,
+    _priority_response_projection,
+    _research_dispatch_sort_key,
+    _runner_research_route,
     _server_normalize_priority_decisions,
 )
 from usertest_backlog.workflows.problem_mining import (
@@ -159,19 +162,22 @@ def test_priority_bucket_cannot_permanently_suppress_a_canonical_problem() -> No
             "priority_bucket": "watch",
             "selected_for_research": False,
             "priority_status": "prioritized",
+            "research_route": "research_new",
         },
         {
             "problem_id": "problem:malformed-output",
             "priority_bucket": "watch",
             "selected_for_research": False,
-            "priority_status": "invalid_output",
+            "priority_status": "prioritized",
+            "research_route": "await_evidence",
+            "reconsider_when": "New source evidence changes the frontier.",
         },
     ]
 
     _enforce_full_drain_research_policy(decisions)
 
     assert decisions[0]["selected_for_research"] is True
-    assert decisions[1]["selected_for_research"] is True
+    assert decisions[1]["selected_for_research"] is False
     assert {decision["priority_status"] for decision in decisions} == {"prioritized"}
 
 
@@ -184,6 +190,16 @@ def test_priority_model_cannot_block_or_omit_a_canonical_case() -> None:
         {
             "problem_id": "problem:omitted",
             "evidence_atom_ids": ["atom:omitted"],
+            "_carried_forward_case": True,
+            "prior_stage_context": {
+                "research": {
+                    "current": {
+                        "research_status": "blocked",
+                        "root_cause_status": "blocked",
+                        "blocking_reasons": ["required_artifact_unavailable"],
+                    }
+                }
+            },
         },
     ]
     normalized, warnings = _server_normalize_priority_decisions(
@@ -207,11 +223,137 @@ def test_priority_model_cannot_block_or_omit_a_canonical_case() -> None:
         "problem:blocked",
         "problem:omitted",
     ]
-    assert all(item["selected_for_research"] is True for item in normalized)
+    assert normalized[0]["selected_for_research"] is True
+    assert normalized[0]["research_route"] == "research_new"
+    assert normalized[1]["selected_for_research"] is True
+    assert normalized[1]["research_route"] == "reassess_actionability"
+    assert normalized[1]["reconsider_when"] is None
     assert all(item["priority_status"] == "prioritized" for item in normalized)
     assert normalized[0]["model_priority_accepted"] is True
     assert normalized[1]["model_priority_accepted"] is False
     assert "prioritizer_missing_problem_id:problem:omitted" in warnings
+
+
+def test_prioritizer_does_not_waste_correction_turn_on_runner_routed_wait() -> None:
+    response = json.dumps(
+        [
+            {
+                "problem_id": "problem:waiting",
+                "priority_bucket": "watch",
+                "selected_for_research": False,
+                "priority_rationale": "The runner route names the missing evidence trigger.",
+                "evidence_atom_ids_used": ["atom:waiting"],
+                "priority_status": "prioritized",
+            }
+        ]
+    )
+
+    _parsed, errors, valid_keys = _priority_response_projection(
+        response,
+        problem_records=[
+            {
+                "problem_id": "problem:waiting",
+                "evidence_atom_ids": ["atom:waiting"],
+            }
+        ],
+    )
+
+    assert errors == []
+    assert valid_keys == ["priority_decision:problem:waiting"]
+
+
+def test_legacy_malformed_research_gets_one_reassessment_then_waits_unchanged() -> None:
+    record: dict[str, Any] = {
+        "problem_id": "problem:legacy-malformed",
+        "case_id": "case:legacy-malformed",
+        "case_revision": 1,
+        "evidence_atom_ids": ["atom:source"],
+        "source_evidence_atom_ids": ["atom:source"],
+        "_carried_forward_case": True,
+        "prior_stage_context": {
+            "research": {
+                "current": {
+                    "research_schema_version": 3,
+                    "stage_snapshot_id": "stagesnap:before-reassessment",
+                    "repo_revision": "abc123",
+                    "research_status": "blocked",
+                    "reproduction_status": "blocked",
+                    "root_cause_status": "blocked",
+                    "blocking_reasons": ["research_dossier_malformed:ValueError"],
+                }
+            }
+        },
+    }
+
+    first = _runner_research_route(record)
+    assert first["research_route"] == "reassess_actionability"
+    assert first["selected_for_research"] is True
+
+    record["prior_stage_context"]["artifact_refs"] = {
+        "problem_prioritization": {
+            "item_refs": [
+                {
+                    "problem_id": record["problem_id"],
+                    "case_id": record["case_id"],
+                    "research_route": first["research_route"],
+                    "research_route_revision": first["research_route_revision"],
+                    "research_frontier_sha256": first["research_frontier_sha256"],
+                    "research_snapshot_id": first["research_snapshot_id"],
+                }
+            ]
+        }
+    }
+    record["prior_stage_context"]["research"]["current"][
+        "stage_snapshot_id"
+    ] = "stagesnap:after-reassessment"
+    second = _runner_research_route(record)
+
+    assert second["research_route"] == "await_evidence"
+    assert second["selected_for_research"] is False
+    assert second["reconsider_when"]
+    assert second["research_frontier_sha256"] == first["research_frontier_sha256"]
+
+
+def test_research_dispatch_order_uses_route_bucket_score_then_identity() -> None:
+    decisions = [
+        {
+            "problem_id": "problem:reassess",
+            "case_id": "case:z",
+            "research_route": "reassess_actionability",
+            "priority_bucket": "p0",
+            "pre_score": 99.0,
+        },
+        {
+            "problem_id": "problem:new-low",
+            "case_id": "case:b",
+            "research_route": "research_new",
+            "priority_bucket": "p1",
+            "pre_score": 3.0,
+        },
+        {
+            "problem_id": "problem:update",
+            "case_id": "case:c",
+            "research_route": "research_update",
+            "priority_bucket": "p2",
+            "pre_score": 1.0,
+        },
+        {
+            "problem_id": "problem:new-high",
+            "case_id": "case:a",
+            "research_route": "research_new",
+            "priority_bucket": "p1",
+            "pre_score": 8.0,
+        },
+    ]
+
+    assert [
+        item["problem_id"] for item in sorted(decisions, key=_research_dispatch_sort_key)
+    ] == [
+        "problem:update",
+        "problem:new-high",
+        "problem:new-low",
+        "problem:reassess",
+    ]
 
 
 def test_retained_artifacts_replay_through_current_depth_gates() -> None:

@@ -338,6 +338,53 @@ def test_extract_backlog_atoms_extracts_task_run_v1_report_blocks(tmp_path: Path
     )
 
 
+def test_success_report_emits_non_originating_terminal_context_without_agent_message(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "target_a" / "20260101T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True, exist_ok=True)
+    records = [
+        {
+            "run_dir": str(run_dir),
+            "run_rel": "target_a/20260101T000000Z/codex/0",
+            "agent": "codex",
+            "status": "ok",
+            "metrics": {
+                "commands_failed": 1,
+                "failed_commands": [
+                    {"command": "python -m package doctor", "exit_code": 1}
+                ],
+            },
+            "report": {
+                "schema_version": 1,
+                "kind": "task_run_v1",
+                "status": "success",
+                "goal": "Complete the documented workflow",
+                "summary": "Setup recovered and the intended workflow completed.",
+                "steps": [{"name": "workflow", "attempts": [{"action": "run"}], "outcome": "ok"}],
+                "outputs": [{"label": "result", "path": "result.txt"}],
+                "verification": [
+                    {"check": "original scenario", "result": "passed"}
+                ],
+                "issues": [],
+                "next_actions": ["No follow-up required."],
+            },
+        }
+    ]
+
+    atoms = extract_backlog_atoms(records, repo_root=tmp_path)["atoms"]
+    [context] = [atom for atom in atoms if atom.get("source") == "run_outcome_context"]
+
+    assert context["report_status"] == "success"
+    assert context["verification_result_values"] == ["passed"]
+    assert context["verification_check_count"] == 1
+    assert context["explicit_issue_count"] == 0
+    assert context["problem_mining_context_only"] is True
+    assert context["lineage_mining_blocker"] == "runner_terminal_context_only"
+    assert context not in eligible_problem_mining_atoms(atoms)
+    assert any(atom.get("source") == "command_failure" for atom in atoms)
+
+
 def test_extract_backlog_atoms_retains_every_structured_issue_by_default(
     tmp_path: Path,
 ) -> None:

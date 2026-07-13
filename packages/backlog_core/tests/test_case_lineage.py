@@ -15,6 +15,7 @@ from backlog_core.case_lineage import (
     atom_is_independent_problem_evidence,
     attach_supporting_atoms_to_problem_cases,
     build_case_registry,
+    build_source_evidence_snapshot,
     eligible_problem_mining_atoms,
     load_case_registry,
     normalize_atom_lineage,
@@ -696,6 +697,49 @@ def test_registry_preserves_case_context_for_future_relation_review() -> None:
         "run/two/agent/1:failure:1",
     ]
     assert records[0]["_historical_case_context"] is True
+
+
+def test_registry_revision_tracks_same_id_source_content_changes() -> None:
+    problem = {
+        "problem_id": "problem:same-id",
+        "case_id": "case:same-id",
+        "evidence_atom_ids": ["run:source:1"],
+        "source_evidence_atom_ids": ["run:source:1"],
+    }
+    original_atom = _atom("run:source:1", detail="original bytes")
+    first = build_case_registry([problem], supporting_atoms=[original_atom])
+    unchanged = build_case_registry(
+        [problem],
+        previous=first,
+        supporting_atoms=[dict(original_atom)],
+    )
+    changed_atom = _atom("run:source:1", detail="repaired bytes")
+    changed = build_case_registry(
+        [problem],
+        previous=unchanged,
+        supporting_atoms=[changed_atom],
+    )
+
+    first_case = first["cases"]["case:same-id"]
+    unchanged_case = unchanged["cases"]["case:same-id"]
+    changed_case = changed["cases"]["case:same-id"]
+    assert first_case["source_evidence_snapshot_complete"] is True
+    assert unchanged_case["case_revision"] == first_case["case_revision"] == 1
+    assert unchanged_case["source_evidence_snapshot_sha256"] == first_case[
+        "source_evidence_snapshot_sha256"
+    ]
+    assert changed_case["case_revision"] == 2
+    assert changed_case["source_evidence_snapshot_sha256"] != first_case[
+        "source_evidence_snapshot_sha256"
+    ]
+
+
+def test_source_snapshot_is_explicitly_incomplete_when_current_atom_is_missing() -> None:
+    snapshot = build_source_evidence_snapshot(["run:source:1"], [])
+
+    assert snapshot["complete"] is False
+    assert snapshot["missing_atom_ids"] == ["run:source:1"]
+    assert snapshot["snapshot_sha256"] is None
 
 
 def test_registry_persists_same_class_recurrence_against_resolving_plan() -> None:

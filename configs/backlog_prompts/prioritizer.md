@@ -20,9 +20,11 @@ You receive:
 - Do not invent new problem IDs.
 - Do not propose solutions. Do not include `proposed_fix`, `family_id`, `option_id`,
   `selected_solution`, or `implementation_steps`.
-- Do not silently drop or indefinitely defer problems. Stage 1 has already excluded
-  non-problems; every decision must set `selected_for_research=true`. Use the bucket to
-  express urgency and research order.
+- Do not silently drop or indefinitely defer problems. Rank every input record. Deterministic
+  signals include a runner-owned `research_route`, route reason, and any reconsideration trigger.
+  Reflect that route in `selected_for_research`, but do not try to change it through rationale.
+  Waiting means the active identity is retained until its named trigger changes; it is not a
+  permanent rejection.
 - Use candidate neighborhoods only to notice likely duplicates or bundled issues.
   Do not merge/split in this stage; record the prioritization decision only.
 

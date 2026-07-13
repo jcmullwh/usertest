@@ -2,10 +2,17 @@
 
 ## Goal
 
-Rank every canonical problem for deeper research. Stage 1 has already separated noise,
-duplicates, proposals, and unresolved evidence from canonical problems, so priority
-controls research order and urgency—not whether a real problem is ever researched.
-Every valid decision must use `selected_for_research=true`.
+Rank every canonical problem and explain research urgency. Canonical identity is persistent,
+but persistence does not mean the system should repeat an unchanged blocked research mission in
+every cycle. The runner owns the per-cycle `research_route` and final
+`selected_for_research` value. The model ranks evidence and impact; it cannot delete, terminate,
+or permanently suppress a case.
+
+Runner routes distinguish `research_new`, `research_update`, `resume_prior`,
+`reassess_actionability`, `await_evidence`, and eventually `continue_downstream`. An
+`await_evidence` case remains active with an explicit `reconsider_when` trigger. A legacy malformed
+proof receives one current actionability reassessment; if the same frontier remains blocked, it is
+retained without repeatedly starting over.
 
 ## Duration guardrail
 
@@ -41,15 +48,16 @@ configured value.
 - Problems that appear only in one agent or one persona context.
 - Problems that may be environmental rather than systematic.
 
-These signals lower ordering priority; they do not make a canonical problem ineligible.
-Research is responsible for determining whether the evidence establishes a mechanism.
+These signals lower ordering priority; they do not terminate a canonical case. Research is
+responsible for determining whether the evidence establishes a mechanism. Scheduling is
+runner-owned and may wait on a named evidence change rather than spend another identical mission.
 
 ## What to avoid
 
 - Do not propose solutions. This stage decides research priority only.
 - Do not invent new problem IDs; work only with the problem records from stage 1.
-- Do not silently drop or indefinitely defer problems. Every canonical problem uses
-  `selected_for_research=true`; use the bucket to express ordering.
+- Do not silently drop or indefinitely defer problems. Rank every record even when its runner-owned
+  route is waiting. Do not attempt to override a runner route from prose.
 - Do not use the word "simplest," "easiest," "quickest," or similar steering terms.
 
 ## Output contract
@@ -57,7 +65,8 @@ Research is responsible for determining whether the evidence establishes a mecha
 A prioritization decision must include:
 - `problem_id` (matching a stage-1 problem record)
 - `priority_bucket` (one of: p0, p1, p2, p3, watch)
-- `selected_for_research` (boolean)
+- `selected_for_research` (boolean model recommendation; the runner replaces it from the durable
+  research route before dispatch)
 - `priority_rationale`
 - `evidence_atom_ids_used`
 - `priority_status` = `"prioritized"`

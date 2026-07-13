@@ -49,6 +49,7 @@ from backlog_miner.origin_evidence import (
 )
 from backlog_miner.research_evidence import (
     ReplayExecutor,
+    _persisted_research_attempt_errors,
     verify_research_evidence,
 )
 
@@ -634,6 +635,106 @@ def _blocked_research_after_run_failure(
         verification["claims_sha256"] = research_claims_sha256(dossier)
         verification["receipt_sha256"] = evidence_verification_sha256(verification)
     return dossier
+
+
+def _runner_external_wait(run_dir: Path) -> dict[str, Any] | None:
+    """Read one runner-attested, resumable ChatGPT subscription wait."""
+    error_path = run_dir / "error.json"
+    if not error_path.is_file():
+        return None
+    try:
+        error = _load_json_object(error_path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return None
+    wait_raw = error.get("external_wait")
+    wait = wait_raw if isinstance(wait_raw, dict) else {}
+    if (
+        error.get("type") != "AgentExternalWait"
+        or error.get("code") != "codex_chatgpt_subscription_usage_limit"
+        or error.get("provider") != "codex"
+        or error.get("route") != "chatgpt_subscription"
+        or error.get("api_fallback_allowed") is not False
+        or wait.get("state") != "parked"
+        or wait.get("retry_mode") != "resume_same_session"
+        or wait.get("route") != "chatgpt_subscription"
+        or wait.get("api_fallback_allowed") is not False
+    ):
+        return None
+    return {
+        "code": "codex_chatgpt_subscription_usage_limit",
+        "provider": "codex",
+        "phase": _coerce_str(error.get("phase")) or "agent_execution",
+        "route": "chatgpt_subscription",
+        "api_fallback_allowed": False,
+        "state": "parked",
+        "retry_mode": "resume_same_session",
+        "retry_disposition": wait.get("retry_disposition"),
+        "resume_after": json.loads(json.dumps(wait.get("resume_after"), ensure_ascii=False)),
+        "run_dir": str(run_dir.resolve()),
+        "error_artifact": str(error_path.resolve()),
+        "error_artifact_sha256": sha256(error_path.read_bytes()).hexdigest(),
+        "error_artifact_size_bytes": error_path.stat().st_size,
+    }
+
+
+def _stage_external_wait_checkpoint(
+    *,
+    external_wait: dict[str, Any],
+    case_id: str,
+    problem_id: str,
+    expected_session_id: str | None,
+    observed_session_id: str | None,
+) -> dict[str, Any]:
+    """Bind one provider-global wait to the Stage-3 frontier that encountered it."""
+    checkpoint: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "parked_external_wait",
+        "scope": "repro_research_stage",
+        "reason": "codex_chatgpt_subscription_usage_limit",
+        "trigger_case_id": case_id,
+        "trigger_problem_id": problem_id,
+        "expected_session_id": expected_session_id,
+        "observed_session_id": observed_session_id,
+        "authored_work_disposition": "retained",
+        "resume_status": "checkpoint_persisted_same_author_resume_supported",
+        "next_action": "resume_same_author_from_checkpoint_after_provider_reset",
+        "route": "chatgpt_subscription",
+        "api_fallback_allowed": False,
+        "external_wait": json.loads(json.dumps(external_wait, ensure_ascii=False)),
+    }
+    checkpoint["checkpoint_sha256"] = _canonical_json_sha256(checkpoint)
+    return checkpoint
+
+
+def _parked_before_dispatch_dossier(
+    *,
+    case_id: str,
+    problem_id: str,
+    evidence_assignment: dict[str, Any],
+    evidence_atom_ids: Sequence[str],
+    requested_repo_ref: str | None,
+    resolved_repo_ref: str | None,
+    checkpoint: dict[str, Any],
+) -> dict[str, Any]:
+    """Represent selected work intentionally left undispatched by a provider-global wait."""
+    checkpoint_sha256 = str(checkpoint["checkpoint_sha256"])
+    return _blocked_research_placeholder(
+        case_id=case_id,
+        problem_id=problem_id,
+        evidence_assignment=evidence_assignment,
+        evidence_atom_ids=evidence_atom_ids,
+        requested_repo_ref=requested_repo_ref,
+        resolved_repo_ref=resolved_repo_ref,
+        reason=(
+            "research_external_wait_stage_parked_before_dispatch:"
+            f"{checkpoint_sha256}"
+        ),
+        unknown="Research did not start because the signed-in Codex subscription is parked",
+        evidence_needed=(
+            "Resume this selected case after the provider reset recorded by the Stage-3 "
+            "external-wait checkpoint"
+        ),
+    )
 
 
 def _research_attempt_record(
@@ -1629,7 +1730,20 @@ def _research_attempt_workspace(attempt: dict[str, Any]) -> str | None:
 
 
 def _research_attempt_workspace_path(attempt: dict[str, Any]) -> Path | None:
-    """Return the original workspace path without lossy case normalization."""
+    """Return the hash-bound runner workspace for one retained attempt.
+
+    A dossier's ``repo_workspace``/``workspace_dir`` text is not provenance.  Only the
+    runner-owned ``workspace_ref.json`` recorded in an immutable attempt may authorize a
+    same-author continuation.  Rehash the attempt and its exact artifact before trusting the
+    path so correction cannot silently move to a caller-supplied or subsequently edited
+    workspace.
+    """
+    if attempt.get("attempt_sha256") != research_attempt_sha256(attempt):
+        return None
+    run_dir_raw = _coerce_str(attempt.get("run_dir"))
+    if run_dir_raw is None:
+        return None
+    run_dir = Path(run_dir_raw).resolve()
     artifacts_raw = attempt.get("attempt_artifacts")
     artifacts = artifacts_raw if isinstance(artifacts_raw, list) else []
     workspace_ref = next(
@@ -1647,12 +1761,55 @@ def _research_attempt_workspace_path(attempt: dict[str, Any]) -> Path | None:
     path_raw = _coerce_str(workspace_ref.get("path"))
     if path_raw is None:
         return None
+    workspace_ref_path = Path(path_raw).resolve()
+    if workspace_ref_path != (run_dir / "workspace_ref.json").resolve():
+        return None
+    if not workspace_ref_path.is_file():
+        return None
     try:
-        obj = _load_json_object(Path(path_raw))
+        workspace_ref_bytes = workspace_ref_path.read_bytes()
+        workspace_ref_size = workspace_ref_path.stat().st_size
+    except OSError:
+        return None
+    if sha256(workspace_ref_bytes).hexdigest() != workspace_ref.get(
+        "sha256"
+    ) or workspace_ref_size != workspace_ref.get("size_bytes"):
+        return None
+    try:
+        obj = _load_json_object(workspace_ref_path)
     except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
         return None
     workspace_raw = _coerce_str(obj.get("workspace_dir"))
     return Path(workspace_raw).resolve() if workspace_raw is not None else None
+
+
+def _research_continuation_workspace_path(
+    *,
+    source_attempt: dict[str, Any],
+    continuation_run_dir: Path,
+) -> Path | None:
+    """Bind a continuation run to its retained author's exact workspace.
+
+    The retained attempt supplies the content-addressed authority.  The new runner-owned
+    workspace record must name that same path; a dossier field or a continuation record that
+    points elsewhere is never accepted.  The continuation record is captured in the new
+    attempt's artifact receipts immediately after candidate validation.
+    """
+    retained_workspace = _research_attempt_workspace_path(source_attempt)
+    if retained_workspace is None:
+        return None
+    workspace_ref_path = continuation_run_dir.resolve() / "workspace_ref.json"
+    try:
+        workspace_ref = _load_json_object(workspace_ref_path)
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError):
+        return None
+    continuation_workspace_raw = _coerce_str(workspace_ref.get("workspace_dir"))
+    if continuation_workspace_raw is None:
+        return None
+    continuation_workspace = Path(continuation_workspace_raw).resolve()
+    if continuation_workspace != retained_workspace:
+        return None
+    return retained_workspace
 
 
 def _research_attempt_revision(attempt: dict[str, Any]) -> str | None:
@@ -1986,6 +2143,65 @@ def _run_targeted_dossier_repairs(
         repair_seconds = _run_wall_seconds(result.run_dir) or 0.0
         correction_seconds_total += repair_seconds
         correction_seconds_since_best += repair_seconds
+        external_wait = _runner_external_wait(result.run_dir)
+        if external_wait is not None:
+            wait_progress = {
+                "decision": "parked",
+                "reason": "codex_chatgpt_subscription_usage_limit",
+                "before_error_count": len(current_errors),
+                "after_error_count": len(current_errors),
+                "resolved_error_identities": [],
+                "introduced_error_identities": [],
+                "dossier_changed": False,
+                "repeated_state_count": 0,
+                "correction_seconds_since_best_progress": correction_seconds_since_best,
+                "total_correction_seconds": correction_seconds_total,
+                "original_investigation_seconds": original_seconds,
+                "authored_work_disposition": "retained",
+                "external_wait": external_wait,
+                "retained_frontier": {
+                    "latest_safe_dossier_sha256": _canonical_json_sha256(baseline),
+                    "objective_best_dossier_sha256": _canonical_json_sha256(best_dossier),
+                    "candidate_disposition": "no_candidate_provider_wait",
+                    "next_action": "resume_same_session_after_provider_reset",
+                },
+            }
+            wait_attempt = _research_attempt_record(
+                attempt_number=attempt_number,
+                outcome="external_wait",
+                run_dir=result.run_dir,
+                report_path=result.run_dir / "report.json",
+                validation_errors=current_errors,
+                attempted_dossier=baseline,
+                attempt_kind=attempt_kind,
+                source_attempt_sha256=accepted_source["attempt_sha256"],
+                authorized_paths=authorized_paths,
+                baseline_dossier_sha256=_canonical_json_sha256(baseline),
+                baseline_projection_sha256=contract["baseline_projection_sha256"],
+                repair_contract_sha256=contract["repair_contract_sha256"],
+                validation_errors_before=current_errors,
+                agent_session_id=session_id,
+                observed_agent_session_id=result.agent_session_id,
+                resumed_from_session_id=session_id,
+                attempt_wall_seconds=repair_seconds,
+                repair_progress=wait_progress,
+            )
+            attempts.append(wait_attempt)
+            return {
+                "dossier": baseline,
+                "validation_errors": current_errors,
+                "source_attempt_sha256": accepted_source.get("attempt_sha256"),
+                "best_dossier": best_dossier,
+                "best_validation_errors": best_errors,
+                "best_source_attempt_sha256": best_source.get("attempt_sha256"),
+                "attempts": attempts,
+                "repair_run_dirs": repair_runs,
+                "status": "parked_external_wait",
+                "external_wait": external_wait,
+                "expected_session_id": session_id,
+                "observed_session_id": result.agent_session_id,
+                "continuation_failure": None,
+            }
         candidate, candidate_errors = _repair_candidate_from_run(
             result=result,
             case_id=case_id,
@@ -2174,6 +2390,7 @@ def continue_research_dossier_from_independent_feedback(
     replay_executor: ReplayExecutor | None,
     artifacts_dir: Path,
     independent_feedback: Mapping[str, Any] | None = None,
+    continuation_attempt_kind: str = "independent_qualification_research_continuation",
 ) -> dict[str, Any]:
     """Resume one retained researcher with external semantic feedback and reverify it.
 
@@ -2304,11 +2521,9 @@ def continue_research_dossier_from_independent_feedback(
             replay_executor=replay_executor,
         )
         if origin_attachment:
-            workspace = _research_attempt_workspace_path(
-                {
-                    "run_dir": str(verification_run_dir),
-                    "workspace_dir": None,
-                }
+            workspace = _research_continuation_workspace_path(
+                source_attempt=source_attempt,
+                continuation_run_dir=verification_run_dir,
             )
             attachment_reads, attachment_errors = (
                 _origin_attachment_read_receipts(
@@ -2349,7 +2564,7 @@ def continue_research_dossier_from_independent_feedback(
         first_attempt_number=len(attempts) + 1,
         candidate_validator=validate_candidate,
         research_capabilities=True,
-        attempt_kind="independent_qualification_research_continuation",
+        attempt_kind=continuation_attempt_kind,
         independent_feedback=independent_feedback,
     )
     repaired_raw = repair.get("dossier")
@@ -2389,8 +2604,220 @@ def continue_research_dossier_from_independent_feedback(
         "repair_run_dirs": list(repair.get("repair_run_dirs") or []),
         "expected_session_id": repair.get("expected_session_id"),
         "observed_session_id": repair.get("observed_session_id"),
+        "external_wait": repair.get("external_wait"),
+        "continuation_failure": repair.get("continuation_failure"),
         "authored_work_disposition": "retained",
     }
+
+
+def _resume_checkpoint_from_stage_document(
+    stage_document: Mapping[str, Any] | None,
+    *,
+    selected_problem_ids: Sequence[str] = (),
+    selected_case_ids: Mapping[str, str] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, dict[str, Any]]]:
+    """Validate and project one persisted Stage-3 provider-wait checkpoint."""
+    if not isinstance(stage_document, Mapping):
+        return None, {}
+    meta_raw = stage_document.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    checkpoint_raw = meta.get("external_wait")
+    checkpoint = dict(checkpoint_raw) if isinstance(checkpoint_raw, Mapping) else {}
+    wait_raw = checkpoint.get("external_wait")
+    wait = wait_raw if isinstance(wait_raw, Mapping) else {}
+    checkpoint_without_hash = {
+        key: value for key, value in checkpoint.items() if key != "checkpoint_sha256"
+    }
+    if (
+        meta.get("stage_status") != "parked_external_wait"
+        or checkpoint.get("status") != "parked_external_wait"
+        or checkpoint.get("scope") != "repro_research_stage"
+        or checkpoint.get("reason") != "codex_chatgpt_subscription_usage_limit"
+        or checkpoint.get("resume_status")
+        != "checkpoint_persisted_same_author_resume_supported"
+        or checkpoint.get("route") != "chatgpt_subscription"
+        or checkpoint.get("api_fallback_allowed") is not False
+        or wait.get("code") != "codex_chatgpt_subscription_usage_limit"
+        or wait.get("provider") != "codex"
+        or wait.get("state") != "parked"
+        or wait.get("route") != "chatgpt_subscription"
+        or wait.get("api_fallback_allowed") is not False
+        or checkpoint.get("checkpoint_sha256")
+        != _canonical_json_sha256(checkpoint_without_hash)
+    ):
+        raise ValueError("research_external_wait_resume_checkpoint_invalid")
+    items_raw = stage_document.get("items")
+    items = items_raw if isinstance(items_raw, list) else []
+    item_problem_ids: list[str] = []
+    by_problem_id: dict[str, dict[str, Any]] = {}
+    for item_index, item in enumerate(items):
+        if not isinstance(item, dict):
+            raise ValueError(
+                f"research_external_wait_resume_dossier_invalid:{item_index}"
+            )
+        problem_id = _coerce_str(item.get("problem_id"))
+        if problem_id is None:
+            raise ValueError(
+                f"research_external_wait_resume_dossier_problem_id_missing:{item_index}"
+            )
+        if problem_id in by_problem_id:
+            raise ValueError(
+                f"research_external_wait_resume_dossier_duplicate:{problem_id}"
+            )
+        item_problem_ids.append(problem_id)
+        by_problem_id[problem_id] = dict(item)
+    if list(selected_problem_ids) != item_problem_ids:
+        raise ValueError("research_external_wait_resume_dossier_selection_changed")
+    trigger_problem_id = _coerce_str(checkpoint.get("trigger_problem_id"))
+    if trigger_problem_id is None or trigger_problem_id not in by_problem_id:
+        raise ValueError("research_external_wait_resume_trigger_dossier_missing")
+    trigger_case_id = _coerce_str(checkpoint.get("trigger_case_id"))
+    trigger_dossier_case_id = _coerce_str(
+        by_problem_id[trigger_problem_id].get("case_id")
+    )
+    current_trigger_case_id = (
+        selected_case_ids.get(trigger_problem_id)
+        if isinstance(selected_case_ids, Mapping)
+        else None
+    )
+    if (
+        trigger_case_id is None
+        or trigger_dossier_case_id != trigger_case_id
+        or current_trigger_case_id != trigger_case_id
+    ):
+        raise ValueError("research_external_wait_resume_trigger_case_changed")
+    trigger_index = item_problem_ids.index(trigger_problem_id)
+    checkpoint_sha256 = str(checkpoint["checkpoint_sha256"])
+    expected_parked_reason = (
+        "research_external_wait_stage_parked_before_dispatch:" + checkpoint_sha256
+    )
+    for item_index, problem_id in enumerate(item_problem_ids):
+        blockers = _string_list(by_problem_id[problem_id].get("blocking_reasons"))
+        is_parked_placeholder = expected_parked_reason in blockers
+        if item_index < trigger_index and is_parked_placeholder:
+            raise ValueError(
+                f"research_external_wait_resume_pretrigger_placeholder_invalid:{problem_id}"
+            )
+        if item_index > trigger_index and blockers != [expected_parked_reason]:
+            raise ValueError(
+                f"research_external_wait_resume_parked_placeholder_invalid:{problem_id}"
+            )
+    return checkpoint, by_problem_id
+
+
+def resume_research_dossier_from_external_wait(
+    *,
+    dossier: dict[str, Any],
+    checkpoint: Mapping[str, Any],
+    repo_input: str,
+    requested_repo_ref: str | None,
+    resolved_repo_ref: str | None,
+    agent: str,
+    model: str | None,
+    cfg: RunnerConfig,
+    replay_timeout_seconds: float | None,
+    replay_executor: ReplayExecutor | None,
+    artifacts_dir: Path,
+) -> dict[str, Any]:
+    """Rehydrate one parked author frontier and continue it in the exact Codex session."""
+    validated, _ = parse_research_dossier_list(json.dumps([dossier]))
+    retained = validated[0]
+    attempts_raw = retained.get("research_attempts")
+    attempts = (
+        [dict(item) for item in attempts_raw if isinstance(item, dict)]
+        if isinstance(attempts_raw, list)
+        else []
+    )
+    if not attempts or attempts[-1].get("outcome") != "external_wait":
+        raise ValueError("research_external_wait_resume_attempt_missing")
+    wait_attempt = attempts[-1]
+    progress_raw = wait_attempt.get("repair_progress")
+    progress = progress_raw if isinstance(progress_raw, dict) else {}
+    wait_raw = progress.get("external_wait")
+    wait = wait_raw if isinstance(wait_raw, dict) else {}
+    checkpoint_wait_raw = checkpoint.get("external_wait")
+    checkpoint_wait = checkpoint_wait_raw if isinstance(checkpoint_wait_raw, Mapping) else {}
+    run_dir_raw = _coerce_str(wait_attempt.get("run_dir"))
+    if (
+        progress.get("decision") != "parked"
+        or wait.get("code") != "codex_chatgpt_subscription_usage_limit"
+        or wait.get("route") != "chatgpt_subscription"
+        or wait.get("api_fallback_allowed") is not False
+        or wait.get("error_artifact_sha256") != checkpoint_wait.get("error_artifact_sha256")
+        or run_dir_raw is None
+    ):
+        raise ValueError("research_external_wait_resume_attempt_invalid")
+    live_wait = _runner_external_wait(Path(run_dir_raw).resolve())
+    if (
+        live_wait is None
+        or live_wait.get("error_artifact_sha256") != wait.get("error_artifact_sha256")
+        or live_wait.get("error_artifact_size_bytes") != wait.get("error_artifact_size_bytes")
+    ):
+        raise ValueError("research_external_wait_resume_artifact_changed")
+    if wait_attempt.get("attempt_sha256") != research_attempt_sha256(wait_attempt):
+        raise ValueError("research_external_wait_resume_attempt_hash_changed")
+    wait_attempt_errors = _persisted_research_attempt_errors(
+        {"research_attempts": [wait_attempt]}
+    )
+    if wait_attempt_errors:
+        raise ValueError(
+            "research_external_wait_resume_wait_attempt_invalid:"
+            + ",".join(wait_attempt_errors)
+        )
+    checkpoint_expected_session = _coerce_str(checkpoint.get("expected_session_id"))
+    checkpoint_observed_session = _coerce_str(checkpoint.get("observed_session_id"))
+    attempt_expected_session = _coerce_str(wait_attempt.get("agent_session_id"))
+    attempt_observed_session = _coerce_str(
+        wait_attempt.get("observed_agent_session_id")
+    )
+    if (
+        checkpoint_expected_session is None
+        or checkpoint_observed_session is None
+        or attempt_expected_session != checkpoint_expected_session
+        or attempt_observed_session != checkpoint_observed_session
+    ):
+        raise ValueError("research_external_wait_resume_session_provenance_changed")
+    wait_revision = _research_attempt_revision(wait_attempt)
+    retained_revision = _coerce_str(retained.get("repo_revision"))
+    if (
+        wait_revision is None
+        or retained_revision is None
+        or wait_revision != retained_revision.casefold()
+    ):
+        raise ValueError("research_external_wait_resume_target_revision_changed")
+    prior = dict(retained)
+    prior["research_attempts"] = attempts[:-1]
+    prior_attempt_errors = _persisted_research_attempt_errors(prior)
+    if prior_attempt_errors:
+        raise ValueError(
+            "research_external_wait_resume_prior_attempt_invalid:"
+            + ",".join(prior_attempt_errors)
+        )
+    validation_errors = _string_list(wait_attempt.get("validation_errors"))
+    if not validation_errors:
+        raise ValueError("research_external_wait_resume_validation_errors_missing")
+    return continue_research_dossier_from_independent_feedback(
+        dossier=retained,
+        validation_errors=validation_errors,
+        repo_input=repo_input,
+        requested_repo_ref=requested_repo_ref,
+        resolved_repo_ref=resolved_repo_ref,
+        agent=agent,
+        model=model,
+        cfg=cfg,
+        replay_timeout_seconds=replay_timeout_seconds,
+        replay_executor=replay_executor,
+        artifacts_dir=artifacts_dir,
+        independent_feedback={
+            "kind": "provider_external_wait_resume",
+            "checkpoint_sha256": checkpoint.get("checkpoint_sha256"),
+            "instruction": (
+                "The provider reset has cleared. Continue the retained investigation in this "
+                "same author session and correct the still-recorded validation errors."
+            ),
+        },
+        continuation_attempt_kind="evidence_verification_research_continuation",
+    )
 
 
 def _append_prompt_for_problem(
@@ -2490,6 +2917,7 @@ def run_repro_research_stage(
     replay_timeout_seconds: float | None = 300.0,
     replay_executor: ReplayExecutor | None = None,
     replay_executor_metadata: dict[str, Any] | None = None,
+    resume_stage_document: Mapping[str, Any] | None = None,
     _attempt_number: int = 1,
     _full_attempt_kind: str = "full_research",
     _full_source_attempt_sha256: str | None = None,
@@ -2538,7 +2966,9 @@ def run_repro_research_stage(
     nonprogress, session/workspace integrity failures, or correction cost approaching the original
     investigation. Evidence-assignment and verification failures never use either path. Global
     configuration failures (for example a missing repo reference or stage guidance) still raise
-    because no case can be researched correctly under that configuration.
+    because no case can be researched correctly under that configuration. A runner-attested
+    ChatGPT subscription usage limit is provider-global: it retains the triggering frontier and
+    emits parked placeholders for every remaining selected case without further model dispatch.
     """
     if _attempt_number < 1:
         raise ValueError("_attempt_number must be positive")
@@ -2566,6 +2996,74 @@ def run_repro_research_stage(
     requests: list[dict[str, Any]] = []
     dossiers: list[dict[str, Any]] = []
     replay_metadata = dict(replay_executor_metadata or {"executor": "blocked"})
+    stage_external_wait: dict[str, Any] | None = None
+    selected_problem_ids_ordered: list[str] = []
+    selected_case_ids: dict[str, str] = {}
+    for problem_index, problem in enumerate(selected_problems, start=1):
+        if not isinstance(problem, dict):
+            raise ValueError(
+                f"run_repro_research_stage: selected_problems[{problem_index}] invalid"
+            )
+        problem_id = _coerce_str(problem.get("problem_id"))
+        if problem_id is None:
+            raise ValueError(
+                f"run_repro_research_stage: selected_problems[{problem_index}] missing problem_id"
+            )
+        if problem_id in selected_case_ids:
+            raise ValueError(
+                f"run_repro_research_stage: duplicate selected problem_id:{problem_id}"
+            )
+        selected_problem_ids_ordered.append(problem_id)
+        selected_case_ids[problem_id] = (
+            _coerce_str(problem.get("case_id")) or "case:unassigned"
+        )
+    resume_checkpoint, resume_items_by_problem_id = _resume_checkpoint_from_stage_document(
+        resume_stage_document,
+        selected_problem_ids=selected_problem_ids_ordered,
+        selected_case_ids=selected_case_ids,
+    )
+    resume_trigger_problem_id = (
+        _coerce_str(resume_checkpoint.get("trigger_problem_id"))
+        if resume_checkpoint is not None
+        else None
+    )
+    resume_trigger_cleared = resume_checkpoint is None
+    selected_problem_ids = set(selected_problem_ids_ordered)
+    if (
+        resume_checkpoint is not None
+        and resume_trigger_problem_id not in selected_problem_ids
+    ):
+        raise ValueError("research_external_wait_resume_trigger_not_selected")
+    if resume_checkpoint is not None:
+        # Validate the entire retained frontier before resuming its trigger.  Checking
+        # assignments only as the dispatch loop reaches each case could resume the model before
+        # discovering that a later parked case or earlier completed case had changed.
+        for problem in selected_problems:
+            problem_id = str(problem["problem_id"])
+            persisted_dossier = resume_items_by_problem_id[problem_id]
+            persisted_assignment_raw = persisted_dossier.get("evidence_assignment")
+            persisted_assignment = (
+                persisted_assignment_raw
+                if isinstance(persisted_assignment_raw, dict)
+                else {}
+            )
+            current_assignment_raw = problem.get("evidence_assignment")
+            current_assignment = (
+                current_assignment_raw
+                if isinstance(current_assignment_raw, dict)
+                else {}
+            )
+            if persisted_assignment.get("assignment_sha256") != current_assignment.get(
+                "assignment_sha256"
+            ):
+                raise ValueError(
+                    "research_external_wait_resume_evidence_assignment_changed:"
+                    + problem_id
+                )
+            if _coerce_str(persisted_dossier.get("case_id")) != selected_case_ids[problem_id]:
+                raise ValueError(
+                    "research_external_wait_resume_case_assignment_changed:" + problem_id
+                )
 
     if not dry_run and selected_problems and (repo_input is None or not str(repo_input).strip()):
         raise ValueError(
@@ -2642,6 +3140,150 @@ def run_repro_research_stage(
             "evidence_atom_ids": evidence_atom_ids,
         }
         requests.append(req_meta)
+
+        if stage_external_wait is not None:
+            checkpoint_sha256 = str(stage_external_wait["checkpoint_sha256"])
+            req_meta.update(
+                {
+                    "dispatch_status": "parked_not_started",
+                    "external_wait_checkpoint_sha256": checkpoint_sha256,
+                    "blocked_by_problem_id": stage_external_wait["trigger_problem_id"],
+                    "route": "chatgpt_subscription",
+                    "api_fallback_allowed": False,
+                }
+            )
+            parked = _parked_before_dispatch_dossier(
+                case_id=case_id,
+                problem_id=pid,
+                evidence_assignment=evidence_assignment,
+                evidence_atom_ids=evidence_atom_ids,
+                requested_repo_ref=requested_repo_ref,
+                resolved_repo_ref=resolved_repo_ref,
+                checkpoint=stage_external_wait,
+            )
+            validated, _ = parse_research_dossier_list(json.dumps([parked]))
+            dossiers.append(validated[0])
+            continue
+
+        persisted_dossier = resume_items_by_problem_id.get(pid)
+        if persisted_dossier is not None:
+            persisted_assignment_raw = persisted_dossier.get("evidence_assignment")
+            persisted_assignment = (
+                persisted_assignment_raw if isinstance(persisted_assignment_raw, dict) else {}
+            )
+            if persisted_assignment.get("assignment_sha256") != evidence_assignment.get(
+                "assignment_sha256"
+            ):
+                raise ValueError(
+                    f"research_external_wait_resume_evidence_assignment_changed:{pid}"
+                )
+        persisted_blockers = (
+            _string_list(persisted_dossier.get("blocking_reasons"))
+            if isinstance(persisted_dossier, dict)
+            else []
+        )
+        persisted_was_parked_before_dispatch = any(
+            reason.startswith("research_external_wait_stage_parked_before_dispatch:")
+            for reason in persisted_blockers
+        )
+        if (
+            resume_checkpoint is not None
+            and pid != resume_trigger_problem_id
+            and persisted_dossier is not None
+            and not persisted_was_parked_before_dispatch
+        ):
+            persisted_validated, _ = parse_research_dossier_list(
+                json.dumps([persisted_dossier])
+            )
+            dossiers.append(persisted_validated[0])
+            req_meta.update(
+                {
+                    "dispatch_status": "retained_completed_before_external_wait",
+                    "resume_checkpoint_sha256": resume_checkpoint["checkpoint_sha256"],
+                }
+            )
+            continue
+
+        if (
+            resume_checkpoint is not None
+            and not resume_trigger_cleared
+            and pid == resume_trigger_problem_id
+        ):
+            if persisted_dossier is None:
+                raise ValueError("research_external_wait_resume_trigger_dossier_missing")
+            assert repo_input is not None
+            resume_result = resume_research_dossier_from_external_wait(
+                dossier=persisted_dossier,
+                checkpoint=resume_checkpoint,
+                repo_input=str(repo_input),
+                requested_repo_ref=requested_repo_ref,
+                resolved_repo_ref=resolved_repo_ref,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                replay_timeout_seconds=replay_timeout_seconds,
+                replay_executor=replay_executor,
+                artifacts_dir=stage_artifacts_dir / "external_wait_resume" / f"{idx:03d}_{seed}",
+            )
+            resumed_raw = resume_result.get("dossier")
+            resumed = dict(resumed_raw) if isinstance(resumed_raw, dict) else persisted_dossier
+            resumed_validated, _ = parse_research_dossier_list(json.dumps([resumed]))
+            dossiers.append(resumed_validated[0])
+            req_meta["attempts"] = [
+                _research_attempt_request_summary(attempt)
+                for attempt in (
+                    resumed.get("research_attempts")
+                    if isinstance(resumed.get("research_attempts"), list)
+                    else []
+                )
+                if isinstance(attempt, dict)
+            ]
+            resume_status = str(resume_result.get("status") or "")
+            if resume_status == "corrected":
+                resume_trigger_cleared = True
+                req_meta.update(
+                    {
+                        "dispatch_status": "resumed_same_author_after_provider_reset",
+                        "resume_checkpoint_sha256": resume_checkpoint["checkpoint_sha256"],
+                        "expected_session_id": resume_checkpoint.get("expected_session_id"),
+                        "observed_session_id": resume_result.get("observed_session_id"),
+                    }
+                )
+            elif resume_status == "parked_external_wait":
+                resumed_wait = resume_result.get("external_wait")
+                if not isinstance(resumed_wait, dict):
+                    raise ValueError("research_external_wait_resume_repark_missing_attestation")
+                stage_external_wait = _stage_external_wait_checkpoint(
+                    external_wait=resumed_wait,
+                    case_id=case_id,
+                    problem_id=pid,
+                    expected_session_id=_coerce_str(
+                        resume_result.get("expected_session_id")
+                    ),
+                    observed_session_id=_coerce_str(
+                        resume_result.get("observed_session_id")
+                    ),
+                )
+                req_meta.update(
+                    {
+                        "dispatch_status": "reparked_during_same_session_resume",
+                        "external_wait_checkpoint_sha256": stage_external_wait[
+                            "checkpoint_sha256"
+                        ],
+                        "route": "chatgpt_subscription",
+                        "api_fallback_allowed": False,
+                    }
+                )
+            else:
+                resume_trigger_cleared = True
+                req_meta.update(
+                    {
+                        "dispatch_status": "resume_repairable_paused",
+                        "resume_checkpoint_sha256": resume_checkpoint["checkpoint_sha256"],
+                        "resume_status": resume_status,
+                    }
+                )
+            continue
 
         missing_atom_ids = _string_list(problem.get("missing_evidence_atom_ids"))
         expected_atom_ids = _string_list(evidence_assignment.get("expected_atom_ids"))
@@ -2835,6 +3477,7 @@ def run_repro_research_stage(
             dossiers.append(validated[0])
             continue
         run_dir = result.run_dir
+        run_external_wait = _runner_external_wait(run_dir)
         _write_evidence_assignment_sidecar(
             run_dir,
             evidence_assignment=evidence_assignment,
@@ -2959,13 +3602,35 @@ def run_repro_research_stage(
 
         nonretry_reason: str | None = None
         if result.exit_code != 0:
-            nonretry_reason = f"runner_exit_code:{result.exit_code}"
+            nonretry_reason = (
+                "research_external_wait_parked"
+                if run_external_wait is not None
+                else f"runner_exit_code:{result.exit_code}"
+            )
         elif diff_class == "suspicious_implementation":
             nonretry_reason = "suspicious_implementation_diff"
         if nonretry_reason is not None:
+            attempt_progress = _full_restart_provenance
+            if run_external_wait is not None:
+                if _full_attempt_kind == "fresh_research_retry" and isinstance(
+                    _full_restart_provenance, dict
+                ):
+                    attempt_progress = dict(_full_restart_provenance)
+                    attempt_progress.pop("provenance_sha256", None)
+                    attempt_progress["external_wait"] = run_external_wait
+                    attempt_progress["provenance_sha256"] = _canonical_json_sha256(attempt_progress)
+                else:
+                    attempt_progress = {
+                        "decision": "parked",
+                        "reason": "codex_chatgpt_subscription_usage_limit",
+                        "external_wait": run_external_wait,
+                        "authored_work_disposition": "retained",
+                    }
             nonretry_attempt = _research_attempt_record(
                 attempt_number=_attempt_number,
-                outcome="runner_contract_invalid",
+                outcome=(
+                    "external_wait" if run_external_wait is not None else "runner_contract_invalid"
+                ),
                 run_dir=run_dir,
                 report_path=report_path,
                 validation_errors=[nonretry_reason, *output_contract_errors],
@@ -2978,7 +3643,7 @@ def run_repro_research_stage(
                 agent_session_id=result.agent_session_id,
                 observed_agent_session_id=result.agent_session_id,
                 attempt_wall_seconds=_run_wall_seconds(run_dir),
-                repair_progress=_full_restart_provenance,
+                repair_progress=attempt_progress,
             )
             blocked = _blocked_research_after_run_failure(
                 case_id=case_id,
@@ -2989,10 +3654,18 @@ def run_repro_research_stage(
                 resolved_repo_ref=resolved_repo_ref,
                 run_dir=run_dir,
                 reason=nonretry_reason,
-                unknown="The research run failed a non-retryable execution integrity gate",
+                unknown=(
+                    "Research is waiting for the ChatGPT subscription reset"
+                    if run_external_wait is not None
+                    else "The research run failed a non-retryable execution integrity gate"
+                ),
                 evidence_needed=(
-                    "Inspect the retained run and start a new research cycle only after "
-                    "the execution or prohibited-diff failure is resolved"
+                    "Resume the retained workflow after the recorded provider reset"
+                    if run_external_wait is not None
+                    else (
+                        "Inspect the retained run and start a new research cycle only after "
+                        "the execution or prohibited-diff failure is resolved"
+                    )
                 ),
             )
             blocked["diff_classification"] = diff_class
@@ -3005,6 +3678,24 @@ def run_repro_research_stage(
             req_meta["attempts"] = [
                 _research_attempt_request_summary(attempt) for attempt in nonretry_history
             ]
+            if run_external_wait is not None:
+                stage_external_wait = _stage_external_wait_checkpoint(
+                    external_wait=run_external_wait,
+                    case_id=case_id,
+                    problem_id=pid,
+                    expected_session_id=result.agent_session_id,
+                    observed_session_id=result.agent_session_id,
+                )
+                req_meta.update(
+                    {
+                        "dispatch_status": "parked_during_dispatch",
+                        "external_wait_checkpoint_sha256": stage_external_wait[
+                            "checkpoint_sha256"
+                        ],
+                        "route": "chatgpt_subscription",
+                        "api_fallback_allowed": False,
+                    }
+                )
             continue
         current_attempt = _research_attempt_record(
             attempt_number=_attempt_number,
@@ -3062,6 +3753,34 @@ def run_repro_research_stage(
                     "continuation_failure": repair_result.get("continuation_failure"),
                 }
                 repair_status = str(repair_result.get("status") or "")
+                if repair_status == "parked_external_wait":
+                    correction_block_reason = "research_external_wait_parked"
+                    req_meta["targeted_dossier_repairs"]["external_wait"] = repair_result.get(
+                        "external_wait"
+                    )
+                    repair_external_wait = repair_result.get("external_wait")
+                    if isinstance(repair_external_wait, dict):
+                        stage_external_wait = _stage_external_wait_checkpoint(
+                            external_wait=repair_external_wait,
+                            case_id=case_id,
+                            problem_id=pid,
+                            expected_session_id=_coerce_str(
+                                repair_result.get("expected_session_id")
+                            ),
+                            observed_session_id=_coerce_str(
+                                repair_result.get("observed_session_id")
+                            ),
+                        )
+                        req_meta.update(
+                            {
+                                "dispatch_status": "parked_during_same_session_repair",
+                                "external_wait_checkpoint_sha256": stage_external_wait[
+                                    "checkpoint_sha256"
+                                ],
+                                "route": "chatgpt_subscription",
+                                "api_fallback_allowed": False,
+                            }
+                        )
                 continuation_unavailable = repair_status in {
                     "same_session_continuation_unavailable",
                     "workspace_unavailable",
@@ -3241,6 +3960,23 @@ def run_repro_research_stage(
                     _full_restart_provenance=fresh_restart_provenance,
                     _prior_attempts=research_attempt_history,
                 )
+                retry_meta_raw = retry_doc.get("input_meta")
+                retry_meta = retry_meta_raw if isinstance(retry_meta_raw, dict) else {}
+                retry_external_wait = retry_meta.get("external_wait")
+                if isinstance(retry_external_wait, dict):
+                    stage_external_wait = json.loads(
+                        json.dumps(retry_external_wait, ensure_ascii=False)
+                    )
+                    req_meta.update(
+                        {
+                            "dispatch_status": "parked_during_fresh_research_retry",
+                            "external_wait_checkpoint_sha256": stage_external_wait.get(
+                                "checkpoint_sha256"
+                            ),
+                            "route": "chatgpt_subscription",
+                            "api_fallback_allowed": False,
+                        }
+                    )
                 retry_items_raw = retry_doc.get("items")
                 retry_items = retry_items_raw if isinstance(retry_items_raw, list) else []
                 if retry_items and isinstance(retry_items[0], dict):
@@ -3361,13 +4097,17 @@ def run_repro_research_stage(
                 run_dir=run_dir,
                 reason=correction_block_reason or "research_dossier_output_contract_invalid",
                 unknown=(
-                    "The author session or retained workspace required for correction was "
+                    "The retained author is waiting for the ChatGPT subscription reset"
+                    if correction_block_reason == "research_external_wait_parked"
+                    else "The author session or retained workspace required for correction was "
                     "unavailable"
                     if correction_block_reason is not None
                     else "The case-local dossier failed the model-output contract"
                 ),
                 evidence_needed=(
-                    "Inspect the retained validation errors and raw attempted dossier"
+                    "Resume the same retained author session after the recorded provider reset"
+                    if correction_block_reason == "research_external_wait_parked"
+                    else "Inspect the retained validation errors and raw attempted dossier"
                 ),
             )
             _set_research_attempts(blocked, research_attempt_history)
@@ -3668,6 +4408,34 @@ def run_repro_research_stage(
                 "observed_session_id": verifier_repair.get("observed_session_id"),
                 "continuation_failure": verifier_repair.get("continuation_failure"),
             }
+            if verifier_repair.get("status") == "parked_external_wait":
+                verifier_external_wait = verifier_repair.get("external_wait")
+                if isinstance(verifier_external_wait, dict):
+                    stage_external_wait = _stage_external_wait_checkpoint(
+                        external_wait=verifier_external_wait,
+                        case_id=case_id,
+                        problem_id=pid,
+                        expected_session_id=_coerce_str(
+                            verifier_repair.get("expected_session_id")
+                        ),
+                        observed_session_id=_coerce_str(
+                            verifier_repair.get("observed_session_id")
+                        ),
+                    )
+                    req_meta["evidence_verification_corrections"]["external_wait"] = (
+                        verifier_external_wait
+                    )
+                    req_meta.update(
+                        {
+                            "dispatch_status": "parked_during_evidence_verification",
+                            "external_wait_checkpoint_sha256": stage_external_wait[
+                                "checkpoint_sha256"
+                            ],
+                            "route": "chatgpt_subscription",
+                            "api_fallback_allowed": False,
+                        }
+                    )
+                    blocking_reasons.append("research_external_wait_parked")
             repaired_raw = verifier_repair.get("dossier")
             repaired = dict(repaired_raw) if isinstance(repaired_raw, dict) else {}
             accepted = verified_candidates.get(_canonical_json_sha256(repaired))
@@ -3798,6 +4566,27 @@ def run_repro_research_stage(
         dossiers,
         input_meta={
             "selected_problem_count": len(selected_problems),
+            "stage_status": (
+                "parked_external_wait" if stage_external_wait is not None else "completed"
+            ),
+            "external_wait": (
+                json.loads(json.dumps(stage_external_wait, ensure_ascii=False))
+                if stage_external_wait is not None
+                else None
+            ),
+            "parked_before_dispatch_count": sum(
+                1
+                for request_meta in requests
+                if request_meta.get("dispatch_status") == "parked_not_started"
+            ),
+            "resumed_external_wait_checkpoint_sha256": (
+                resume_checkpoint.get("checkpoint_sha256")
+                if resume_checkpoint is not None
+                else None
+            ),
+            "external_wait_resume_cleared": (
+                resume_trigger_cleared if resume_checkpoint is not None else None
+            ),
             "evidence_sufficient_count": sum(
                 1 for dossier in dossiers if dossier.get("research_status") == "evidence_sufficient"
             ),

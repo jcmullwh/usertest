@@ -1,6 +1,13 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from collections.abc import Mapping
+
+from backlog_core import (
+    SOURCE_EVIDENCE_PROJECTION_VERSION,
+    source_evidence_atom_projection,
+    source_evidence_atom_sha256,
+)
 from backlog_core.stage_contracts import evidence_assignment_sha256
 from backlog_miner.research_evidence import (
     BlockedReplayExecutor,
@@ -315,37 +322,6 @@ def _evidence_assignment(
     evidence_atoms: list[dict[str, Any]],
     repo_root: Path,
 ) -> tuple[dict[str, Any], list[str]]:
-    decision_fields = {
-        "links",
-        "artifact_links",
-        "case_id",
-        "supporting_case_ids",
-        "disposition",
-        "disposition_status",
-        "disposition_receipt",
-        "disposition_revisit_when",
-        "evidence_role",
-        "origin_stage",
-        "parent_case_id",
-        "parent_problem_id",
-        "parent_ticket_fingerprint",
-        "derived_from_atom_ids",
-        "lineage_authorities",
-        "lineage_validation_errors",
-        "lineage_mining_blocker",
-        "legacy_report_lineage_claims",
-        "legacy_parent_problem_id",
-        "novel_case_rationale",
-    }
-
-    def source_evidence_projection(atom: dict[str, Any]) -> dict[str, Any]:
-        return {
-            key: value
-            for key, value in atom.items()
-            if key not in decision_fields
-            and not key.startswith(("case_", "disposition_", "lineage_", "parent_"))
-        }
-
     receipts: list[dict[str, Any]] = []
     missing: list[str] = []
     by_id = {
@@ -359,20 +335,13 @@ def _evidence_assignment(
             missing.append(atom_id)
             continue
         artifacts = _origin_artifact_receipts(atom, repo_root=repo_root)
-        atom_projection = source_evidence_projection(atom)
+        atom_projection = source_evidence_atom_projection(atom)
         receipts.append(
             {
                 "atom_id": atom_id,
-                "atom_sha256": sha256(
-                    json.dumps(
-                        atom_projection,
-                        sort_keys=True,
-                        separators=(",", ":"),
-                        ensure_ascii=False,
-                    ).encode()
-                ).hexdigest(),
+                "atom_sha256": source_evidence_atom_sha256(atom),
                 "atom_snapshot": atom_projection,
-                "source_projection_version": 1,
+                "source_projection_version": SOURCE_EVIDENCE_PROJECTION_VERSION,
                 "artifact_receipts": artifacts,
                 "origin_evidence_mode": (
                     "snapshot_and_artifacts" if artifacts else "signed_snapshot"
@@ -554,6 +523,8 @@ def _run_repro_research_stage(
     replay_timeout_seconds: float,
     replay_executor: ReplayExecutor,
     replay_executor_metadata: dict[str, Any],
+    resume_stage_document: Mapping[str, Any] | None = None,
+    reused_research_dossiers: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     """Run stage 3 reproduce-plus-research and write the stage artifacts."""
     import json as _json
@@ -664,21 +635,145 @@ def _run_repro_research_stage(
         }
         selected_payloads.append(payload)
 
-    stage_doc = run_repro_research_stage(
-        repo_root=repo_root,
-        repo_input=repo_input,
-        repo_ref=repo_ref,
-        target_slug=target_slug,
-        selected_problems=selected_payloads,
-        artifacts_dir=artifacts_dir,
-        agent=agent,
-        model=model,
-        cfg=cfg,
-        dry_run=dry_run,
-        replay_timeout_seconds=replay_timeout_seconds,
-        replay_executor=replay_executor,
-        replay_executor_metadata=replay_executor_metadata,
+    reused = [dict(item) for item in reused_research_dossiers]
+    core_resume_stage_document = resume_stage_document
+    if reused and isinstance(resume_stage_document, Mapping):
+        # The provider-wait checkpoint belongs only to freshly dispatched cases.  Reused
+        # dossiers are appended after the core runner returns, so remove that exact retained
+        # suffix before asking the core runner to validate/resume its selected frontier.
+        retained_doc = _json.loads(_json.dumps(resume_stage_document, ensure_ascii=False))
+        retained_items_raw = retained_doc.get("items")
+        retained_items = retained_items_raw if isinstance(retained_items_raw, list) else []
+        if len(retained_items) < len(reused) or retained_items[-len(reused) :] != reused:
+            raise ValueError("stage3_resume_reused_research_suffix_changed")
+        fresh_retained = retained_items[: -len(reused)]
+        retained_doc["items"] = fresh_retained
+        retained_doc["item_count"] = len(fresh_retained)
+        retained_meta_raw = retained_doc.get("input_meta")
+        retained_meta = (
+            dict(retained_meta_raw) if isinstance(retained_meta_raw, Mapping) else {}
+        )
+        retained_meta.update(
+            {
+                "fresh_research_dossier_count": len(fresh_retained),
+                "retained_research_reused_count": 0,
+                "research_dossier_count": len(fresh_retained),
+                "evidence_sufficient_count": sum(
+                    item.get("research_status") == "evidence_sufficient"
+                    for item in fresh_retained
+                    if isinstance(item, Mapping)
+                ),
+                "blocked_case_count": sum(
+                    item.get("research_status") == "blocked"
+                    for item in fresh_retained
+                    if isinstance(item, Mapping)
+                ),
+                "insufficient_evidence_count": sum(
+                    item.get("research_status") == "insufficient_evidence"
+                    for item in fresh_retained
+                    if isinstance(item, Mapping)
+                ),
+                "useful_research_output_count": sum(
+                    item.get("research_status")
+                    in {"evidence_sufficient", "insufficient_evidence"}
+                    for item in fresh_retained
+                    if isinstance(item, Mapping)
+                ),
+            }
+        )
+        retained_doc["input_meta"] = retained_meta
+        core_resume_stage_document = retained_doc
+    if selected_payloads:
+        stage_doc = run_repro_research_stage(
+            repo_root=repo_root,
+            repo_input=repo_input,
+            repo_ref=repo_ref,
+            target_slug=target_slug,
+            selected_problems=selected_payloads,
+            artifacts_dir=artifacts_dir,
+            agent=agent,
+            model=model,
+            cfg=cfg,
+            dry_run=dry_run,
+            replay_timeout_seconds=replay_timeout_seconds,
+            replay_executor=replay_executor,
+            replay_executor_metadata=replay_executor_metadata,
+            resume_stage_document=core_resume_stage_document,
+        )
+    elif reused:
+        # A hash-bound retained proof has already passed the current readiness gate.  Building
+        # the current Stage-3 artifact locally avoids paying for (or nondeterministically
+        # degrading) a second research mission whose only job would be to reproduce that proof.
+        stage_doc = build_stage_document(
+            "repro_research",
+            [],
+            input_meta={
+                "selected_problem_count": 0,
+                "stage_status": "completed",
+                "dry_run": bool(dry_run),
+                "agent": agent,
+                "model": model,
+                "model_invocation_skipped": "all_ready_proofs_reused",
+            },
+            artifacts={},
+        )
+    else:
+        stage_doc = run_repro_research_stage(
+            repo_root=repo_root,
+            repo_input=repo_input,
+            repo_ref=repo_ref,
+            target_slug=target_slug,
+            selected_problems=selected_payloads,
+            artifacts_dir=artifacts_dir,
+            agent=agent,
+            model=model,
+            cfg=cfg,
+            dry_run=dry_run,
+            replay_timeout_seconds=replay_timeout_seconds,
+            replay_executor=replay_executor,
+            replay_executor_metadata=replay_executor_metadata,
+            resume_stage_document=core_resume_stage_document,
+        )
+
+    fresh_raw = stage_doc.get("items")
+    fresh = [dict(item) for item in fresh_raw if isinstance(item, dict)] if isinstance(
+        fresh_raw, list
+    ) else []
+    all_dossiers = [*fresh, *reused]
+    identities = [
+        (str(item.get("case_id") or ""), str(item.get("problem_id") or ""))
+        for item in all_dossiers
+    ]
+    if len(identities) != len(set(identities)):
+        raise ValueError("stage3_reused_research_duplicates_fresh_dossier")
+    stage_doc["items"] = all_dossiers
+    stage_doc["item_count"] = len(all_dossiers)
+    input_meta_raw = stage_doc.get("input_meta")
+    input_meta = dict(input_meta_raw) if isinstance(input_meta_raw, Mapping) else {}
+    input_meta.update(
+        {
+            "fresh_research_dossier_count": len(fresh),
+            "retained_research_reused_count": len(reused),
+            "research_dossier_count": len(all_dossiers),
+            "evidence_sufficient_count": sum(
+                item.get("research_status") == "evidence_sufficient"
+                for item in all_dossiers
+            ),
+            "blocked_case_count": sum(
+                item.get("research_status") == "blocked" for item in all_dossiers
+            ),
+            "insufficient_evidence_count": sum(
+                item.get("research_status") == "insufficient_evidence"
+                for item in all_dossiers
+            ),
+            "useful_research_output_count": sum(
+                item.get("research_status")
+                in {"evidence_sufficient", "insufficient_evidence"}
+                for item in all_dossiers
+            ),
+        }
     )
+    stage_doc["input_meta"] = input_meta
 
     artifacts = stage_doc.get("artifacts")
     artifacts_dict = artifacts if isinstance(artifacts, dict) else {}

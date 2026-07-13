@@ -2,8 +2,9 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
+from copy import deepcopy
 from hashlib import sha256
 from uuid import uuid4
 
@@ -29,7 +30,15 @@ from usertest_backlog.workflows.derived_evidence import (
     ingest_derived_evidence_records,
     with_operational_candidate_metadata,
 )
-from usertest_backlog.workflows.implementation_planning import _run_implementation_planning_stage
+from usertest_backlog.workflows.downstream_hydration import (
+    chain_matches_research_dossier,
+    flatten_chain_items,
+    hydrate_retained_downstream_chain,
+)
+from usertest_backlog.workflows.implementation_planning import (
+    _render_change_plans_markdown,
+    _run_implementation_planning_stage,
+)
 from usertest_backlog.workflows.orphan_implementation_history import (
     recover_orphan_implementation_history,
 )
@@ -39,11 +48,17 @@ from usertest_backlog.workflows.pipeline_provenance import (
 from usertest_backlog.workflows.post_research_relations import (
     collapse_post_research_verified_mechanisms,
 )
-from usertest_backlog.workflows.prioritization import _run_problem_prioritization_stage
+from usertest_backlog.workflows.prioritization import (
+    _research_dispatch_sort_key,
+    _run_problem_prioritization_stage,
+)
 from usertest_backlog.workflows.problem_mining import (
     _persist_canonical_relation_receipts,
     _run_problem_case_relation_review,
     _run_problem_mining_stage,
+)
+from usertest_backlog.workflows.problem_mining_evidence import (
+    immutable_atom_evidence_projection,
 )
 from usertest_backlog.workflows.qualification_healing import (
     pending_repaired_shadow_run_errors,
@@ -72,6 +87,7 @@ from usertest_backlog.workflows.reproduction_research import (
     _configured_replay_executor,
     _run_repro_research_stage,
 )
+from usertest_backlog.workflows.research_hydration import hydrate_retained_research_proof
 from usertest_backlog.workflows.shadow_validation import (
     evaluate_shadow_invariants,
     normalize_shadow_gate_config,
@@ -84,10 +100,55 @@ from usertest_backlog.workflows.shadow_validation import (
     write_pending_operational_shadow_run,
     write_pending_shadow_run,
 )
-from usertest_backlog.workflows.solution_options import _run_solution_optioning_stage
-from usertest_backlog.workflows.solution_selection import _run_solution_selection_stage
+from usertest_backlog.workflows.solution_options import (
+    _render_solution_options_markdown,
+    _run_solution_optioning_stage,
+)
+from usertest_backlog.workflows.solution_selection import (
+    _render_solution_selection_markdown,
+    _run_solution_selection_stage,
+)
 
 _EXACT_SESSION_CORRECTION_AGENTS = frozenset({"codex"})
+
+
+def _attach_current_case_registry_context(
+    problem_records: Sequence[Mapping[str, Any]],
+    *,
+    case_registry: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Attach the current durable evidence/proof frontier after Stage-1 rediscovery."""
+
+    contexts_by_case_id = {
+        str(context["case_id"]): context
+        for context in problem_case_records_from_registry(case_registry)
+        if isinstance(context.get("case_id"), str)
+    }
+    durable_fields = (
+        "evidence_atom_ids",
+        "source_evidence_atom_ids",
+        "derived_evidence_atom_ids",
+        "case_revision",
+        "source_evidence_projection_version",
+        "source_evidence_atom_sha256_by_id",
+        "source_evidence_snapshot_complete",
+        "source_evidence_snapshot_missing_atom_ids",
+        "source_evidence_snapshot_sha256",
+        "prior_stage_context",
+        "_historical_case_context",
+        "last_pipeline_stage",
+    )
+    attached: list[dict[str, Any]] = []
+    for raw_record in problem_records:
+        record = dict(raw_record)
+        case_id = _coerce_string(record.get("case_id"))
+        context = contexts_by_case_id.get(case_id or "")
+        if context is not None:
+            for field in durable_fields:
+                if field in context:
+                    record[field] = deepcopy(context[field])
+        attached.append(record)
+    return attached
 
 
 def _restore_sealed_qualification_lineage(
@@ -570,6 +631,183 @@ def _require_stage_model_invocation_provenance(stage_doc: dict[str, Any]) -> Non
         )
 
 
+def _stage3_provider_external_wait(stage_doc: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Return only the runner-owned, non-API Stage-3 subscription checkpoint."""
+    meta_raw = stage_doc.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    checkpoint_raw = meta.get("external_wait")
+    checkpoint = checkpoint_raw if isinstance(checkpoint_raw, Mapping) else {}
+    wait_raw = checkpoint.get("external_wait")
+    wait = wait_raw if isinstance(wait_raw, Mapping) else {}
+    checkpoint_without_hash = {
+        key: value for key, value in checkpoint.items() if key != "checkpoint_sha256"
+    }
+    if (
+        meta.get("stage_status") != "parked_external_wait"
+        or checkpoint.get("status") != "parked_external_wait"
+        or checkpoint.get("scope") != "repro_research_stage"
+        or checkpoint.get("reason") != "codex_chatgpt_subscription_usage_limit"
+        or checkpoint.get("resume_status")
+        != "checkpoint_persisted_same_author_resume_supported"
+        or checkpoint.get("route") != "chatgpt_subscription"
+        or checkpoint.get("api_fallback_allowed") is not False
+        or wait.get("code") != "codex_chatgpt_subscription_usage_limit"
+        or wait.get("provider") != "codex"
+        or wait.get("state") != "parked"
+        or wait.get("route") != "chatgpt_subscription"
+        or wait.get("api_fallback_allowed") is not False
+        or not _qualification_valid_sha256(wait.get("error_artifact_sha256"))
+        or not isinstance(wait.get("error_artifact_size_bytes"), int)
+        or checkpoint.get("checkpoint_sha256")
+        != _qualification_canonical_sha256(checkpoint_without_hash)
+    ):
+        return None
+    return json.loads(json.dumps(checkpoint, ensure_ascii=False))
+
+
+def _stage3_resume_file_receipt(path: Path) -> dict[str, Any]:
+    payload = path.read_bytes()
+    return {
+        "path": str(path.resolve()),
+        "sha256": sha256(payload).hexdigest(),
+        "size_bytes": len(payload),
+    }
+
+
+def _stage3_resume_upstream_contract(
+    *,
+    paths: Mapping[str, Path],
+    source_atoms: Sequence[Mapping[str, Any]],
+    target_slug: str | None,
+    repo_input: str | None,
+    research_ref: str | None,
+    selected_problem_ids: Sequence[str],
+) -> dict[str, Any]:
+    contract: dict[str, Any] = {
+        "schema_version": 1,
+        "contract_kind": "stage3_external_wait_resume_upstream",
+        "scope": {
+            "target_slug": target_slug,
+            "repo_input": repo_input,
+            "research_ref": research_ref,
+        },
+        "selected_problem_ids": list(selected_problem_ids),
+        "source_atom_corpus": {
+            "projection": "immutable_atom_evidence_projection_v1",
+            "atom_count": len(source_atoms),
+            "content_sha256": _qualification_canonical_sha256(
+                sorted(
+                    [immutable_atom_evidence_projection(atom) for atom in source_atoms],
+                    key=lambda atom: (
+                        _coerce_string(atom.get("atom_id")) or "",
+                        _qualification_canonical_sha256(atom),
+                    ),
+                )
+            ),
+        },
+        "artifacts": {
+            name: _stage3_resume_file_receipt(path)
+            for name, path in paths.items()
+            if path.is_file()
+        },
+    }
+    contract["content_sha256"] = _qualification_canonical_sha256(contract)
+    return contract
+
+
+def _load_stage3_resume_upstream(
+    *,
+    stage3_document: Mapping[str, Any],
+    expected_paths: Mapping[str, Path],
+    target_slug: str | None,
+    repo_input: str | None,
+    research_ref: str | None,
+    current_atoms: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    meta_raw = stage3_document.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    contract_raw = meta.get("resume_upstream")
+    contract = dict(contract_raw) if isinstance(contract_raw, Mapping) else {}
+    without_hash = {key: value for key, value in contract.items() if key != "content_sha256"}
+    scope_raw = contract.get("scope")
+    scope = scope_raw if isinstance(scope_raw, Mapping) else {}
+    artifacts_raw = contract.get("artifacts")
+    artifacts = artifacts_raw if isinstance(artifacts_raw, Mapping) else {}
+    source_atom_corpus_raw = contract.get("source_atom_corpus")
+    source_atom_corpus = (
+        source_atom_corpus_raw
+        if isinstance(source_atom_corpus_raw, Mapping)
+        else {}
+    )
+    if (
+        contract.get("schema_version") != 1
+        or contract.get("contract_kind") != "stage3_external_wait_resume_upstream"
+        or contract.get("content_sha256") != _qualification_canonical_sha256(without_hash)
+        or scope.get("target_slug") != target_slug
+        or scope.get("repo_input") != repo_input
+        or scope.get("research_ref") != research_ref
+        or source_atom_corpus.get("projection")
+        != "immutable_atom_evidence_projection_v1"
+    ):
+        raise ValueError("stage3_external_wait_resume_upstream_contract_invalid")
+    required = {
+        "atoms",
+        "problem_records",
+        "problem_mining_evidence",
+        "prioritized_problems",
+        "case_registry",
+    }
+    if not required <= set(artifacts):
+        raise ValueError("stage3_external_wait_resume_upstream_artifacts_missing")
+    for name in required:
+        path = expected_paths[name].resolve()
+        receipt_raw = artifacts.get(name)
+        receipt = receipt_raw if isinstance(receipt_raw, Mapping) else {}
+        if (
+            receipt.get("path") != str(path)
+            or not path.is_file()
+            or receipt != _stage3_resume_file_receipt(path)
+        ):
+            raise ValueError(f"stage3_external_wait_resume_upstream_changed:{name}")
+    current_source_projection = sorted(
+        [immutable_atom_evidence_projection(atom) for atom in current_atoms],
+        key=lambda atom: (
+            _coerce_string(atom.get("atom_id")) or "",
+            _qualification_canonical_sha256(atom),
+        ),
+    )
+    if (
+        source_atom_corpus.get("atom_count") != len(current_atoms)
+        or source_atom_corpus.get("content_sha256")
+        != _qualification_canonical_sha256(current_source_projection)
+    ):
+        raise ValueError("stage3_external_wait_resume_source_atoms_changed")
+    try:
+        stage1 = json.loads(expected_paths["problem_records"].read_text(encoding="utf-8"))
+        stage2 = json.loads(expected_paths["prioritized_problems"].read_text(encoding="utf-8"))
+        case_registry = json.loads(expected_paths["case_registry"].read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise ValueError(
+            f"stage3_external_wait_resume_upstream_unreadable:{type(exc).__name__}"
+        ) from exc
+    if not all(isinstance(value, dict) for value in (stage1, stage2, case_registry)):
+        raise ValueError("stage3_external_wait_resume_upstream_not_object")
+    if stage1.get("stage") != "problem_mining" or stage2.get("stage") != "problem_prioritization":
+        raise ValueError("stage3_external_wait_resume_upstream_stage_mismatch")
+    _require_stage_model_invocation_provenance(stage1)
+    _require_stage_model_invocation_provenance(stage2)
+    selected_ids = [
+        str(item["problem_id"])
+        for item in (stage2.get("items") if isinstance(stage2.get("items"), list) else [])
+        if isinstance(item, dict)
+        and item.get("selected_for_research") is True
+        and isinstance(item.get("problem_id"), str)
+    ]
+    if selected_ids != contract.get("selected_problem_ids"):
+        raise ValueError("stage3_external_wait_resume_upstream_selection_changed")
+    return stage1, stage2, case_registry
+
+
 def _persist_downstream_case_lineage(
     *,
     stage_doc: dict[str, Any],
@@ -622,6 +860,95 @@ def _persist_case_registry_stage_lineage(
     )
     write_case_registry(case_registry_path, updated)
     return updated
+
+
+def _merge_reused_downstream_stage_document(
+    *,
+    stage: str,
+    stage_doc: Mapping[str, Any] | None,
+    reused_items: Sequence[Mapping[str, Any]],
+    agent: str,
+    dry_run: bool,
+    artifacts: Mapping[str, str],
+    count_updates: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Merge exact retained items without manufacturing a model invocation."""
+
+    local_only = stage_doc is None
+    if stage_doc is None:
+        merged = build_stage_document(
+            stage,
+            [],
+            input_meta={
+                "model_invocation_skipped": "all_ready_downstream_chains_reused",
+                "stage_status": "completed",
+                "dry_run": bool(dry_run),
+            },
+            artifacts=dict(artifacts),
+        )
+        merged = attach_stage_model_invocation_contract(
+            merged,
+            agent=agent,
+            dry_run=dry_run,
+            manifest_refs=[],
+            invocation_expected=False,
+        )
+    else:
+        merged = dict(stage_doc)
+    fresh_raw = merged.get("items")
+    fresh = (
+        [dict(item) for item in fresh_raw if isinstance(item, Mapping)]
+        if isinstance(fresh_raw, list)
+        else []
+    )
+    reused = [dict(item) for item in reused_items]
+    all_items = [*fresh, *reused]
+    identity_rows = [
+        (
+            _coerce_string(item.get("case_id")),
+            _coerce_string(item.get("problem_id")),
+            _coerce_string(item.get("option_id")),
+            _coerce_string(item.get("selected_option_id")),
+            _coerce_string(item.get("plan_revision_id")),
+        )
+        for item in all_items
+    ]
+    if len(identity_rows) != len(set(identity_rows)):
+        raise ValueError(f"{stage}_reused_downstream_item_identity_duplicate")
+    merged["items"] = all_items
+    merged["item_count"] = len(all_items)
+    input_meta_raw = merged.get("input_meta")
+    input_meta = dict(input_meta_raw) if isinstance(input_meta_raw, Mapping) else {}
+    input_meta.update(dict(count_updates))
+    input_meta.update(
+        {
+            "fresh_item_count": len(fresh),
+            "reused_item_count": len(reused),
+            "retained_downstream_chain_reuse": bool(reused),
+            "all_items_reused": local_only and bool(reused),
+        }
+    )
+    merged["input_meta"] = input_meta
+    artifacts_raw = merged.get("artifacts")
+    merged_artifacts = (
+        dict(artifacts_raw) if isinstance(artifacts_raw, Mapping) else {}
+    )
+    merged_artifacts.update(dict(artifacts))
+    merged["artifacts"] = merged_artifacts
+    return merged
+
+
+def _run_fresh_downstream_stage(
+    *,
+    fresh_problem_records: Sequence[Mapping[str, Any]],
+    reused_chains: Sequence[Mapping[str, Any]],
+    run_stage: Callable[[], dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Dispatch only when at least one case still needs downstream model work."""
+
+    if not fresh_problem_records and reused_chains:
+        return None
+    return run_stage()
 
 
 def _ticket_lineage_stage_document(
@@ -3182,6 +3509,39 @@ def _execute_qualification_correction_locked(
             qualification_manifest=(manifest if isinstance(manifest, dict) else None),
             resume_frontiers=_qualification_scheduler_resume_frontiers(selected_group),
         )
+        runtime_external_wait_raw = runtime.consumption.get("external_wait")
+        runtime_external_wait = (
+            dict(runtime_external_wait_raw)
+            if isinstance(runtime_external_wait_raw, Mapping)
+            else None
+        )
+        if runtime_external_wait is not None:
+            parked_state = _qualification_scheduler_next_state(state)
+            parked_groups = parked_state["group_states"]
+            parked_group = dict(parked_groups[group_id])
+            parked_group["status"] = "repairable_paused:provider_external_wait"
+            parked_group["active_attempt"] = None
+            parked_group["external_wait"] = runtime_external_wait
+            parked_group["invocation_count"] = invocation_number
+            parked_groups[group_id] = parked_group
+            parked_state["current_runtime"] = _qualification_runtime_projection(runtime)
+            state = _write_qualification_scheduler_checkpoint(
+                completion_path=completion_path,
+                state=parked_state,
+            )
+            return {
+                "status": "parked_external_wait",
+                "authored_work_disposition": "retained",
+                "external_wait": runtime_external_wait,
+                "qualification_scheduler_checkpoint_path": str(
+                    _qualification_scheduler_checkpoint_path(
+                        completion_path,
+                        str(state["content_sha256"]),
+                    ).resolve()
+                ),
+                "fresh_author_invocation_suppressed": False,
+                "api_fallback_allowed": False,
+            }
         group_route_hashes = {
             str(route.get("route_sha256")) for route in group_routes
         }
@@ -5457,6 +5817,49 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     )
     artifacts_dir = out_json.parent / f"{default_name}.backlog_artifacts"
     case_registry_json = out_json.parent / f"{default_name}.case_registry.json"
+    retained_research_path = out_json.parent / f"{default_name}.research.json"
+    preexisting_stage3_resume_document: dict[str, Any] | None = None
+    if bool(args.resume) and retained_research_path.is_file():
+        try:
+            retained_research_raw = json.loads(
+                retained_research_path.read_text(encoding="utf-8")
+            )
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            print(
+                "[backlog] ERROR: retained Stage-3 artifact is unreadable; refusing to "
+                f"overwrite possible authored work during resume: {type(exc).__name__}",
+                file=sys.stderr,
+            )
+            return 2
+        if not isinstance(retained_research_raw, dict):
+            print(
+                "[backlog] ERROR: retained Stage-3 artifact is not an object; refusing to "
+                "overwrite possible authored work during resume.",
+                file=sys.stderr,
+            )
+            return 2
+        retained_meta_raw = retained_research_raw.get("input_meta")
+        retained_meta = retained_meta_raw if isinstance(retained_meta_raw, Mapping) else {}
+        retained_checkpoint_raw = retained_meta.get("external_wait")
+        retained_checkpoint = (
+            retained_checkpoint_raw
+            if isinstance(retained_checkpoint_raw, Mapping)
+            else {}
+        )
+        parked_resume_intent = (
+            retained_meta.get("stage_status") == "parked_external_wait"
+            or retained_checkpoint.get("status") == "parked_external_wait"
+        )
+        verified_wait = _stage3_provider_external_wait(retained_research_raw)
+        if parked_resume_intent and verified_wait is None:
+            print(
+                "[backlog] ERROR: retained Stage-3 provider-wait checkpoint failed "
+                "integrity validation; refusing to restart or overwrite it.",
+                file=sys.stderr,
+            )
+            return 2
+        if verified_wait is not None:
+            preexisting_stage3_resume_document = retained_research_raw
     qualification_source_snapshot: dict[str, Any] | None = None
     if qualification_prepare:
         seed_raw = getattr(args, "qualification_case_registry_seed", None)
@@ -5688,7 +6091,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     )
     if plan_sync_meta is not None:
         plan_sync_meta["failure_event_backfill"] = backfill_meta
-        if not non_exporting_shadow:
+        if not non_exporting_shadow and preexisting_stage3_resume_document is None:
             _write_atom_actions_yaml(atom_actions_path, atom_actions)
 
     case_outcome_sync = _sync_case_registry_outcomes(
@@ -5703,12 +6106,17 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         current_plan_sync_at=plan_sync_at,
         generated_at=backfill_at,
     )
-    if not non_exporting_shadow and stale_actioned_reset["reset_to_new"]:
+    if (
+        not non_exporting_shadow
+        and stale_actioned_reset["reset_to_new"]
+        and preexisting_stage3_resume_document is None
+    ):
         _write_atom_actions_yaml(atom_actions_path, atom_actions)
     try:
         # Lifecycle evidence is durable independently of whether a later mining stage
         # succeeds; do not wait for relation review to persist validated outcomes.
-        write_case_registry(case_registry_json, case_registry)
+        if preexisting_stage3_resume_document is None:
+            write_case_registry(case_registry_json, case_registry)
     except (OSError, ValueError) as exc:
         print(f"[backlog] ERROR: failed to persist case outcomes: {exc}", file=sys.stderr)
         return 2
@@ -6020,7 +6428,11 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             agent_last_message_atoms.append(atom)
         atoms.append(atom)
 
-    if reopened_atoms and not non_exporting_shadow:
+    if (
+        reopened_atoms
+        and not non_exporting_shadow
+        and preexisting_stage3_resume_document is None
+    ):
         # Persist immediately so a later stage failure cannot let the monotonic action
         # updater reapply a stale supports_case/ticketed row on the next cycle.
         _write_atom_actions_yaml(atom_actions_path, atom_actions)
@@ -6168,7 +6580,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             return 2
         try:
             case_registry = load_case_registry(Path(registry_seed_path))
-            write_case_registry(case_registry_json, case_registry)
+            if preexisting_stage3_resume_document is None:
+                write_case_registry(case_registry_json, case_registry)
         except (OSError, ValueError) as exc:
             print(f"[backlog] ERROR: qualification registry seed invalid: {exc}", file=sys.stderr)
             return 2
@@ -6240,8 +6653,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             if atom_id is not None
         ],
     }
-    write_backlog_atoms(atoms_doc, atoms_jsonl)
-    write_backlog_atoms({"atoms": agent_last_message_atoms}, agent_last_message_atoms_jsonl)
+    if preexisting_stage3_resume_document is None:
+        write_backlog_atoms(atoms_doc, atoms_jsonl)
+        write_backlog_atoms({"atoms": agent_last_message_atoms}, agent_last_message_atoms_jsonl)
 
     sample_size = int(args.sample_size)
     if sample_size < 0:
@@ -6346,20 +6760,44 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     change_plans_md = out_json.parent / f"{default_name}.change_plans.md"
 
     try:
+        stage3_resume_document: dict[str, Any] | None = None
+        retained_stage1: dict[str, Any] | None = None
+        retained_stage2: dict[str, Any] | None = None
+        if preexisting_stage3_resume_document is not None:
+            retained_stage1, retained_stage2, case_registry = _load_stage3_resume_upstream(
+                stage3_document=preexisting_stage3_resume_document,
+                expected_paths={
+                    "atoms": atoms_jsonl,
+                    "problem_records": problem_records_json,
+                    "problem_mining_evidence": problem_mining_evidence_json,
+                    "prioritized_problems": prioritized_json,
+                    "case_registry": case_registry_json,
+                },
+                target_slug=target_slug,
+                repo_input=repo_input,
+                research_ref=research_ref,
+                current_atoms=atoms,
+            )
+            stage3_resume_document = preexisting_stage3_resume_document
+
         stage1_guidance = pipeline_manifest.load_stage_guidance("problem_mining")
-        stage1_doc = _run_problem_mining_stage(
-            repo_root=repo_root,
-            atoms=atoms,
-            pipeline_manifest=pipeline_manifest,
-            artifacts_dir=artifacts_dir,
-            out_json=problem_records_json,
-            out_md=problem_records_md,
-            agent=agent,
-            model=model,
-            cfg=cfg,
-            dry_run=dry_run,
-            stage_guidance_text=stage1_guidance,
-            case_registry=case_registry,
+        stage1_doc = (
+            retained_stage1
+            if retained_stage1 is not None
+            else _run_problem_mining_stage(
+                repo_root=repo_root,
+                atoms=atoms,
+                pipeline_manifest=pipeline_manifest,
+                artifacts_dir=artifacts_dir,
+                out_json=problem_records_json,
+                out_md=problem_records_md,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                dry_run=dry_run,
+                stage_guidance_text=stage1_guidance,
+                case_registry=case_registry,
+            )
         )
 
         items1_raw = stage1_doc.get("items") if isinstance(stage1_doc, dict) else None
@@ -6386,58 +6824,83 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             carried = dict(historical_case)
             carried["_carried_forward_case"] = True
             carried_problem_records.append(carried)
-        problem_records = [*newly_mined_problem_records, *carried_problem_records]
-        stage1_doc = dict(stage1_doc)
-        stage1_doc["items"] = problem_records
-        stage1_meta_raw = stage1_doc.get("input_meta")
-        stage1_meta = dict(stage1_meta_raw) if isinstance(stage1_meta_raw, dict) else {}
-        stage1_meta.update(
-            {
-                "newly_mined_case_count": len(newly_mined_problem_records),
-                "carried_forward_active_case_count": len(carried_problem_records),
-            }
-        )
-        stage1_doc["input_meta"] = stage1_meta
+        if retained_stage1 is not None:
+            # A provider-wait resume reuses the exact sealed Stage-1 payload.  Recomputing
+            # carry-forward metadata here would create a new upstream document even though no
+            # mining or relation decision was rerun.
+            problem_records = [dict(item) for item in newly_mined_problem_records]
+        else:
+            problem_records = [*newly_mined_problem_records, *carried_problem_records]
+            stage1_doc = dict(stage1_doc)
+            stage1_doc["items"] = problem_records
+            stage1_meta_raw = stage1_doc.get("input_meta")
+            stage1_meta = dict(stage1_meta_raw) if isinstance(stage1_meta_raw, dict) else {}
+            stage1_meta.update(
+                {
+                    "newly_mined_case_count": len(newly_mined_problem_records),
+                    "carried_forward_active_case_count": len(carried_problem_records),
+                }
+            )
+            stage1_doc["input_meta"] = stage1_meta
 
-        stage1_doc, problem_records, atoms, case_registry = _run_problem_case_relation_review(
-            stage_doc=stage1_doc,
-            problem_records=problem_records,
-            atoms=atoms,
-            pipeline_manifest=pipeline_manifest,
-            artifacts_dir=artifacts_dir,
-            out_json=problem_records_json,
-            out_md=problem_records_md,
-            case_registry_path=case_registry_json,
-            previous_case_registry=case_registry,
-            agent=agent,
-            model=model,
-            cfg=cfg,
-            dry_run=dry_run,
-            stage_guidance_text=stage1_guidance,
+        if stage3_resume_document is None:
+            stage1_doc, problem_records, atoms, case_registry = _run_problem_case_relation_review(
+                stage_doc=stage1_doc,
+                problem_records=problem_records,
+                atoms=atoms,
+                pipeline_manifest=pipeline_manifest,
+                artifacts_dir=artifacts_dir,
+                out_json=problem_records_json,
+                out_md=problem_records_md,
+                case_registry_path=case_registry_json,
+                previous_case_registry=case_registry,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                dry_run=dry_run,
+                stage_guidance_text=stage1_guidance,
+            )
+        problem_records = _attach_current_case_registry_context(
+            problem_records,
+            case_registry=case_registry,
         )
+        if stage3_resume_document is None:
+            stage1_doc = dict(stage1_doc)
+            stage1_doc["items"] = problem_records
+            stage1_doc["item_count"] = len(problem_records)
+            problem_records_json.write_text(
+                json.dumps(stage1_doc, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
         _require_stage_model_invocation_provenance(stage1_doc)
         atoms_doc["atoms"] = atoms
         atoms_doc["atom_dispositions"] = atom_disposition_summary(atoms)
-        write_backlog_atoms(atoms_doc, atoms_jsonl)
-        case_registry = _persist_case_registry_stage_lineage(
-            case_registry=case_registry,
-            case_registry_path=case_registry_json,
-            stage_doc=stage1_doc,
-        )
+        if stage3_resume_document is None:
+            write_backlog_atoms(atoms_doc, atoms_jsonl)
+        if stage3_resume_document is None:
+            case_registry = _persist_case_registry_stage_lineage(
+                case_registry=case_registry,
+                case_registry_path=case_registry_json,
+                stage_doc=stage1_doc,
+            )
 
         stage2_guidance = pipeline_manifest.load_stage_guidance("problem_prioritization")
-        stage2_doc = _run_problem_prioritization_stage(
-            atoms=atoms,
-            problem_records=problem_records,
-            pipeline_manifest=pipeline_manifest,
-            artifacts_dir=artifacts_dir,
-            out_json=prioritized_json,
-            out_md=prioritized_md,
-            agent=agent,
-            model=model,
-            cfg=cfg,
-            dry_run=dry_run,
-            stage_guidance_text=stage2_guidance,
+        stage2_doc = (
+            retained_stage2
+            if retained_stage2 is not None
+            else _run_problem_prioritization_stage(
+                atoms=atoms,
+                problem_records=problem_records,
+                pipeline_manifest=pipeline_manifest,
+                artifacts_dir=artifacts_dir,
+                out_json=prioritized_json,
+                out_md=prioritized_md,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                dry_run=dry_run,
+                stage_guidance_text=stage2_guidance,
+            )
         )
         _require_stage_model_invocation_provenance(stage2_doc)
 
@@ -6447,19 +6910,134 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             if isinstance(items2_raw, list)
             else []
         )
-        stage2_doc, priority_decisions = _persist_downstream_case_lineage(
-            stage_doc=stage2_doc,
-            out_json=prioritized_json,
-            problem_cases=problem_records,
+        records_by_problem_id = {
+            str(record["problem_id"]): record
+            for record in problem_records
+            if isinstance(record, dict) and isinstance(record.get("problem_id"), str)
+        }
+        reused_downstream_chains_by_problem_id: dict[str, dict[str, Any]] = {}
+        for decision in priority_decisions:
+            route = _coerce_string(decision.get("research_route"))
+            if route not in {"continue_downstream", "await_outcome"}:
+                continue
+            problem_id = _coerce_string(decision.get("problem_id"))
+            record = records_by_problem_id.get(problem_id or "")
+            if record is None:
+                raise ValueError(
+                    f"retained_downstream_problem_record_missing:{problem_id or '(missing)'}"
+                )
+            if route == "await_outcome":
+                chain, chain_errors = hydrate_retained_downstream_chain(record)
+                if chain is not None and not chain_errors:
+                    reused_downstream_chains_by_problem_id[str(problem_id)] = chain
+                    continue
+                # A stale downstream cache is not a case failure. Reuse research when it is
+                # still current and let the ordinary Stage 4-6 path rebuild the chain.
+                dossier, research_errors = hydrate_retained_research_proof(record)
+                if dossier is not None and not research_errors:
+                    decision.update(
+                        {
+                            "research_route": "continue_downstream",
+                            "selected_for_research": False,
+                            "eligible_for_downstream": True,
+                            "route_reason": (
+                                "The retained downstream chain changed before consumption; "
+                                "research remains current and the normal downstream path will "
+                                "self-heal it. First chain result: "
+                                + (chain_errors[0] if chain_errors else "chain_unavailable")
+                                + "."
+                            ),
+                        }
+                    )
+                else:
+                    decision.update(
+                        {
+                            "research_route": "research_update",
+                            "selected_for_research": True,
+                            "eligible_for_downstream": True,
+                            "route_reason": (
+                                "The retained research and downstream chain changed before "
+                                "consumption; fresh research is required. First research result: "
+                                + (
+                                    research_errors[0]
+                                    if research_errors
+                                    else "research_unavailable"
+                                )
+                                + "."
+                            ),
+                        }
+                    )
+            elif route == "continue_downstream":
+                dossier, research_errors = hydrate_retained_research_proof(record)
+                if dossier is None or research_errors:
+                    decision.update(
+                        {
+                            "research_route": "research_update",
+                            "selected_for_research": True,
+                            "eligible_for_downstream": True,
+                            "route_reason": (
+                                "The retained research changed before consumption; fresh "
+                                "research is required. First result: "
+                                + (
+                                    research_errors[0]
+                                    if research_errors
+                                    else "research_unavailable"
+                                )
+                                + "."
+                            ),
+                        }
+                    )
+        if stage3_resume_document is None:
+            stage2_doc = dict(stage2_doc)
+            stage2_doc["items"] = priority_decisions
+            stage2_doc["item_count"] = len(priority_decisions)
+            stage2_doc, priority_decisions = _persist_downstream_case_lineage(
+                stage_doc=stage2_doc,
+                out_json=prioritized_json,
+                problem_cases=problem_records,
+            )
+            case_registry = _persist_case_registry_stage_lineage(
+                case_registry=case_registry,
+                case_registry_path=case_registry_json,
+                stage_doc=stage2_doc,
+            )
+        selected_priority = sorted(
+            (
+                dec
+                for dec in priority_decisions
+                if dec.get("selected_for_research") is True
+            ),
+            key=_research_dispatch_sort_key,
         )
-        case_registry = _persist_case_registry_stage_lineage(
-            case_registry=case_registry,
-            case_registry_path=case_registry_json,
-            stage_doc=stage2_doc,
-        )
-        selected_priority = [
-            dec for dec in priority_decisions if dec.get("selected_for_research") is True
-        ]
+        reused_research_dossiers: list[dict[str, Any]] = []
+        for decision in priority_decisions:
+            route = decision.get("research_route")
+            if route not in {"continue_downstream", "await_outcome"}:
+                continue
+            problem_id = _coerce_string(decision.get("problem_id"))
+            record = records_by_problem_id.get(problem_id or "")
+            if record is None:
+                raise ValueError(
+                    f"stage3_retained_research_problem_record_missing:{problem_id or '(missing)'}"
+                )
+            chain = reused_downstream_chains_by_problem_id.get(problem_id or "")
+            dossier = (
+                dict(chain["research_dossier"])
+                if isinstance(chain, Mapping)
+                and isinstance(chain.get("research_dossier"), Mapping)
+                else None
+            )
+            hydration_errors: list[str] = []
+            if dossier is None:
+                dossier, hydration_errors = hydrate_retained_research_proof(record)
+            if dossier is None or hydration_errors:
+                raise ValueError(
+                    "stage3_retained_research_hydration_changed:"
+                    + problem_id
+                    + ":"
+                    + ",".join(hydration_errors or ["proof_unavailable"])
+                )
+            reused_research_dossiers.append(dossier)
 
         resolved_repo_input = repo_input
         if resolved_repo_input is None:
@@ -6564,6 +7142,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             replay_timeout_seconds=replay_timeout_seconds,
             replay_executor=replay_executor,
             replay_executor_metadata=replay_executor_metadata,
+            resume_stage_document=stage3_resume_document,
+            reused_research_dossiers=reused_research_dossiers,
         )
 
         items3_raw = stage3_doc.get("items") if isinstance(stage3_doc, dict) else None
@@ -6582,6 +7162,44 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             case_registry_path=case_registry_json,
             stage_doc=stage3_doc,
         )
+        stage3_external_wait = _stage3_provider_external_wait(stage3_doc)
+        if stage3_external_wait is not None:
+            resume_upstream = _stage3_resume_upstream_contract(
+                paths={
+                    "atoms": atoms_jsonl,
+                    "problem_records": problem_records_json,
+                    "problem_mining_evidence": problem_mining_evidence_json,
+                    "prioritized_problems": prioritized_json,
+                    "case_registry": case_registry_json,
+                },
+                source_atoms=atoms,
+                target_slug=target_slug,
+                repo_input=repo_input,
+                research_ref=research_ref,
+                selected_problem_ids=[
+                    str(item["problem_id"])
+                    for item in selected_priority
+                    if isinstance(item.get("problem_id"), str)
+                ],
+            )
+            stage3_doc = dict(stage3_doc)
+            stage3_meta_raw = stage3_doc.get("input_meta")
+            stage3_meta = dict(stage3_meta_raw) if isinstance(stage3_meta_raw, dict) else {}
+            stage3_meta["resume_upstream"] = resume_upstream
+            stage3_doc["input_meta"] = stage3_meta
+            research_json.write_text(
+                json.dumps(stage3_doc, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            print(
+                "[stage3] PARKED: signed-in Codex subscription usage limit; "
+                "Stages 4-6 were not dispatched. Resume this same pipeline invocation after the "
+                "provider reset to continue the retained author/session frontier. API billing "
+                "fallback remains disabled. "
+                f"checkpoint={stage3_external_wait.get('checkpoint_sha256')}",
+                file=sys.stderr,
+            )
+            return 2
 
         post_research_relations = collapse_post_research_verified_mechanisms(
             problem_records=problem_records,
@@ -6663,8 +7281,63 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 stage_doc=stage3_doc,
             )
 
+        research_by_problem_id = {
+            str(dossier["problem_id"]): dossier
+            for dossier in research_dossiers
+            if isinstance(dossier, dict) and isinstance(dossier.get("problem_id"), str)
+        }
+        current_records_by_problem_id = {
+            str(record["problem_id"]): record
+            for record in problem_records
+            if isinstance(record, dict) and isinstance(record.get("problem_id"), str)
+        }
+        valid_reused_chains_by_problem_id: dict[str, dict[str, Any]] = {}
+        for problem_id, chain in reused_downstream_chains_by_problem_id.items():
+            dossier = research_by_problem_id.get(problem_id)
+            record = current_records_by_problem_id.get(problem_id)
+            if (
+                dossier is not None
+                and record is not None
+                and _coerce_string(record.get("case_id"))
+                == _coerce_string(chain.get("case_id"))
+                and chain_matches_research_dossier(chain, dossier)
+            ):
+                valid_reused_chains_by_problem_id[problem_id] = chain
+                continue
+            # Post-research canonicalization changed the causal work unit. Preserve the
+            # current research result, but rebuild options/plans for the new unit.
+            for decision in priority_decisions:
+                if _coerce_string(decision.get("problem_id")) == problem_id:
+                    decision["research_route"] = "continue_downstream"
+                    decision["selected_for_research"] = False
+                    decision["eligible_for_downstream"] = True
+                    decision["route_reason"] = (
+                        "Post-research canonicalization changed the retained chain identity; "
+                        "the normal downstream path will rebuild it from current research."
+                    )
+        await_outcome_problem_ids = set(valid_reused_chains_by_problem_id)
+        reused_chains = [
+            valid_reused_chains_by_problem_id[problem_id]
+            for problem_id in sorted(valid_reused_chains_by_problem_id)
+        ]
+        fresh_problem_records = [
+            record
+            for record in problem_records
+            if _coerce_string(record.get("problem_id")) not in await_outcome_problem_ids
+        ]
+        fresh_priority_decisions = [
+            decision
+            for decision in priority_decisions
+            if _coerce_string(decision.get("problem_id")) not in await_outcome_problem_ids
+        ]
+        fresh_research_dossiers = [
+            dossier
+            for dossier in research_dossiers
+            if _coerce_string(dossier.get("problem_id")) not in await_outcome_problem_ids
+        ]
+
         target_repo_roots_by_problem: dict[str, Path] = {}
-        for dossier in research_dossiers:
+        for dossier in fresh_research_dossiers:
             research_ready, _research_blockers = assess_research_readiness(dossier)
             if not research_ready:
                 continue
@@ -6704,37 +7377,107 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 )
             target_repo_roots_by_problem[pid] = workspace
 
-        stage4_guidance = pipeline_manifest.load_stage_guidance("solution_optioning")
-        stage4_doc = _run_solution_optioning_stage(
-            repo_root=repo_root,
-            target_repo_roots_by_problem=target_repo_roots_by_problem,
-            atoms=atoms,
-            problem_records=problem_records,
-            priority_decisions=priority_decisions,
-            research_dossiers=research_dossiers,
-            pipeline_manifest=pipeline_manifest,
-            artifacts_dir=artifacts_dir,
-            out_json=solution_options_json,
-            out_md=solution_options_md,
-            agent=agent,
-            model=model,
-            cfg=cfg,
-            dry_run=dry_run,
-            breadth_profile=breadth_profile,
-            stage_guidance_text=stage4_guidance,
-        )
-        _require_stage_model_invocation_provenance(stage4_doc)
-
-        items4_raw = stage4_doc.get("items") if isinstance(stage4_doc, dict) else None
-        solution_options = (
-            [item for item in items4_raw if isinstance(item, dict)]
-            if isinstance(items4_raw, list)
+        taxonomy = pipeline_manifest.load_taxonomy()
+        families_raw = taxonomy.get("solution_families")
+        families = (
+            [family for family in families_raw if isinstance(family, dict)]
+            if isinstance(families_raw, list)
             else []
         )
+        family_order: list[str] = []
+        family_labels_by_id: dict[str, str] = {}
+        for family in families:
+            family_id = _coerce_string(family.get("family_id"))
+            if family_id is None:
+                continue
+            family_order.append(family_id)
+            family_labels_by_id[family_id] = (
+                _coerce_string(family.get("label")) or family_id
+            )
+        problem_records_by_id = {
+            str(record["problem_id"]): record
+            for record in problem_records
+            if isinstance(record.get("problem_id"), str)
+        }
+
+        reused_solution_options = flatten_chain_items(reused_chains, "solution_options")
+        stage4_fresh_doc = _run_fresh_downstream_stage(
+            fresh_problem_records=fresh_problem_records,
+            reused_chains=reused_chains,
+            run_stage=lambda: _run_solution_optioning_stage(
+                repo_root=repo_root,
+                target_repo_roots_by_problem=target_repo_roots_by_problem,
+                atoms=atoms,
+                problem_records=fresh_problem_records,
+                priority_decisions=fresh_priority_decisions,
+                research_dossiers=fresh_research_dossiers,
+                pipeline_manifest=pipeline_manifest,
+                artifacts_dir=artifacts_dir,
+                out_json=solution_options_json,
+                out_md=solution_options_md,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                dry_run=dry_run,
+                breadth_profile=breadth_profile,
+                stage_guidance_text=pipeline_manifest.load_stage_guidance(
+                    "solution_optioning"
+                ),
+            ),
+        )
+        if stage4_fresh_doc is not None:
+            _require_stage_model_invocation_provenance(stage4_fresh_doc)
+        stage4_doc = _merge_reused_downstream_stage_document(
+            stage="solution_optioning",
+            stage_doc=stage4_fresh_doc,
+            reused_items=reused_solution_options,
+            agent=agent,
+            dry_run=dry_run,
+            artifacts={
+                "solution_options_json": str(solution_options_json),
+                "solution_options_md": str(solution_options_md),
+            },
+            count_updates={
+                "problem_record_count": len(problem_records),
+                "priority_decision_count": len(priority_decisions),
+                "research_dossier_count": len(research_dossiers),
+                "fresh_problem_record_count": len(fresh_problem_records),
+                "reused_case_count": len(reused_chains),
+                "solution_optioning_status": "ok",
+            },
+        )
+        _require_stage_model_invocation_provenance(stage4_doc)
         stage4_doc, solution_options = _persist_downstream_case_lineage(
             stage_doc=stage4_doc,
             out_json=solution_options_json,
             problem_cases=problem_records,
+        )
+        stage4_meta_raw = stage4_doc.get("input_meta")
+        stage4_meta = stage4_meta_raw if isinstance(stage4_meta_raw, dict) else {}
+        optioning_outcomes_raw = stage4_meta.get("optioning_outcomes")
+        optioning_outcomes = (
+            [item for item in optioning_outcomes_raw if isinstance(item, dict)]
+            if isinstance(optioning_outcomes_raw, list)
+            else []
+        )
+        solution_options_md.parent.mkdir(parents=True, exist_ok=True)
+        solution_options_md.write_text(
+            _render_solution_options_markdown(
+                solution_options,
+                problem_records_by_id=problem_records_by_id,
+                family_order=family_order,
+                family_labels_by_id=family_labels_by_id,
+                optioning_outcomes_by_id={
+                    str(item["problem_id"]): item
+                    for item in optioning_outcomes
+                    if isinstance(item.get("problem_id"), str)
+                },
+                title=(
+                    f"{solution_options_json.stem.removesuffix('.solution_options')} "
+                    "- Solution Options"
+                ),
+            ),
+            encoding="utf-8",
         )
         case_registry = _persist_case_registry_stage_lineage(
             case_registry=case_registry,
@@ -6742,36 +7485,55 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             stage_doc=stage4_doc,
         )
 
-        stage5_guidance = pipeline_manifest.load_stage_guidance("solution_selection")
-        stage5_doc = _run_solution_selection_stage(
-            repo_root=repo_root,
-            target_repo_roots_by_problem=target_repo_roots_by_problem,
-            atoms=atoms,
-            problem_records=problem_records,
-            research_dossiers=research_dossiers,
-            solution_options=solution_options,
-            solution_optioning_stage_doc=stage4_doc,
-            pipeline_manifest=pipeline_manifest,
-            artifacts_dir=artifacts_dir,
-            out_json=solution_selection_json,
-            out_md=solution_selection_md,
-            agent=agent,
-            model=model,
-            cfg=cfg,
-            dry_run=dry_run,
-            breadth_profile=breadth_profile,
-            stage_guidance_text=stage5_guidance,
-        )
-        _require_stage_model_invocation_provenance(stage5_doc)
+        fresh_solution_options = [
+            option
+            for option in solution_options
+            if _coerce_string(option.get("problem_id")) not in await_outcome_problem_ids
+        ]
+        stage4_for_selection = None
+        if stage4_fresh_doc is not None:
+            stage4_for_selection = dict(stage4_fresh_doc)
+            stage4_for_selection["items"] = fresh_solution_options
+            stage4_for_selection["item_count"] = len(fresh_solution_options)
 
-        items5_raw = stage5_doc.get("items") if isinstance(stage5_doc, dict) else None
-        selection_decisions = (
-            [item for item in items5_raw if isinstance(item, dict)]
-            if isinstance(items5_raw, list)
-            else []
+        reused_selection_decisions = flatten_chain_items(
+            reused_chains,
+            "selection_decisions",
         )
-        stage5_meta_raw = stage5_doc.get("input_meta") if isinstance(stage5_doc, dict) else None
-        stage5_meta = stage5_meta_raw if isinstance(stage5_meta_raw, dict) else {}
+        stage5_fresh_doc = _run_fresh_downstream_stage(
+            fresh_problem_records=fresh_problem_records,
+            reused_chains=reused_chains,
+            run_stage=lambda: _run_solution_selection_stage(
+                repo_root=repo_root,
+                target_repo_roots_by_problem=target_repo_roots_by_problem,
+                atoms=atoms,
+                problem_records=fresh_problem_records,
+                research_dossiers=fresh_research_dossiers,
+                solution_options=fresh_solution_options,
+                solution_optioning_stage_doc=stage4_for_selection,
+                pipeline_manifest=pipeline_manifest,
+                artifacts_dir=artifacts_dir,
+                out_json=solution_selection_json,
+                out_md=solution_selection_md,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                dry_run=dry_run,
+                breadth_profile=breadth_profile,
+                stage_guidance_text=pipeline_manifest.load_stage_guidance(
+                    "solution_selection"
+                ),
+            ),
+        )
+        if stage5_fresh_doc is not None:
+            _require_stage_model_invocation_provenance(stage5_fresh_doc)
+
+        stage5_meta_raw = (
+            stage5_fresh_doc.get("input_meta")
+            if isinstance(stage5_fresh_doc, dict)
+            else None
+        )
+        stage5_meta = dict(stage5_meta_raw) if isinstance(stage5_meta_raw, dict) else {}
         option_revisions_raw = stage5_meta.get("option_revisions")
         option_revisions = (
             [item for item in option_revisions_raw if isinstance(item, dict)]
@@ -6800,55 +7562,199 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 if _coerce_string(option.get("problem_id")) != revised_problem_id
             ]
             solution_options.extend(revised)
-        stage5_meta["option_revisions"] = option_revisions
-        stage5_doc["input_meta"] = stage5_meta
+        if stage5_fresh_doc is not None:
+            stage5_meta["option_revisions"] = option_revisions
+            stage5_fresh_doc["input_meta"] = stage5_meta
+
+        # A Stage-5 correction changes the option-set content consumed by the selected
+        # mechanism. Persist it into the Stage-4 artifact before recording selection so
+        # the next cycle can hydrate one exact, internally consistent chain.
+        if option_revisions:
+            stage4_doc["items"] = solution_options
+            stage4_doc["item_count"] = len(solution_options)
+            stage4_meta_raw = stage4_doc.get("input_meta")
+            stage4_meta = dict(stage4_meta_raw) if isinstance(stage4_meta_raw, dict) else {}
+            stage4_meta["stage5_option_revision_count"] = len(option_revisions)
+            stage4_doc["input_meta"] = stage4_meta
+            stage4_doc, solution_options = _persist_downstream_case_lineage(
+                stage_doc=stage4_doc,
+                out_json=solution_options_json,
+                problem_cases=problem_records,
+            )
+            solution_options_md.write_text(
+                _render_solution_options_markdown(
+                    solution_options,
+                    problem_records_by_id=problem_records_by_id,
+                    family_order=family_order,
+                    family_labels_by_id=family_labels_by_id,
+                    optioning_outcomes_by_id={
+                        str(item["problem_id"]): item
+                        for item in optioning_outcomes
+                        if isinstance(item.get("problem_id"), str)
+                    },
+                    title=(
+                        f"{solution_options_json.stem.removesuffix('.solution_options')} "
+                        "- Solution Options"
+                    ),
+                ),
+                encoding="utf-8",
+            )
+            case_registry = _persist_case_registry_stage_lineage(
+                case_registry=case_registry,
+                case_registry_path=case_registry_json,
+                stage_doc=stage4_doc,
+            )
+
+        stage5_doc = _merge_reused_downstream_stage_document(
+            stage="solution_selection",
+            stage_doc=stage5_fresh_doc,
+            reused_items=reused_selection_decisions,
+            agent=agent,
+            dry_run=dry_run,
+            artifacts={
+                "solution_selection_json": str(solution_selection_json),
+                "solution_selection_md": str(solution_selection_md),
+            },
+            count_updates={
+                "problem_record_count": len(problem_records),
+                "research_dossier_count": len(research_dossiers),
+                "option_count": len(solution_options),
+                "fresh_problem_record_count": len(fresh_problem_records),
+                "reused_case_count": len(reused_chains),
+                "solution_selection_status": "ok",
+            },
+        )
+        _require_stage_model_invocation_provenance(stage5_doc)
         stage5_doc, selection_decisions = _persist_downstream_case_lineage(
             stage_doc=stage5_doc,
             out_json=solution_selection_json,
             problem_cases=problem_records,
         )
+        solution_selection_md.parent.mkdir(parents=True, exist_ok=True)
+        solution_selection_md.write_text(
+            _render_solution_selection_markdown(
+                selection_decisions,
+                problem_records_by_id=problem_records_by_id,
+                family_labels_by_id=family_labels_by_id,
+                title=(
+                    f"{solution_selection_json.stem.removesuffix('.solution_selection')} "
+                    "- Solution Selection"
+                ),
+            ),
+            encoding="utf-8",
+        )
         case_registry = _persist_case_registry_stage_lineage(
             case_registry=case_registry,
             case_registry_path=case_registry_json,
             stage_doc=stage5_doc,
         )
 
-        stage6_guidance = pipeline_manifest.load_stage_guidance("implementation_planning")
-        stage6_doc = _run_implementation_planning_stage(
-            repo_root=repo_root,
-            target_repo_roots_by_problem=target_repo_roots_by_problem,
-            problem_records=problem_records,
-            research_dossiers=research_dossiers,
-            solution_options=solution_options,
-            selection_decisions=selection_decisions,
-            pipeline_manifest=pipeline_manifest,
-            artifacts_dir=artifacts_dir,
-            out_json=change_plans_json,
-            out_md=change_plans_md,
+        fresh_solution_options = [
+            option
+            for option in solution_options
+            if _coerce_string(option.get("problem_id")) not in await_outcome_problem_ids
+        ]
+        fresh_selection_decisions = [
+            decision
+            for decision in selection_decisions
+            if _coerce_string(decision.get("problem_id")) not in await_outcome_problem_ids
+        ]
+        reused_change_plans = flatten_chain_items(reused_chains, "change_plans")
+        stage6_fresh_doc = _run_fresh_downstream_stage(
+            fresh_problem_records=fresh_problem_records,
+            reused_chains=reused_chains,
+            run_stage=lambda: _run_implementation_planning_stage(
+                repo_root=repo_root,
+                target_repo_roots_by_problem=target_repo_roots_by_problem,
+                problem_records=fresh_problem_records,
+                research_dossiers=fresh_research_dossiers,
+                solution_options=fresh_solution_options,
+                selection_decisions=fresh_selection_decisions,
+                pipeline_manifest=pipeline_manifest,
+                artifacts_dir=artifacts_dir,
+                out_json=change_plans_json,
+                out_md=change_plans_md,
+                agent=agent,
+                model=model,
+                cfg=cfg,
+                dry_run=dry_run,
+                stage_guidance_text=pipeline_manifest.load_stage_guidance(
+                    "implementation_planning"
+                ),
+            ),
+        )
+        if stage6_fresh_doc is not None:
+            _require_stage_model_invocation_provenance(stage6_fresh_doc)
+        stage6_doc = _merge_reused_downstream_stage_document(
+            stage="implementation_planning",
+            stage_doc=stage6_fresh_doc,
+            reused_items=reused_change_plans,
             agent=agent,
-            model=model,
-            cfg=cfg,
             dry_run=dry_run,
-            stage_guidance_text=stage6_guidance,
+            artifacts={
+                "change_plans_json": str(change_plans_json),
+                "change_plans_md": str(change_plans_md),
+            },
+            count_updates={
+                "problem_record_count": len(problem_records),
+                "research_dossier_count": len(research_dossiers),
+                "option_count": len(solution_options),
+                "decision_count": len(selection_decisions),
+                "change_plan_count": len(reused_change_plans)
+                + (
+                    len(stage6_fresh_doc.get("items", []))
+                    if isinstance(stage6_fresh_doc, dict)
+                    and isinstance(stage6_fresh_doc.get("items"), list)
+                    else 0
+                ),
+                "fresh_problem_record_count": len(fresh_problem_records),
+                "reused_case_count": len(reused_chains),
+                "implementation_planning_status": "ok",
+            },
         )
         _require_stage_model_invocation_provenance(stage6_doc)
-
-        items6_raw = stage6_doc.get("items") if isinstance(stage6_doc, dict) else None
-        change_plans = (
-            [item for item in items6_raw if isinstance(item, dict)]
-            if isinstance(items6_raw, list)
-            else []
-        )
         stage6_doc, change_plans = _persist_downstream_case_lineage(
             stage_doc=stage6_doc,
             out_json=change_plans_json,
             problem_cases=problem_records,
+        )
+        change_plans_md.parent.mkdir(parents=True, exist_ok=True)
+        change_plans_md.write_text(
+            _render_change_plans_markdown(
+                change_plans,
+                problem_records_by_id=problem_records_by_id,
+                title=(
+                    f"{change_plans_json.stem.removesuffix('.change_plans')} "
+                    "- Change Plans"
+                ),
+            ),
+            encoding="utf-8",
         )
         case_registry = _persist_case_registry_stage_lineage(
             case_registry=case_registry,
             case_registry_path=case_registry_json,
             stage_doc=stage6_doc,
         )
+    except BacklogProviderExternalWait as exc:
+        external_wait_path = out_json.parent / f"{default_name}.backlog_external_wait.json"
+        external_wait_temp = external_wait_path.with_name(
+            f".{external_wait_path.name}.{uuid4().hex}.tmp"
+        )
+        try:
+            external_wait_temp.write_text(
+                json.dumps(exc.external_wait, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            external_wait_temp.replace(external_wait_path)
+        finally:
+            external_wait_temp.unlink(missing_ok=True)
+        print(
+            "[backlog] PARKED: signed-in Codex subscription usage limit; no later model "
+            "stage was dispatched and API billing fallback remains disabled. "
+            f"checkpoint={exc.external_wait.get('checkpoint_sha256')}",
+            file=sys.stderr,
+        )
+        return 2
     except Exception as exc:  # noqa: BLE001
         print(f"[backlog] ERROR: six-stage backlog pipeline failed: {exc}", file=sys.stderr)
         return 2

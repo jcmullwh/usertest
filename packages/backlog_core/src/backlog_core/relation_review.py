@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Mapping, Sequence
+from hashlib import sha256
 from typing import Any, Protocol
 
 from backlog_core.case_lineage import (
@@ -60,6 +61,26 @@ _VALID_STAGES: frozenset[str] = frozenset(
 _VALID_ACTIONS: frozenset[str] = frozenset(
     {"merge", "keep_separate", "split", "same_cause_group", "alias"}
 )
+
+
+def _runner_owned_same_cause_group_id(
+    member_case_ids: Sequence[str],
+    *,
+    provisional: bool,
+) -> str:
+    """Mint a stable runner-owned ID for an exact same-cause member set.
+
+    ``group_id`` is model-authored naming, not causal evidence. Independent review
+    batches can agree on the exact member set while choosing different labels. The
+    operational unit therefore binds its identity to the stable case members instead
+    of requiring nondeterministic prose-derived IDs to match byte-for-byte.  The status
+    prefix is descriptive only; causal verification remains a separate contract.
+    """
+
+    members = sorted(set(member_case_ids))
+    digest = sha256("\0".join(members).encode("utf-8")).hexdigest()[:20]
+    status = "provisional" if provisional else "canonical"
+    return f"cause:{status}:{digest}"
 
 
 def _stage_config(relation_config: dict[str, Any], stage: str) -> dict[str, Any]:
@@ -1017,6 +1038,15 @@ def canonicalize_problem_cases(
                             peer_case
                         )
                         decision["_provisional_same_cause"] = True
+                    elif action == "alias":
+                        # Direction is not causal evidence. Two facets may independently
+                        # alias each other when separate review batches agree they are one
+                        # suspected cause but choose opposite owners. Defer that exact
+                        # cycle until reciprocal review is available; it can become one
+                        # provisional research unit, never a durable alias.
+                        errors.append(
+                            f"collapse_objective_identity_missing:{peer_case}"
+                        )
                     else:
                         errors.append(f"collapse_objective_identity_missing:{peer_case}")
             if not evidence_refs.issubset(allowed_evidence):
@@ -1049,11 +1079,82 @@ def canonicalize_problem_cases(
                 focus_action = _clean_relation_string(decision.get("action"))
                 peer_decision = decision_by_focus[peer_case]
                 peer_action = _clean_relation_string(peer_decision.get("action"))
+                reciprocal_provisional_alias = (
+                    focus_action == peer_action == "alias"
+                    and peers_by_focus.get(focus_case) == [peer_case]
+                    and peers_by_focus.get(peer_case) == [focus_case]
+                )
+                if reciprocal_provisional_alias:
+                    # The first pass deliberately records the normal alias error so a
+                    # one-sided or candidate-only alias can never bypass the objective
+                    # identity requirement.  Remove only the two exact errors after a
+                    # complete reciprocal active-case cycle has been established.
+                    for member_case, target_case in (
+                        (focus_case, peer_case),
+                        (peer_case, focus_case),
+                    ):
+                        objective_error = (
+                            f"collapse_objective_identity_missing:{target_case}"
+                        )
+                        errors_by_focus[member_case] = [
+                            error
+                            for error in errors_by_focus[member_case]
+                            if error != objective_error
+                        ]
+                    canonical_group_id = _runner_owned_same_cause_group_id(
+                        [focus_case, peer_case],
+                        provisional=True,
+                    )
+                    for alias_decision, member_case, target_case in (
+                        (decision, focus_case, peer_case),
+                        (peer_decision, peer_case, focus_case),
+                    ):
+                        alias_decision.setdefault("_submitted_action", "alias")
+                        alias_decision.setdefault(
+                            "_submitted_alias_target_id",
+                            alias_decision.get("alias_target_id"),
+                        )
+                        alias_decision["action"] = "same_cause_group"
+                        alias_decision["group_id"] = canonical_group_id
+                        alias_decision["member_ids"] = [member_case, target_case]
+                        alias_decision["_provisional_same_cause"] = True
+                    provisional_same_cause_peers.setdefault(focus_case, set()).add(
+                        peer_case
+                    )
+                    provisional_same_cause_peers.setdefault(peer_case, set()).add(
+                        focus_case
+                    )
+                    focus_action = peer_action = "same_cause_group"
                 compatible = {focus_action, peer_action} <= {"merge", "alias"}
                 if focus_action == peer_action == "same_cause_group":
-                    compatible = _clean_relation_string(
-                        decision.get("group_id")
-                    ) == _clean_relation_string(peer_decision.get("group_id"))
+                    focus_members = {focus_case, *peers_by_focus.get(focus_case, [])}
+                    peer_members = {peer_case, *peers_by_focus.get(peer_case, [])}
+                    provisional_relation = (
+                        peer_case
+                        in provisional_same_cause_peers.get(focus_case, set())
+                        or focus_case
+                        in provisional_same_cause_peers.get(peer_case, set())
+                    )
+                    compatible = focus_members == peer_members
+                    if compatible:
+                        canonical_group_id = _runner_owned_same_cause_group_id(
+                            sorted(focus_members),
+                            provisional=provisional_relation,
+                        )
+                        # Preserve a submitted group label only when the model actually
+                        # submitted a group relation. A reciprocal alias converted above
+                        # has no model-authored group label and must not manufacture one
+                        # in the audit trail.
+                        if decision.get("_submitted_action") is None:
+                            decision.setdefault(
+                                "_submitted_group_id", decision.get("group_id")
+                            )
+                        if peer_decision.get("_submitted_action") is None:
+                            peer_decision.setdefault(
+                                "_submitted_group_id", peer_decision.get("group_id")
+                            )
+                        decision["group_id"] = canonical_group_id
+                        peer_decision["group_id"] = canonical_group_id
                 if focus_action == peer_action == "alias":
                     compatible = False
                 if not compatible:
@@ -1079,7 +1180,12 @@ def canonicalize_problem_cases(
                     peer_decision["_provisional_same_cause"] = True
 
         strict_decisions: list[dict[str, Any]] = []
-        for focus_case, decision in decision_by_focus.items():
+        strict_focus_rank = {case_id: index for index, case_id in enumerate(order)}
+        for focus_case in sorted(
+            decision_by_focus,
+            key=lambda case_id: strict_focus_rank[case_id],
+        ):
+            decision = decision_by_focus[focus_case]
             validation_errors = list(dict.fromkeys(errors_by_focus[focus_case]))
             if not validation_errors:
                 strict_decisions.append(decision)
@@ -1119,6 +1225,21 @@ def canonicalize_problem_cases(
             "rationale": _clean_relation_string(decision.get("rationale")) or "",
             "review_confidence": decision.get("review_confidence"),
         }
+        submitted_group_id = _clean_relation_string(decision.get("_submitted_group_id"))
+        if submitted_group_id is not None:
+            audit_entry["submitted_group_id"] = submitted_group_id
+            audit_entry["canonical_group_id"] = _clean_relation_string(
+                decision.get("group_id")
+            )
+        submitted_action = _clean_relation_string(decision.get("_submitted_action"))
+        if submitted_action is not None:
+            audit_entry["submitted_action"] = submitted_action
+            audit_entry["submitted_alias_target_id"] = _clean_relation_string(
+                decision.get("_submitted_alias_target_id")
+            )
+            audit_entry["canonical_group_id"] = _clean_relation_string(
+                decision.get("group_id")
+            )
         if isinstance(decision.get("provisional_relation_suggestion"), Mapping):
             audit_entry["provisional_relation_suggestion"] = dict(
                 decision["provisional_relation_suggestion"]
@@ -1198,18 +1319,37 @@ def canonicalize_problem_cases(
                 "canonicalize_problem_cases: split cannot be combined with merge/alias/"
                 "same_cause_group in one component"
             )
-        preferred = min(
-            members,
-            key=lambda case_id: (
-                # A candidate-only record came from the persisted case registry.
-                # Its durable identity must survive a recurrence even when the
-                # reviewer uses merge/same_cause_group instead of the preferred
-                # alias spelling.
-                0 if by_case[case_id].get("_relation_candidate_only") is True else 1,
-                preference_rank.get(case_id, 10**9),
-                order_rank[case_id],
-            ),
+        component_has_same_cause_group = any(
+            group_by_case.get(case_id) is not None for case_id in members
         )
+        if strict_review and component_has_same_cause_group:
+            # Model response ordering is not identity evidence.  A strict same-cause
+            # work unit keeps a persisted candidate when one exists, otherwise the
+            # stable case ID determines its representative across response permutations.
+            preferred = min(
+                members,
+                key=lambda case_id: (
+                    0
+                    if by_case[case_id].get("_relation_candidate_only") is True
+                    else 1,
+                    case_id,
+                ),
+            )
+        else:
+            preferred = min(
+                members,
+                key=lambda case_id: (
+                    # A candidate-only record came from the persisted case registry.
+                    # Its durable identity must survive a recurrence even when the
+                    # reviewer uses merge/same_cause_group instead of the preferred
+                    # alias spelling.
+                    0
+                    if by_case[case_id].get("_relation_candidate_only") is True
+                    else 1,
+                    preference_rank.get(case_id, 10**9),
+                    order_rank[case_id],
+                ),
+            )
         base = dict(by_case[preferred])
         provisional_clearance = provisional_clearance_by_case.get(preferred)
         if provisional_clearance is not None:

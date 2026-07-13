@@ -22,6 +22,27 @@ configured value.
 - Problems where confusion points and failures point to the same underlying issue.
 - Problems with clear user-blocking impact even if the root cause is not yet known.
 
+## Interpret observations in their run outcome
+
+The workspace may contain `context_atom_ids` in addition to `assigned_atom_ids`. Context atoms
+are terminal reports or failures from the same originating runs. Read them in full and use them to
+interpret sequence, recovery, verification, and residual impact, but do not decide them or cite
+them as problem evidence. Only assigned atoms may receive decisions or citations.
+
+- A successful originating run is counterevidence, not a blanket negative. A failed diagnostic,
+  prerequisite probe, or early attempt is not an actionable problem when terminal evidence shows
+  the intended workflow recovered and its relevant verification passed with no residual impact.
+- A successful run can still establish a real problem. Preserve an assigned observed issue when
+  the terminal report says a feature remained degraded, a user-facing defect persisted, or a
+  separate verification oracle failed.
+- Separate an upstream blocker from consequences of that blocker. Missing downstream validation,
+  confidence, or artifacts are not independent problems unless evidence shows they persist after
+  the upstream blocker is removed or have a distinct mechanism and impact.
+- Ancillary stderr, optional service failures, and warnings require demonstrated effect on the
+  requested task or user experience. Their presence alone does not establish an actionable case.
+- Missing or ambiguous terminal context is uncertainty, not proof of either success or failure.
+  Use `unresolved` or `deferred` with a concrete reconsideration trigger.
+
 ## What to avoid
 
 - Do not propose solutions, fixes, or implementation ideas. Stage 1 only identifies that
@@ -54,6 +75,9 @@ known, use `unresolved`, which is also reconsidered on later cycles.
 The runner applies the neutral problem-identification lens to every bounded job and sends every
 non-support decision through a separate adversarial pass. Disagreement remains unresolved; a
 second pass may recover a concrete problem, but cannot erase a supported case from the first pass.
+The adversarial pass receives the same terminal context. A finding that ignored recovery,
+verification, or residual impact is feedback for correction of that same authored result; it is
+not a reason to discard an otherwise improving result and start over immediately.
 
 A problem record must include:
 - `problem_id` (stable string, e.g. `problem:readme-quickstart-missing`)

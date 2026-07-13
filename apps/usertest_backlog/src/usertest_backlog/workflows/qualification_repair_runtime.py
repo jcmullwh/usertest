@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Any
 
 from backlog_core import assemble_backlog_tickets
+from backlog_miner import BacklogProviderExternalWait
 from backlog_miner.pipeline import PipelinePromptManifest
 from backlog_miner.research_evidence import ReplayExecutor
 from backlog_miner.research_runner import (
@@ -73,6 +74,29 @@ def _items(document: Mapping[str, Any]) -> list[dict[str, Any]]:
         if isinstance(raw, list)
         else []
     )
+
+
+def _stage3_external_wait(document: Mapping[str, Any]) -> dict[str, Any] | None:
+    meta_raw = document.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    checkpoint_raw = meta.get("external_wait")
+    checkpoint = checkpoint_raw if isinstance(checkpoint_raw, Mapping) else {}
+    wait_raw = checkpoint.get("external_wait")
+    wait = wait_raw if isinstance(wait_raw, Mapping) else {}
+    if (
+        meta.get("stage_status") != "parked_external_wait"
+        or checkpoint.get("status") != "parked_external_wait"
+        or checkpoint.get("reason") != "codex_chatgpt_subscription_usage_limit"
+        or checkpoint.get("route") != "chatgpt_subscription"
+        or checkpoint.get("api_fallback_allowed") is not False
+        or wait.get("code") != "codex_chatgpt_subscription_usage_limit"
+        or wait.get("provider") != "codex"
+        or wait.get("state") != "parked"
+        or wait.get("route") != "chatgpt_subscription"
+        or wait.get("api_fallback_allowed") is not False
+    ):
+        return None
+    return dict(wait)
 
 
 def _problem_id(record: Mapping[str, Any]) -> str | None:
@@ -1367,6 +1391,10 @@ def run_stage456_qualification_repairs(
                 artifacts_dir=route_dir,
                 independent_feedback=feedback,
             )
+            if research_result.get("status") == "parked_external_wait":
+                research_external_wait = research_result.get("external_wait")
+                if isinstance(research_external_wait, Mapping):
+                    raise BacklogProviderExternalWait(dict(research_external_wait))
             corrected_raw = research_result.get("dossier")
             corrected = dict(corrected_raw) if isinstance(corrected_raw, Mapping) else {}
             document = dict(stage3)
@@ -1798,6 +1826,9 @@ def run_stage456_qualification_repairs(
                     replay_executor=replay_executor,
                     replay_executor_metadata=dict(replay_executor_metadata or {}),
                 )
+                new_stage3_external_wait = _stage3_external_wait(new_stage3)
+                if new_stage3_external_wait is not None:
+                    raise BacklogProviderExternalWait(new_stage3_external_wait)
                 documents["repro_research"] = _merge_problem_items(
                     documents["repro_research"],
                     new_stage3,
@@ -1984,11 +2015,12 @@ def run_stage456_qualification_repairs(
     execution_consumptions: list[dict[str, Any]] = []
     executed_plan_groups: list[dict[str, Any]] = []
     executed_group_ids: set[str] = set()
+    provider_external_wait: dict[str, Any] | None = None
     # One earliest author frontier owns each causal component for this scoring pass.
-    # A pause still blocks later work in that component, while disjoint components keep
-    # making progress instead of being globally starved. Recompute after every group:
-    # accepted Stage-1 work can create a merge/alias edge that makes a previously
-    # disjoint downstream author stale.
+    # Recompute after every completed group because accepted Stage-1 work can create a
+    # merge/alias edge that makes a previously disjoint downstream author stale. A
+    # provider-global wait is different from an author-local pause: it stops this whole
+    # scoring pass immediately, retaining every later group as pending without dispatch.
     while True:
         route_plan = plan_qualification_repair_route_groups(
             routes,
@@ -2010,19 +2042,23 @@ def run_stage456_qualification_repairs(
             route_by_sha[route_sha]
             for route_sha in planned_group["route_sha256s"]
         ]
-        execution = consume_qualification_corrections(
-            routes=group_routes,
-            source_pending_run_sha256=source_pending_run_sha256,
-            source_adjudication_sha256=source_adjudication_sha256,
-            load_current_payload=current_payload,
-            invoke_exact_author=invoke_exact_author,
-            rerun_downstream=rerun_downstream,
-            resume_frontiers={
-                route_sha: frontier
-                for route_sha, frontier in (resume_frontiers or {}).items()
-                if route_sha in set(planned_group["route_sha256s"])
-            },
-        )
+        try:
+            execution = consume_qualification_corrections(
+                routes=group_routes,
+                source_pending_run_sha256=source_pending_run_sha256,
+                source_adjudication_sha256=source_adjudication_sha256,
+                load_current_payload=current_payload,
+                invoke_exact_author=invoke_exact_author,
+                rerun_downstream=rerun_downstream,
+                resume_frontiers={
+                    route_sha: frontier
+                    for route_sha, frontier in (resume_frontiers or {}).items()
+                    if route_sha in set(planned_group["route_sha256s"])
+                },
+            )
+        except BacklogProviderExternalWait as exc:
+            provider_external_wait = dict(exc.external_wait)
+            break
         execution_consumptions.append(execution)
         executed_plan_groups.append(planned_group)
         executed_group_ids.add(str(planned_group["group_id"]))
@@ -2161,6 +2197,7 @@ def run_stage456_qualification_repairs(
             for execution in execution_consumptions
         ),
         "route_group_plan": route_plan,
+        "external_wait": provider_external_wait,
     }
     accepted_repair_count = sum(
         int(execution.get("accepted_repair_count") or 0)
@@ -2189,6 +2226,10 @@ def run_stage456_qualification_repairs(
         "same_corpus_feedback_exposed": True,
         "release_qualification_eligible": False,
         "fresh_independent_readjudication_required": True,
+        "status": (
+            "parked_external_wait" if provider_external_wait is not None else "completed"
+        ),
+        "external_wait": provider_external_wait,
     }
     consumption["content_sha256"] = _hash(consumption)
     tickets = assemble_backlog_tickets(

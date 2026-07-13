@@ -573,6 +573,105 @@ def _load_token_monitoring_artifacts(record: dict[str, Any], run_dir: Path) -> t
     return monitoring_obj, error_obj
 
 
+def _bounded_terminal_context_text(
+    value: Any,
+    *,
+    max_chars: int = 1_200,
+) -> dict[str, Any] | None:
+    """Return an explicit bounded preview for terminal run context.
+
+    This is routing/interpretation context, not the sole evidence carrier for a problem.
+    Structured issue atoms remain lossless.  The digest and truncation flag make the bound
+    visible rather than silently presenting a prefix as the complete terminal explanation.
+    """
+
+    text = _coerce_string(value)
+    if text is None:
+        return None
+    encoded = text.encode("utf-8")
+    truncated = len(text) > max_chars
+    return {
+        "preview": text[:max_chars].rstrip() if truncated else text,
+        "truncated": truncated,
+        "original_chars": len(text),
+        "sha256": sha256(encoded).hexdigest(),
+    }
+
+
+def _modern_report_terminal_context(
+    *,
+    report: dict[str, Any],
+    report_kind: str,
+    report_status: str,
+) -> tuple[str, dict[str, Any]]:
+    """Build runner-owned terminal context without making success a problem source."""
+
+    summary_value = (
+        report.get("summary")
+        or report.get("failure_point")
+        or (
+            report.get("evidence", {}).get("what_happened")
+            if isinstance(report.get("evidence"), dict)
+            else None
+        )
+    )
+    summary = _bounded_terminal_context_text(summary_value)
+    verification_raw = report.get("verification")
+    verification = verification_raw if isinstance(verification_raw, list) else []
+    verification_results = [
+        result
+        for item in verification
+        if isinstance(item, dict)
+        for result in [_coerce_string(item.get("result"))]
+        if result is not None
+    ]
+    issue_items = [
+        item
+        for block in ("issues", "risks")
+        for item in (
+            report.get(block) if isinstance(report.get(block), list) else []
+        )
+        if isinstance(item, dict)
+    ]
+    issue_severity_counts = Counter(
+        (_coerce_string(item.get("severity")) or "unknown").casefold()
+        for item in issue_items
+    )
+    batch_results_raw = report.get("results")
+    batch_results = batch_results_raw if isinstance(batch_results_raw, list) else []
+    batch_status_counts = Counter(
+        (_coerce_string(item.get("status")) or "unknown").casefold()
+        for item in batch_results
+        if isinstance(item, dict)
+    )
+    outcome_text = (
+        f"Origin run terminal outcome: kind={report_kind}; status={report_status}; "
+        f"verification_checks={len(verification)}; explicit_issues={len(issue_items)}"
+    )
+    if summary is not None:
+        outcome_text += f"; summary={summary['preview']}"
+    return outcome_text, {
+        "terminal_context_schema_version": 1,
+        "terminal_context_scope": "origin_run_outcome_not_case_resolution",
+        "report_kind": report_kind,
+        "report_status": report_status,
+        "report_summary_context": summary,
+        "verification_check_count": len(verification),
+        "verification_result_values": list(dict.fromkeys(verification_results[:20])),
+        "verification_results_omitted_count": max(0, len(verification_results) - 20),
+        "explicit_issue_count": len(issue_items),
+        "issue_severity_counts": dict(sorted(issue_severity_counts.items())),
+        "batch_result_status_counts": dict(sorted(batch_status_counts.items())),
+        "output_count": len(report.get("outputs"))
+        if isinstance(report.get("outputs"), list)
+        else 0,
+        # The context atom must be available to same-run miners but can never originate a case.
+        "problem_mining_context_only": True,
+        "lineage_mining_blocker": "runner_terminal_context_only",
+        "severity_hint": "low",
+    }
+
+
 def _extract_modern_report_atoms(
     *,
     report: dict[str, Any],
@@ -1269,6 +1368,16 @@ def extract_backlog_atoms(
             report_kind = _coerce_string(report.get("kind"))
             report_status = _coerce_string(report.get("status"))
             if report_kind is not None or report_status is not None:
+                terminal_text, terminal_fields = _modern_report_terminal_context(
+                    report=report,
+                    report_kind=report_kind or "unknown",
+                    report_status=(report_status or "unknown").casefold(),
+                )
+                _emit(
+                    "run_outcome_context",
+                    terminal_text,
+                    **terminal_fields,
+                )
                 _extract_modern_report_atoms(
                     report=report,
                     report_kind=report_kind or "unknown",

@@ -23,6 +23,10 @@ _FAILURE_SUBTYPE_RULES: tuple[tuple[str, tuple[re.Pattern[str], ...]], ...] = (
         ),
     ),
     (
+        "provider_subscription_usage_limit",
+        (re.compile(r"you(?:'ve| have) hit your usage limit", re.IGNORECASE),),
+    ),
+    (
         "provider_capacity",
         (
             re.compile(r"\b429\b", re.IGNORECASE),
@@ -142,6 +146,18 @@ _CLAUDE_RESET_EXTRACT_RE = re.compile(
 _CLAUDE_IANA_TZ_IN_PARENS_RE = re.compile(r"\((?P<tz>[A-Za-z_]+/[A-Za-z_]+)\)")
 _RAW_EVENTS_PLAINTEXT_EXCERPT_TAIL_BYTES = 24_000
 _RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS = 4_000
+_CODEX_SUBSCRIPTION_USAGE_LIMIT_RE = re.compile(
+    r"you(?:'ve| have) hit your usage limit",
+    re.IGNORECASE,
+)
+_CODEX_SUBSCRIPTION_RESUME_AFTER_RE = re.compile(
+    r"\btry again at\s+(?P<when>[^.\r\n]+)",
+    re.IGNORECASE,
+)
+_CODEX_SUBSCRIPTION_SETTINGS_URL_RE = re.compile(
+    r"https://chatgpt\.com/codex/settings/usage",
+    re.IGNORECASE,
+)
 
 
 def _new_codex_metadata_capture_summary() -> dict[str, Any]:
@@ -235,6 +251,88 @@ def _extract_raw_events_plaintext_excerpt(raw_events_path: Path) -> str:
     if len(text) > _RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS:
         text = text[-_RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS:]
     return text
+
+
+def _extract_raw_events_error_messages(raw_events_path: Path) -> str:
+    """Extract provider error text from structured agent event streams.
+
+    Codex can report a terminal account limit only in JSON events while leaving both stderr and
+    the last-message artifact empty. Keep this projection intentionally narrow: only top-level
+    ``error`` events and ``turn.failed.error.message`` are provider failure evidence.
+    """
+    tail = _read_tail_text(raw_events_path, max_bytes=_RAW_EVENTS_PLAINTEXT_EXCERPT_TAIL_BYTES)
+    if not tail.strip():
+        return ""
+
+    messages: list[str] = []
+    for line in tail.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        event_type = parsed.get("type")
+        message: str | None = None
+        if event_type == "error" and isinstance(parsed.get("message"), str):
+            message = parsed["message"].strip()
+        elif event_type == "turn.failed":
+            error = parsed.get("error")
+            if isinstance(error, dict) and isinstance(error.get("message"), str):
+                message = error["message"].strip()
+        if message and message not in messages:
+            messages.append(message)
+
+    text = "\n".join(messages).strip()
+    if len(text) > _RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS:
+        text = text[-_RAW_EVENTS_PLAINTEXT_EXCERPT_MAX_CHARS:]
+    return text
+
+
+def _extract_codex_subscription_usage_limit(text: str) -> dict[str, Any] | None:
+    """Recognize the signed-in ChatGPT subscription's explicit usage-limit response."""
+    if not isinstance(text, str) or not _CODEX_SUBSCRIPTION_USAGE_LIMIT_RE.search(text):
+        return None
+    resume_match = _CODEX_SUBSCRIPTION_RESUME_AFTER_RE.search(text)
+    resume_after_raw = resume_match.group("when").strip() if resume_match is not None else None
+    return {
+        "provider": "codex",
+        "reason": "chatgpt_subscription_usage_limit",
+        "resume_after_raw": resume_after_raw or None,
+        # The provider message does not identify a timezone. Preserve the account-local value
+        # without manufacturing UTC precision.
+        "resume_after_timezone": "provider_account_local_unspecified",
+        "settings_url": (
+            "https://chatgpt.com/codex/settings/usage"
+            if _CODEX_SUBSCRIPTION_SETTINGS_URL_RE.search(text)
+            else None
+        ),
+    }
+
+
+def _format_codex_subscription_usage_limit_stderr(
+    *,
+    provider_message: str,
+    resume_after_raw: str | None,
+) -> str:
+    lines = [
+        "[agent_external_wait] Codex ChatGPT subscription usage limit reached.",
+        "state=parked",
+        "route=chatgpt_subscription",
+        "retry_mode=resume_same_session",
+    ]
+    if isinstance(resume_after_raw, str) and resume_after_raw.strip():
+        lines.append(f"resume_after_raw={resume_after_raw.strip()}")
+        lines.append("resume_after_timezone=provider_account_local_unspecified")
+    lines.append(
+        "hint=Resume the retained session after the provider reset; do not switch to API billing."
+    )
+    if provider_message.strip():
+        lines.extend(["", "[provider_message]", provider_message.strip()])
+    return "\n".join(lines).strip()
 
 
 def _extract_claude_quota_exhaustion(text: str) -> dict[str, Any] | None:
@@ -736,8 +834,11 @@ __all__ = (
     "_classify_failure_subtype",
     "_codex_metadata_capture_from_stderr",
     "_extract_claude_quota_exhaustion",
+    "_extract_codex_subscription_usage_limit",
+    "_extract_raw_events_error_messages",
     "_extract_raw_events_plaintext_excerpt",
     "_format_claude_quota_exhaustion_stderr",
+    "_format_codex_subscription_usage_limit_stderr",
     "_is_retryable_provider_capacity_failure",
     "_is_retryable_tool_use_id_collision_failure",
     "_is_retryable_transient_network_failure",

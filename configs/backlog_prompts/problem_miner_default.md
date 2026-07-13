@@ -13,7 +13,13 @@ Stage 1 only asks: what problem exists and what is the evidence?
 - Every problem record MUST cite one or more evidence_atom_ids from the input.
 - `atoms.json` contains this miner's exact, bounded `assigned_atom_ids` partition. Read
   every complete markdown chunk listed in `chunks[*].text_file`; together those chunks
-  contain every assigned atom. Emit exactly one decision for every assigned atom.
+  contain every assigned atom plus any `context_atom_ids` from the same originating runs.
+  Emit exactly one decision for every assigned atom and no decision for a context atom.
+- Context atoms are evidence for interpreting the assigned observations, not evidence that may
+  originate a case in this job. Never cite a `context_atom_id` in `evidence_atom_ids`. Use the
+  terminal context to determine whether an attempt recovered, whether intended verification
+  passed, what impact remained, and whether a downstream gap is only a consequence of an
+  upstream blocker.
 - This workspace contains only this job's assigned evidence. Do not cite atom IDs from
   memory or another job. The index preview alone is never evidence for a citation.
 - If you cannot cite evidence atoms, do not create the record.
@@ -21,6 +27,16 @@ Stage 1 only asks: what problem exists and what is the evidence?
   discard a distinct observed problem merely to reduce the record count.
 - Prefer fewer, higher-quality problem records over many vague ones.
 - State what was observed (confusion, failure, error), not what should be done.
+- Do not promote every nonzero command or stderr line into a problem. When same-run terminal
+  context directly shows recovery and successful relevant verification with no residual impact,
+  treat the failed probe or attempt as non-support. Conversely, overall success does not erase an
+  independently observed residual defect or degraded feature.
+- Do not split one upstream failure into separate cases for each downstream thing that could not
+  be inspected or verified unless the evidence establishes an independent mechanism or persistent
+  impact after the blocker.
+- Ancillary warnings and optional-service failures require demonstrated task or user impact.
+- If terminal context is absent or does not settle the effect, remain `unresolved` or `deferred`;
+  do not infer that the observation either recovered or persisted.
 - Output must be limited to the fields in the Output contract below.
 - Do NOT propose or hint at solutions or implementation approaches.
 - A suggested-change/proposal atom is not evidence that its implied problem exists.
@@ -80,13 +96,17 @@ Requirements:
   - `chunks`: descriptors with `text_file`, `atom_ids`, byte counts, and content hashes
   - `total_atom_count`
   - `assigned_atom_ids` and `assigned_atom_count`
+  - `context_atom_ids` and `context_atom_count` (read-only terminal context; never decide or cite)
+  - `decision_eligible_atom_ids` (identical to `assigned_atom_ids`)
   - `problem_record_limit` (`null`; distinct evidenced problems are not count-capped)
 - Read the markdown index listed by `index_file` for routing context.
 - Read every markdown file listed in `chunks[*].text_file` in full. A verified complete
-  chunk read covers every atom listed in that chunk's `atom_ids`; normally there are no
-  more than three bounded chunks in one job.
-- For every artifact referenced by an assigned `origin_attachment_evidence.atom_refs` entry, open its artifact
-  manifest and read every bounded attachment chunk in full. Never rely on the host
+  chunk read covers every assigned and context atom listed in that chunk's `atom_ids`; normally
+  there are no more than three bounded chunks in one job.
+- For every artifact referenced by an assigned or context
+  `origin_attachment_evidence.atom_refs` entry, open its artifact manifest and read every bounded
+  attachment chunk in full. Context attachments are required interpretation evidence even though
+  their atom IDs cannot receive decisions or citations. Never rely on the host
   `artifact_ref.path`. A materialization error requires an `unresolved` atom decision.
 - With PowerShell/Codex, read one chunk per command using, for example,
   `Get-Content -Raw -Encoding UTF8 -LiteralPath atoms_text/atoms_001.md`; `-Raw` and

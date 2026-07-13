@@ -79,6 +79,34 @@ def _write_success_artifacts(
     return SimpleNamespace(exit_code=0, thread_id=_THREAD_ID)
 
 
+def _write_subscription_wait_artifacts(kwargs: dict[str, object]) -> SimpleNamespace:
+    raw_events_path = kwargs["raw_events_path"]
+    last_message_path = kwargs["last_message_path"]
+    stderr_path = kwargs["stderr_path"]
+    assert isinstance(raw_events_path, Path)
+    assert isinstance(last_message_path, Path)
+    assert isinstance(stderr_path, Path)
+    message = (
+        "You've hit your usage limit. Visit "
+        "https://chatgpt.com/codex/settings/usage to purchase more credits or try again at "
+        "Jul 18th, 2026 2:33 AM."
+    )
+    raw_events_path.write_text(
+        "\n".join(
+            [
+                json.dumps({"type": "thread.started", "thread_id": _THREAD_ID}),
+                json.dumps({"type": "error", "message": message}),
+                json.dumps({"type": "turn.failed", "error": {"message": message}}),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    last_message_path.write_text("", encoding="utf-8")
+    stderr_path.write_text("", encoding="utf-8")
+    return SimpleNamespace(exit_code=1, thread_id=_THREAD_ID)
+
+
 def _load_receipt(out_dir: Path, tag: str = "miner_001") -> dict[str, object]:
     return json.loads((out_dir / f"{tag}.codex_auth_receipt.json").read_text(encoding="utf-8"))
 
@@ -656,3 +684,64 @@ def test_failed_fresh_codex_invocation_retains_manifest_without_author_session(
     assert "model_invocation_manifest_not_verified" in verify_model_invocation_manifest(
         manifest_path
     )
+
+
+def test_structured_codex_subscription_wait_is_attested_and_not_retried(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    codex_home = tmp_path / "host_codex_home"
+    codex_home.mkdir()
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setattr(
+        mod,
+        "probe_codex_login_status",
+        lambda **_: _login_status(codex_home=codex_home),
+    )
+    exec_calls: list[dict[str, object]] = []
+
+    def wait_exec(**kwargs: object) -> SimpleNamespace:
+        exec_calls.append(dict(kwargs))
+        return _write_subscription_wait_artifacts(kwargs)
+
+    monkeypatch.setattr(mod, "run_codex_exec", wait_exec)
+    out_dir = tmp_path / "stage"
+
+    with pytest.raises(mod.BacklogProviderExternalWait) as exc_info:
+        run_stage_prompt_json(
+            stage="problem_prioritization",
+            prompt="Return JSON.",
+            out_dir=out_dir,
+            tag="problem_prioritization_001",
+            agent="codex",
+            model=None,
+            cfg=_cfg(tmp_path),
+            structured=True,
+        )
+
+    assert len(exec_calls) == 1
+    assert all(
+        exec_calls[0]["env_overrides"][name] == "" for name in _BLOCKED_ENV_VARS
+    )
+    wait = exc_info.value.external_wait
+    assert wait["state"] == "parked"
+    assert wait["route"] == "chatgpt_subscription"
+    assert wait["api_fallback_allowed"] is False
+    assert wait["agent_session_id"] == _THREAD_ID
+    assert wait["resume_after"] == {
+        "raw": "Jul 18th, 2026 2:33 AM",
+        "timezone": "provider_account_local_unspecified",
+    }
+    wait_path = Path(wait["external_wait_artifact"])
+    assert json.loads(wait_path.read_text(encoding="utf-8")) == wait
+    receipt = _load_receipt(out_dir, "problem_prioritization_001")
+    assert receipt["status"] == "external_wait_verified"
+    assert receipt["external_wait_attested"] is True
+    assert receipt["api_fallback_allowed"] is False
+    manifest_path = model_invocation_manifest_path(
+        out_dir=out_dir,
+        tag="problem_prioritization_001",
+    )
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    assert manifest["error_kind"] == "BacklogProviderExternalWait"

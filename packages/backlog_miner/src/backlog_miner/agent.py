@@ -4,11 +4,16 @@ from pathlib import Path
 
 from runner_core import RunnerConfig
 
-from backlog_miner.ensemble import BacklogPromptResult
+from backlog_miner.ensemble import BacklogPromptResult, BacklogProviderExternalWait
 from backlog_miner.ensemble import run_backlog_prompt as _run_backlog_prompt
 from backlog_miner.ensemble import run_backlog_prompt_result as _run_backlog_prompt_result
 
-__all__ = ["BacklogPromptResult", "run_backlog_prompt", "run_backlog_prompt_result"]
+__all__ = [
+    "BacklogPromptResult",
+    "BacklogProviderExternalWait",
+    "run_backlog_prompt",
+    "run_backlog_prompt_result",
+]
 
 
 def run_backlog_prompt(

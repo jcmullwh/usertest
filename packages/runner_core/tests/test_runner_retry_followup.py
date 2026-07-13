@@ -134,6 +134,16 @@ def _make_dummy_codex_retry_binary(tmp_path: Path) -> str:
                 ),
                 "        return 1",
                 "",
+                "    if mode == 'structured_subscription_usage_limit':",
+                "        message = (",
+                '            "You\'ve hit your usage limit. Visit "',
+                "            'https://chatgpt.com/codex/settings/usage to purchase more credits '",
+                "            'or try again at Jul 18th, 2026 2:33 AM.'",
+                "        )",
+                "        print(json.dumps({'type': 'error', 'message': message}))",
+                "        print(json.dumps({'type': 'turn.failed', 'error': {'message': message}}))",
+                "        return 1",
+                "",
                 "    if mode == 'invalid_then_valid' and attempt == 1:",
                 "        if out_path is not None:",
                 "            Path(out_path).write_text('not valid json\\n', encoding='utf-8')",
@@ -754,6 +764,66 @@ def test_run_once_does_not_retry_non_retryable_capacity_failure(
     attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
     assert len(attempts["attempts"]) == 1
     assert attempts["rate_limit_retries_used"] == 0
+
+
+def test_run_once_parks_codex_subscription_limit_from_structured_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    state_file = tmp_path / "attempt_state_subscription_limit.txt"
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "structured_subscription_usage_limit")
+    monkeypatch.setenv("DUMMY_INCLUDE_CODEX_METADATA_WARNING", "1")
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=2,
+            agent_followup_attempts=2,
+        ),
+    )
+
+    assert result.exit_code == 1
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert len(attempts["attempts"]) == 1
+    assert attempts["rate_limit_retries_used"] == 0
+    assert attempts["attempts"][0]["failure_subtype"] == ("provider_subscription_usage_limit")
+    assert attempts["attempts"][0]["retry_scheduled"] is False
+    wait = attempts["external_wait"]
+    assert wait["state"] == "parked"
+    assert wait["retry_mode"] == "resume_same_session"
+    assert wait["resume_after"] == {
+        "raw": "Jul 18th, 2026 2:33 AM",
+        "timezone": "provider_account_local_unspecified",
+    }
+    assert wait["route"] == "chatgpt_subscription"
+    assert wait["api_fallback_allowed"] is False
+
+    error = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error["type"] == "AgentExternalWait"
+    assert error["code"] == "codex_chatgpt_subscription_usage_limit"
+    assert error["route"] == "chatgpt_subscription"
+    assert error["api_fallback_allowed"] is False
+    assert "You've hit your usage limit" in error["provider_message"]
+    stderr = (result.run_dir / "agent_stderr.txt").read_text(encoding="utf-8")
+    assert "[agent_external_wait]" in stderr
+    assert "do not switch to API billing" in stderr
 
 
 def test_run_once_does_not_followup_when_agent_output_is_empty(

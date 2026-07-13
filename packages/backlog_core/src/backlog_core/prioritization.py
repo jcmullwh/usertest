@@ -11,8 +11,10 @@ Design goals:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
+
+from backlog_core.operational_candidates import operational_candidate_receipt_errors
 
 # These weights are heuristic and intentionally simple. Stage 2 may override
 # them with explicit rationale; this module only provides pre-score signals.
@@ -20,6 +22,10 @@ _SEVERITY_SCORE: dict[str, float] = {"low": 0.20, "medium": 0.50, "high": 0.80, 
 
 # Evidence-source strength proxy (objective-ish sources score higher).
 _SOURCE_STRENGTH: dict[str, float] = {
+    # This source is runner-produced structured evidence.  The strength is used only
+    # after ``operational_candidate_receipt_errors`` verifies the complete receipt;
+    # an atom carrying this source label alone receives no typed-source bonus.
+    "operational_failure_candidate": 1.00,
     "run_failure_event": 1.00,
     "report_validation_error": 0.90,
     "command_failure": 0.85,
@@ -39,6 +45,71 @@ _SOURCE_STRENGTH: dict[str, float] = {
     "suggested_change": 0.65,
     "confidence_missing": 0.60,
 }
+
+
+def _verified_operational_candidate_observation(
+    atom: Mapping[str, Any],
+) -> tuple[int, tuple[str, ...]] | None:
+    """Return receipt-bound occurrence and source-run evidence, if trustworthy.
+
+    Operational candidates deliberately use a synthetic atom/run identity, so treating
+    that identity as one observed run loses the runner's recurrence ledger.  Conversely,
+    reading the candidate's prose projection would let generated text affect ranking.
+    This helper accepts only the full runner receipt after its content hashes and atom
+    bindings validate, then cross-checks that its typed signals and parent bindings name
+    the same unique source runs.
+    """
+
+    if _coerce_string(atom.get("source")) != "operational_failure_candidate":
+        return None
+    try:
+        if operational_candidate_receipt_errors(atom):
+            return None
+    except (KeyError, TypeError, ValueError):
+        # Malformed historical inputs are not ranking evidence.  Stage contracts retain
+        # responsibility for reporting their integrity errors to operators.
+        return None
+
+    receipt_raw = atom.get("operational_candidate_receipt")
+    if not isinstance(receipt_raw, Mapping):
+        return None
+    occurrence_count = receipt_raw.get("occurrence_count")
+    signals_raw = receipt_raw.get("typed_signal_receipts")
+    bindings_raw = receipt_raw.get("parent_bindings")
+    if (
+        isinstance(occurrence_count, bool)
+        or not isinstance(occurrence_count, int)
+        or occurrence_count <= 0
+        or not isinstance(signals_raw, list)
+        or not isinstance(bindings_raw, list)
+    ):
+        return None
+
+    signal_run_ids = tuple(
+        sorted(
+            run_id
+            for raw in signals_raw
+            if isinstance(raw, Mapping)
+            for run_id in [_coerce_string(raw.get("run_id"))]
+            if run_id is not None
+        )
+    )
+    binding_run_ids = tuple(
+        sorted(
+            run_id
+            for raw in bindings_raw
+            if isinstance(raw, Mapping)
+            for run_id in [_coerce_string(raw.get("run_id"))]
+            if run_id is not None
+        )
+    )
+    if (
+        len(signal_run_ids) != occurrence_count
+        or len(set(signal_run_ids)) != occurrence_count
+        or binding_run_ids != signal_run_ids
+    ):
+        return None
+    return occurrence_count, signal_run_ids
 
 
 def _coerce_string(value: Any) -> str | None:
@@ -148,19 +219,41 @@ def compute_problem_priority_signals(
         evidence_ids = _coerce_string_list(rec.get("evidence_atom_ids"))
         evidence_atoms = [atoms_by_id[eid] for eid in evidence_ids if eid in atoms_by_id]
 
+        ordinary_evidence_atoms = [
+            atom
+            for atom in evidence_atoms
+            if _coerce_string(atom.get("source")) != "operational_failure_candidate"
+        ]
+        verified_operational_observations: list[tuple[int, tuple[str, ...]]] = []
+        unverified_operational_receipts = 0
+        for atom in evidence_atoms:
+            if _coerce_string(atom.get("source")) != "operational_failure_candidate":
+                continue
+            verified = _verified_operational_candidate_observation(atom)
+            if verified is None:
+                unverified_operational_receipts += 1
+            else:
+                verified_operational_observations.append(verified)
+
         runs = {
             _coerce_string(a.get("run_id"))
-            for a in evidence_atoms
+            for a in ordinary_evidence_atoms
             if _coerce_string(a.get("run_id")) is not None
         }
+        operational_source_runs = {
+            run_id
+            for _occurrence_count, source_run_ids in verified_operational_observations
+            for run_id in source_run_ids
+        }
+        runs.update(operational_source_runs)
         agents = {
             _coerce_string(a.get("agent"))
-            for a in evidence_atoms
+            for a in ordinary_evidence_atoms
             if _coerce_string(a.get("agent")) is not None
         }
         missions = {
             _coerce_string(a.get("mission_id"))
-            for a in evidence_atoms
+            for a in ordinary_evidence_atoms
             if _coerce_string(a.get("mission_id")) is not None
         }
 
@@ -178,8 +271,18 @@ def compute_problem_priority_signals(
             min(1.0, 0.55 * runs_score + 0.30 * agents_score + 0.15 * missions_score),
         )
 
-        # Recurrence within the observed evidence (independent of LLM confidence).
-        recurrence_score = min(1.0, evidence_count / 6.0)  # 1.0 at 6 cited atoms
+        # Recurrence within observed evidence (independent of LLM confidence).  One
+        # verified operational candidate may represent multiple exact runner-observed
+        # occurrences.  Unverified candidate receipts contribute neither their synthetic
+        # atom nor any prose-claimed count.
+        verified_operational_occurrences = sum(
+            occurrence_count
+            for occurrence_count, _source_run_ids in verified_operational_observations
+        )
+        effective_observation_count = (
+            len(ordinary_evidence_atoms) + verified_operational_occurrences
+        )
+        recurrence_score = min(1.0, effective_observation_count / 6.0)
 
         # Source strength: average of known per-source strengths.
         src_strengths: list[float] = []
@@ -187,10 +290,12 @@ def compute_problem_priority_signals(
         for atom in evidence_atoms:
             source = _coerce_string(atom.get("source")) or "unknown"
             sources_count[source] = sources_count.get(source, 0) + 1
+            if source == "operational_failure_candidate":
+                if _verified_operational_candidate_observation(atom) is not None:
+                    src_strengths.append(_SOURCE_STRENGTH[source])
+                continue
             src_strengths.append(_SOURCE_STRENGTH.get(source, 0.50))
-        source_strength_score = (
-            (sum(src_strengths) / len(src_strengths)) if src_strengths else 0.50
-        )
+        source_strength_score = (sum(src_strengths) / len(src_strengths)) if src_strengths else 0.50
 
         # Trust combines model confidence (stage-1) and evidence-source strength.
         trust_score = max(0.0, min(1.0, 0.55 * confidence + 0.45 * source_strength_score))
@@ -240,7 +345,14 @@ def compute_problem_priority_signals(
             },
             "recurrence": {
                 "evidence_atoms_cited": evidence_count,
+                "effective_observations": effective_observation_count,
                 "recurrence_score": round(recurrence_score, 4),
+            },
+            "operational_candidates": {
+                "verified_receipts": len(verified_operational_observations),
+                "unverified_receipts": unverified_operational_receipts,
+                "verified_occurrences": verified_operational_occurrences,
+                "distinct_source_runs": len(operational_source_runs),
             },
             "sources": {
                 "source_strength_score": round(source_strength_score, 4),

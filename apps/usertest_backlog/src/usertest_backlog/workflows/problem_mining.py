@@ -609,6 +609,162 @@ def _problem_mining_job_batches(
     return batches
 
 
+_PROBLEM_MINING_TERMINAL_CONTEXT_SOURCES = frozenset(
+    {
+        "agent_last_message_artifact",
+        "report_outcome",
+        "run_outcome_context",
+        "run_failure_event",
+    }
+)
+
+
+def _problem_mining_origin_run_key(atom: Mapping[str, Any]) -> str | None:
+    """Return the stable origin-run identity used to attach terminal context."""
+
+    origin_run_id = _coerce_string(atom.get("origin_run_id"))
+    if origin_run_id is not None:
+        return f"origin:{origin_run_id}"
+    run_rel = _coerce_string(atom.get("run_rel"))
+    if run_rel is not None:
+        return f"run_rel:{run_rel}"
+    run_id = _coerce_string(atom.get("run_id"))
+    return f"run_id:{run_id}" if run_id is not None else None
+
+
+def _problem_mining_jobs_with_terminal_context(
+    *,
+    eligible_prompt_atoms: list[dict[str, Any]],
+    all_prompt_atoms: list[dict[str, Any]],
+    chunk_max_bytes: int = _PROBLEM_MINING_CHUNK_MAX_BYTES,
+    max_chunks: int = _PROBLEM_MINING_JOB_MAX_CHUNKS,
+    max_atoms: int = _PROBLEM_MINING_JOB_MAX_ATOMS,
+    max_bytes: int = _PROBLEM_MINING_JOB_MAX_BYTES,
+) -> list[dict[str, Any]]:
+    """Build bounded jobs whose decisions stay eligible-only but include run outcomes.
+
+    Stage 1 previously partitioned only atoms that could originate a case.  That could put a
+    transient failed probe in one job while omitting the same run's terminal success report,
+    or show a downstream evidence gap without the run failure that caused it.  Terminal atoms
+    from the full corpus are therefore repeated as context-only workspace members for each run
+    represented by an assignment.  They must be read, but cannot receive decisions or citations.
+
+    The existing job ceilings apply to the combined assigned-plus-context workspace.  If context
+    makes a base job too large, only the eligible assignment is split; terminal evidence is never
+    truncated or silently dropped.
+    """
+
+    context_ids_by_run: dict[str, set[str]] = {}
+    for atom in all_prompt_atoms:
+        if _coerce_string(atom.get("source")) not in _PROBLEM_MINING_TERMINAL_CONTEXT_SOURCES:
+            continue
+        run_key = _problem_mining_origin_run_key(atom)
+        atom_id = _coerce_string(atom.get("atom_id"))
+        if run_key is not None and atom_id is not None:
+            context_ids_by_run.setdefault(run_key, set()).add(atom_id)
+
+    def _workspace_for(assigned_atoms: list[dict[str, Any]]) -> dict[str, Any]:
+        assigned_ids = {
+            atom_id
+            for atom in assigned_atoms
+            for atom_id in [_coerce_string(atom.get("atom_id"))]
+            if atom_id is not None
+        }
+        run_keys = {
+            run_key
+            for atom in assigned_atoms
+            for run_key in [_problem_mining_origin_run_key(atom)]
+            if run_key is not None
+        }
+        context_atoms: list[dict[str, Any]] = []
+        context_ids: set[str] = set()
+        for atom in all_prompt_atoms:
+            run_key = _problem_mining_origin_run_key(atom)
+            atom_id = _coerce_string(atom.get("atom_id"))
+            if (
+                run_key not in run_keys
+                or atom_id is None
+                or atom_id in assigned_ids
+                or atom_id in context_ids
+                or atom_id not in context_ids_by_run.get(run_key, ())
+            ):
+                continue
+            projected = dict(atom)
+            projected["problem_mining_context_role"] = "origin_run_terminal"
+            projected["decision_eligible"] = False
+            context_atoms.append(projected)
+            context_ids.add(atom_id)
+        return {
+            "assigned_atoms": [dict(atom) for atom in assigned_atoms],
+            "context_atoms": context_atoms,
+            "prompt_atoms": [*[dict(atom) for atom in assigned_atoms], *context_atoms],
+            "assigned_atom_ids": [
+                str(atom["atom_id"])
+                for atom in assigned_atoms
+                if isinstance(atom.get("atom_id"), str)
+            ],
+            "context_atom_ids": sorted(context_ids),
+        }
+
+    def _fits_one_job(candidate: dict[str, Any]) -> bool:
+        combined_batches = _problem_mining_job_batches(
+            list(candidate["prompt_atoms"]),
+            chunk_max_bytes=chunk_max_bytes,
+            max_chunks=max_chunks,
+            max_atoms=max_atoms,
+            max_bytes=max_bytes,
+        )
+        return len(combined_batches) == 1
+
+    jobs: list[dict[str, Any]] = []
+    base_batches = _problem_mining_job_batches(
+        eligible_prompt_atoms,
+        chunk_max_bytes=chunk_max_bytes,
+        max_chunks=max_chunks,
+        max_atoms=max_atoms,
+        max_bytes=max_bytes,
+    )
+    for base_batch in base_batches:
+        candidate = _workspace_for(base_batch)
+        if _fits_one_job(candidate):
+            jobs.append(candidate)
+            continue
+
+        current: list[dict[str, Any]] = []
+        for atom in base_batch:
+            expanded = _workspace_for([*current, atom])
+            if current and not _fits_one_job(expanded):
+                jobs.append(_workspace_for(current))
+                current = []
+                expanded = _workspace_for([atom])
+            if not _fits_one_job(expanded):
+                atom_id = _coerce_string(atom.get("atom_id")) or "(missing atom_id)"
+                raise ValueError(
+                    "problem_mining_terminal_context_exceeds_single_job:"
+                    f"{atom_id}:context_atom_count={len(expanded['context_atom_ids'])}"
+                )
+            current.append(atom)
+        if current:
+            jobs.append(_workspace_for(current))
+
+    assigned_ids = [
+        atom_id
+        for job in jobs
+        for atom_id in job["assigned_atom_ids"]
+        if isinstance(atom_id, str)
+    ]
+    expected_ids = [
+        str(atom["atom_id"])
+        for atom in eligible_prompt_atoms
+        if isinstance(atom.get("atom_id"), str)
+    ]
+    if sorted(assigned_ids) != sorted(expected_ids) or len(assigned_ids) != len(
+        set(assigned_ids)
+    ):
+        raise ValueError("problem_mining_context_jobs_assignment_partition_mismatch")
+    return jobs
+
+
 def _reconcile_problem_mining_reviews(
     *,
     primary_records: list[dict[str, Any]],
@@ -868,6 +1024,10 @@ def _coverage_depth_review_prompt(
         "INDEPENDENT FULL COVERAGE AND DEPTH REVIEW\n\n"
         "Review every assigned atom from the evidence files, including atoms that the "
         "primary pass attached to a problem and atoms it did not attach. Do not trust "
+        "the primary pass if it ignored same-run terminal context showing recovery, "
+        "verification, residual impact, or an upstream blocker. Context-only atoms must "
+        "be read but must not receive decisions or citations. Do not treat overall success "
+        "as proof that every separately observed residual issue is noise. Do not trust "
         "the primary pass merely because it cited an atom. For every primary "
         "supports_case claim, decide whether the complete observed evidence directly "
         "establishes that exact problem. To confirm it, emit the corresponding primary "
@@ -1139,6 +1299,8 @@ def _write_chunked_problem_mining_atoms_workspace(
     if not set(assigned_ids).issubset(set(prompt_atom_ids)):
         raise ValueError("stage1 assigned atom IDs must be contained in the eligible corpus")
     assigned_set = set(assigned_ids)
+    context_ids = sorted(set(prompt_atom_ids) - assigned_set)
+    context_set = set(context_ids)
 
     if workspace_dir.is_symlink():
         raise ValueError("stage1 atoms workspace may not be a symlink")
@@ -1252,6 +1414,7 @@ def _write_chunked_problem_mining_atoms_workspace(
                     "bytes": atom_file_bytes,
                     "sha256": atom_file_sha256,
                     "assigned": atom_id in assigned_set,
+                    "context_only": atom_id in context_set,
                 }
             )
             index_lines.append(
@@ -1280,6 +1443,11 @@ def _write_chunked_problem_mining_atoms_workspace(
                     for atom in atoms_chunk
                     if isinstance(atom.get("atom_id"), str) and str(atom["atom_id"]) in assigned_set
                 ],
+                "context_atom_ids": [
+                    str(atom["atom_id"])
+                    for atom in atoms_chunk
+                    if isinstance(atom.get("atom_id"), str) and str(atom["atom_id"]) in context_set
+                ],
                 "atom_count": len(atoms_chunk),
                 "bytes": chunk_bytes,
                 "text_bytes": text_bytes,
@@ -1303,6 +1471,9 @@ def _write_chunked_problem_mining_atoms_workspace(
         "total_atom_count": len(prompt_atoms),
         "assigned_atom_count": len(assigned_ids),
         "assigned_atom_ids": assigned_ids,
+        "decision_eligible_atom_ids": assigned_ids,
+        "context_atom_count": len(context_ids),
+        "context_atom_ids": context_ids,
         "chunk_count": len(chunk_entries),
         "chunk_max_bytes": int(chunk_max_bytes),
         "total_chunk_bytes": int(total_chunk_bytes),
@@ -3354,6 +3525,7 @@ def _run_problem_mining_stage(
 
     mining_atoms = eligible_problem_mining_atoms(atoms)
     prompt_atoms = _atoms_for_problem_mining_prompt(mining_atoms)
+    all_prompt_atoms = _atoms_for_problem_mining_prompt(atoms)
     evidence_draft = build_problem_mining_evidence_draft(
         atoms=atoms,
         eligible_atoms=mining_atoms,
@@ -3366,24 +3538,26 @@ def _run_problem_mining_stage(
         (path for path in template_paths if path.name == "problem_miner_default.md"),
         template_paths[0] if template_paths else None,
     )
-    job_atom_batches = _problem_mining_job_batches(prompt_atoms)
+    job_descriptors = _problem_mining_jobs_with_terminal_context(
+        eligible_prompt_atoms=prompt_atoms,
+        all_prompt_atoms=all_prompt_atoms,
+    )
     miner_jobs: list[dict[str, Any]] = []
     assignments: dict[str, list[str]] = {}
-    for job_index, job_atoms in enumerate(job_atom_batches, start=1):
+    for job_index, descriptor in enumerate(job_descriptors, start=1):
         tag = f"problem_mining_{job_index:03d}"
         if neutral_template_path is None:
             raise ValueError("problem_mining_neutral_template_missing")
         template_path = neutral_template_path
-        assigned_atom_ids = [
-            str(atom["atom_id"]) for atom in job_atoms if isinstance(atom.get("atom_id"), str)
-        ]
+        assigned_atom_ids = list(descriptor["assigned_atom_ids"])
         assignments[tag] = assigned_atom_ids
         miner_jobs.append(
             {
                 "tag": tag,
                 "template_path": template_path,
-                "prompt_atoms": job_atoms,
+                "prompt_atoms": list(descriptor["prompt_atoms"]),
                 "assigned_atom_ids": assigned_atom_ids,
+                "context_atom_ids": list(descriptor["context_atom_ids"]),
             }
         )
     atoms_placeholder = _json.dumps(
@@ -3403,6 +3577,7 @@ def _run_problem_mining_stage(
         template_path = Path(job["template_path"])
         job_prompt_atoms = list(job["prompt_atoms"])
         assigned_atom_ids = list(job["assigned_atom_ids"])
+        context_atom_ids = list(job["context_atom_ids"])
         miner_out_dir = stage_artifacts_dir / tag
         miner_out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -3430,6 +3605,8 @@ def _run_problem_mining_stage(
             "atom_count": len(job_prompt_atoms),
             "assigned_atom_count": len(assigned_atom_ids),
             "assigned_atom_ids": assigned_atom_ids,
+            "context_atom_count": len(context_atom_ids),
+            "context_atom_ids": context_atom_ids,
             "prompt_atom_count": len(job_prompt_atoms),
             "workspace_dir": str(workspace_dir),
             "atoms_json": str(atoms_json_path),

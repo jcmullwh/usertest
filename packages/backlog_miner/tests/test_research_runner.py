@@ -1654,6 +1654,60 @@ def _write_run_provenance(
     )
 
 
+def _materialized_origin_attachment_with_read_events(
+    *,
+    tmp_path: Path,
+    workspace: Path,
+) -> tuple[dict[str, Any], list[dict[str, object]]]:
+    origin_run = tmp_path / "origin-attachment-run"
+    origin_run.mkdir(exist_ok=True)
+    artifact = origin_run / "agent_stderr.txt"
+    artifact.write_text("retained root-cause evidence\n", encoding="utf-8")
+    manifest = mod.materialize_origin_attachments(
+        atoms=[
+            {
+                "atom_id": "atom:one",
+                "run_dir": str(origin_run),
+                "attachments": [
+                    {
+                        "kind": "agent_stderr",
+                        "artifact_ref": {
+                            "path": artifact.name,
+                            "sha256": sha256(artifact.read_bytes()).hexdigest(),
+                            "size_bytes": artifact.stat().st_size,
+                        },
+                    }
+                ],
+            }
+        ],
+        workspace_dir=workspace,
+        source_root=tmp_path,
+        relative_root=Path(".usertest_research") / "origin_evidence",
+    )
+    assert manifest["errors"] == []
+    events: list[dict[str, object]] = []
+    for requirement in mod.origin_attachment_requirements(manifest):
+        path = workspace / str(requirement["file"])
+        events.append(
+            {
+                "ts": "2026-07-12T00:00:00Z",
+                "type": "read_file",
+                "data": {
+                    "path": str(requirement["file"]),
+                    "read_source": "tool",
+                    "source_exit_code": 0,
+                    **observed_read_attestation(
+                        path=path,
+                        observed_text=path.read_text(encoding="utf-8"),
+                        source_exit_code=0,
+                        allow_partial=False,
+                    ),
+                },
+            }
+        )
+    return manifest, events
+
+
 @pytest.mark.parametrize("outer_status", ["partial", "failure"])
 def test_full_runner_preserves_verified_insufficient_research(
     tmp_path: Path,
@@ -1883,6 +1937,623 @@ def test_output_repair_continues_same_author_session_and_invalid_then_valid(
     persisted, persisted_errors = verify_persisted_research_evidence(dossier)
     assert persisted is False
     assert "research_attempt_artifact_changed:0:report" in persisted_errors
+
+
+def test_output_repair_parks_subscription_wait_and_retains_author_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    workspace = tmp_path / "subscription_wait_workspace"
+    revision = _init_workspace(workspace)
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    calls = 0
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        nonlocal calls
+        calls += 1
+        run_dir = tmp_path / f"subscription_wait_run_{calls}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        if calls == 1:
+            _write_json(
+                run_dir / "report.json",
+                {
+                    "schema_version": 1,
+                    "kind": "troubleshoot_v1",
+                    "status": "failure",
+                    "goal": "Research the assigned case",
+                    "failure_point": "The proof extension was omitted",
+                    "evidence": {"what_happened": "A repairable draft was produced"},
+                    "attempted_fixes": [],
+                    "recommended_fix_path": ["Correct the dossier in this session"],
+                },
+            )
+        else:
+            assert request.codex_resume_session_id == session_id
+        _write_run_provenance(
+            run_dir=run_dir,
+            workspace=workspace,
+            revision=revision,
+            ref=request.ref,
+            requested_codex_resume_session_id=request.codex_resume_session_id,
+        )
+        if calls == 2:
+            external_wait = {
+                "schema_version": 1,
+                "state": "parked",
+                "reason": "codex_chatgpt_subscription_usage_limit",
+                "retryable": True,
+                "retry_disposition": "resume_after_provider_reset",
+                "retry_mode": "resume_same_session",
+                "resume_after": {
+                    "raw": "Jul 18th, 2026 2:33 AM",
+                    "timezone": "provider_account_local_unspecified",
+                },
+                "provider": "codex",
+                "route": "chatgpt_subscription",
+                "api_fallback_allowed": False,
+                "settings_url": "https://chatgpt.com/codex/settings/usage",
+            }
+            _write_json(
+                run_dir / "error.json",
+                {
+                    "type": "AgentExternalWait",
+                    "subtype": "provider_subscription_usage_limit",
+                    "code": "codex_chatgpt_subscription_usage_limit",
+                    "provider": "codex",
+                    "phase": "agent_execution",
+                    "route": "chatgpt_subscription",
+                    "api_fallback_allowed": False,
+                    "external_wait": external_wait,
+                },
+            )
+            return RunResult(
+                run_dir=run_dir,
+                exit_code=1,
+                report_validation_errors=["code=codex_chatgpt_subscription_usage_limit"],
+                agent_session_id=session_id,
+            )
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=str(workspace),
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=[_problem_payload(tmp_path)],
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+        replay_executor=TrustedHostReplayExecutor(
+            approved_source_roots=[workspace],
+            source_identity=workspace,
+        ),
+        replay_executor_metadata={"executor": "trusted_host"},
+    )
+
+    assert calls == 2
+    dossier = document["items"][0]
+    assert dossier["research_status"] == "blocked"
+    assert dossier["blocking_reasons"] == ["research_external_wait_parked"]
+    attempts = dossier["research_attempts"]
+    assert [attempt["outcome"] for attempt in attempts] == [
+        "output_contract_invalid",
+        "external_wait",
+    ]
+    wait_attempt = attempts[1]
+    assert wait_attempt["agent_session_id"] == session_id
+    assert wait_attempt["resumed_from_session_id"] == session_id
+    assert wait_attempt["repair_progress"]["decision"] == "parked"
+    assert wait_attempt["repair_progress"]["authored_work_disposition"] == "retained"
+    assert wait_attempt["repair_progress"]["retained_frontier"]["next_action"] == (
+        "resume_same_session_after_provider_reset"
+    )
+    wait = wait_attempt["repair_progress"]["external_wait"]
+    assert wait["resume_after"] == {
+        "raw": "Jul 18th, 2026 2:33 AM",
+        "timezone": "provider_account_local_unspecified",
+    }
+    assert wait["route"] == "chatgpt_subscription"
+    assert wait["api_fallback_allowed"] is False
+
+
+def test_subscription_wait_parks_remaining_stage3_cases_without_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    workspace = tmp_path / "stage_wait_workspace"
+    revision = _init_workspace(workspace)
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    calls = 0
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        nonlocal calls
+        calls += 1
+        run_dir = tmp_path / f"stage_wait_run_{calls}"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_run_provenance(
+            run_dir=run_dir,
+            workspace=workspace,
+            revision=revision,
+            ref=request.ref,
+        )
+        external_wait = {
+            "schema_version": 1,
+            "state": "parked",
+            "reason": "codex_chatgpt_subscription_usage_limit",
+            "retryable": True,
+            "retry_disposition": "resume_after_provider_reset",
+            "retry_mode": "resume_same_session",
+            "resume_after": {
+                "raw": "Jul 18th, 2026 2:33 AM",
+                "timezone": "provider_account_local_unspecified",
+            },
+            "provider": "codex",
+            "route": "chatgpt_subscription",
+            "api_fallback_allowed": False,
+            "settings_url": "https://chatgpt.com/codex/settings/usage",
+        }
+        _write_json(
+            run_dir / "error.json",
+            {
+                "type": "AgentExternalWait",
+                "subtype": "provider_subscription_usage_limit",
+                "code": "codex_chatgpt_subscription_usage_limit",
+                "provider": "codex",
+                "phase": "agent_execution",
+                "route": "chatgpt_subscription",
+                "api_fallback_allowed": False,
+                "external_wait": external_wait,
+            },
+        )
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=1,
+            report_validation_errors=["code=codex_chatgpt_subscription_usage_limit"],
+            agent_session_id=session_id,
+        )
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    first = _problem_payload(tmp_path)
+    selected = [first]
+    for number in (2, 3):
+        item = json.loads(json.dumps(first))
+        item["case_id"] = f"case:test-{number}"
+        item["problem_id"] = f"problem:test-{number}"
+        item["evidence_assignment"]["case_id"] = item["case_id"]
+        item["evidence_assignment"]["problem_id"] = item["problem_id"]
+        item["evidence_assignment"]["assignment_sha256"] = evidence_assignment_sha256(
+            item["evidence_assignment"]
+        )
+        selected.append(item)
+
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=str(workspace),
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=selected,
+        artifacts_dir=tmp_path / "compiled" / "x.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+        replay_executor=TrustedHostReplayExecutor(
+            approved_source_roots=[workspace],
+            source_identity=workspace,
+        ),
+        replay_executor_metadata={"executor": "trusted_host"},
+    )
+
+    assert calls == 1
+    assert [item["problem_id"] for item in document["items"]] == [
+        "problem:test-1",
+        "problem:test-2",
+        "problem:test-3",
+    ]
+    assert document["items"][0]["blocking_reasons"] == ["research_external_wait_parked"]
+    checkpoint = document["input_meta"]["external_wait"]
+    assert document["input_meta"]["stage_status"] == "parked_external_wait"
+    assert document["input_meta"]["parked_before_dispatch_count"] == 2
+    assert checkpoint["trigger_problem_id"] == "problem:test-1"
+    assert checkpoint["expected_session_id"] == session_id
+    assert checkpoint["resume_status"] == (
+        "checkpoint_persisted_same_author_resume_supported"
+    )
+    assert checkpoint["route"] == "chatgpt_subscription"
+    assert checkpoint["api_fallback_allowed"] is False
+    assert all(
+        item["blocking_reasons"]
+        == [
+            "research_external_wait_stage_parked_before_dispatch:"
+            + checkpoint["checkpoint_sha256"]
+        ]
+        for item in document["items"][1:]
+    )
+    requests = json.loads(
+        Path(document["artifacts"]["requests_json"]).read_text(encoding="utf-8")
+    )["requests"]
+    assert [request.get("dispatch_status") for request in requests] == [
+        "parked_during_dispatch",
+        "parked_not_started",
+        "parked_not_started",
+    ]
+    assert all(request.get("api_fallback_allowed") is False for request in requests)
+
+
+def _build_persisted_stage_wait(
+    *,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[dict[str, Any], list[dict[str, Any]], Path, str, str]:
+    guidance_path = tmp_path / "configs" / "backlog_stage_guidance" / "repro_research.md"
+    guidance_path.parent.mkdir(parents=True, exist_ok=True)
+    guidance_path.write_text("# guidance\n", encoding="utf-8")
+    workspace = tmp_path / "persisted_stage_wait_workspace"
+    revision = _init_workspace(workspace)
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    first = _problem_payload(tmp_path)
+    selected = [first]
+    for number in (2, 3):
+        item = json.loads(json.dumps(first))
+        item["case_id"] = f"case:test-{number}"
+        item["problem_id"] = f"problem:test-{number}"
+        item["evidence_assignment"]["case_id"] = item["case_id"]
+        item["evidence_assignment"]["problem_id"] = item["problem_id"]
+        item["evidence_assignment"]["assignment_sha256"] = evidence_assignment_sha256(
+            item["evidence_assignment"]
+        )
+        selected.append(item)
+
+    def wait_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        run_dir = tmp_path / "persisted_stage_wait_run"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_run_provenance(
+            run_dir=run_dir,
+            workspace=workspace,
+            revision=revision,
+            ref=request.ref,
+        )
+        external_wait = {
+            "schema_version": 1,
+            "state": "parked",
+            "reason": "codex_chatgpt_subscription_usage_limit",
+            "retryable": True,
+            "retry_disposition": "resume_after_provider_reset",
+            "retry_mode": "resume_same_session",
+            "resume_after": {
+                "raw": "Jul 18th, 2026 2:33 AM",
+                "timezone": "provider_account_local_unspecified",
+            },
+            "provider": "codex",
+            "route": "chatgpt_subscription",
+            "api_fallback_allowed": False,
+            "settings_url": "https://chatgpt.com/codex/settings/usage",
+        }
+        _write_json(
+            run_dir / "error.json",
+            {
+                "type": "AgentExternalWait",
+                "subtype": "provider_subscription_usage_limit",
+                "code": "codex_chatgpt_subscription_usage_limit",
+                "provider": "codex",
+                "phase": "agent_execution",
+                "route": "chatgpt_subscription",
+                "api_fallback_allowed": False,
+                "external_wait": external_wait,
+            },
+        )
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=1,
+            report_validation_errors=["code=codex_chatgpt_subscription_usage_limit"],
+            agent_session_id=session_id,
+        )
+
+    monkeypatch.setattr(mod, "run_once", wait_once)
+    document = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=str(workspace),
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=selected,
+        artifacts_dir=tmp_path / "compiled" / "resume.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+        replay_executor=TrustedHostReplayExecutor(
+            approved_source_roots=[workspace],
+            source_identity=workspace,
+        ),
+        replay_executor_metadata={"executor": "trusted_host"},
+    )
+    return document, selected, workspace, revision, session_id
+
+
+def test_process_boundary_resume_reuses_wait_author_then_advances_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_document, selected, workspace, revision, session_id = (
+        _build_persisted_stage_wait(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    )
+    persisted_bytes = json.dumps(first_document, ensure_ascii=False).encode("utf-8")
+    continuation_calls: list[dict[str, Any]] = []
+
+    def continue_retained(**kwargs: Any) -> dict[str, Any]:
+        continuation_calls.append(kwargs)
+        dossier = kwargs["dossier"]
+        wait_attempt = dossier["research_attempts"][-1]
+        assert wait_attempt["outcome"] == "external_wait"
+        assert wait_attempt["agent_session_id"] == session_id
+        assert mod._research_attempt_workspace_path(wait_attempt) == workspace.resolve()
+        return {
+            "status": "corrected",
+            "dossier": dossier,
+            "attempts": [],
+            "expected_session_id": session_id,
+            "observed_session_id": session_id,
+            "authored_work_disposition": "retained",
+        }
+
+    resumed_dispatches: list[str] = []
+    second_session = "029f2cca-9011-7e32-88ae-6c25af578b49"
+
+    def wait_on_next_case(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        payload = _assigned_problem_payload(request.agent_append_system_prompt or "")
+        resumed_dispatches.append(str(payload["problem_id"]))
+        assert request.codex_resume_session_id is None
+        run_dir = tmp_path / "resumed_next_case_wait"
+        run_dir.mkdir(parents=True, exist_ok=True)
+        _write_run_provenance(
+            run_dir=run_dir,
+            workspace=workspace,
+            revision=revision,
+            ref=request.ref,
+        )
+        external_wait = {
+            "schema_version": 1,
+            "state": "parked",
+            "reason": "codex_chatgpt_subscription_usage_limit",
+            "retryable": True,
+            "retry_disposition": "resume_after_provider_reset",
+            "retry_mode": "resume_same_session",
+            "resume_after": {"raw": "later", "timezone": "provider_account_local_unspecified"},
+            "provider": "codex",
+            "route": "chatgpt_subscription",
+            "api_fallback_allowed": False,
+        }
+        _write_json(
+            run_dir / "error.json",
+            {
+                "type": "AgentExternalWait",
+                "code": "codex_chatgpt_subscription_usage_limit",
+                "provider": "codex",
+                "phase": "agent_execution",
+                "route": "chatgpt_subscription",
+                "api_fallback_allowed": False,
+                "external_wait": external_wait,
+            },
+        )
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=1,
+            report_validation_errors=["code=codex_chatgpt_subscription_usage_limit"],
+            agent_session_id=second_session,
+        )
+
+    monkeypatch.setattr(
+        mod,
+        "continue_research_dossier_from_independent_feedback",
+        continue_retained,
+    )
+    monkeypatch.setattr(mod, "run_once", wait_on_next_case)
+    resumed = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=str(workspace),
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=json.loads(json.dumps(selected)),
+        artifacts_dir=tmp_path / "compiled" / "resume.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=False,
+        replay_executor=TrustedHostReplayExecutor(
+            approved_source_roots=[workspace],
+            source_identity=workspace,
+        ),
+        replay_executor_metadata={"executor": "trusted_host"},
+        resume_stage_document=json.loads(persisted_bytes),
+    )
+
+    assert len(continuation_calls) == 1
+    assert resumed_dispatches == ["problem:test-2"]
+    assert resumed["input_meta"]["resumed_external_wait_checkpoint_sha256"] == (
+        first_document["input_meta"]["external_wait"]["checkpoint_sha256"]
+    )
+    assert resumed["input_meta"]["external_wait_resume_cleared"] is True
+    assert resumed["input_meta"]["external_wait"]["trigger_problem_id"] == (
+        "problem:test-2"
+    )
+    requests = json.loads(
+        Path(resumed["artifacts"]["requests_json"]).read_text(encoding="utf-8")
+    )["requests"]
+    assert [request.get("dispatch_status") for request in requests] == [
+        "resumed_same_author_after_provider_reset",
+        "parked_during_dispatch",
+        "parked_not_started",
+    ]
+
+
+def test_resume_rejects_missing_trigger_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, selected, workspace, _revision, _session_id = _build_persisted_stage_wait(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_once",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not dispatch")),
+    )
+    with pytest.raises(
+        ValueError,
+        match="research_external_wait_resume_dossier_selection_changed",
+    ):
+        mod.run_repro_research_stage(
+            repo_root=tmp_path,
+            repo_input=str(workspace),
+            repo_ref="HEAD",
+            target_slug="target_a",
+            selected_problems=selected[1:],
+            artifacts_dir=tmp_path / "compiled" / "resume.backlog_artifacts",
+            agent="codex",
+            model=None,
+            cfg=_cfg(tmp_path),
+            dry_run=False,
+            resume_stage_document=document,
+        )
+
+
+def test_resume_rejects_changed_trigger_assignment_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, selected, workspace, _revision, _session_id = _build_persisted_stage_wait(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    changed = json.loads(json.dumps(selected))
+    changed[0]["evidence_assignment"]["status"] = "incomplete"
+    changed[0]["evidence_assignment"]["assignment_sha256"] = evidence_assignment_sha256(
+        changed[0]["evidence_assignment"]
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_once",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not dispatch")),
+    )
+    with pytest.raises(
+        ValueError,
+        match="research_external_wait_resume_evidence_assignment_changed:problem:test-1",
+    ):
+        mod.run_repro_research_stage(
+            repo_root=tmp_path,
+            repo_input=str(workspace),
+            repo_ref="HEAD",
+            target_slug="target_a",
+            selected_problems=changed,
+            artifacts_dir=tmp_path / "compiled" / "resume.backlog_artifacts",
+            agent="codex",
+            model=None,
+            cfg=_cfg(tmp_path),
+            dry_run=False,
+            resume_stage_document=document,
+        )
+
+
+def test_resume_rejects_changed_pretrigger_assignment_before_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    document, selected, workspace, _revision, _session_id = _build_persisted_stage_wait(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    staged = json.loads(json.dumps(document))
+    checkpoint = dict(staged["input_meta"]["external_wait"])
+    checkpoint.pop("checkpoint_sha256")
+    checkpoint["trigger_problem_id"] = "problem:test-2"
+    checkpoint["trigger_case_id"] = "case:test-2"
+    checkpoint["checkpoint_sha256"] = mod._canonical_json_sha256(checkpoint)
+    staged["input_meta"]["external_wait"] = checkpoint
+    staged["items"][2]["blocking_reasons"] = [
+        "research_external_wait_stage_parked_before_dispatch:"
+        + checkpoint["checkpoint_sha256"]
+    ]
+    changed = json.loads(json.dumps(selected))
+    changed[0]["evidence_assignment"]["status"] = "incomplete"
+    changed[0]["evidence_assignment"]["assignment_sha256"] = evidence_assignment_sha256(
+        changed[0]["evidence_assignment"]
+    )
+    monkeypatch.setattr(
+        mod,
+        "run_once",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not dispatch")),
+    )
+    with pytest.raises(
+        ValueError,
+        match="research_external_wait_resume_evidence_assignment_changed:problem:test-1",
+    ):
+        mod.run_repro_research_stage(
+            repo_root=tmp_path,
+            repo_input=str(workspace),
+            repo_ref="HEAD",
+            target_slug="target_a",
+            selected_problems=changed,
+            artifacts_dir=tmp_path / "compiled" / "resume.backlog_artifacts",
+            agent="codex",
+            model=None,
+            cfg=_cfg(tmp_path),
+            dry_run=False,
+            resume_stage_document=staged,
+        )
+
+
+@pytest.mark.parametrize(
+    "artifact_name",
+    ["workspace_ref.json", "target_ref.json", "codex_execpolicy_overlay.json"],
+)
+def test_resume_rehashes_last_wait_attempt_artifacts_before_using_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    artifact_name: str,
+) -> None:
+    document, selected, workspace, _revision, _session_id = _build_persisted_stage_wait(
+        tmp_path=tmp_path,
+        monkeypatch=monkeypatch,
+    )
+    wait_run_dir = Path(document["items"][0]["research_attempts"][-1]["run_dir"])
+    (wait_run_dir / artifact_name).write_text("{}\n", encoding="utf-8")
+    monkeypatch.setattr(
+        mod,
+        "continue_research_dossier_from_independent_feedback",
+        lambda **_kwargs: (_ for _ in ()).throw(AssertionError("must not resume")),
+    )
+    with pytest.raises(
+        ValueError,
+        match="research_external_wait_resume_wait_attempt_invalid",
+    ):
+        mod.run_repro_research_stage(
+            repo_root=tmp_path,
+            repo_input=str(workspace),
+            repo_ref="HEAD",
+            target_slug="target_a",
+            selected_problems=selected,
+            artifacts_dir=tmp_path / "compiled" / "resume.backlog_artifacts",
+            agent="codex",
+            model=None,
+            cfg=_cfg(tmp_path),
+            dry_run=False,
+            resume_stage_document=document,
+        )
 
 
 def test_successful_same_session_output_repair_reuses_workspace(
@@ -3494,6 +4165,320 @@ def test_independent_feedback_resumes_research_author_and_reverifies_candidate(
         "independent_qualification_research_continuation"
     )
     assert captured[0]["independent_feedback"] == independent_feedback
+
+
+def test_independent_feedback_correction_reuses_content_bound_origin_workspace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    workspace = tmp_path / "independent-origin-workspace"
+    revision = _init_workspace(workspace)
+    manifest, read_events = _materialized_origin_attachment_with_read_events(
+        tmp_path=tmp_path,
+        workspace=workspace,
+    )
+    session_id = "11111111-1111-4111-8111-111111111111"
+    baseline = {"case_id": "case:one", "problem_id": "problem:one"}
+    source_run = tmp_path / "independent-origin-source-run"
+    source_run.mkdir()
+    _write_json(source_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=source_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+        events=read_events,
+    )
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="output_contract_valid",
+        run_dir=source_run,
+        report_path=source_run / "report.json",
+        validation_errors=[],
+        attempted_dossier=baseline,
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        attempt_wall_seconds=10.0,
+    )
+    assignment = {
+        "expected_atom_ids": ["atom:one"],
+        "status": "complete",
+        "origin_attachment_evidence": manifest,
+    }
+    dossier = {
+        **baseline,
+        "repo_revision": revision,
+        "repo_workspace": str(tmp_path / "untrusted-dossier-workspace"),
+        "evidence_assignment": assignment,
+        "research_attempts": [source_attempt],
+        "evidence_verification": {
+            "status": "verified",
+            "workspace_dir": str(tmp_path / "untrusted-receipt-workspace"),
+            "origin_attachment_evidence": manifest,
+        },
+    }
+    correction_run = tmp_path / "independent-origin-correction-run"
+    correction_run.mkdir()
+    _write_json(correction_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=correction_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+        requested_codex_resume_session_id=session_id,
+        events=read_events,
+    )
+    candidate = {**baseline, "root_cause": "corrected from the retained attachment"}
+
+    def targeted(**kwargs: object) -> dict[str, object]:
+        assert kwargs["source_attempt"] == source_attempt
+        validator = kwargs["candidate_validator"]
+        result = SimpleNamespace(
+            run_dir=correction_run,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+        assert validator(candidate, result) == []
+        correction_attempt = mod._research_attempt_record(
+            attempt_number=2,
+            outcome="repair_contract_valid",
+            run_dir=correction_run,
+            report_path=correction_run / "report.json",
+            validation_errors=[],
+            attempted_dossier=candidate,
+            attempt_kind="independent_qualification_research_continuation",
+            source_attempt_sha256=source_attempt["attempt_sha256"],
+            agent_session_id=session_id,
+            observed_agent_session_id=session_id,
+            resumed_from_session_id=session_id,
+        )
+        return {
+            "status": "corrected",
+            "dossier": candidate,
+            "validation_errors": [],
+            "attempts": [correction_attempt],
+            "repair_run_dirs": [str(correction_run)],
+            "expected_session_id": session_id,
+            "observed_session_id": session_id,
+        }
+
+    monkeypatch.setattr(mod, "_run_targeted_dossier_repairs", targeted)
+    monkeypatch.setattr(
+        mod,
+        "verify_research_evidence",
+        lambda *_args, **_kwargs: {
+            "status": "verified",
+            "errors": [],
+            "planning_workspace_dir": str(workspace),
+        },
+    )
+
+    result = mod.continue_research_dossier_from_independent_feedback(
+        dossier=dossier,
+        validation_errors=["independent_qualification_finding:origin_claim"],
+        repo_input=str(workspace),
+        requested_repo_ref=revision,
+        resolved_repo_ref=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        replay_timeout_seconds=None,
+        replay_executor=None,
+        artifacts_dir=tmp_path / "artifacts",
+        independent_feedback={"kind": "independent_qualification_feedback"},
+    )
+
+    assert result["status"] == "corrected"
+    receipt = result["dossier"]["evidence_verification"]
+    assert receipt["status"] == "verified"
+    assert len(receipt["origin_attachment_read_attestations"]) == len(
+        mod.origin_attachment_requirements(manifest)
+    )
+    assert "origin_attachment_workspace_unavailable" not in json.dumps(result)
+    correction_attempt = result["dossier"]["research_attempts"][-1]
+    assert mod._research_attempt_workspace_path(correction_attempt) == workspace.resolve()
+
+
+def test_provider_wait_resume_reaches_origin_attachment_correction_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    workspace = tmp_path / "wait-origin-workspace"
+    revision = _init_workspace(workspace)
+    manifest, read_events = _materialized_origin_attachment_with_read_events(
+        tmp_path=tmp_path,
+        workspace=workspace,
+    )
+    session_id = "22222222-2222-4222-8222-222222222222"
+    baseline = {"case_id": "case:wait", "problem_id": "problem:wait"}
+    wait_run = tmp_path / "wait-origin-source-run"
+    wait_run.mkdir()
+    _write_json(wait_run / "report.json", {"status": "failure"})
+    _write_run_provenance(
+        run_dir=wait_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+        requested_codex_resume_session_id=session_id,
+        events=read_events,
+    )
+    _write_json(
+        wait_run / "error.json",
+        {
+            "type": "AgentExternalWait",
+            "code": "codex_chatgpt_subscription_usage_limit",
+            "provider": "codex",
+            "phase": "agent_execution",
+            "route": "chatgpt_subscription",
+            "api_fallback_allowed": False,
+            "external_wait": {
+                "state": "parked",
+                "retry_mode": "resume_same_session",
+                "retry_disposition": "resume_after_provider_reset",
+                "resume_after": {"raw": "later"},
+                "route": "chatgpt_subscription",
+                "api_fallback_allowed": False,
+            },
+        },
+    )
+    external_wait = mod._runner_external_wait(wait_run)
+    assert external_wait is not None
+    validation_errors = ["independent_qualification_finding:origin_claim"]
+    wait_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="external_wait",
+        run_dir=wait_run,
+        report_path=wait_run / "report.json",
+        validation_errors=validation_errors,
+        attempted_dossier=baseline,
+        attempt_kind="independent_qualification_research_continuation",
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+        resumed_from_session_id=session_id,
+        attempt_wall_seconds=10.0,
+        repair_progress={
+            "decision": "parked",
+            "reason": "codex_chatgpt_subscription_usage_limit",
+            "external_wait": external_wait,
+        },
+    )
+    assignment = {
+        "expected_atom_ids": ["atom:one"],
+        "status": "complete",
+        "origin_attachment_evidence": manifest,
+    }
+    dossier = {
+        **baseline,
+        "repo_revision": revision,
+        "evidence_assignment": assignment,
+        "research_attempts": [wait_attempt],
+        "evidence_verification": {
+            "status": "verified",
+            "origin_attachment_evidence": manifest,
+        },
+    }
+    checkpoint = {
+        "checkpoint_sha256": "c" * 64,
+        "expected_session_id": session_id,
+        "observed_session_id": session_id,
+        "external_wait": external_wait,
+    }
+    correction_run = tmp_path / "wait-origin-correction-run"
+    correction_run.mkdir()
+    _write_json(correction_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=correction_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+        requested_codex_resume_session_id=session_id,
+        events=read_events,
+    )
+    candidate = {**baseline, "root_cause": "corrected after the provider reset"}
+    targeted_calls: list[dict[str, object]] = []
+
+    def targeted(**kwargs: object) -> dict[str, object]:
+        targeted_calls.append(kwargs)
+        validator = kwargs["candidate_validator"]
+        result = SimpleNamespace(
+            run_dir=correction_run,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+        assert validator(candidate, result) == []
+        correction_attempt = mod._research_attempt_record(
+            attempt_number=2,
+            outcome="repair_contract_valid",
+            run_dir=correction_run,
+            report_path=correction_run / "report.json",
+            validation_errors=[],
+            attempted_dossier=candidate,
+            attempt_kind="evidence_verification_research_continuation",
+            source_attempt_sha256=wait_attempt["attempt_sha256"],
+            agent_session_id=session_id,
+            observed_agent_session_id=session_id,
+            resumed_from_session_id=session_id,
+        )
+        return {
+            "status": "corrected",
+            "dossier": candidate,
+            "validation_errors": [],
+            "attempts": [correction_attempt],
+            "repair_run_dirs": [str(correction_run)],
+            "expected_session_id": session_id,
+            "observed_session_id": session_id,
+        }
+
+    monkeypatch.setattr(
+        mod,
+        "parse_research_dossier_list",
+        lambda _raw: ([dossier], []),
+    )
+    monkeypatch.setattr(mod, "_run_targeted_dossier_repairs", targeted)
+    monkeypatch.setattr(
+        mod,
+        "verify_research_evidence",
+        lambda *_args, **_kwargs: {
+            "status": "verified",
+            "errors": [],
+            "planning_workspace_dir": str(workspace),
+        },
+    )
+
+    result = mod.resume_research_dossier_from_external_wait(
+        dossier=dossier,
+        checkpoint=checkpoint,
+        repo_input=str(workspace),
+        requested_repo_ref=revision,
+        resolved_repo_ref=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        replay_timeout_seconds=None,
+        replay_executor=None,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    assert result["status"] == "corrected"
+    assert len(targeted_calls) == 1
+    assert targeted_calls[0]["source_attempt"] == wait_attempt
+    assert targeted_calls[0]["attempt_kind"] == (
+        "evidence_verification_research_continuation"
+    )
+    assert targeted_calls[0]["independent_feedback"]["kind"] == (
+        "provider_external_wait_resume"
+    )
+    receipt = result["dossier"]["evidence_verification"]
+    assert len(receipt["origin_attachment_read_attestations"]) == len(
+        mod.origin_attachment_requirements(manifest)
+    )
+    assert "origin_attachment_workspace_unavailable" not in json.dumps(result)
 
 
 def test_independent_research_feedback_is_embedded_exactly_in_repair_contract() -> None:

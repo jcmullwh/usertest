@@ -122,6 +122,18 @@ def _string(value: Any) -> str | None:
     return cleaned if cleaned else None
 
 
+def priority_decision_allows_downstream(priority: Mapping[str, Any] | None) -> bool:
+    """Separate Stage-3 dispatch from acceptance of a current retained proof."""
+
+    return bool(
+        isinstance(priority, Mapping)
+        and (
+            priority.get("selected_for_research") is True
+            or priority.get("eligible_for_downstream") is True
+        )
+    )
+
+
 def _string_list(value: Any, *, nonempty: bool = False) -> list[str] | None:
     if not isinstance(value, list):
         return None
@@ -4729,7 +4741,7 @@ def assess_ticket_readiness(ticket: Mapping[str, Any] | None) -> tuple[bool, lis
     else:
         if _string(priority.get("_parse_warning")) is not None:
             reasons.append("priority_decision_parse_warning_present")
-        if priority.get("selected_for_research") is not True:
+        if not priority_decision_allows_downstream(priority):
             reasons.append("priority_decision_not_selected_for_research")
         if _string(priority.get("priority_bucket")) is None:
             reasons.append("priority_decision_bucket_missing")
@@ -4808,6 +4820,7 @@ __all__ = [
     "falsification_review_receipt_errors",
     "infer_live_verification_requirement",
     "plan_revision_id_for",
+    "priority_decision_allows_downstream",
     "research_evidence_references",
     "research_limitation_references",
     "verified_mechanism_evidence",

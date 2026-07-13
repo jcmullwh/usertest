@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from backlog_core import assess_research_readiness
+from backlog_core import assess_research_readiness, priority_decision_allows_downstream
 from backlog_miner.prompt_correction import (
     CorrectionRunResult,
     acquire_author_session,
@@ -18,6 +18,26 @@ from usertest_backlog.workflows.depth_contracts import (
     read_repo_revision,
     stage_include_directories,
 )
+
+
+def _priority_progression_blockers(
+    decision: Mapping[str, Any],
+    *,
+    problem_record: Mapping[str, Any],
+    problem_id: str,
+) -> list[str]:
+    blockers: list[str] = []
+    if _coerce_string(decision.get("_parse_warning")) is not None:
+        blockers.append("priority_parse_warning_present")
+    if not priority_decision_allows_downstream(decision):
+        blockers.append("priority_not_selected_for_research")
+    if _coerce_string(decision.get("problem_id")) != problem_id:
+        blockers.append("priority_problem_id_mismatch")
+    if _coerce_string(decision.get("case_id")) != _coerce_string(
+        problem_record.get("case_id")
+    ):
+        blockers.append("priority_case_id_mismatch")
+    return blockers
 
 
 def _optioning_json_value(response: str) -> Any:
@@ -716,15 +736,11 @@ def _run_solution_optioning_stage(
         )
         rec = records_by_id.get(pid) or {}
         dec = priority_by_id.get(pid) or {}
-        priority_blockers: list[str] = []
-        if _coerce_string(dec.get("_parse_warning")) is not None:
-            priority_blockers.append("priority_parse_warning_present")
-        if dec.get("selected_for_research") is not True:
-            priority_blockers.append("priority_not_selected_for_research")
-        if _coerce_string(dec.get("problem_id")) != pid:
-            priority_blockers.append("priority_problem_id_mismatch")
-        if _coerce_string(dec.get("case_id")) != _coerce_string(rec.get("case_id")):
-            priority_blockers.append("priority_case_id_mismatch")
+        priority_blockers = _priority_progression_blockers(
+            dec,
+            problem_record=rec,
+            problem_id=pid,
+        )
         if priority_blockers:
             optioning_outcomes.append(
                 {

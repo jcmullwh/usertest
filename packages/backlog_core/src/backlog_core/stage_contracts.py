@@ -734,6 +734,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
         "repair_contract_invalid",
         "repair_scope_rejected",
         "evidence_verification_invalid",
+        "external_wait",
     }
     valid_attempt_kinds = {
         "full_research",
@@ -915,6 +916,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                         "repair_contract_invalid",
                         "repair_scope_rejected",
                         "invocation_failed",
+                        "external_wait",
                     }:
                         errors.append(
                             f"research_dossier_invalid_repair_attempt_outcome: {pid}: index={index}"
@@ -932,7 +934,12 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                             f"{pid}: index={index}"
                         )
                     else:
-                        if progress.get("decision") not in {"continue", "accepted", "restart"}:
+                        if progress.get("decision") not in {
+                            "continue",
+                            "accepted",
+                            "restart",
+                            "parked",
+                        }:
                             errors.append(
                                 f"research_dossier_repair_attempt_progress_decision_invalid: "
                                 f"{pid}: index={index}"
@@ -975,6 +982,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                         "output_contract_invalid",
                         "runner_contract_invalid",
                         "invocation_failed",
+                        "external_wait",
                     }:
                         errors.append(
                             f"research_dossier_invalid_fresh_retry_outcome: {pid}: index={index}"
