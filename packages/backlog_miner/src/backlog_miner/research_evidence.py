@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Protocol
+from uuid import uuid4
 
 import yaml
 from agent_adapters.read_attestation import observed_read_attestation
@@ -389,9 +390,7 @@ def materialize_clean_revision_view(
             existing_raw = exc.filename or (exc.args[0] if exc.args else None)
             existing = Path(existing_raw).resolve() if existing_raw is not None else None
             if existing is None or not existing.is_dir():
-                return None, None, None, [
-                    "planning_revision_view_acquire_failed:FileExistsError"
-                ]
+                return None, None, None, ["planning_revision_view_acquire_failed:FileExistsError"]
             destination = existing
         except (OSError, RuntimeError, ValueError) as exc:
             return None, None, None, [f"planning_revision_view_acquire_failed:{type(exc).__name__}"]
@@ -532,8 +531,7 @@ def _declared_disposable_state_paths(
 def _state_entry_is_declared(relative: str, declared: Sequence[str]) -> bool:
     path = PurePosixPath(relative)
     return any(
-        path == PurePosixPath(root) or PurePosixPath(root) in path.parents
-        for root in declared
+        path == PurePosixPath(root) or PurePosixPath(root) in path.parents for root in declared
     )
 
 
@@ -567,9 +565,7 @@ def _declared_state_transition_receipts(
             "runner_attested": True,
             "before_entries": root_before,
             "after_entries": root_after,
-            "changed_entries": [
-                path for path in changed if _state_entry_is_declared(path, [root])
-            ],
+            "changed_entries": [path for path in changed if _state_entry_is_declared(path, [root])],
         }
         receipt["transition_sha256"] = _canonical_json_sha256(receipt)
         receipts.append(receipt)
@@ -937,11 +933,11 @@ def _declared_repository_binding_receipts(
     if not isinstance(raw, list) or not raw or len(raw) > 32:
         return True, []
     inspected_raw = dossier.get("inspected_files")
-    inspected = {
-        _normalize_path(path)
-        for path in inspected_raw
-        if isinstance(path, str) and path.strip()
-    } if isinstance(inspected_raw, list) else set()
+    inspected = (
+        {_normalize_path(path) for path in inspected_raw if isinstance(path, str) and path.strip()}
+        if isinstance(inspected_raw, list)
+        else set()
+    )
     receipts: list[dict[str, Any]] = []
     for item in raw:
         if not isinstance(item, Mapping):
@@ -1034,17 +1030,19 @@ def _practical_command_authorization(
             _parse_argv_without_shell(atom_command) if isinstance(atom_command, str) else None
         )
         if atom_argv == argv:
-            return _command_authorization_receipt({
-                "authorization_kind": "immutable_source_command",
-                "executed_argv_sha256": _canonical_json_sha256(argv),
-                "shell": False,
-                "workspace_confined": True,
-                "origin_atom_id": receipt.get("atom_id"),
-                "origin_atom_sha256": receipt.get("atom_sha256"),
-                "origin_atom_field_path": "$.command",
-                "origin_command_value_sha256": _canonical_json_sha256(atom_command),
-                **entrypoint,
-            })
+            return _command_authorization_receipt(
+                {
+                    "authorization_kind": "immutable_source_command",
+                    "executed_argv_sha256": _canonical_json_sha256(argv),
+                    "shell": False,
+                    "workspace_confined": True,
+                    "origin_atom_id": receipt.get("atom_id"),
+                    "origin_atom_sha256": receipt.get("atom_sha256"),
+                    "origin_atom_field_path": "$.command",
+                    "origin_command_value_sha256": _canonical_json_sha256(atom_command),
+                    **entrypoint,
+                }
+            )
     inspected_raw = dossier.get("inspected_files")
     inspected = (
         {_normalize_path(path) for path in inspected_raw if isinstance(path, str) and path.strip()}
@@ -1056,48 +1054,55 @@ def _practical_command_authorization(
         _normalize_path(str(entrypoint.get("declaration_path") or "")),
     }
     artifacts_raw = dossier.get("artifact_refs")
-    artifact = next(
-        (
-            item
-            for item in artifacts_raw
-            if isinstance(item, dict)
-            and _normalize_path(str(item.get("path") or ""))
-            == _normalize_path(str(entrypoint["entrypoint_path"]))
-        ),
-        None,
-    ) if isinstance(artifacts_raw, list) else None
-    if (
-        _normalize_path(str(entrypoint["entrypoint_path"])).startswith(
-            ".usertest_research/"
+    artifact = (
+        next(
+            (
+                item
+                for item in artifacts_raw
+                if isinstance(item, dict)
+                and _normalize_path(str(item.get("path") or ""))
+                == _normalize_path(str(entrypoint["entrypoint_path"]))
+            ),
+            None,
         )
-        and isinstance(artifact, dict)
-    ):
-        return _command_authorization_receipt({
-            "authorization_kind": "attested_research_harness",
-            "executed_argv_sha256": _canonical_json_sha256(argv),
-            "shell": False,
-            "workspace_confined": True,
-            "artifact_id": artifact.get("artifact_id"),
-            **entrypoint,
-        })
+        if isinstance(artifacts_raw, list)
+        else None
+    )
+    if _normalize_path(str(entrypoint["entrypoint_path"])).startswith(
+        ".usertest_research/"
+    ) and isinstance(artifact, dict):
+        return _command_authorization_receipt(
+            {
+                "authorization_kind": "attested_research_harness",
+                "executed_argv_sha256": _canonical_json_sha256(argv),
+                "shell": False,
+                "workspace_confined": True,
+                "artifact_id": artifact.get("artifact_id"),
+                **entrypoint,
+            }
+        )
     matched = sorted((possible_paths - {""}) & inspected)
     if matched:
-        return _command_authorization_receipt({
-            "authorization_kind": "declared_inspected_repository_entrypoint",
-            "executed_argv_sha256": _canonical_json_sha256(argv),
-            "shell": False,
-            "workspace_confined": True,
-            "inspected_entrypoint_path": matched[0],
-            **entrypoint,
-        })
+        return _command_authorization_receipt(
+            {
+                "authorization_kind": "declared_inspected_repository_entrypoint",
+                "executed_argv_sha256": _canonical_json_sha256(argv),
+                "shell": False,
+                "workspace_confined": True,
+                "inspected_entrypoint_path": matched[0],
+                **entrypoint,
+            }
+        )
     if _text(entrypoint.get("entrypoint_git_blob_sha")) is not None:
-        return _command_authorization_receipt({
-            "authorization_kind": "immutable_repository_entrypoint",
-            "executed_argv_sha256": _canonical_json_sha256(argv),
-            "shell": False,
-            "workspace_confined": True,
-            **entrypoint,
-        })
+        return _command_authorization_receipt(
+            {
+                "authorization_kind": "immutable_repository_entrypoint",
+                "executed_argv_sha256": _canonical_json_sha256(argv),
+                "shell": False,
+                "workspace_confined": True,
+                **entrypoint,
+            }
+        )
     return None
 
 
@@ -1144,10 +1149,7 @@ def _authorized_replay_invocation(
             argv, _portable_path_changed = _portable_replay_path_argv(argv)
     if (
         argv is None
-        or any(
-            token.casefold() in _REPLAY_INLINE_CODE_FLAGS
-            for token in argv[1:]
-        )
+        or any(token.casefold() in _REPLAY_INLINE_CODE_FLAGS for token in argv[1:])
         or not _replay_argv_is_workspace_confined(argv)
     ):
         return None
@@ -1248,9 +1250,7 @@ def _replay_inputs_receipt(
         {
             "schema_version": 1,
             "source_experiment_id": source_experiment_id,
-            "environment": {
-                key: value for key, value in sorted(environment_overrides.items())
-            },
+            "environment": {key: value for key, value in sorted(environment_overrides.items())},
             "disposable_state_paths": list(disposable_state_paths),
             "runner_approved": True,
         },
@@ -1808,6 +1808,13 @@ def _clean_replay_receipts(
     artifact_refs_raw = dossier.get("artifact_refs")
     artifact_refs = artifact_refs_raw if isinstance(artifact_refs_raw, list) else []
     assignment = evidence_assignment if isinstance(evidence_assignment, dict) else {}
+    # Replay workspaces are attempt-scoped immutable evidence.  A deterministic basename is
+    # unsafe on Windows because long-path relocation maps the same basename from
+    # different verification attempts into one shared temp directory.  The first
+    # replay then leaves its attested overlay in that clone and every later attempt
+    # fails the clean-workspace check before it can execute.  Use one fresh namespace
+    # per verifier invocation so retries remain independent and self-healing.
+    invocation_id = uuid4().hex[:12]
 
     for index, experiment in enumerate(experiments):
         if not isinstance(experiment, dict):
@@ -1858,7 +1865,7 @@ def _clean_replay_receipts(
             )
             continue
         replay_id = sha256(f"{index}:{experiment_id}:{command}".encode()).hexdigest()[:16]
-        workspace = replay_root / f"workspace_{replay_id}"
+        workspace = replay_root / f"workspace_{replay_id}_{invocation_id}"
         acquired, head, clean, acquire_errors = materialize_clean_revision_view(
             source_workspace=baseline_workspace,
             destination=workspace,
@@ -1918,12 +1925,10 @@ def _clean_replay_receipts(
             continue
         post_replay_state = _canonical_workspace_state(acquired)
         post_replay_mutations = pre_replay_state != post_replay_state
-        undeclared_mutations, state_transition_receipts = (
-            _declared_state_transition_receipts(
-                before=pre_replay_state,
-                after=post_replay_state,
-                declared=disposable_state_paths,
-            )
+        undeclared_mutations, state_transition_receipts = _declared_state_transition_receipts(
+            before=pre_replay_state,
+            after=post_replay_state,
+            declared=disposable_state_paths,
         )
         index_or_head_changed = any(
             pre_replay_state.get(field) != post_replay_state.get(field)
@@ -1939,16 +1944,18 @@ def _clean_replay_receipts(
             completed.execution_metadata,
             isolation=isolation,
         )
-        if environment_overrides and replay_environment_attestation(
-            {"execution_metadata": completed.execution_metadata}
-        ) is None:
+        if (
+            environment_overrides
+            and replay_environment_attestation({"execution_metadata": completed.execution_metadata})
+            is None
+        ):
             metadata_errors.append("replay_environment_attestation_unverifiable")
         errors.extend(
             f"experiment_replay_isolation:{experiment_id}:{error}" for error in metadata_errors
         )
         stdout = completed.stdout
         stderr = completed.stderr
-        evidence_dir = replay_root / f"evidence_{replay_id}"
+        evidence_dir = replay_root / f"evidence_{replay_id}_{invocation_id}"
         evidence_dir.mkdir(parents=True, exist_ok=True)
         stdout_path = evidence_dir / "stdout.txt"
         stderr_path = evidence_dir / "stderr.txt"
@@ -1956,22 +1963,58 @@ def _clean_replay_receipts(
         stderr_path.write_text(stderr, encoding="utf-8")
         stdout_id = f"runner:replay:{experiment_id}:stdout"
         stderr_id = f"runner:replay:{experiment_id}:stderr"
-        artifact_refs.extend(
-            [
-                {
-                    "artifact_id": stdout_id,
-                    "kind": "replay_stdout",
-                    "path": str(stdout_path),
-                    "description": "Runner-owned clean replay stdout",
-                },
-                {
-                    "artifact_id": stderr_id,
-                    "kind": "replay_stderr",
-                    "path": str(stderr_path),
-                    "description": "Runner-owned clean replay stderr",
-                },
-            ]
-        )
+        replay_artifact_refs = [
+            {
+                "artifact_id": stdout_id,
+                "kind": "replay_stdout",
+                "path": str(stdout_path),
+                "description": "Runner-owned clean replay stdout",
+            },
+            {
+                "artifact_id": stderr_id,
+                "kind": "replay_stderr",
+                "path": str(stderr_path),
+                "description": "Runner-owned clean replay stderr",
+            },
+        ]
+        replay_artifact_contracts = {
+            stdout_id: ("replay_stdout", "Runner-owned clean replay stdout"),
+            stderr_id: ("replay_stderr", "Runner-owned clean replay stderr"),
+        }
+        replay_artifact_filenames = {
+            stdout_id: "stdout.txt",
+            stderr_id: "stderr.txt",
+        }
+
+        def is_prior_runner_replay_ref(
+            ref: Any,
+            contracts: Mapping[str, tuple[str, str]] = replay_artifact_contracts,
+            filenames: Mapping[str, str] = replay_artifact_filenames,
+        ) -> bool:
+            if not isinstance(ref, dict):
+                return False
+            artifact_id = _text(ref.get("artifact_id"))
+            expected_contract = contracts.get(artifact_id or "")
+            path_raw = _text(ref.get("path"))
+            if (
+                expected_contract is None
+                or (ref.get("kind"), ref.get("description")) != expected_contract
+                or path_raw is None
+            ):
+                return False
+            try:
+                prior_path = Path(path_raw).resolve()
+            except OSError:
+                return False
+            expected_filename = filenames.get(artifact_id or "")
+            return (
+                expected_filename is not None
+                and prior_path.name.casefold() == expected_filename
+                and prior_path.parent.name.casefold().startswith("evidence_")
+            )
+
+        artifact_refs[:] = [ref for ref in artifact_refs if not is_prior_runner_replay_ref(ref)]
+        artifact_refs.extend(replay_artifact_refs)
         experiment_artifacts_raw = experiment.get("artifact_refs")
         experiment_artifacts = (
             list(experiment_artifacts_raw) if isinstance(experiment_artifacts_raw, list) else []
@@ -5060,11 +5103,7 @@ def _derived_causal_root_bindings(
             binding.get("runner_attested") is True
             and binding.get("atom_field_binding_sha256")
             == _canonical_json_sha256(
-                {
-                    key: value
-                    for key, value in binding.items()
-                    if key != "atom_field_binding_sha256"
-                }
+                {key: value for key, value in binding.items() if key != "atom_field_binding_sha256"}
             )
             and isinstance(binding.get("observation_predicate"), Mapping)
             and not proof_predicate_contract_errors(binding.get("observation_predicate"))
@@ -5476,9 +5515,7 @@ def _adapter_executed_consumer_receipt(
     for experiment_id in experiment_ids:
         replay = clean_replays.get(str(experiment_id))
         argv = replay.get("executed_argv") if isinstance(replay, Mapping) else None
-        authorization = (
-            replay.get("command_authorization") if isinstance(replay, Mapping) else None
-        )
+        authorization = replay.get("command_authorization") if isinstance(replay, Mapping) else None
         if (
             not isinstance(argv, list)
             or not argv
@@ -5490,12 +5527,9 @@ def _adapter_executed_consumer_receipt(
             return None
         current_identity = command_authorization_identity(authorization)
         entrypoint_path = _text(authorization.get("entrypoint_path"))
-        if (
-            not isinstance(current_identity, dict)
-            or (
-                entrypoint_path is not None
-                and entrypoint_path.replace("\\", "/").startswith(".usertest_research/")
-            )
+        if not isinstance(current_identity, dict) or (
+            entrypoint_path is not None
+            and entrypoint_path.replace("\\", "/").startswith(".usertest_research/")
         ):
             return None
         if authorization_identity is None:
@@ -5549,9 +5583,7 @@ def _adapter_executed_consumer_receipt(
         hash_field="consumer_identity_sha256",
     )
     intervention = proof.get("intervention")
-    causal_target = (
-        _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
-    )
+    causal_target = _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
     return content_bound_payload(
         {
             "verification_method": "runner_adapter_consumer_binding_v1",
@@ -5631,21 +5663,24 @@ def _adapter_mechanism_evidence_receipt(
     }
     link["mechanism_link_sha256"] = _canonical_json_sha256(link)
     observations = proof.get("observations")
-    experiment_ids = [
-        str(observation.get("experiment_id"))
-        for observation in (
-            observations.get("baseline"),
-            observations.get("challenge"),
-        )
-        if isinstance(observation, Mapping) and _text(observation.get("experiment_id")) is not None
-    ] if isinstance(observations, Mapping) else []
+    experiment_ids = (
+        [
+            str(observation.get("experiment_id"))
+            for observation in (
+                observations.get("baseline"),
+                observations.get("challenge"),
+            )
+            if isinstance(observation, Mapping)
+            and _text(observation.get("experiment_id")) is not None
+        ]
+        if isinstance(observations, Mapping)
+        else []
+    )
     source_root = proof.get("source_root")
     origin_atom_ids = [
         atom_id
         for atom_id in (
-            source_root.get("origin_atom_ids", [])
-            if isinstance(source_root, Mapping)
-            else []
+            source_root.get("origin_atom_ids", []) if isinstance(source_root, Mapping) else []
         )
         if isinstance(atom_id, str)
     ]
@@ -5661,8 +5696,7 @@ def _adapter_mechanism_evidence_receipt(
                 and not isinstance(binding.get("observation_predicate"), Mapping)
             )
             or (
-                binding.get("binding_role") is None
-                and _text(binding.get("match_kind")) is not None
+                binding.get("binding_role") is None and _text(binding.get("match_kind")) is not None
             )
         )
     ]
@@ -5675,8 +5709,7 @@ def _adapter_mechanism_evidence_receipt(
         origin_symptom_bindings.extend(
             dict(binding)
             for binding in attested_predicate_bindings
-            if isinstance(binding, Mapping)
-            and binding.get("atom_id") in origin_atom_ids
+            if isinstance(binding, Mapping) and binding.get("atom_id") in origin_atom_ids
         )
     if not experiment_ids or not origin_atom_ids or not origin_symptom_bindings:
         return None
@@ -5953,7 +5986,7 @@ def _typed_mechanism_evidence_receipts(
             hypothesis_support_receipts.append(adapter_receipt)
 
         adapter_evidence_present = bool(hypothesis_support_receipts)
-        for raw_support_id in ([] if adapter_evidence_present else support_ids):
+        for raw_support_id in [] if adapter_evidence_present else support_ids:
             support_id = _text(raw_support_id)
             experiment = experiments.get(support_id or "")
             replay = clean_replays.get(support_id or "")
@@ -6300,9 +6333,7 @@ def _typed_mechanism_evidence_receipts(
 
         counter_raw = hypothesis.get("counterevidence")
         counter_ids = (
-            []
-            if adapter_evidence_present
-            else counter_raw if isinstance(counter_raw, list) else []
+            [] if adapter_evidence_present else counter_raw if isinstance(counter_raw, list) else []
         )
         for raw_control_id in counter_ids:
             control_id = _text(raw_control_id)
@@ -6549,8 +6580,7 @@ def _verified_mechanism_projection(
         declared_roots = item.get("causal_root_bindings")
         derived_roots = (
             [dict(value) for value in declared_roots if isinstance(value, dict)]
-            if item.get("evidence_type") == "adapter_proof"
-            and isinstance(declared_roots, list)
+            if item.get("evidence_type") == "adapter_proof" and isinstance(declared_roots, list)
             else _derived_causal_root_bindings(
                 experiment_ids=(
                     [value for value in experiments_raw if isinstance(value, str)]
@@ -7662,9 +7692,7 @@ def _causal_proof_positive_contract(
     challenge = observations.get("challenge") if isinstance(observations, Mapping) else None
     positive = proof_receipt.get("positive_outcome")
     source_root = proof_receipt.get("source_root")
-    positive_basis = (
-        source_root.get("positive_basis") if isinstance(source_root, Mapping) else None
-    )
+    positive_basis = source_root.get("positive_basis") if isinstance(source_root, Mapping) else None
     if (
         not isinstance(intervention, Mapping)
         or intervention.get("baseline_experiment_id") != experiment_id
@@ -8020,9 +8048,7 @@ def _outcome_oracle_receipts(
                 for proof in experiment_proofs
                 if isinstance(proof, Mapping)
             ]
-            replay_observation = (
-                proof_replay_observations[0] if proof_replay_observations else None
-            )
+            replay_observation = proof_replay_observations[0] if proof_replay_observations else None
             if (
                 not isinstance(argv, list)
                 or not argv
@@ -8044,8 +8070,7 @@ def _outcome_oracle_receipts(
                 )
                 or not isinstance(replay_observation, Mapping)
                 or any(
-                    observation != replay_observation
-                    for observation in proof_replay_observations
+                    observation != replay_observation for observation in proof_replay_observations
                 )
             ):
                 continue
@@ -8055,8 +8080,7 @@ def _outcome_oracle_receipts(
                 if _text(proof.get("proof_receipt_id")) is not None
             )
             needs_asset = any(
-                token.replace("\\", "/").startswith(".usertest_research/")
-                for token in argv
+                token.replace("\\", "/").startswith(".usertest_research/") for token in argv
             )
             asset: dict[str, Any] | None = None
             if needs_asset:
@@ -8297,9 +8321,7 @@ def _verification_boundary_receipts(
         requires_live = declaration.get("requires_live_verification")
         faithful = declaration.get("faithful_equivalence")
         replay = clean_replays.get(experiment_id)
-        authorization = (
-            replay.get("command_authorization") if isinstance(replay, Mapping) else None
-        )
+        authorization = replay.get("command_authorization") if isinstance(replay, Mapping) else None
         argv = replay.get("executed_argv") if isinstance(replay, Mapping) else None
         if (
             boundary_kind is None
@@ -8342,8 +8364,7 @@ def _verification_boundary_receipts(
                 for proof in proof_adapter_receipts
                 if _text(proof.get("proof_receipt_id")) is not None
                 and isinstance(proof.get("replay_observation"), Mapping)
-                and proof["replay_observation"].get("source_experiment_id")
-                == experiment_id
+                and proof["replay_observation"].get("source_experiment_id") == experiment_id
             }
         )
         matching_proofs = [
@@ -8427,8 +8448,7 @@ def _verification_boundary_receipts(
                     if proof_id in oracle.get("proof_receipt_ids", [])
                     and isinstance(oracle.get("execution"), Mapping)
                     and oracle["execution"].get("replay_inputs") == proof_inputs
-                    and oracle["execution"].get("replay_observation")
-                    == proof_observation
+                    and oracle["execution"].get("replay_observation") == proof_observation
                 ),
                 None,
             )
@@ -8456,9 +8476,7 @@ def _verification_boundary_receipts(
                     "source_identity_refs": source_identity_refs,
                     "proof_receipt_id": proof_id,
                     "replay_inputs_sha256": proof_inputs.get("replay_inputs_sha256"),
-                    "replay_observation_sha256": proof_observation.get(
-                        "replay_observation_sha256"
-                    ),
+                    "replay_observation_sha256": proof_observation.get("replay_observation_sha256"),
                     "selected_mechanism_evidence_ids": selected_mechanism_ids,
                     "outcome_oracle_id": bound_oracle.get("outcome_oracle_id"),
                     "runner_attested": True,
@@ -8501,12 +8519,8 @@ def _verification_boundary_receipts(
                         "origin_command_value_sha256": authorization.get(
                             "origin_command_value_sha256"
                         ),
-                        "executed_argv_sha256": authorization.get(
-                            "executed_argv_sha256"
-                        ),
-                        "command_authorization_sha256": authorization.get(
-                            "authorization_sha256"
-                        ),
+                        "executed_argv_sha256": authorization.get("executed_argv_sha256"),
+                        "command_authorization_sha256": authorization.get("authorization_sha256"),
                         "runner_attested": True,
                     },
                     hash_field="source_identity_sha256",
@@ -8517,22 +8531,17 @@ def _verification_boundary_receipts(
             for oracle in matching_oracles:
                 execution = oracle.get("execution")
                 oracle_observation = (
-                    execution.get("replay_observation")
-                    if isinstance(execution, Mapping)
-                    else None
+                    execution.get("replay_observation") if isinstance(execution, Mapping) else None
                 )
                 positive_contracts = oracle.get("positive_outcome_contracts")
                 positive_contract_ids = sorted(
                     {
                         str(contract.get("positive_outcome_contract_id"))
                         for contract in (
-                            positive_contracts
-                            if isinstance(positive_contracts, list)
-                            else []
+                            positive_contracts if isinstance(positive_contracts, list) else []
                         )
                         if isinstance(contract, Mapping)
-                        and _text(contract.get("positive_outcome_contract_id"))
-                        is not None
+                        and _text(contract.get("positive_outcome_contract_id")) is not None
                     }
                 )
                 if (
@@ -8567,12 +8576,9 @@ def _verification_boundary_receipts(
                         "origin_atom_ids": [origin_atom_id],
                         "source_identity": source_identity,
                         "source_identity_refs": [
-                            "origin_command_identity:"
-                            f"{source_identity['source_identity_sha256']}"
+                            f"origin_command_identity:{source_identity['source_identity_sha256']}"
                         ],
-                        "replay_inputs_sha256": replay_inputs.get(
-                            "replay_inputs_sha256"
-                        ),
+                        "replay_inputs_sha256": replay_inputs.get("replay_inputs_sha256"),
                         "replay_observation_sha256": oracle_observation.get(
                             "replay_observation_sha256"
                         ),
@@ -8601,9 +8607,7 @@ def _verification_boundary_receipts(
                 if isinstance(replay.get("replay_inputs"), Mapping)
                 else None
             ),
-            "execution_isolation_sha256": _canonical_json_sha256(
-                replay.get("execution_isolation")
-            ),
+            "execution_isolation_sha256": _canonical_json_sha256(replay.get("execution_isolation")),
         }
         provenance_refs = sorted(
             {
@@ -8620,14 +8624,14 @@ def _verification_boundary_receipts(
             }
         )
         boundary_projection: dict[str, Any] = {
-                    "schema_version": 1,
-                    "experiment_id": experiment_id,
-                    "boundary_kind": boundary_kind,
-                    "requires_live_verification": requires_live,
-                    "faithful_equivalence": faithful,
-                    "provenance_refs": provenance_refs,
-                    "rationale_sha256": sha256(rationale.encode("utf-8")).hexdigest(),
-                    "runner_attested": True,
+            "schema_version": 1,
+            "experiment_id": experiment_id,
+            "boundary_kind": boundary_kind,
+            "requires_live_verification": requires_live,
+            "faithful_equivalence": faithful,
+            "provenance_refs": provenance_refs,
+            "rationale_sha256": sha256(rationale.encode("utf-8")).hexdigest(),
+            "runner_attested": True,
         }
         if equivalence_proof is not None:
             boundary_projection["equivalence_proof"] = equivalence_proof
@@ -8824,15 +8828,13 @@ def _falsification_attempt_receipts(
                     )
                     if isinstance(value, str)
                 }
-                if (
-                    not isinstance(proof_receipt, Mapping)
-                    and not baseline_artifacts.intersection(challenge_artifacts)
+                if not isinstance(proof_receipt, Mapping) and not baseline_artifacts.intersection(
+                    challenge_artifacts
                 ):
                     reasons.append("shared_artifact_missing")
-                if (
-                    not isinstance(proof_receipt, Mapping)
-                    and baseline.get("command") == challenge.get("command")
-                ):
+                if not isinstance(proof_receipt, Mapping) and baseline.get(
+                    "command"
+                ) == challenge.get("command"):
                     reasons.append("challenge_reuses_baseline_command")
                 if challenge.get("scenario_kind") == "control":
                     relationship = challenge.get("control_relationship")
@@ -8914,9 +8916,7 @@ def _falsification_attempt_receipts(
                 else None
             )
             verified_intervention_symbols = intervention_symbols or proof_symbols
-            required_relationship_symbols = (
-                relationship_symbols or verified_intervention_symbols
-            )
+            required_relationship_symbols = relationship_symbols or verified_intervention_symbols
             if hypothesis_index == 0:
                 if not baseline_mechanism_ids:
                     reasons.append("baseline_mechanism_unbound")
@@ -9236,9 +9236,7 @@ def _explicit_atom_binding_receipts(
             continue
         binding_is_direct = False
         observation_predicate = declaration.get("observation_predicate")
-        generic_predicate_binding = role == "symptom" and isinstance(
-            observation_predicate, Mapping
-        )
+        generic_predicate_binding = role == "symptom" and isinstance(observation_predicate, Mapping)
         if observation_predicate is not None and not generic_predicate_binding:
             errors.append(f"{prefix}:observation_predicate_role")
             continue
@@ -9287,26 +9285,24 @@ def _explicit_atom_binding_receipts(
             continue
         direct = direct or binding_is_direct
         projection: dict[str, Any] = {
-                "experiment_id": experiment_id,
-                "atom_id": atom_id,
-                "match_kind": (
-                    "explicit_symptom_field_predicate_declaration"
-                    if generic_predicate_binding
-                    else f"explicit_{role}_field_binding"
-                ),
-                "binding_role": role,
-                "origin_atom_sha256": atom_receipt.get("atom_sha256"),
-                "origin_atom_field_path": field_path,
-                "origin_atom_value_sha256": expected_hash,
+            "experiment_id": experiment_id,
+            "atom_id": atom_id,
+            "match_kind": (
+                "explicit_symptom_field_predicate_declaration"
+                if generic_predicate_binding
+                else f"explicit_{role}_field_binding"
+            ),
+            "binding_role": role,
+            "origin_atom_sha256": atom_receipt.get("atom_sha256"),
+            "origin_atom_field_path": field_path,
+            "origin_atom_value_sha256": expected_hash,
         }
         if generic_predicate_binding:
             projection.update(
                 {
                     "origin_atom_value": actual_value,
                     "observation_predicate": dict(observation_predicate),
-                    "observation_predicate_sha256": _canonical_json_sha256(
-                        observation_predicate
-                    ),
+                    "observation_predicate_sha256": _canonical_json_sha256(observation_predicate),
                 }
             )
         verified.append(
@@ -9543,9 +9539,7 @@ def _implementation_touchpoint_receipts(
         return [], ["proof_adapter_implementation_touchpoints_invalid"]
 
     intervention = proof_receipt.get("intervention")
-    causal_target = (
-        _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
-    )
+    causal_target = _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
     if causal_target is None:
         return [], ["proof_adapter_implementation_touchpoint_causal_target_unavailable"]
 
@@ -9572,11 +9566,7 @@ def _implementation_touchpoint_receipts(
             diagnostics.append(label)
             continue
         path_raw = _text(raw.get("path"))
-        path = (
-            path_raw.replace("\\", "/").removeprefix("./")
-            if path_raw is not None
-            else None
-        )
+        path = path_raw.replace("\\", "/").removeprefix("./") if path_raw is not None else None
         causal_locator = _text(raw.get("causal_locator")) or causal_target
         symbols_raw = raw.get("symbols", [])
         relationship = _text(raw.get("relationship"))
@@ -9644,10 +9634,11 @@ def _proof_adapter_receipts(
     registry = builtin_proof_adapter_registry()
     basis_registry = builtin_positive_basis_registry()
     hypotheses_raw = dossier.get("root_cause_hypotheses")
-    hypothesis_ids = {
-        str(item.get("hypothesis_id"))
-        for item in hypotheses_raw if isinstance(item, Mapping)
-    } if isinstance(hypotheses_raw, list) else set()
+    hypothesis_ids = (
+        {str(item.get("hypothesis_id")) for item in hypotheses_raw if isinstance(item, Mapping)}
+        if isinstance(hypotheses_raw, list)
+        else set()
+    )
     receipts: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
     for experiment_id, experiment in experiments.items():
@@ -9696,8 +9687,7 @@ def _proof_adapter_receipts(
                 and not isinstance(binding.get("observation_predicate"), Mapping)
             )
             or (
-                binding.get("binding_role") is None
-                and _text(binding.get("match_kind")) is not None
+                binding.get("binding_role") is None and _text(binding.get("match_kind")) is not None
             )
         }
         provisional_source_atom_ids = legacy_source_atom_ids | {
@@ -9722,9 +9712,7 @@ def _proof_adapter_receipts(
             source_atom_ids: set[str],
             *,
             attested_predicate_bindings: Sequence[Mapping[str, Any]] = (),
-            semantic_claim: Mapping[str, Any] = (
-                semantic if isinstance(semantic, Mapping) else {}
-            ),
+            semantic_claim: Mapping[str, Any] = (semantic if isinstance(semantic, Mapping) else {}),
             positive_predicate: Mapping[str, Any] = (
                 predicate if isinstance(predicate, Mapping) else {}
             ),
@@ -9813,9 +9801,7 @@ def _proof_adapter_receipts(
             attested_predicate_bindings: list[dict[str, Any]] = []
             for binding in predicate_candidates:
                 declared_projection = {
-                    key: value
-                    for key, value in binding.items()
-                    if key != "declared_binding_sha256"
+                    key: value for key, value in binding.items() if key != "declared_binding_sha256"
                 }
                 predicate_contract = binding.get("observation_predicate")
                 baseline_value = (
@@ -9845,13 +9831,9 @@ def _proof_adapter_receipts(
                         {
                             "atom_id": binding.get("atom_id"),
                             "origin_atom_sha256": binding.get("origin_atom_sha256"),
-                            "origin_atom_field_path": binding.get(
-                                "origin_atom_field_path"
-                            ),
+                            "origin_atom_field_path": binding.get("origin_atom_field_path"),
                             "origin_atom_value": binding.get("origin_atom_value"),
-                            "origin_atom_value_sha256": binding.get(
-                                "origin_atom_value_sha256"
-                            ),
+                            "origin_atom_value_sha256": binding.get("origin_atom_value_sha256"),
                             "observation_predicate": dict(predicate_contract),
                             "observation_predicate_sha256": binding.get(
                                 "observation_predicate_sha256"
@@ -9907,9 +9889,7 @@ def _proof_adapter_receipts(
             bound = dict(proof_receipt)
             adapter_evidence_raw = bound.get("adapter_evidence")
             adapter_evidence = (
-                dict(adapter_evidence_raw)
-                if isinstance(adapter_evidence_raw, Mapping)
-                else {}
+                dict(adapter_evidence_raw) if isinstance(adapter_evidence_raw, Mapping) else {}
             )
             adapter_evidence["implementation_touchpoints"] = touchpoints
             bound["adapter_evidence"] = adapter_evidence
@@ -10210,15 +10190,13 @@ def verify_research_evidence(
         repo_revision=repo_revision,
         errors=errors,
     )
-    verification_boundaries, verification_boundary_errors = (
-        _verification_boundary_receipts(
-            experiments=declared_experiments,
-            clean_replays=clean_replays,
-            mechanism_evidence=mechanism_evidence,
-            proof_adapter_receipts=proof_adapter_receipts,
-            outcome_oracles=outcome_oracles,
-            verified_mechanism_provenance=verified_mechanism_provenance,
-        )
+    verification_boundaries, verification_boundary_errors = _verification_boundary_receipts(
+        experiments=declared_experiments,
+        clean_replays=clean_replays,
+        mechanism_evidence=mechanism_evidence,
+        proof_adapter_receipts=proof_adapter_receipts,
+        outcome_oracles=outcome_oracles,
+        verified_mechanism_provenance=verified_mechanism_provenance,
     )
     errors.extend(verification_boundary_errors)
     falsification_attempts = _falsification_attempt_receipts(
@@ -10250,9 +10228,7 @@ def verify_research_evidence(
             ("optional_control", optional_control_errors),
             (
                 "optional_falsification_intervention",
-                optional_falsification_intervention_errors
-                if proof_adapter_receipts
-                else [],
+                optional_falsification_intervention_errors if proof_adapter_receipts else [],
             ),
             ("preliminary_mechanism_projection", preliminary_mechanism_errors),
         )
@@ -10484,12 +10460,8 @@ def _persisted_research_attempt_errors(dossier: dict[str, Any]) -> list[str]:
             else:
                 errors.append(f"research_attempt_target_ref_invalid:{attempt_index}")
 
-        target_agent_raw = (
-            _text(target_ref.get("agent")) if isinstance(target_ref, dict) else None
-        )
-        target_agent = (
-            target_agent_raw.casefold() if target_agent_raw is not None else None
-        )
+        target_agent_raw = _text(target_ref.get("agent")) if isinstance(target_ref, dict) else None
+        target_agent = target_agent_raw.casefold() if target_agent_raw is not None else None
         attempt_kind = _text(attempt.get("attempt_kind"))
         continuation_attempt_kinds = {
             "model_output_repair",
@@ -10528,7 +10500,9 @@ def _persisted_research_attempt_errors(dossier: dict[str, Any]) -> list[str]:
                 or auth_path is None
                 or not auth_path.is_file()
             ):
-                errors.append(f"research_attempt_codex_subscription_receipt_missing:{attempt_index}")
+                errors.append(
+                    f"research_attempt_codex_subscription_receipt_missing:{attempt_index}"
+                )
             else:
                 errors.extend(
                     f"research_attempt_{attempt_index}_{error}"
@@ -11068,33 +11042,26 @@ def verify_persisted_research_evidence(
         declared_experiments = {
             str(experiment.get("experiment_id")): experiment
             for experiment in (
-                declared_experiments_raw
-                if isinstance(declared_experiments_raw, list)
-                else []
+                declared_experiments_raw if isinstance(declared_experiments_raw, list) else []
             )
-            if isinstance(experiment, dict)
-            and _text(experiment.get("experiment_id")) is not None
+            if isinstance(experiment, dict) and _text(experiment.get("experiment_id")) is not None
         }
-        recomputed_adapter_receipts, recomputed_adapter_diagnostics = (
-            _proof_adapter_receipts(
-                dossier,
-                case_id=str(dossier.get("case_id") or ""),
-                problem_id=str(dossier.get("problem_id") or ""),
-                experiments=declared_experiments,
-                clean_replays=persisted_replays,
-                evidence_assignment=assignment,
-                atom_bindings=recomputed_bindings,
-                planning_workspace=planning_workspace,
-                symbol_receipts=[symbol for symbol in symbols if isinstance(symbol, dict)],
-                artifact_receipts=[
-                    artifact
-                    for artifact in receipt.get("artifacts", [])
-                    if isinstance(artifact, dict)
-                ],
-                inspected_file_receipts=[
-                    file_receipt for file_receipt in files if isinstance(file_receipt, dict)
-                ],
-            )
+        recomputed_adapter_receipts, recomputed_adapter_diagnostics = _proof_adapter_receipts(
+            dossier,
+            case_id=str(dossier.get("case_id") or ""),
+            problem_id=str(dossier.get("problem_id") or ""),
+            experiments=declared_experiments,
+            clean_replays=persisted_replays,
+            evidence_assignment=assignment,
+            atom_bindings=recomputed_bindings,
+            planning_workspace=planning_workspace,
+            symbol_receipts=[symbol for symbol in symbols if isinstance(symbol, dict)],
+            artifact_receipts=[
+                artifact for artifact in receipt.get("artifacts", []) if isinstance(artifact, dict)
+            ],
+            inspected_file_receipts=[
+                file_receipt for file_receipt in files if isinstance(file_receipt, dict)
+            ],
         )
         if receipt.get("proof_adapter_receipts", []) != recomputed_adapter_receipts:
             errors.append("research_proof_adapter_receipts_changed")
@@ -11199,17 +11166,13 @@ def verify_persisted_research_evidence(
         errors.extend(oracle_errors)
         if receipt.get("outcome_oracles") != recomputed_outcome_oracles:
             errors.append("research_outcome_oracles_changed")
-        recomputed_verification_boundaries, boundary_errors = (
-            _verification_boundary_receipts(
-                experiments=declared_experiments,
-                clean_replays=persisted_replays,
-                mechanism_evidence=recomputed_mechanism_evidence,
-                proof_adapter_receipts=recomputed_adapter_receipts,
-                outcome_oracles=recomputed_outcome_oracles,
-                verified_mechanism_provenance=(
-                    recomputed_verified_mechanism_provenance
-                ),
-            )
+        recomputed_verification_boundaries, boundary_errors = _verification_boundary_receipts(
+            experiments=declared_experiments,
+            clean_replays=persisted_replays,
+            mechanism_evidence=recomputed_mechanism_evidence,
+            proof_adapter_receipts=recomputed_adapter_receipts,
+            outcome_oracles=recomputed_outcome_oracles,
+            verified_mechanism_provenance=(recomputed_verified_mechanism_provenance),
         )
         errors.extend(boundary_errors)
         if receipt.get("verification_boundaries", []) != recomputed_verification_boundaries:

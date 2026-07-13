@@ -3,12 +3,13 @@
   "document_id": "historical-automated-backlog-depth-remediation-metrics",
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "snapshot": {
-    "generated_at": "2026-07-13T01:33:43Z",
+    "generated_at": "2026-07-13T07:01:19Z",
     "branch": "codex/backlog-depth-remediation",
-    "last_committed_revision_with_full_matrix": "cdd666f31af5cc91d8df4d42a5b38b47a1e99305",
+    "last_committed_revision_with_full_matrix": "a1d52f43da7a4b653954bf268a589227e607108e",
     "latest_exact_revision_with_sealed_live_measurement": "a0ffd921663abba8f955aa2ad0df5fbb7ba95455",
-    "working_tree_state": "uncommitted remediation changes present",
-    "current_uncommitted_changes_live_rerun": "offline_matrix_and_static_gates_completed_subscription_capacity_restored_exact_revision_sealed_qualification_pending",
+    "diagnostic_cycle_revision": "a1d52f43da7a4b653954bf268a589227e607108e",
+    "working_tree_state": "a1d52f43 is the last committed full-matrix revision. The uncommitted Stage-3 recovery tree has retained passing receipts for complete affected scopes, a 14-of-14 project test matrix, and 14-of-14 lint. A static-contract aggregate exited 1 because of one pre-existing deptry false positive in untouched backlog_repo and an initially malformed smoke-guard invocation; the corrected smoke guard, doctor, and four repository contracts passed. No live end-to-end cycle exists.",
+    "diagnostic_cycle_state": "cycle_001_stopped_in_stage3_unscored_after_v1_benchmark_invalidation",
     "qualification_status": "not_qualified",
     "successful_consecutive_qualification_cycles": 0,
     "required_consecutive_qualification_cycles": 2
@@ -169,14 +170,14 @@
     {
       "id": "runner_core_full_suite_current",
       "path": "packages/runner_core/tests",
-      "kind": "current_working_tree_full_test_result",
-      "limitations": "The completed execution reported 428 passed, one skipped, exit 0 in 963.3 seconds. Raw stdout is not linked in this companion."
+      "kind": "a1_committed_baseline_full_test_result",
+      "limitations": "The execution later committed in a1d52f43 reported 428 passed, one skipped, exit 0 in 963.3 seconds. Raw stdout is not linked; later uncommitted Stage-3 recovery changes are outside this run."
     },
     {
       "id": "current_working_tree_matrix_and_static_gates",
       "path": ".agents/plans/3 - in_progress/20260709_historical_automated_backlog_depth_remediation.md",
-      "kind": "current_working_tree_verification_record",
-      "limitations": "The final-byte canonical 14-project matrix and static checks were observed in the current dirty working tree. Raw command stdout is not linked in this companion. Deptry reported one unchanged backlog_repo baseline finding, so global deptry is recorded as 13 of 14 rather than as a clean 14 of 14."
+      "kind": "a1_committed_baseline_verification_record",
+      "limitations": "The final pre-commit canonical 14-project matrix and static checks were later committed as a1d52f43. Raw command stdout is not linked. Deptry reported one unchanged backlog_repo baseline finding. Later uncommitted Stage-3 recovery changes are outside this matrix."
     },
     {
       "id": "attachment_backed_self_heal_tests",
@@ -187,13 +188,13 @@
     {
       "id": "backlog_miner_full_suite_current",
       "path": "packages/backlog_miner/tests",
-      "kind": "current_working_tree_full_test_result",
-      "limitations": "The final execution reported 229 passed, one skipped, exit 0 in 143.8 seconds. Raw stdout is not linked in this companion."
+      "kind": "a1_committed_baseline_full_test_result",
+      "limitations": "The execution later committed in a1d52f43 reported 229 passed, one skipped, exit 0 in 143.8 seconds. Raw stdout is not linked; a separate retained JUnit source now covers the complete later uncommitted miner suite."
     },
     {
       "id": "current_maintenance_ci_image",
       "path": ".tmp/maintenance_image_context",
-      "kind": "current_working_tree_ci_equivalent_image_build",
+      "kind": "a1_committed_baseline_ci_equivalent_image_build",
       "sha256": "edf1e6faa675f42b729d1ce90de8643c3cc8e0d6a02a07f57010cc65628c6dfb",
       "limitations": "Context preparation and the CI-equivalent Docker build passed locally. This proves buildability of the prepared maintenance context, not live backlog behavior or deployment."
     },
@@ -366,6 +367,194 @@
       "uri": "file:///I:/usertest_backlog_qualification/a0ffd921_20260712T165455Z/cycles/cycle_001/.qualification_transaction.json",
       "kind": "sealed_qualification_transaction",
       "limitations": "The transaction exists, but no final research, backlog, output-adjudication, or shared-streak artifact was produced."
+    },
+    {
+      "id": "a1_cycle_001_transaction",
+      "path": "H:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\cycles\\cycle_001\\.qualification_transaction.json",
+      "uri": "file:///H:/usertest_backlog_qualification/a1d52f43_20260713T013833Z/cycles/cycle_001/.qualification_transaction.json",
+      "kind": "stopped_exact_revision_diagnostic_transaction",
+      "limitations": "The execution ran at exact revision a1d52f43 and later stopped in Stage 3. Its v1 manifest digest was invalidated, so it is diagnostic only and cannot contribute a formal qualification score or streak."
+    },
+    {
+      "id": "a1_manifest_v1_invalidation",
+      "path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\qualification_corpus_manifest_v1_invalidation.json",
+      "uri": "file:///I:/usertest_backlog_qualification/a1d52f43_20260713T013833Z/custody/qualification_corpus_manifest_v1_invalidation.json",
+      "kind": "qualification_benchmark_invalidation_receipt",
+      "file_sha256": "EDD7E7FDD89BD505B5B816E0748A17B3E416E3FB03F32252A9E86E323332589F",
+      "invalidated_manifest_content_sha256": "AF804D03B8743DB222DA8DB186BAC37EA7E01EC119C216DAFCB5C20289073C37",
+      "limitations": "Two output-blind audits corrected the benchmark before any v2 qualification model stage."
+    },
+    {
+      "id": "a1_manifest_v2",
+      "path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\qualification_corpus_manifest_v2.json",
+      "uri": "file:///I:/usertest_backlog_qualification/a1d52f43_20260713T013833Z/custody/qualification_corpus_manifest_v2.json",
+      "kind": "corrected_sealed_held_out_manifest",
+      "content_sha256": "CFB3ED7E0CA5BD0ACEEAC5AA1AEDA5745F98320D0C877BF0FF72A0AB0B6069A",
+      "file_sha256": "C2F4B346837606710A84F836057DB4CD0CC3C0BEB7236E739759CB15402196CF",
+      "limitations": "This is a known historical regression corpus, not an untouched generalization benchmark."
+    },
+    {
+      "id": "a1_case1_same_author_structural_recovery",
+      "path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\cycle_001_case1_same_author_recovery.json",
+      "uri": "file:///I:/usertest_backlog_qualification/a1d52f43_20260713T013833Z/custody/cycle_001_case1_same_author_recovery.json",
+      "kind": "diagnostic_same_author_recovery_receipt",
+      "file_sha256": "4B17F94AE8D7AAFF64F0396C550F082A8F1437B2151DD447DCCB4B86E97AE8CF",
+      "limitations": "Records structural correction from 21 to 10 to three findings in the retained session; the dossier was not accepted."
+    },
+    {
+      "id": "a1_case1_exact_hints_structural_recovery",
+      "path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\cycle_001_case1_same_author_recovery_exact_hints.json",
+      "uri": "file:///I:/usertest_backlog_qualification/a1d52f43_20260713T013833Z/custody/cycle_001_case1_same_author_recovery_exact_hints.json",
+      "kind": "diagnostic_same_author_recovery_receipt",
+      "file_sha256": "8D8EAF9C8F93C93300F1EE5E8DA54BFA87D14B88A44EF684442E373C903D9400",
+      "limitations": "Records three structural findings reduced to zero; evidence verification still remained."
+    },
+    {
+      "id": "a1_case1_evidence_continuation",
+      "path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\cycle_001_case1_evidence_continuation.json",
+      "uri": "file:///I:/usertest_backlog_qualification/a1d52f43_20260713T013833Z/custody/cycle_001_case1_evidence_continuation.json",
+      "kind": "diagnostic_evidence_correction_receipt",
+      "file_sha256": "D6FCED9537167094D2F0E1A085EE49EF270428B8BA25986197E49835C7B6E598",
+      "limitations": "Records a best two-finding frontier followed by regression and the pre-fix wrapper returning the latest 21-finding state."
+    },
+    {
+      "id": "a1_case1_best_frontier_continuation",
+      "path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\cycle_001_case1_best_frontier_continuation.json",
+      "uri": "file:///I:/usertest_backlog_qualification/a1d52f43_20260713T013833Z/custody/cycle_001_case1_best_frontier_continuation.json",
+      "kind": "diagnostic_best_frontier_recovery_receipt",
+      "file_sha256": "6FC45545B89B61C25918C976F1BED1643D1098919D4DC44E7B6BCA497CB3050A",
+      "limitations": "Records a one-finding best frontier preserved after later regression; it is not an accepted dossier."
+    },
+    {
+      "id": "a1_case1_fresh_replay_verification",
+      "path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\cycle_001_case1_mechanical_best_verification_fresh_replay_fix.json",
+      "uri": "file:///I:/usertest_backlog_qualification/a1d52f43_20260713T013833Z/custody/cycle_001_case1_mechanical_best_verification_fresh_replay_fix.json",
+      "kind": "diagnostic_fresh_replay_evidence_receipt",
+      "file_sha256": "BD7A5E135996CE6BC0C3CE28A8D2289A421BC715C9E8ED04B741B5C61478788D",
+      "limitations": "A throw-away one-field removal isolated 21 remaining replay and attestation findings. It is diagnostic isolation, not automatic repair or acceptance."
+    },
+    {
+      "id": "a1_case1_attested_continuation",
+      "path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\cycle_001_case1_attested_research_continuation.json",
+      "uri": "file:///I:/usertest_backlog_qualification/a1d52f43_20260713T013833Z/custody/cycle_001_case1_attested_research_continuation.json",
+      "kind": "diagnostic_same_author_evidence_continuation",
+      "file_sha256": "03C116F37979239F485595E9A3B4DFCA66F9E43D0723365B91718FB79AC7681A",
+      "limitations": "Records 21 evidence findings reduced to 18 by narrowing claims, followed by one unchanged no-tool state."
+    },
+    {
+      "id": "a1_case1_three_repeat_continuation",
+      "path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\cycle_001_case1_attested_research_continuation_round2.json",
+      "uri": "file:///I:/usertest_backlog_qualification/a1d52f43_20260713T013833Z/custody/cycle_001_case1_attested_research_continuation_round2.json",
+      "kind": "diagnostic_same_author_nonprogress_receipt",
+      "file_sha256": "DC109E70586FE8EA8492E5173C49C9E44A313B8FE9534922285D2CAE62DC64A2",
+      "limitations": "Records three exact 18-to-18 no-tool states; the controller continued twice and stopped after the third repeat."
+    },
+    {
+      "id": "postchange_core_adapters_junit",
+      "path": "U:\\usertest_backlog_verification\\working_tree_20260713T055810Z\\core_adapters.junit.xml",
+      "uri": "file:///U:/usertest_backlog_verification/working_tree_20260713T055810Z/core_adapters.junit.xml",
+      "kind": "postchange_junit_receipt",
+      "file_sha256": "8A2DB84BFD5FD3B0980AF65862A82E0352EAC5ED853429215F0E921538E57A22",
+      "tests": 532,
+      "passed": 532,
+      "failed": 0,
+      "skipped": 0,
+      "elapsed_seconds": 17.347,
+      "limitations": "Deterministic core-adapter test evidence on the uncommitted working tree; not a repository matrix, live model run, or qualification cycle."
+    },
+    {
+      "id": "postchange_backlog_miner_junit",
+      "path": "U:\\usertest_backlog_verification\\working_tree_20260713T055810Z\\backlog_miner.junit.xml",
+      "uri": "file:///U:/usertest_backlog_verification/working_tree_20260713T055810Z/backlog_miner.junit.xml",
+      "kind": "postchange_junit_receipt",
+      "file_sha256": "4E805A41821604697E5F59C49F4D4A8D0B6D0AC0C235CB6EF44DCBAB90FC5A65",
+      "tests": 239,
+      "passed": 238,
+      "failed": 0,
+      "skipped": 1,
+      "elapsed_seconds": 217.159,
+      "limitations": "Complete backlog_miner suite evidence on the uncommitted working tree; the one skip is retained in the denominator and this remains offline contract evidence."
+    },
+    {
+      "id": "postchange_usertest_backlog_initial_junit",
+      "path": "U:\\usertest_backlog_verification\\working_tree_20260713T055810Z\\usertest_backlog.junit.xml",
+      "uri": "file:///U:/usertest_backlog_verification/working_tree_20260713T055810Z/usertest_backlog.junit.xml",
+      "kind": "postchange_junit_regression_discovery_receipt",
+      "file_sha256": "3C34251C93DCD6293F99595F99CA1ED8DA13F977FD61337916EACB6F2DE62FE2",
+      "tests": 668,
+      "passed": 666,
+      "failed": 2,
+      "skipped": 0,
+      "elapsed_seconds": 433.62,
+      "limitations": "The first complete application-suite run exposed two regressions: a fully completed Stage-3 cache was incorrectly treated like a normal resume frontier on later cycles. This receipt is intentionally retained rather than replaced by the green rerun."
+    },
+    {
+      "id": "postchange_usertest_backlog_two_regressions_junit",
+      "path": "U:\\usertest_backlog_verification\\working_tree_20260713T055810Z\\usertest_backlog_two_regressions.junit.xml",
+      "uri": "file:///U:/usertest_backlog_verification/working_tree_20260713T055810Z/usertest_backlog_two_regressions.junit.xml",
+      "kind": "postchange_targeted_regression_receipt",
+      "file_sha256": "9F30EF06C60617C2569A850D36764C2637E70429E773D7889B04CC98B4C09480",
+      "tests": 2,
+      "passed": 2,
+      "failed": 0,
+      "skipped": 0,
+      "elapsed_seconds": 6.135,
+      "limitations": "Exact rerun of the two application tests that failed in the first complete suite; it verifies the narrow correction but does not replace the required complete rerun."
+    },
+    {
+      "id": "postchange_usertest_backlog_rerun_junit",
+      "path": "U:\\usertest_backlog_verification\\working_tree_20260713T055810Z\\usertest_backlog_rerun.junit.xml",
+      "uri": "file:///U:/usertest_backlog_verification/working_tree_20260713T055810Z/usertest_backlog_rerun.junit.xml",
+      "kind": "postchange_junit_receipt",
+      "file_sha256": "E04EE82CCC598372E369D5357419025151AA5CB8807C7C1481C36687C42872A3",
+      "tests": 668,
+      "passed": 668,
+      "failed": 0,
+      "skipped": 0,
+      "elapsed_seconds": 417.606,
+      "limitations": "Corrected complete application-suite rerun on the uncommitted working tree; not a full repository matrix, live model run, end-to-end backlog cycle, or qualification result."
+    },
+    {
+      "id": "postchange_all_projects_test_log",
+      "path": "U:\\usertest_backlog_verification\\working_tree_20260713T055810Z\\all_projects_test.log",
+      "uri": "file:///U:/usertest_backlog_verification/working_tree_20260713T055810Z/all_projects_test.log",
+      "kind": "postchange_repository_matrix_log",
+      "file_sha256": "793D7706C90AE2F7B06E0A8BF2AAFC04DBA0BBBCF474BBB9C76887DD5F6F00E1",
+      "project_environments": 14,
+      "passed_project_environments": 14,
+      "exit_code": 0,
+      "elapsed_seconds": 2096.3,
+      "limitations": "Repository-wide deterministic test evidence on an uncommitted working tree; it does not establish live model quality, qualification, or original-scenario resolution."
+    },
+    {
+      "id": "postchange_all_projects_lint_log",
+      "path": "U:\\usertest_backlog_verification\\working_tree_20260713T055810Z\\all_projects_lint.log",
+      "uri": "file:///U:/usertest_backlog_verification/working_tree_20260713T055810Z/all_projects_lint.log",
+      "kind": "postchange_repository_lint_log",
+      "file_sha256": "280434791B241AAE5E17D623777DDC41123B8A1FE94FCC9D6B8D765FAFFCB983",
+      "project_environments": 14,
+      "passed_project_environments": 14,
+      "exit_code": 0,
+      "elapsed_seconds": 98.376,
+      "limitations": "All-project Ruff evidence on an uncommitted working tree; it is a static compatibility check, not backlog-quality or live-outcome evidence."
+    },
+    {
+      "id": "postchange_static_contracts_log",
+      "path": "U:\\usertest_backlog_verification\\working_tree_20260713T055810Z\\static_contracts.log",
+      "uri": "file:///U:/usertest_backlog_verification/working_tree_20260713T055810Z/static_contracts.log",
+      "kind": "postchange_static_contract_aggregate_log",
+      "file_sha256": "F6D650993A7ACB8A38E95C3FE11D559B6723B509AE18AA13B4150B4696C8BB83",
+      "aggregate_exit_code": 1,
+      "limitations": "The aggregate is not green. Depcheck reported the known untouched backlog_repo DEP002 false positive, and the smoke guard was initially invoked without its required --repo-root argument. Doctor and four repository contracts passed; a separate corrected smoke-guard receipt passed."
+    },
+    {
+      "id": "postchange_smoke_import_guard_corrected_log",
+      "path": "U:\\usertest_backlog_verification\\working_tree_20260713T055810Z\\smoke_import_guard_corrected.log",
+      "uri": "file:///U:/usertest_backlog_verification/working_tree_20260713T055810Z/smoke_import_guard_corrected.log",
+      "kind": "postchange_corrected_static_contract_log",
+      "file_sha256": "4B2F5D95179255FC7E8E2426DAFAA2A89F84242E1626B807928682066A837A1D",
+      "exit_code": 0,
+      "limitations": "Corrected invocation with the required repository root passed and verified that usertest resolves within this workspace. This repairs the invocation error, not the unrelated pre-existing deptry finding."
     },
     {
       "id": "execution_plan",
@@ -692,8 +881,128 @@
       "post_restart_subscription_capacity_response"
     ]
   },
+  "current_exact_revision_cycle": {
+    "run_id": "a1d52f43_20260713T013833Z_cycle_001",
+    "revision": "a1d52f43da7a4b653954bf268a589227e607108e",
+    "measurement_date": "2026-07-13",
+    "state_at_snapshot": "stopped_in_stage3_diagnostic_only",
+    "result": "incomplete_not_scored",
+    "export_enabled": false,
+    "tickets_generated": 0,
+    "qualification_contribution": {
+      "successful_cycles": 0,
+      "required_consecutive_cycles": 2,
+      "reason": "Cycle 001 was launched against the subsequently invalidated v1 label manifest. A formal score against either v1 or v2 is prohibited: v1 has an invalid denominator, while v2 was not the sealed manifest for this already-running model execution."
+    },
+    "interim_diagnostic_trace": {
+      "final_score": null,
+      "score_prohibited": true,
+      "under_invalidated_v1_join": {
+        "candidate_cases_matching_then_actionable_labels": 5,
+        "candidate_cases_matching_then_definite_false_labels_before_exact_synthesis": 4,
+        "additional_historically_false_candidate_added_by_exact_synthesis": 1
+      },
+      "interpretation": "These are interim model-behavior observations, not a completed case mix and not TP/FP metrics. The five v1-actionable matches cannot be described as five true actionable cases after benchmark correction."
+    },
+    "benchmark_invalidation": {
+      "invalidated_manifest_path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\qualification_corpus_manifest.json",
+      "invalidated_manifest_content_sha256": "af804d03b8743db222da8db186bac37ea7e01ec119c216dafcb5c20289073c37",
+      "audit_independence": "Two independent historical-currentness audits did not inspect cycle-001 model outputs.",
+      "v1_label_counts": {"actionable": 5, "non_actionable": 25, "ambiguous": 1, "unknown": 1},
+      "corrections": {
+        "definite_actionable_retained": 1,
+        "changed_to_ambiguous": 1,
+        "changed_to_non_actionable": 3
+      },
+      "reason": "The first adjudication conflated observed historical failure evidence with distinct current unactioned problems. Three labels were already fixed or represented correct enforcement; one depended on current configuration and recurrence evidence."
+    },
+    "replacement_manifest": {
+      "path": "I:\\usertest_backlog_qualification\\a1d52f43_20260713T013833Z\\custody\\qualification_corpus_manifest_v2.json",
+      "content_sha256": "cfb3ed7e0ca5bd0aceeeac5aa1aeda5745f98320d0c877bf0ff72a0ab0b6069a",
+      "eligible_atoms": 2781,
+      "label_groups": 32,
+      "label_counts": {"actionable": 1, "non_actionable": 28, "ambiguous": 2, "unknown": 1},
+      "independent_from_pipeline": true,
+      "labels_withheld_from_model_stages": true,
+      "generalization_claim": "none; this is a known historical regression corpus"
+    },
+    "stage3_diagnostic_recovery": {
+      "case_count": 1,
+      "accepted_dossiers": 0,
+      "accepted_plans": 0,
+      "tickets_generated": 0,
+      "retained_session_id": "019f5966-3aa2-7c40-b6d6-555b6ce1b0f4",
+      "process_failure": {
+        "type": "TypeError",
+        "message": "unhashable type: 'dict'",
+        "cause": "A model-authored object in an enum-shaped field reached set membership before a type guard.",
+        "current_behavior": "Unhashable model JSON shapes produce ordinary validation feedback instead of crashing the stage.",
+        "live_end_to_end_retest": false
+      },
+      "structural_correction": {
+        "same_author_retained": true,
+        "restart_used": false,
+        "trajectory": [21, 10, 3, 0],
+        "output_contract_valid_at_best": true,
+        "accepted_after_structural_correction": false,
+        "source_ids": ["a1_case1_same_author_structural_recovery", "a1_case1_exact_hints_structural_recovery"]
+      },
+      "evidence_correction": {
+        "first_branch_trajectory": [22, 19, 24, 2, 23, 21, 21],
+        "first_branch_best_error_count": 2,
+        "pre_fix_wrapper_returned_latest_error_count": 21,
+        "pre_fix_best_frontier_lost": true,
+        "wrapper_fix": "The continuation now returns the objective best dossier, validation errors, source attempt hash, and matching verifier receipt when later turns regress.",
+        "second_branch_trajectory": [2, 21, 21, 1, 21],
+        "second_branch_best_error_count": 1,
+        "post_fix_best_frontier_preserved": true,
+        "source_ids": ["a1_case1_evidence_continuation", "a1_case1_best_frontier_continuation"]
+      },
+      "fresh_replay_after_diagnostic_field_removal": {
+        "structural_errors": 0,
+        "evidence_errors": 21,
+        "error_families": [
+          "replay workspace mutation",
+          "experiment command observation",
+          "inspected file and symbol attestation",
+          "primary mechanism evidence and coverage",
+          "causal root",
+          "verification boundary",
+          "hypothesis support"
+        ],
+        "interpretation": "The lone unsupported top-level field was mechanically removed only to isolate the next layer. The resulting 21 findings show that structurally valid output was still not causal proof.",
+        "source_ids": ["a1_case1_fresh_replay_verification"]
+      },
+      "same_author_attestation_feedback": {
+        "initial_trajectory": [21, 18, 18],
+        "best_error_count": 18,
+        "subsequent_exact_repeat_trajectory": [18, 18, 18, 18],
+        "subsequent_feedback_turns": 3,
+        "command_events_per_subsequent_turn": [0, 0, 0],
+        "read_events_per_subsequent_turn": [0, 0, 0],
+        "dossier_changed_per_subsequent_turn": [false, false, false],
+        "controller_decisions": ["continue", "continue", "restart"],
+        "stop_reason": "exact_state_repeated_after_feedback",
+        "interpretation": "The author received three opportunities on the exact retained frontier and stopped only after clear repeated nonprogress. It did not use the newly available bounded-read path, so the evidence findings remain unresolved.",
+        "source_ids": ["a1_case1_attested_continuation", "a1_case1_three_repeat_continuation"]
+      },
+      "limit": "These are diagnostic recovery measurements for one unscored case. They do not establish accepted research, plan throughput, qualification, or generalization."
+    },
+    "source_ids": [
+      "a1_cycle_001_transaction",
+      "a1_manifest_v1_invalidation",
+      "a1_manifest_v2",
+      "a1_case1_same_author_structural_recovery",
+      "a1_case1_exact_hints_structural_recovery",
+      "a1_case1_evidence_continuation",
+      "a1_case1_best_frontier_continuation",
+      "a1_case1_fresh_replay_verification",
+      "a1_case1_attested_continuation",
+      "a1_case1_three_repeat_continuation"
+    ]
+  },
   "current_working_tree_offline_evidence": {
-    "status": "final_byte_offline_matrix_and_static_gates_completed_with_baseline_deptry_issue",
+    "status": "committed_baseline_plus_uncommitted_stage3_recovery_full_affected_suites_and_repository_matrix",
     "evidence_layer": "offline_contract",
     "full_runner_suite": {
       "result": "passed",
@@ -712,7 +1021,7 @@
       "percent": 100.0,
       "exit_code": 0,
       "elapsed_seconds": 1624.1,
-      "prior_checkpoint": "An earlier 14-of-14 execution completed in 1,717 seconds after correcting a test-only package import boundary. A later objective audit found and fixed an attachment-backed self-healing defect, so the 1,624.1-second execution is the current final-byte matrix result.",
+      "prior_checkpoint": "An earlier 14-of-14 execution completed in 1,717 seconds after correcting a test-only package import boundary. A later objective audit found and fixed an attachment-backed self-healing defect, so the 1,624.1-second execution is the final pre-commit matrix for the a1d52f43 baseline. Current uncommitted Stage-3 recovery changes have not run a new matrix.",
       "source_ids": ["current_working_tree_matrix_and_static_gates"]
     },
     "static_verification": {
@@ -762,6 +1071,203 @@
       },
       "source_ids": ["current_working_tree_matrix_and_static_gates", "attachment_backed_self_heal_tests", "backlog_miner_full_suite_current", "current_maintenance_ci_image"]
     },
+    "uncommitted_stage3_recovery_verification": {
+      "affected_sweep": {
+        "result": "passed_with_platform_skip",
+        "collected": 199,
+        "passed": 198,
+        "skipped": 1,
+        "failed": 0,
+        "exit_code": 0,
+        "elapsed_seconds": 181.4,
+        "command": "$srcs = Get-ChildItem -Path packages,apps -Directory -Recurse | Where-Object { $_.Name -eq 'src' } | Select-Object -ExpandProperty FullName; $env:PYTHONPATH = ($srcs -join [IO.Path]::PathSeparator); python -m pytest packages/agent_adapters/tests/test_basic.py packages/backlog_miner/tests/test_research_evidence.py packages/backlog_miner/tests/test_research_runner.py apps/usertest_backlog/tests/test_research_hydration.py -q",
+        "timing_boundary": "Executed before the later exact-repeat threshold changed from two to three.",
+        "evidence_quality": "Observed in the live console; no raw log receipt was retained."
+      },
+      "post_threshold_focused_sweep": {
+        "result": "passed",
+        "collected": 103,
+        "passed": 103,
+        "skipped": 0,
+        "failed": 0,
+        "exit_code": 0,
+        "elapsed_seconds": 89.2,
+        "scope": "agent adapter basic tests, research runner, research hydration, and two CLI-focused tests",
+        "evidence_quality": "Observed in the live console; no raw log receipt was retained."
+      },
+      "validator_robustness_console_checks": {
+        "mutation_probes": {
+          "uncaught_crashes": 0,
+          "probe_count": null,
+          "result": "no_crash_observed",
+          "evidence_quality": "Observed in the subagent console; no raw receipt or denominator was retained, so no pass percentage is claimed."
+        },
+        "stage_contracts_suite": {
+          "passed": 142,
+          "failed": 0,
+          "result": "passed",
+          "evidence_quality": "Observed in the subagent console; no raw JUnit or command log was retained."
+        }
+      },
+      "retained_postchange_suites": {
+        "core_adapters": {
+          "tests": 532,
+          "passed": 532,
+          "failed": 0,
+          "skipped": 0,
+          "elapsed_seconds": 17.347,
+          "result": "passed",
+          "source_ids": ["postchange_core_adapters_junit"]
+        },
+        "backlog_miner": {
+          "tests": 239,
+          "passed": 238,
+          "failed": 0,
+          "skipped": 1,
+          "elapsed_seconds": 217.159,
+          "result": "passed_with_platform_skip",
+          "source_ids": ["postchange_backlog_miner_junit"]
+        },
+        "usertest_backlog_first_complete_run": {
+          "tests": 668,
+          "passed": 666,
+          "failed": 2,
+          "skipped": 0,
+          "elapsed_seconds": 433.62,
+          "result": "failed_and_exposed_cache_resume_regression",
+          "failed_tests": [
+            "test_two_shadow_cycles_retain_open_cases_and_add_new_evidence_without_export",
+            "test_reports_backlog_carryover_actioned_only_demotes_ticketed_and_queued_atoms"
+          ],
+          "source_ids": ["postchange_usertest_backlog_initial_junit"]
+        },
+        "usertest_backlog_exact_regression_rerun": {
+          "tests": 2,
+          "passed": 2,
+          "failed": 0,
+          "skipped": 0,
+          "elapsed_seconds": 6.135,
+          "result": "passed",
+          "source_ids": ["postchange_usertest_backlog_two_regressions_junit"]
+        },
+        "usertest_backlog_corrected_complete_rerun": {
+          "tests": 668,
+          "passed": 668,
+          "failed": 0,
+          "skipped": 0,
+          "elapsed_seconds": 417.606,
+          "result": "passed",
+          "source_ids": ["postchange_usertest_backlog_rerun_junit"]
+        },
+        "interpretation": "The first complete application run is part of the evidence: it found two real cache/resume defects. The exact two-test rerun and then a complete 668-test rerun passed after correction. Reporting only the final green run would conceal the regression-discovery step."
+      },
+      "postchange_repository_verification": {
+        "all_project_tests": {
+          "result": "passed",
+          "passed_project_environments": 14,
+          "project_environment_denominator": 14,
+          "percent": 100.0,
+          "exit_code": 0,
+          "elapsed_seconds": 2096.3,
+          "source_ids": ["postchange_all_projects_test_log"]
+        },
+        "all_project_lint": {
+          "result": "passed",
+          "passed_project_environments": 14,
+          "project_environment_denominator": 14,
+          "percent": 100.0,
+          "exit_code": 0,
+          "elapsed_seconds": 98.376,
+          "source_ids": ["postchange_all_projects_lint_log"]
+        },
+        "static_contract_aggregate": {
+          "result": "nonzero_with_known_baseline_and_invocation_findings",
+          "aggregate_exit_code": 1,
+          "depcheck": {
+            "passed_project_environments": 13,
+            "project_environment_denominator": 14,
+            "result": "one_preexisting_false_positive",
+            "finding": "Untouched packages/backlog_repo reports DEP002 for run_artifacts despite an actual import and known_first_party configuration.",
+            "remediation_diff_in_package": false
+          },
+          "doctor": {
+            "result": "passed_with_optional_bash_warning",
+            "exit_code": 0
+          },
+          "repository_contracts": {
+            "passed": 4,
+            "denominator": 4,
+            "names": [
+              "package_readme_contract",
+              "lint_prompts",
+              "lint_analysis_principles",
+              "lint_local_dependency_urls"
+            ]
+          },
+          "initial_smoke_import_guard": {
+            "result": "invocation_error",
+            "cause": "The aggregate command omitted required --repo-root.",
+            "exit_code": 2
+          },
+          "corrected_smoke_import_guard": {
+            "result": "passed",
+            "exit_code": 0,
+            "verified": "usertest resolves within the current workspace",
+            "source_ids": ["postchange_smoke_import_guard_corrected_log"]
+          },
+          "source_ids": ["postchange_static_contracts_log"]
+        },
+        "interpretation": "Repository-wide tests and lint are green. The static aggregate is reported as exit 1, not relabeled as green: one component is a documented pre-existing deptry false positive in untouched backlog_repo and the other was a malformed smoke-guard invocation whose corrected command passed."
+      },
+      "covered_behaviors": [
+        "unhashable model enum shapes become validation feedback",
+        "objective best research frontiers survive later regressions",
+        "replay verifier invocations use unique workspaces and do not collide with prior replay output",
+        "exact bounded Codex PowerShell reads attest only exact output",
+        "three exact no-progress states are required before restart",
+        "atomic Stage-3 completed-prefix checkpointing reuses two of three cases after a simulated crash",
+        "a fully completed Stage-3 proof set can be reused after a later-stage failure when its semantic compatibility and upstream inputs remain current",
+        "model selection and prompt-prose changes are explicitly compatible with retained Stage-3 proof reuse",
+        "agent identity, signed-in subscription execution route, semantic proof-contract version, upstream artifact content, and evidence assignment changes invalidate reuse",
+        "completed-cache invalidation from new evidence or case-lifecycle content becomes a normal fresh Stage-3 run, while in-progress and provider-wait checkpoints remain overwrite-protected"
+      ],
+      "completed_prefix_reuse_test": {
+        "selected_cases": 3,
+        "completed_before_simulated_crash": 2,
+        "reused_after_resume": 2,
+        "redispatched_after_resume": 1,
+        "stale_assignment_rejected": true,
+        "evidence_layer": "offline_test"
+      },
+      "stage3_completed_cache_contract": {
+        "compatibility_contract": {
+          "model_selection_change": "compatible",
+          "prompt_prose_change": "compatible",
+          "agent_identity_change": "invalidates",
+          "execution_route_or_subscription_provenance_change": "invalidates",
+          "semantic_proof_contract_version_change": "invalidates",
+          "upstream_artifact_content_change": "invalidates",
+          "evidence_assignment_change": "invalidates"
+        },
+        "fully_completed_cache_reuse": "offline_tested",
+        "later_stage_failure_reuse": "all completed Stage-3 dossiers can be reused without new model dispatch when compatibility, assignment, and upstream hashes remain current",
+        "cache_miss_behavior": "New evidence or case-lifecycle changes invalidate a completed cache and run Stage 3 normally; they are not treated as corruption or an in-progress author resume.",
+        "protected_frontiers": "In-progress and provider-wait checkpoints continue to fail closed on integrity or upstream mismatch so authored work is not silently overwritten.",
+        "evidence_layer": "offline_contract_tests"
+      },
+      "bounded_read_attestation": {
+        "status": "implemented_and_offline_tested",
+        "accepted_shape": "Get-Content -Encoding UTF8 -LiteralPath <path> | Select-Object -Skip <N> -First <M>",
+        "maximum_first_lines": 2000,
+        "extra_output_rejected": true,
+        "live_author_use_observed": false
+      },
+      "full_post_change_core_adapters_suite": "532_passed_retained_junit",
+      "full_post_change_backlog_miner_suite": "238_passed_1_skipped_retained_junit",
+      "full_post_change_usertest_backlog_suite": "668_passed_after_initial_666_passed_2_failed_and_targeted_correction",
+      "full_post_change_project_matrix": "14_of_14_passed_exit_0_in_2096_3_seconds_retained_log",
+      "full_post_change_end_to_end_cycle": "not_run"
+    },
     "contracts_with_targeted_regression_evidence": [
       {
         "contract": "terminal outcome context",
@@ -792,11 +1298,11 @@
       "exact-revision subscription-backed sealed qualification",
       "two consecutive export-disabled shadow cycles"
     ],
-    "live_model_status": "subscription_capacity_restored_exact_revision_sealed_qualification_pending",
+    "live_model_status": "subscription_capacity_restored_cycle_001_stopped_unscored_v2_qualification_pending",
     "successful_shadow_cycles": 0,
     "required_consecutive_shadow_cycles": 2,
     "ticket_regeneration_started": false,
-    "interpretation": "The targeted regressions, full runner, canonical 14-project matrix, and repository/static checks establish intended deterministic contracts in the dirty working tree, with one explicitly retained pre-existing deptry baseline finding. They do not establish model throughput, accepted dossier or plan quality, generalization, or operational resolution."
+    "interpretation": "The uncommitted Stage-3 recovery tree now has retained passing receipts for complete affected scopes, a 14-of-14 project test matrix, and 14-of-14 lint. The first full application run found two defects; both exact regressions and the complete rerun passed after correction. The static aggregate remains transparently exit 1 because of one pre-existing deptry false positive in untouched backlog_repo and a malformed smoke-guard invocation whose corrected command passed. This is materially stronger offline evidence, but there is still no completed live end-to-end cycle. The stopped cycle supplies diagnostic behavior only because its v1 benchmark was invalidated; it does not establish formal throughput, accepted dossier or plan quality, generalization, or operational resolution."
   },
   "evolution_timeline": [
     {
@@ -884,10 +1390,10 @@
       "interpretation": "The sealed run demonstrates high mining recall and genuine self-repair progress, but weak precision and poor prioritization consumed the research budget on a false candidate. The run did not qualify and contributed zero successful cycles to the required streak."
     },
     {
-      "phase": "current_working_tree",
-      "revision": "uncommitted changes after a0ffd921663abba8f955aa2ad0df5fbb7ba95455",
+      "phase": "a1_exact_revision_diagnostic_plus_uncommitted_stage3_recovery",
+      "revision": "a1d52f43da7a4b653954bf268a589227e607108e",
       "measurement_date": "2026-07-13",
-      "result": "not_qualified",
+      "result": "diagnostic_incomplete_not_qualified",
       "improved": [
         "Targeted offline regressions pass for terminal outcome context, evidence-fresh research routing, content-bound retained-proof and downstream reuse, and rooted connected aggregate causal support.",
         "A deterministic replay over the already scored a0 cases preserved the exact 4 actionable, 18 definite-false, and two uncertain source join and ranked all four actionable cases first.",
@@ -896,17 +1402,31 @@
         "After that material fix, two targeted and eight broader self-healing tests passed, the full backlog_miner suite passed 229 tests with one skip in 143.8 seconds, and the final-byte canonical matrix passed 14 of 14 in 1,624.1 seconds.",
         "Ruff and lock freshness passed in all 14 project environments; 43 repository-tool tests, the prompt/README/local-dependency-URL checks, and all tracked structured-file parses passed.",
         "CI-equivalent maintenance-context preparation and Docker build passed in 131.6 seconds; the final image manifest-list digest is sha256:edf1e6faa675f42b729d1ce90de8643c3cc8e0d6a02a07f57010cc65628c6dfb.",
-        "A post-restart production-wrapper probe completed in 24.7 seconds with exit zero and the exact requested response through the verified host ChatGPT subscription route, proving that simple-turn subscription capacity is currently available."
+        "A post-restart production-wrapper probe completed in 24.7 seconds with exit zero and the exact requested response through the verified host ChatGPT subscription route, proving that simple-turn subscription capacity is currently available.",
+        "The first exact-revision live author recovered in the same retained session after a throwaway research harness deadlocked; no author restart was used for that correctable failure.",
+        "After the Stage-3 unhashable-dictionary crash, the retained author reduced structural findings 21 to 10 to three to zero instead of restarting the investigation.",
+        "Evidence correction reached a two-finding best frontier that the old wrapper lost; after the wrapper fix, a later branch preserved a one-finding best frontier despite subsequent regression.",
+        "Unique replay workspaces removed verifier self-collision and a fresh diagnostic replay exposed 21 remaining replay and attestation defects instead of hiding them behind workspace contamination.",
+        "The same author reduced those 21 findings to 18, then produced three exact no-tool repeats; the controller continued twice and stopped only after the third repeated state.",
+        "An atomic Stage-3 completed-prefix regression reused two of three cases after a simulated crash and dispatched only the unfinished third case.",
+      "The affected adapter/miner/hydration sweep completed with 198 passed, one skipped, and zero failed in 181.4 seconds; a later post-threshold focused sweep passed 103 tests in 89.2 seconds. Both were console-observed without retained logs.",
+      "The uncommitted tree then passed complete retained-receipt scopes: core_adapters 532 of 532 and backlog_miner 238 passed with one skip.",
+      "The first 668-test usertest_backlog run exposed two completed-cache/resume defects at 666 passed and two failed. The exact two regressions then passed, followed by a retained complete rerun at 668 of 668.",
+      "Completed Stage-3 proof reuse now distinguishes compatible model/prompt changes from material agent, subscription-route, proof-version, upstream, and assignment changes. Completed cache misses run normally while in-progress and provider-wait checkpoints remain protected.",
+      "The current uncommitted tree passed all 14 project test environments with exit zero in 2,096.3 seconds and all 14 lint environments with exit zero in 98.376 seconds; both logs are retained and hashed.",
+      "The static-contract aggregate exited one. Its only depcheck finding is a documented pre-existing false positive in untouched backlog_repo; doctor and four repository contracts passed, and the smoke import guard passed when rerun with its required repository-root argument."
       ],
       "failed_or_unknown": [
         "Deptry passed in 13 of 14 project environments; untouched backlog_repo retains a pre-existing DEP002 finding for run_artifacts despite an actual import and known_first_party configuration.",
         "The deterministic replay is a reused development benchmark, not a new sealed, model-dependent, or generalization measurement.",
-        "The current uncommitted fixes have no exact-revision sealed pipeline measurement; the post-restart probe exercised only a trivial signed-in turn.",
-        "No accepted dossier, plan, or outcome exists from the sealed qualification run.",
+        "Cycle 001 stopped in Stage 3 and is diagnostic only because the v1 benchmark was invalidated after output-blind audits corrected four of its five actionable labels.",
+        "No formal score may be computed from cycle 001: v1 has an invalid denominator, and v2 was not the sealed manifest for the already-running execution.",
+        "The structurally corrected a1 dossier still failed causal evidence verification; no accepted dossier, plan, or outcome exists from the diagnostic run.",
+      "The current Stage-3 recovery changes have passed complete affected-package/application suites and a new 14-project matrix, but have not passed an end-to-end v2 cycle.",
         "No qualification cycle has passed, the successful consecutive streak is zero of two, and export remains disabled.",
         "Qualified ticket regeneration, implementation drain, and outcome resolution have not started."
       ],
-      "interpretation": "The current working tree has meaningful offline development evidence, a passing full runner suite, a passing 14-project matrix, and restored subscription capacity for a simple production-wrapper turn, but remains unqualified. A new exact-revision sealed qualification is still required; neither the capacity probe nor any offline replay or matrix is treated as qualification or generalization proof."
+    "interpretation": "Revision a1d52f43 has meaningful committed-baseline evidence and restored subscription capacity. The subsequent uncommitted recovery tree now has complete affected-package/application receipts plus a passing 14-project test matrix and all-project lint, including an honestly retained two-failure discovery run followed by targeted and full green reruns. The static aggregate remains nonzero for one pre-existing deptry false positive and one corrected invocation error. The stopped diagnostic cycle still proves that the current case lacks adequate causal evidence. The project remains unqualified; an exact revision and end-to-end cycle sealed to corrected manifest v2 are required."
     }
   ],
   "repository_matrix_history": {
@@ -920,7 +1440,8 @@
       {"checkpoint": 5, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 1107.3, "commit": null},
       {"checkpoint": 6, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 875.8, "commit": "cdd666f31af5cc91d8df4d42a5b38b47a1e99305"},
       {"checkpoint": 7, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 1717.0, "commit": null, "working_tree": "uncommitted after a0ffd921663abba8f955aa2ad0df5fbb7ba95455", "note": "Passed after correcting one test-only package import-boundary failure."},
-      {"checkpoint": 8, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 1624.1, "commit": null, "working_tree": "final-byte uncommitted changes after a0ffd921663abba8f955aa2ad0df5fbb7ba95455", "note": "Current final-byte matrix after fixing the attachment-backed independent-feedback/provider-wait self-healing defect."}
+      {"checkpoint": 8, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 1624.1, "commit": "a1d52f43da7a4b653954bf268a589227e607108e", "working_tree": "final pre-commit bytes later committed as a1d52f43", "note": "Committed a1 baseline after fixing the attachment-backed independent-feedback/provider-wait self-healing defect; later uncommitted Stage-3 recovery changes are not included."},
+      {"checkpoint": 9, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 2096.3, "commit": null, "working_tree": "uncommitted after a1d52f43da7a4b653954bf268a589227e607108e", "note": "Current Stage-3 recovery working tree; exit zero with retained raw log and SHA-256 receipt.", "source_ids": ["postchange_all_projects_test_log"]}
     ],
     "latest_slow_suite": {
       "name": "runner_core",
@@ -928,8 +1449,8 @@
       "completed_without_shortened_timeout": true
     },
     "performance_interpretation": "No performance trend is claimed. Suite content grew and machine contention varied; elapsed times are not like-for-like. The stable conclusion is only that every checkpoint completed with all 14 environments passing.",
-    "evidence_quality": "The first six checkpoints are ExecPlan-recorded. The seventh and eighth are current-working-tree execution results; raw matrix stdout is not linked in this companion.",
-    "source_ids": ["execution_plan", "executive_summary", "current_working_tree_matrix_and_static_gates"]
+    "evidence_quality": "The first six checkpoints are ExecPlan-recorded. The seventh and eighth were working-tree execution results later included in the a1d52f43 baseline; raw matrix stdout is not linked. The ninth is the current uncommitted Stage-3 recovery tree and has a retained raw log with verified SHA-256.",
+    "source_ids": ["execution_plan", "executive_summary", "current_working_tree_matrix_and_static_gates", "postchange_all_projects_test_log"]
   },
   "live_stage3": {
     "revision": "cdd666f31af5cc91d8df4d42a5b38b47a1e99305",
@@ -1473,12 +1994,23 @@
       "No invalid or insufficient Stage 3 output advanced to an accepted dossier, plan, or outcome.",
       "Current targeted offline regressions pass for terminal outcome context, evidence-fresh research routing, content-bound retained-proof and downstream reuse, and rooted connected aggregate causal support.",
       "The deterministic reused-development replay preserves the exact 4 actionable, 18 definite-false, and two uncertain source join and ranks all four known actionable cases first.",
-      "The current full runner suite completed with 428 passed, one skipped, exit zero in 963.3 seconds.",
+      "The a1 committed-baseline full runner suite completed with 428 passed, one skipped, exit zero in 963.3 seconds.",
       "A material attachment-backed independent-feedback/provider-wait continuation defect was fixed: retained attempt integrity and runner-owned workspace_ref content/location now bind workspace authority, and the continuation workspace must match.",
-      "Two targeted and eight broader regressions passed; the final full backlog_miner suite completed with 229 passed, one skipped, exit zero in 143.8 seconds.",
-      "The final-byte canonical matrix completed with all 14 project environments passing, exit zero, in 1,624.1 seconds; Ruff and lock freshness passed 14 of 14, 43 repository-tool tests and the prompt/README/local-dependency-URL checks passed, and 97 tracked structured files parsed successfully.",
+      "Two targeted and eight broader regressions passed; the a1 committed-baseline full backlog_miner suite completed with 229 passed, one skipped, exit zero in 143.8 seconds.",
+      "The a1 committed-baseline canonical matrix completed with all 14 project environments passing, exit zero, in 1,624.1 seconds; Ruff and lock freshness passed 14 of 14, 43 repository-tool tests and the prompt/README/local-dependency-URL checks passed, and 97 tracked structured files parsed successfully.",
       "The CI-equivalent maintenance image built successfully in 131.6 seconds and its local digest matched sha256:edf1e6faa675f42b729d1ce90de8643c3cc8e0d6a02a07f57010cc65628c6dfb.",
-      "The post-restart production-wrapper capacity probe completed in 24.7 seconds with exit zero, the exact requested response, and verified direct host ChatGPT-subscription provenance with API fallback disabled."
+      "The post-restart production-wrapper capacity probe completed in 24.7 seconds with exit zero, the exact requested response, and verified direct host ChatGPT-subscription provenance with API fallback disabled.",
+      "The a1 diagnostic Stage-3 validator crash was traced to an unhashable model JSON shape; current type guards convert that shape into feedback rather than a process crash.",
+      "The retained Stage-3 author reduced structural findings 21 to 10 to three to zero. Evidence correction reached best frontiers of two and then one; the fixed wrapper preserves the best frontier across later regressions.",
+      "A unique-workspace replay then exposed 21 causal evidence and attestation findings. The same author reduced them to 18, followed by three exact no-tool repeats; the controller stopped on the third repeat rather than discarding the first imperfect turn.",
+      "An offline crash-resume regression reused two completed cases out of three and dispatched only the unfinished case; exact bounded Codex PowerShell reads are offline-tested and reject extra output.",
+      "The recovery affected sweep completed with 198 passed, one skipped, zero failed in 181.4 seconds; a later post-threshold focused sweep passed 103 tests in 89.2 seconds. Both are console-observed and have no retained raw log receipt.",
+      "Validator mutation probes produced zero uncaught crashes and the Stage-contract suite passed 142 tests in console-only checks; the mutation-probe denominator was not retained and no percentage is claimed.",
+      "The current uncommitted tree has retained JUnit receipts for core_adapters at 532 of 532 passed and backlog_miner at 238 passed, one skipped, zero failed.",
+      "The first complete usertest_backlog run passed 666 of 668 and exposed two completed-cache/resume regressions. After correction, both exact regressions passed and the complete rerun passed 668 of 668. All three receipts are retained.",
+      "Stage-3 completed-proof reuse now has an explicit semantic compatibility contract: model and prompt-prose changes remain compatible, while agent, subscription execution route, semantic proof version, upstream content, or assignment changes invalidate reuse. A completed cache miss runs Stage 3 normally; in-progress and provider-wait frontiers remain protected.",
+      "The current uncommitted recovery tree passed all 14 project test environments with exit zero in 2,096.3 seconds and all 14 lint environments with exit zero in 98.376 seconds; both retained logs match their recorded SHA-256 hashes.",
+      "The static-contract aggregate exited one rather than being marketed as green. Its lone depcheck finding is the pre-existing backlog_repo false positive with no remediation diff; doctor and four repository contracts passed, and the corrected smoke-import invocation passed."
     ],
     "what_is_not_proven": [
       "That mining precision is adequate: the latest definite atom precision was 15.152 percent, and 18 of 24 candidate cases were definite false cases.",
@@ -1486,13 +2018,16 @@
       "That the sealed pipeline can produce even one contract-valid, evidence-verified, accepted causal dossier or code-grounded plan.",
       "That the measured mining behavior generalizes beyond the reused development/regression corpus; no fresh separately sealed evaluation corpus has been run.",
       "That deptry is clean across all projects: it passed 13 of 14, with an unchanged backlog_repo DEP002 baseline finding for run_artifacts.",
-      "That current uncommitted fixes work in a live model-dependent backlog pipeline; the successful post-restart probe was deliberately trivial and was not an exact-revision sealed qualification.",
+      "That current uncommitted recovery fixes work in a completed live model-dependent backlog pipeline; cycle 001 stopped in Stage 3 and cannot be scored.",
+      "That the structurally valid recovered dossier is evidence-sufficient; its fresh replay still reported 21 findings and later same-author correction stalled at 18.",
+      "That the current uncommitted recovery changes work in a full live end-to-end cycle. Complete affected scopes and the 14-project repository matrix now pass, but they do not supply live-pipeline proof.",
       "That two consecutive completed qualification cycles can produce well-researched, code-grounded ready plans.",
       "That a regenerated backlog can be implemented and its original problems resolved.",
       "Any aggregate historical or new-contract solve rate."
     ],
     "next_decisive_measurements": [
-      "Run a new exact-revision sealed qualification with the signed-in subscription route and remeasure atom recall, atom precision, case mix, prioritization order, self-repair convergence, and accepted-dossier throughput.",
+      "Resolve or explicitly disposition the static aggregate's known baseline/invocation findings, commit an exact revision, and retain provenance for the already passing affected suites, repository matrix, and lint run.",
+      "Run a new exact-revision sealed qualification with corrected manifest v2 and the signed-in subscription route; reuse valid Stage-3 checkpoints during narrow recovery rather than restarting completed mining or cases.",
       "Build and run a fresh, separately sealed evaluation corpus before using the development/regression scores as evidence of generalization.",
       "Run two consecutive completed export-disabled qualification cycles and inspect their cases, evidence, plans, and case-graph stability.",
       "Only then reconcile tickets, regenerate, implement, replay original scenarios, and record outcomes."
@@ -1511,8 +2046,14 @@
     "Sixteen completed Stage 3 run directories consist of eight substantive authoring invocations and eight completed usage-limit attempts. One additional interrupted setup produced no sampling artifact and is not counted as a failed model call.",
     "The a0 qualification cycle was incomplete, not a completed passing or completed failing cycle. It contributes zero to the required successful consecutive streak of two.",
     "Historical resolution is unknown, not zero. New-contract resolution is not measurable because no qualified cases have completed the lifecycle.",
-    "Current uncommitted changes have passed targeted offline regressions, the full runner, the 14-project matrix, Ruff, lock freshness, repository-tool tests, tracked structured parsing, and a CI-equivalent maintenance-image build. Deptry retains one pre-existing backlog_repo finding. Sealed live qualification, ticket regeneration, and the full end-to-end outcome lifecycle remain outstanding.",
+    "The full runner, earlier matrix, lock freshness, repository-tool tests, tracked structured parsing, and maintenance-image build apply to the committed a1d52f43 baseline. The later uncommitted Stage-3 recovery tree has retained JUnit receipts for core_adapters 532/532, backlog_miner 238 passed/one skipped, and a corrected usertest_backlog 668/668 rerun, plus a retained 14-of-14 project test log and 14-of-14 lint log. It has not run an end-to-end qualification cycle.",
     "The a0 prioritization replay is deterministic development evidence over already scored cases. It is not a sealed model run and must not be used as a percentage estimate or generalization claim.",
-    "The July 13 post-restart capacity probe proves only that one simple production-wrapper turn currently completes through the signed-in subscription route. It contributes zero qualification cycles and does not measure mining, research, planning, or outcomes."
+    "The July 13 post-restart capacity probe proves only that one simple production-wrapper turn currently completes through the signed-in subscription route. It contributes zero qualification cycles and does not measure mining, research, planning, or outcomes.",
+    "Cycle 001 is diagnostic, stopped, and unscored. Its v1 denominator was invalidated, corrected v2 did not start that execution, and Stage 3 produced no accepted dossier.",
+    "The three-repeat nonprogress observation is one retained author on one case. It supports the stop-rule behavior but is not an estimate of model correction success on future cases.",
+    "The two-of-three checkpoint reuse and fully completed-cache reuse results are deterministic offline regressions, not evidence that a live multi-case qualification cycle has resumed successfully.",
+    "The first full usertest_backlog run failed two tests before correction. The later 2/2 targeted result and 668/668 full rerun establish the current offline state; retaining the failed receipt is necessary to show the actual correction sequence.",
+    "The validator mutation probes and 142-pass Stage-contract suite are console-observed only. Zero uncaught mutation-probe crashes is reported without a denominator because the invocation count was not retained.",
+    "The post-change static-contract aggregate exited one. The depcheck component retains one documented pre-existing false positive in untouched backlog_repo; the original smoke-guard command omitted required --repo-root, while the corrected invocation passed. Doctor and four named repository contracts passed."
   ]
 }

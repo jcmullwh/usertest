@@ -154,11 +154,7 @@ def _maybe_unwrap_shell_command(argv: list[str]) -> list[str]:
 
     def _strip_wrapper_quotes(value: str) -> str:
         stripped = value.strip()
-        while (
-            len(stripped) >= 2
-            and stripped[0] == stripped[-1]
-            and stripped[0] in {"'", '"'}
-        ):
+        while len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
             stripped = stripped[1:-1].strip()
         return stripped
 
@@ -309,6 +305,55 @@ def _maybe_emit_read_events(
 ) -> Iterable[dict[str, Any]]:
     if workspace_root is None:
         return []
+    range_read = _powershell_exact_range_read(argv)
+    if range_read is not None:
+        path_token, skip_lines, first_lines = range_read
+        effective_cwd = cwd if cwd is not None else workspace_root
+        candidate = _resolve_candidate_path(
+            path_token,
+            base_dir=effective_cwd,
+            workspace_root=workspace_root,
+            workspace_mount=workspace_mount,
+        )
+        if candidate is None or not candidate.is_file():
+            return []
+        try:
+            file_text = candidate.read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            return []
+        normalized_file = file_text.replace("\r\n", "\n").replace("\r", "\n")
+        selected_text = "".join(
+            normalized_file.splitlines(keepends=True)[skip_lines : skip_lines + first_lines]
+        )
+        normalized_stdout = stdout_text.replace("\r\n", "\n").replace("\r", "\n")
+        observed_text = (
+            selected_text
+            if normalized_stdout == selected_text
+            or (not selected_text.endswith("\n") and normalized_stdout == selected_text + "\n")
+            else None
+        )
+        attestation = observed_read_attestation(
+            path=candidate,
+            observed_text=observed_text,
+            source_exit_code=source_exit_code,
+            allow_partial=True,
+        )
+        return [
+            make_event(
+                "read_file",
+                {
+                    "path": _safe_relpath(candidate, workspace_root),
+                    "bytes": attestation.get("file_size_bytes"),
+                    "read_source": "shell_command",
+                    "attestation_kind": "exact_line_range",
+                    "source_exit_code": source_exit_code,
+                    "requested_skip_lines": skip_lines,
+                    "requested_first_lines": first_lines,
+                    **attestation,
+                },
+                ts=(next(ts_iter, fallback_ts) if ts_iter is not None else fallback_ts),
+            )
+        ]
     if any(token in CHAIN_OPERATORS for token in argv):
         return []
     command = argv[0].casefold() if argv else ""
@@ -389,6 +434,65 @@ def _maybe_emit_read_events(
     return out
 
 
+def _powershell_exact_range_read(argv: list[str]) -> tuple[str, int, int] | None:
+    """Recognize one output-attestable PowerShell file slice and nothing broader."""
+    if "|" not in argv or argv.count("|") != 1:
+        return None
+    pipe_index = argv.index("|")
+    source = argv[:pipe_index]
+    selector = argv[pipe_index + 1 :]
+    if not source or source[0].casefold() not in {"get-content", "gc"}:
+        return None
+    path_token: str | None = None
+    encoding_seen = False
+    index = 1
+    while index < len(source):
+        token = source[index]
+        folded = token.casefold()
+        if folded == "-encoding":
+            if encoding_seen or index + 1 >= len(source):
+                return None
+            if source[index + 1].casefold() != "utf8":
+                return None
+            encoding_seen = True
+            index += 2
+            continue
+        if folded == "-literalpath":
+            if path_token is not None or index + 1 >= len(source):
+                return None
+            path_token = source[index + 1]
+            index += 2
+            continue
+        return None
+    if path_token is None or not encoding_seen:
+        return None
+    if not selector or selector[0].casefold() not in {"select-object", "select"}:
+        return None
+    values: dict[str, int] = {}
+    index = 1
+    while index < len(selector):
+        option = selector[index].casefold()
+        if option not in {"-skip", "-first"} or option in values or index + 1 >= len(selector):
+            return None
+        try:
+            value = int(selector[index + 1])
+        except ValueError:
+            return None
+        values[option] = value
+        index += 2
+    skip_lines = values.get("-skip")
+    first_lines = values.get("-first")
+    if (
+        skip_lines is None
+        or first_lines is None
+        or skip_lines < 0
+        or first_lines < 1
+        or first_lines > 2_000
+    ):
+        return None
+    return path_token, skip_lines, first_lines
+
+
 def normalize_codex_events(
     *,
     raw_events_path: Path,
@@ -449,6 +553,7 @@ def normalize_codex_events(
             event = make_event("delegation_result", data, ts=_next_ts())
             out_f.write(json.dumps(event, ensure_ascii=False) + "\n")
             return True
+
         for raw_line, payload in _iter_codex_raw_lines(raw_events_path):
             if ts_iter is None:
                 line_ts = _next_raw_ts()

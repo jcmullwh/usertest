@@ -568,6 +568,43 @@ def test_output_retry_projection_and_field_hints_are_content_addressed() -> None
     assert "identical addressed source atoms" in hints[4]["required_change"]
 
 
+def test_repair_hints_give_exact_shapes_for_common_nondeterministic_errors() -> None:
+    errors = [
+        "research_dossier_invalid_experiment_command: problem:retry: index=0",
+        "research_dossier_invalid_experiment_outcome: problem:retry: index=0 value={}",
+        "research_dossier_invalid_assertion_source: problem:retry: index=0 value='artifact:x'",
+        "research_dossier_invalid_hypothesis_disposition: problem:retry: index=0 "
+        "value='insufficient_evidence'",
+        "research_dossier_unknown_fields: problem:retry: ['implementation_touchpoints']",
+    ]
+
+    hints = mod._research_retry_remediation_hints(errors)
+
+    assert "not an argv array or object" in hints[0]["required_change"]
+    assert "supports, refutes, or inconclusive" in hints[1]["required_change"]
+    assert "exit_code, stdout, stderr, or combined" in hints[2]["required_change"]
+    assert "The first hypothesis must be primary" in hints[3]["required_change"]
+    assert "Remove only the unsupported top-level fields" in hints[4]["required_change"]
+
+
+def test_verifier_hints_give_attestable_read_and_disposable_state_protocols() -> None:
+    errors = [
+        "inspected_file_not_observed:packages/runner_core/src/runner_core/runner.py",
+        "inspected_symbol_unresolved:runner_core.runner.run_once",
+        "inspected_file_unresolved:.usertest_research/state/observations.json",
+        "experiment_replay_workspace_mutated:experiment:repro",
+    ]
+
+    hints = mod._research_retry_remediation_hints(errors)
+
+    assert "Get-Content -Raw -Encoding UTF8 -LiteralPath" in hints[0]["required_change"]
+    assert "Select-Object -Skip <N> -First <M>" in hints[0]["required_change"]
+    assert "complete definition" in hints[1]["required_change"]
+    assert "artifact_ref/experiment artifact" in hints[2]["required_change"]
+    assert hints[3]["target_fields"] == ["experiments[].replay_setup.disposable_state_paths"]
+    assert "Never declare tracked product paths" in hints[3]["required_change"]
+
+
 def test_fresh_restart_retains_latest_safe_and_objective_best_frontiers() -> None:
     best_dossier = {"case_id": "case:test", "phase": "best", "errors": 1}
     latest_dossier = {"case_id": "case:test", "phase": "latest", "errors": 1}
@@ -597,12 +634,14 @@ def test_fresh_restart_retains_latest_safe_and_objective_best_frontiers() -> Non
 
     assert frontiers["latest_safe_projection"]["attempted_dossier"] == latest_dossier
     assert frontiers["best_count_projection"]["attempted_dossier"] == best_dossier
-    assert frontiers["latest_safe_projection_sha256"] == frontiers["latest_safe_projection"][
-        "projection_sha256"
-    ]
-    assert frontiers["best_count_projection_sha256"] == frontiers["best_count_projection"][
-        "projection_sha256"
-    ]
+    assert (
+        frontiers["latest_safe_projection_sha256"]
+        == frontiers["latest_safe_projection"]["projection_sha256"]
+    )
+    assert (
+        frontiers["best_count_projection_sha256"]
+        == frontiers["best_count_projection"]["projection_sha256"]
+    )
     unhashed = dict(frontiers)
     digest = unhashed.pop("frontiers_sha256")
     assert digest == mod._canonical_json_sha256(unhashed)
@@ -746,9 +785,10 @@ def test_correction_progress_counts_two_old_to_one_new_as_progress() -> None:
 
 
 def test_duplicate_validator_diagnostics_cannot_fabricate_progress() -> None:
-    assert mod._dedupe_validation_errors(
-        ["old:a", " old:a  ", "new:b", "new:b"]
-    ) == ["old:a", "new:b"]
+    assert mod._dedupe_validation_errors(["old:a", " old:a  ", "new:b", "new:b"]) == [
+        "old:a",
+        "new:b",
+    ]
 
     progress = mod._correction_progress_assessment(
         before_errors=["old:a", " old:a  "],
@@ -814,15 +854,17 @@ def test_immutable_change_is_never_accepted_and_repetition_stalls() -> None:
     }
 
     first = mod._correction_progress_assessment(repeated_state_count=1, **common)
-    repeated = mod._correction_progress_assessment(repeated_state_count=2, **common)
+    second = mod._correction_progress_assessment(repeated_state_count=2, **common)
+    repeated = mod._correction_progress_assessment(repeated_state_count=3, **common)
 
     assert first["decision"] == "continue"
     assert first["reason"] == "revert_accidental_retained_evidence_change"
+    assert second["decision"] == "continue"
     assert repeated["decision"] == "restart"
     assert repeated["reason"] == "retained_evidence_change_repeated_after_feedback"
 
 
-def test_first_noop_gets_feedback_second_noop_and_cycle_stall() -> None:
+def test_two_noops_get_feedback_third_noop_and_cycle_stall() -> None:
     common = {
         "before_errors": ["shape:error"],
         "after_errors": ["shape:error"],
@@ -837,18 +879,20 @@ def test_first_noop_gets_feedback_second_noop_and_cycle_stall() -> None:
 
     first = mod._correction_progress_assessment(repeated_state_count=1, **common)
     second = mod._correction_progress_assessment(repeated_state_count=2, **common)
+    third = mod._correction_progress_assessment(repeated_state_count=3, **common)
     cycle = mod._correction_progress_assessment(
         **{
             **common,
             "before_errors": ["shape:other"],
             "after_errors": ["shape:error"],
             "before_dossier_sha256": "b" * 64,
-            "repeated_state_count": 2,
+            "repeated_state_count": 3,
         }
     )
 
     assert first["decision"] == "continue"
-    assert second["decision"] == "restart"
+    assert second["decision"] == "continue"
+    assert third["decision"] == "restart"
     assert cycle["decision"] == "restart"
 
 
@@ -983,9 +1027,7 @@ def test_same_author_retains_improving_unverified_draft_as_next_correction_front
     )
     corrected = json.loads(json.dumps(improved))
     corrected["experiments"][0]["result"] = "observed"
-    command_error = (
-        "research_dossier_invalid_experiment_command: problem:test-1: index=0"
-    )
+    command_error = "research_dossier_invalid_experiment_command: problem:test-1: index=0"
     result_error = "research_dossier_invalid_experiment_result: problem:test-1: index=0"
     source_attempt = mod._research_attempt_record(
         attempt_number=1,
@@ -1032,19 +1074,21 @@ def test_same_author_retains_improving_unverified_draft_as_next_correction_front
     assert result["dossier"] == corrected
     assert len(requests) == 2
     assert [request.codex_resume_session_id for request in requests] == [session_id, session_id]
-    assert _dossier_repair_payload(requests[0].agent_append_system_prompt or "")[
-        "immutable_evidence_paths"
-    ] == []
-    assert _dossier_repair_payload(requests[1].agent_append_system_prompt or "")[
-        "baseline_dossier"
-    ] == improved
+    assert (
+        _dossier_repair_payload(requests[0].agent_append_system_prompt or "")[
+            "immutable_evidence_paths"
+        ]
+        == []
+    )
+    assert (
+        _dossier_repair_payload(requests[1].agent_append_system_prompt or "")["baseline_dossier"]
+        == improved
+    )
     assert [attempt["outcome"] for attempt in result["attempts"]] == [
         "repair_contract_invalid",
         "repair_contract_valid",
     ]
-    assert result["attempts"][0]["repair_progress"]["reason"] == (
-        "best_error_count_decreased"
-    )
+    assert result["attempts"][0]["repair_progress"]["reason"] == ("best_error_count_decreased")
     assert all(
         attempt["repair_progress"].get("fundamental_change_paths", []) == []
         for attempt in result["attempts"]
@@ -1137,9 +1181,7 @@ def test_adaptive_correction_resumes_one_session_beyond_three_turns(
     assert [attempt["attempt_kind"] for attempt in result["attempts"]] == [
         "model_output_repair"
     ] * 4
-    assert result["attempts"][0]["repair_progress"]["reason"] == (
-        "best_error_count_decreased"
-    )
+    assert result["attempts"][0]["repair_progress"]["reason"] == ("best_error_count_decreased")
     assert all(attempt["agent_session_id"] == session_id for attempt in result["attempts"])
     assert all(attempt["resumed_from_session_id"] == session_id for attempt in result["attempts"])
 
@@ -1206,12 +1248,165 @@ def test_changing_targeted_runner_failures_consume_rework_economics(
         6.0,
         6.0,
     ]
-    assert result["attempts"][1]["repair_progress"][
-        "correction_seconds_since_best_progress"
-    ] == 12.0
-    assert result["attempts"][1]["repair_progress"]["authored_work_disposition"] == (
-        "retained"
+    assert (
+        result["attempts"][1]["repair_progress"]["correction_seconds_since_best_progress"] == 12.0
     )
+    assert result["attempts"][1]["repair_progress"]["authored_work_disposition"] == ("retained")
+
+
+def test_resumed_correction_preserves_original_investigation_cost_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "resumed-budget-workspace"
+    revision = _init_workspace(workspace)
+    retained_repair_run = tmp_path / "resumed-budget-retained-repair"
+    retained_repair_run.mkdir()
+    _write_json(retained_repair_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=retained_repair_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+    )
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    baseline = {"case_id": "case:test-1", "problem_id": "problem:test-1", "phase": 0}
+    source_attempt = mod._research_attempt_record(
+        attempt_number=2,
+        outcome="output_contract_invalid",
+        run_dir=retained_repair_run,
+        report_path=retained_repair_run / "report.json",
+        validation_errors=["shape:retained-repair"],
+        attempted_dossier=baseline,
+        agent_session_id=session_id,
+        # This is only the most recent repair turn, not the original investigation cost.
+        attempt_wall_seconds=10.0,
+    )
+    monotonic_values = iter([0.0, 6.0, 6.0, 12.0, 12.0, 18.0])
+    monkeypatch.setattr(mod.time, "monotonic", lambda: next(monotonic_values))
+    calls = 0
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        nonlocal calls
+        calls += 1
+        assert request.codex_resume_session_id == session_id
+        run_dir = tmp_path / f"resumed-budget-correction-{calls}"
+        run_dir.mkdir()
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    candidates = [
+        ({**baseline, "phase": 1}, ["shape:new-1"]),
+        ({**baseline, "phase": 2}, ["shape:new-2"]),
+        ({**baseline, "phase": 3}, []),
+    ]
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        mod,
+        "_repair_candidate_from_run",
+        lambda **kwargs: candidates.pop(0),
+    )
+
+    result = mod._run_targeted_dossier_repairs(
+        repo_input=str(workspace),
+        repo_revision=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        case_id="case:test-1",
+        problem_id="problem:test-1",
+        evidence_assignment={},
+        source_attempt=source_attempt,
+        validation_errors=["shape:retained-repair"],
+        first_attempt_number=3,
+        original_investigation_seconds=100.0,
+    )
+
+    assert result["status"] == "corrected"
+    assert calls == 3
+    assert result["attempts"][1]["repair_progress"]["original_investigation_seconds"] == 100.0
+
+
+def test_resumed_unverified_draft_can_normalize_malformed_evidence_shape(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace = tmp_path / "resumed-unverified-workspace"
+    revision = _init_workspace(workspace)
+    retained_repair_run = tmp_path / "resumed-unverified-retained-repair"
+    retained_repair_run.mkdir()
+    _write_json(retained_repair_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=retained_repair_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+    )
+    session_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
+    baseline = {
+        "case_id": "case:test-1",
+        "problem_id": "problem:test-1",
+        "experiments": [
+            {
+                "experiment_id": "experiment:retained",
+                "command": ["python", "probe.py"],
+            }
+        ],
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["experiments"][0]["command"] = "python probe.py"
+    source_attempt = mod._research_attempt_record(
+        attempt_number=4,
+        outcome="repair_contract_invalid",
+        run_dir=retained_repair_run,
+        report_path=retained_repair_run / "report.json",
+        validation_errors=["research_dossier_invalid_experiment_command"],
+        attempted_dossier=baseline,
+        agent_session_id=session_id,
+        attempt_wall_seconds=30.0,
+    )
+
+    def fake_run_once(*, config: RunnerConfig, request: RunRequest) -> RunResult:
+        assert request.codex_resume_session_id == session_id
+        run_dir = tmp_path / "resumed-unverified-correction"
+        run_dir.mkdir()
+        return RunResult(
+            run_dir=run_dir,
+            exit_code=0,
+            report_validation_errors=[],
+            agent_session_id=session_id,
+        )
+
+    monkeypatch.setattr(mod, "run_once", fake_run_once)
+    monkeypatch.setattr(
+        mod,
+        "_repair_candidate_from_run",
+        lambda **kwargs: (corrected, []),
+    )
+
+    result = mod._run_targeted_dossier_repairs(
+        repo_input=str(workspace),
+        repo_revision=revision,
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        case_id="case:test-1",
+        problem_id="problem:test-1",
+        evidence_assignment={},
+        source_attempt=source_attempt,
+        validation_errors=["research_dossier_invalid_experiment_command"],
+        first_attempt_number=5,
+        original_investigation_seconds=300.0,
+        source_baseline_is_unverified_draft=True,
+    )
+
+    assert result["status"] == "corrected"
+    assert result["dossier"] == corrected
+    assert result["attempts"][0]["repair_progress"].get("fundamental_change_paths", []) == []
 
 
 def test_post_verifier_gap_resumes_same_author_with_research_capabilities(
@@ -1312,9 +1507,7 @@ def test_post_verifier_gap_resumes_same_author_with_research_capabilities(
     assert request.parent_case_id == "case:test-1"
     assert ("powershell.exe",) in request.codex_execpolicy_allow_prefixes
     assert ("python",) in request.codex_execpolicy_allow_prefixes
-    assert result["attempts"][0]["attempt_kind"] == (
-        "evidence_verification_research_continuation"
-    )
+    assert result["attempts"][0]["attempt_kind"] == ("evidence_verification_research_continuation")
 
 
 def test_research_capable_correction_cannot_advance_when_candidate_verifier_rejects_it(
@@ -1404,18 +1597,19 @@ def test_research_capable_correction_cannot_advance_when_candidate_verifier_reje
     )
 
     assert result["status"] == "restart:exact_state_repeated_after_feedback"
-    assert len(requests) == 2
-    assert len(verifier_calls) == 2
-    assert result["validation_errors"] == [
-        "experiment_command_not_observed:experiment:unsupported"
-    ]
+    assert len(requests) == 3
+    assert len(verifier_calls) == 3
+    assert result["validation_errors"] == ["experiment_command_not_observed:experiment:unsupported"]
     assert all(attempt["outcome"] != "repair_contract_valid" for attempt in result["attempts"])
 
 
 def test_every_post_verifier_error_defaults_to_research_capable_continuation() -> None:
-    assert mod._verifier_feedback_requires_research_tools(
-        ["future_verifier_domain_error_without_known_keywords"]
-    ) is True
+    assert (
+        mod._verifier_feedback_requires_research_tools(
+            ["future_verifier_domain_error_without_known_keywords"]
+        )
+        is True
+    )
 
 
 def test_continuity_failure_persists_expected_and_observed_session_ids(
@@ -1514,9 +1708,7 @@ def test_research_prompts_state_exact_causal_and_output_contract_rules() -> None
     ]
     prompt = "\n".join(path.read_text(encoding="utf-8") for path in prompt_paths)
     assert [
-        fragment
-        for fragment in exact_fragments
-        if fragment.casefold() not in prompt.casefold()
+        fragment for fragment in exact_fragments if fragment.casefold() not in prompt.casefold()
     ] == []
 
 
@@ -1916,9 +2108,7 @@ def test_output_repair_continues_same_author_session_and_invalid_then_valid(
     repair_auth_path.write_bytes(repair_auth_bytes)
     repair_auth_receipt = json.loads(repair_auth_bytes)
     repair_auth_receipt["api_fallback_allowed"] = True
-    repair_auth_receipt["receipt_sha256"] = codex_execpolicy_receipt_sha256(
-        repair_auth_receipt
-    )
+    repair_auth_receipt["receipt_sha256"] = codex_execpolicy_receipt_sha256(repair_auth_receipt)
     _write_json(repair_auth_path, repair_auth_receipt)
     repair_auth_artifact.update(
         exists=True,
@@ -1928,10 +2118,7 @@ def test_output_repair_continues_same_author_session_and_invalid_then_valid(
     repair_attempt["attempt_sha256"] = mod.research_attempt_sha256(repair_attempt)
     persisted, persisted_errors = verify_persisted_research_evidence(dossier)
     assert persisted is False
-    assert (
-        "research_attempt_1_codex_execpolicy_api_fallback_allowed_invalid"
-        in persisted_errors
-    )
+    assert "research_attempt_1_codex_execpolicy_api_fallback_allowed_invalid" in persisted_errors
 
     Path(attempts[0]["report_path"]).write_text("{}\n", encoding="utf-8")
     persisted, persisted_errors = verify_persisted_research_evidence(dossier)
@@ -2170,22 +2357,19 @@ def test_subscription_wait_parks_remaining_stage3_cases_without_dispatch(
     assert document["input_meta"]["parked_before_dispatch_count"] == 2
     assert checkpoint["trigger_problem_id"] == "problem:test-1"
     assert checkpoint["expected_session_id"] == session_id
-    assert checkpoint["resume_status"] == (
-        "checkpoint_persisted_same_author_resume_supported"
-    )
+    assert checkpoint["resume_status"] == ("checkpoint_persisted_same_author_resume_supported")
     assert checkpoint["route"] == "chatgpt_subscription"
     assert checkpoint["api_fallback_allowed"] is False
     assert all(
         item["blocking_reasons"]
         == [
-            "research_external_wait_stage_parked_before_dispatch:"
-            + checkpoint["checkpoint_sha256"]
+            "research_external_wait_stage_parked_before_dispatch:" + checkpoint["checkpoint_sha256"]
         ]
         for item in document["items"][1:]
     )
-    requests = json.loads(
-        Path(document["artifacts"]["requests_json"]).read_text(encoding="utf-8")
-    )["requests"]
+    requests = json.loads(Path(document["artifacts"]["requests_json"]).read_text(encoding="utf-8"))[
+        "requests"
+    ]
     assert [request.get("dispatch_status") for request in requests] == [
         "parked_during_dispatch",
         "parked_not_started",
@@ -2288,8 +2472,8 @@ def test_process_boundary_resume_reuses_wait_author_then_advances_frontier(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    first_document, selected, workspace, revision, session_id = (
-        _build_persisted_stage_wait(tmp_path=tmp_path, monkeypatch=monkeypatch)
+    first_document, selected, workspace, revision, session_id = _build_persisted_stage_wait(
+        tmp_path=tmp_path, monkeypatch=monkeypatch
     )
     persisted_bytes = json.dumps(first_document, ensure_ascii=False).encode("utf-8")
     continuation_calls: list[dict[str, Any]] = []
@@ -2383,16 +2567,15 @@ def test_process_boundary_resume_reuses_wait_author_then_advances_frontier(
 
     assert len(continuation_calls) == 1
     assert resumed_dispatches == ["problem:test-2"]
-    assert resumed["input_meta"]["resumed_external_wait_checkpoint_sha256"] == (
-        first_document["input_meta"]["external_wait"]["checkpoint_sha256"]
+    assert (
+        resumed["input_meta"]["resumed_external_wait_checkpoint_sha256"]
+        == (first_document["input_meta"]["external_wait"]["checkpoint_sha256"])
     )
     assert resumed["input_meta"]["external_wait_resume_cleared"] is True
-    assert resumed["input_meta"]["external_wait"]["trigger_problem_id"] == (
-        "problem:test-2"
-    )
-    requests = json.loads(
-        Path(resumed["artifacts"]["requests_json"]).read_text(encoding="utf-8")
-    )["requests"]
+    assert resumed["input_meta"]["external_wait"]["trigger_problem_id"] == ("problem:test-2")
+    requests = json.loads(Path(resumed["artifacts"]["requests_json"]).read_text(encoding="utf-8"))[
+        "requests"
+    ]
     assert [request.get("dispatch_status") for request in requests] == [
         "resumed_same_author_after_provider_reset",
         "parked_during_dispatch",
@@ -2485,8 +2668,7 @@ def test_resume_rejects_changed_pretrigger_assignment_before_dispatch(
     checkpoint["checkpoint_sha256"] = mod._canonical_json_sha256(checkpoint)
     staged["input_meta"]["external_wait"] = checkpoint
     staged["items"][2]["blocking_reasons"] = [
-        "research_external_wait_stage_parked_before_dispatch:"
-        + checkpoint["checkpoint_sha256"]
+        "research_external_wait_stage_parked_before_dispatch:" + checkpoint["checkpoint_sha256"]
     ]
     changed = json.loads(json.dumps(selected))
     changed[0]["evidence_assignment"]["status"] = "incomplete"
@@ -2760,6 +2942,235 @@ def test_run_repro_research_stage_dry_run_writes_requests_and_placeholders(tmp_p
     assert requests["replay_executor"]["executor"] == "docker"
 
 
+def test_stage3_progress_checkpoint_reuses_completed_prefix_after_crash(
+    tmp_path: Path,
+) -> None:
+    selected: list[dict[str, object]] = []
+    for index in range(1, 4):
+        problem = _problem_payload(tmp_path)
+        problem_id = f"problem:test-{index}"
+        case_id = f"case:test-{index}"
+        problem["problem_id"] = problem_id
+        problem["case_id"] = case_id
+        assignment = dict(problem["evidence_assignment"])
+        assignment["problem_id"] = problem_id
+        assignment["case_id"] = case_id
+        assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
+        problem["evidence_assignment"] = assignment
+        selected.append(problem)
+
+    checkpoints: list[dict[str, Any]] = []
+
+    class SimulatedCrash(RuntimeError):
+        pass
+
+    def crash_after_second(document: dict[str, Any]) -> None:
+        checkpoints.append(json.loads(json.dumps(document)))
+        if document["item_count"] == 2:
+            raise SimulatedCrash
+
+    with pytest.raises(SimulatedCrash):
+        mod.run_repro_research_stage(
+            repo_root=tmp_path,
+            repo_input=None,
+            repo_ref="HEAD",
+            target_slug="target_a",
+            selected_problems=selected,
+            artifacts_dir=tmp_path / "compiled" / "crashed.backlog_artifacts",
+            agent="codex",
+            model=None,
+            cfg=_cfg(tmp_path),
+            dry_run=True,
+            progress_callback=crash_after_second,
+        )
+
+    retained = checkpoints[-1]
+    assert retained["input_meta"]["stage_status"] == "checkpointed_progress"
+    assert [item["problem_id"] for item in retained["items"]] == [
+        "problem:test-1",
+        "problem:test-2",
+    ]
+
+    resumed_checkpoints: list[dict[str, Any]] = []
+    completed = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=None,
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=selected,
+        artifacts_dir=tmp_path / "compiled" / "resumed.backlog_artifacts",
+        agent="codex",
+        model="different-model-is-resume-compatible",
+        cfg=_cfg(tmp_path),
+        dry_run=True,
+        resume_stage_document=retained,
+        progress_callback=lambda document: resumed_checkpoints.append(
+            json.loads(json.dumps(document))
+        ),
+    )
+
+    assert completed["input_meta"]["resumed_completed_prefix_count"] == 2
+    assert len(completed["items"]) == 3
+    assert [document["item_count"] for document in resumed_checkpoints] == [3]
+    requests = json.loads(
+        Path(completed["artifacts"]["requests_json"]).read_text(encoding="utf-8")
+    )["requests"]
+    assert [request.get("dispatch_status") for request in requests] == [
+        "reused_completed_prefix",
+        "reused_completed_prefix",
+        None,
+    ]
+
+    with pytest.raises(ValueError, match="research_progress_resume_compatibility_changed"):
+        mod.run_repro_research_stage(
+            repo_root=tmp_path,
+            repo_input=None,
+            repo_ref="HEAD",
+            target_slug="target_a",
+            selected_problems=selected,
+            artifacts_dir=tmp_path / "compiled" / "changed-agent.backlog_artifacts",
+            agent="claude",
+            model=None,
+            cfg=_cfg(tmp_path),
+            dry_run=True,
+            resume_stage_document=retained,
+        )
+
+    changed_contract = json.loads(json.dumps(retained))
+    changed_progress = changed_contract["input_meta"]["progress_checkpoint"]
+    changed_compatibility = changed_progress["research_compatibility"]
+    changed_compatibility["semantic_proof_contract_version"] = "incompatible-proof-v2"
+    changed_compatibility["contract_sha256"] = mod._canonical_json_sha256(
+        {key: value for key, value in changed_compatibility.items() if key != "contract_sha256"}
+    )
+    changed_progress["checkpoint_sha256"] = mod._canonical_json_sha256(
+        {key: value for key, value in changed_progress.items() if key != "checkpoint_sha256"}
+    )
+    with pytest.raises(ValueError, match="research_progress_resume_compatibility_changed"):
+        mod.run_repro_research_stage(
+            repo_root=tmp_path,
+            repo_input=None,
+            repo_ref="HEAD",
+            target_slug="target_a",
+            selected_problems=selected,
+            artifacts_dir=tmp_path / "compiled" / "changed-contract.backlog_artifacts",
+            agent="codex",
+            model=None,
+            cfg=_cfg(tmp_path),
+            dry_run=True,
+            resume_stage_document=changed_contract,
+        )
+
+    changed = json.loads(json.dumps(selected))
+    changed_assignment = changed[1]["evidence_assignment"]
+    changed_assignment["errors"] = ["changed"]
+    changed_assignment["assignment_sha256"] = evidence_assignment_sha256(changed_assignment)
+    with pytest.raises(ValueError, match="research_progress_resume_checkpoint_invalid"):
+        mod.run_repro_research_stage(
+            repo_root=tmp_path,
+            repo_input=None,
+            repo_ref="HEAD",
+            target_slug="target_a",
+            selected_problems=changed,
+            artifacts_dir=tmp_path / "compiled" / "changed.backlog_artifacts",
+            agent="codex",
+            model=None,
+            cfg=_cfg(tmp_path),
+            dry_run=True,
+            resume_stage_document=retained,
+        )
+
+
+def test_stage3_completed_checkpoint_reuses_all_research_after_later_failure(
+    tmp_path: Path,
+) -> None:
+    selected: list[dict[str, object]] = []
+    for index in range(1, 4):
+        problem = _problem_payload(tmp_path)
+        problem_id = f"problem:complete-{index}"
+        case_id = f"case:complete-{index}"
+        problem["problem_id"] = problem_id
+        problem["case_id"] = case_id
+        assignment = dict(problem["evidence_assignment"])
+        assignment["problem_id"] = problem_id
+        assignment["case_id"] = case_id
+        assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
+        problem["evidence_assignment"] = assignment
+        selected.append(problem)
+
+    completed = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=None,
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=selected,
+        artifacts_dir=tmp_path / "compiled" / "completed.backlog_artifacts",
+        agent="codex",
+        model=None,
+        cfg=_cfg(tmp_path),
+        dry_run=True,
+    )
+    assert (
+        mod._validated_completed_stage3_checkpoint(
+            completed,
+            expected_compatibility_contract=mod.stage3_research_compatibility_contract(
+                agent="codex"
+            ),
+        )
+        is not None
+    )
+
+    # These fields are rederived from the separately bound case registry. Their
+    # attachment after Stage 3 must not force the authored proof to run again.
+    completed_with_lineage = json.loads(json.dumps(completed))
+    for item in completed_with_lineage["items"]:
+        item["canonical_problem_id"] = item["problem_id"]
+        item["case_member_problem_ids"] = [item["problem_id"]]
+
+    resumed = mod.run_repro_research_stage(
+        repo_root=tmp_path,
+        repo_input=None,
+        repo_ref="HEAD",
+        target_slug="target_a",
+        selected_problems=selected,
+        artifacts_dir=tmp_path / "compiled" / "completed-resume.backlog_artifacts",
+        agent="codex",
+        model="different-model-is-resume-compatible",
+        cfg=_cfg(tmp_path),
+        dry_run=True,
+        resume_stage_document=completed_with_lineage,
+    )
+
+    assert resumed["input_meta"]["resumed_completed_prefix_count"] == 3
+    requests = json.loads(Path(resumed["artifacts"]["requests_json"]).read_text(encoding="utf-8"))[
+        "requests"
+    ]
+    assert [request.get("dispatch_status") for request in requests] == [
+        "reused_completed_prefix",
+        "reused_completed_prefix",
+        "reused_completed_prefix",
+    ]
+
+    changed = json.loads(json.dumps(selected))
+    assignment = changed[0]["evidence_assignment"]
+    assignment["errors"] = ["new-origin-evidence"]
+    assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
+    with pytest.raises(ValueError, match="research_progress_resume_checkpoint_invalid"):
+        mod.run_repro_research_stage(
+            repo_root=tmp_path,
+            repo_input=None,
+            repo_ref="HEAD",
+            target_slug="target_a",
+            selected_problems=changed,
+            artifacts_dir=tmp_path / "compiled" / "completed-changed.backlog_artifacts",
+            agent="codex",
+            model=None,
+            cfg=_cfg(tmp_path),
+            dry_run=True,
+            resume_stage_document=completed,
+        )
+
+
 def test_pending_multi_case_identity_blocks_research_without_new_invocation(
     tmp_path: Path,
 ) -> None:
@@ -2787,9 +3198,7 @@ def test_pending_multi_case_identity_blocks_research_without_new_invocation(
     assert len(doc["items"]) == 1
     dossier = doc["items"][0]
     assert dossier["research_status"] == "blocked"
-    assert dossier["blocking_reasons"] == [
-        "canonical_case_identity_pending_relation_review"
-    ]
+    assert dossier["blocking_reasons"] == ["canonical_case_identity_pending_relation_review"]
     requests = json.loads(Path(doc["artifacts"]["requests_json"]).read_text(encoding="utf-8"))
     assert len(requests["requests"]) == 1
 
@@ -4161,10 +4570,248 @@ def test_independent_feedback_resumes_research_author_and_reverifies_candidate(
     assert len(result["dossier"]["research_attempts"]) == 2
     assert captured[0]["source_attempt"] == source_attempt
     assert captured[0]["research_capabilities"] is True
-    assert captured[0]["attempt_kind"] == (
-        "independent_qualification_research_continuation"
-    )
+    assert captured[0]["attempt_kind"] == ("independent_qualification_research_continuation")
     assert captured[0]["independent_feedback"] == independent_feedback
+
+
+def test_independent_feedback_resumes_retained_best_frontier_with_original_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "11111111-1111-4111-8111-111111111111"
+    original = {"case_id": "case:one", "problem_id": "problem:one", "phase": "original"}
+    best = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "phase": "best",
+        "artifact_refs": [
+            {
+                "artifact_id": "model:one",
+                "kind": "log",
+                "path": "evidence.log",
+            }
+        ],
+    }
+    regressed = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "phase": "regressed",
+    }
+    initial_attempt = {
+        "attempt_sha256": "a" * 64,
+        "attempt_kind": "full_research",
+        "outcome": "output_contract_invalid",
+        "agent_session_id": session_id,
+        "attempt_wall_seconds": 600.0,
+        "attempted_dossier": original,
+    }
+    best_attempt = {
+        "attempt_sha256": "b" * 64,
+        "attempt_kind": "independent_qualification_research_continuation",
+        "outcome": "repair_contract_invalid",
+        "agent_session_id": session_id,
+        "attempt_wall_seconds": 30.0,
+        "attempted_dossier": best,
+    }
+    regression_attempt = {
+        "attempt_sha256": "c" * 64,
+        "attempt_kind": "independent_qualification_research_continuation",
+        "outcome": "repair_contract_invalid",
+        "agent_session_id": session_id,
+        "attempt_wall_seconds": 20.0,
+        "attempted_dossier": regressed,
+    }
+    dossier = {
+        **best,
+        "artifact_refs": [
+            *best["artifact_refs"],
+            {
+                "artifact_id": "runner:report_json",
+                "kind": "report_json",
+                "path": "runner/report.json",
+            },
+        ],
+        "repo_revision": "d" * 40,
+        "evidence_assignment": {
+            "expected_atom_ids": ["atom:one"],
+            "status": "complete",
+        },
+        "research_attempts": [initial_attempt, best_attempt, regression_attempt],
+        "evidence_verification": {"status": "failed", "errors": ["best:error"]},
+    }
+    captured: list[dict[str, object]] = []
+
+    def targeted(**kwargs: object) -> dict[str, object]:
+        captured.append(kwargs)
+        return {
+            "status": "restart:exact_state_repeated_after_feedback",
+            "dossier": best,
+            "validation_errors": ["best:error"],
+            "best_dossier": best,
+            "best_validation_errors": ["best:error"],
+            "best_source_attempt_sha256": best_attempt["attempt_sha256"],
+            "attempts": [],
+        }
+
+    monkeypatch.setattr(mod, "_run_targeted_dossier_repairs", targeted)
+
+    result = mod.continue_research_dossier_from_independent_feedback(
+        dossier=dossier,
+        validation_errors=["best:error"],
+        repo_input=str(tmp_path),
+        requested_repo_ref="dev",
+        resolved_repo_ref="dev",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        replay_timeout_seconds=None,
+        replay_executor=None,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    assert result["dossier"]["phase"] == "best"
+    assert captured[0]["source_attempt"] == best_attempt
+    assert captured[0]["original_investigation_seconds"] == 600.0
+    assert captured[0]["source_baseline_is_unverified_draft"] is True
+
+
+def test_independent_feedback_pause_returns_objective_best_verified_frontier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    session_id = "11111111-1111-4111-8111-111111111111"
+    source_attempt = {
+        "attempt_sha256": "a" * 64,
+        "agent_session_id": session_id,
+        "attempt_wall_seconds": 10.0,
+        "attempted_dossier": {"case_id": "case:one", "problem_id": "problem:one"},
+    }
+    dossier = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": "b" * 40,
+        "evidence_assignment": {"expected_atom_ids": ["atom:one"], "status": "complete"},
+        "research_attempts": [source_attempt],
+        "evidence_verification": {"status": "failed", "errors": ["original:error"]},
+    }
+    run_dir = tmp_path / "best-frontier-run"
+    run_dir.mkdir()
+    best = {"case_id": "case:one", "problem_id": "problem:one", "phase": "best"}
+    latest = {"case_id": "case:one", "problem_id": "problem:one", "phase": "regressed"}
+
+    def targeted(**kwargs: object) -> dict[str, object]:
+        validator = kwargs["candidate_validator"]
+        result = SimpleNamespace(run_dir=run_dir, exit_code=0, report_validation_errors=[])
+        assert validator(best, result) == ["best:error"]
+        return {
+            "status": "restart:exact_state_repeated_after_feedback",
+            "dossier": latest,
+            "validation_errors": ["latest:error:a", "latest:error:b"],
+            "best_dossier": best,
+            "best_validation_errors": ["best:error"],
+            "best_source_attempt_sha256": "d" * 64,
+            "attempts": [{"attempt_sha256": "c" * 64}],
+            "repair_run_dirs": [str(run_dir)],
+        }
+
+    monkeypatch.setattr(mod, "_run_targeted_dossier_repairs", targeted)
+    monkeypatch.setattr(
+        mod,
+        "verify_research_evidence",
+        lambda *_args, **_kwargs: {
+            "status": "failed",
+            "errors": ["best:error"],
+            "planning_workspace_dir": str(tmp_path / "planning"),
+        },
+    )
+    monkeypatch.setattr(mod, "_canonical_repo_revision", lambda _run_dir: "b" * 40)
+    monkeypatch.setattr(mod, "_load_diff_numstat", lambda _path: [])
+    monkeypatch.setattr(mod, "_runner_artifact_refs", lambda _path: [])
+
+    result = mod.continue_research_dossier_from_independent_feedback(
+        dossier=dossier,
+        validation_errors=["original:error"],
+        repo_input=str(tmp_path),
+        requested_repo_ref="dev",
+        resolved_repo_ref="dev",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        replay_timeout_seconds=None,
+        replay_executor=None,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    assert result["status"] == "restart:exact_state_repeated_after_feedback"
+    assert result["dossier"]["phase"] == "best"
+    assert result["dossier"]["evidence_verification"]["errors"] == ["best:error"]
+    assert result["validation_errors"] == ["best:error"]
+    assert result["best_source_attempt_sha256"] == "d" * 64
+
+
+def test_independent_feedback_pause_merges_unverified_best_model_draft(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_attempt = {
+        "attempt_sha256": "a" * 64,
+        "agent_session_id": "11111111-1111-4111-8111-111111111111",
+        "attempt_wall_seconds": 10.0,
+        "attempted_dossier": {"case_id": "case:one", "problem_id": "problem:one"},
+    }
+    dossier = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": "b" * 40,
+        "phase": "original",
+        "evidence_assignment": {"expected_atom_ids": ["atom:one"], "status": "complete"},
+        "research_attempts": [source_attempt],
+        "evidence_verification": {"status": "failed", "errors": ["original:error"]},
+    }
+    best = {
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "phase": "best-unverified-draft",
+    }
+
+    monkeypatch.setattr(
+        mod,
+        "_run_targeted_dossier_repairs",
+        lambda **kwargs: {
+            "status": "restart:exact_state_repeated_after_feedback",
+            "dossier": {**best, "phase": "regressed"},
+            "validation_errors": ["latest:error:a", "latest:error:b"],
+            "best_dossier": best,
+            "best_validation_errors": ["best:output-contract-error"],
+            "best_source_attempt_sha256": "d" * 64,
+            "attempts": [{"attempt_sha256": "c" * 64}],
+        },
+    )
+
+    result = mod.continue_research_dossier_from_independent_feedback(
+        dossier=dossier,
+        validation_errors=["original:error"],
+        repo_input=str(tmp_path),
+        requested_repo_ref="dev",
+        resolved_repo_ref="dev",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        replay_timeout_seconds=None,
+        replay_executor=None,
+        artifacts_dir=tmp_path / "artifacts",
+    )
+
+    assert result["dossier"]["phase"] == "best-unverified-draft"
+    retained_receipt = result["dossier"]["evidence_verification"]
+    assert retained_receipt["status"] == "failed"
+    assert retained_receipt["errors"] == ["original:error"]
+    assert retained_receipt["claims_sha256"] == mod.research_claims_sha256(result["dossier"])
+    assert retained_receipt["receipt_sha256"] == evidence_verification_sha256(retained_receipt)
+    assert "claims_sha256" not in dossier["evidence_verification"]
+    assert result["validation_errors"] == ["best:output-contract-error"]
 
 
 def test_independent_feedback_correction_reuses_content_bound_origin_workspace(
@@ -4468,12 +5115,8 @@ def test_provider_wait_resume_reaches_origin_attachment_correction_path(
     assert result["status"] == "corrected"
     assert len(targeted_calls) == 1
     assert targeted_calls[0]["source_attempt"] == wait_attempt
-    assert targeted_calls[0]["attempt_kind"] == (
-        "evidence_verification_research_continuation"
-    )
-    assert targeted_calls[0]["independent_feedback"]["kind"] == (
-        "provider_external_wait_resume"
-    )
+    assert targeted_calls[0]["attempt_kind"] == ("evidence_verification_research_continuation")
+    assert targeted_calls[0]["independent_feedback"]["kind"] == ("provider_external_wait_resume")
     receipt = result["dossier"]["evidence_verification"]
     assert len(receipt["origin_attachment_read_attestations"]) == len(
         mod.origin_attachment_requirements(manifest)
@@ -4524,9 +5167,7 @@ def test_independent_research_feedback_is_embedded_exactly_in_repair_contract() 
     prompt = mod._append_prompt_for_targeted_repair(contract)
 
     assert contract["independent_feedback"] == feedback
-    assert contract["independent_feedback_sha256"] == mod._canonical_json_sha256(
-        feedback
-    )
+    assert contract["independent_feedback_sha256"] == mod._canonical_json_sha256(feedback)
     assert feedback["rationale"] in prompt
     assert feedback["findings"][0]["rationale"] in prompt
     assert feedback["source_pending_run_sha256"] in prompt

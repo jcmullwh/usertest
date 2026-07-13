@@ -924,19 +924,17 @@ def test_outcome_oracles_ignore_support_from_nonprimary_hypothesis(tmp_path: Pat
         argv = ["python", f"tools/{experiment_id}.py"]
         return {
             "executed_argv": argv,
-                "command_authorization": mod._command_authorization_receipt(
-                    {
-                        "authorization_kind": (
-                            "declared_inspected_repository_entrypoint"
-                        ),
-                        "executed_argv_sha256": mod._canonical_json_sha256(argv),
-                        "shell": False,
-                        "workspace_confined": True,
-                        "entrypoint_path": f"tools/{experiment_id}.py",
-                        "entrypoint_sha256": "c" * 64,
-                        "entrypoint_git_blob_sha": "d" * 40,
-                    }
-                ),
+            "command_authorization": mod._command_authorization_receipt(
+                {
+                    "authorization_kind": ("declared_inspected_repository_entrypoint"),
+                    "executed_argv_sha256": mod._canonical_json_sha256(argv),
+                    "shell": False,
+                    "workspace_confined": True,
+                    "entrypoint_path": f"tools/{experiment_id}.py",
+                    "entrypoint_sha256": "c" * 64,
+                    "entrypoint_git_blob_sha": "d" * 40,
+                }
+            ),
             "assertion_passed": True,
             "exit_code": 1,
             "stdout_sha256": "a" * 64,
@@ -1587,13 +1585,66 @@ def test_clean_replay_copies_hash_attested_overlay_harness(tmp_path: Path) -> No
             source_identity=research,
         ),
     )
+    second_errors: list[str] = []
+    second_receipts = mod._clean_replay_receipts(
+        dossier,
+        baseline_workspace=baseline,
+        research_workspace=research,
+        overlay_manifest=overlay["research_overlay_manifest"],
+        replay_root=tmp_path / "replays",
+        repo_revision=revision,
+        timeout_seconds=30,
+        errors=second_errors,
+        replay_executor=mod.TrustedHostReplayExecutor(
+            approved_source_roots=[research],
+            source_identity=research,
+        ),
+    )
+    third_errors: list[str] = []
+    third_receipts = mod._clean_replay_receipts(
+        dossier,
+        baseline_workspace=baseline,
+        research_workspace=research,
+        overlay_manifest=overlay["research_overlay_manifest"],
+        replay_root=tmp_path / "correction-run" / "evidence_replays",
+        repo_revision=revision,
+        timeout_seconds=30,
+        errors=third_errors,
+        replay_executor=mod.TrustedHostReplayExecutor(
+            approved_source_roots=[research],
+            source_identity=research,
+        ),
+    )
 
     receipt = receipts["overlay-repro"]
+    second_receipt = second_receipts["overlay-repro"]
+    third_receipt = third_receipts["overlay-repro"]
     replay_harness = Path(receipt["workspace_dir"]) / ".usertest_research/test_repro.py"
     assert replay_harness.is_file()
     assert receipt["overlay_manifest_sha256"] == overlay["research_overlay_manifest_sha256"]
     assert receipt["post_replay_mutations"] is False
     assert errors == []
+    assert second_errors == []
+    assert third_errors == []
+    assert (
+        len(
+            {
+                receipt["workspace_dir"],
+                second_receipt["workspace_dir"],
+                third_receipt["workspace_dir"],
+            }
+        )
+        == 3
+    )
+    replay_refs = [
+        ref
+        for ref in dossier["artifact_refs"]
+        if str(ref.get("artifact_id", "")).startswith("runner:replay:")
+    ]
+    assert [ref["artifact_id"] for ref in replay_refs] == [
+        "runner:replay:overlay-repro:stdout",
+        "runner:replay:overlay-repro:stderr",
+    ]
 
 
 def test_clean_replay_detects_persisted_tracked_file_mutation(tmp_path: Path) -> None:
@@ -2140,9 +2191,7 @@ def test_preexisting_repository_cli_is_hash_bound_without_language_whitelist(
     assert receipts["unbound"]["command_authorization"]["authorization_kind"] == (
         "immutable_repository_entrypoint"
     )
-    assert receipts["unbound"]["command_authorization"]["entrypoint_path"] == (
-        "tools/show_mode.py"
-    )
+    assert receipts["unbound"]["command_authorization"]["entrypoint_path"] == ("tools/show_mode.py")
     assert receipts["unbound"]["command_authorization"]["entrypoint_git_blob_sha"]
 
 
@@ -2153,7 +2202,7 @@ def test_preexisting_repository_cli_is_hash_bound_without_language_whitelist(
         ("go.mod", "module example.invalid/depth\n\ngo 1.23\n", "go test ./..."),
         ("pom.xml", "<project><modelVersion>4.0.0</modelVersion></project>\n", "mvn test"),
         ("build.gradle", "plugins { id 'java' }\n", "gradle test"),
-        ("Depth.Tests.csproj", "<Project Sdk=\"Microsoft.NET.Sdk\" />\n", "dotnet test"),
+        ("Depth.Tests.csproj", '<Project Sdk="Microsoft.NET.Sdk" />\n', "dotnet test"),
     ],
 )
 def test_repository_native_runner_authorization_uses_declared_tracked_bindings(
@@ -2202,18 +2251,19 @@ def test_declared_repository_binding_cannot_bypass_inspection_or_tracking(
     _baseline_repo_commit_existing(workspace, "tracked manifest")
     experiment = {
         "scenario_kind": "original_replay",
-        "repository_bindings": [
-            {"path": "Cargo.toml", "relationship": "governs the workspace"}
-        ],
+        "repository_bindings": [{"path": "Cargo.toml", "relationship": "governs the workspace"}],
     }
 
-    assert mod._authorized_replay_invocation(
-        command="cargo test",
-        experiment=experiment,
-        dossier={"inspected_files": []},
-        assignment={},
-        workspace=workspace,
-    ) is None
+    assert (
+        mod._authorized_replay_invocation(
+            command="cargo test",
+            experiment=experiment,
+            dossier={"inspected_files": []},
+            assignment={},
+            workspace=workspace,
+        )
+        is None
+    )
 
 
 def test_git_attestation_helpers_do_not_impose_convenience_timeouts(
@@ -2419,9 +2469,7 @@ def test_powershell_environment_adapter_runs_through_production_replay_and_oracl
         }
         for experiment_id in replays
     ]
-    experiment_index = {
-        str(experiment["experiment_id"]): experiment for experiment in experiments
-    }
+    experiment_index = {str(experiment["experiment_id"]): experiment for experiment in experiments}
     probe_sha256 = mod.sha256(probe.read_bytes()).hexdigest()
     inspected_file_receipts = [
         {
@@ -2636,9 +2684,7 @@ def test_powershell_environment_adapter_runs_through_production_replay_and_oracl
     assert len(oracles) == 1
     assert oracles[0]["kind"] == "causal_proof_replay"
     assert oracles[0]["execution"]["replay_inputs"] == proofs[0]["replay_inputs"]
-    assert oracles[0]["execution"]["replay_observation"] == proofs[0][
-        "replay_observation"
-    ]
+    assert oracles[0]["execution"]["replay_observation"] == proofs[0]["replay_observation"]
     contract = oracles[0]["positive_outcome_contracts"][0]
     assert contract["kind"] == "causal_proof_predicate"
     assert contract["postconditions"][0]["predicate"] == {
@@ -2663,20 +2709,15 @@ def test_powershell_environment_adapter_runs_through_production_replay_and_oracl
     assert equivalence["source_experiment_id"] == "experiment:without-mode"
     assert equivalence["origin_atom_ids"] == [atom_id]
     assert equivalence["proof_receipt_id"] == proofs[0]["proof_receipt_id"]
-    assert equivalence["replay_inputs_sha256"] == proofs[0]["replay_inputs"][
-        "replay_inputs_sha256"
-    ]
-    assert equivalence["replay_observation_sha256"] == proofs[0][
-        "replay_observation"
-    ]["replay_observation_sha256"]
+    assert equivalence["replay_inputs_sha256"] == proofs[0]["replay_inputs"]["replay_inputs_sha256"]
+    assert (
+        equivalence["replay_observation_sha256"]
+        == proofs[0]["replay_observation"]["replay_observation_sha256"]
+    )
     assert mechanism[0]["mechanism_evidence_id"] in boundaries[0]["provenance_refs"]
     assert oracles[0]["outcome_oracle_id"] in boundaries[0]["provenance_refs"]
     assert boundaries[0]["boundary_sha256"] == mod._canonical_json_sha256(
-        {
-            key: value
-            for key, value in boundaries[0].items()
-            if key != "boundary_sha256"
-        }
+        {key: value for key, value in boundaries[0].items() if key != "boundary_sha256"}
     )
     rejected, rejected_errors = mod._verification_boundary_receipts(
         experiments=experiment_index,
@@ -2688,8 +2729,7 @@ def test_powershell_environment_adapter_runs_through_production_replay_and_oracl
     )
     assert rejected == []
     assert rejected_errors == [
-        "verification_boundary_invalid:experiment:without-mode:"
-        "faithful_equivalence_unattested"
+        "verification_boundary_invalid:experiment:without-mode:faithful_equivalence_unattested"
     ]
     source_replay = dict(replays["experiment:without-mode"])
     source_authorization = source_replay["command_authorization"]
@@ -2718,8 +2758,7 @@ def test_powershell_environment_adapter_runs_through_production_replay_and_oracl
     )
     assert no_identity == []
     assert no_identity_errors == [
-        "verification_boundary_invalid:experiment:without-mode:"
-        "faithful_equivalence_unattested"
+        "verification_boundary_invalid:experiment:without-mode:faithful_equivalence_unattested"
     ]
     verification = {
         "experiments": list(replays.values()),
@@ -2736,11 +2775,14 @@ def test_powershell_environment_adapter_runs_through_production_replay_and_oracl
         "atom_bindings": atom_bindings,
     }
     dossier["evidence_assignment"] = assignment
-    assert stage_contracts._validate_outcome_oracles(
-        dossier,
-        verification,
-        pid=str(dossier["problem_id"]),
-    ) == []
+    assert (
+        stage_contracts._validate_outcome_oracles(
+            dossier,
+            verification,
+            pid=str(dossier["problem_id"]),
+        )
+        == []
+    )
 
 
 def test_filesystem_adapter_attests_disposable_state_without_tracked_mutation(
@@ -2932,9 +2974,7 @@ def test_exact_origin_scenario_can_attest_equivalence_without_redundant_adapter(
     contract = {
         "schema_version": 1,
         "kind": "repository_test_assertion",
-        "postconditions": [
-            {"type": "command_exit_code", "command_index": 0, "equals": 0}
-        ],
+        "postconditions": [{"type": "command_exit_code", "command_index": 0, "equals": 0}],
     }
     contract["positive_outcome_contract_id"] = mod._content_addressed_receipt_id(
         "positive_outcome_contract",
@@ -3250,9 +3290,47 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
             source_identity=workspace,
         ),
     )
-    dossier["evidence_verification"] = receipt
+    first_persisted_dossier = deepcopy(dossier)
+    first_persisted_dossier["evidence_verification"] = receipt
+    repeated_receipt = mod.verify_research_evidence(
+        dossier,
+        run_dir=run_dir,
+        repo_revision=revision,
+        case_id=str(dossier["case_id"]),
+        problem_id=str(dossier["problem_id"]),
+        expected_case_id=str(dossier["case_id"]),
+        expected_problem_id=str(dossier["problem_id"]),
+        evidence_assignment=assignment,
+        evidence_atom_ids=[atom_id],
+        revision_view_destination=tmp_path / "revision-view",
+        replay_timeout_seconds=None,
+        requested_repo_ref=revision,
+        resolved_repo_ref=revision,
+        replay_executor=mod.TrustedHostReplayExecutor(
+            approved_source_roots=[tmp_path],
+            source_identity=workspace,
+        ),
+    )
+    dossier["evidence_verification"] = repeated_receipt
 
     assert receipt["status"] == "verified", receipt["errors"]
+    assert repeated_receipt["status"] == "verified", repeated_receipt["errors"]
+    first_replay_paths = {
+        str(artifact["path"])
+        for artifact in receipt["artifacts"]
+        if str(artifact.get("artifact_id", "")).startswith("runner:replay:")
+    }
+    repeated_replay_paths = {
+        str(artifact["path"])
+        for artifact in repeated_receipt["artifacts"]
+        if str(artifact.get("artifact_id", "")).startswith("runner:replay:")
+    }
+    assert first_replay_paths.isdisjoint(repeated_replay_paths)
+    first_persisted_valid, first_persisted_errors = mod.verify_persisted_research_evidence(
+        first_persisted_dossier
+    )
+    assert first_persisted_errors == []
+    assert first_persisted_valid is True
     assert len(receipt["proof_adapter_receipts"]) == 1
     assert receipt["proof_adapter_receipts"][0]["adapter_id"] == "environment.v1"
     assert len(receipt["outcome_oracles"]) == 1
@@ -3264,9 +3342,7 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
     adapter_mechanism = receipt["mechanism_evidence"][0]
     assert adapter_mechanism["causal_target"] == "env:BACKLOG_DEPTH_VERIFY_MODE"
     assert adapter_mechanism["consumer_identity"]["runner_attested"] is True
-    assert adapter_mechanism["consumer_identity"]["entrypoint"] == (
-        "tools/environment_probe.ps1"
-    )
+    assert adapter_mechanism["consumer_identity"]["entrypoint"] == ("tools/environment_probe.ps1")
     assert adapter_mechanism["executed_consumer"]["causal_target"] == (
         "env:BACKLOG_DEPTH_VERIFY_MODE"
     )
@@ -3282,9 +3358,7 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
         if mode == "missing":
             rejected_claim.pop("implementation_touchpoints")
         else:
-            rejected_claim["implementation_touchpoints"][0]["causal_locator"] = (
-                "unrelated:mode"
-            )
+            rejected_claim["implementation_touchpoints"][0]["causal_locator"] = "unrelated:mode"
         rejected_run_dir = tmp_path / f"research-run-{mode}"
         rejected_run_dir.mkdir()
         for filename in (
@@ -3294,9 +3368,7 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
             "normalized_events.jsonl",
         ):
             (rejected_run_dir / filename).write_bytes((run_dir / filename).read_bytes())
-        rejected_dossier["artifact_refs"][0]["path"] = str(
-            rejected_run_dir / "target_ref.json"
-        )
+        rejected_dossier["artifact_refs"][0]["path"] = str(rejected_run_dir / "target_ref.json")
         rejected_receipt = mod.verify_research_evidence(
             rejected_dossier,
             run_dir=rejected_run_dir,
@@ -3934,11 +4006,7 @@ def test_explicit_symptom_binding_accepts_registered_structured_predicates(
     assert len(bindings) == 1
     assert bindings[0]["observation_predicate"] == predicate
     assert bindings[0]["declared_binding_sha256"] == mod._canonical_json_sha256(
-        {
-            key: value
-            for key, value in bindings[0].items()
-            if key != "declared_binding_sha256"
-        }
+        {key: value for key, value in bindings[0].items() if key != "declared_binding_sha256"}
     )
 
 
@@ -4031,9 +4099,7 @@ def test_structured_atom_predicate_is_attested_against_adapter_baseline(
             "proof_adapter": claim,
         },
     }
-    dossier = {
-        "root_cause_hypotheses": [{"hypothesis_id": "hypothesis:attempts"}]
-    }
+    dossier = {"root_cause_hypotheses": [{"hypothesis_id": "hypothesis:attempts"}]}
 
     proofs, diagnostics = mod._proof_adapter_receipts(
         dossier,

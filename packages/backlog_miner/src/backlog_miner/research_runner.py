@@ -50,6 +50,7 @@ from backlog_miner.origin_evidence import (
 from backlog_miner.research_evidence import (
     ReplayExecutor,
     _persisted_research_attempt_errors,
+    verify_persisted_research_evidence,
     verify_research_evidence,
 )
 
@@ -66,6 +67,7 @@ _GUIDANCE_PATH = Path("configs") / "backlog_stage_guidance" / "repro_research.md
 _REPO_INTENT_PATH = Path("configs") / "repo_intent.md"
 
 _EXTENSION_KEY = "backlog_repro_research"
+_REPEATED_CORRECTION_STATE_RESTART_COUNT = 3
 
 _RUNNER_OWNED_DOSSIER_FIELDS: frozenset[str] = frozenset(
     {
@@ -343,6 +345,57 @@ def _canonical_json_sha256(value: Any) -> str:
             separators=(",", ":"),
         ).encode()
     ).hexdigest()
+
+
+def _model_owned_dossier_projection(dossier: Mapping[str, Any]) -> dict[str, Any]:
+    """Project one dossier to the exact fields authored by the researcher.
+
+    ``artifact_refs`` is a mixed field: the researcher authors evidence references and the
+    runner later appends its own ``runner:*`` receipts. Remove only that reserved namespace
+    when matching a persisted dossier back to the immutable model-output attempt.
+    """
+    projection: dict[str, Any] = {}
+    for key, value in dossier.items():
+        if key in _RUNNER_OWNED_DOSSIER_FIELDS:
+            continue
+        projected_value = value
+        if key == "artifact_refs" and isinstance(value, list):
+            projected_value = [
+                item
+                for item in value
+                if not (
+                    isinstance(item, Mapping)
+                    and isinstance(item.get("artifact_id"), str)
+                    and str(item["artifact_id"]).startswith("runner:")
+                )
+            ]
+        projection[key] = json.loads(json.dumps(projected_value, ensure_ascii=False))
+    return projection
+
+
+def _continuation_source_attempt(
+    *,
+    dossier: Mapping[str, Any],
+    attempts: Sequence[dict[str, Any]],
+) -> dict[str, Any]:
+    """Select the retained frontier's author attempt, not merely the latest attempt.
+
+    A correction cycle can end with a regression while retaining an earlier objective-best
+    dossier.  The immutable attempt ledger remains chronological, so the last entry is not
+    necessarily the dossier the caller is asking the author to continue.  Match the retained
+    model-owned projection back to the most recent attempt that produced it.
+    """
+    retained_sha256 = _canonical_json_sha256(_model_owned_dossier_projection(dossier))
+    for attempt in reversed(attempts):
+        attempted_raw = attempt.get("attempted_dossier")
+        if not isinstance(attempted_raw, Mapping):
+            continue
+        if (
+            _canonical_json_sha256(_model_owned_dossier_projection(attempted_raw))
+            == retained_sha256
+        ):
+            return attempt
+    return attempts[-1]
 
 
 def _write_evidence_assignment_sidecar(
@@ -725,10 +778,7 @@ def _parked_before_dispatch_dossier(
         evidence_atom_ids=evidence_atom_ids,
         requested_repo_ref=requested_repo_ref,
         resolved_repo_ref=resolved_repo_ref,
-        reason=(
-            "research_external_wait_stage_parked_before_dispatch:"
-            f"{checkpoint_sha256}"
-        ),
+        reason=(f"research_external_wait_stage_parked_before_dispatch:{checkpoint_sha256}"),
         unknown="Research did not start because the signed-in Codex subscription is parked",
         evidence_needed=(
             "Resume this selected case after the provider reset recorded by the Stage-3 "
@@ -1012,6 +1062,21 @@ def _attempt_correction_state(attempt: dict[str, Any]) -> str:
     )
 
 
+def _clean_investigation_estimate_seconds(
+    attempts: Sequence[dict[str, Any]],
+) -> float | None:
+    """Estimate clean-investigation cost from full authoring turns in the ledger."""
+    full_attempt_seconds = [
+        float(attempt.get("attempt_wall_seconds"))
+        for attempt in attempts
+        if attempt.get("attempt_kind") in {"full_research", "fresh_research_retry"}
+        and isinstance(attempt.get("attempt_wall_seconds"), (int, float))
+        and not isinstance(attempt.get("attempt_wall_seconds"), bool)
+        and float(attempt.get("attempt_wall_seconds")) > 0.0
+    ]
+    return sum(full_attempt_seconds) / len(full_attempt_seconds) if full_attempt_seconds else None
+
+
 def _fresh_restart_progress_assessment(
     *,
     full_attempt_kind: str,
@@ -1039,16 +1104,8 @@ def _fresh_restart_progress_assessment(
         if isinstance(attempt.get("attempt_wall_seconds"), (int, float))
         and not isinstance(attempt.get("attempt_wall_seconds"), bool)
     )
-    full_attempt_seconds = [
-        float(attempt.get("attempt_wall_seconds"))
-        for attempt in [*prior_attempts, *current_cycle_attempts]
-        if attempt.get("attempt_kind") in {"full_research", "fresh_research_retry"}
-        and isinstance(attempt.get("attempt_wall_seconds"), (int, float))
-        and not isinstance(attempt.get("attempt_wall_seconds"), bool)
-        and float(attempt.get("attempt_wall_seconds")) > 0.0
-    ]
-    clean_investigation_estimate = (
-        sum(full_attempt_seconds) / len(full_attempt_seconds) if full_attempt_seconds else None
+    clean_investigation_estimate = _clean_investigation_estimate_seconds(
+        [*prior_attempts, *current_cycle_attempts]
     )
     assessment: dict[str, Any] = {
         "decision": "repairable_paused",
@@ -1198,6 +1255,13 @@ def _research_retry_remediation_hints(
                 "and expected scalar; equals uses the same source with a different observed "
                 "expected scalar. Do not make a survived assertion match its disproof condition."
             )
+        elif code == "research_dossier_unknown_fields":
+            target_fields = ["extensions.backlog_repro_research"]
+            required_change = (
+                "Remove only the unsupported top-level fields named by the validation error. "
+                "Do not relocate them into evidence-bearing structures or change the retained "
+                "experiments, hypotheses, status, unknowns, or blockers."
+            )
         elif code == "research_dossier_missing_required_field":
             missing_field = error.rpartition(":")[2].strip() or "<field named by error>"
             target_fields = [f"extensions.backlog_repro_research.{missing_field}"]
@@ -1218,6 +1282,81 @@ def _research_retry_remediation_hints(
         elif code == "research_extension_missing":
             target_fields = ["extensions.backlog_repro_research"]
             required_change = "Emit the complete required research extension object."
+        elif code == "research_dossier_invalid_experiment_command":
+            target_fields = ["experiments[].command"]
+            required_change = (
+                "Use one non-empty shell-free command string, not an argv array or object. "
+                "Preserve the retained executable and arguments exactly, quoting tokens with "
+                "spaces inside the string; do not run a new command or invent evidence."
+            )
+        elif code == "research_dossier_invalid_experiment_outcome":
+            target_fields = ["experiments[].outcome"]
+            required_change = (
+                "Use exactly one scalar outcome: supports, refutes, or inconclusive. Put any "
+                "explanation in result; reproduced/not_reproduced and structured objects are "
+                "not experiment outcomes."
+            )
+        elif code in {
+            "research_dossier_invalid_experiment_observable_assertion",
+            "research_dossier_invalid_assertion_source",
+            "research_dossier_invalid_assertion_operator",
+            "research_dossier_invalid_exit_code_assertion",
+            "research_dossier_invalid_text_assertion_expected",
+        }:
+            target_fields = ["experiments[].observable_assertion"]
+            required_change = (
+                "Use an object with source equal to exit_code, stdout, stderr, or combined; "
+                "operator equal to equals, contains, or not_contains; and expected equal to "
+                "the observed scalar. For exit_code, use operator=equals and an integer "
+                "expected value. Artifact IDs and JSON pointers belong in artifact_refs/result, "
+                "not in assertion.source."
+            )
+        elif code in {
+            "research_dossier_invalid_hypothesis_disposition",
+            "research_dossier_primary_hypothesis_disposition_invalid",
+        }:
+            target_fields = ["root_cause_hypotheses[].disposition"]
+            required_change = (
+                "Use exactly primary, refuted, plausible, or unresolved. The first hypothesis "
+                "must be primary even when research_status is insufficient_evidence; primary "
+                "only identifies the leading mechanism and does not claim resolution or "
+                "evidence sufficiency."
+            )
+        elif code == "inspected_file_not_observed":
+            target_fields = ["inspected_files", "inspected_symbols"]
+            required_change = (
+                "If the claim is still needed, actually reread the named repository file in "
+                "this research turn using one standalone attested command: Get-Content -Raw "
+                "-Encoding UTF8 -LiteralPath <path> for a small file, or Get-Content -Encoding "
+                "UTF8 -LiteralPath <path> | Select-Object -Skip <N> -First <M> for an exact "
+                "bounded range. Search/Select-String is discovery only, and the attested read "
+                "must not be chained with markers or other commands. Otherwise remove the "
+                "unsupported inspected-file/symbol claim and preserve the resulting unknown."
+            )
+        elif code == "inspected_symbol_unresolved":
+            target_fields = ["inspected_symbols", "inspected_files"]
+            required_change = (
+                "After locating the symbol, perform a standalone attested whole-file or exact "
+                "bounded Get-Content read containing its complete definition. Do not use "
+                "Select-String output as proof. If the definition was not observed, remove the "
+                "symbol claim and report the mechanism/change-surface boundary honestly."
+            )
+        elif code == "inspected_file_unresolved":
+            target_fields = ["inspected_files", "artifact_refs"]
+            required_change = (
+                "Only tracked files from the pinned planning revision belong in "
+                "inspected_files. A .usertest_research overlay or generated run artifact must "
+                "remain an artifact_ref/experiment artifact, not masquerade as a repository "
+                "implementation file."
+            )
+        elif code == "experiment_replay_workspace_mutated":
+            target_fields = ["experiments[].replay_setup.disposable_state_paths"]
+            required_change = (
+                "If the replay intentionally creates case-local state, declare only those exact "
+                "relative paths in replay_setup.disposable_state_paths; otherwise change the "
+                "research harness to avoid the mutation. Never declare tracked product paths or "
+                "unrelated workspace state as disposable."
+            )
         elif code.startswith("research_report_"):
             target_fields = ["report.json"]
             required_change = (
@@ -1318,9 +1457,7 @@ def _validation_error_identity(error: str) -> str:
 def _dedupe_validation_errors(errors: Sequence[str]) -> list[str]:
     """Use one normalized entry per validator identity for feedback and progress."""
 
-    return list(
-        dict.fromkeys(_validation_error_identity(str(error)) for error in errors)
-    )
+    return list(dict.fromkeys(_validation_error_identity(str(error)) for error in errors))
 
 
 def _repair_error_requires_new_investigation(error: str) -> bool:
@@ -1565,7 +1702,7 @@ def _correction_progress_assessment(
                 reason="retained_evidence_rework_reached_investigation_cost",
                 fundamental_change_paths=list(fundamental_changes),
             )
-        elif repeated_state_count >= 2:
+        elif repeated_state_count >= _REPEATED_CORRECTION_STATE_RESTART_COUNT:
             progress.update(
                 decision="restart",
                 reason="retained_evidence_change_repeated_after_feedback",
@@ -1584,7 +1721,7 @@ def _correction_progress_assessment(
     elif objective_progress:
         # This remains progress even when the remaining error is new and resets the cost clock.
         progress.update(decision="continue", reason="best_error_count_decreased")
-    elif repeated_state_count >= 2:
+    elif repeated_state_count >= _REPEATED_CORRECTION_STATE_RESTART_COUNT:
         progress.update(decision="restart", reason="exact_state_repeated_after_feedback")
     elif (
         original_investigation_seconds is not None
@@ -1658,13 +1795,9 @@ def _repair_contract(
         ),
     }
     if isinstance(independent_feedback, Mapping):
-        immutable_feedback = json.loads(
-            json.dumps(dict(independent_feedback), ensure_ascii=False)
-        )
+        immutable_feedback = json.loads(json.dumps(dict(independent_feedback), ensure_ascii=False))
         contract["independent_feedback"] = immutable_feedback
-        contract["independent_feedback_sha256"] = _canonical_json_sha256(
-            immutable_feedback
-        )
+        contract["independent_feedback_sha256"] = _canonical_json_sha256(immutable_feedback)
     contract["repair_contract_sha256"] = _canonical_json_sha256(contract)
     return contract
 
@@ -1936,6 +2069,8 @@ def _run_targeted_dossier_repairs(
     research_capabilities: bool = False,
     attempt_kind: str = "model_output_repair",
     independent_feedback: Mapping[str, Any] | None = None,
+    original_investigation_seconds: float | None = None,
+    source_baseline_is_unverified_draft: bool | None = None,
 ) -> dict[str, Any]:
     """Continue the authoring Codex session until corrected or demonstrably worth restarting."""
     workspace = _research_attempt_workspace_path(source_attempt)
@@ -1946,7 +2081,11 @@ def _run_targeted_dossier_repairs(
         else {}
     )
     current_errors = _dedupe_validation_errors(validation_errors)
-    baseline_is_unverified_draft = source_attempt.get("outcome") == "output_contract_invalid"
+    baseline_is_unverified_draft = (
+        source_baseline_is_unverified_draft
+        if isinstance(source_baseline_is_unverified_draft, bool)
+        else source_attempt.get("outcome") == "output_contract_invalid"
+    )
     accepted_source = source_attempt
     best_dossier = json.loads(json.dumps(baseline, ensure_ascii=False))
     best_errors = list(current_errors)
@@ -1986,7 +2125,11 @@ def _run_targeted_dossier_repairs(
             "observed_session_id": None,
             "continuation_failure": "retained_author_workspace_missing",
         }
-    original_seconds_raw = source_attempt.get("attempt_wall_seconds")
+    original_seconds_raw = (
+        original_investigation_seconds
+        if original_investigation_seconds is not None
+        else source_attempt.get("attempt_wall_seconds")
+    )
     original_seconds = (
         float(original_seconds_raw)
         if isinstance(original_seconds_raw, (int, float))
@@ -2066,8 +2209,7 @@ def _run_targeted_dossier_repairs(
             invocation_failure_counts[failure] = invocation_failure_counts.get(failure, 0) + 1
             failure_repeated = invocation_failure_counts[failure]
             economic_pause = bool(
-                original_seconds is not None
-                and correction_seconds_since_best >= original_seconds
+                original_seconds is not None and correction_seconds_since_best >= original_seconds
             )
             failure_reason = (
                 "correction_cost_reached_investigation_cost"
@@ -2077,9 +2219,7 @@ def _run_targeted_dossier_repairs(
                 else "retry_same_session_after_first_invocation_failure"
             )
             failure_progress = {
-                "decision": (
-                    "restart" if economic_pause or failure_repeated >= 2 else "continue"
-                ),
+                "decision": ("restart" if economic_pause or failure_repeated >= 2 else "continue"),
                 "reason": failure_reason,
                 "before_error_count": len(current_errors),
                 "after_error_count": 1,
@@ -2391,6 +2531,7 @@ def continue_research_dossier_from_independent_feedback(
     artifacts_dir: Path,
     independent_feedback: Mapping[str, Any] | None = None,
     continuation_attempt_kind: str = "independent_qualification_research_continuation",
+    original_investigation_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Resume one retained researcher with external semantic feedback and reverify it.
 
@@ -2405,9 +2546,7 @@ def continue_research_dossier_from_independent_feedback(
     problem_id = _coerce_str(dossier.get("problem_id"))
     repo_revision = _coerce_str(dossier.get("repo_revision"))
     assignment_raw = dossier.get("evidence_assignment")
-    evidence_assignment = (
-        dict(assignment_raw) if isinstance(assignment_raw, dict) else {}
-    )
+    evidence_assignment = dict(assignment_raw) if isinstance(assignment_raw, dict) else {}
     evidence_atom_ids = _string_list(evidence_assignment.get("expected_atom_ids"))
     attempts_raw = dossier.get("research_attempts")
     attempts = (
@@ -2435,9 +2574,7 @@ def continue_research_dossier_from_independent_feedback(
         return {
             "status": "repairable_paused:research_feedback_context_missing",
             "dossier": dict(dossier),
-            "validation_errors": [
-                "research_feedback_context_missing:" + ",".join(missing)
-            ],
+            "validation_errors": ["research_feedback_context_missing:" + ",".join(missing)],
             "attempts": [],
             "authored_work_disposition": "retained",
         }
@@ -2446,13 +2583,38 @@ def continue_research_dossier_from_independent_feedback(
     assert repo_revision is not None
     assert evidence_atom_ids
 
-    source_attempt = attempts[-1]
+    source_attempt = _continuation_source_attempt(
+        dossier=dossier,
+        attempts=attempts,
+    )
+    explicit_original_seconds = (
+        float(original_investigation_seconds)
+        if isinstance(original_investigation_seconds, (int, float))
+        and not isinstance(original_investigation_seconds, bool)
+        and float(original_investigation_seconds) > 0.0
+        else None
+    )
+    effective_original_seconds = (
+        explicit_original_seconds
+        if explicit_original_seconds is not None
+        else _clean_investigation_estimate_seconds(attempts)
+    )
     verified_candidates: dict[str, tuple[dict[str, Any], dict[str, Any], Path]] = {}
     origin_receipt_raw = dossier.get("evidence_verification")
     origin_receipt = origin_receipt_raw if isinstance(origin_receipt_raw, dict) else {}
     origin_attachment_raw = origin_receipt.get("origin_attachment_evidence")
     origin_attachment = (
         dict(origin_attachment_raw) if isinstance(origin_attachment_raw, dict) else {}
+    )
+    source_baseline_is_unverified_draft = bool(
+        origin_receipt.get("status") != "verified"
+        or source_attempt.get("outcome")
+        in {
+            "output_contract_invalid",
+            "repair_contract_invalid",
+            "repair_scope_rejected",
+            "invocation_failed",
+        }
     )
 
     def validate_candidate(candidate: dict[str, Any], correction_result: Any) -> Sequence[str]:
@@ -2464,9 +2626,7 @@ def continue_research_dossier_from_independent_feedback(
         }
         prepared["research_schema_version"] = RESEARCH_PROOF_SCHEMA_VERSION
         prepared["evidence_assignment"] = evidence_assignment
-        prepared["repo_revision"] = (
-            _canonical_repo_revision(verification_run_dir) or repo_revision
-        )
+        prepared["repo_revision"] = _canonical_repo_revision(verification_run_dir) or repo_revision
         diff_paths = [
             path
             for entry in _load_diff_numstat(verification_run_dir / "diff_numstat.json")
@@ -2510,9 +2670,7 @@ def continue_research_dossier_from_independent_feedback(
                 artifacts_dir
                 / "revision_views"
                 / sha256(
-                    (
-                        f"{repo_input}\0{prepared['repo_revision']}\0{verification_run_dir}"
-                    ).encode()
+                    (f"{repo_input}\0{prepared['repo_revision']}\0{verification_run_dir}").encode()
                 ).hexdigest()[:16]
             ),
             replay_timeout_seconds=replay_timeout_seconds,
@@ -2566,24 +2724,20 @@ def continue_research_dossier_from_independent_feedback(
         research_capabilities=True,
         attempt_kind=continuation_attempt_kind,
         independent_feedback=independent_feedback,
+        original_investigation_seconds=effective_original_seconds,
+        source_baseline_is_unverified_draft=source_baseline_is_unverified_draft,
     )
     repaired_raw = repair.get("dossier")
     repaired = dict(repaired_raw) if isinstance(repaired_raw, dict) else dict(dossier)
     accepted = verified_candidates.get(_canonical_json_sha256(repaired))
-    new_attempts = [
-        dict(item)
-        for item in repair.get("attempts", [])
-        if isinstance(item, dict)
-    ]
+    new_attempts = [dict(item) for item in repair.get("attempts", []) if isinstance(item, dict)]
     if repair.get("status") == "corrected" and accepted is not None:
         prepared, receipt, verification_run_dir = accepted
         prepared["evidence_verification"] = receipt
         prepared["run_dir"] = str(verification_run_dir)
         workspace_dir = receipt.get("planning_workspace_dir")
-        prepared["repo_workspace"] = (
-            workspace_dir if isinstance(workspace_dir, str) else None
-        )
-        prepared["research_attempts"] = [*attempts, *new_attempts]
+        prepared["repo_workspace"] = workspace_dir if isinstance(workspace_dir, str) else None
+        _set_research_attempts(prepared, [*attempts, *new_attempts])
         return {
             "status": "corrected",
             "dossier": prepared,
@@ -2594,12 +2748,34 @@ def continue_research_dossier_from_independent_feedback(
             "observed_session_id": repair.get("observed_session_id"),
             "authored_work_disposition": "retained",
         }
-    retained = dict(dossier)
-    retained["research_attempts"] = [*attempts, *new_attempts]
+    best_raw = repair.get("best_dossier")
+    best = dict(best_raw) if isinstance(best_raw, dict) else repaired
+    best_errors_raw = repair.get("best_validation_errors")
+    best_errors = (
+        _string_list(best_errors_raw)
+        if isinstance(best_errors_raw, list)
+        else _string_list(repair.get("validation_errors")) or errors
+    )
+    best_verified = verified_candidates.get(_canonical_json_sha256(best))
+    if best_verified is not None:
+        retained, retained_receipt, retained_run_dir = best_verified
+        retained["evidence_verification"] = retained_receipt
+        retained["run_dir"] = str(retained_run_dir)
+        retained_workspace = retained_receipt.get("planning_workspace_dir")
+        retained["repo_workspace"] = (
+            retained_workspace if isinstance(retained_workspace, str) else None
+        )
+    else:
+        retained = json.loads(json.dumps(dossier, ensure_ascii=False))
+        for key, value in best.items():
+            if key not in _RUNNER_OWNED_DOSSIER_FIELDS:
+                retained[key] = json.loads(json.dumps(value, ensure_ascii=False))
+    _set_research_attempts(retained, [*attempts, *new_attempts])
     return {
         "status": str(repair.get("status") or "repairable_paused:research_correction_failed"),
         "dossier": retained,
-        "validation_errors": list(repair.get("validation_errors") or errors),
+        "validation_errors": best_errors,
+        "best_source_attempt_sha256": repair.get("best_source_attempt_sha256"),
         "attempts": new_attempts,
         "repair_run_dirs": list(repair.get("repair_run_dirs") or []),
         "expected_session_id": repair.get("expected_session_id"),
@@ -2621,6 +2797,8 @@ def _resume_checkpoint_from_stage_document(
         return None, {}
     meta_raw = stage_document.get("input_meta")
     meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    if meta.get("stage_status") in {"checkpointed_progress", "completed"}:
+        return None, {}
     checkpoint_raw = meta.get("external_wait")
     checkpoint = dict(checkpoint_raw) if isinstance(checkpoint_raw, Mapping) else {}
     wait_raw = checkpoint.get("external_wait")
@@ -2633,8 +2811,7 @@ def _resume_checkpoint_from_stage_document(
         or checkpoint.get("status") != "parked_external_wait"
         or checkpoint.get("scope") != "repro_research_stage"
         or checkpoint.get("reason") != "codex_chatgpt_subscription_usage_limit"
-        or checkpoint.get("resume_status")
-        != "checkpoint_persisted_same_author_resume_supported"
+        or checkpoint.get("resume_status") != "checkpoint_persisted_same_author_resume_supported"
         or checkpoint.get("route") != "chatgpt_subscription"
         or checkpoint.get("api_fallback_allowed") is not False
         or wait.get("code") != "codex_chatgpt_subscription_usage_limit"
@@ -2642,8 +2819,7 @@ def _resume_checkpoint_from_stage_document(
         or wait.get("state") != "parked"
         or wait.get("route") != "chatgpt_subscription"
         or wait.get("api_fallback_allowed") is not False
-        or checkpoint.get("checkpoint_sha256")
-        != _canonical_json_sha256(checkpoint_without_hash)
+        or checkpoint.get("checkpoint_sha256") != _canonical_json_sha256(checkpoint_without_hash)
     ):
         raise ValueError("research_external_wait_resume_checkpoint_invalid")
     items_raw = stage_document.get("items")
@@ -2652,18 +2828,14 @@ def _resume_checkpoint_from_stage_document(
     by_problem_id: dict[str, dict[str, Any]] = {}
     for item_index, item in enumerate(items):
         if not isinstance(item, dict):
-            raise ValueError(
-                f"research_external_wait_resume_dossier_invalid:{item_index}"
-            )
+            raise ValueError(f"research_external_wait_resume_dossier_invalid:{item_index}")
         problem_id = _coerce_str(item.get("problem_id"))
         if problem_id is None:
             raise ValueError(
                 f"research_external_wait_resume_dossier_problem_id_missing:{item_index}"
             )
         if problem_id in by_problem_id:
-            raise ValueError(
-                f"research_external_wait_resume_dossier_duplicate:{problem_id}"
-            )
+            raise ValueError(f"research_external_wait_resume_dossier_duplicate:{problem_id}")
         item_problem_ids.append(problem_id)
         by_problem_id[problem_id] = dict(item)
     if list(selected_problem_ids) != item_problem_ids:
@@ -2672,9 +2844,7 @@ def _resume_checkpoint_from_stage_document(
     if trigger_problem_id is None or trigger_problem_id not in by_problem_id:
         raise ValueError("research_external_wait_resume_trigger_dossier_missing")
     trigger_case_id = _coerce_str(checkpoint.get("trigger_case_id"))
-    trigger_dossier_case_id = _coerce_str(
-        by_problem_id[trigger_problem_id].get("case_id")
-    )
+    trigger_dossier_case_id = _coerce_str(by_problem_id[trigger_problem_id].get("case_id"))
     current_trigger_case_id = (
         selected_case_ids.get(trigger_problem_id)
         if isinstance(selected_case_ids, Mapping)
@@ -2703,6 +2873,389 @@ def _resume_checkpoint_from_stage_document(
                 f"research_external_wait_resume_parked_placeholder_invalid:{problem_id}"
             )
     return checkpoint, by_problem_id
+
+
+_STAGE3_SEMANTIC_PROOF_CONTRACT_VERSION = "root_cause_research_proof_v1"
+_STAGE3_ORCHESTRATION_LINEAGE_FIELDS = frozenset(
+    {"canonical_problem_id", "case_member_problem_ids", "same_cause_group_id"}
+)
+
+
+def stage3_research_dossier_resume_sha256(dossier: Mapping[str, Any]) -> str:
+    """Hash the authored proof while ignoring derived orchestration annotations.
+
+    Canonical case-lineage annotations are reapplied from the hash-bound upstream
+    case registry after resume.  They must not make an otherwise identical research
+    proof unusable merely because Stage 3 completed before orchestration attached
+    those derived fields.
+    """
+
+    projection = {
+        key: value
+        for key, value in dossier.items()
+        if key not in _STAGE3_ORCHESTRATION_LINEAGE_FIELDS
+    }
+    return _canonical_json_sha256(projection)
+
+
+def stage3_research_compatibility_contract(*, agent: str) -> dict[str, Any]:
+    """Return the material Stage-3 resume contract.
+
+    Model selection and prompt prose are intentionally absent: changing either is
+    compatible with reusing a proof that still satisfies the current persisted
+    evidence contract.  Agent identity, the Codex subscription route, and an
+    explicit semantic proof-contract version are material.
+    """
+
+    normalized_agent = str(agent).strip().casefold()
+    if not normalized_agent:
+        raise ValueError("stage3_research_compatibility_agent_missing")
+    codex_subscription = normalized_agent == "codex"
+    contract: dict[str, Any] = {
+        "schema_version": 1,
+        "contract_kind": "stage3_research_resume_compatibility",
+        "semantic_proof_contract_version": _STAGE3_SEMANTIC_PROOF_CONTRACT_VERSION,
+        "agent": normalized_agent,
+        "execution_route": {
+            "route": ("chatgpt_subscription" if codex_subscription else "configured_agent_backend"),
+            "host_codex_data_required": codex_subscription,
+            "api_fallback_allowed": False if codex_subscription else None,
+        },
+        "declared_compatible_changes": ["model_selection", "prompt_prose"],
+    }
+    contract["contract_sha256"] = _canonical_json_sha256(contract)
+    return contract
+
+
+def _valid_stage3_research_compatibility_contract(
+    value: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    contract = dict(value)
+    without_hash = {key: item for key, item in contract.items() if key != "contract_sha256"}
+    route_raw = contract.get("execution_route")
+    route = route_raw if isinstance(route_raw, Mapping) else {}
+    agent = _coerce_str(contract.get("agent"))
+    codex_subscription = agent == "codex"
+    if (
+        set(contract)
+        != {
+            "schema_version",
+            "contract_kind",
+            "semantic_proof_contract_version",
+            "agent",
+            "execution_route",
+            "declared_compatible_changes",
+            "contract_sha256",
+        }
+        or contract.get("schema_version") != 1
+        or contract.get("contract_kind") != "stage3_research_resume_compatibility"
+        or not isinstance(contract.get("semantic_proof_contract_version"), str)
+        or agent is None
+        or set(route) != {"route", "host_codex_data_required", "api_fallback_allowed"}
+        or route.get("route")
+        != ("chatgpt_subscription" if codex_subscription else "configured_agent_backend")
+        or route.get("host_codex_data_required") is not codex_subscription
+        or route.get("api_fallback_allowed") != (False if codex_subscription else None)
+        or contract.get("declared_compatible_changes") != ["model_selection", "prompt_prose"]
+        or contract.get("contract_sha256") != _canonical_json_sha256(without_hash)
+    ):
+        return None
+    return json.loads(json.dumps(contract, ensure_ascii=False))
+
+
+def _completed_prefix_checkpoint(
+    *,
+    selected_problems: Sequence[Mapping[str, Any]],
+    completed_dossiers: Sequence[Mapping[str, Any]],
+    resolved_repo_ref: str | None,
+    compatibility_contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind a completed Stage-3 prefix so a process crash does not repeat it."""
+    selected = [
+        {
+            "problem_id": _coerce_str(problem.get("problem_id")),
+            "case_id": _coerce_str(problem.get("case_id")) or "case:unassigned",
+            "assignment_sha256": (
+                problem.get("evidence_assignment", {}).get("assignment_sha256")
+                if isinstance(problem.get("evidence_assignment"), Mapping)
+                else None
+            ),
+        }
+        for problem in selected_problems
+    ]
+    completed = [
+        {
+            "problem_id": _coerce_str(dossier.get("problem_id")),
+            "case_id": _coerce_str(dossier.get("case_id")),
+            "dossier_sha256": stage3_research_dossier_resume_sha256(dossier),
+        }
+        for dossier in completed_dossiers
+    ]
+    checkpoint: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "checkpointed_progress",
+        "scope": "repro_research_stage",
+        "resolved_repo_ref": resolved_repo_ref,
+        "research_compatibility": json.loads(
+            json.dumps(compatibility_contract, ensure_ascii=False)
+        ),
+        "selected": selected,
+        "completed_prefix": completed,
+    }
+    checkpoint["checkpoint_sha256"] = _canonical_json_sha256(checkpoint)
+    return checkpoint
+
+
+def completed_stage3_checkpoint(
+    *,
+    dossiers: Sequence[Mapping[str, Any]],
+    fresh_research_dossier_count: int,
+    retained_research_reused_count: int,
+    compatibility_contract: Mapping[str, Any],
+    progress_checkpoint: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind every final Stage-3 item while retaining the fresh/reused boundary."""
+
+    compatibility = _valid_stage3_research_compatibility_contract(compatibility_contract)
+    if compatibility is None:
+        raise ValueError("research_completed_compatibility_contract_invalid")
+    if (
+        isinstance(fresh_research_dossier_count, bool)
+        or not isinstance(fresh_research_dossier_count, int)
+        or fresh_research_dossier_count < 0
+        or isinstance(retained_research_reused_count, bool)
+        or not isinstance(retained_research_reused_count, int)
+        or retained_research_reused_count < 0
+        or fresh_research_dossier_count + retained_research_reused_count != len(dossiers)
+    ):
+        raise ValueError("research_completed_dossier_counts_invalid")
+    progress = dict(progress_checkpoint)
+    progress_without_hash = {
+        key: item for key, item in progress.items() if key != "checkpoint_sha256"
+    }
+    if progress.get("checkpoint_sha256") != _canonical_json_sha256(progress_without_hash):
+        raise ValueError("research_completed_progress_checkpoint_invalid")
+    completed_items = [
+        {
+            "problem_id": _coerce_str(dossier.get("problem_id")),
+            "case_id": _coerce_str(dossier.get("case_id")),
+            "dossier_sha256": stage3_research_dossier_resume_sha256(dossier),
+        }
+        for dossier in dossiers
+    ]
+    checkpoint: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "completed",
+        "scope": "repro_research_stage",
+        "fresh_research_dossier_count": fresh_research_dossier_count,
+        "retained_research_reused_count": retained_research_reused_count,
+        "research_compatibility_sha256": compatibility["contract_sha256"],
+        "progress_checkpoint_sha256": progress["checkpoint_sha256"],
+        "completed_items": completed_items,
+    }
+    checkpoint["checkpoint_sha256"] = _canonical_json_sha256(checkpoint)
+    return checkpoint
+
+
+def _validated_completed_stage3_checkpoint(
+    stage_document: Mapping[str, Any],
+    *,
+    expected_compatibility_contract: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return one intact final checkpoint, optionally bound to current semantics."""
+
+    meta_raw = stage_document.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    checkpoint_raw = meta.get("completed_stage_checkpoint")
+    checkpoint = dict(checkpoint_raw) if isinstance(checkpoint_raw, Mapping) else {}
+    without_hash = {key: item for key, item in checkpoint.items() if key != "checkpoint_sha256"}
+    compatibility = _valid_stage3_research_compatibility_contract(
+        meta.get("research_compatibility")
+    )
+    progress_raw = meta.get("progress_checkpoint")
+    progress = dict(progress_raw) if isinstance(progress_raw, Mapping) else {}
+    progress_without_hash = {
+        key: item for key, item in progress.items() if key != "checkpoint_sha256"
+    }
+    items_raw = stage_document.get("items")
+    items = items_raw if isinstance(items_raw, list) else []
+    fresh_count = checkpoint.get("fresh_research_dossier_count")
+    reused_count = checkpoint.get("retained_research_reused_count")
+    summaries_raw = checkpoint.get("completed_items")
+    summaries = summaries_raw if isinstance(summaries_raw, list) else []
+    expected_compatibility = (
+        dict(expected_compatibility_contract)
+        if isinstance(expected_compatibility_contract, Mapping)
+        else None
+    )
+    if (
+        stage_document.get("stage") != _STAGE
+        or meta.get("stage_status") != "completed"
+        or stage_document.get("item_count") != len(items)
+        or checkpoint.get("schema_version") != 1
+        or checkpoint.get("status") != "completed"
+        or checkpoint.get("scope") != "repro_research_stage"
+        or checkpoint.get("checkpoint_sha256") != _canonical_json_sha256(without_hash)
+        or compatibility is None
+        or (expected_compatibility is not None and compatibility != expected_compatibility)
+        or checkpoint.get("research_compatibility_sha256") != compatibility.get("contract_sha256")
+        or progress.get("checkpoint_sha256") != _canonical_json_sha256(progress_without_hash)
+        or checkpoint.get("progress_checkpoint_sha256") != progress.get("checkpoint_sha256")
+        or isinstance(fresh_count, bool)
+        or not isinstance(fresh_count, int)
+        or fresh_count < 0
+        or isinstance(reused_count, bool)
+        or not isinstance(reused_count, int)
+        or reused_count < 0
+        or fresh_count + reused_count != len(items)
+        or len(summaries) != len(items)
+    ):
+        return None
+    progress_compatibility = _valid_stage3_research_compatibility_contract(
+        progress.get("research_compatibility")
+    )
+    progress_completed_raw = progress.get("completed_prefix")
+    progress_completed = progress_completed_raw if isinstance(progress_completed_raw, list) else []
+    progress_selected_raw = progress.get("selected")
+    progress_selected = progress_selected_raw if isinstance(progress_selected_raw, list) else []
+    if (
+        progress.get("schema_version") != 1
+        or progress.get("status") != "checkpointed_progress"
+        or progress.get("scope") != "repro_research_stage"
+        or progress_compatibility != compatibility
+        or len(progress_completed) != fresh_count
+        or len(progress_selected) != fresh_count
+    ):
+        return None
+    for index, (summary, item) in enumerate(zip(summaries, items, strict=True)):
+        if (
+            not isinstance(summary, Mapping)
+            or not isinstance(item, Mapping)
+            or summary.get("problem_id") != item.get("problem_id")
+            or summary.get("case_id") != item.get("case_id")
+            or summary.get("dossier_sha256") != stage3_research_dossier_resume_sha256(item)
+        ):
+            return None
+        if index < fresh_count:
+            fresh_summary = progress_completed[index]
+            if (
+                not isinstance(fresh_summary, Mapping)
+                or fresh_summary.get("problem_id") != summary.get("problem_id")
+                or fresh_summary.get("case_id") != summary.get("case_id")
+                or fresh_summary.get("dossier_sha256") != summary.get("dossier_sha256")
+            ):
+                return None
+    return json.loads(json.dumps(checkpoint, ensure_ascii=False))
+
+
+def _resume_completed_prefix_from_stage_document(
+    stage_document: Mapping[str, Any] | None,
+    *,
+    selected_problems: Sequence[Mapping[str, Any]],
+    resolved_repo_ref: str | None,
+    expected_compatibility_contract: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Validate and return only a sequential, fully committed Stage-3 prefix."""
+    if not isinstance(stage_document, Mapping):
+        return []
+    meta_raw = stage_document.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    stage_status = meta.get("stage_status")
+    if stage_status not in {"checkpointed_progress", "completed"}:
+        return []
+    checkpoint_raw = meta.get("progress_checkpoint")
+    checkpoint = dict(checkpoint_raw) if isinstance(checkpoint_raw, Mapping) else {}
+    checkpoint_without_hash = {
+        key: value for key, value in checkpoint.items() if key != "checkpoint_sha256"
+    }
+    expected_selected = [
+        {
+            "problem_id": _coerce_str(problem.get("problem_id")),
+            "case_id": _coerce_str(problem.get("case_id")) or "case:unassigned",
+            "assignment_sha256": (
+                problem.get("evidence_assignment", {}).get("assignment_sha256")
+                if isinstance(problem.get("evidence_assignment"), Mapping)
+                else None
+            ),
+        }
+        for problem in selected_problems
+    ]
+    completed_raw = checkpoint.get("completed_prefix")
+    completed = completed_raw if isinstance(completed_raw, list) else []
+    items_raw = stage_document.get("items")
+    all_items = items_raw if isinstance(items_raw, list) else []
+    if stage_status == "completed":
+        completion = _validated_completed_stage3_checkpoint(
+            stage_document,
+            expected_compatibility_contract=expected_compatibility_contract,
+        )
+        if completion is None:
+            raise ValueError("research_completed_resume_checkpoint_invalid")
+        fresh_count = completion["fresh_research_dossier_count"]
+        items = all_items[:fresh_count]
+    else:
+        items = all_items
+    persisted_compatibility = _valid_stage3_research_compatibility_contract(
+        checkpoint.get("research_compatibility")
+    )
+    if persisted_compatibility is None:
+        raise ValueError("research_progress_resume_compatibility_invalid")
+    if persisted_compatibility != dict(expected_compatibility_contract):
+        raise ValueError("research_progress_resume_compatibility_changed")
+    if (
+        checkpoint.get("schema_version") != 1
+        or checkpoint.get("status") != "checkpointed_progress"
+        or checkpoint.get("scope") != "repro_research_stage"
+        or checkpoint.get("resolved_repo_ref") != resolved_repo_ref
+        or checkpoint.get("selected") != expected_selected
+        or checkpoint.get("checkpoint_sha256") != _canonical_json_sha256(checkpoint_without_hash)
+        or len(completed) != len(items)
+        or len(items) > len(expected_selected)
+    ):
+        raise ValueError("research_progress_resume_checkpoint_invalid")
+    retained: list[dict[str, Any]] = []
+    for index, (summary, item) in enumerate(zip(completed, items, strict=True)):
+        if not isinstance(summary, Mapping) or not isinstance(item, dict):
+            raise ValueError(f"research_progress_resume_dossier_invalid:{index}")
+        expected = expected_selected[index]
+        if (
+            summary.get("problem_id") != expected["problem_id"]
+            or summary.get("case_id") != expected["case_id"]
+            or _coerce_str(item.get("problem_id")) != expected["problem_id"]
+            or _coerce_str(item.get("case_id")) != expected["case_id"]
+            or summary.get("dossier_sha256") != stage3_research_dossier_resume_sha256(item)
+        ):
+            raise ValueError(f"research_progress_resume_prefix_changed:{index}")
+        proof_item = {
+            key: value
+            for key, value in item.items()
+            if key not in _STAGE3_ORCHESTRATION_LINEAGE_FIELDS
+        }
+        validated, _ = parse_research_dossier_list(json.dumps([proof_item]))
+        persisted = validated[0]
+        attempt_errors = _persisted_research_attempt_errors(persisted)
+        if attempt_errors:
+            raise ValueError(
+                "research_progress_resume_attempt_changed:"
+                + str(expected["problem_id"])
+                + ":"
+                + ",".join(attempt_errors)
+            )
+        verification_raw = persisted.get("evidence_verification")
+        verification = verification_raw if isinstance(verification_raw, dict) else {}
+        if verification.get("status") == "verified":
+            evidence_valid, evidence_errors = verify_persisted_research_evidence(persisted)
+            if not evidence_valid or evidence_errors:
+                raise ValueError(
+                    "research_progress_resume_evidence_changed:"
+                    + str(expected["problem_id"])
+                    + ":"
+                    + ",".join(evidence_errors or ["persisted_verification_failed"])
+                )
+        retained.append(persisted)
+    return retained
 
 
 def resume_research_dossier_from_external_wait(
@@ -2756,20 +3309,15 @@ def resume_research_dossier_from_external_wait(
         raise ValueError("research_external_wait_resume_artifact_changed")
     if wait_attempt.get("attempt_sha256") != research_attempt_sha256(wait_attempt):
         raise ValueError("research_external_wait_resume_attempt_hash_changed")
-    wait_attempt_errors = _persisted_research_attempt_errors(
-        {"research_attempts": [wait_attempt]}
-    )
+    wait_attempt_errors = _persisted_research_attempt_errors({"research_attempts": [wait_attempt]})
     if wait_attempt_errors:
         raise ValueError(
-            "research_external_wait_resume_wait_attempt_invalid:"
-            + ",".join(wait_attempt_errors)
+            "research_external_wait_resume_wait_attempt_invalid:" + ",".join(wait_attempt_errors)
         )
     checkpoint_expected_session = _coerce_str(checkpoint.get("expected_session_id"))
     checkpoint_observed_session = _coerce_str(checkpoint.get("observed_session_id"))
     attempt_expected_session = _coerce_str(wait_attempt.get("agent_session_id"))
-    attempt_observed_session = _coerce_str(
-        wait_attempt.get("observed_agent_session_id")
-    )
+    attempt_observed_session = _coerce_str(wait_attempt.get("observed_agent_session_id"))
     if (
         checkpoint_expected_session is None
         or checkpoint_observed_session is None
@@ -2790,8 +3338,7 @@ def resume_research_dossier_from_external_wait(
     prior_attempt_errors = _persisted_research_attempt_errors(prior)
     if prior_attempt_errors:
         raise ValueError(
-            "research_external_wait_resume_prior_attempt_invalid:"
-            + ",".join(prior_attempt_errors)
+            "research_external_wait_resume_prior_attempt_invalid:" + ",".join(prior_attempt_errors)
         )
     validation_errors = _string_list(wait_attempt.get("validation_errors"))
     if not validation_errors:
@@ -2918,6 +3465,7 @@ def run_repro_research_stage(
     replay_executor: ReplayExecutor | None = None,
     replay_executor_metadata: dict[str, Any] | None = None,
     resume_stage_document: Mapping[str, Any] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
     _attempt_number: int = 1,
     _full_attempt_kind: str = "full_research",
     _full_source_attempt_sha256: str | None = None,
@@ -3014,9 +3562,7 @@ def run_repro_research_stage(
                 f"run_repro_research_stage: duplicate selected problem_id:{problem_id}"
             )
         selected_problem_ids_ordered.append(problem_id)
-        selected_case_ids[problem_id] = (
-            _coerce_str(problem.get("case_id")) or "case:unassigned"
-        )
+        selected_case_ids[problem_id] = _coerce_str(problem.get("case_id")) or "case:unassigned"
     resume_checkpoint, resume_items_by_problem_id = _resume_checkpoint_from_stage_document(
         resume_stage_document,
         selected_problem_ids=selected_problem_ids_ordered,
@@ -3029,10 +3575,7 @@ def run_repro_research_stage(
     )
     resume_trigger_cleared = resume_checkpoint is None
     selected_problem_ids = set(selected_problem_ids_ordered)
-    if (
-        resume_checkpoint is not None
-        and resume_trigger_problem_id not in selected_problem_ids
-    ):
+    if resume_checkpoint is not None and resume_trigger_problem_id not in selected_problem_ids:
         raise ValueError("research_external_wait_resume_trigger_not_selected")
     if resume_checkpoint is not None:
         # Validate the entire retained frontier before resuming its trigger.  Checking
@@ -3043,22 +3586,17 @@ def run_repro_research_stage(
             persisted_dossier = resume_items_by_problem_id[problem_id]
             persisted_assignment_raw = persisted_dossier.get("evidence_assignment")
             persisted_assignment = (
-                persisted_assignment_raw
-                if isinstance(persisted_assignment_raw, dict)
-                else {}
+                persisted_assignment_raw if isinstance(persisted_assignment_raw, dict) else {}
             )
             current_assignment_raw = problem.get("evidence_assignment")
             current_assignment = (
-                current_assignment_raw
-                if isinstance(current_assignment_raw, dict)
-                else {}
+                current_assignment_raw if isinstance(current_assignment_raw, dict) else {}
             )
             if persisted_assignment.get("assignment_sha256") != current_assignment.get(
                 "assignment_sha256"
             ):
                 raise ValueError(
-                    "research_external_wait_resume_evidence_assignment_changed:"
-                    + problem_id
+                    "research_external_wait_resume_evidence_assignment_changed:" + problem_id
                 )
             if _coerce_str(persisted_dossier.get("case_id")) != selected_case_ids[problem_id]:
                 raise ValueError(
@@ -3084,6 +3622,61 @@ def run_repro_research_stage(
         and requested_repo_ref is not None
         else requested_repo_ref
     )
+    compatibility_contract = stage3_research_compatibility_contract(agent=agent)
+    completed_prefix = _resume_completed_prefix_from_stage_document(
+        resume_stage_document,
+        selected_problems=selected_problems,
+        resolved_repo_ref=resolved_repo_ref,
+        expected_compatibility_contract=compatibility_contract,
+    )
+    if completed_prefix and resume_checkpoint is not None:
+        raise ValueError("research_resume_checkpoint_modes_conflict")
+    dossiers.extend(completed_prefix)
+    resumed_progress_checkpoint_sha256 = None
+    if completed_prefix and isinstance(resume_stage_document, Mapping):
+        resume_meta_raw = resume_stage_document.get("input_meta")
+        resume_meta = resume_meta_raw if isinstance(resume_meta_raw, Mapping) else {}
+        progress_raw = resume_meta.get("progress_checkpoint")
+        progress = progress_raw if isinstance(progress_raw, Mapping) else {}
+        resumed_progress_checkpoint_sha256 = _coerce_str(progress.get("checkpoint_sha256"))
+
+    def commit_dossier(dossier: dict[str, Any]) -> None:
+        index = len(dossiers)
+        if index >= len(selected_problem_ids_ordered):
+            raise ValueError("research_progress_commit_exceeds_selection")
+        expected_problem_id = selected_problem_ids_ordered[index]
+        if (
+            _coerce_str(dossier.get("problem_id")) != expected_problem_id
+            or _coerce_str(dossier.get("case_id")) != selected_case_ids[expected_problem_id]
+        ):
+            raise ValueError("research_progress_commit_identity_mismatch:" + expected_problem_id)
+        dossiers.append(dossier)
+        if progress_callback is None or stage_external_wait is not None:
+            return
+        checkpoint = _completed_prefix_checkpoint(
+            selected_problems=selected_problems,
+            completed_dossiers=dossiers,
+            resolved_repo_ref=resolved_repo_ref,
+            compatibility_contract=compatibility_contract,
+        )
+        progress_callback(
+            build_stage_document(
+                _STAGE,
+                dossiers,
+                input_meta={
+                    "selected_problem_count": len(selected_problems),
+                    "stage_status": "checkpointed_progress",
+                    "progress_checkpoint": checkpoint,
+                    "research_compatibility": compatibility_contract,
+                    "resumed_progress_checkpoint_sha256": (resumed_progress_checkpoint_sha256),
+                    "repo_input": repo_input,
+                    "target_slug": target_slug,
+                    "agent": agent,
+                    "model": model,
+                },
+                artifacts={},
+            )
+        )
 
     for idx, problem in enumerate(selected_problems, start=1):
         pid = _coerce_str(problem.get("problem_id"))
@@ -3141,6 +3734,15 @@ def run_repro_research_stage(
         }
         requests.append(req_meta)
 
+        if idx <= len(completed_prefix):
+            req_meta.update(
+                {
+                    "dispatch_status": "reused_completed_prefix",
+                    "progress_checkpoint_sha256": resumed_progress_checkpoint_sha256,
+                }
+            )
+            continue
+
         if stage_external_wait is not None:
             checkpoint_sha256 = str(stage_external_wait["checkpoint_sha256"])
             req_meta.update(
@@ -3162,7 +3764,7 @@ def run_repro_research_stage(
                 checkpoint=stage_external_wait,
             )
             validated, _ = parse_research_dossier_list(json.dumps([parked]))
-            dossiers.append(validated[0])
+            commit_dossier(validated[0])
             continue
 
         persisted_dossier = resume_items_by_problem_id.get(pid)
@@ -3174,9 +3776,7 @@ def run_repro_research_stage(
             if persisted_assignment.get("assignment_sha256") != evidence_assignment.get(
                 "assignment_sha256"
             ):
-                raise ValueError(
-                    f"research_external_wait_resume_evidence_assignment_changed:{pid}"
-                )
+                raise ValueError(f"research_external_wait_resume_evidence_assignment_changed:{pid}")
         persisted_blockers = (
             _string_list(persisted_dossier.get("blocking_reasons"))
             if isinstance(persisted_dossier, dict)
@@ -3192,10 +3792,8 @@ def run_repro_research_stage(
             and persisted_dossier is not None
             and not persisted_was_parked_before_dispatch
         ):
-            persisted_validated, _ = parse_research_dossier_list(
-                json.dumps([persisted_dossier])
-            )
-            dossiers.append(persisted_validated[0])
+            persisted_validated, _ = parse_research_dossier_list(json.dumps([persisted_dossier]))
+            commit_dossier(persisted_validated[0])
             req_meta.update(
                 {
                     "dispatch_status": "retained_completed_before_external_wait",
@@ -3228,7 +3826,7 @@ def run_repro_research_stage(
             resumed_raw = resume_result.get("dossier")
             resumed = dict(resumed_raw) if isinstance(resumed_raw, dict) else persisted_dossier
             resumed_validated, _ = parse_research_dossier_list(json.dumps([resumed]))
-            dossiers.append(resumed_validated[0])
+            commit_dossier(resumed_validated[0])
             req_meta["attempts"] = [
                 _research_attempt_request_summary(attempt)
                 for attempt in (
@@ -3257,19 +3855,13 @@ def run_repro_research_stage(
                     external_wait=resumed_wait,
                     case_id=case_id,
                     problem_id=pid,
-                    expected_session_id=_coerce_str(
-                        resume_result.get("expected_session_id")
-                    ),
-                    observed_session_id=_coerce_str(
-                        resume_result.get("observed_session_id")
-                    ),
+                    expected_session_id=_coerce_str(resume_result.get("expected_session_id")),
+                    observed_session_id=_coerce_str(resume_result.get("observed_session_id")),
                 )
                 req_meta.update(
                     {
                         "dispatch_status": "reparked_during_same_session_resume",
-                        "external_wait_checkpoint_sha256": stage_external_wait[
-                            "checkpoint_sha256"
-                        ],
+                        "external_wait_checkpoint_sha256": stage_external_wait["checkpoint_sha256"],
                         "route": "chatgpt_subscription",
                         "api_fallback_allowed": False,
                     }
@@ -3306,13 +3898,11 @@ def run_repro_research_stage(
                 evidence_needed="Restore or explicitly disposition every cited atom",
             )
             validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-            dossiers.append(validated[0])
+            commit_dossier(validated[0])
             continue
 
         problem_record_raw = problem.get("problem_record")
-        problem_record = (
-            problem_record_raw if isinstance(problem_record_raw, dict) else {}
-        )
+        problem_record = problem_record_raw if isinstance(problem_record_raw, dict) else {}
         if problem_record.get("case_identity_status") == "pending_relation":
             blocked = _blocked_research_placeholder(
                 case_id=case_id,
@@ -3333,7 +3923,7 @@ def run_repro_research_stage(
                 ),
             )
             validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-            dossiers.append(validated[0])
+            commit_dossier(validated[0])
             continue
 
         if dry_run:
@@ -3349,7 +3939,7 @@ def run_repro_research_stage(
                 evidence_needed="Rerun stage 3 without --dry-run",
             )
             validated, _ = parse_research_dossier_list(json.dumps([placeholder]))
-            dossiers.append(validated[0])
+            commit_dossier(validated[0])
             continue
 
         prepared_workspace: Path | None = None
@@ -3421,7 +4011,7 @@ def run_repro_research_stage(
                     ),
                 )
                 validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-                dossiers.append(validated[0])
+                commit_dossier(validated[0])
                 continue
 
         append_prompt = _append_prompt_for_problem(
@@ -3474,7 +4064,7 @@ def run_repro_research_stage(
                 evidence_needed="Retry this case and retain a valid research report",
             )
             validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-            dossiers.append(validated[0])
+            commit_dossier(validated[0])
             continue
         run_dir = result.run_dir
         run_external_wait = _runner_external_wait(run_dir)
@@ -3589,7 +4179,7 @@ def run_repro_research_stage(
             implementation_history = [*map(dict, _prior_attempts), implementation_attempt]
             _set_research_attempts(blocked, implementation_history)
             validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-            dossiers.append(validated[0])
+            commit_dossier(validated[0])
             req_meta["attempts"] = [
                 _research_attempt_request_summary(attempt) for attempt in implementation_history
             ]
@@ -3674,7 +4264,7 @@ def run_repro_research_stage(
             nonretry_history = [*map(dict, _prior_attempts), nonretry_attempt]
             _set_research_attempts(blocked, nonretry_history)
             validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-            dossiers.append(validated[0])
+            commit_dossier(validated[0])
             req_meta["attempts"] = [
                 _research_attempt_request_summary(attempt) for attempt in nonretry_history
             ]
@@ -3689,9 +4279,7 @@ def run_repro_research_stage(
                 req_meta.update(
                     {
                         "dispatch_status": "parked_during_dispatch",
-                        "external_wait_checkpoint_sha256": stage_external_wait[
-                            "checkpoint_sha256"
-                        ],
+                        "external_wait_checkpoint_sha256": stage_external_wait["checkpoint_sha256"],
                         "route": "chatgpt_subscription",
                         "api_fallback_allowed": False,
                     }
@@ -4080,7 +4668,7 @@ def run_repro_research_stage(
                     )
                 _set_research_attempts(retried, retry_attempts)
                 retried_validated, _ = parse_research_dossier_list(json.dumps([retried]))
-                dossiers.append(retried_validated[0])
+                commit_dossier(retried_validated[0])
                 req_meta["attempts"] = [
                     _research_attempt_request_summary(attempt) for attempt in retry_attempts
                 ]
@@ -4112,7 +4700,7 @@ def run_repro_research_stage(
             )
             _set_research_attempts(blocked, research_attempt_history)
             validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-            dossiers.append(validated[0])
+            commit_dossier(validated[0])
             req_meta["attempts"] = [
                 _research_attempt_request_summary(attempt) for attempt in research_attempt_history
             ]
@@ -4415,12 +5003,8 @@ def run_repro_research_stage(
                         external_wait=verifier_external_wait,
                         case_id=case_id,
                         problem_id=pid,
-                        expected_session_id=_coerce_str(
-                            verifier_repair.get("expected_session_id")
-                        ),
-                        observed_session_id=_coerce_str(
-                            verifier_repair.get("observed_session_id")
-                        ),
+                        expected_session_id=_coerce_str(verifier_repair.get("expected_session_id")),
+                        observed_session_id=_coerce_str(verifier_repair.get("observed_session_id")),
                     )
                     req_meta["evidence_verification_corrections"]["external_wait"] = (
                         verifier_external_wait
@@ -4502,7 +5086,7 @@ def run_repro_research_stage(
             # recorded by the blocked wrapper, not retroactively rewritten into the model turn.
             _set_research_attempts(blocked, research_attempt_history)
             validated, _ = parse_research_dossier_list(json.dumps([blocked]))
-            dossiers.append(validated[0])
+            commit_dossier(validated[0])
             req_meta["attempts"] = [
                 _research_attempt_request_summary(attempt) for attempt in research_attempt_history
             ]
@@ -4510,7 +5094,7 @@ def run_repro_research_stage(
         normalized = validated[0]
         if warnings:
             normalized["_parse_warning"] = "; ".join(warnings)
-        dossiers.append(normalized)
+        commit_dossier(normalized)
 
     requests_path = stage_artifacts_dir / "repro_research_requests.json"
     requests_path.write_text(
@@ -4561,6 +5145,27 @@ def run_repro_research_stage(
             "fresh_restart_cycle_wall_seconds",
         )
     }
+    completed_progress_checkpoint = (
+        _completed_prefix_checkpoint(
+            selected_problems=selected_problems,
+            completed_dossiers=dossiers,
+            resolved_repo_ref=resolved_repo_ref,
+            compatibility_contract=compatibility_contract,
+        )
+        if stage_external_wait is None
+        else None
+    )
+    final_completed_checkpoint = (
+        completed_stage3_checkpoint(
+            dossiers=dossiers,
+            fresh_research_dossier_count=len(dossiers),
+            retained_research_reused_count=0,
+            compatibility_contract=compatibility_contract,
+            progress_checkpoint=completed_progress_checkpoint,
+        )
+        if completed_progress_checkpoint is not None
+        else None
+    )
     stage_doc = build_stage_document(
         _STAGE,
         dossiers,
@@ -4569,6 +5174,9 @@ def run_repro_research_stage(
             "stage_status": (
                 "parked_external_wait" if stage_external_wait is not None else "completed"
             ),
+            "research_compatibility": compatibility_contract,
+            "progress_checkpoint": completed_progress_checkpoint,
+            "completed_stage_checkpoint": final_completed_checkpoint,
             "external_wait": (
                 json.loads(json.dumps(stage_external_wait, ensure_ascii=False))
                 if stage_external_wait is not None
@@ -4584,6 +5192,8 @@ def run_repro_research_stage(
                 if resume_checkpoint is not None
                 else None
             ),
+            "resumed_completed_prefix_count": len(completed_prefix),
+            "resumed_progress_checkpoint_sha256": resumed_progress_checkpoint_sha256,
             "external_wait_resume_cleared": (
                 resume_trigger_cleared if resume_checkpoint is not None else None
             ),

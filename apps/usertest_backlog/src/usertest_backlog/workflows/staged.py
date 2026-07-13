@@ -10,6 +10,12 @@ from uuid import uuid4
 
 from backlog_core import assess_research_readiness, build_operational_failure_candidates
 from backlog_miner.research_evidence import BlockedReplayExecutor
+from backlog_miner.research_runner import (
+    _valid_stage3_research_compatibility_contract,
+    _validated_completed_stage3_checkpoint,
+    stage3_research_compatibility_contract,
+    stage3_research_dossier_resume_sha256,
+)
 from backlog_repo import verify_outcome_record_provenance
 
 from usertest_backlog.commands.atom_actions import (
@@ -84,6 +90,7 @@ from usertest_backlog.workflows.qualification_transaction import (
     write_qualification_input_bundle,
 )
 from usertest_backlog.workflows.reproduction_research import (
+    _atomic_write_research_json,
     _configured_replay_executor,
     _run_repro_research_stage,
 )
@@ -192,9 +199,7 @@ def _qualification_correction_identity(
 
 
 def _write_qualification_json_once(path: Path, payload: Mapping[str, Any]) -> Path:
-    encoded = (
-        json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n"
-    ).encode("utf-8")
+    encoded = (json.dumps(dict(payload), ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
         with path.open("xb") as stream:
@@ -203,13 +208,9 @@ def _write_qualification_json_once(path: Path, payload: Mapping[str, Any]) -> Pa
         try:
             existing = path.read_bytes()
         except OSError as exc:
-            raise ValueError(
-                f"qualification_correction_write_once_unreadable:{path}"
-            ) from exc
+            raise ValueError(f"qualification_correction_write_once_unreadable:{path}") from exc
         if existing != encoded:
-            raise ValueError(
-                f"qualification_correction_write_once_conflict:{path}"
-            ) from None
+            raise ValueError(f"qualification_correction_write_once_conflict:{path}") from None
     return path
 
 
@@ -222,9 +223,7 @@ def _write_qualification_bytes_once(path: Path, content: bytes) -> Path:
         try:
             existing = path.read_bytes()
         except OSError as exc:
-            raise ValueError(
-                f"qualification_write_once_unreadable:{path}"
-            ) from exc
+            raise ValueError(f"qualification_write_once_unreadable:{path}") from exc
         if existing != content:
             raise ValueError(f"qualification_write_once_conflict:{path}") from None
     if path.read_bytes() != content:
@@ -240,9 +239,7 @@ def _load_qualification_correction_completion(
     candidates = [path] if path.is_file() else []
     candidates.extend(
         candidate
-        for candidate in sorted(
-            path.parent.glob(f"{path.stem}.terminal.*{path.suffix}")
-        )
+        for candidate in sorted(path.parent.glob(f"{path.stem}.terminal.*{path.suffix}"))
         if candidate not in candidates
     )
     for candidate in candidates:
@@ -419,9 +416,7 @@ def _normalized_qualification_execution_profile(
             else None
         ),
         "policy_enabled": not bool(getattr(args, "no_policy", False)),
-        "carryover_actioned_only": bool(
-            getattr(args, "carryover_actioned_only", False)
-        ),
+        "carryover_actioned_only": bool(getattr(args, "carryover_actioned_only", False)),
         "exclude_atom_statuses": sorted(
             {
                 normalized
@@ -462,9 +457,9 @@ def _qualification_cycle_namespace_errors(
         cycle_root=cycle_root,
         stage_runs_dir=stage_runs_dir,
     )
-    expected_bytes = (
-        json.dumps(dict(contract), indent=2, ensure_ascii=False) + "\n"
-    ).encode("utf-8")
+    expected_bytes = (json.dumps(dict(contract), indent=2, ensure_ascii=False) + "\n").encode(
+        "utf-8"
+    )
     marker_exists = [marker.is_file() for marker in markers]
     if any(marker_exists):
         if not all(marker_exists):
@@ -497,9 +492,7 @@ def _qualification_cycle_namespace_errors(
 
     if all(marker_exists):
         owned_names_raw = contract.get("owned_cycle_names")
-        owned_names = (
-            set(owned_names_raw) if isinstance(owned_names_raw, list) else set()
-        )
+        owned_names = set(owned_names_raw) if isinstance(owned_names_raw, list) else set()
         for path in cycle_root.iterdir():
             if path.name == markers[0].name:
                 continue
@@ -531,9 +524,7 @@ def _prepare_or_validate_qualification_cycle_namespace(
         stage_runs_dir=stage_runs_dir,
     )
     if not markers[0].exists():
-        encoded = (
-            json.dumps(dict(contract), indent=2, ensure_ascii=False) + "\n"
-        ).encode("utf-8")
+        encoded = (json.dumps(dict(contract), indent=2, ensure_ascii=False) + "\n").encode("utf-8")
         for marker in markers:
             _write_qualification_bytes_once(marker, encoded)
 
@@ -614,9 +605,7 @@ def _prior_qualification_label_paths(state_path: Path) -> dict[str, Path]:
             for path_field in ("source_path", "snapshot_path"):
                 raw = _coerce_string(receipt.get(path_field))
                 if raw is not None:
-                    result[f"prior_cycle_{cycle_index}:{name}:{path_field}"] = Path(
-                        raw
-                    ).resolve()
+                    result[f"prior_cycle_{cycle_index}:{name}:{path_field}"] = Path(raw).resolve()
     return result
 
 
@@ -647,8 +636,7 @@ def _stage3_provider_external_wait(stage_doc: Mapping[str, Any]) -> dict[str, An
         or checkpoint.get("status") != "parked_external_wait"
         or checkpoint.get("scope") != "repro_research_stage"
         or checkpoint.get("reason") != "codex_chatgpt_subscription_usage_limit"
-        or checkpoint.get("resume_status")
-        != "checkpoint_persisted_same_author_resume_supported"
+        or checkpoint.get("resume_status") != "checkpoint_persisted_same_author_resume_supported"
         or checkpoint.get("route") != "chatgpt_subscription"
         or checkpoint.get("api_fallback_allowed") is not False
         or wait.get("code") != "codex_chatgpt_subscription_usage_limit"
@@ -663,6 +651,86 @@ def _stage3_provider_external_wait(stage_doc: Mapping[str, Any]) -> dict[str, An
     ):
         return None
     return json.loads(json.dumps(checkpoint, ensure_ascii=False))
+
+
+def _stage3_completed_progress(
+    stage_doc: Mapping[str, Any],
+    *,
+    expected_compatibility_contract: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Return only a hash-bound, sequential Stage-3 progress checkpoint."""
+    meta_raw = stage_doc.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    checkpoint_raw = meta.get("progress_checkpoint")
+    checkpoint = checkpoint_raw if isinstance(checkpoint_raw, Mapping) else {}
+    selected_raw = checkpoint.get("selected")
+    selected = selected_raw if isinstance(selected_raw, list) else []
+    completed_raw = checkpoint.get("completed_prefix")
+    completed = completed_raw if isinstance(completed_raw, list) else []
+    items_raw = stage_doc.get("items")
+    items = items_raw if isinstance(items_raw, list) else []
+    checkpoint_without_hash = {
+        key: value for key, value in checkpoint.items() if key != "checkpoint_sha256"
+    }
+    compatibility = _valid_stage3_research_compatibility_contract(
+        checkpoint.get("research_compatibility")
+    )
+    meta_compatibility = _valid_stage3_research_compatibility_contract(
+        meta.get("research_compatibility")
+    )
+    expected_compatibility = (
+        dict(expected_compatibility_contract)
+        if isinstance(expected_compatibility_contract, Mapping)
+        else None
+    )
+    if (
+        meta.get("stage_status") != "checkpointed_progress"
+        or checkpoint.get("schema_version") != 1
+        or checkpoint.get("status") != "checkpointed_progress"
+        or checkpoint.get("scope") != "repro_research_stage"
+        or not selected
+        or not completed
+        or len(completed) != len(items)
+        or len(completed) > len(selected)
+        or stage_doc.get("item_count") != len(items)
+        or compatibility is None
+        or meta_compatibility != compatibility
+        or (expected_compatibility is not None and compatibility != expected_compatibility)
+        or checkpoint.get("checkpoint_sha256")
+        != _qualification_canonical_sha256(checkpoint_without_hash)
+    ):
+        return None
+    for index, (summary, item) in enumerate(zip(completed, items, strict=True)):
+        selected_item = selected[index] if index < len(selected) else None
+        if (
+            not isinstance(summary, Mapping)
+            or not isinstance(item, Mapping)
+            or not isinstance(selected_item, Mapping)
+            or summary.get("problem_id") != selected_item.get("problem_id")
+            or summary.get("case_id") != selected_item.get("case_id")
+            or item.get("problem_id") != selected_item.get("problem_id")
+            or item.get("case_id") != selected_item.get("case_id")
+            or summary.get("dossier_sha256") != stage3_research_dossier_resume_sha256(item)
+        ):
+            return None
+    return json.loads(json.dumps(checkpoint, ensure_ascii=False))
+
+
+def _stage3_completed_stage(
+    stage_doc: Mapping[str, Any],
+    *,
+    expected_compatibility_contract: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Return only a final Stage-3 artifact safe to reuse after later-stage failure."""
+
+    meta_raw = stage_doc.get("input_meta")
+    meta = meta_raw if isinstance(meta_raw, Mapping) else {}
+    if not isinstance(meta.get("resume_upstream"), Mapping):
+        return None
+    return _validated_completed_stage3_checkpoint(
+        stage_doc,
+        expected_compatibility_contract=expected_compatibility_contract,
+    )
 
 
 def _stage3_resume_file_receipt(path: Path) -> dict[str, Any]:
@@ -685,7 +753,7 @@ def _stage3_resume_upstream_contract(
 ) -> dict[str, Any]:
     contract: dict[str, Any] = {
         "schema_version": 1,
-        "contract_kind": "stage3_external_wait_resume_upstream",
+        "contract_kind": "stage3_resume_upstream",
         "scope": {
             "target_slug": target_slug,
             "repo_input": repo_input,
@@ -735,19 +803,17 @@ def _load_stage3_resume_upstream(
     artifacts = artifacts_raw if isinstance(artifacts_raw, Mapping) else {}
     source_atom_corpus_raw = contract.get("source_atom_corpus")
     source_atom_corpus = (
-        source_atom_corpus_raw
-        if isinstance(source_atom_corpus_raw, Mapping)
-        else {}
+        source_atom_corpus_raw if isinstance(source_atom_corpus_raw, Mapping) else {}
     )
     if (
         contract.get("schema_version") != 1
-        or contract.get("contract_kind") != "stage3_external_wait_resume_upstream"
+        or contract.get("contract_kind")
+        not in {"stage3_resume_upstream", "stage3_external_wait_resume_upstream"}
         or contract.get("content_sha256") != _qualification_canonical_sha256(without_hash)
         or scope.get("target_slug") != target_slug
         or scope.get("repo_input") != repo_input
         or scope.get("research_ref") != research_ref
-        or source_atom_corpus.get("projection")
-        != "immutable_atom_evidence_projection_v1"
+        or source_atom_corpus.get("projection") != "immutable_atom_evidence_projection_v1"
     ):
         raise ValueError("stage3_external_wait_resume_upstream_contract_invalid")
     required = {
@@ -776,11 +842,9 @@ def _load_stage3_resume_upstream(
             _qualification_canonical_sha256(atom),
         ),
     )
-    if (
-        source_atom_corpus.get("atom_count") != len(current_atoms)
-        or source_atom_corpus.get("content_sha256")
-        != _qualification_canonical_sha256(current_source_projection)
-    ):
+    if source_atom_corpus.get("atom_count") != len(current_atoms) or source_atom_corpus.get(
+        "content_sha256"
+    ) != _qualification_canonical_sha256(current_source_projection):
         raise ValueError("stage3_external_wait_resume_source_atoms_changed")
     try:
         stage1 = json.loads(expected_paths["problem_records"].read_text(encoding="utf-8"))
@@ -798,10 +862,16 @@ def _load_stage3_resume_upstream(
     _require_stage_model_invocation_provenance(stage2)
     selected_ids = [
         str(item["problem_id"])
-        for item in (stage2.get("items") if isinstance(stage2.get("items"), list) else [])
-        if isinstance(item, dict)
-        and item.get("selected_for_research") is True
-        and isinstance(item.get("problem_id"), str)
+        for item in sorted(
+            (
+                item
+                for item in (stage2.get("items") if isinstance(stage2.get("items"), list) else [])
+                if isinstance(item, dict)
+                and item.get("selected_for_research") is True
+                and isinstance(item.get("problem_id"), str)
+            ),
+            key=_research_dispatch_sort_key,
+        )
     ]
     if selected_ids != contract.get("selected_problem_ids"):
         raise ValueError("stage3_external_wait_resume_upstream_selection_changed")
@@ -838,10 +908,13 @@ def _persist_downstream_case_lineage(
     input_meta["case_lineage_propagated"] = True
     input_meta["canonical_case_count"] = len(problem_cases)
     updated_doc["input_meta"] = input_meta
-    out_json.write_text(
-        json.dumps(updated_doc, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-    )
+    if updated_doc.get("stage") == "repro_research":
+        _atomic_write_research_json(out_json, updated_doc)
+    else:
+        out_json.write_text(
+            json.dumps(updated_doc, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
+        )
     return updated_doc, propagated
 
 
@@ -930,9 +1003,7 @@ def _merge_reused_downstream_stage_document(
     )
     merged["input_meta"] = input_meta
     artifacts_raw = merged.get("artifacts")
-    merged_artifacts = (
-        dict(artifacts_raw) if isinstance(artifacts_raw, Mapping) else {}
-    )
+    merged_artifacts = dict(artifacts_raw) if isinstance(artifacts_raw, Mapping) else {}
     merged_artifacts.update(dict(artifacts))
     merged["artifacts"] = merged_artifacts
     return merged
@@ -1340,13 +1411,9 @@ def _qualification_correction_metrics(
         "pending_not_invoked_route_count": 0,
     }
     result_map = result if isinstance(result, Mapping) else {}
-    consumption_path_raw = _coerce_string(
-        result_map.get("correction_consumption_path")
-    )
+    consumption_path_raw = _coerce_string(result_map.get("correction_consumption_path"))
     consumption_path = (
-        Path(consumption_path_raw).resolve()
-        if consumption_path_raw is not None
-        else None
+        Path(consumption_path_raw).resolve() if consumption_path_raw is not None else None
     )
     consumption_sha256: str | None = None
     consumption: Mapping[str, Any] = {}
@@ -1490,9 +1557,7 @@ def _record_best_qualified_fallback(
 
     binding_errors = best_qualified_fallback_errors(binding, verify_files=True)
     if binding_errors:
-        raise ValueError(
-            "best_qualified_fallback_invalid:" + ",".join(binding_errors)
-        )
+        raise ValueError("best_qualified_fallback_invalid:" + ",".join(binding_errors))
     report_path = Path(str(binding["report_path"])).resolve()
     report_wrapper = _load_qualification_json_object(
         report_path,
@@ -1503,19 +1568,11 @@ def _record_best_qualified_fallback(
         name="best_qualified_fallback_phase1_bundle",
     )
     bundle_artifacts_raw = phase1_bundle.get("artifacts")
-    bundle_artifacts = (
-        bundle_artifacts_raw
-        if isinstance(bundle_artifacts_raw, Mapping)
-        else {}
-    )
+    bundle_artifacts = bundle_artifacts_raw if isinstance(bundle_artifacts_raw, Mapping) else {}
 
     def bundled_path(name: str) -> Path | None:
         receipt = bundle_artifacts.get(name)
-        raw = (
-            _coerce_string(receipt.get("snapshot_path"))
-            if isinstance(receipt, Mapping)
-            else None
-        )
+        raw = _coerce_string(receipt.get("snapshot_path")) if isinstance(receipt, Mapping) else None
         return Path(raw).resolve() if raw is not None else None
 
     report_raw = report_wrapper.get("report")
@@ -1531,14 +1588,10 @@ def _record_best_qualified_fallback(
         disposition="best_qualified_ancestor_fallback",
         result_status=result_status,
         failed_report_path=_coerce_string(
-            current_qualification_meta.get(
-                "latest_failed_adjudication_report_path"
-            )
+            current_qualification_meta.get("latest_failed_adjudication_report_path")
         ),
         failed_report_sha256=_coerce_string(
-            current_qualification_meta.get(
-                "latest_failed_adjudication_report_sha256"
-            )
+            current_qualification_meta.get("latest_failed_adjudication_report_sha256")
         ),
         correction_consumption_path=correction_consumption_path,
         correction_consumption_sha256=correction_consumption_sha256,
@@ -1551,9 +1604,7 @@ def _record_best_qualified_fallback(
             "correction_required": True,
             "correction_metrics": cumulative_metrics,
             "best_qualified_fallback_used": True,
-            "best_qualified_fallback_content_sha256": binding.get(
-                "content_sha256"
-            ),
+            "best_qualified_fallback_content_sha256": binding.get("content_sha256"),
         }
     )
     report["qualification"] = qualification
@@ -1591,21 +1642,15 @@ def _record_best_qualified_fallback(
     if prompts_snapshot_raw is not None:
         artifacts["prompts_dir"] = str(Path(prompts_snapshot_raw).resolve())
     source_shadow_raw = artifacts.get("shadow_qualification")
-    source_shadow = (
-        dict(source_shadow_raw) if isinstance(source_shadow_raw, Mapping) else {}
-    )
+    source_shadow = dict(source_shadow_raw) if isinstance(source_shadow_raw, Mapping) else {}
     source_shadow.update(
         {
             "pending_adjudication": False,
             "qualification_status": qualification.get("status"),
             "qualification_passed": True,
             "qualification_failures": qualification.get("failures", []),
-            "qualification_basis_sha256": report.get(
-                "qualification_basis_sha256"
-            ),
-            "qualification_output_adjudication_path": binding.get(
-                "output_adjudication_path"
-            ),
+            "qualification_basis_sha256": report.get("qualification_basis_sha256"),
+            "qualification_output_adjudication_path": binding.get("output_adjudication_path"),
             "qualification_output_adjudication_sha256_post_run": binding.get(
                 "output_adjudication_sha256"
             ),
@@ -1645,15 +1690,9 @@ def _record_best_qualified_fallback(
     )
     artifacts["shadow_qualification"] = source_shadow
     export_contract_raw = artifacts.get("export_contract")
-    export_contract = (
-        dict(export_contract_raw)
-        if isinstance(export_contract_raw, Mapping)
-        else {}
-    )
+    export_contract = dict(export_contract_raw) if isinstance(export_contract_raw, Mapping) else {}
     fallback_policy_path = bundled_path("config.policy") or policy_config_path
-    fallback_export_gate_path = (
-        bundled_path("config.export_gate") or export_gate_config_path
-    )
+    fallback_export_gate_path = bundled_path("config.export_gate") or export_gate_config_path
     export_contract.update(
         {
             "policy_config_path": str(fallback_policy_path.resolve()),
@@ -1664,19 +1703,11 @@ def _record_best_qualified_fallback(
     fallback_backlog["artifacts"] = artifacts
     fallback_identity = _qualification_canonical_sha256(
         {
-            "best_qualified_fallback_content_sha256": binding.get(
-                "content_sha256"
-            ),
-            "correction_history_sha256s": [
-                item.get("content_sha256") for item in history
-            ],
+            "best_qualified_fallback_content_sha256": binding.get("content_sha256"),
+            "correction_history_sha256s": [item.get("content_sha256") for item in history],
         }
     )
-    fallback_root = (
-        out_json.parent
-        / f"{out_json.stem}.qualified_raw_fallback"
-        / fallback_identity
-    )
+    fallback_root = out_json.parent / f"{out_json.stem}.qualified_raw_fallback" / fallback_identity
     fallback_json = fallback_root / "qualified_raw_fallback.backlog.json"
     fallback_md = fallback_root / "qualified_raw_fallback.backlog.md"
     write_backlog(
@@ -1702,12 +1733,8 @@ def _record_best_qualified_fallback(
             current_qualification_meta.get("scored_at")
             or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         ),
-        required_consecutive_cycles=shadow_gate_config[
-            "required_consecutive_shadow_cycles"
-        ],
-        require_exact_export_projection=shadow_gate_config[
-            "require_exact_export_projection"
-        ],
+        required_consecutive_cycles=shadow_gate_config["required_consecutive_shadow_cycles"],
+        require_exact_export_projection=shadow_gate_config["require_exact_export_projection"],
     )
     return state, report, fallback_json
 
@@ -1930,13 +1957,9 @@ def _qualification_atoms_from_bytes(content: bytes) -> list[dict[str, Any]]:
             try:
                 item = json.loads(line)
             except json.JSONDecodeError as exc:
-                raise ValueError(
-                    f"qualification_atoms_jsonl_invalid:{line_number}"
-                ) from exc
+                raise ValueError(f"qualification_atoms_jsonl_invalid:{line_number}") from exc
             if not isinstance(item, dict):
-                raise ValueError(
-                    f"qualification_atoms_row_invalid:{line_number}"
-                ) from None
+                raise ValueError(f"qualification_atoms_row_invalid:{line_number}") from None
             atoms.append(item)
         return atoms
     if isinstance(parsed, list) and all(isinstance(item, dict) for item in parsed):
@@ -1969,8 +1992,7 @@ def _phase1_artifact_path_from_backlog(
         "solution_options": pipeline.get("solution_options_json"),
         "solution_selection": pipeline.get("solution_selection_json"),
         "change_plans": pipeline.get("change_plans_json"),
-        "case_registry": pipeline.get("case_registry_json")
-        or artifacts.get("case_registry_json"),
+        "case_registry": pipeline.get("case_registry_json") or artifacts.get("case_registry_json"),
     }
     raw = _coerce_string(raw_by_name.get(name))
     if raw is None:
@@ -1993,11 +2015,7 @@ def _phase1_snapshot_destination(
         return snapshot_root / "repository" / "configs" / "backlog_prompts" / relative
     if name == "pipeline.stage_guidance_manifest":
         return (
-            snapshot_root
-            / "repository"
-            / "configs"
-            / "backlog_stage_guidance"
-            / source_path.name
+            snapshot_root / "repository" / "configs" / "backlog_stage_guidance" / source_path.name
         )
     if name.startswith("pipeline.guidance:"):
         relative = name.split(":", 1)[1]
@@ -2035,8 +2053,7 @@ def _phase1_selected_artifact_names(
     selected.update(
         name
         for name in artifact_paths
-        if name.startswith("pipeline.prompt:")
-        or name.startswith("pipeline.guidance:")
+        if name.startswith("pipeline.prompt:") or name.startswith("pipeline.guidance:")
     )
     return selected
 
@@ -2078,18 +2095,14 @@ def _snapshot_phase1_qualification_bundle(
     if pending_sha256 is None:
         raise ValueError("qualification_phase1_pending_sha256_missing")
     snapshot_root = (
-        backlog_path.parent
-        / f"{backlog_path.stem}.qualification_pending_snapshot"
-        / pending_sha256
+        backlog_path.parent / f"{backlog_path.stem}.qualification_pending_snapshot" / pending_sha256
     )
     expected_receipts = _phase1_expected_receipts(pending)
     backlog_bytes = backlog_path.read_bytes()
     backlog_sha256 = sha256(backlog_bytes).hexdigest()
     if pending.get("backlog_sha256") != backlog_sha256:
         raise ValueError("pending_shadow_phase1_snapshot_hash_mismatch")
-    backlog_snapshot_path = (
-        snapshot_root / "backlog" / backlog_sha256 / "pending.backlog.json"
-    )
+    backlog_snapshot_path = snapshot_root / "backlog" / backlog_sha256 / "pending.backlog.json"
     _write_qualification_bytes_once(backlog_snapshot_path, backlog_bytes)
 
     selected_names = _phase1_selected_artifact_names(artifact_paths)
@@ -2132,10 +2145,7 @@ def _snapshot_phase1_qualification_bundle(
             raise ValueError(f"qualification_phase1_source_missing:{name}")
         content = resolved_source.read_bytes()
         content_sha256 = sha256(content).hexdigest()
-        if (
-            expected.get("sha256") != content_sha256
-            or expected.get("size_bytes") != len(content)
-        ):
+        if expected.get("sha256") != content_sha256 or expected.get("size_bytes") != len(content):
             raise ValueError(f"qualification_phase1_source_changed_after_validation:{name}")
         destination = _phase1_snapshot_destination(
             snapshot_root=snapshot_root,
@@ -2174,9 +2184,7 @@ def _snapshot_phase1_qualification_bundle(
             / "qualification_manifest.json"
         )
         _write_qualification_bytes_once(manifest_snapshot_path, manifest_bytes)
-        validation_artifact_paths["qualification.corpus_manifest"] = (
-            manifest_snapshot_path
-        )
+        validation_artifact_paths["qualification.corpus_manifest"] = manifest_snapshot_path
         loaded_bytes["qualification.corpus_manifest"] = manifest_bytes
         snapshot_artifacts["qualification.corpus_manifest"] = {
             "source_path": str(manifest_source),
@@ -2220,10 +2228,7 @@ def _snapshot_phase1_qualification_bundle(
 
     immutable_pending_path = snapshot_root / "phase1.validation.pending.json"
     pending_build_path = (
-        snapshot_root
-        / ".pending-build"
-        / uuid4().hex
-        / "phase1.validation.pending.json"
+        snapshot_root / ".pending-build" / uuid4().hex / "phase1.validation.pending.json"
     )
     immutable_pending = write_pending_shadow_run(
         pending_path=pending_build_path,
@@ -2246,8 +2251,7 @@ def _snapshot_phase1_qualification_bundle(
     )
     if immutable_pending_errors or immutable_pending_loaded is None:
         raise ValueError(
-            "qualification_phase1_snapshot_pending_invalid:"
-            + ",".join(immutable_pending_errors)
+            "qualification_phase1_snapshot_pending_invalid:" + ",".join(immutable_pending_errors)
         )
 
     bundle: dict[str, Any] = {
@@ -2263,8 +2267,7 @@ def _snapshot_phase1_qualification_bundle(
         "qualification_output_adjudication": adjudication_receipt,
         "artifacts": snapshot_artifacts,
         "source_artifact_sha256s": {
-            name: snapshot_artifacts[name]["sha256"]
-            for name in _PHASE1_REQUIRED_ARTIFACT_NAMES
+            name: snapshot_artifacts[name]["sha256"] for name in _PHASE1_REQUIRED_ARTIFACT_NAMES
         },
         "immutable_pending_run": {
             "path": str(immutable_pending_path.resolve()),
@@ -2276,12 +2279,7 @@ def _snapshot_phase1_qualification_bundle(
         ),
     }
     bundle["content_sha256"] = _qualification_canonical_sha256(bundle)
-    bundle_path = (
-        snapshot_root
-        / "bundle"
-        / str(bundle["content_sha256"])
-        / "phase1.bundle.json"
-    )
+    bundle_path = snapshot_root / "bundle" / str(bundle["content_sha256"]) / "phase1.bundle.json"
     _write_qualification_json_once(bundle_path, bundle)
     loaded = {
         "bundle": bundle,
@@ -2325,10 +2323,9 @@ def _load_phase1_qualification_bundle(
         raise ValueError("qualification_phase1_bundle_backlog_receipt_missing")
     backlog_snapshot = Path(str(backlog_receipt.get("snapshot_path"))).resolve()
     backlog_bytes = backlog_snapshot.read_bytes()
-    if (
-        sha256(backlog_bytes).hexdigest() != backlog_receipt.get("sha256")
-        or len(backlog_bytes) != backlog_receipt.get("size_bytes")
-    ):
+    if sha256(backlog_bytes).hexdigest() != backlog_receipt.get("sha256") or len(
+        backlog_bytes
+    ) != backlog_receipt.get("size_bytes"):
         raise ValueError("qualification_phase1_bundle_backlog_changed")
     backlog = _qualification_json_from_bytes(
         backlog_bytes,
@@ -2349,9 +2346,7 @@ def _load_phase1_qualification_bundle(
         snapshot_path_raw = _coerce_string(raw_receipt.get("snapshot_path"))
         if not exists:
             if snapshot_path_raw is not None or raw_receipt.get("sha256") is not None:
-                raise ValueError(
-                    f"qualification_phase1_bundle_absent_artifact_invalid:{name}"
-                )
+                raise ValueError(f"qualification_phase1_bundle_absent_artifact_invalid:{name}")
             artifact_bytes[name] = None
             validation_artifact_paths[name] = None
             continue
@@ -2359,10 +2354,9 @@ def _load_phase1_qualification_bundle(
             raise ValueError(f"qualification_phase1_bundle_artifact_path_missing:{name}")
         snapshot_path = Path(snapshot_path_raw).resolve()
         content = snapshot_path.read_bytes()
-        if (
-            sha256(content).hexdigest() != raw_receipt.get("sha256")
-            or len(content) != raw_receipt.get("size_bytes")
-        ):
+        if sha256(content).hexdigest() != raw_receipt.get("sha256") or len(
+            content
+        ) != raw_receipt.get("size_bytes"):
             raise ValueError(f"qualification_phase1_bundle_artifact_changed:{name}")
         artifact_bytes[name] = content
         validation_artifact_paths[name] = snapshot_path
@@ -2386,16 +2380,13 @@ def _load_phase1_qualification_bundle(
     if adjudication.get("exists") is True:
         adjudication_path = Path(str(adjudication.get("snapshot_path"))).resolve()
         adjudication_bytes = adjudication_path.read_bytes()
-        if (
-            sha256(adjudication_bytes).hexdigest() != adjudication.get("sha256")
-            or len(adjudication_bytes) != adjudication.get("size_bytes")
-        ):
+        if sha256(adjudication_bytes).hexdigest() != adjudication.get("sha256") or len(
+            adjudication_bytes
+        ) != adjudication.get("size_bytes"):
             raise ValueError("qualification_phase1_bundle_adjudication_changed")
 
     immutable_pending_raw = bundle.get("immutable_pending_run")
-    immutable_pending = (
-        immutable_pending_raw if isinstance(immutable_pending_raw, Mapping) else {}
-    )
+    immutable_pending = immutable_pending_raw if isinstance(immutable_pending_raw, Mapping) else {}
     immutable_pending_path = Path(str(immutable_pending.get("path"))).resolve()
     immutable_pending_bytes = immutable_pending_path.read_bytes()
     if sha256(immutable_pending_bytes).hexdigest() != immutable_pending.get("file_sha256"):
@@ -2408,12 +2399,9 @@ def _load_phase1_qualification_bundle(
     if (
         pending_errors
         or validated_pending is None
-        or validated_pending.get("content_sha256")
-        != immutable_pending.get("content_sha256")
+        or validated_pending.get("content_sha256") != immutable_pending.get("content_sha256")
     ):
-        raise ValueError(
-            "qualification_phase1_bundle_pending_invalid:" + ",".join(pending_errors)
-        )
+        raise ValueError("qualification_phase1_bundle_pending_invalid:" + ",".join(pending_errors))
     return {
         "bundle": bundle,
         "backlog": backlog,
@@ -2466,9 +2454,7 @@ def _phase1_bundle_context(loaded_bundle: Mapping[str, Any]) -> dict[str, Any]:
         documents[key] = value
     return {
         "artifacts": artifacts,
-        "atoms": _qualification_atoms_from_bytes(
-            loaded_bundle["artifact_bytes"]["atoms"]
-        ),
+        "atoms": _qualification_atoms_from_bytes(loaded_bundle["artifact_bytes"]["atoms"]),
         "qualification_manifest": _phase1_bundle_json_artifact(
             loaded_bundle,
             name="qualification.corpus_manifest",
@@ -2540,8 +2526,7 @@ def _qualification_repair_context(
         ),
         "case_registry": _load_qualification_json_object(
             artifact_path(
-                pipeline.get("case_registry_json")
-                or artifacts.get("case_registry_json"),
+                pipeline.get("case_registry_json") or artifacts.get("case_registry_json"),
                 name="case_registry",
             ),
             name="case_registry",
@@ -2601,9 +2586,7 @@ def _write_qualification_execution_claim(
         "source_pending_run_sha256": source_pending_run_sha256,
         "source_adjudication_sha256": source_adjudication_sha256,
         "route_sha256s": [route.get("route_sha256") for route in routes],
-        "author_session_ids": [
-            route.get("agent_session_id") for route in routes
-        ],
+        "author_session_ids": [route.get("agent_session_id") for route in routes],
         "attempt_dir": str(attempt_dir.resolve()),
         "recovery_kind": recovery_kind,
     }
@@ -2652,9 +2635,7 @@ def _qualification_runtime_from_projection(value: Any) -> QualificationRepairRun
         },
         tickets=[dict(ticket) for ticket in tickets if isinstance(ticket, Mapping)],
         affected_problem_ids=[
-            value
-            for value in affected_problem_ids
-            if isinstance(value, str) and value.strip()
+            value for value in affected_problem_ids if isinstance(value, str) and value.strip()
         ],
         atoms=(
             [dict(atom) for atom in atoms if isinstance(atom, Mapping)]
@@ -2681,9 +2662,7 @@ def _write_qualification_scheduler_checkpoint(
     completion_path: Path,
     state: Mapping[str, Any],
 ) -> dict[str, Any]:
-    payload = {
-        key: value for key, value in dict(state).items() if key != "content_sha256"
-    }
+    payload = {key: value for key, value in dict(state).items() if key != "content_sha256"}
     payload["content_sha256"] = _qualification_canonical_sha256(payload)
     _write_qualification_json_once(
         _qualification_scheduler_checkpoint_path(
@@ -2781,9 +2760,7 @@ def _qualification_scheduler_initial_state(
         routes,
         stage1=context["stage1"],
         case_registry=(
-            context["case_registry"]
-            if isinstance(context.get("case_registry"), Mapping)
-            else None
+            context["case_registry"] if isinstance(context.get("case_registry"), Mapping) else None
         ),
     )
     group_states: dict[str, dict[str, Any]] = {}
@@ -2890,8 +2867,7 @@ def _qualification_scheduler_status_from_receipts(
     if any(status.startswith("retained_pending") for status in statuses):
         return "retained_pending_not_invoked"
     if statuses and all(
-        status == "uncorrectable" or status.startswith("stalled:")
-        for status in statuses
+        status == "uncorrectable" or status.startswith("stalled:") for status in statuses
     ):
         return "terminal_nonprogress"
     return "repairable_paused:qualification_correction_status_unknown"
@@ -3002,15 +2978,12 @@ def _qualification_scheduler_aggregate_runtime(
                     continue
                 wrapped_runtime = runtime_history_raw.get("runtime")
                 runtime_raw = (
-                    wrapped_runtime
-                    if isinstance(wrapped_runtime, Mapping)
-                    else runtime_history_raw
+                    wrapped_runtime if isinstance(wrapped_runtime, Mapping) else runtime_history_raw
                 )
                 sequence_raw = runtime_history_raw.get("scheduler_generation")
                 sequence = (
                     int(sequence_raw)
-                    if isinstance(sequence_raw, int)
-                    and not isinstance(sequence_raw, bool)
+                    if isinstance(sequence_raw, int) and not isinstance(sequence_raw, bool)
                     else history_index
                 )
                 runtime = _qualification_runtime_from_projection(runtime_raw)
@@ -3029,8 +3002,7 @@ def _qualification_scheduler_aggregate_runtime(
             (
                 item
                 for item in groups.values()
-                if isinstance(item, Mapping)
-                and route_sha in item.get("route_sha256s", [])
+                if isinstance(item, Mapping) and route_sha in item.get("route_sha256s", [])
             ),
             {},
         )
@@ -3059,8 +3031,7 @@ def _qualification_scheduler_aggregate_runtime(
             if isinstance(result.get("materialized_stage_receipts"), list)
             and result.get("materialized_stage_receipts")
             and all(
-                isinstance(receipt, Mapping)
-                for receipt in result["materialized_stage_receipts"]
+                isinstance(receipt, Mapping) for receipt in result["materialized_stage_receipts"]
             )
         ),
         [],
@@ -3099,9 +3070,7 @@ def _qualification_scheduler_aggregate_runtime(
         "route_set_sha256": _qualification_canonical_sha256(
             [route.get("route_sha256") for route in routes]
         ),
-        "route_receipts": [
-            receipt_by_route[str(route.get("route_sha256"))] for route in routes
-        ],
+        "route_receipts": [receipt_by_route[str(route.get("route_sha256"))] for route in routes],
         "accepted_repair_count": accepted_count,
         "accepted_repair_group_count": sum(
             1
@@ -3138,9 +3107,7 @@ def _qualification_scheduler_aggregate_runtime(
                 )
             },
             tickets=[
-                dict(ticket)
-                for ticket in backlog.get("tickets", [])
-                if isinstance(ticket, Mapping)
+                dict(ticket) for ticket in backlog.get("tickets", []) if isinstance(ticket, Mapping)
             ],
             affected_problem_ids=sorted(affected_problem_ids),
             atoms=[dict(atom) for atom in context["atoms"]],
@@ -3305,17 +3272,13 @@ def _execute_qualification_correction_locked(
                 context=context,
             ),
         )
-    if state.get("route_sha256s") != [
-        str(route.get("route_sha256")) for route in routes
-    ]:
+    if state.get("route_sha256s") != [str(route.get("route_sha256")) for route in routes]:
         raise ValueError("qualification_correction_scheduler_routes_changed")
     expected_plan = plan_qualification_repair_route_groups(
         routes,
         stage1=context["stage1"],
         case_registry=(
-            context["case_registry"]
-            if isinstance(context.get("case_registry"), Mapping)
-            else None
+            context["case_registry"] if isinstance(context.get("case_registry"), Mapping) else None
         ),
     )
     if (
@@ -3358,9 +3321,7 @@ def _execute_qualification_correction_locked(
             raise ValueError("qualification_correction_scheduler_invocable_group_invalid")
         active_attempt_raw = selected_group.get("active_attempt")
         active_attempt = (
-            dict(active_attempt_raw)
-            if isinstance(active_attempt_raw, Mapping)
-            else None
+            dict(active_attempt_raw) if isinstance(active_attempt_raw, Mapping) else None
         )
         invocation_number = (
             int(active_attempt["invocation_number"])
@@ -3369,10 +3330,7 @@ def _execute_qualification_correction_locked(
         )
         group_slug = group_id.rsplit(":", 1)[-1]
         claim_root = (
-            completion_path.parent
-            / "group_attempts"
-            / group_slug
-            / f"{invocation_number:04d}"
+            completion_path.parent / "group_attempts" / group_slug / f"{invocation_number:04d}"
         )
         primary_claim_path = claim_root / "execution_claim.json"
         reconciliation_claim_path = claim_root / "reconciliation_claim.json"
@@ -3502,8 +3460,7 @@ def _execute_qualification_correction_locked(
             ),
             case_registry=(
                 current_runtime.case_registry
-                if current_runtime is not None
-                and current_runtime.case_registry is not None
+                if current_runtime is not None and current_runtime.case_registry is not None
                 else context["case_registry"]
             ),
             qualification_manifest=(manifest if isinstance(manifest, dict) else None),
@@ -3542,9 +3499,7 @@ def _execute_qualification_correction_locked(
                 "fresh_author_invocation_suppressed": False,
                 "api_fallback_allowed": False,
             }
-        group_route_hashes = {
-            str(route.get("route_sha256")) for route in group_routes
-        }
+        group_route_hashes = {str(route.get("route_sha256")) for route in group_routes}
         receipts = [
             dict(receipt)
             for receipt in runtime.consumption.get("route_receipts", [])
@@ -3558,9 +3513,7 @@ def _execute_qualification_correction_locked(
         completed_group = dict(completed_groups[group_id])
         completed_group["status"] = _qualification_scheduler_status_from_receipts(
             receipts,
-            accepted_repair_count=int(
-                runtime.consumption.get("accepted_repair_count") or 0
-            ),
+            accepted_repair_count=int(runtime.consumption.get("accepted_repair_count") or 0),
         )
         completed_group["invocation_count"] = invocation_number
         completed_group["active_attempt"] = None
@@ -3584,12 +3537,9 @@ def _execute_qualification_correction_locked(
         completed_groups[group_id] = completed_group
         completed_state["current_runtime"] = runtime_projection
         completed_state["materialization_result"] = None
-        if (
-            completed_group["status"] == "accepted"
-            and any(
-                _coerce_string(route.get("authoring_stage")) == "problem_mining"
-                for route in group_routes
-            )
+        if completed_group["status"] == "accepted" and any(
+            _coerce_string(route.get("authoring_stage")) == "problem_mining"
+            for route in group_routes
         ):
             _qualification_scheduler_apply_current_causal_plan(
                 completed_state,
@@ -3601,7 +3551,8 @@ def _execute_qualification_correction_locked(
                         str(existing_group_id)
                         for existing_group_id, existing_group in completed_groups.items()
                         if isinstance(existing_group, Mapping)
-                        and existing_group.get("status") in {
+                        and existing_group.get("status")
+                        in {
                             "accepted",
                             "terminal_nonprogress",
                         }
@@ -3624,8 +3575,7 @@ def _execute_qualification_correction_locked(
     )
     consumption_sha256 = str(runtime.consumption["content_sha256"])
     consumption_sidecar = out_json.with_name(
-        f"{out_json.stem}.qualification_correction_consumption."
-        f"{consumption_sha256}.json"
+        f"{out_json.stem}.qualification_correction_consumption.{consumption_sha256}.json"
     )
     _write_qualification_json_once(consumption_sidecar, runtime.consumption)
     repair_result = materialize_repaired_shadow_run(
@@ -3665,9 +3615,7 @@ def _execute_qualification_correction_locked(
                 )
             )
         ),
-        "qualification_scheduler_status": (
-            "resumable_pending" if pending else "terminal"
-        ),
+        "qualification_scheduler_status": ("resumable_pending" if pending else "terminal"),
         "qualification_scheduler_checkpoint_path": str(
             _qualification_scheduler_checkpoint_path(
                 completion_path,
@@ -3769,9 +3717,7 @@ def _score_materialized_shadow_run(
         recorded_bundle_sha256 = _coerce_string(
             qualification_meta.get("qualification_input_bundle_sha256")
         )
-        repaired_same_corpus = bool(
-            qualification_meta.get("same_corpus_feedback_exposed") is True
-        )
+        repaired_same_corpus = bool(qualification_meta.get("same_corpus_feedback_exposed") is True)
         if recorded_bundle_path_raw is not None:
             if qualification_input_bundle_path is None and not repaired_same_corpus:
                 raise ValueError("qualification_input_bundle_required_for_score")
@@ -3787,17 +3733,9 @@ def _score_materialized_shadow_run(
                 verify_files=True,
             )
             score_pipeline_raw = score_input_bundle.get("pipeline")
-            score_pipeline = (
-                score_pipeline_raw
-                if isinstance(score_pipeline_raw, Mapping)
-                else {}
-            )
+            score_pipeline = score_pipeline_raw if isinstance(score_pipeline_raw, Mapping) else {}
             score_manifest_raw = score_pipeline.get("files")
-            score_manifest = (
-                score_manifest_raw
-                if isinstance(score_manifest_raw, Mapping)
-                else {}
-            )
+            score_manifest = score_manifest_raw if isinstance(score_manifest_raw, Mapping) else {}
             score_runtime_binding_errors = first_party_module_binding_errors(
                 modules=sys.modules,
                 repo_root=repo_root,
@@ -3810,8 +3748,7 @@ def _score_materialized_shadow_run(
                 )
             if (
                 recorded_bundle_sha256 is None
-                or score_input_bundle.get("content_sha256")
-                != recorded_bundle_sha256
+                or score_input_bundle.get("content_sha256") != recorded_bundle_sha256
             ):
                 raise ValueError("qualification_input_bundle_hash_changed")
             if repaired_same_corpus:
@@ -3824,9 +3761,7 @@ def _score_materialized_shadow_run(
                     Path(repaired_contract_path_raw).resolve(),
                     name="qualification_repair_child_contract",
                 )
-                repaired_contract_errors = pending_repaired_shadow_run_errors(
-                    repaired_contract
-                )
+                repaired_contract_errors = pending_repaired_shadow_run_errors(repaired_contract)
                 if repaired_contract_errors:
                     raise ValueError(
                         "qualification_repair_child_contract_invalid:"
@@ -3834,24 +3769,18 @@ def _score_materialized_shadow_run(
                     )
                 repaired_child_contract_for_score = repaired_contract
                 if repaired_contract.get("sealed_parent_bound") is not True:
-                    raise ValueError(
-                        "qualification_repair_child_contract_parent_unsealed"
-                    )
+                    raise ValueError("qualification_repair_child_contract_parent_unsealed")
                 if (
                     repaired_contract.get("qualification_input_bundle_path")
                     != str(resolved_bundle_path)
-                    or repaired_contract.get(
-                        "qualification_input_bundle_sha256"
-                    )
+                    or repaired_contract.get("qualification_input_bundle_sha256")
                     != recorded_bundle_sha256
                     or repaired_contract.get("repaired_backlog_sha256")
                     != _qualification_file_sha256(out_json)
                     or repaired_contract.get("shared_shadow_state_path")
                     != str(state_path.resolve())
                 ):
-                    raise ValueError(
-                        "qualification_repair_child_contract_binding_mismatch"
-                    )
+                    raise ValueError("qualification_repair_child_contract_binding_mismatch")
                 parent_contract_path_raw = _coerce_string(
                     repaired_contract.get("parent_cycle_contract_path")
                 )
@@ -3862,34 +3791,23 @@ def _score_materialized_shadow_run(
                     name="qualification_repair_parent_contract",
                 )
                 parent_contract_projection = {
-                    key: item
-                    for key, item in parent_contract.items()
-                    if key != "content_sha256"
+                    key: item for key, item in parent_contract.items() if key != "content_sha256"
                 }
                 if (
                     parent_contract.get("content_sha256")
                     != repaired_contract.get("parent_cycle_contract_sha256")
                     or parent_contract.get("content_sha256")
-                    != _qualification_canonical_sha256(
-                        parent_contract_projection
-                    )
-                    or parent_contract.get(
-                        "qualification_input_bundle_sha256"
-                    )
+                    != _qualification_canonical_sha256(parent_contract_projection)
+                    or parent_contract.get("qualification_input_bundle_sha256")
                     != recorded_bundle_sha256
-                    or parent_contract.get("shadow_state_path")
-                    != str(state_path.resolve())
+                    or parent_contract.get("shadow_state_path") != str(state_path.resolve())
                 ):
-                    raise ValueError(
-                        "qualification_repair_parent_contract_binding_mismatch"
-                    )
+                    raise ValueError("qualification_repair_parent_contract_binding_mismatch")
                 correction_consumption_path_raw = _coerce_string(
                     repaired_contract.get("correction_consumption_path")
                 )
                 if correction_consumption_path_raw is None:
-                    raise ValueError(
-                        "qualification_repair_consumption_path_missing"
-                    )
+                    raise ValueError("qualification_repair_consumption_path_missing")
                 correction_consumption = _load_qualification_json_object(
                     Path(correction_consumption_path_raw).resolve(),
                     name="qualification_repair_consumption",
@@ -3906,38 +3824,22 @@ def _score_materialized_shadow_run(
                     or correction_consumption.get("source_adjudication_sha256")
                     != repaired_contract.get("source_adjudication_sha256")
                 ):
-                    raise ValueError(
-                        "qualification_repair_consumption_binding_mismatch"
-                    )
-                child_receipts_raw = repaired_contract.get(
-                    "repaired_artifact_receipts"
-                )
-                child_receipts = (
-                    child_receipts_raw
-                    if isinstance(child_receipts_raw, list)
-                    else []
-                )
+                    raise ValueError("qualification_repair_consumption_binding_mismatch")
+                child_receipts_raw = repaired_contract.get("repaired_artifact_receipts")
+                child_receipts = child_receipts_raw if isinstance(child_receipts_raw, list) else []
                 for receipt in child_receipts:
                     if not isinstance(receipt, Mapping):
-                        raise ValueError(
-                            "qualification_repair_child_artifact_invalid"
-                        )
-                    source_path_raw = _coerce_string(
-                        receipt.get("source_path")
-                    )
+                        raise ValueError("qualification_repair_child_artifact_invalid")
+                    source_path_raw = _coerce_string(receipt.get("source_path"))
                     source_path = (
-                        Path(source_path_raw).resolve()
-                        if source_path_raw is not None
-                        else None
+                        Path(source_path_raw).resolve() if source_path_raw is not None else None
                     )
                     if receipt.get("exists") is True:
                         if (
                             source_path is None
                             or not source_path.is_file()
-                            or receipt.get("sha256")
-                            != _qualification_file_sha256(source_path)
-                            or receipt.get("size_bytes")
-                            != source_path.stat().st_size
+                            or receipt.get("sha256") != _qualification_file_sha256(source_path)
+                            or receipt.get("size_bytes") != source_path.stat().st_size
                         ):
                             raise ValueError(
                                 "qualification_repair_child_artifact_changed:"
@@ -3957,12 +3859,8 @@ def _score_materialized_shadow_run(
             completed_path_raw = _coerce_string(
                 qualification_meta.get("qualification_correction_completion_path")
             )
-            phase1_bundle_path_raw = _coerce_string(
-                qualification_meta.get("phase1_bundle_path")
-            )
-            phase1_bundle_sha256 = _coerce_string(
-                qualification_meta.get("phase1_bundle_sha256")
-            )
+            phase1_bundle_path_raw = _coerce_string(qualification_meta.get("phase1_bundle_path"))
+            phase1_bundle_sha256 = _coerce_string(qualification_meta.get("phase1_bundle_sha256"))
             if phase1_bundle_path_raw is None or phase1_bundle_sha256 is None:
                 raise ValueError("pending_shadow_run_not_waiting_for_adjudication")
             loaded_phase1_bundle = _load_phase1_qualification_bundle(
@@ -3989,11 +3887,7 @@ def _score_materialized_shadow_run(
                         ensure_ascii=False,
                     )
                 )
-                return (
-                    0
-                    if qualification_meta.get("qualification_passed") is True
-                    else 3
-                )
+                return 0 if qualification_meta.get("qualification_passed") is True else 3
             if completed_input_sha256 is None or completed_path_raw is None:
                 raise ValueError("qualification_correction_identity_incomplete")
             prior_result = _load_qualification_correction_completion(
@@ -4012,10 +3906,8 @@ def _score_materialized_shadow_run(
                     name="pending_qualification_correction",
                 )
                 if (
-                    pending_correction.get("contract_kind")
-                    != "pending_qualification_correction"
-                    or pending_correction.get("correction_input_sha256")
-                    != completed_input_sha256
+                    pending_correction.get("contract_kind") != "pending_qualification_correction"
+                    or pending_correction.get("correction_input_sha256") != completed_input_sha256
                     or pending_correction.get("content_sha256")
                     != _qualification_canonical_sha256(
                         {
@@ -4028,30 +3920,21 @@ def _score_materialized_shadow_run(
                     raise ValueError("pending_qualification_correction_invalid")
                 recovery_routes_raw = pending_correction.get("correction_routes")
                 recovery_routes = (
-                    [
-                        item
-                        for item in recovery_routes_raw
-                        if isinstance(item, Mapping)
-                    ]
+                    [item for item in recovery_routes_raw if isinstance(item, Mapping)]
                     if isinstance(recovery_routes_raw, list)
                     else []
                 )
                 if not recovery_routes:
                     raise ValueError("pending_qualification_correction_routes_missing")
                 bundle_artifacts = phase1_bundle.get("artifacts")
-                bundle_artifacts = (
-                    bundle_artifacts if isinstance(bundle_artifacts, Mapping) else {}
-                )
-                source_artifact_sha256s = phase1_bundle.get(
-                    "source_artifact_sha256s"
-                )
+                bundle_artifacts = bundle_artifacts if isinstance(bundle_artifacts, Mapping) else {}
+                source_artifact_sha256s = phase1_bundle.get("source_artifact_sha256s")
                 if not isinstance(source_artifact_sha256s, Mapping):
                     raise ValueError("qualification_recovery_source_hashes_missing")
                 if (
                     pending_correction.get("phase1_bundle_path")
                     != str(Path(phase1_bundle_path_raw).resolve())
-                    or pending_correction.get("phase1_bundle_sha256")
-                    != phase1_bundle_sha256
+                    or pending_correction.get("phase1_bundle_sha256") != phase1_bundle_sha256
                     or pending_correction.get("source_pending_run_sha256")
                     != phase1_bundle.get("source_pending_run_sha256")
                     or pending_correction.get("phase1_backlog_snapshot_sha256")
@@ -4059,67 +3942,43 @@ def _score_materialized_shadow_run(
                     or pending_correction.get("source_artifact_sha256s")
                     != dict(source_artifact_sha256s)
                     or pending_correction.get("immutable_pending_run_sha256")
-                    != phase1_bundle.get("immutable_pending_run", {}).get(
-                        "content_sha256"
-                    )
+                    != phase1_bundle.get("immutable_pending_run", {}).get("content_sha256")
                 ):
                     raise ValueError("qualification_recovery_bundle_binding_mismatch")
 
-                manifest_receipt = bundle_artifacts.get(
-                    "qualification.corpus_manifest"
-                )
-                manifest_receipt = (
-                    manifest_receipt if isinstance(manifest_receipt, Mapping) else {}
-                )
-                adjudication_receipt = phase1_bundle.get(
-                    "qualification_output_adjudication"
-                )
+                manifest_receipt = bundle_artifacts.get("qualification.corpus_manifest")
+                manifest_receipt = manifest_receipt if isinstance(manifest_receipt, Mapping) else {}
+                adjudication_receipt = phase1_bundle.get("qualification_output_adjudication")
                 adjudication_receipt = (
-                    adjudication_receipt
-                    if isinstance(adjudication_receipt, Mapping)
-                    else {}
+                    adjudication_receipt if isinstance(adjudication_receipt, Mapping) else {}
                 )
-                recovery_manifest_path_raw = _coerce_string(
-                    manifest_receipt.get("snapshot_path")
-                )
+                recovery_manifest_path_raw = _coerce_string(manifest_receipt.get("snapshot_path"))
                 recovery_adjudication_path_raw = _coerce_string(
                     adjudication_receipt.get("snapshot_path")
                 )
-                recovery_manifest_sha256 = _coerce_string(
-                    manifest_receipt.get("sha256")
-                )
+                recovery_manifest_sha256 = _coerce_string(manifest_receipt.get("sha256"))
                 if (
                     recovery_manifest_path_raw is None
                     or recovery_adjudication_path_raw is None
                     or recovery_manifest_sha256 is None
                     or pending_correction.get("phase1_backlog_snapshot_path")
                     != phase1_bundle.get("backlog", {}).get("snapshot_path")
-                    or pending_correction.get(
-                        "qualification_manifest_snapshot_path"
-                    )
+                    or pending_correction.get("qualification_manifest_snapshot_path")
                     != recovery_manifest_path_raw
-                    or pending_correction.get(
-                        "qualification_output_adjudication_snapshot_path"
-                    )
+                    or pending_correction.get("qualification_output_adjudication_snapshot_path")
                     != recovery_adjudication_path_raw
                     or pending_correction.get("immutable_pending_run_path")
                     != phase1_bundle.get("immutable_pending_run", {}).get("path")
-                    or pending_correction.get(
-                        "qualification_manifest_snapshot_sha256"
-                    )
+                    or pending_correction.get("qualification_manifest_snapshot_sha256")
                     != recovery_manifest_sha256
-                    or pending_correction.get(
-                        "qualification_output_adjudication_snapshot_sha256"
-                    )
+                    or pending_correction.get("qualification_output_adjudication_snapshot_sha256")
                     != adjudication_receipt.get("sha256")
                     or pending_correction.get("source_adjudication_sha256")
                     != adjudication_receipt.get("sha256")
                 ):
                     raise ValueError("qualification_recovery_snapshot_hash_mismatch")
                 expected_correction_identity = _qualification_correction_identity(
-                    source_pending_run_sha256=str(
-                        pending_correction["source_pending_run_sha256"]
-                    ),
+                    source_pending_run_sha256=str(pending_correction["source_pending_run_sha256"]),
                     source_adjudication_sha256=str(
                         pending_correction["source_adjudication_sha256"]
                     ),
@@ -4134,23 +3993,15 @@ def _score_materialized_shadow_run(
                 recovery_backlog = dict(loaded_phase1_bundle["backlog"])
                 policy_receipt = bundle_artifacts.get("config.policy")
                 export_gate_receipt = bundle_artifacts.get("config.export_gate")
-                policy_receipt = (
-                    policy_receipt if isinstance(policy_receipt, Mapping) else {}
-                )
+                policy_receipt = policy_receipt if isinstance(policy_receipt, Mapping) else {}
                 export_gate_receipt = (
-                    export_gate_receipt
-                    if isinstance(export_gate_receipt, Mapping)
-                    else {}
+                    export_gate_receipt if isinstance(export_gate_receipt, Mapping) else {}
                 )
-                recovery_policy_path_raw = _coerce_string(
-                    policy_receipt.get("snapshot_path")
-                )
+                recovery_policy_path_raw = _coerce_string(policy_receipt.get("snapshot_path"))
                 recovery_export_gate_path_raw = _coerce_string(
                     export_gate_receipt.get("snapshot_path")
                 )
-                policy_bytes = loaded_phase1_bundle["artifact_bytes"].get(
-                    "config.policy"
-                )
+                policy_bytes = loaded_phase1_bundle["artifact_bytes"].get("config.policy")
                 if (
                     recovery_policy_path_raw is None
                     or recovery_export_gate_path_raw is None
@@ -4159,9 +4010,7 @@ def _score_materialized_shadow_run(
                     raise ValueError("qualification_recovery_policy_snapshot_missing")
                 recovery_policy_loaded = yaml.safe_load(policy_bytes.decode("utf-8"))
                 recovery_policy_root = (
-                    recovery_policy_loaded
-                    if isinstance(recovery_policy_loaded, Mapping)
-                    else {}
+                    recovery_policy_loaded if isinstance(recovery_policy_loaded, Mapping) else {}
                 )
                 prior_result = _execute_qualification_correction(
                     repo_root=repo_root,
@@ -4169,18 +4018,14 @@ def _score_materialized_shadow_run(
                     backlog=recovery_backlog,
                     context=recovery_context,
                     routes=recovery_routes,
-                    source_pending_run_sha256=str(
-                        pending_correction["source_pending_run_sha256"]
-                    ),
+                    source_pending_run_sha256=str(pending_correction["source_pending_run_sha256"]),
                     source_adjudication_sha256=str(
                         pending_correction["source_adjudication_sha256"]
                     ),
                     correction_input_sha256=completed_input_sha256,
                     completion_path=Path(completed_path_raw).resolve(),
                     phase1_bundle_sha256=phase1_bundle_sha256,
-                    qualification_manifest_path=Path(
-                        recovery_manifest_path_raw
-                    ).resolve(),
+                    qualification_manifest_path=Path(recovery_manifest_path_raw).resolve(),
                     qualification_manifest_sha256=recovery_manifest_sha256,
                     qualification_output_adjudication_path=(
                         Path(recovery_adjudication_path_raw).resolve()
@@ -4189,9 +4034,7 @@ def _score_materialized_shadow_run(
                         recovery_policy_root.get("backlog_policy", {})
                     ),
                     policy_config_path=Path(recovery_policy_path_raw).resolve(),
-                    export_gate_config_path=Path(
-                        recovery_export_gate_path_raw
-                    ).resolve(),
+                    export_gate_config_path=Path(recovery_export_gate_path_raw).resolve(),
                     agent=agent,
                     model=model,
                     cfg=cfg,
@@ -4208,9 +4051,7 @@ def _score_materialized_shadow_run(
                             qualification_meta.get("qualification_passed") is True
                         ),
                         "ready_for_export": False,
-                        "failures": list(
-                            qualification_meta.get("qualification_failures") or []
-                        ),
+                        "failures": list(qualification_meta.get("qualification_failures") or []),
                         "qualification_correction": {
                             **prior_result,
                             "correction_completion_reused": (
@@ -4225,16 +4066,13 @@ def _score_materialized_shadow_run(
                     ensure_ascii=False,
                 )
             )
-            return (
-                0 if qualification_meta.get("qualification_passed") is True else 3
-            )
-        sealed_transaction = (
-            recorded_bundle_path_raw is not None and not repaired_same_corpus
-        )
+            return 0 if qualification_meta.get("qualification_passed") is True else 3
+        sealed_transaction = recorded_bundle_path_raw is not None and not repaired_same_corpus
         if sealed_transaction:
-            if _coerce_string(
-                qualification_meta.get("qualification_corpus_manifest_path")
-            ) is not None:
+            if (
+                _coerce_string(qualification_meta.get("qualification_corpus_manifest_path"))
+                is not None
+            ):
                 raise ValueError("sealed_phase1_manifest_path_was_not_withheld")
             expected_manifest_sha256 = _coerce_string(
                 qualification_meta.get("qualification_manifest_sha256_expected")
@@ -4244,8 +4082,7 @@ def _score_materialized_shadow_run(
                 or expected_manifest_sha256 is None
                 or (
                     qualification_manifest_sha256_expected_override is not None
-                    and qualification_manifest_sha256_expected_override
-                    != expected_manifest_sha256
+                    and qualification_manifest_sha256_expected_override != expected_manifest_sha256
                 )
                 or _qualification_file_sha256(qualification_manifest_path)
                 != expected_manifest_sha256
@@ -4253,9 +4090,7 @@ def _score_materialized_shadow_run(
                 raise ValueError("qualification_phase2_manifest_digest_mismatch")
         if repaired_child_contract_for_score is not None and (
             qualification_manifest_path is None
-            or repaired_child_contract_for_score.get(
-                "qualification_manifest_sha256"
-            )
+            or repaired_child_contract_for_score.get("qualification_manifest_sha256")
             != _qualification_file_sha256(qualification_manifest_path)
         ):
             raise ValueError("qualification_repair_manifest_binding_mismatch")
@@ -4264,9 +4099,7 @@ def _score_materialized_shadow_run(
             "no_actionable_evidence_receipt_path": (no_actionable_evidence_receipt_path),
         }
         if not sealed_transaction:
-            configured_paths["qualification_corpus_manifest_path"] = (
-                qualification_manifest_path
-            )
+            configured_paths["qualification_corpus_manifest_path"] = qualification_manifest_path
         for field, path in configured_paths.items():
             recorded = _coerce_string(qualification_meta.get(field))
             current = str(path) if path is not None else None
@@ -4302,9 +4135,7 @@ def _score_materialized_shadow_run(
         if pending_errors or pending is None:
             raise ValueError("pending_shadow_run_invalid:" + ",".join(pending_errors))
         if repaired_child_contract_for_score is not None and (
-            repaired_child_contract_for_score.get(
-                "repaired_pending_run_sha256"
-            )
+            repaired_child_contract_for_score.get("repaired_pending_run_sha256")
             != pending.get("content_sha256")
         ):
             raise ValueError("qualification_repair_pending_binding_mismatch")
@@ -4316,9 +4147,7 @@ def _score_materialized_shadow_run(
                 pending=pending,
                 artifact_paths=artifact_paths,
                 qualification_manifest_path=qualification_manifest_path,
-                qualification_output_adjudication_path=(
-                    qualification_output_adjudication_path
-                ),
+                qualification_output_adjudication_path=(qualification_output_adjudication_path),
             )
         )
         # From this point onward no scoring or correction input is reread from its mutable
@@ -4327,9 +4156,7 @@ def _score_materialized_shadow_run(
         artifacts_raw = backlog.get("artifacts")
         artifacts = artifacts_raw if isinstance(artifacts_raw, dict) else {}
         qualification_raw = artifacts.get("shadow_qualification")
-        qualification_meta = (
-            qualification_raw if isinstance(qualification_raw, dict) else {}
-        )
+        qualification_meta = qualification_raw if isinstance(qualification_raw, dict) else {}
         phase1_context = _phase1_bundle_context(loaded_phase1_bundle)
         atoms = list(phase1_context["atoms"])
         stage1 = dict(phase1_context["stage1"])
@@ -4340,9 +4167,7 @@ def _score_materialized_shadow_run(
         stage6 = dict(phase1_context["stage6"])
         case_registry = dict(phase1_context["case_registry"])
         phase1_backlog_receipt = phase1_bundle["backlog"]
-        phase1_snapshot_path = Path(
-            str(phase1_backlog_receipt["snapshot_path"])
-        ).resolve()
+        phase1_snapshot_path = Path(str(phase1_backlog_receipt["snapshot_path"])).resolve()
         phase1_backlog_sha256 = str(phase1_backlog_receipt["sha256"])
 
         snapshot_artifacts = phase1_bundle["artifacts"]
@@ -4363,9 +4188,7 @@ def _score_materialized_shadow_run(
             required=qualification_manifest_path is not None,
         )
         adjudication_receipt = phase1_bundle["qualification_output_adjudication"]
-        adjudication_snapshot_raw = _coerce_string(
-            adjudication_receipt.get("snapshot_path")
-        )
+        adjudication_snapshot_raw = _coerce_string(adjudication_receipt.get("snapshot_path"))
         adjudication_snapshot_path = (
             Path(adjudication_snapshot_raw).resolve()
             if adjudication_snapshot_raw is not None
@@ -4427,52 +4250,33 @@ def _score_materialized_shadow_run(
             )
             source_artifacts_raw = source_scored.get("artifacts")
             source_artifacts = (
-                source_artifacts_raw
-                if isinstance(source_artifacts_raw, Mapping)
-                else {}
+                source_artifacts_raw if isinstance(source_artifacts_raw, Mapping) else {}
             )
-            source_qualification_raw = source_artifacts.get(
-                "shadow_qualification"
-            )
+            source_qualification_raw = source_artifacts.get("shadow_qualification")
             source_qualification = (
-                source_qualification_raw
-                if isinstance(source_qualification_raw, Mapping)
-                else {}
+                source_qualification_raw if isinstance(source_qualification_raw, Mapping) else {}
             )
-            raw_report_path = _coerce_string(
-                source_qualification.get("raw_first_pass_report_path")
-            )
+            raw_report_path = _coerce_string(source_qualification.get("raw_first_pass_report_path"))
             raw_report_sha256 = _coerce_string(
                 source_qualification.get("raw_first_pass_report_sha256")
             )
             if (
                 raw_report_path is None
                 or raw_report_sha256 is None
-                or _qualification_file_sha256(Path(raw_report_path))
-                != raw_report_sha256
+                or _qualification_file_sha256(Path(raw_report_path)) != raw_report_sha256
             ):
                 raise ValueError("qualification_repair_first_pass_report_invalid")
             qualification_meta["first_pass_diagnostic"] = {
                 "report_path": raw_report_path,
                 "report_sha256": raw_report_sha256,
-                "qualification_status": source_qualification.get(
-                    "qualification_status"
-                ),
-                "qualification_passed": source_qualification.get(
-                    "qualification_passed"
-                ),
-                "qualification_failures": source_qualification.get(
-                    "qualification_failures"
-                ),
+                "qualification_status": source_qualification.get("qualification_status"),
+                "qualification_passed": source_qualification.get("qualification_passed"),
+                "qualification_failures": source_qualification.get("qualification_failures"),
             }
             qualification_meta["raw_first_pass_report_path"] = raw_report_path
-            qualification_meta["raw_first_pass_report_sha256"] = (
-                raw_report_sha256
-            )
-            qualification_meta["raw_first_pass_report_content_sha256"] = (
-                source_qualification.get(
-                    "raw_first_pass_report_content_sha256"
-                )
+            qualification_meta["raw_first_pass_report_sha256"] = raw_report_sha256
+            qualification_meta["raw_first_pass_report_content_sha256"] = source_qualification.get(
+                "raw_first_pass_report_content_sha256"
             )
             artifacts["shadow_qualification"] = qualification_meta
             backlog["artifacts"] = artifacts
@@ -4494,17 +4298,13 @@ def _score_materialized_shadow_run(
                 "qualification_manifest_sha256_expected"
             ),
             qualification_manifest_sha256_observed=(
-                snapshot_artifacts.get("qualification.corpus_manifest", {}).get(
-                    "sha256"
-                )
+                snapshot_artifacts.get("qualification.corpus_manifest", {}).get("sha256")
             ),
             qualification_output_adjudication=output_adjudication,
             qualification_output_adjudication_sha256_pre_run=pending.get(
                 "output_adjudication_sha256_pre_run"
             ),
-            qualification_output_adjudication_sha256_post_run=(
-                adjudication_receipt.get("sha256")
-            ),
+            qualification_output_adjudication_sha256_post_run=(adjudication_receipt.get("sha256")),
             qualification_pending_run_sha256=pending.get("content_sha256"),
             no_actionable_evidence_receipt=no_actionable_receipt,
         )
@@ -4515,15 +4315,9 @@ def _score_materialized_shadow_run(
             repo_root=repo_root,
         )
         report["export_projection_sha256"] = export_projection["sha256"]
-        scored_correction_routes_raw = report.get("qualification", {}).get(
-            "correction_routes"
-        )
+        scored_correction_routes_raw = report.get("qualification", {}).get("correction_routes")
         all_scored_correction_routes = (
-            [
-                item
-                for item in scored_correction_routes_raw
-                if isinstance(item, Mapping)
-            ]
+            [item for item in scored_correction_routes_raw if isinstance(item, Mapping)]
             if isinstance(scored_correction_routes_raw, list)
             else []
         )
@@ -4531,20 +4325,12 @@ def _score_materialized_shadow_run(
         # finding. Aggregate-passing output remains a qualified immutable
         # fallback, so advisory repair cannot deadlock good-dominant throughput.
         scored_correction_routes = all_scored_correction_routes
-        advisory_correction = bool(
-            report["passed"] and scored_correction_routes
-        )
-        scored_adjudication_sha256 = _coerce_string(
-            adjudication_receipt.get("sha256")
-        )
+        advisory_correction = bool(report["passed"] and scored_correction_routes)
+        scored_adjudication_sha256 = _coerce_string(adjudication_receipt.get("sha256"))
         scored_manifest_sha256 = _coerce_string(
-            snapshot_artifacts.get("qualification.corpus_manifest", {}).get(
-                "sha256"
-            )
+            snapshot_artifacts.get("qualification.corpus_manifest", {}).get("sha256")
         )
-        phase1_source_artifact_sha256s = dict(
-            phase1_bundle["source_artifact_sha256s"]
-        )
+        phase1_source_artifact_sha256s = dict(phase1_bundle["source_artifact_sha256s"])
         if scored_correction_routes and isinstance(scored_adjudication_sha256, str):
             if scored_manifest_sha256 is None:
                 raise ValueError("qualification_repair_manifest_binding_missing")
@@ -4563,8 +4349,7 @@ def _score_materialized_shadow_run(
                 / "completion.json"
             )
             correction_pending_path_for_score = (
-                correction_completion_path_for_score.parent
-                / "pending_correction.json"
+                correction_completion_path_for_score.parent / "pending_correction.json"
             )
             pending_correction: dict[str, Any] = {
                 "schema_version": 1,
@@ -4574,9 +4359,7 @@ def _score_materialized_shadow_run(
                 "source_adjudication_sha256": scored_adjudication_sha256,
                 "phase1_bundle_path": str(phase1_bundle_path.resolve()),
                 "phase1_bundle_sha256": phase1_bundle["content_sha256"],
-                "phase1_backlog_snapshot_path": str(
-                    phase1_snapshot_path.resolve()
-                ),
+                "phase1_backlog_snapshot_path": str(phase1_snapshot_path.resolve()),
                 "phase1_backlog_snapshot_sha256": phase1_backlog_sha256,
                 "qualification_manifest_snapshot_path": (
                     str(manifest_snapshot_path.resolve())
@@ -4589,16 +4372,12 @@ def _score_materialized_shadow_run(
                     if adjudication_snapshot_path is not None
                     else None
                 ),
-                "qualification_output_adjudication_snapshot_sha256": (
-                    scored_adjudication_sha256
-                ),
+                "qualification_output_adjudication_snapshot_sha256": (scored_adjudication_sha256),
                 "source_artifact_sha256s": phase1_source_artifact_sha256s,
-                "immutable_pending_run_path": phase1_bundle[
-                    "immutable_pending_run"
-                ]["path"],
-                "immutable_pending_run_sha256": phase1_bundle[
-                    "immutable_pending_run"
-                ]["content_sha256"],
+                "immutable_pending_run_path": phase1_bundle["immutable_pending_run"]["path"],
+                "immutable_pending_run_sha256": phase1_bundle["immutable_pending_run"][
+                    "content_sha256"
+                ],
                 "correction_routes": [dict(route) for route in scored_correction_routes],
             }
             pending_correction["content_sha256"] = _qualification_canonical_sha256(
@@ -4611,9 +4390,7 @@ def _score_materialized_shadow_run(
         raw_first_pass_report_path: Path | None = None
         raw_first_pass_report_sha256: str | None = None
         raw_first_pass_report_content_sha256: str | None = None
-        if scored_correction_routes or (
-            repaired_same_corpus and report.get("passed") is not True
-        ):
+        if scored_correction_routes or (repaired_same_corpus and report.get("passed") is not True):
             raw_first_pass_report_body = {
                 "schema_version": 1,
                 "contract_kind": "qualification_raw_first_pass_report",
@@ -4628,31 +4405,22 @@ def _score_materialized_shadow_run(
                 "content_sha256": raw_first_pass_report_content_sha256,
             }
             raw_first_pass_report_path = out_json.with_name(
-                f"{out_json.stem}.raw_first_pass."
-                f"{raw_first_pass_report_content_sha256}.json"
+                f"{out_json.stem}.raw_first_pass.{raw_first_pass_report_content_sha256}.json"
             )
             _write_qualification_json_once(
                 raw_first_pass_report_path,
                 raw_first_pass_report,
             )
-            raw_first_pass_report_sha256 = _qualification_file_sha256(
-                raw_first_pass_report_path
-            )
+            raw_first_pass_report_sha256 = _qualification_file_sha256(raw_first_pass_report_path)
         prior_best_raw = qualification_meta.get("best_qualified_fallback")
         best_qualified_fallback_for_score = select_best_qualified_fallback(
             prior=(prior_best_raw if isinstance(prior_best_raw, Mapping) else None),
-            candidate_backlog_path=(
-                phase1_snapshot_path if report.get("passed") is True else None
-            ),
+            candidate_backlog_path=(phase1_snapshot_path if report.get("passed") is True else None),
             candidate_report_path=(
-                raw_first_pass_report_path
-                if report.get("passed") is True
-                else None
+                raw_first_pass_report_path if report.get("passed") is True else None
             ),
             candidate_output_adjudication_path=(
-                adjudication_snapshot_path
-                if report.get("passed") is True
-                else None
+                adjudication_snapshot_path if report.get("passed") is True else None
             ),
             candidate_phase1_bundle_path=(
                 phase1_bundle_path if report.get("passed") is True else None
@@ -4667,34 +4435,26 @@ def _score_materialized_shadow_run(
                 "qualification_passed": report["passed"],
                 "qualification_failures": report["qualification"]["failures"],
                 "advisory_correction_route_count": (
-                    len(scored_correction_routes)
-                    if advisory_correction
-                    else 0
+                    len(scored_correction_routes) if advisory_correction else 0
                 ),
                 "clean_first_pass": bool(
                     report["passed"]
                     and not all_scored_correction_routes
-                    and report["qualification"].get("correction_required")
-                    is not True
+                    and report["qualification"].get("correction_required") is not True
                 ),
                 "correction_required": bool(
                     all_scored_correction_routes
                     or report["qualification"].get("correction_required") is True
                 ),
                 "advisory_raw_fallback_eligible": advisory_correction,
-                "correction_metrics": report["qualification"].get(
-                    "correction_metrics", {}
-                ),
+                "correction_metrics": report["qualification"].get("correction_metrics", {}),
                 "independent_release_evidence": report["qualification"].get(
                     "independent_release_evidence"
                 ),
-                "useful_output_verified": report["qualification"].get(
-                    "useful_output_verified"
-                ),
+                "useful_output_verified": report["qualification"].get("useful_output_verified"),
                 "release_qualification_eligible": bool(
                     report["passed"]
-                    and report["qualification"].get("useful_output_verified")
-                    is True
+                    and report["qualification"].get("useful_output_verified") is True
                 ),
                 "best_qualified_fallback": best_qualified_fallback_for_score,
                 "raw_first_pass_report_path": (
@@ -4712,9 +4472,7 @@ def _score_materialized_shadow_run(
                     or raw_first_pass_report_sha256
                 ),
                 "raw_first_pass_report_content_sha256": (
-                    qualification_meta.get(
-                        "raw_first_pass_report_content_sha256"
-                    )
+                    qualification_meta.get("raw_first_pass_report_content_sha256")
                     or raw_first_pass_report_content_sha256
                 ),
                 "original_first_pass_report_path": (
@@ -4734,31 +4492,23 @@ def _score_materialized_shadow_run(
                 "latest_failed_adjudication_report_path": (
                     str(raw_first_pass_report_path.resolve())
                     if raw_first_pass_report_path is not None
-                    else qualification_meta.get(
-                        "latest_failed_adjudication_report_path"
-                    )
+                    else qualification_meta.get("latest_failed_adjudication_report_path")
                 ),
                 "latest_failed_adjudication_report_sha256": (
                     raw_first_pass_report_sha256
-                    or qualification_meta.get(
-                        "latest_failed_adjudication_report_sha256"
-                    )
+                    or qualification_meta.get("latest_failed_adjudication_report_sha256")
                 ),
-                "qualification_output_adjudication_sha256_post_run": (
-                    scored_adjudication_sha256
-                ),
+                "qualification_output_adjudication_sha256_post_run": (scored_adjudication_sha256),
                 "phase1_bundle_path": str(phase1_bundle_path.resolve()),
                 "phase1_bundle_sha256": phase1_bundle["content_sha256"],
                 "phase1_backlog_snapshot_path": str(phase1_snapshot_path.resolve()),
                 "phase1_backlog_snapshot_sha256": phase1_backlog_sha256,
                 "phase1_pending_run_sha256": pending.get("content_sha256"),
                 "phase1_source_artifact_sha256s": phase1_source_artifact_sha256s,
-                "phase1_immutable_pending_run_path": phase1_bundle[
-                    "immutable_pending_run"
-                ]["path"],
-                "phase1_immutable_pending_run_sha256": phase1_bundle[
-                    "immutable_pending_run"
-                ]["content_sha256"],
+                "phase1_immutable_pending_run_path": phase1_bundle["immutable_pending_run"]["path"],
+                "phase1_immutable_pending_run_sha256": phase1_bundle["immutable_pending_run"][
+                    "content_sha256"
+                ],
                 "qualification_manifest_sha256_expected": pending.get(
                     "qualification_manifest_sha256_expected"
                 ),
@@ -4772,9 +4522,7 @@ def _score_materialized_shadow_run(
                     if adjudication_snapshot_path is not None
                     else None
                 ),
-                "qualification_correction_input_sha256": (
-                    correction_input_sha256_for_score
-                ),
+                "qualification_correction_input_sha256": (correction_input_sha256_for_score),
                 "qualification_correction_completion_path": (
                     str(correction_completion_path_for_score.resolve())
                     if correction_completion_path_for_score is not None
@@ -4855,9 +4603,7 @@ def _score_materialized_shadow_run(
         else:
             try:
                 output_adjudication_sha256 = _coerce_string(
-                    phase1_bundle.get("qualification_output_adjudication", {}).get(
-                        "sha256"
-                    )
+                    phase1_bundle.get("qualification_output_adjudication", {}).get("sha256")
                 )
                 manifest_sha256 = _coerce_string(
                     phase1_bundle.get("artifacts", {})
@@ -4885,9 +4631,7 @@ def _score_materialized_shadow_run(
                     phase1_bundle_sha256=str(phase1_bundle["content_sha256"]),
                     qualification_manifest_path=manifest_snapshot_path,
                     qualification_manifest_sha256=manifest_sha256,
-                    qualification_output_adjudication_path=(
-                        adjudication_snapshot_path
-                    ),
+                    qualification_output_adjudication_path=(adjudication_snapshot_path),
                     policy_config=policy_cfg,
                     policy_config_path=policy_config_path,
                     export_gate_config_path=export_gate_snapshot_path,
@@ -4909,9 +4653,7 @@ def _score_materialized_shadow_run(
                         "qualification_output_adjudication", {}
                     ).get("sha256"),
                     "phase1_bundle_sha256": phase1_bundle.get("content_sha256"),
-                    "route_sha256s": [
-                        route.get("route_sha256") for route in correction_routes
-                    ],
+                    "route_sha256s": [route.get("route_sha256") for route in correction_routes],
                     "error_type": type(exc).__name__,
                     "error": str(exc),
                     "authored_work_disposition": "retained",
@@ -4943,28 +4685,20 @@ def _score_materialized_shadow_run(
         repair_result.get("status") if isinstance(repair_result, Mapping) else None
     )
     repaired_backlog_path_raw = _coerce_string(
-        repair_result.get("repaired_backlog_path")
-        if isinstance(repair_result, Mapping)
-        else None
+        repair_result.get("repaired_backlog_path") if isinstance(repair_result, Mapping) else None
     )
     repair_materialized = bool(
-        repaired_backlog_path_raw is not None
-        and Path(repaired_backlog_path_raw).is_file()
+        repaired_backlog_path_raw is not None and Path(repaired_backlog_path_raw).is_file()
     )
     correction_in_progress = repair_status == "correction_in_progress"
     best_fallback_raw = qualification_meta.get("best_qualified_fallback")
-    best_fallback = (
-        best_fallback_raw if isinstance(best_fallback_raw, Mapping) else None
-    )
+    best_fallback = best_fallback_raw if isinstance(best_fallback_raw, Mapping) else None
     fallback_selected_path: Path | None = None
     should_use_best_fallback = bool(
         best_fallback is not None
         and not repair_materialized
         and not correction_in_progress
-        and (
-            advisory_correction
-            or (repaired_same_corpus and report.get("passed") is not True)
-        )
+        and (advisory_correction or (repaired_same_corpus and report.get("passed") is not True))
     )
     if should_use_best_fallback and best_fallback is not None:
         try:
@@ -4982,11 +4716,7 @@ def _score_materialized_shadow_run(
                 round_metrics=fallback_metrics,
                 result_status=(
                     repair_status
-                    or (
-                        "no_correctable_route"
-                        if not correction_routes
-                        else "operational_failure"
-                    )
+                    or ("no_correctable_route" if not correction_routes else "operational_failure")
                 ),
                 correction_consumption_path=fallback_consumption_path,
                 correction_consumption_sha256=fallback_consumption_sha256,
@@ -5006,9 +4736,7 @@ def _score_materialized_shadow_run(
             repair_result = {
                 **(dict(repair_result) if isinstance(repair_result, Mapping) else {}),
                 "status": "best_qualified_ancestor_retained",
-                "best_qualified_fallback_content_sha256": best_fallback.get(
-                    "content_sha256"
-                ),
+                "best_qualified_fallback_content_sha256": best_fallback.get("content_sha256"),
                 "selected_backlog_path": str(fallback_selected_path.resolve()),
             }
         except (OSError, ValueError, yaml.YAMLError) as exc:
@@ -5075,11 +4803,7 @@ def _release_qualification_bundle_from_state(state_path: Path) -> Path:
         if receipt is None:
             continue
         path_raw = receipt.get("snapshot_path") or receipt.get("source_path")
-        path = (
-            Path(path_raw).resolve()
-            if isinstance(path_raw, str) and path_raw.strip()
-            else None
-        )
+        path = Path(path_raw).resolve() if isinstance(path_raw, str) and path_raw.strip() else None
         if path is not None and path.is_file():
             return path
     raise ValueError("operational_release_qualification_bundle_missing")
@@ -5151,9 +4875,7 @@ def _score_materialized_operational_shadow_run(
             artifact_paths=artifact_paths,
         )
         if pending_errors or pending is None:
-            raise ValueError(
-                "pending_operational_shadow_run_invalid:" + ",".join(pending_errors)
-            )
+            raise ValueError("pending_operational_shadow_run_invalid:" + ",".join(pending_errors))
 
         pipeline_raw = artifacts.get("six_stage_pipeline")
         pipeline = pipeline_raw if isinstance(pipeline_raw, dict) else {}
@@ -5307,14 +5029,10 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     )
     shadow_state_raw = getattr(args, "shadow_state", None)
     explicit_shadow_state_path = (
-        shadow_state_raw.expanduser().resolve()
-        if isinstance(shadow_state_raw, Path)
-        else None
+        shadow_state_raw.expanduser().resolve() if isinstance(shadow_state_raw, Path) else None
     )
     qualification_path_overrides = {
-        "qualification_corpus_manifest_path": getattr(
-            args, "qualification_corpus_manifest", None
-        ),
+        "qualification_corpus_manifest_path": getattr(args, "qualification_corpus_manifest", None),
         "qualification_output_adjudication_path": getattr(
             args, "qualification_output_adjudication", None
         ),
@@ -5335,8 +5053,13 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     if shadow and operational_shadow:
         print("Cannot combine release and operational shadow modes.", file=sys.stderr)
         return 2
-    if qualification_prepare and (shadow or operational_shadow or bool(getattr(args, "dry_run", False))):
-        print("Qualification preparation is model-free and cannot combine with run modes.", file=sys.stderr)
+    if qualification_prepare and (
+        shadow or operational_shadow or bool(getattr(args, "dry_run", False))
+    ):
+        print(
+            "Qualification preparation is model-free and cannot combine with run modes.",
+            file=sys.stderr,
+        )
         return 2
     if qualification_input_bundle_path is not None and not shadow:
         print("--qualification-input-bundle requires --shadow.", file=sys.stderr)
@@ -5358,9 +5081,10 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        if not score_shadow and qualification_path_overrides[
-            "qualification_corpus_manifest_path"
-        ] is not None:
+        if (
+            not score_shadow
+            and qualification_path_overrides["qualification_corpus_manifest_path"] is not None
+        ):
             print(
                 "Sealed phase one receives only --qualification-manifest-sha256; "
                 "supply the manifest path to --score-shadow.",
@@ -5396,6 +5120,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     repo_root = _resolve_repo_root(args.repo_root)
     cfg = _load_runner_config(repo_root)
     requested_agent = str(args.agent)
+    stage3_resume_compatibility_contract = stage3_research_compatibility_contract(
+        agent=requested_agent
+    )
     requested_model = (
         str(args.model) if isinstance(args.model, str) and args.model.strip() else None
     )
@@ -5435,18 +5162,10 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             print(f"Invalid qualification input bundle: {exc}", file=sys.stderr)
             return 2
         bundle_pipeline_raw = qualification_input_bundle.get("pipeline")
-        bundle_pipeline = (
-            bundle_pipeline_raw
-            if isinstance(bundle_pipeline_raw, Mapping)
-            else {}
-        )
+        bundle_pipeline = bundle_pipeline_raw if isinstance(bundle_pipeline_raw, Mapping) else {}
         bundle_files_raw = bundle_pipeline.get("files")
-        bundle_files = (
-            bundle_files_raw if isinstance(bundle_files_raw, Mapping) else {}
-        )
-        if _coerce_string(bundle_files.get("repo_root")) != str(
-            repo_root.resolve()
-        ):
+        bundle_files = bundle_files_raw if isinstance(bundle_files_raw, Mapping) else {}
+        if _coerce_string(bundle_files.get("repo_root")) != str(repo_root.resolve()):
             print(
                 "Qualification input bundle pipeline root does not match --repo-root.",
                 file=sys.stderr,
@@ -5488,6 +5207,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             )
             return 2
         if shadow:
+
             def qualification_path(field: str) -> Path | None:
                 override = qualification_path_overrides[field]
                 if isinstance(override, Path):
@@ -5500,9 +5220,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                     shadow_gate_config[field],
                 )
 
-            qualification_manifest_path = qualification_path(
-                "qualification_corpus_manifest_path"
-            )
+            qualification_manifest_path = qualification_path("qualification_corpus_manifest_path")
             qualification_output_adjudication_path = qualification_path(
                 "qualification_output_adjudication_path"
             )
@@ -5513,16 +5231,13 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             # digest. The actual held-out manifest is supplied after model output.
             if qualification_input_bundle is not None and not score_shadow:
                 qualification_manifest_path = None
-                qualification_manifest_sha256_expected = (
-                    qualification_manifest_sha256_override
-                )
+                qualification_manifest_sha256_expected = qualification_manifest_sha256_override
             else:
                 qualification_manifest_sha256_expected = _qualification_file_sha256(
                     qualification_manifest_path
                 )
                 if qualification_manifest_sha256_override is not None and (
-                    qualification_manifest_sha256_expected
-                    != qualification_manifest_sha256_override
+                    qualification_manifest_sha256_expected != qualification_manifest_sha256_override
                 ):
                     print(
                         "Qualification manifest bytes do not match "
@@ -5537,9 +5252,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     runs_dir = args.runs_dir.resolve() if args.runs_dir is not None else cfg.runs_dir
     stage_runs_raw = getattr(args, "stage_runs_dir", None)
     stage_runs_dir = (
-        stage_runs_raw.expanduser().resolve()
-        if isinstance(stage_runs_raw, Path)
-        else runs_dir
+        stage_runs_raw.expanduser().resolve() if isinstance(stage_runs_raw, Path) else runs_dir
     )
     qualification_cycle_contract_value: dict[str, Any] | None = None
     qualification_cycle_contract_path: Path | None = None
@@ -5613,7 +5326,10 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             out_json.resolve().relative_to(qualification_cycle_root)
             out_md.resolve().relative_to(qualification_cycle_root)
         except ValueError:
-            print("Qualification outputs must remain inside --qualification-cycle-root.", file=sys.stderr)
+            print(
+                "Qualification outputs must remain inside --qualification-cycle-root.",
+                file=sys.stderr,
+            )
             return 2
         initial_readable_roots = [repo_root, runs_dir, stage_runs_dir]
         if repo_input is not None and _looks_like_local_repo_input(repo_input):
@@ -5632,14 +5348,11 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         )
         if initial_custody_errors:
             print(
-                "Qualification custody is not isolated: "
-                + ",".join(initial_custody_errors),
+                "Qualification custody is not isolated: " + ",".join(initial_custody_errors),
                 file=sys.stderr,
             )
             return 2
-        cycle_breadth_profile = _normalize_breadth_profile(
-            getattr(args, "breadth_profile", None)
-        )
+        cycle_breadth_profile = _normalize_breadth_profile(getattr(args, "breadth_profile", None))
         (
             cycle_prompts_dir,
             cycle_policy_config_path,
@@ -5659,8 +5372,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             policy_config_path=cycle_policy_config_path,
         )
         cycle_manifest_sha256 = (
-            qualification_manifest_sha256_override
-            or qualification_manifest_sha256_expected
+            qualification_manifest_sha256_override or qualification_manifest_sha256_expected
         )
         if not _qualification_valid_sha256(cycle_manifest_sha256):
             print(
@@ -5719,17 +5431,11 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 score_backlog = {}
             score_artifacts_raw = score_backlog.get("artifacts")
             score_artifacts = (
-                score_artifacts_raw
-                if isinstance(score_artifacts_raw, Mapping)
-                else {}
+                score_artifacts_raw if isinstance(score_artifacts_raw, Mapping) else {}
             )
             score_export_raw = score_artifacts.get("export_contract")
-            score_export = (
-                score_export_raw if isinstance(score_export_raw, Mapping) else {}
-            )
-            recorded_state_path = _coerce_string(
-                score_export.get("shadow_state_path")
-            )
+            score_export = score_export_raw if isinstance(score_export_raw, Mapping) else {}
+            recorded_state_path = _coerce_string(score_export.get("shadow_state_path"))
             if recorded_state_path is not None:
                 score_state_path = Path(recorded_state_path).resolve()
         return _score_materialized_shadow_run(
@@ -5766,21 +5472,16 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
 
     atom_actions_arg: Path | None = args.atom_actions_yaml
     requested_atom_actions_path = (
-        _resolve_optional_path(repo_root, atom_actions_arg)
-        or atom_actions_arg.resolve()
+        _resolve_optional_path(repo_root, atom_actions_arg) or atom_actions_arg.resolve()
         if atom_actions_arg is not None
         else repo_root / "configs" / "backlog_atom_actions.yaml"
     )
     if qualification_input_bundle is not None:
         bundle_source_raw = qualification_input_bundle.get("source_inputs")
-        bundle_source = (
-            bundle_source_raw if isinstance(bundle_source_raw, Mapping) else {}
-        )
+        bundle_source = bundle_source_raw if isinstance(bundle_source_raw, Mapping) else {}
         atom_actions_receipt_raw = bundle_source.get("atom_actions")
         atom_actions_receipt = (
-            atom_actions_receipt_raw
-            if isinstance(atom_actions_receipt_raw, Mapping)
-            else {}
+            atom_actions_receipt_raw if isinstance(atom_actions_receipt_raw, Mapping) else {}
         )
         sealed_atom_actions_raw = _coerce_string(atom_actions_receipt.get("path"))
         if sealed_atom_actions_raw is None:
@@ -5819,11 +5520,10 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
     case_registry_json = out_json.parent / f"{default_name}.case_registry.json"
     retained_research_path = out_json.parent / f"{default_name}.research.json"
     preexisting_stage3_resume_document: dict[str, Any] | None = None
+    completed_stage3_resume_candidate: dict[str, Any] | None = None
     if bool(args.resume) and retained_research_path.is_file():
         try:
-            retained_research_raw = json.loads(
-                retained_research_path.read_text(encoding="utf-8")
-            )
+            retained_research_raw = json.loads(retained_research_path.read_text(encoding="utf-8"))
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             print(
                 "[backlog] ERROR: retained Stage-3 artifact is unreadable; refusing to "
@@ -5842,15 +5542,30 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         retained_meta = retained_meta_raw if isinstance(retained_meta_raw, Mapping) else {}
         retained_checkpoint_raw = retained_meta.get("external_wait")
         retained_checkpoint = (
-            retained_checkpoint_raw
-            if isinstance(retained_checkpoint_raw, Mapping)
-            else {}
+            retained_checkpoint_raw if isinstance(retained_checkpoint_raw, Mapping) else {}
         )
         parked_resume_intent = (
             retained_meta.get("stage_status") == "parked_external_wait"
             or retained_checkpoint.get("status") == "parked_external_wait"
         )
         verified_wait = _stage3_provider_external_wait(retained_research_raw)
+        progress_resume_intent = retained_meta.get("stage_status") == "checkpointed_progress"
+        verified_progress = _stage3_completed_progress(
+            retained_research_raw,
+            expected_compatibility_contract=stage3_resume_compatibility_contract,
+        )
+        completed_checkpoint_raw = retained_meta.get("completed_stage_checkpoint")
+        completed_resume_intent = retained_meta.get("stage_status") == "completed" and isinstance(
+            completed_checkpoint_raw, Mapping
+        )
+        verified_completed = (
+            _stage3_completed_stage(
+                retained_research_raw,
+                expected_compatibility_contract=stage3_resume_compatibility_contract,
+            )
+            if completed_resume_intent
+            else None
+        )
         if parked_resume_intent and verified_wait is None:
             print(
                 "[backlog] ERROR: retained Stage-3 provider-wait checkpoint failed "
@@ -5858,8 +5573,27 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 file=sys.stderr,
             )
             return 2
-        if verified_wait is not None:
+        if progress_resume_intent and verified_progress is None:
+            print(
+                "[backlog] ERROR: retained Stage-3 progress checkpoint failed "
+                "integrity validation; refusing to restart or overwrite it.",
+                file=sys.stderr,
+            )
+            return 2
+        if completed_resume_intent and verified_completed is None:
+            print(
+                "[backlog] NOTE: retained completed Stage-3 checkpoint is not compatible "
+                "with this invocation and will be treated as a cache miss. In-progress "
+                "and provider-wait checkpoints remain protected from overwrite.",
+                file=sys.stderr,
+            )
+        if verified_wait is not None or verified_progress is not None:
             preexisting_stage3_resume_document = retained_research_raw
+        elif verified_completed is not None:
+            # A completed proof is a reusable cache, not an in-progress author frontier.
+            # Validate it against the newly materialized Stage-1/2 inputs below; changed
+            # evidence must cause a normal fresh Stage 3 rather than aborting the new cycle.
+            completed_stage3_resume_candidate = retained_research_raw
     qualification_source_snapshot: dict[str, Any] | None = None
     if qualification_prepare:
         seed_raw = getattr(args, "qualification_case_registry_seed", None)
@@ -6008,9 +5742,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             return 2
     if qualification_input_bundle is not None:
         bound_source_raw = qualification_input_bundle.get("source_inputs")
-        bound_source = (
-            bound_source_raw if isinstance(bound_source_raw, Mapping) else {}
-        )
+        bound_source = bound_source_raw if isinstance(bound_source_raw, Mapping) else {}
         bound_owner_roots_raw = bound_source.get("owner_roots")
         bound_owner_roots = (
             {
@@ -6036,8 +5768,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         ]
         prior_label_paths = (
             _prior_qualification_label_paths(explicit_shadow_state_path)
-            if qualification_input_bundle is not None
-            and explicit_shadow_state_path is not None
+            if qualification_input_bundle is not None and explicit_shadow_state_path is not None
             else {}
         )
         exposure_errors = _qualification_workspace_exposure_errors(
@@ -6056,12 +5787,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                         "cycle_root": qualification_cycle_root,
                         "shared_state": explicit_shadow_state_path,
                         "corpus_manifest": qualification_manifest_path,
-                        "output_adjudication": (
-                            qualification_output_adjudication_path
-                        ),
-                        "no_actionable_receipt": (
-                            no_actionable_evidence_receipt_path
-                        ),
+                        "output_adjudication": (qualification_output_adjudication_path),
+                        "no_actionable_receipt": (no_actionable_evidence_receipt_path),
                         **prior_label_paths,
                     },
                     model_readable_roots=model_readable_roots,
@@ -6326,8 +6053,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             excluded_idea["idea_originated"] = True
             excluded_idea["idea_origin_provenance"] = (
                 "atom_action_ledger"
-                if isinstance(action_entry, dict)
-                and atom_is_idea_originated(action_entry)
+                if isinstance(action_entry, dict) and atom_is_idea_originated(action_entry)
                 else "atom"
             )
             excluded_atoms.append(excluded_idea)
@@ -6428,11 +6154,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             agent_last_message_atoms.append(atom)
         atoms.append(atom)
 
-    if (
-        reopened_atoms
-        and not non_exporting_shadow
-        and preexisting_stage3_resume_document is None
-    ):
+    if reopened_atoms and not non_exporting_shadow and preexisting_stage3_resume_document is None:
         # Persist immediately so a later stage failure cannot let the monotonic action
         # updater reapply a stale supports_case/ticketed row on the next cycle.
         _write_atom_actions_yaml(atom_actions_path, atom_actions)
@@ -7002,11 +6724,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 stage_doc=stage2_doc,
             )
         selected_priority = sorted(
-            (
-                dec
-                for dec in priority_decisions
-                if dec.get("selected_for_research") is True
-            ),
+            (dec for dec in priority_decisions if dec.get("selected_for_research") is True),
             key=_research_dispatch_sort_key,
         )
         reused_research_dossiers: list[dict[str, Any]] = []
@@ -7023,8 +6741,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             chain = reused_downstream_chains_by_problem_id.get(problem_id or "")
             dossier = (
                 dict(chain["research_dossier"])
-                if isinstance(chain, Mapping)
-                and isinstance(chain.get("research_dossier"), Mapping)
+                if isinstance(chain, Mapping) and isinstance(chain.get("research_dossier"), Mapping)
                 else None
             )
             hydration_errors: list[str] = []
@@ -7124,6 +6841,54 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 )
                 return 2
 
+        stage3_resume_upstream = _stage3_resume_upstream_contract(
+            paths={
+                "atoms": atoms_jsonl,
+                "problem_records": problem_records_json,
+                "problem_mining_evidence": problem_mining_evidence_json,
+                "prioritized_problems": prioritized_json,
+                "case_registry": case_registry_json,
+            },
+            source_atoms=atoms,
+            target_slug=target_slug,
+            repo_input=repo_input,
+            research_ref=research_ref,
+            selected_problem_ids=[
+                str(item["problem_id"])
+                for item in selected_priority
+                if isinstance(item.get("problem_id"), str)
+            ],
+        )
+        if stage3_resume_document is None and completed_stage3_resume_candidate is not None:
+            try:
+                _load_stage3_resume_upstream(
+                    stage3_document=completed_stage3_resume_candidate,
+                    expected_paths={
+                        "atoms": atoms_jsonl,
+                        "problem_records": problem_records_json,
+                        "problem_mining_evidence": problem_mining_evidence_json,
+                        "prioritized_problems": prioritized_json,
+                        "case_registry": case_registry_json,
+                    },
+                    target_slug=target_slug,
+                    repo_input=repo_input,
+                    research_ref=research_ref,
+                    current_atoms=atoms,
+                )
+                candidate_meta_raw = completed_stage3_resume_candidate.get("input_meta")
+                candidate_meta = (
+                    candidate_meta_raw if isinstance(candidate_meta_raw, Mapping) else {}
+                )
+                if candidate_meta.get("resume_upstream") != stage3_resume_upstream:
+                    raise ValueError("stage3_completed_resume_upstream_contract_changed")
+            except ValueError as exc:
+                print(
+                    "[stage3] NOTE: completed research cache invalidated by current "
+                    f"upstream inputs; running Stage 3 normally ({exc}).",
+                    file=sys.stderr,
+                )
+            else:
+                stage3_resume_document = completed_stage3_resume_candidate
         stage3_doc = _run_repro_research_stage(
             repo_root=repo_root,
             repo_input=resolved_repo_input,
@@ -7144,6 +6909,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             replay_executor_metadata=replay_executor_metadata,
             resume_stage_document=stage3_resume_document,
             reused_research_dossiers=reused_research_dossiers,
+            resume_upstream_contract=stage3_resume_upstream,
         )
 
         items3_raw = stage3_doc.get("items") if isinstance(stage3_doc, dict) else None
@@ -7164,7 +6930,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
         )
         stage3_external_wait = _stage3_provider_external_wait(stage3_doc)
         if stage3_external_wait is not None:
-            resume_upstream = _stage3_resume_upstream_contract(
+            stage3_resume_upstream = _stage3_resume_upstream_contract(
                 paths={
                     "atoms": atoms_jsonl,
                     "problem_records": problem_records_json,
@@ -7185,12 +6951,9 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             stage3_doc = dict(stage3_doc)
             stage3_meta_raw = stage3_doc.get("input_meta")
             stage3_meta = dict(stage3_meta_raw) if isinstance(stage3_meta_raw, dict) else {}
-            stage3_meta["resume_upstream"] = resume_upstream
+            stage3_meta["resume_upstream"] = stage3_resume_upstream
             stage3_doc["input_meta"] = stage3_meta
-            research_json.write_text(
-                json.dumps(stage3_doc, ensure_ascii=False, indent=2) + "\n",
-                encoding="utf-8",
-            )
+            _atomic_write_research_json(research_json, stage3_doc)
             print(
                 "[stage3] PARKED: signed-in Codex subscription usage limit; "
                 "Stages 4-6 were not dispatched. Resume this same pipeline invocation after the "
@@ -7281,6 +7044,35 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 stage_doc=stage3_doc,
             )
 
+        # Stage-lineage persistence updates the case registry after the core Stage-3
+        # document is built. Refresh the upstream receipt to the exact durable files a
+        # later completed-cache resume will read; otherwise a crash immediately before
+        # Stage 4 would reject its own successfully persisted research.
+        stage3_resume_upstream = _stage3_resume_upstream_contract(
+            paths={
+                "atoms": atoms_jsonl,
+                "problem_records": problem_records_json,
+                "problem_mining_evidence": problem_mining_evidence_json,
+                "prioritized_problems": prioritized_json,
+                "case_registry": case_registry_json,
+            },
+            source_atoms=atoms,
+            target_slug=target_slug,
+            repo_input=repo_input,
+            research_ref=research_ref,
+            selected_problem_ids=[
+                str(item["problem_id"])
+                for item in selected_priority
+                if isinstance(item.get("problem_id"), str)
+            ],
+        )
+        stage3_doc = dict(stage3_doc)
+        stage3_meta_raw = stage3_doc.get("input_meta")
+        stage3_meta = dict(stage3_meta_raw) if isinstance(stage3_meta_raw, Mapping) else {}
+        stage3_meta["resume_upstream"] = stage3_resume_upstream
+        stage3_doc["input_meta"] = stage3_meta
+        _atomic_write_research_json(research_json, stage3_doc)
+
         research_by_problem_id = {
             str(dossier["problem_id"]): dossier
             for dossier in research_dossiers
@@ -7298,8 +7090,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             if (
                 dossier is not None
                 and record is not None
-                and _coerce_string(record.get("case_id"))
-                == _coerce_string(chain.get("case_id"))
+                and _coerce_string(record.get("case_id")) == _coerce_string(chain.get("case_id"))
                 and chain_matches_research_dossier(chain, dossier)
             ):
                 valid_reused_chains_by_problem_id[problem_id] = chain
@@ -7391,9 +7182,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             if family_id is None:
                 continue
             family_order.append(family_id)
-            family_labels_by_id[family_id] = (
-                _coerce_string(family.get("label")) or family_id
-            )
+            family_labels_by_id[family_id] = _coerce_string(family.get("label")) or family_id
         problem_records_by_id = {
             str(record["problem_id"]): record
             for record in problem_records
@@ -7420,9 +7209,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 cfg=cfg,
                 dry_run=dry_run,
                 breadth_profile=breadth_profile,
-                stage_guidance_text=pipeline_manifest.load_stage_guidance(
-                    "solution_optioning"
-                ),
+                stage_guidance_text=pipeline_manifest.load_stage_guidance("solution_optioning"),
             ),
         )
         if stage4_fresh_doc is not None:
@@ -7520,18 +7307,14 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 cfg=cfg,
                 dry_run=dry_run,
                 breadth_profile=breadth_profile,
-                stage_guidance_text=pipeline_manifest.load_stage_guidance(
-                    "solution_selection"
-                ),
+                stage_guidance_text=pipeline_manifest.load_stage_guidance("solution_selection"),
             ),
         )
         if stage5_fresh_doc is not None:
             _require_stage_model_invocation_provenance(stage5_fresh_doc)
 
         stage5_meta_raw = (
-            stage5_fresh_doc.get("input_meta")
-            if isinstance(stage5_fresh_doc, dict)
-            else None
+            stage5_fresh_doc.get("input_meta") if isinstance(stage5_fresh_doc, dict) else None
         )
         stage5_meta = dict(stage5_meta_raw) if isinstance(stage5_meta_raw, dict) else {}
         option_revisions_raw = stage5_meta.get("option_revisions")
@@ -7723,10 +7506,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             _render_change_plans_markdown(
                 change_plans,
                 problem_records_by_id=problem_records_by_id,
-                title=(
-                    f"{change_plans_json.stem.removesuffix('.change_plans')} "
-                    "- Change Plans"
-                ),
+                title=(f"{change_plans_json.stem.removesuffix('.change_plans')} - Change Plans"),
             ),
             encoding="utf-8",
         )
@@ -7938,12 +7718,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                     if qualification_manifest_path is not None
                     else None
                 ),
-                "qualification_manifest_sha256_expected": (
-                    qualification_manifest_sha256_expected
-                ),
-                "qualification_manifest_sha256_observed": (
-                    qualification_manifest_sha256_observed
-                ),
+                "qualification_manifest_sha256_expected": (qualification_manifest_sha256_expected),
+                "qualification_manifest_sha256_observed": (qualification_manifest_sha256_observed),
                 "qualification_input_bundle_path": (
                     str(qualification_input_bundle_path)
                     if qualification_input_bundle_path is not None
@@ -7955,9 +7731,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                     else None
                 ),
                 "qualification_cycle_root": (
-                    str(qualification_cycle_root)
-                    if qualification_cycle_root is not None
-                    else None
+                    str(qualification_cycle_root) if qualification_cycle_root is not None else None
                 ),
                 "qualification_cycle_contract_path": (
                     str(qualification_cycle_contract_path)
@@ -7970,9 +7744,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                     else None
                 ),
                 "stage_runs_dir": str(stage_runs_dir),
-                "shadow_state_path": str(
-                    explicit_shadow_state_path or shadow_state_path(out_json)
-                ),
+                "shadow_state_path": str(explicit_shadow_state_path or shadow_state_path(out_json)),
                 "qualification_output_adjudication_path": (
                     str(qualification_output_adjudication_path)
                     if qualification_output_adjudication_path is not None
@@ -8016,9 +7788,7 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 "projection_sha256": export_projection["sha256"],
                 "policy_config_path": str(policy_config_path.resolve()),
                 "ux_review_json_path": str(_ux_review_path_for_backlog(out_json).resolve()),
-                "shadow_state_path": str(
-                    explicit_shadow_state_path or shadow_state_path(out_json)
-                ),
+                "shadow_state_path": str(explicit_shadow_state_path or shadow_state_path(out_json)),
             }
         )
         artifacts_dict["export_contract"] = export_contract

@@ -11,6 +11,12 @@ product change. A detailed report is not sufficient unless retained runner evide
 - Treat assigned source atoms as immutable problem evidence. Research/implementation atoms are
   derived evidence for their parent case unless they expose a distinct failure.
 - Use the pinned repository revision and retained artifacts. Inspect the actual change surface.
+- Search and `Select-String` output are discovery only. For every file or symbol listed as
+  inspected, perform a standalone attested read after locating it: use
+  `Get-Content -Raw -Encoding UTF8 -LiteralPath <path>` for a small file, or the exact bounded
+  form `Get-Content -Encoding UTF8 -LiteralPath <path> | Select-Object -Skip <N> -First <M>`
+  for a large file. Do not chain either read with markers or unrelated commands. A bounded read
+  must contain the complete claimed definition.
 - Commands are direct argv with `shell=false`. Use a tracked repository entrypoint or an attested
   research harness. The language/runtime is not prescribed; inline interpreter commands and shell
   control syntax are forbidden. If a repository-native runner has no repository path in argv

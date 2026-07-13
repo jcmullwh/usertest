@@ -481,7 +481,7 @@ def _validate_problem_record(item: dict[str, Any]) -> list[str]:
             )
 
     sev = item.get("severity")
-    if sev is not None and sev not in _VALID_SEVERITIES:
+    if sev is not None and (not isinstance(sev, str) or sev not in _VALID_SEVERITIES):
         warnings.append(f"problem_record_invalid_severity: {pid}: {sev!r}")
 
     conf = item.get("confidence")
@@ -495,7 +495,9 @@ def _validate_problem_record(item: dict[str, Any]) -> list[str]:
         warnings.append(f"problem_record_empty_evidence_atom_ids: {pid}")
 
     status = item.get("problem_status")
-    if status is not None and status not in _VALID_PROBLEM_STATUSES:
+    if status is not None and (
+        not isinstance(status, str) or status not in _VALID_PROBLEM_STATUSES
+    ):
         warnings.append(f"problem_record_invalid_status: {pid}: {status!r}")
 
     return warnings
@@ -522,7 +524,9 @@ def _validate_priority_decision(item: dict[str, Any]) -> list[str]:
             warnings.append(f"priority_decision_missing_required_field: {pid}: {field}")
 
     bucket = item.get("priority_bucket")
-    if bucket is not None and bucket not in _VALID_PRIORITY_BUCKETS:
+    if bucket is not None and (
+        not isinstance(bucket, str) or bucket not in _VALID_PRIORITY_BUCKETS
+    ):
         warnings.append(f"priority_decision_invalid_bucket: {pid}: {bucket!r}")
 
     sfr = item.get("selected_for_research")
@@ -807,8 +811,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                 _canonical_uuid_string(agent_session_id) != agent_session_id
             ):
                 errors.append(
-                    f"research_dossier_research_attempt_session_id_invalid: "
-                    f"{pid}: index={index}"
+                    f"research_dossier_research_attempt_session_id_invalid: {pid}: index={index}"
                 )
             observed_session_id = attempt.get("observed_agent_session_id")
             if observed_session_id is not None and (
@@ -951,10 +954,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                             )
                     session_id = attempt.get("agent_session_id")
                     resumed_id = attempt.get("resumed_from_session_id")
-                    if (
-                        _canonical_uuid_string(session_id) != session_id
-                        or session_id != resumed_id
-                    ):
+                    if _canonical_uuid_string(session_id) != session_id or session_id != resumed_id:
                         errors.append(
                             f"research_dossier_repair_attempt_session_continuity_invalid: "
                             f"{pid}: index={index}"
@@ -1009,8 +1009,7 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                         != _canonical_sha256(provenance_without_hash)
                     ):
                         errors.append(
-                            f"research_dossier_fresh_retry_provenance_invalid: "
-                            f"{pid}: index={index}"
+                            f"research_dossier_fresh_retry_provenance_invalid: {pid}: index={index}"
                         )
             wall_seconds = attempt.get("attempt_wall_seconds")
             if wall_seconds is not None and (
@@ -1176,11 +1175,11 @@ def _validate_research_attempts(value: Any, *, pid: str) -> list[str]:
                     # It points at the model attempt it verified but deliberately has
                     # no repair baseline; the following same-author repair/continuation
                     # uses the feedback record itself as its hashed baseline.
-                    if (
-                        attempt.get("attempt_kind") != "evidence_verification_feedback"
-                        and attempt.get("baseline_dossier_sha256")
-                        != source_attempt.get("attempted_dossier_sha256")
-                    ):
+                    if attempt.get(
+                        "attempt_kind"
+                    ) != "evidence_verification_feedback" and attempt.get(
+                        "baseline_dossier_sha256"
+                    ) != source_attempt.get("attempted_dossier_sha256"):
                         errors.append(
                             f"research_dossier_research_attempt_baseline_hash_mismatch: "
                             f"{pid}: index={index}"
@@ -1222,9 +1221,7 @@ def _validate_proof_adapter_claim(value: Any, *, pid: str, index: int) -> list[s
         "challenge_experiment_id",
     ):
         if not _is_nonempty_string(value.get(field)):
-            errors.append(
-                f"research_dossier_proof_adapter_{field}_invalid: {pid}: index={index}"
-            )
+            errors.append(f"research_dossier_proof_adapter_{field}_invalid: {pid}: index={index}")
     if value.get("baseline_experiment_id") == value.get("challenge_experiment_id"):
         errors.append(f"research_dossier_proof_adapter_pair_not_distinct: {pid}: index={index}")
     intervention = value.get("intervention")
@@ -1232,9 +1229,7 @@ def _validate_proof_adapter_claim(value: Any, *, pid: str, index: int) -> list[s
         not _is_nonempty_string(intervention.get(field))
         for field in ("kind", "target", "predicted_polarity")
     ):
-        errors.append(
-            f"research_dossier_proof_adapter_intervention_invalid: {pid}: index={index}"
-        )
+        errors.append(f"research_dossier_proof_adapter_intervention_invalid: {pid}: index={index}")
     observations = value.get("observations")
     if observations is not None and (
         not isinstance(observations, dict)
@@ -1244,9 +1239,7 @@ def _validate_proof_adapter_claim(value: Any, *, pid: str, index: int) -> list[s
             for label in ("baseline", "challenge")
         )
     ):
-        errors.append(
-            f"research_dossier_proof_adapter_observations_invalid: {pid}: index={index}"
-        )
+        errors.append(f"research_dossier_proof_adapter_observations_invalid: {pid}: index={index}")
     positive = value.get("positive_outcome")
     if not isinstance(positive, dict):
         errors.append(
@@ -1262,9 +1255,8 @@ def _validate_proof_adapter_claim(value: Any, *, pid: str, index: int) -> list[s
                 f"research_dossier_proof_adapter_positive_basis_invalid: {pid}: index={index}"
             )
         semantic_basis = positive.get("semantic_basis")
-        if (
-            not isinstance(semantic_basis, dict)
-            or not _is_nonempty_string(semantic_basis.get("kind"))
+        if not isinstance(semantic_basis, dict) or not _is_nonempty_string(
+            semantic_basis.get("kind")
         ):
             errors.append(
                 f"research_dossier_proof_adapter_semantic_basis_invalid: {pid}: index={index}"
@@ -1288,14 +1280,10 @@ def _validate_replay_setup(value: Any, *, pid: str, index: int) -> list[str]:
                 or _REPLAY_ENVIRONMENT_KEY_RE.fullmatch(key) is None
                 or (item is not None and not isinstance(item, str))
                 or (isinstance(item, str) and (len(item) > 4096 or "\x00" in item))
-                for key, item in (
-                    environment.items() if isinstance(environment, dict) else []
-                )
+                for key, item in (environment.items() if isinstance(environment, dict) else [])
             )
         ):
-            errors.append(
-                f"research_dossier_replay_environment_invalid: {pid}: index={index}"
-            )
+            errors.append(f"research_dossier_replay_environment_invalid: {pid}: index={index}")
     paths = value.get("disposable_state_paths")
     if paths is not None:
         if (
@@ -1309,9 +1297,7 @@ def _validate_replay_setup(value: Any, *, pid: str, index: int) -> list[str]:
                 for path in (paths if isinstance(paths, list) else [])
             )
         ):
-            errors.append(
-                f"research_dossier_replay_state_paths_invalid: {pid}: index={index}"
-            )
+            errors.append(f"research_dossier_replay_state_paths_invalid: {pid}: index={index}")
     return errors
 
 
@@ -1337,7 +1323,7 @@ def _validate_experiments(value: Any, *, pid: str) -> list[str]:
                 errors.append(f"research_dossier_duplicate_experiment_id: {pid}: {experiment_id}")
             seen_ids.add(str(experiment_id))
         outcome = experiment.get("outcome")
-        if outcome not in _VALID_EXPERIMENT_OUTCOMES:
+        if not isinstance(outcome, str) or outcome not in _VALID_EXPERIMENT_OUTCOMES:
             errors.append(
                 f"research_dossier_invalid_experiment_outcome: {pid}: index={idx} value={outcome!r}"
             )
@@ -1348,7 +1334,10 @@ def _validate_experiments(value: Any, *, pid: str) -> list[str]:
                 f"index={idx} value={scenario_kind!r}"
             )
         fidelity_mapping = experiment.get("fidelity_mapping")
-        if scenario_kind in {"faithful_replay", "live_runtime"}:
+        if isinstance(scenario_kind, str) and scenario_kind in {
+            "faithful_replay",
+            "live_runtime",
+        }:
             if not isinstance(fidelity_mapping, dict) or any(
                 not _is_nonempty_string(fidelity_mapping.get(field))
                 for field in (
@@ -1375,6 +1364,7 @@ def _validate_experiments(value: Any, *, pid: str) -> list[str]:
             )
             if (
                 not isinstance(mechanism_link, dict)
+                or not isinstance(mechanism_link.get("kind"), str)
                 or mechanism_link.get("kind")
                 not in {"entrypoint_dataflow", "verified_symbol_trace"}
                 or not _is_nonempty_string(mechanism_link.get("entrypoint"))
@@ -1494,7 +1484,7 @@ def _validate_experiments(value: Any, *, pid: str) -> list[str]:
                     postcondition.get("type") if isinstance(postcondition, dict) else None
                 )
                 valid_predicate = False
-                if predicate_type in {
+                if isinstance(predicate_type, str) and predicate_type in {
                     "command_stdout_equals",
                     "command_stdout_contains",
                     "command_stderr_equals",
@@ -1533,10 +1523,12 @@ def _validate_experiments(value: Any, *, pid: str) -> list[str]:
                 basis = positive_contract.get("semantic_basis")
                 basis_kind = basis.get("kind") if isinstance(basis, dict) else None
                 common_valid = (
-                    scenario_kind in {"original_replay", "faithful_replay"}
+                    isinstance(scenario_kind, str)
+                    and scenario_kind in {"original_replay", "faithful_replay"}
                     and "expected_value" in positive_contract
                     and _is_nonempty_string(positive_contract.get("semantic_rationale"))
                     and len(str(positive_contract.get("semantic_rationale") or "").strip()) >= 20
+                    and isinstance(positive_contract.get("semantic_relation"), str)
                     and positive_contract.get("semantic_relation")
                     in {
                         "exact_expected_value",
@@ -1559,7 +1551,9 @@ def _validate_experiments(value: Any, *, pid: str) -> list[str]:
                     )
                 elif basis_kind == "repository_contract_quote":
                     valid_basis = (
-                        basis.get("contract_type") in {"api_contract", "documentation", "schema"}
+                        isinstance(basis.get("contract_type"), str)
+                        and basis.get("contract_type")
+                        in {"api_contract", "documentation", "schema"}
                         and _is_nonempty_string(basis.get("path"))
                         and not str(basis.get("path")).startswith(("/", "\\"))
                         and ".." not in str(basis.get("path")).replace("\\", "/").split("/")
@@ -1611,11 +1605,11 @@ def _validate_experiments(value: Any, *, pid: str) -> list[str]:
         source = assertion.get("source")
         operator = assertion.get("operator")
         expected = assertion.get("expected")
-        if source not in _VALID_ASSERTION_SOURCES:
+        if not isinstance(source, str) or source not in _VALID_ASSERTION_SOURCES:
             errors.append(
                 f"research_dossier_invalid_assertion_source: {pid}: index={idx} value={source!r}"
             )
-        if operator not in _VALID_ASSERTION_OPERATORS:
+        if not isinstance(operator, str) or operator not in _VALID_ASSERTION_OPERATORS:
             errors.append(
                 f"research_dossier_invalid_assertion_operator: {pid}: "
                 f"index={idx} value={operator!r}"
@@ -1678,7 +1672,7 @@ def _validate_hypotheses(value: Any, *, pid: str) -> list[str]:
         )
         disposition = hypothesis.get("disposition")
         expected_disposition = "primary" if idx == 0 else None
-        if disposition not in _VALID_HYPOTHESIS_DISPOSITIONS:
+        if not isinstance(disposition, str) or disposition not in _VALID_HYPOTHESIS_DISPOSITIONS:
             errors.append(
                 f"research_dossier_invalid_hypothesis_disposition: {pid}: "
                 f"index={idx} value={disposition!r}"
@@ -1698,7 +1692,9 @@ def _validate_hypotheses(value: Any, *, pid: str) -> list[str]:
                 hypothesis.get("disposition_evidence"),
                 field=f"hypotheses_{idx}_disposition_evidence",
                 pid=pid,
-                require_nonempty=disposition in {"primary", "refuted"},
+                require_nonempty=(
+                    isinstance(disposition, str) and disposition in {"primary", "refuted"}
+                ),
             )
         )
         attempts = hypothesis.get("falsification_attempts")
@@ -1755,12 +1751,12 @@ def _validate_hypotheses(value: Any, *, pid: str) -> list[str]:
                 source = condition.get("source")
                 operator = condition.get("operator")
                 expected = condition.get("expected")
-                if source not in _VALID_ASSERTION_SOURCES:
+                if not isinstance(source, str) or source not in _VALID_ASSERTION_SOURCES:
                     errors.append(
                         f"research_dossier_falsification_attempt_disproof_source_invalid: "
                         f"{pid}: hypothesis={hypothesis_id} index={attempt_index}"
                     )
-                if operator not in _VALID_ASSERTION_OPERATORS:
+                if not isinstance(operator, str) or operator not in _VALID_ASSERTION_OPERATORS:
                     errors.append(
                         f"research_dossier_falsification_attempt_disproof_operator_invalid: "
                         f"{pid}: hypothesis={hypothesis_id} index={attempt_index}"
@@ -1780,7 +1776,11 @@ def _validate_hypotheses(value: Any, *, pid: str) -> list[str]:
                         f"research_dossier_falsification_attempt_disproof_expected_invalid: "
                         f"{pid}: hypothesis={hypothesis_id} index={attempt_index}"
                     )
-            if attempt.get("outcome") not in _VALID_FALSIFICATION_ATTEMPT_OUTCOMES:
+            attempt_outcome = attempt.get("outcome")
+            if (
+                not isinstance(attempt_outcome, str)
+                or attempt_outcome not in _VALID_FALSIFICATION_ATTEMPT_OUTCOMES
+            ):
                 errors.append(
                     f"research_dossier_falsification_attempt_outcome_invalid: {pid}: "
                     f"hypothesis={hypothesis_id} index={attempt_index}"
@@ -1817,8 +1817,7 @@ def _declared_adapter_touchpoint_locators(
         intervention = claim.get("intervention")
         target = (
             str(intervention.get("target")).strip()
-            if isinstance(intervention, Mapping)
-            and _is_nonempty_string(intervention.get("target"))
+            if isinstance(intervention, Mapping) and _is_nonempty_string(intervention.get("target"))
             else None
         )
         touchpoints = claim.get("implementation_touchpoints")
@@ -1987,9 +1986,7 @@ def _validate_research_evidence_links(item: dict[str, Any], *, pid: str) -> list
         mechanism_symbols_raw = hypothesis.get("mechanism_symbols")
         mechanism_symbols = [
             symbol
-            for symbol in (
-                mechanism_symbols_raw if isinstance(mechanism_symbols_raw, list) else []
-            )
+            for symbol in (mechanism_symbols_raw if isinstance(mechanism_symbols_raw, list) else [])
             if isinstance(symbol, str) and symbol.strip()
         ]
         disposition = hypothesis.get("disposition")
@@ -2478,9 +2475,7 @@ def verified_hypothesis_falsification_attempts(
         baseline_receipt = receipt_experiments.get(str(baseline_id))
         challenge_receipt = receipt_experiments.get(str(challenge_id))
         intervention_receipt = interventions.get((hypothesis_id, str(attempt_id)))
-        proof_receipt = proof_by_pair.get(
-            (hypothesis_id, str(baseline_id), str(challenge_id))
-        )
+        proof_receipt = proof_by_pair.get((hypothesis_id, str(baseline_id), str(challenge_id)))
         baseline_artifacts_raw = (
             baseline.get("artifact_refs") if isinstance(baseline, dict) else None
         )
@@ -2506,6 +2501,7 @@ def verified_hypothesis_falsification_attempts(
             or attempt.get("hypothesis_id") != hypothesis_id
             or attempt.get("claim") != hypothesis.get("statement")
             or not isinstance(disproof_condition, dict)
+            or not isinstance(outcome, str)
             or outcome not in _VALID_FALSIFICATION_ATTEMPT_OUTCOMES
             or not isinstance(baseline, dict)
             or not isinstance(challenge, dict)
@@ -2517,14 +2513,17 @@ def verified_hypothesis_falsification_attempts(
             or challenge.get("outcome") != expected_experiment_outcomes.get(str(outcome))
             or (
                 not isinstance(proof_receipt, Mapping)
-                and challenge.get("scenario_kind")
-                not in {
-                    "original_replay",
-                    "faithful_replay",
-                    "control",
-                    "static_trace",
-                    "live_runtime",
-                }
+                and (
+                    not isinstance(challenge.get("scenario_kind"), str)
+                    or challenge.get("scenario_kind")
+                    not in {
+                        "original_replay",
+                        "faithful_replay",
+                        "control",
+                        "static_trace",
+                        "live_runtime",
+                    }
+                )
             )
             or (
                 not isinstance(proof_receipt, Mapping)
@@ -2601,9 +2600,7 @@ def verified_hypothesis_falsification_attempts(
                 "stderr_sha256": challenge_receipt.get("stderr_sha256"),
                 "mechanism_evidence_ids": sorted(mechanism_evidence_ids[str(challenge_id)]),
                 "mechanism_symbols": (
-                    list(expected_symbols)
-                    if isinstance(expected_symbols, list)
-                    else []
+                    list(expected_symbols) if isinstance(expected_symbols, list) else []
                 ),
                 "intervention_receipt_id": (
                     intervention_receipt.get("intervention_receipt_id")
@@ -3147,11 +3144,7 @@ def _derived_causal_root_bindings(
             binding.get("runner_attested") is True
             and binding.get("atom_field_binding_sha256")
             == _canonical_sha256(
-                {
-                    key: value
-                    for key, value in binding.items()
-                    if key != "atom_field_binding_sha256"
-                }
+                {key: value for key, value in binding.items() if key != "atom_field_binding_sha256"}
             )
             and isinstance(binding.get("observation_predicate"), Mapping)
             and not proof_predicate_contract_errors(binding.get("observation_predicate"))
@@ -3204,8 +3197,7 @@ def _derived_causal_root_bindings(
     authorization_attested = bool(
         _receipt_text(authorization.get("authorization_kind")) is not None
         and authorization.get("runner_attested") is True
-        and authorization.get("authorization_sha256")
-        == _canonical_sha256(authorization_projection)
+        and authorization.get("authorization_sha256") == _canonical_sha256(authorization_projection)
         and authorization.get("executed_argv_sha256") == _canonical_sha256(argv)
         and authorization.get("shell") is False
         and authorization.get("workspace_confined") is True
@@ -3608,19 +3600,23 @@ def _validate_falsification_interventions(
         mechanisms = hypothesis.get("mechanism_symbols")
         attempts_raw = hypothesis.get("falsification_attempts")
         for attempt in attempts_raw if isinstance(attempts_raw, list) else []:
-            if not isinstance(attempt, dict) or attempt.get("outcome") not in {
-                "survived",
-                "disproved",
-            }:
+            if (
+                not isinstance(attempt, dict)
+                or not isinstance(attempt.get("outcome"), str)
+                or attempt.get("outcome") not in {"survived", "disproved"}
+            ):
                 continue
             attempt_id = str(attempt.get("attempt_id") or "")
-            if _verified_proof_adapter_for_pair(
-                item,
-                receipt,
-                hypothesis_id=hypothesis_id,
-                baseline_experiment_id=str(attempt.get("baseline_experiment_id") or ""),
-                challenge_experiment_id=str(attempt.get("challenge_experiment_id") or ""),
-            ) is not None:
+            if (
+                _verified_proof_adapter_for_pair(
+                    item,
+                    receipt,
+                    hypothesis_id=hypothesis_id,
+                    baseline_experiment_id=str(attempt.get("baseline_experiment_id") or ""),
+                    challenge_experiment_id=str(attempt.get("challenge_experiment_id") or ""),
+                )
+                is not None
+            ):
                 continue
             if hypothesis_id and attempt_id:
                 expected[(hypothesis_id, attempt_id)] = {
@@ -4477,6 +4473,7 @@ def _validate_causal_control_verification(
         source = support_assertion.get("source")
         common_observable_valid = (
             observable.get("verification_method") == "runner_replay_complement_v1"
+            and isinstance(source, str)
             and source in {"exit_code", "stdout", "stderr", "combined"}
             and control_assertion.get("source") == source
             and support_replay.get("assertion_passed") is True
@@ -4690,11 +4687,7 @@ def _content_bound_consumer_identity_valid(value: Any) -> bool:
         and _valid_sha256(supplied)
         and supplied
         == _canonical_sha256(
-            {
-                key: item
-                for key, item in value.items()
-                if key != "consumer_identity_sha256"
-            }
+            {key: item for key, item in value.items() if key != "consumer_identity_sha256"}
         )
     )
 
@@ -4721,9 +4714,7 @@ def _expected_adapter_executed_consumer(
     for experiment_id in experiment_ids:
         replay = experiments.get(str(experiment_id))
         argv = replay.get("executed_argv") if isinstance(replay, Mapping) else None
-        authorization = (
-            replay.get("command_authorization") if isinstance(replay, Mapping) else None
-        )
+        authorization = replay.get("command_authorization") if isinstance(replay, Mapping) else None
         if (
             not isinstance(argv, list)
             or not argv
@@ -4735,12 +4726,9 @@ def _expected_adapter_executed_consumer(
             return None
         current_identity = command_authorization_identity(authorization)
         entrypoint_path = _receipt_text(authorization.get("entrypoint_path"))
-        if (
-            not isinstance(current_identity, dict)
-            or (
-                entrypoint_path is not None
-                and entrypoint_path.replace("\\", "/").startswith(".usertest_research/")
-            )
+        if not isinstance(current_identity, dict) or (
+            entrypoint_path is not None
+            and entrypoint_path.replace("\\", "/").startswith(".usertest_research/")
         ):
             return None
         if authorization_identity is None:
@@ -4803,9 +4791,7 @@ def _expected_adapter_executed_consumer(
             if _is_nonempty_string(touchpoint.get("touchpoint_id"))
         ),
         "causal_target": (
-            _receipt_text(intervention.get("target"))
-            if isinstance(intervention, Mapping)
-            else None
+            _receipt_text(intervention.get("target")) if isinstance(intervention, Mapping) else None
         ),
         "runner_attested": True,
     }
@@ -4851,9 +4837,7 @@ def _validate_typed_mechanism_evidence(
     proof_adapter_raw = receipt.get("proof_adapter_receipts")
     proof_adapter_receipts = {
         str(proof.get("proof_receipt_id")): proof
-        for proof in (
-            proof_adapter_raw if isinstance(proof_adapter_raw, list) else []
-        )
+        for proof in (proof_adapter_raw if isinstance(proof_adapter_raw, list) else [])
         if isinstance(proof, dict)
         and _is_nonempty_string(proof.get("proof_receipt_id"))
         and not validate_causal_proof_receipt(proof)
@@ -5005,19 +4989,20 @@ def _validate_typed_mechanism_evidence(
         )
         claimed_symbols = normalized_subset if aggregate_receipts else expected_symbols
         evidence_type = raw.get("evidence_type")
-        code_path_pairs = {
-            (path.get("symbol"), path.get("path"))
-            for path in code_paths if isinstance(path, dict)
-        } if isinstance(code_paths, list) else set()
-        adapter_targets_raw = raw.get("mechanism_targets")
-        adapter_targets = (
-            adapter_targets_raw if isinstance(adapter_targets_raw, list) else []
+        code_path_pairs = (
+            {
+                (path.get("symbol"), path.get("path"))
+                for path in code_paths
+                if isinstance(path, dict)
+            }
+            if isinstance(code_paths, list)
+            else set()
         )
+        adapter_targets_raw = raw.get("mechanism_targets")
+        adapter_targets = adapter_targets_raw if isinstance(adapter_targets_raw, list) else []
         adapter_proof = proof_adapter_receipts.get(str(raw.get("proof_receipt_id") or ""))
         adapter_evidence = (
-            adapter_proof.get("adapter_evidence")
-            if isinstance(adapter_proof, Mapping)
-            else None
+            adapter_proof.get("adapter_evidence") if isinstance(adapter_proof, Mapping) else None
         )
         adapter_proof_touchpoints = (
             adapter_evidence.get("implementation_touchpoints")
@@ -5070,8 +5055,7 @@ def _validate_typed_mechanism_evidence(
                     bool(adapter_touchpoints)
                     and raw.get("executed_consumer") == expected_executed_consumer
                     and isinstance(expected_executed_consumer, Mapping)
-                    and consumer_identity
-                    == expected_executed_consumer.get("consumer_identity")
+                    and consumer_identity == expected_executed_consumer.get("consumer_identity")
                 )
                 or (
                     not adapter_touchpoints
@@ -5403,18 +5387,12 @@ def _validate_positive_outcome_contracts(
             proof = proof_receipts.get(proof_id or "")
             intervention = proof.get("intervention") if isinstance(proof, dict) else None
             observations = proof.get("observations") if isinstance(proof, dict) else None
-            baseline = (
-                observations.get("baseline") if isinstance(observations, dict) else None
-            )
-            challenge = (
-                observations.get("challenge") if isinstance(observations, dict) else None
-            )
+            baseline = observations.get("baseline") if isinstance(observations, dict) else None
+            challenge = observations.get("challenge") if isinstance(observations, dict) else None
             positive = proof.get("positive_outcome") if isinstance(proof, dict) else None
             source_root = proof.get("source_root") if isinstance(proof, dict) else None
             positive_basis = (
-                source_root.get("positive_basis")
-                if isinstance(source_root, dict)
-                else None
+                source_root.get("positive_basis") if isinstance(source_root, dict) else None
             )
             adapter_contract = contract.get("adapter_contract")
             expected_postcondition = {
@@ -5432,9 +5410,7 @@ def _validate_positive_outcome_contracts(
                     positive.get("observation_source") if isinstance(positive, dict) else None
                 ),
                 "positive_basis_sha256": (
-                    positive_basis.get("basis_sha256")
-                    if isinstance(positive_basis, dict)
-                    else None
+                    positive_basis.get("basis_sha256") if isinstance(positive_basis, dict) else None
                 ),
             }
             valid = valid and (
@@ -5869,8 +5845,7 @@ def _validate_outcome_oracles(
                 execution.get("command_authorization") if isinstance(execution, dict) else None
             )
             valid = valid and (
-                oracle.get("proof_scope")
-                in {"behavioral", "adapter_causal_behavior"}
+                oracle.get("proof_scope") in {"behavioral", "adapter_causal_behavior"}
                 and isinstance(execution, dict)
                 and isinstance(argv, list)
                 and bool(argv)
@@ -5901,14 +5876,10 @@ def _validate_outcome_oracles(
                     and not validate_causal_proof_receipt(proof)
                 }
                 setup_receipt = (
-                    execution.get("replay_setup_receipt")
-                    if isinstance(execution, dict)
-                    else None
+                    execution.get("replay_setup_receipt") if isinstance(execution, dict) else None
                 )
                 setup_reference = (
-                    execution.get("replay_setup_reference")
-                    if isinstance(execution, dict)
-                    else None
+                    execution.get("replay_setup_reference") if isinstance(execution, dict) else None
                 )
                 valid = valid and (
                     oracle.get("proof_scope") == "adapter_causal_behavior"
@@ -5918,9 +5889,8 @@ def _validate_outcome_oracles(
                     and all(proof_id in proof_index for proof_id in proof_ids)
                     and all(
                         isinstance(proof_index[proof_id].get("intervention"), dict)
-                        and proof_index[proof_id]["intervention"].get(
-                            "baseline_experiment_id"
-                        ) == experiment_id
+                        and proof_index[proof_id]["intervention"].get("baseline_experiment_id")
+                        == experiment_id
                         for proof_id in proof_ids
                     )
                     and isinstance(setup_receipt, dict)
@@ -6403,11 +6373,7 @@ def _validate_evidence_verification(item: dict[str, Any], *, pid: str) -> list[s
                 and _valid_sha256(transition.get("transition_sha256"))
                 and transition.get("transition_sha256")
                 == _canonical_sha256(
-                    {
-                        key: value
-                        for key, value in transition.items()
-                        if key != "transition_sha256"
-                    }
+                    {key: value for key, value in transition.items() if key != "transition_sha256"}
                 )
                 for transition in transitions
             )
@@ -6525,9 +6491,12 @@ def _validate_evidence_verification(item: dict[str, Any], *, pid: str) -> list[s
         receipt_file_paths = {
             file_receipt.get("path")
             for file_receipt in receipt_files
-            if isinstance(file_receipt, dict)
+            if isinstance(file_receipt, dict) and _is_nonempty_string(file_receipt.get("path"))
         }
-        if receipt_file_paths != set(declared_files):
+        declared_file_paths = {
+            path for path in declared_files if isinstance(path, str) and path.strip()
+        }
+        if receipt_file_paths != declared_file_paths:
             errors.append(f"research_evidence_verification_file_path_mismatch: {pid}")
         declared_symbols_raw = item.get("inspected_symbols")
         declared_symbols = {
@@ -6629,13 +6598,45 @@ def _validate_evidence_verification(item: dict[str, Any], *, pid: str) -> list[s
                     and control_link.get("mechanism_symbols") == mechanism_symbols
                     and control_link.get("shared_atom_ids")
                     == sorted(
-                        set(control.get("addresses_atom_ids", []))
-                        & set(support.get("addresses_atom_ids", []))
+                        {
+                            atom_id
+                            for atom_id in (
+                                control.get("addresses_atom_ids", [])
+                                if isinstance(control.get("addresses_atom_ids"), list)
+                                else []
+                            )
+                            if isinstance(atom_id, str)
+                        }
+                        & {
+                            atom_id
+                            for atom_id in (
+                                support.get("addresses_atom_ids", [])
+                                if isinstance(support.get("addresses_atom_ids"), list)
+                                else []
+                            )
+                            if isinstance(atom_id, str)
+                        }
                     )
                     and control_link.get("shared_artifact_refs")
                     == sorted(
-                        set(control.get("artifact_refs", []))
-                        & set(support.get("artifact_refs", []))
+                        {
+                            artifact_id
+                            for artifact_id in (
+                                control.get("artifact_refs", [])
+                                if isinstance(control.get("artifact_refs"), list)
+                                else []
+                            )
+                            if isinstance(artifact_id, str)
+                        }
+                        & {
+                            artifact_id
+                            for artifact_id in (
+                                support.get("artifact_refs", [])
+                                if isinstance(support.get("artifact_refs"), list)
+                                else []
+                            )
+                            if isinstance(artifact_id, str)
+                        }
                     )
                     and control_link.get("controlled_variable")
                     == relationship.get("controlled_variable")
@@ -6656,16 +6657,26 @@ def _validate_evidence_verification(item: dict[str, Any], *, pid: str) -> list[s
                 for experiment_id in supporting_ids
                 if isinstance(experiment_id, str)
                 and declared_experiments.get(experiment_id, {}).get("outcome") == "supports"
+                and isinstance(
+                    declared_experiments.get(experiment_id, {}).get("scenario_kind"),
+                    str,
+                )
                 and declared_experiments.get(experiment_id, {}).get("scenario_kind")
                 in {"original_replay", "faithful_replay", "static_trace", "live_runtime"}
-                for artifact_id in declared_experiments.get(experiment_id, {}).get(
-                    "artifact_refs", []
+                for artifact_id in (
+                    declared_experiments.get(experiment_id, {}).get("artifact_refs", [])
+                    if isinstance(
+                        declared_experiments.get(experiment_id, {}).get("artifact_refs"),
+                        list,
+                    )
+                    else []
                 )
-                if artifact_id in artifact_paths
+                if isinstance(artifact_id, str) and artifact_id in artifact_paths
             }
             if supporting_artifact_paths and any(
                 receipt_symbol_paths.get(symbol) not in supporting_artifact_paths
                 for symbol in (mechanism_symbols if isinstance(mechanism_symbols, list) else [])
+                if isinstance(symbol, str)
             ):
                 errors.append(
                     f"research_evidence_verification_mechanism_source_unbound: "
@@ -6699,10 +6710,13 @@ def _validate_evidence_verification(item: dict[str, Any], *, pid: str) -> list[s
                 (hypothesis_id, symbol) in expected_causal_pairs
                 and experiment_id in supporting
                 and experiment.get("outcome") == "supports"
+                and isinstance(experiment.get("scenario_kind"), str)
                 and experiment.get("scenario_kind")
                 in {"original_replay", "faithful_replay", "live_runtime"}
                 and link.get("path") == receipt_symbol_paths.get(symbol)
+                and isinstance(link.get("stream"), str)
                 and link.get("stream") in {"stdout", "stderr"}
+                and isinstance(link.get("trace_kind"), str)
                 and link.get("trace_kind")
                 in {
                     "python_traceback",
@@ -6787,7 +6801,9 @@ def _validate_legacy_research_dossier(item: dict[str, Any]) -> list[str]:
             "implementation_performed must be false; stage 3 is research-only"
         )
     repro = item.get("reproduction_status")
-    if repro is not None and repro not in _VALID_REPRODUCTION_STATUSES:
+    if repro is not None and (
+        not isinstance(repro, str) or repro not in _VALID_REPRODUCTION_STATUSES
+    ):
         warnings.append(f"legacy_research_dossier_invalid_reproduction_status: {pid}: {repro!r}")
     return warnings
 
@@ -6952,10 +6968,10 @@ def _validate_research_dossier(
     if not _is_nonempty_string(method):
         errors.append(f"research_dossier_invalid_research_method: {pid}: {method!r}")
     repro = item.get("reproduction_status")
-    if repro not in _VALID_REPRODUCTION_STATUSES:
+    if not isinstance(repro, str) or repro not in _VALID_REPRODUCTION_STATUSES:
         errors.append(f"research_dossier_invalid_reproduction_status: {pid}: {repro!r}")
     status = item.get("research_status")
-    if status not in _VALID_RESEARCH_STATUSES:
+    if not isinstance(status, str) or status not in _VALID_RESEARCH_STATUSES:
         errors.append(f"research_dossier_invalid_research_status: {pid}: {status!r}")
 
     writes_used = item.get("writes_used")
@@ -6973,11 +6989,11 @@ def _validate_research_dossier(
     )
 
     broader = item.get("broader_class_assessment")
-    if broader not in _VALID_BROADER_CLASS:
+    if not isinstance(broader, str) or broader not in _VALID_BROADER_CLASS:
         errors.append(f"research_dossier_invalid_broader_class_assessment: {pid}: {broader!r}")
     if include_runner_contract:
         diff_cls = item.get("diff_classification")
-        if diff_cls not in _VALID_DIFF_CLASSIFICATIONS:
+        if not isinstance(diff_cls, str) or diff_cls not in _VALID_DIFF_CLASSIFICATIONS:
             errors.append(f"research_dossier_invalid_diff_classification: {pid}: {diff_cls!r}")
 
     errors.extend(_validate_artifact_refs(item.get("artifact_refs"), pid=pid))
@@ -7016,7 +7032,7 @@ def _validate_research_dossier(
     if status == "evidence_sufficient":
         if method == "reproduction" and repro != "reproduced":
             errors.append(f"research_dossier_sufficient_without_reproduction: {pid}: {repro!r}")
-        if repro in {"partial", "blocked"}:
+        if isinstance(repro, str) and repro in {"partial", "blocked"}:
             errors.append(
                 f"research_dossier_sufficient_with_incomplete_reproduction: {pid}: {repro!r}"
             )
@@ -7115,11 +7131,7 @@ def _verified_connected_adapter_touchpoint_locators(
             continue
         evidence_id = evidence.get("mechanism_evidence_id")
         expected_evidence_id = "mechanism_evidence:" + _canonical_sha256(
-            {
-                key: value
-                for key, value in evidence.items()
-                if key != "mechanism_evidence_id"
-            }
+            {key: value for key, value in evidence.items() if key != "mechanism_evidence_id"}
         )
         proof = proof_receipts.get(str(evidence.get("proof_receipt_id") or ""))
         if (
@@ -7134,8 +7146,7 @@ def _verified_connected_adapter_touchpoint_locators(
         intervention = proof.get("intervention")
         target = (
             str(intervention.get("target"))
-            if isinstance(intervention, Mapping)
-            and _is_nonempty_string(intervention.get("target"))
+            if isinstance(intervention, Mapping) and _is_nonempty_string(intervention.get("target"))
             else None
         )
         graph = proof.get("mechanism_graph")
@@ -7221,8 +7232,7 @@ def _verified_connected_adapter_touchpoint_locators(
             }
             expected_hash = _canonical_sha256(projection)
             if (
-                touchpoint.get("touchpoint_id")
-                != f"implementation_touchpoint:{expected_hash}"
+                touchpoint.get("touchpoint_id") != f"implementation_touchpoint:{expected_hash}"
                 or touchpoint.get("evidence_sha256") != expected_hash
                 or touchpoint.get("runner_attested") is not True
                 or touchpoint.get("causal_locator") != target
@@ -7263,7 +7273,7 @@ def assess_research_readiness(item: dict[str, Any] | None) -> tuple[bool, list[s
         reasons.append("research_blocking_reasons_present")
 
     repro = item.get("reproduction_status")
-    if repro in {"partial", "blocked"}:
+    if isinstance(repro, str) and repro in {"partial", "blocked"}:
         reasons.append(f"reproduction_{repro}")
 
     repo_revision = str(item.get("repo_revision") or "").strip().lower()
@@ -7371,6 +7381,7 @@ def assess_research_readiness(item: dict[str, Any] | None) -> tuple[bool, list[s
             str(hypothesis.get("hypothesis_id"))
             for hypothesis in hypotheses[1:]
             if isinstance(hypothesis, dict)
+            and isinstance(hypothesis.get("disposition"), str)
             and hypothesis.get("disposition") in {"plausible", "unresolved"}
             and _is_nonempty_string(hypothesis.get("hypothesis_id"))
         }
@@ -7494,7 +7505,11 @@ def _validate_solution_option(item: dict[str, Any], *, known_family_ids: set[str
             )
 
     fid = item.get("family_id")
-    if known_family_ids and fid is not None and fid not in known_family_ids:
+    if (
+        known_family_ids
+        and fid is not None
+        and (not isinstance(fid, str) or fid not in known_family_ids)
+    ):
         warnings.append(
             f"solution_option_unknown_family_id: {oid}: {fid!r} (known: {sorted(known_family_ids)})"
         )

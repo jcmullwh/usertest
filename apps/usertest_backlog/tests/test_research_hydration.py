@@ -17,7 +17,12 @@ from backlog_core import (
 from backlog_miner.research_evidence import BlockedReplayExecutor
 from runner_core import RunnerConfig
 
-from usertest_backlog.workflows import prioritization, reproduction_research, research_hydration
+from usertest_backlog.workflows import (
+    prioritization,
+    reproduction_research,
+    research_hydration,
+    staged,
+)
 
 
 def _atom(*, atom_id: str = "atom:one", detail: str = "original evidence") -> dict:
@@ -80,6 +85,41 @@ def _dossier(
         "evidence_boundaries": ["The live deployment was not inspected."],
         "evidence_assignment": _assignment(source_atom),
     }
+
+
+def _completed_core_stage_document(
+    *,
+    items: list[dict],
+    selected_problems: list[dict],
+    agent: str = "codex",
+    resolved_repo_ref: str | None = "abc123",
+    artifacts: dict | None = None,
+) -> dict:
+    compatibility = reproduction_research.stage3_research_compatibility_contract(agent=agent)
+    progress = reproduction_research._completed_prefix_checkpoint(
+        selected_problems=selected_problems,
+        completed_dossiers=items,
+        resolved_repo_ref=resolved_repo_ref,
+        compatibility_contract=compatibility,
+    )
+    completion = reproduction_research.completed_stage3_checkpoint(
+        dossiers=items,
+        fresh_research_dossier_count=len(items),
+        retained_research_reused_count=0,
+        compatibility_contract=compatibility,
+        progress_checkpoint=progress,
+    )
+    return build_stage_document(
+        "repro_research",
+        items,
+        input_meta={
+            "stage_status": "completed",
+            "research_compatibility": compatibility,
+            "progress_checkpoint": progress,
+            "completed_stage_checkpoint": completion,
+        },
+        artifacts=artifacts or {},
+    )
 
 
 def _retained_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[dict, Path]:
@@ -185,9 +225,7 @@ def test_new_source_evidence_invalidates_an_otherwise_ready_retained_proof(
     current_hashes[new_atom["atom_id"]] = source_evidence_atom_sha256(new_atom)
     record["source_evidence_atom_ids"].append(new_atom["atom_id"])
     record["source_evidence_atom_sha256_by_id"] = current_hashes
-    record["source_evidence_snapshot_sha256"] = source_evidence_snapshot_sha256(
-        current_hashes
-    )
+    record["source_evidence_snapshot_sha256"] = source_evidence_snapshot_sha256(current_hashes)
     record["case_revision"] += 1
 
     dossier, errors = research_hydration.hydrate_retained_research_proof(record)
@@ -206,9 +244,7 @@ def test_same_atom_id_with_changed_source_bytes_routes_to_research_update(
     changed_atom = _atom(detail="corrected evidence bytes")
     changed_hashes = {"atom:one": source_evidence_atom_sha256(changed_atom)}
     record["source_evidence_atom_sha256_by_id"] = changed_hashes
-    record["source_evidence_snapshot_sha256"] = source_evidence_snapshot_sha256(
-        changed_hashes
-    )
+    record["source_evidence_snapshot_sha256"] = source_evidence_snapshot_sha256(changed_hashes)
     record["case_revision"] += 1
 
     dossier, errors = research_hydration.hydrate_retained_research_proof(record)
@@ -316,10 +352,9 @@ def test_stage3_merges_fresh_and_reused_dossiers(
 
     def fresh_dispatch(**kwargs):
         calls.append(list(kwargs["selected_problems"]))
-        return build_stage_document(
-            "repro_research",
-            [fresh],
-            input_meta={},
+        return _completed_core_stage_document(
+            items=[fresh],
+            selected_problems=list(kwargs["selected_problems"]),
             artifacts={"requests_json": str(tmp_path / "requests.json")},
         )
 
@@ -369,6 +404,121 @@ def test_stage3_merges_fresh_and_reused_dossiers(
     assert stage_doc["input_meta"]["useful_research_output_count"] == 2
 
 
+def test_stage3_wrapper_atomically_persists_progress_and_resumes_without_suffix_rewrite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    fresh = _dossier(problem_id="problem:fresh", case_id="case:fresh")
+    reused = _dossier(problem_id="problem:reused", case_id="case:reused")
+    out_json = tmp_path / "compiled" / "research.json"
+    upstream = {"contract_kind": "stage3_resume_upstream", "content_sha256": "a" * 64}
+
+    class SimulatedCrash(RuntimeError):
+        pass
+
+    def crashing_dispatch(**kwargs):
+        progress = build_stage_document(
+            "repro_research",
+            [fresh],
+            input_meta={
+                "stage_status": "checkpointed_progress",
+                "progress_checkpoint": {"status": "checkpointed_progress"},
+            },
+            artifacts={},
+        )
+        kwargs["progress_callback"](progress)
+        raise SimulatedCrash
+
+    monkeypatch.setattr(
+        reproduction_research,
+        "run_repro_research_stage",
+        crashing_dispatch,
+    )
+    common = {
+        "repo_root": tmp_path,
+        "repo_input": str(tmp_path),
+        "repo_ref": "abc123",
+        "target_slug": "target",
+        "selected_priority_decisions": [
+            {"problem_id": "problem:fresh", "selected_for_research": True}
+        ],
+        "problem_records": [
+            {
+                "problem_id": "problem:fresh",
+                "case_id": "case:fresh",
+                "evidence_atom_ids": ["atom:fresh"],
+                "source_evidence_atom_ids": ["atom:fresh"],
+            }
+        ],
+        "atoms": [{"atom_id": "atom:fresh"}],
+        "artifacts_dir": tmp_path / "artifacts",
+        "out_json": out_json,
+        "out_md": tmp_path / "compiled" / "research.md",
+        "agent": "codex",
+        "model": None,
+        "cfg": RunnerConfig(
+            repo_root=tmp_path,
+            runs_dir=tmp_path / "runs",
+            agents={},
+            policies={},
+        ),
+        "dry_run": False,
+        "replay_timeout_seconds": 300.0,
+        "replay_executor": BlockedReplayExecutor(reason="test"),
+        "replay_executor_metadata": {"executor": "blocked", "reason": "test"},
+        "reused_research_dossiers": [reused],
+        "resume_upstream_contract": upstream,
+    }
+    with pytest.raises(SimulatedCrash):
+        reproduction_research._run_repro_research_stage(**common)
+
+    persisted = json.loads(out_json.read_text(encoding="utf-8"))
+    assert persisted["items"] == [fresh]
+    assert persisted["input_meta"]["resume_upstream"] == upstream
+    temporary_files = list(out_json.parent.glob(f".{out_json.name}.*.tmp"))
+    assert temporary_files == []
+
+    observed_resume: list[dict] = []
+
+    def resumed_dispatch(**kwargs):
+        observed_resume.append(dict(kwargs["resume_stage_document"]))
+        return _completed_core_stage_document(
+            items=[fresh],
+            selected_problems=list(kwargs["selected_problems"]),
+        )
+
+    monkeypatch.setattr(
+        reproduction_research,
+        "run_repro_research_stage",
+        resumed_dispatch,
+    )
+    completed = reproduction_research._run_repro_research_stage(
+        **common,
+        resume_stage_document=persisted,
+    )
+
+    assert observed_resume[0]["items"] == [fresh]
+    assert completed["items"] == [fresh, reused]
+    assert completed["input_meta"]["resume_upstream"] == upstream
+    assert (
+        staged._stage3_completed_stage(
+            completed,
+            expected_compatibility_contract=(
+                reproduction_research.stage3_research_compatibility_contract(agent="codex")
+            ),
+        )
+        is not None
+    )
+    assert (
+        staged._stage3_completed_stage(
+            completed,
+            expected_compatibility_contract=(
+                reproduction_research.stage3_research_compatibility_contract(agent="claude")
+            ),
+        )
+        is None
+    )
+
+
 def test_mixed_provider_wait_resume_strips_and_reappends_exact_reused_suffix(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -390,11 +540,9 @@ def test_mixed_provider_wait_resume_strips_and_reappends_exact_reused_suffix(
 
     def resumed_fresh_dispatch(**kwargs):
         observed_resume_docs.append(dict(kwargs["resume_stage_document"]))
-        return build_stage_document(
-            "repro_research",
-            [fresh],
-            input_meta={"stage_status": "completed"},
-            artifacts={},
+        return _completed_core_stage_document(
+            items=[fresh],
+            selected_problems=list(kwargs["selected_problems"]),
         )
 
     monkeypatch.setattr(

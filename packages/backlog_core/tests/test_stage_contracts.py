@@ -1523,9 +1523,7 @@ def test_causal_roots_accept_content_bound_unlisted_source_identity_contracts() 
         "observation_predicate": predicate,
         "runner_attested": True,
     }
-    predicate_binding["atom_field_binding_sha256"] = _fixture_json_sha256(
-        predicate_binding
-    )
+    predicate_binding["atom_field_binding_sha256"] = _fixture_json_sha256(predicate_binding)
     argv = ["future-runner", "probe"]
     authorization = {
         "authorization_kind": "future_repository_source_identity_v9",
@@ -1564,18 +1562,16 @@ def test_causal_roots_accept_content_bound_unlisted_source_identity_contracts() 
         "kind": "equals",
         "expected": "different",
     }
-    assert {
-        root["kind"]
-        for root in contracts._derived_causal_root_bindings(tampered_binding)
-    } == {"immutable_source_command"}
+    assert {root["kind"] for root in contracts._derived_causal_root_bindings(tampered_binding)} == {
+        "immutable_source_command"
+    }
 
     tampered_authorization = json.loads(json.dumps(support))
     tampered_authorization["command_authorization"]["authorization_kind"] = (
         "changed-after-attestation"
     )
     assert {
-        root["kind"]
-        for root in contracts._derived_causal_root_bindings(tampered_authorization)
+        root["kind"] for root in contracts._derived_causal_root_bindings(tampered_authorization)
     } == {"origin_symptom_observation"}
 
 
@@ -2368,9 +2364,7 @@ def test_output_contract_reports_structured_support_ref_instead_of_crashing() ->
             "summary": "Model-authored prose must not replace the declared evidence ID.",
         }
     ]
-    dossier["root_cause_hypotheses"][0]["mechanism_symbols"] = [
-        {"symbol": "parser.parse_record"}
-    ]
+    dossier["root_cause_hypotheses"][0]["mechanism_symbols"] = [{"symbol": "parser.parse_record"}]
 
     errors = contracts.research_dossier_output_contract_errors(dossier)
 
@@ -2384,6 +2378,167 @@ def test_output_contract_reports_structured_support_ref_instead_of_crashing() ->
         and "type=dict" in error
         for error in errors
     )
+
+
+def test_output_contract_reports_structured_experiment_fields_instead_of_crashing() -> None:
+    dossier = _valid_dossier()
+    experiment = dossier["experiments"][0]
+    experiment.update(
+        {
+            "command": {"argv": ["python", "research.py"]},
+            "result": {"summary": "The historical repair used a structured result."},
+            "outcome": {
+                "kind": "baseline_issue_observed",
+                "summary": "The historical repair used a structured outcome.",
+            },
+            "observable_assertion": {
+                "source": {"kind": "artifact_json"},
+                "operator": ["equals"],
+                "expected": False,
+            },
+        }
+    )
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert any("invalid_experiment_command" in error for error in errors)
+    assert any("invalid_experiment_result" in error for error in errors)
+    assert any("invalid_experiment_outcome" in error for error in errors)
+    assert any("invalid_assertion_source" in error for error in errors)
+    assert any("invalid_assertion_operator" in error for error in errors)
+
+
+@pytest.mark.parametrize(
+    "malformation",
+    [
+        "scenario_kind",
+        "mechanism_link_kind",
+        "positive_predicate_type",
+        "positive_semantic_relation",
+        "positive_basis_contract_type",
+    ],
+)
+def test_output_contract_treats_unhashable_enum_shapes_as_feedback(
+    malformation: str,
+) -> None:
+    dossier = _valid_dossier()
+    experiment = dossier["experiments"][0]
+    if malformation == "scenario_kind":
+        experiment["scenario_kind"] = {"kind": "original_replay"}
+    elif malformation == "mechanism_link_kind":
+        experiment["mechanism_link"] = {
+            "kind": {"value": "entrypoint_dataflow"},
+            "entrypoint": "parser.parse_record",
+            "code_path": [
+                {
+                    "path": "src/parser.py",
+                    "symbol": "parser.parse_record",
+                    "observation": "The parser receives the retained input.",
+                }
+            ],
+        }
+    elif malformation == "positive_predicate_type":
+        experiment["positive_outcome_contract"] = {
+            "contract_kind": "origin_atom_exact_value",
+            "atom_id": "atom:test",
+            "field_path": "$.text",
+            "postcondition": {"type": {"kind": "command_stdout_equals"}},
+        }
+    else:
+        experiment["positive_outcome_contract"] = {
+            "contract_kind": "retained_harness_semantic_assertion",
+            "expected_value": "validation succeeds",
+            "semantic_rationale": (
+                "The retained repository contract defines the expected behavior."
+            ),
+            "semantic_relation": (
+                {"kind": "repository_contract_requirement"}
+                if malformation == "positive_semantic_relation"
+                else "repository_contract_requirement"
+            ),
+            "semantic_basis": {
+                "kind": "repository_contract_quote",
+                "exact_quote": "validation succeeds",
+                "contract_type": (
+                    {"kind": "schema"}
+                    if malformation == "positive_basis_contract_type"
+                    else "schema"
+                ),
+                "path": "schemas/report.json",
+            },
+        }
+
+    errors = contracts.research_dossier_output_contract_errors(dossier)
+
+    assert errors
+
+
+@pytest.mark.parametrize("invalid_value", [{"unexpected": "object"}, ["unexpected-list"]])
+@pytest.mark.parametrize(
+    ("field_path", "expected_error"),
+    [
+        (("experiments", 0, "scenario_kind"), "invalid_experiment_scenario_kind"),
+        (
+            ("root_cause_hypotheses", 0, "disposition"),
+            "invalid_hypothesis_disposition",
+        ),
+        (
+            (
+                "root_cause_hypotheses",
+                0,
+                "falsification_attempts",
+                0,
+                "disproof_condition",
+                "source",
+            ),
+            "falsification_attempt_disproof_source_invalid",
+        ),
+        (
+            (
+                "root_cause_hypotheses",
+                0,
+                "falsification_attempts",
+                0,
+                "disproof_condition",
+                "operator",
+            ),
+            "falsification_attempt_disproof_operator_invalid",
+        ),
+        (
+            ("root_cause_hypotheses", 0, "falsification_attempts", 0, "outcome"),
+            "falsification_attempt_outcome_invalid",
+        ),
+        (("reproduction_status",), "invalid_reproduction_status"),
+        (("research_status",), "invalid_research_status"),
+        (("broader_class_assessment",), "invalid_broader_class_assessment"),
+        (("diff_classification",), "invalid_diff_classification"),
+    ],
+)
+def test_current_research_parser_reports_unhashable_enum_shapes_as_validation_errors(
+    field_path: tuple[str | int, ...],
+    expected_error: str,
+    invalid_value: dict[str, str] | list[str],
+) -> None:
+    dossier = _valid_dossier()
+    target: dict | list = dossier
+    for component in field_path[:-1]:
+        if isinstance(target, dict):
+            assert isinstance(component, str)
+            target = target[component]
+        else:
+            assert isinstance(component, int)
+            target = target[component]
+        assert isinstance(target, (dict, list))
+    final_component = field_path[-1]
+    if isinstance(target, dict):
+        assert isinstance(final_component, str)
+        target[final_component] = invalid_value
+    else:
+        assert isinstance(final_component, int)
+        target[final_component] = invalid_value
+
+    with pytest.raises(ValueError, match=expected_error):
+        parse_research_dossier_list(json.dumps([dossier]))
 
 
 def _historical_rich_partial_output_dossier() -> dict:
@@ -2761,9 +2916,7 @@ def test_research_attempt_history_preserves_post_output_verifier_corrections() -
         "repair_progress": None,
         "attempt_artifacts": artifacts(2),
     }
-    verifier_feedback["attempt_sha256"] = contracts.research_attempt_sha256(
-        verifier_feedback
-    )
+    verifier_feedback["attempt_sha256"] = contracts.research_attempt_sha256(verifier_feedback)
 
     corrected_dossier = {"phase": "verifier-corrected"}
     verifier_repair: dict[str, object] = {
@@ -2869,9 +3022,7 @@ def test_current_research_attempt_history_allows_multiple_progress_gated_fresh_c
         attempt: dict[str, object] = {
             "attempt_number": index,
             "attempt_kind": kind,
-            "outcome": (
-                "repair_contract_invalid" if is_repair else "output_contract_invalid"
-            ),
+            "outcome": ("repair_contract_invalid" if is_repair else "output_contract_invalid"),
             "run_dir": f"C:/retained/cycle-{index}",
             "report_path": f"C:/retained/cycle-{index}/report.json",
             "validation_errors": errors_after,
@@ -2881,9 +3032,7 @@ def test_current_research_attempt_history_allows_multiple_progress_gated_fresh_c
             "validation_errors_after": errors_after,
             "attempted_dossier": dossier_projection,
             "attempted_dossier_sha256": _fixture_json_sha256(dossier_projection),
-            "source_attempt_sha256": (
-                previous["attempt_sha256"] if previous is not None else None
-            ),
+            "source_attempt_sha256": (previous["attempt_sha256"] if previous is not None else None),
             "authorized_paths": (["extensions.backlog_repro_research"] if is_repair else []),
             "baseline_dossier_sha256": (
                 previous["attempted_dossier_sha256"] if previous is not None else None

@@ -36,6 +36,105 @@ def _write_yaml(path: Path, obj: object) -> None:
     path.write_text(yaml.safe_dump(obj, sort_keys=False), encoding="utf-8")
 
 
+def test_stage3_progress_checkpoint_integrity_detects_dossier_tampering() -> None:
+    item = {"case_id": "case:one", "problem_id": "problem:one", "status": "blocked"}
+    compatibility = staged_module.stage3_research_compatibility_contract(agent="codex")
+    checkpoint: dict[str, Any] = {
+        "schema_version": 1,
+        "status": "checkpointed_progress",
+        "scope": "repro_research_stage",
+        "resolved_repo_ref": "a" * 40,
+        "research_compatibility": compatibility,
+        "selected": [
+            {
+                "case_id": "case:one",
+                "problem_id": "problem:one",
+                "assignment_sha256": "b" * 64,
+            },
+            {
+                "case_id": "case:two",
+                "problem_id": "problem:two",
+                "assignment_sha256": "c" * 64,
+            },
+        ],
+        "completed_prefix": [
+            {
+                "case_id": "case:one",
+                "problem_id": "problem:one",
+                "dossier_sha256": staged_module.stage3_research_dossier_resume_sha256(item),
+            }
+        ],
+    }
+    checkpoint["checkpoint_sha256"] = staged_module._qualification_canonical_sha256(checkpoint)
+    document = {
+        "stage": "repro_research",
+        "items": [item],
+        "item_count": 1,
+        "input_meta": {
+            "stage_status": "checkpointed_progress",
+            "research_compatibility": compatibility,
+            "progress_checkpoint": checkpoint,
+        },
+    }
+
+    assert (
+        staged_module._stage3_completed_progress(
+            document,
+            expected_compatibility_contract=compatibility,
+        )
+        == checkpoint
+    )
+
+    tampered = json.loads(json.dumps(document))
+    tampered["items"][0]["status"] = "evidence_sufficient"
+    assert (
+        staged_module._stage3_completed_progress(
+            tampered,
+            expected_compatibility_contract=compatibility,
+        )
+        is None
+    )
+
+
+def test_stage3_completed_resume_rejects_changed_upstream_artifact(tmp_path: Path) -> None:
+    paths = {
+        name: tmp_path / f"{name}.json"
+        for name in (
+            "atoms",
+            "problem_records",
+            "problem_mining_evidence",
+            "prioritized_problems",
+            "case_registry",
+        )
+    }
+    for path in paths.values():
+        path.write_text("{}\n", encoding="utf-8")
+    contract = staged_module._stage3_resume_upstream_contract(
+        paths=paths,
+        source_atoms=[],
+        target_slug="target",
+        repo_input=str(tmp_path),
+        research_ref="abc123",
+        selected_problem_ids=[],
+    )
+    document = {"input_meta": {"resume_upstream": contract}}
+
+    paths["problem_mining_evidence"].write_text('{"changed": true}\n', encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="stage3_external_wait_resume_upstream_changed:problem_mining_evidence",
+    ):
+        staged_module._load_stage3_resume_upstream(
+            stage3_document=document,
+            expected_paths=paths,
+            target_slug="target",
+            repo_input=str(tmp_path),
+            research_ref="abc123",
+            current_atoms=[],
+        )
+
+
 def _minimal_shadow_artifact_paths(
     *,
     repo_root: Path,
@@ -545,9 +644,7 @@ def test_phase_two_scores_exact_materialized_artifacts_and_records_without_model
             "case_registry_json": str(stage_paths["case_registry"]),
             "six_stage_pipeline": {
                 "problem_records_json": str(stage_paths["problem_records"]),
-                "problem_mining_evidence_json": str(
-                    stage_paths["problem_mining_evidence"]
-                ),
+                "problem_mining_evidence_json": str(stage_paths["problem_mining_evidence"]),
                 "prioritized_problems_json": str(stage_paths["prioritized_problems"]),
                 "research_json": str(stage_paths["research"]),
                 "solution_options_json": str(stage_paths["solution_options"]),
@@ -673,59 +770,61 @@ def test_phase_two_scores_exact_materialized_artifacts_and_records_without_model
     scored_backlog_bytes = out_json.read_bytes()
     scored_backlog = json.loads(scored_backlog_bytes)
     snapshot_path = Path(
-        scored_backlog["artifacts"]["shadow_qualification"][
-            "phase1_backlog_snapshot_path"
-        ]
+        scored_backlog["artifacts"]["shadow_qualification"]["phase1_backlog_snapshot_path"]
     )
     assert snapshot_path.read_bytes() == pending_backlog_bytes
-    assert staged_module._score_materialized_shadow_run(
-        repo_root=repo_root,
-        runs_dir=tmp_path / "runs",
-        out_json=out_json,
-        out_md=out_md,
-        repo_input=None,
-        shadow_gate_config={
-            "required_consecutive_shadow_cycles": 2,
-            "require_exact_export_projection": True,
-        },
-        qualification_manifest_path=manifest_path,
-        qualification_output_adjudication_path=adjudication_path,
-        no_actionable_evidence_receipt_path=None,
-        agent="codex",
-        model=None,
-        cfg=SimpleNamespace(runs_dir=tmp_path / "runs"),
-        research_config={},
-        research_ref=None,
-        replay_timeout_seconds=10800.0,
-    ) == 0
+    assert (
+        staged_module._score_materialized_shadow_run(
+            repo_root=repo_root,
+            runs_dir=tmp_path / "runs",
+            out_json=out_json,
+            out_md=out_md,
+            repo_input=None,
+            shadow_gate_config={
+                "required_consecutive_shadow_cycles": 2,
+                "require_exact_export_projection": True,
+            },
+            qualification_manifest_path=manifest_path,
+            qualification_output_adjudication_path=adjudication_path,
+            no_actionable_evidence_receipt_path=None,
+            agent="codex",
+            model=None,
+            cfg=SimpleNamespace(runs_dir=tmp_path / "runs"),
+            research_config={},
+            research_ref=None,
+            replay_timeout_seconds=10800.0,
+        )
+        == 0
+    )
     assert len(captured) == 1
     assert out_json.read_bytes() == scored_backlog_bytes
     scored_meta = json.loads(scored_backlog_bytes)["artifacts"]["shadow_qualification"]
-    bundle = json.loads(
-        Path(scored_meta["phase1_bundle_path"]).read_text(encoding="utf-8")
-    )
+    bundle = json.loads(Path(scored_meta["phase1_bundle_path"]).read_text(encoding="utf-8"))
     stage1_snapshot = Path(bundle["artifacts"]["problem_records"]["snapshot_path"])
     _write_json(stage1_snapshot, {"items": [{"tampered": True}]})
-    assert staged_module._score_materialized_shadow_run(
-        repo_root=repo_root,
-        runs_dir=tmp_path / "runs",
-        out_json=out_json,
-        out_md=out_md,
-        repo_input=None,
-        shadow_gate_config={
-            "required_consecutive_shadow_cycles": 2,
-            "require_exact_export_projection": True,
-        },
-        qualification_manifest_path=manifest_path,
-        qualification_output_adjudication_path=adjudication_path,
-        no_actionable_evidence_receipt_path=None,
-        agent="codex",
-        model=None,
-        cfg=SimpleNamespace(runs_dir=tmp_path / "runs"),
-        research_config={},
-        research_ref=None,
-        replay_timeout_seconds=10800.0,
-    ) == 2
+    assert (
+        staged_module._score_materialized_shadow_run(
+            repo_root=repo_root,
+            runs_dir=tmp_path / "runs",
+            out_json=out_json,
+            out_md=out_md,
+            repo_input=None,
+            shadow_gate_config={
+                "required_consecutive_shadow_cycles": 2,
+                "require_exact_export_projection": True,
+            },
+            qualification_manifest_path=manifest_path,
+            qualification_output_adjudication_path=adjudication_path,
+            no_actionable_evidence_receipt_path=None,
+            agent="codex",
+            model=None,
+            cfg=SimpleNamespace(runs_dir=tmp_path / "runs"),
+            research_config={},
+            research_ref=None,
+            replay_timeout_seconds=10800.0,
+        )
+        == 2
+    )
     assert len(captured) == 1
 
 
@@ -768,9 +867,7 @@ def test_score_path_consumes_routes_and_persists_isolated_repaired_pending_run(
                 "case_registry_json": str(stage_paths["case_registry"]),
                 "six_stage_pipeline": {
                     "problem_records_json": str(stage_paths["problem_records"]),
-                    "problem_mining_evidence_json": str(
-                        stage_paths["problem_mining_evidence"]
-                    ),
+                    "problem_mining_evidence_json": str(stage_paths["problem_mining_evidence"]),
                     "prioritized_problems_json": str(stage_paths["prioritized_problems"]),
                     "research_json": str(stage_paths["research"]),
                     "solution_options_json": str(stage_paths["solution_options"]),
@@ -849,9 +946,7 @@ def test_score_path_consumes_routes_and_persists_isolated_repaired_pending_run(
             "content_sha256": "7" * 64,
             "accepted_repair_count": 1,
             "unresolved_route_count": 0,
-            "route_receipts": [
-                {"route_sha256": route["route_sha256"], "status": "corrected"}
-            ],
+            "route_receipts": [{"route_sha256": route["route_sha256"], "status": "corrected"}],
             "rerun_downstream_stages": [],
             "downstream_result": {},
         },
@@ -874,9 +969,7 @@ def test_score_path_consumes_routes_and_persists_isolated_repaired_pending_run(
             raise KeyboardInterrupt("injected_after_runtime_checkpoint")
         return {
             "repaired_backlog_path": str(tmp_path / "repair" / "backlog.json"),
-            "pending_repaired_shadow_run_path": str(
-                tmp_path / "repair" / "pending.json"
-            ),
+            "pending_repaired_shadow_run_path": str(tmp_path / "repair" / "pending.json"),
             "fresh_independent_readjudication_required": True,
             "release_qualification_eligible": False,
         }
@@ -911,21 +1004,16 @@ def test_score_path_consumes_routes_and_persists_isolated_repaired_pending_run(
     scored_after_crash = out_json.read_bytes()
     scored_after_crash_doc = json.loads(scored_after_crash)
     qualification_meta = scored_after_crash_doc["artifacts"]["shadow_qualification"]
-    pending_correction_path = Path(
-        qualification_meta["qualification_correction_pending_path"]
-    )
+    pending_correction_path = Path(qualification_meta["qualification_correction_pending_path"])
     pending_correction_bytes = pending_correction_path.read_bytes()
     pending_correction = json.loads(pending_correction_bytes)
-    assert pending_correction["phase1_bundle_sha256"] == qualification_meta[
-        "phase1_bundle_sha256"
-    ]
-    assert pending_correction["phase1_backlog_snapshot_sha256"] == qualification_meta[
-        "phase1_backlog_snapshot_sha256"
-    ]
+    assert pending_correction["phase1_bundle_sha256"] == qualification_meta["phase1_bundle_sha256"]
+    assert (
+        pending_correction["phase1_backlog_snapshot_sha256"]
+        == qualification_meta["phase1_backlog_snapshot_sha256"]
+    )
     assert pending_correction["qualification_manifest_snapshot_sha256"]
-    assert pending_correction[
-        "qualification_output_adjudication_snapshot_sha256"
-    ]
+    assert pending_correction["qualification_output_adjudication_snapshot_sha256"]
     assert set(pending_correction["source_artifact_sha256s"]) == {
         "atoms",
         "problem_records",
@@ -965,23 +1053,17 @@ def test_score_path_consumes_routes_and_persists_isolated_repaired_pending_run(
     assert scored_bytes == []
     assert out_json.read_bytes() == scored_after_crash
     sidecars = list(
-        out_json.parent.glob(
-            f"{out_json.stem}.qualification_correction_consumption.*.json"
-        )
+        out_json.parent.glob(f"{out_json.stem}.qualification_correction_consumption.*.json")
     )
     assert len(sidecars) == 1
     sidecar = sidecars[0]
     sidecar_payload = json.loads(sidecar.read_text(encoding="utf-8"))
     assert sidecar_payload["accepted_repair_count"] == 1
-    assert sidecar_payload["route_receipts"] == runtime_result.consumption[
-        "route_receipts"
-    ]
+    assert sidecar_payload["route_receipts"] == runtime_result.consumption["route_receipts"]
     scored_backlog_bytes = out_json.read_bytes()
     scored_backlog = json.loads(scored_backlog_bytes)
     snapshot_path = Path(
-        scored_backlog["artifacts"]["shadow_qualification"][
-            "phase1_backlog_snapshot_path"
-        ]
+        scored_backlog["artifacts"]["shadow_qualification"]["phase1_backlog_snapshot_path"]
     )
     assert snapshot_path.read_bytes() == pending_backlog_bytes
     assert score() == 3
@@ -1024,9 +1106,7 @@ def test_phase1_bundle_rejects_source_or_snapshot_mutation_after_validation(
             "case_registry_json": str(stage_paths["case_registry"]),
             "six_stage_pipeline": {
                 "problem_records_json": str(stage_paths["problem_records"]),
-                "problem_mining_evidence_json": str(
-                    stage_paths["problem_mining_evidence"]
-                ),
+                "problem_mining_evidence_json": str(stage_paths["problem_mining_evidence"]),
                 "prioritized_problems_json": str(stage_paths["prioritized_problems"]),
                 "research_json": str(stage_paths["research"]),
                 "solution_options_json": str(stage_paths["solution_options"]),
@@ -1138,16 +1218,12 @@ def _qualification_execute_inputs(
         "backlog": {"tickets": []},
         "context": context,
         "source_pending_run_sha256": "1" * 64,
-        "source_adjudication_sha256": hashlib.sha256(
-            adjudication_path.read_bytes()
-        ).hexdigest(),
+        "source_adjudication_sha256": hashlib.sha256(adjudication_path.read_bytes()).hexdigest(),
         "correction_input_sha256": "2" * 64,
         "completion_path": tmp_path / "work" / "completion.json",
         "phase1_bundle_sha256": "3" * 64,
         "qualification_manifest_path": manifest_path,
-        "qualification_manifest_sha256": hashlib.sha256(
-            manifest_path.read_bytes()
-        ).hexdigest(),
+        "qualification_manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
         "qualification_output_adjudication_path": adjudication_path,
         "policy_config": policy,
         "policy_config_path": policy_path,
@@ -1174,9 +1250,7 @@ def _qualification_execution_route(
         "route_status": status,
         "authoring_stage": "implementation_planning",
         "agent_session_id": session_id if status == "same_author_resume" else None,
-        "workspace_dir": (
-            f"C:/retained/{marker}" if status == "same_author_resume" else None
-        ),
+        "workspace_dir": (f"C:/retained/{marker}" if status == "same_author_resume" else None),
         "actionable_label_ids": [component],
         "author_provenance": {
             "exact_session_continuation": status == "same_author_resume",
@@ -1242,9 +1316,7 @@ def test_unavailable_author_route_is_retained_without_model_invocation_or_comple
     result = staged_module._execute_qualification_correction(routes=[route], **inputs)
 
     assert runtime_calls == []
-    assert result["status"] == (
-        "repairable_paused:qualification_correction_frontier_retained"
-    )
+    assert result["status"] == ("repairable_paused:qualification_correction_frontier_retained")
     assert result["qualification_scheduler_pending"] is True
     assert not Path(inputs["completion_path"]).exists()
 
@@ -1268,9 +1340,7 @@ def test_indeterminate_crash_uses_one_bound_exact_session_reconciliation(
             "content_sha256": "6" * 64,
             "accepted_repair_count": 1,
             "unresolved_route_count": 0,
-            "route_receipts": [
-                {"route_sha256": route["route_sha256"], "status": "corrected"}
-            ],
+            "route_receipts": [{"route_sha256": route["route_sha256"], "status": "corrected"}],
             "rerun_downstream_stages": [],
             "downstream_result": {},
         },
@@ -1308,13 +1378,16 @@ def test_indeterminate_crash_uses_one_bound_exact_session_reconciliation(
     assert recovered["accepted_repair_count"] == 1
     assert reused["correction_completion_reused"] is True
     assert Path(inputs["completion_path"]).is_file()
-    assert len(
-        list(
-            Path(inputs["completion_path"]).parent.glob(
-                "group_attempts/*/*/reconciliation_claim.json"
+    assert (
+        len(
+            list(
+                Path(inputs["completion_path"]).parent.glob(
+                    "group_attempts/*/*/reconciliation_claim.json"
+                )
             )
         )
-    ) == 1
+        == 1
+    )
 
 
 def test_concurrent_scorer_returns_in_progress_without_duplicate_model_invocation(
@@ -1335,9 +1408,7 @@ def test_concurrent_scorer_returns_in_progress_without_duplicate_model_invocatio
             "content_sha256": "8" * 64,
             "accepted_repair_count": 1,
             "unresolved_route_count": 0,
-            "route_receipts": [
-                {"route_sha256": route["route_sha256"], "status": "corrected"}
-            ],
+            "route_receipts": [{"route_sha256": route["route_sha256"], "status": "corrected"}],
             "rerun_downstream_stages": [],
             "downstream_result": {},
         },
@@ -1455,9 +1526,7 @@ def test_paused_qualification_resumes_same_frontier_without_terminal_completion(
     assert paused["status"].startswith("repairable_paused:")
     assert not Path(inputs["completion_path"]).exists()
     first_checkpoint = Path(paused["qualification_scheduler_checkpoint_path"])
-    assert first_checkpoint.name == (
-        paused["qualification_scheduler_checkpoint_sha256"] + ".json"
-    )
+    assert first_checkpoint.name == (paused["qualification_scheduler_checkpoint_sha256"] + ".json")
 
     resumed = staged_module._execute_qualification_correction(routes=[route], **inputs)
     reused = staged_module._execute_qualification_correction(routes=[route], **inputs)
@@ -1466,9 +1535,7 @@ def test_paused_qualification_resumes_same_frontier_without_terminal_completion(
     assert runtime_calls[0]["routes"] == [route]
     assert runtime_calls[0]["resume_frontiers"] == {}
     assert runtime_calls[1]["routes"] == [route]
-    assert runtime_calls[1]["resume_frontiers"] == {
-        route["route_sha256"]: frontier
-    }
+    assert runtime_calls[1]["resume_frontiers"] == {route["route_sha256"]: frontier}
     assert resumed["status"] == "corrected_pending_independent_readjudication"
     assert resumed["qualification_scheduler_pending"] is False
     assert Path(inputs["completion_path"]).is_file()
@@ -1570,9 +1637,7 @@ def test_scheduler_materializes_six_stage_and_auxiliary_receipts_without_mock(
                 "stage": stage,
                 "path": str(path.resolve()),
                 "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-                "content_sha256": staged_module._qualification_canonical_sha256(
-                    document
-                ),
+                "content_sha256": staged_module._qualification_canonical_sha256(document),
             }
         )
         if stage in {
@@ -1589,9 +1654,7 @@ def test_scheduler_materializes_six_stage_and_auxiliary_receipts_without_mock(
             "content_sha256": "7" * 64,
             "accepted_repair_count": 1,
             "unresolved_route_count": 0,
-            "route_receipts": [
-                {"route_sha256": route["route_sha256"], "status": "corrected"}
-            ],
+            "route_receipts": [{"route_sha256": route["route_sha256"], "status": "corrected"}],
             "rerun_downstream_stages": ["implementation_planning"],
             "downstream_result": {
                 "affected_problem_ids": ["problem:one"],
@@ -1630,8 +1693,7 @@ def test_scheduler_materializes_six_stage_and_auxiliary_receipts_without_mock(
     }
     assert all(path.is_file() for path in published.values())
     assert {
-        json.loads(path.read_text(encoding="utf-8"))["marker"]
-        for path in published.values()
+        json.loads(path.read_text(encoding="utf-8"))["marker"] for path in published.values()
     } == {f"repaired:{stage}" for stage in published}
     assert Path(result["pending_repaired_shadow_run_path"]).is_file()
     assert result["release_qualification_eligible"] is False
@@ -1641,11 +1703,7 @@ def test_scheduler_materializes_six_stage_and_auxiliary_receipts_without_mock(
     assert json.loads(json.dumps(published_consumption)) == published_consumption
     assert published_consumption["content_sha256"] == (
         staged_module._qualification_canonical_sha256(
-            {
-                key: value
-                for key, value in published_consumption.items()
-                if key != "content_sha256"
-            }
+            {key: value for key, value in published_consumption.items() if key != "content_sha256"}
         )
     )
 
@@ -1756,13 +1814,16 @@ def test_unavailable_route_does_not_poison_recoverable_group_crash_reconciliatio
     assert recovered["accepted_repair_count"] == 1
     assert recovered["qualification_scheduler_pending"] is True
     assert not Path(inputs["completion_path"]).exists()
-    assert len(
-        list(
-            Path(inputs["completion_path"]).parent.glob(
-                "group_attempts/*/*/reconciliation_claim.json"
+    assert (
+        len(
+            list(
+                Path(inputs["completion_path"]).parent.glob(
+                    "group_attempts/*/*/reconciliation_claim.json"
+                )
             )
         )
-    ) == 1
+        == 1
+    )
 
 
 def test_scheduler_replans_after_stage1_merge_and_never_invokes_stale_planner(
@@ -1884,9 +1945,7 @@ def test_scheduler_replans_after_stage1_merge_and_never_invokes_stale_planner(
     assert runtime_calls == [[stage1_route]]
     assert result["qualification_scheduler_pending"] is True
     checkpoint = json.loads(
-        Path(result["qualification_scheduler_checkpoint_path"]).read_text(
-            encoding="utf-8"
-        )
+        Path(result["qualification_scheduler_checkpoint_path"]).read_text(encoding="utf-8")
     )
     planner_group = next(
         group
@@ -2540,9 +2599,7 @@ def test_stage3_subscription_wait_stops_later_model_stages(
         "api_fallback_allowed": False,
         "external_wait": wait,
     }
-    checkpoint["checkpoint_sha256"] = staged_module._qualification_canonical_sha256(
-        checkpoint
-    )
+    checkpoint["checkpoint_sha256"] = staged_module._qualification_canonical_sha256(checkpoint)
 
     def parked_stage3(**kwargs: Any) -> dict[str, Any]:
         stage_doc = {
@@ -2599,8 +2656,9 @@ def test_stage3_subscription_wait_stops_later_model_stages(
     assert later_stage_calls == []
     compiled = runs_dir / "target_a" / "_compiled"
     research = json.loads((compiled / "target_a.research.json").read_text(encoding="utf-8"))
-    assert research["input_meta"]["external_wait"]["checkpoint_sha256"] == (
-        checkpoint["checkpoint_sha256"]
+    assert (
+        research["input_meta"]["external_wait"]["checkpoint_sha256"]
+        == (checkpoint["checkpoint_sha256"])
     )
     assert not (compiled / "target_a.solution_options.json").exists()
     assert not (compiled / "target_a.solution_selection.json").exists()
@@ -2673,9 +2731,10 @@ def test_stage3_subscription_wait_stops_later_model_stages(
     assert resumed_exc.value.code == 2
     assert len(resumed_stage3_calls) == 1
     resume_call = resumed_stage3_calls[0]
-    assert resume_call["resume_stage_document"]["input_meta"]["external_wait"][
-        "checkpoint_sha256"
-    ] == checkpoint["checkpoint_sha256"]
+    assert (
+        resume_call["resume_stage_document"]["input_meta"]["external_wait"]["checkpoint_sha256"]
+        == checkpoint["checkpoint_sha256"]
+    )
     assert [
         item["problem_id"] for item in resume_call["selected_priority_decisions"]
     ] == retained_selected_ids
