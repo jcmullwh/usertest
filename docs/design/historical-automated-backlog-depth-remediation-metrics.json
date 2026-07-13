@@ -3,12 +3,12 @@
   "document_id": "historical-automated-backlog-depth-remediation-metrics",
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "snapshot": {
-    "generated_at": "2026-07-13T11:31:25Z",
+    "generated_at": "2026-07-13T11:34:53Z",
     "branch": "codex/backlog-depth-remediation",
-    "last_committed_revision_with_full_matrix": "9f6af2bb25d0c5365d0bf176f2db8f45571848a0",
+    "last_committed_revision_with_full_matrix": "51e35fbcb50151590604611f10910a7fd13660e4",
     "latest_exact_revision_with_sealed_live_measurement": "9f6af2bb25d0c5365d0bf176f2db8f45571848a0",
     "diagnostic_cycle_revision": "9f6af2bb25d0c5365d0bf176f2db8f45571848a0",
-    "working_tree_state": "9f6af2bb is the last committed full-matrix revision. Its corrected-v2 cycle reached Stage 3 and exposed deterministic PowerShell-read normalization and same-session evidence-loss defects. The current uncommitted tree fixes those observed boundaries plus two proof-verifier integration gaps and durably binds every reused source to its attempt, case, revision, workspace, session, events, and signed-in Codex receipt. Complete bound replay reduced the retained case from 30 findings to five with zero model calls: two primary evidence gaps and three dependent findings. Complete affected suites pass; the canonical 14-project matrix passed on unchanged Python code/test bytes in 1,334.835 seconds and lint passed 14 of 14 in 55.071 seconds. No live end-to-end cycle has completed.",
+    "working_tree_state": "Implementation revision 51e35fbcb50151590604611f10910a7fd13660e4 contains the cumulative-evidence recovery and is the latest committed revision with a full 14-project matrix. It fixes the live-observed PowerShell-read, same-session evidence-loss, and proof-verifier integration defects and durably binds every reused source to its attempt, case, revision, workspace, session, events, and signed-in Codex receipt. Complete bound replay reduced the retained case from 30 findings to five with zero model calls: two primary evidence gaps and three dependent findings. Complete affected suites pass; the canonical matrix passed on unchanged Python code/test bytes in 1,334.835 seconds and lint passed 14 of 14 in 55.071 seconds. This metrics refresh is documentation-only. No live end-to-end cycle has completed.",
     "diagnostic_cycle_state": "corrected_v2_cycle_001_stopped_in_first_stage3_case_after_deterministic_evidence_loss",
     "qualification_status": "not_qualified",
     "successful_consecutive_qualification_cycles": 0,
@@ -1451,8 +1451,8 @@
   },
   "current_cumulative_evidence_offline_evidence": {
     "status": "offline_complete_live_qualification_pending",
-    "head": "9f6af2bb25d0c5365d0bf176f2db8f45571848a0",
-    "working_tree": "uncommitted cumulative-evidence recovery bytes",
+    "head": "51e35fbcb50151590604611f10910a7fd13660e4",
+    "working_tree": "cumulative-evidence recovery bytes committed; metrics refresh is documentation-only",
     "affected_suites": {
       "agent_adapters": {"passed": 121, "failed": 0, "elapsed_seconds": 13.485},
       "backlog_core": {"passed": 414, "failed": 0, "elapsed_seconds": 4.804},
@@ -1625,6 +1625,7 @@
     {
       "phase": "corrected_v2_9f6_diagnostic_and_cumulative_evidence_recovery",
       "revision": "9f6af2bb25d0c5365d0bf176f2db8f45571848a0",
+      "implementation_revision": "51e35fbcb50151590604611f10910a7fd13660e4",
       "measurement_date": "2026-07-13",
       "result": "diagnostic_incomplete_offline_recovery_complete_live_qualification_pending",
       "improved": [
@@ -1657,7 +1658,7 @@
       {"checkpoint": 7, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 1717.0, "commit": null, "working_tree": "uncommitted after a0ffd921663abba8f955aa2ad0df5fbb7ba95455", "note": "Passed after correcting one test-only package import-boundary failure."},
       {"checkpoint": 8, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 1624.1, "commit": "a1d52f43da7a4b653954bf268a589227e607108e", "working_tree": "final pre-commit bytes later committed as a1d52f43", "note": "Committed a1 baseline after fixing the attachment-backed independent-feedback/provider-wait self-healing defect; later uncommitted Stage-3 recovery changes are not included."},
       {"checkpoint": 9, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 2096.3, "commit": null, "working_tree": "uncommitted after a1d52f43da7a4b653954bf268a589227e607108e", "note": "Stage-3 recovery checkpoint; exit zero with retained raw log and SHA-256 receipt.", "source_ids": ["postchange_all_projects_test_log"]},
-      {"checkpoint": 10, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 1334.835, "commit": null, "working_tree": "uncommitted cumulative-evidence final code/test bytes after 9f6af2bb25d0c5365d0bf176f2db8f45571848a0", "note": "Exit zero. The ten Python source/test diff sections were identical before and after; concurrent changes were limited to the metrics HTML and JSON.", "source_ids": ["final_cumulative_evidence_verification_summary", "final_code_test_byte_provenance"]}
+      {"checkpoint": 10, "passed": 14, "denominator": 14, "percent": 100.0, "elapsed_seconds": 1334.835, "commit": "51e35fbcb50151590604611f10910a7fd13660e4", "working_tree": "final code/test bytes later committed as 51e35fbc", "note": "Exit zero. The ten Python source/test diff sections were identical before and after; concurrent changes were limited to the metrics HTML and JSON.", "source_ids": ["final_cumulative_evidence_verification_summary", "final_code_test_byte_provenance"]}
     ],
     "latest_slow_suite": {
       "name": "runner_core",
