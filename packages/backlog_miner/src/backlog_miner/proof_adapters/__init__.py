@@ -12,8 +12,10 @@ from backlog_miner.proof_adapters.basis import (
     PositiveBasisContext,
     PositiveBasisRegistry,
     PositiveBasisResult,
+    RepositoryContractQuoteBasisAdapter,
     RepositoryFailFirstCommandBasisAdapter,
     builtin_positive_basis_registry,
+    repository_contract_quote_provenance,
 )
 from backlog_miner.proof_adapters.legacy import (
     PytestControlledDifferenceProofAdapter,
@@ -66,9 +68,11 @@ __all__ = [
     "ProofAdapterResult",
     "PytestControlledDifferenceProofAdapter",
     "PythonCallChainProofAdapter",
+    "RepositoryContractQuoteBasisAdapter",
     "RepositoryFailFirstCommandBasisAdapter",
     "StructuredReplayAdapter",
     "adapter_conformance_errors",
     "builtin_proof_adapter_registry",
     "builtin_positive_basis_registry",
+    "repository_contract_quote_provenance",
 ]

@@ -21,6 +21,398 @@ from backlog_miner.origin_evidence import (
 )
 
 
+def _write_normalized_events(path: Path, events: list[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(json.dumps(event) + "\n" for event in events),
+        encoding="utf-8",
+    )
+
+
+def _event_source_attempt(
+    *,
+    run_dir: Path,
+    workspace: Path,
+    revision: str,
+    case_id: str,
+    problem_id: str,
+    session_id: str,
+    events: list[dict[str, object]],
+) -> dict[str, object]:
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "report.json").write_text('{"status":"complete"}\n', encoding="utf-8")
+    (run_dir / "workspace_ref.json").write_text(
+        json.dumps({"workspace_dir": str(workspace)}) + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "target_ref.json").write_text(
+        json.dumps({"agent": "codex", "commit_sha": revision, "ref": revision}) + "\n",
+        encoding="utf-8",
+    )
+    _write_normalized_events(run_dir / "normalized_events.jsonl", events)
+    (run_dir / "codex_execpolicy_overlay.json").write_text("{}\n", encoding="utf-8")
+
+    def artifact(kind: str, filename: str) -> dict[str, object]:
+        path = run_dir / filename
+        return {
+            "kind": kind,
+            "path": str(path.resolve()),
+            "exists": True,
+            "sha256": sha256(path.read_bytes()).hexdigest(),
+            "size_bytes": path.stat().st_size,
+        }
+
+    attempted_dossier = {"case_id": case_id, "problem_id": problem_id}
+    attempt: dict[str, object] = {
+        "attempt_number": 1,
+        "attempt_kind": "full_research",
+        "outcome": "evidence_verification_invalid",
+        "run_dir": str(run_dir.resolve()),
+        "report_path": str((run_dir / "report.json").resolve()),
+        "attempted_dossier": attempted_dossier,
+        "attempted_dossier_sha256": mod._canonical_json_sha256(attempted_dossier),
+        "agent_session_id": session_id,
+        "observed_agent_session_id": session_id,
+        "attempt_artifacts": [
+            artifact("report", "report.json"),
+            artifact("workspace_ref", "workspace_ref.json"),
+            artifact("target_ref", "target_ref.json"),
+            artifact("normalized_events", "normalized_events.jsonl"),
+            artifact("codex_subscription_auth", "codex_execpolicy_overlay.json"),
+        ],
+    }
+    attempt["attempt_sha256"] = stage_contracts.research_attempt_sha256(attempt)
+    return attempt
+
+
+def _write_current_correction_lineage(
+    *,
+    run_dir: Path,
+    revision: str,
+    session_id: str,
+) -> dict[str, object]:
+    (run_dir / "target_ref.json").write_text(
+        json.dumps(
+            {
+                "agent": "codex",
+                "commit_sha": revision,
+                "ref": revision,
+                "requested_codex_resume_session_id": session_id,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    (run_dir / "codex_execpolicy_overlay.json").write_text("{}\n", encoding="utf-8")
+    errors: list[str] = []
+    binding = mod._current_correction_lineage_binding(
+        run_dir=run_dir,
+        expected_agent_session_id=session_id,
+        errors=errors,
+    )
+    assert errors == []
+    assert binding is not None
+    return binding
+
+
+def test_command_observation_normalizes_equivalent_relative_path_spelling() -> None:
+    declared = r"python .usertest_research\shell_capability_research.py gemini-run-once-block"
+    observed = r"python .\.usertest_research\shell_capability_research.py gemini-run-once-block"
+
+    assert mod._normalize_command(declared) == mod._normalize_command(observed)
+    assert mod._normalize_command(declared) != mod._normalize_command(
+        r"python .\.usertest_research\different_probe.py gemini-run-once-block"
+    )
+
+
+def test_evidence_event_stream_retains_fresh_events_before_empty_current_correction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mod, "verify_controlled_codex_execpolicy_receipt", lambda _path: [])
+    fresh_run = tmp_path / "fresh-run"
+    current_run = tmp_path / "current-correction"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    revision = "a" * 40
+    session_id = "33333333-3333-4333-8333-333333333333"
+    fresh_events: list[dict[str, object]] = [
+        {"type": "run_command", "data": {"command": "python proof.py", "exit_code": 0}},
+        {"type": "read_file", "data": {"path": "src/core.py"}},
+    ]
+    attempt = _event_source_attempt(
+        run_dir=fresh_run,
+        workspace=workspace,
+        revision=revision,
+        case_id="case:one",
+        problem_id="problem:one",
+        session_id=session_id,
+        events=fresh_events,
+    )
+    latest_attempt = deepcopy(attempt)
+    latest_attempt["attempt_number"] = 2
+    latest_attempt["validation_errors"] = ["corrected_metadata"]
+    latest_attempt["attempt_sha256"] = stage_contracts.research_attempt_sha256(latest_attempt)
+    _write_normalized_events(current_run / "normalized_events.jsonl", [])
+    current_lineage = _write_current_correction_lineage(
+        run_dir=current_run,
+        revision=revision,
+        session_id=session_id,
+    )
+
+    errors: list[str] = []
+    events, sources, sources_sha256 = mod._load_evidence_event_stream(
+        run_dir=current_run,
+        evidence_attempts=[attempt, latest_attempt],
+        case_id="case:one",
+        problem_id="problem:one",
+        repo_revision=revision,
+        workspace=workspace,
+        agent_session_id=session_id,
+        current_run_lineage=current_lineage,
+        errors=errors,
+    )
+
+    assert errors == []
+    assert events == fresh_events
+    assert [source["run_dir"] for source in sources] == [
+        str(fresh_run.resolve()),
+        str(current_run.resolve()),
+    ]
+    assert sources[0]["global_start_index"] == 0
+    assert sources[0]["global_end_index_exclusive"] == 2
+    assert sources[0]["source_kind"] == "prior_attempt"
+    assert sources[0]["attempt_sha256"] == latest_attempt["attempt_sha256"]
+    assert sources[0]["binding_sha256"] == mod._canonical_json_sha256(
+        {
+            key: sources[0][key]
+            for key in mod._RESEARCH_ATTEMPT_EVENT_BINDING_FIELDS
+            if key != "binding_sha256"
+        }
+    )
+    assert sources[1]["source_kind"] == "current_run"
+    assert sources[1]["event_count"] == 0
+    assert sources[1]["global_start_index"] == 2
+    assert sources[1]["global_end_index_exclusive"] == 2
+    assert sources_sha256 == mod._canonical_json_sha256(sources)
+
+
+def test_persisted_evidence_event_stream_rejects_tamper_and_reordering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(mod, "verify_controlled_codex_execpolicy_receipt", lambda _path: [])
+    fresh_run = tmp_path / "fresh-run"
+    current_run = tmp_path / "current-correction"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    revision = "b" * 40
+    session_id = "44444444-4444-4444-8444-444444444444"
+    fresh_events: list[dict[str, object]] = [
+        {"type": "run_command", "data": {"command": "python proof.py", "exit_code": 0}}
+    ]
+    attempt = _event_source_attempt(
+        run_dir=fresh_run,
+        workspace=workspace,
+        revision=revision,
+        case_id="case:one",
+        problem_id="problem:one",
+        session_id=session_id,
+        events=fresh_events,
+    )
+    _write_normalized_events(current_run / "normalized_events.jsonl", [])
+    current_lineage = _write_current_correction_lineage(
+        run_dir=current_run,
+        revision=revision,
+        session_id=session_id,
+    )
+    build_errors: list[str] = []
+    _events, sources, sources_sha256 = mod._load_evidence_event_stream(
+        run_dir=current_run,
+        evidence_attempts=[attempt],
+        case_id="case:one",
+        problem_id="problem:one",
+        repo_revision=revision,
+        workspace=workspace,
+        agent_session_id=session_id,
+        current_run_lineage=current_lineage,
+        errors=build_errors,
+    )
+    assert build_errors == []
+    receipt: dict[str, object] = {
+        "run_dir": str(current_run.resolve()),
+        "case_id": "case:one",
+        "problem_id": "problem:one",
+        "repo_revision": revision,
+        "workspace_dir": str(workspace.resolve()),
+        "evidence_agent_session_id": session_id,
+        "evidence_event_sources": sources,
+        "evidence_event_sources_sha256": sources_sha256,
+    }
+
+    persisted_errors: list[str] = []
+    assert (
+        mod._load_persisted_evidence_event_stream(
+            receipt,
+            current_run_dir=current_run,
+            research_attempts=[attempt],
+            errors=persisted_errors,
+        )
+        == fresh_events
+    )
+    assert persisted_errors == []
+
+    reordered = deepcopy(receipt)
+    reordered_sources_raw = reordered["evidence_event_sources"]
+    assert isinstance(reordered_sources_raw, list)
+    reordered_sources = list(reversed(reordered_sources_raw))
+    reordered["evidence_event_sources"] = reordered_sources
+    reordered["evidence_event_sources_sha256"] = mod._canonical_json_sha256(reordered_sources)
+    reordered_errors: list[str] = []
+    mod._load_persisted_evidence_event_stream(
+        reordered,
+        current_run_dir=current_run,
+        research_attempts=[attempt],
+        errors=reordered_errors,
+    )
+    assert "research_evidence_event_source_invalid:0" in reordered_errors
+    assert "research_evidence_event_current_source_not_last" in reordered_errors
+
+    wrong_binding = deepcopy(receipt)
+    wrong_sources = wrong_binding["evidence_event_sources"]
+    assert isinstance(wrong_sources, list)
+    assert isinstance(wrong_sources[0], dict)
+    wrong_sources[0]["case_id"] = "case:other"
+    wrong_binding["evidence_event_sources_sha256"] = mod._canonical_json_sha256(wrong_sources)
+    wrong_binding_errors: list[str] = []
+    mod._load_persisted_evidence_event_stream(
+        wrong_binding,
+        current_run_dir=current_run,
+        research_attempts=[attempt],
+        errors=wrong_binding_errors,
+    )
+    assert "research_evidence_event_source_binding_changed:0" in wrong_binding_errors
+
+    current_target_path = current_run / "target_ref.json"
+    current_target_bytes = current_target_path.read_bytes()
+    current_target_path.write_text(
+        json.dumps(
+            {
+                "agent": "codex",
+                "commit_sha": revision,
+                "ref": revision,
+                "requested_codex_resume_session_id": "different-session",
+            }
+        ),
+        encoding="utf-8",
+    )
+    wrong_current_errors: list[str] = []
+    mod._load_persisted_evidence_event_stream(
+        receipt,
+        current_run_dir=current_run,
+        research_attempts=[attempt],
+        errors=wrong_current_errors,
+    )
+    assert any(
+        error.endswith("research_evidence_current_resume_session_mismatch")
+        for error in wrong_current_errors
+    )
+    current_target_path.write_bytes(current_target_bytes)
+
+    with (fresh_run / "normalized_events.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"type": "agent_message", "data": {"text": "tampered"}}) + "\n")
+    tampered_errors: list[str] = []
+    mod._load_persisted_evidence_event_stream(
+        receipt,
+        current_run_dir=current_run,
+        research_attempts=[attempt],
+        errors=tampered_errors,
+    )
+    assert "research_evidence_event_source_changed:0" in tampered_errors
+
+
+def test_evidence_event_stream_current_run_only_and_legacy_receipt_compatibility(
+    tmp_path: Path,
+) -> None:
+    current_run = tmp_path / "current-run"
+    current_events: list[dict[str, object]] = [
+        {"type": "agent_message", "data": {"text": "complete"}}
+    ]
+    _write_normalized_events(current_run / "normalized_events.jsonl", current_events)
+    errors: list[str] = []
+    events, sources, _sources_sha256 = mod._load_evidence_event_stream(
+        run_dir=current_run,
+        evidence_attempts=[],
+        case_id="case:one",
+        problem_id="problem:one",
+        repo_revision="c" * 40,
+        workspace=None,
+        agent_session_id=None,
+        current_run_lineage=None,
+        errors=errors,
+    )
+    assert errors == []
+    assert events == current_events
+    assert len(sources) == 1
+    assert sources[0]["run_dir"] == str(current_run.resolve())
+
+    legacy_errors: list[str] = []
+    assert (
+        mod._load_persisted_evidence_event_stream(
+            {"run_dir": str(current_run.resolve())},
+            current_run_dir=current_run,
+            research_attempts=[],
+            errors=legacy_errors,
+        )
+        == current_events
+    )
+    assert legacy_errors == []
+
+
+def test_experiment_receipt_prefers_latest_current_duplicate() -> None:
+    prior_event = {
+        "type": "run_command",
+        "data": {
+            "command": "python proof.py",
+            "exit_code": 0,
+            "output_excerpt": "prior observation",
+        },
+    }
+    current_event = {
+        "type": "run_command",
+        "data": {
+            "command": "python proof.py",
+            "exit_code": 0,
+            "output_excerpt": "corrected current observation",
+        },
+    }
+    dossier = {
+        "experiments": [
+            {
+                "experiment_id": "experiment:one",
+                "command": "python proof.py",
+                "exit_code": 0,
+                "outcome": "supports",
+                "artifact_refs": ["artifact:one"],
+            }
+        ]
+    }
+    errors: list[str] = []
+
+    receipts, outcomes = mod._experiment_receipts(
+        dossier,
+        events=[prior_event, current_event],
+        artifact_keys={"artifact:one"},
+        clean_replays={"experiment:one": {"experiment_id": "experiment:one"}},
+        errors=errors,
+    )
+
+    assert errors == []
+    assert outcomes == {"experiment:one": "supports"}
+    assert receipts[0]["agent_event_index"] == 1
+    assert receipts[0]["agent_event_sha256"] == mod._canonical_json_sha256(current_event)
+
+
 def test_clean_revision_view_reuses_effective_relocated_workspace(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3062,7 +3454,9 @@ def test_exact_origin_scenario_can_attest_equivalence_without_redundant_adapter(
 
 def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(mod, "verify_controlled_codex_execpolicy_receipt", lambda _path: [])
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     probe = workspace / "tools" / "environment_probe.ps1"
@@ -3311,10 +3705,90 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
             source_identity=workspace,
         ),
     )
+    source_session_id = "55555555-5555-4555-8555-555555555555"
+    source_run_dir = tmp_path / "research-source-run"
+    source_attempt = _event_source_attempt(
+        run_dir=source_run_dir,
+        workspace=workspace,
+        revision=revision,
+        case_id=str(dossier["case_id"]),
+        problem_id=str(dossier["problem_id"]),
+        session_id=source_session_id,
+        events=events,
+    )
+    correction_run_dir = tmp_path / "research-correction-run"
+    correction_run_dir.mkdir()
+    for filename in ("report.json", "workspace_ref.json", "target_ref.json"):
+        (correction_run_dir / filename).write_bytes((run_dir / filename).read_bytes())
+    _write_normalized_events(correction_run_dir / "normalized_events.jsonl", [])
+    (correction_run_dir / "target_ref.json").write_text(
+        json.dumps(
+            {
+                "ref": revision,
+                "commit_sha": revision,
+                "agent": "codex",
+                "requested_codex_resume_session_id": source_session_id,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (correction_run_dir / "codex_execpolicy_overlay.json").write_text("{}\n", encoding="utf-8")
+    correction_dossier = deepcopy(dossier)
+    correction_dossier["research_attempts"] = [source_attempt]
+    correction_artifact_refs = correction_dossier["artifact_refs"]
+    assert isinstance(correction_artifact_refs, list)
+    for artifact_ref in correction_artifact_refs:
+        assert isinstance(artifact_ref, dict)
+        if artifact_ref.get("artifact_id") == "runner:target_ref":
+            artifact_ref["path"] = str(correction_run_dir / "target_ref.json")
+    correction_artifact_refs.append(
+        {
+            "artifact_id": "runner:codex_subscription_auth",
+            "kind": "codex_subscription_auth",
+            "path": str(correction_run_dir / "codex_execpolicy_overlay.json"),
+        }
+    )
+    correction_receipt = mod.verify_research_evidence(
+        correction_dossier,
+        run_dir=correction_run_dir,
+        repo_revision=revision,
+        case_id=str(correction_dossier["case_id"]),
+        problem_id=str(correction_dossier["problem_id"]),
+        expected_case_id=str(correction_dossier["case_id"]),
+        expected_problem_id=str(correction_dossier["problem_id"]),
+        evidence_assignment=assignment,
+        evidence_atom_ids=[atom_id],
+        revision_view_destination=tmp_path / "revision-view-correction",
+        replay_timeout_seconds=None,
+        requested_repo_ref=revision,
+        resolved_repo_ref=revision,
+        evidence_attempts=[source_attempt],
+        evidence_agent_session_id=source_session_id,
+        replay_executor=mod.TrustedHostReplayExecutor(
+            approved_source_roots=[tmp_path],
+            source_identity=workspace,
+        ),
+    )
     dossier["evidence_verification"] = repeated_receipt
 
     assert receipt["status"] == "verified", receipt["errors"]
     assert repeated_receipt["status"] == "verified", repeated_receipt["errors"]
+    assert correction_receipt["status"] == "verified", correction_receipt["errors"]
+    assert [source["run_dir"] for source in correction_receipt["evidence_event_sources"]] == [
+        str(source_run_dir.resolve()),
+        str(correction_run_dir.resolve()),
+    ]
+    assert (
+        correction_receipt["evidence_event_sources"][0]["attempt_sha256"]
+        == source_attempt["attempt_sha256"]
+    )
+    assert correction_receipt["evidence_event_sources"][-1]["event_count"] == 0
+    correction_dossier["evidence_verification"] = correction_receipt
+    correction_persisted_valid, correction_persisted_errors = (
+        mod.verify_persisted_research_evidence(correction_dossier)
+    )
+    assert correction_persisted_errors == []
+    assert correction_persisted_valid is True
     first_replay_paths = {
         str(artifact["path"])
         for artifact in receipt["artifacts"]
@@ -3777,6 +4251,132 @@ def test_harness_call_discard_with_hard_coded_symptom_is_not_mechanism_evidence(
     assert touched == ["core.run"]
     assert link is not None
     assert link["verification_method"] == "runner_harness_observable_dataflow_v1"
+
+
+def test_harness_mechanism_touch_follows_only_immediate_result_method_chain(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "replay"
+    harness = workspace / ".usertest_research" / "shell_probe.py"
+    harness.parent.mkdir(parents=True)
+    replay = {
+        "executed_argv": ["python", ".usertest_research/shell_probe.py"],
+        "workspace_dir": str(workspace),
+    }
+    kwargs = {
+        "replay": replay,
+        "mechanism_symbols": ["_resolve_shell_capability"],
+        "symbol_paths": {
+            "_resolve_shell_capability": (
+                "packages/runner_core/src/runner_core/shell_capability.py"
+            )
+        },
+        "observable_assertion": {
+            "source": "stdout",
+            "operator": "contains",
+            "expected": "available",
+        },
+    }
+    harness.write_text(
+        "import json\n"
+        "from runner_core.shell_capability import _resolve_shell_capability\n"
+        "observation = _resolve_shell_capability(probe_result=True).to_dict()\n"
+        "print(json.dumps(observation))\n",
+        encoding="utf-8",
+    )
+
+    path, touched, link = mod._harness_mechanism_touches(**kwargs)
+
+    assert path == ".usertest_research/shell_probe.py"
+    assert touched == ["_resolve_shell_capability"]
+    assert link is not None
+    assert link["symbol_sinks"] == [{"symbol": "_resolve_shell_capability", "sink": "stdout"}]
+
+    harness.write_text(
+        "import json\n"
+        "from runner_core.shell_capability import _resolve_shell_capability\n"
+        "def unrelated(value):\n"
+        "    return value\n"
+        "observation = unrelated(\n"
+        "    _resolve_shell_capability(probe_result=True)\n"
+        ").to_dict()\n"
+        "print(json.dumps(observation))\n",
+        encoding="utf-8",
+    )
+    _, touched, link = mod._harness_mechanism_touches(**kwargs)
+    assert touched == []
+    assert link is None
+
+    harness.write_text(
+        "import json\n"
+        "from runner_core.shell_capability import _resolve_shell_capability\n"
+        "observation = _resolve_shell_capability(probe_result=True).to_dict()\n"
+        'print(json.dumps({"state": "available"}))\n',
+        encoding="utf-8",
+    )
+    _, touched, link = mod._harness_mechanism_touches(**kwargs)
+    assert touched == []
+    assert link is None
+
+
+def test_proof_adapter_quote_cross_binding_requires_exact_same_contract() -> None:
+    quote = "available is the only state that may dispatch shell-required missions"
+    path = "packages/runner_core/src/runner_core/shell_capability.py"
+    experiment = {
+        "positive_outcome_contract": {
+            "contract_kind": "retained_harness_semantic_assertion",
+            "expected_value": "available",
+            "semantic_basis": {
+                "kind": "repository_contract_quote",
+                "contract_type": "api_contract",
+                "path": path,
+                "exact_quote": quote,
+            },
+        }
+    }
+    claim = {
+        "intervention": {"target": "runner_core.shell_capability.resolve:probe_result"},
+        "implementation_touchpoints": [
+            {
+                "causal_locator": "runner_core.shell_capability.resolve:probe_result",
+                "path": path,
+                "symbols": ["resolve"],
+            }
+        ],
+    }
+    semantic = {
+        "kind": "repository_contract_quote",
+        "path": path,
+        "exact_quote": quote,
+    }
+
+    resolved = mod._resolved_proof_adapter_semantic_basis(
+        experiment=experiment,
+        claim=claim,
+        semantic_basis=semantic,
+        predicate={"kind": "equals", "expected": "available"},
+    )
+
+    assert resolved == {
+        **experiment["positive_outcome_contract"]["semantic_basis"],
+        "symbol": "resolve",
+    }
+
+    conflicting = mod._resolved_proof_adapter_semantic_basis(
+        experiment=experiment,
+        claim=claim,
+        semantic_basis={**semantic, "exact_quote": "different contract"},
+        predicate={"kind": "equals", "expected": "available"},
+    )
+    assert conflicting == {**semantic, "exact_quote": "different contract"}
+
+    wrong_expected = mod._resolved_proof_adapter_semantic_basis(
+        experiment=experiment,
+        claim=claim,
+        semantic_basis=semantic,
+        predicate={"kind": "equals", "expected": "blocked"},
+    )
+    assert wrong_expected == semantic
 
 
 def test_atom_binding_uses_structured_snapshot_output_without_ancillary_artifact() -> None:

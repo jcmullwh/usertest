@@ -401,6 +401,62 @@ def test_codex_current_windows_powershell_event_attests_aggregated_output(
     assert read["data"]["transport_normalization"] == "single_terminal_newline"
 
 
+def test_codex_windows_powershell_noprofile_event_attests_relative_backslash_read(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "atoms_text" / "atoms_001.md"
+    source.parent.mkdir()
+    content = "# Atom Chunk 001\n\nObserved smart quote ’ and arrow → evidence."
+    source.write_text(content, encoding="utf-8")
+    raw = tmp_path / "raw.jsonl"
+    command = (
+        '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
+        '-NoProfile -Command "Get-Content -Raw -Encoding UTF8 '
+        '-LiteralPath .\\atoms_text\\atoms_001.md"'
+    )
+    raw.write_text(
+        json.dumps(
+            {
+                "type": "item.completed",
+                "item": {
+                    "id": "item_1",
+                    "type": "command_execution",
+                    "command": command,
+                    "aggregated_output": content.replace("\n", "\r\n") + "\r\n",
+                    "exit_code": 0,
+                    "status": "completed",
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    normalized = tmp_path / "normalized.jsonl"
+
+    normalize_codex_events(
+        raw_events_path=raw,
+        normalized_events_path=normalized,
+        workspace_root=tmp_path,
+    )
+
+    events = list(iter_events_jsonl(normalized))
+    command_event = next(event for event in events if event["type"] == "run_command")
+    assert command_event["data"]["argv"] == [
+        "Get-Content",
+        "-Raw",
+        "-Encoding",
+        "UTF8",
+        "-LiteralPath",
+        ".\\atoms_text\\atoms_001.md",
+    ]
+    read = next(event for event in events if event["type"] == "read_file")
+    assert read["data"]["path"] == "atoms_text/atoms_001.md"
+    assert read["data"]["content_observed"] is True
+    assert read["data"]["whole_file_observed"] is True
+    assert read["data"]["observed_content"] == content
+    assert read["data"]["transport_normalization"] == "single_terminal_newline"
+
+
 @pytest.mark.parametrize("extra_output", [False, True])
 def test_codex_powershell_exact_line_range_attests_only_exact_output(
     tmp_path: Path,

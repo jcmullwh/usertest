@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -1846,6 +1847,177 @@ def _write_run_provenance(
     )
 
 
+def test_compatible_research_evidence_attempts_require_full_codex_lineage(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "lineage-workspace"
+    revision = _init_workspace(workspace)
+    session_id = "33333333-3333-4333-8333-333333333333"
+    source_run = tmp_path / "lineage-source"
+    source_run.mkdir()
+    _write_json(source_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=source_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+        events=[{"type": "run_command", "data": {"command": "python probe.py"}}],
+    )
+    source_attempt = mod._research_attempt_record(
+        attempt_number=1,
+        outcome="evidence_verification_invalid",
+        run_dir=source_run,
+        report_path=source_run / "report.json",
+        validation_errors=["experiment_command_not_observed:probe"],
+        attempted_dossier={"case_id": "case:one", "problem_id": "problem:one"},
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+    )
+    current_run = tmp_path / "lineage-current"
+    current_run.mkdir()
+
+    latest_same_run_attempt = json.loads(json.dumps(source_attempt))
+    latest_same_run_attempt["attempt_number"] = 2
+    latest_same_run_attempt["validation_errors"] = ["corrected_metadata"]
+    latest_same_run_attempt["attempt_sha256"] = mod.research_attempt_sha256(latest_same_run_attempt)
+    assert mod._compatible_research_evidence_attempts(
+        [source_attempt, latest_same_run_attempt],
+        case_id="case:one",
+        problem_id="problem:one",
+        repo_revision=revision,
+        agent_session_id=session_id,
+        workspace=workspace,
+        current_run_dir=current_run,
+    ) == [latest_same_run_attempt]
+
+    wrong_session = json.loads(json.dumps(source_attempt))
+    wrong_session["agent_session_id"] = "44444444-4444-4444-8444-444444444444"
+    wrong_session["observed_agent_session_id"] = wrong_session["agent_session_id"]
+    wrong_session["attempt_sha256"] = mod.research_attempt_sha256(wrong_session)
+    assert (
+        mod._compatible_research_evidence_attempts(
+            [wrong_session],
+            case_id="case:one",
+            problem_id="problem:one",
+            repo_revision=revision,
+            agent_session_id=session_id,
+            workspace=workspace,
+            current_run_dir=current_run,
+        )
+        == []
+    )
+
+    for overrides in (
+        {"case_id": "case:other"},
+        {"problem_id": "problem:other"},
+        {"repo_revision": "f" * 40},
+        {"workspace": tmp_path / "other-workspace"},
+    ):
+        assert (
+            mod._compatible_research_evidence_attempts(
+                [source_attempt],
+                case_id=str(overrides.get("case_id", "case:one")),
+                problem_id=str(overrides.get("problem_id", "problem:one")),
+                repo_revision=str(overrides.get("repo_revision", revision)),
+                agent_session_id=session_id,
+                workspace=Path(overrides.get("workspace", workspace)),
+                current_run_dir=current_run,
+            )
+            == []
+        )
+
+    noncodex_run = tmp_path / "lineage-noncodex"
+    noncodex_run.mkdir()
+    _write_json(noncodex_run / "report.json", {"status": "complete"})
+    _write_run_provenance(
+        run_dir=noncodex_run,
+        workspace=workspace,
+        revision=revision,
+        ref=revision,
+    )
+    _write_json(
+        noncodex_run / "target_ref.json",
+        {"commit_sha": revision, "ref": revision, "agent": "claude"},
+    )
+    noncodex_attempt = mod._research_attempt_record(
+        attempt_number=2,
+        outcome="evidence_verification_invalid",
+        run_dir=noncodex_run,
+        report_path=noncodex_run / "report.json",
+        validation_errors=[],
+        attempted_dossier={"case_id": "case:one", "problem_id": "problem:one"},
+        agent_session_id=session_id,
+        observed_agent_session_id=session_id,
+    )
+    assert (
+        mod._compatible_research_evidence_attempts(
+            [noncodex_attempt],
+            case_id="case:one",
+            problem_id="problem:one",
+            repo_revision=revision,
+            agent_session_id=session_id,
+            workspace=workspace,
+            current_run_dir=current_run,
+        )
+        == []
+    )
+
+    for run_name, auth_contents in (
+        ("lineage-missing-auth", None),
+        ("lineage-invalid-auth", "{}\n"),
+    ):
+        invalid_auth_run = tmp_path / run_name
+        invalid_auth_run.mkdir()
+        _write_json(invalid_auth_run / "report.json", {"status": "complete"})
+        _write_run_provenance(
+            run_dir=invalid_auth_run,
+            workspace=workspace,
+            revision=revision,
+            ref=revision,
+        )
+        auth_path = invalid_auth_run / "codex_execpolicy_overlay.json"
+        if auth_contents is None:
+            auth_path.unlink()
+        else:
+            auth_path.write_text(auth_contents, encoding="utf-8")
+        invalid_auth_attempt = mod._research_attempt_record(
+            attempt_number=3,
+            outcome="evidence_verification_invalid",
+            run_dir=invalid_auth_run,
+            report_path=invalid_auth_run / "report.json",
+            validation_errors=[],
+            attempted_dossier={"case_id": "case:one", "problem_id": "problem:one"},
+            agent_session_id=session_id,
+            observed_agent_session_id=session_id,
+        )
+        assert (
+            mod._compatible_research_evidence_attempts(
+                [invalid_auth_attempt],
+                case_id="case:one",
+                problem_id="problem:one",
+                repo_revision=revision,
+                agent_session_id=session_id,
+                workspace=workspace,
+                current_run_dir=current_run,
+            )
+            == []
+        )
+
+    (source_run / "normalized_events.jsonl").write_text("{}\n", encoding="utf-8")
+    assert (
+        mod._compatible_research_evidence_attempts(
+            [source_attempt],
+            case_id="case:one",
+            problem_id="problem:one",
+            repo_revision=revision,
+            agent_session_id=session_id,
+            workspace=workspace,
+            current_run_dir=current_run,
+        )
+        == []
+    )
+
+
 def _materialized_origin_attachment_with_read_events(
     *,
     tmp_path: Path,
@@ -2892,16 +3064,27 @@ def test_research_workspace_materializes_and_attests_large_origin_attachment(
         "".join(json.dumps(event) + "\n" for event in events),
         encoding="utf-8",
     )
+    prior_run = tmp_path / "prior-research-run"
+    prior_run.mkdir()
+    prior_events = deepcopy(events)
+    for event in prior_events:
+        event["ts"] = "2026-07-09T00:00:00Z"
+    (prior_run / "normalized_events.jsonl").write_text(
+        "".join(json.dumps(event) + "\n" for event in prior_events),
+        encoding="utf-8",
+    )
 
     receipts, errors = mod._origin_attachment_read_receipts(
         run_dir=research_run,
         workspace_dir=workspace,
         manifest=manifest,
+        evidence_attempts=[{"run_dir": str(prior_run)}],
     )
 
     assert errors == []
     assert len(receipts) == len(requirements)
     assert any(receipt["file"] == requirement["file"] for receipt in receipts)
+    assert all(receipt["read_event_index"] >= len(prior_events) for receipt in receipts)
 
 
 def test_run_repro_research_stage_dry_run_writes_requests_and_placeholders(tmp_path: Path) -> None:
@@ -4875,7 +5058,7 @@ def test_independent_feedback_correction_reuses_content_bound_origin_workspace(
         revision=revision,
         ref=revision,
         requested_codex_resume_session_id=session_id,
-        events=read_events,
+        events=[],
     )
     candidate = {**baseline, "root_cause": "corrected from the retained attachment"}
 
@@ -4913,14 +5096,20 @@ def test_independent_feedback_correction_reuses_content_bound_origin_workspace(
         }
 
     monkeypatch.setattr(mod, "_run_targeted_dossier_repairs", targeted)
-    monkeypatch.setattr(
-        mod,
-        "verify_research_evidence",
-        lambda *_args, **_kwargs: {
+    verification_calls: list[dict[str, object]] = []
+
+    def verify_with_lineage(*_args: object, **kwargs: object) -> dict[str, object]:
+        verification_calls.append(kwargs)
+        return {
             "status": "verified",
             "errors": [],
             "planning_workspace_dir": str(workspace),
-        },
+        }
+
+    monkeypatch.setattr(
+        mod,
+        "verify_research_evidence",
+        verify_with_lineage,
     )
 
     result = mod.continue_research_dossier_from_independent_feedback(
@@ -4945,6 +5134,11 @@ def test_independent_feedback_correction_reuses_content_bound_origin_workspace(
         mod.origin_attachment_requirements(manifest)
     )
     assert "origin_attachment_workspace_unavailable" not in json.dumps(result)
+    evidence_attempts = verification_calls[0]["evidence_attempts"]
+    assert isinstance(evidence_attempts, list)
+    assert [attempt["attempt_sha256"] for attempt in evidence_attempts] == [
+        source_attempt["attempt_sha256"]
+    ]
     correction_attempt = result["dossier"]["research_attempts"][-1]
     assert mod._research_attempt_workspace_path(correction_attempt) == workspace.resolve()
 

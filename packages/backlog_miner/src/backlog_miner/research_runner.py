@@ -50,6 +50,7 @@ from backlog_miner.origin_evidence import (
 from backlog_miner.research_evidence import (
     ReplayExecutor,
     _persisted_research_attempt_errors,
+    _research_attempt_event_source_binding,
     verify_persisted_research_evidence,
     verify_research_evidence,
 )
@@ -190,25 +191,49 @@ def _origin_attachment_read_receipts(
     run_dir: Path,
     workspace_dir: Path,
     manifest: dict[str, Any],
+    evidence_attempts: Sequence[Mapping[str, Any]] = (),
 ) -> tuple[list[dict[str, Any]], list[str]]:
     errors = verify_materialized_origin_attachments(
         workspace_dir=workspace_dir,
         manifest=manifest,
     )
-    events_path = run_dir / "normalized_events.jsonl"
-    if not events_path.is_file():
-        return [], [*errors, "origin_attachment_normalized_events_missing"]
     events: list[dict[str, Any]] = []
-    try:
-        for line_number, line in enumerate(events_path.read_text(encoding="utf-8").splitlines(), 1):
-            if not line.strip():
-                continue
-            raw = json.loads(line)
-            if not isinstance(raw, dict):
-                raise ValueError(f"event {line_number} is not an object")
-            events.append(raw)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
-        return [], [*errors, "origin_attachment_normalized_events_unreadable"]
+    current_run_dir = run_dir.resolve()
+    ordered_run_dirs: list[Path] = []
+    seen_run_dirs: set[Path] = set()
+    for attempt in evidence_attempts:
+        raw_run_dir = _coerce_str(attempt.get("run_dir"))
+        if raw_run_dir is None:
+            continue
+        source_run_dir = Path(raw_run_dir).resolve()
+        if source_run_dir in seen_run_dirs:
+            continue
+        seen_run_dirs.add(source_run_dir)
+        ordered_run_dirs.append(source_run_dir)
+    if current_run_dir not in seen_run_dirs:
+        ordered_run_dirs.append(current_run_dir)
+    for source_index, source_run_dir in enumerate(ordered_run_dirs):
+        events_path = source_run_dir / "normalized_events.jsonl"
+        if not events_path.is_file():
+            return [], [
+                *errors,
+                f"origin_attachment_normalized_events_missing:{source_index}",
+            ]
+        try:
+            for line_number, line in enumerate(
+                events_path.read_text(encoding="utf-8").splitlines(), 1
+            ):
+                if not line.strip():
+                    continue
+                raw = json.loads(line)
+                if not isinstance(raw, dict):
+                    raise ValueError(f"event {line_number} is not an object")
+                events.append(raw)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError):
+            return [], [
+                *errors,
+                f"origin_attachment_normalized_events_unreadable:{source_index}",
+            ]
 
     receipts: list[dict[str, Any]] = []
     observed: set[str] = set()
@@ -221,7 +246,7 @@ def _origin_attachment_read_receipts(
         except ValueError:
             errors.append(f"origin_attachment_read_outside_workspace:{rel_path}")
             continue
-        for event_index, event in enumerate(events):
+        for event_index, event in reversed(list(enumerate(events))):
             if event.get("type") != "read_file":
                 continue
             data_raw = event.get("data")
@@ -1972,6 +1997,50 @@ def _research_attempt_revision(attempt: dict[str, Any]) -> str | None:
     return revision.casefold() if revision is not None else None
 
 
+def _compatible_research_evidence_attempts(
+    attempts: Sequence[dict[str, Any]],
+    *,
+    case_id: str,
+    problem_id: str,
+    repo_revision: str,
+    agent_session_id: str,
+    workspace: Path,
+    current_run_dir: Path,
+) -> list[dict[str, Any]]:
+    """Return authenticated prior attempts from the same retained Codex researcher.
+
+    A correction turn is not a new investigation.  Commands and file reads observed in an
+    earlier turn remain evidence when the correction keeps the same case, revision, workspace,
+    signed-in Codex route, and author session.  This selector deliberately admits only
+    runner-recorded attempts whose complete artifact contract still verifies; the current run
+    remains separate and authoritative for the report, workspace diff, and changed claims.
+    """
+
+    current = current_run_dir.resolve()
+    compatible_by_run: dict[Path, dict[str, Any]] = {}
+    for attempt in attempts:
+        binding_errors: list[str] = []
+        binding = _research_attempt_event_source_binding(
+            attempt,
+            expected_case_id=case_id,
+            expected_problem_id=problem_id,
+            expected_repo_revision=repo_revision,
+            expected_workspace=workspace,
+            expected_agent_session_id=agent_session_id,
+            errors=binding_errors,
+        )
+        if binding is None:
+            continue
+        source_run = Path(str(binding["run_dir"])).resolve()
+        if source_run == current:
+            continue
+        # A verifier-source record and its completed attempt can legitimately name
+        # the same immutable run. Keep one source boundary and bind it to the latest
+        # retained attempt record for that run.
+        compatible_by_run[source_run] = json.loads(json.dumps(attempt, ensure_ascii=False))
+    return list(compatible_by_run.values())
+
+
 def _repair_candidate_from_run(
     *,
     result: Any,
@@ -2071,6 +2140,7 @@ def _run_targeted_dossier_repairs(
     independent_feedback: Mapping[str, Any] | None = None,
     original_investigation_seconds: float | None = None,
     source_baseline_is_unverified_draft: bool | None = None,
+    evidence_attempt_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Continue the authoring Codex session until corrected or demonstrably worth restarting."""
     workspace = _research_attempt_workspace_path(source_attempt)
@@ -2447,6 +2517,8 @@ def _run_targeted_dossier_repairs(
             repair_progress=progress,
         )
         attempts.append(repair_attempt)
+        if evidence_attempt_history is not None:
+            evidence_attempt_history.append(dict(repair_attempt))
         previous_correction_feedback = {
             "source_attempt_sha256": repair_attempt["attempt_sha256"],
             "candidate_dossier_sha256": repair_attempt["attempted_dossier_sha256"],
@@ -2616,6 +2688,7 @@ def continue_research_dossier_from_independent_feedback(
             "invocation_failed",
         }
     )
+    evidence_attempt_history = [dict(attempt) for attempt in attempts]
 
     def validate_candidate(candidate: dict[str, Any], correction_result: Any) -> Sequence[str]:
         verification_run_dir = Path(correction_result.run_dir).resolve()
@@ -2656,9 +2729,26 @@ def continue_research_dossier_from_independent_feedback(
             if ref["path"] not in known_paths:
                 refs.append(ref)
         prepared["artifact_refs"] = refs
+        retained_workspace = _research_attempt_workspace_path(source_attempt)
+        retained_session_id = _coerce_str(source_attempt.get("agent_session_id"))
+        evidence_attempts = (
+            _compatible_research_evidence_attempts(
+                evidence_attempt_history,
+                case_id=case_id,
+                problem_id=problem_id,
+                repo_revision=prepared["repo_revision"],
+                agent_session_id=retained_session_id,
+                workspace=retained_workspace,
+                current_run_dir=verification_run_dir,
+            )
+            if retained_workspace is not None and retained_session_id is not None
+            else []
+        )
         receipt = verify_research_evidence(
             prepared,
             run_dir=verification_run_dir,
+            evidence_attempts=evidence_attempts,
+            evidence_agent_session_id=retained_session_id,
             repo_revision=prepared["repo_revision"],
             case_id=case_id,
             problem_id=problem_id,
@@ -2688,6 +2778,7 @@ def continue_research_dossier_from_independent_feedback(
                     run_dir=verification_run_dir,
                     workspace_dir=workspace,
                     manifest=origin_attachment,
+                    evidence_attempts=evidence_attempts,
                 )
                 if workspace is not None
                 else ([], ["origin_attachment_workspace_unavailable"])
@@ -2726,6 +2817,7 @@ def continue_research_dossier_from_independent_feedback(
         independent_feedback=independent_feedback,
         original_investigation_seconds=effective_original_seconds,
         source_baseline_is_unverified_draft=source_baseline_is_unverified_draft,
+        evidence_attempt_history=evidence_attempt_history,
     )
     repaired_raw = repair.get("dossier")
     repaired = dict(repaired_raw) if isinstance(repaired_raw, dict) else dict(dossier)
@@ -2875,7 +2967,7 @@ def _resume_checkpoint_from_stage_document(
     return checkpoint, by_problem_id
 
 
-_STAGE3_SEMANTIC_PROOF_CONTRACT_VERSION = "root_cause_research_proof_v1"
+_STAGE3_SEMANTIC_PROOF_CONTRACT_VERSION = "root_cause_research_proof_v2_cumulative_evidence"
 _STAGE3_ORCHESTRATION_LINEAGE_FIELDS = frozenset(
     {"canonical_problem_id", "case_member_problem_ids", "same_cause_group_id"}
 )
@@ -4801,6 +4893,9 @@ def run_repro_research_stage(
                 str,
                 tuple[dict[str, Any], dict[str, Any], Path, Any, dict[str, Any]],
             ] = {}
+            verifier_evidence_attempt_history = [
+                dict(attempt) for attempt in research_attempt_history
+            ]
 
             def validate_verifier_candidate(
                 candidate: dict[str, Any],
@@ -4825,6 +4920,8 @@ def run_repro_research_stage(
                 ] = verified_candidates,
                 _origin_attachment_evidence: dict[str, Any] = origin_attachment_evidence,
                 _prepared_workspace: Path | None = prepared_workspace,
+                _evidence_attempt_history: list[dict[str, Any]] = verifier_evidence_attempt_history,
+                _source_attempt: dict[str, Any] = current_attempt,
             ) -> Sequence[str]:
                 verification_run_dir = (
                     correction_result.run_dir if _research_capabilities else _original_run_dir
@@ -4869,9 +4966,28 @@ def run_repro_research_stage(
                     if ref["path"] not in candidate_paths:
                         candidate_refs.append(ref)
                 prepared["artifact_refs"] = candidate_refs
+                retained_workspace = _research_attempt_workspace_path(_source_attempt)
+                retained_session_id = _coerce_str(_source_attempt.get("agent_session_id"))
+                evidence_attempts = (
+                    _compatible_research_evidence_attempts(
+                        _evidence_attempt_history,
+                        case_id=_case_id,
+                        problem_id=_problem_id,
+                        repo_revision=prepared["repo_revision"],
+                        agent_session_id=retained_session_id,
+                        workspace=retained_workspace,
+                        current_run_dir=verification_run_dir,
+                    )
+                    if _research_capabilities
+                    and retained_workspace is not None
+                    and retained_session_id is not None
+                    else []
+                )
                 candidate_receipt = verify_research_evidence(
                     prepared,
                     run_dir=verification_run_dir,
+                    evidence_attempts=evidence_attempts,
+                    evidence_agent_session_id=retained_session_id,
                     repo_revision=prepared["repo_revision"],
                     case_id=_case_id,
                     problem_id=_problem_id,
@@ -4914,6 +5030,7 @@ def run_repro_research_stage(
                             run_dir=verification_run_dir,
                             workspace_dir=candidate_workspace,
                             manifest=_origin_attachment_evidence,
+                            evidence_attempts=evidence_attempts,
                         )
                         if candidate_workspace is not None
                         else ([], ["origin_attachment_workspace_unavailable"])
@@ -4980,6 +5097,7 @@ def run_repro_research_stage(
                     if research_capabilities
                     else "evidence_verification_dossier_repair"
                 ),
+                evidence_attempt_history=verifier_evidence_attempt_history,
             )
             verifier_attempts = [
                 attempt

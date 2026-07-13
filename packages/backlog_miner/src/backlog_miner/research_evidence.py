@@ -40,6 +40,7 @@ from backlog_core.stage_contracts import (
     evidence_assignment_sha256,
     evidence_verification_sha256,
     replay_invocation_references_model_overlay,
+    research_attempt_sha256,
     research_claims_sha256,
 )
 from runner_core.codex_execpolicy import verify_controlled_codex_execpolicy_receipt
@@ -55,6 +56,7 @@ from backlog_miner.proof_adapters import (
     ProofAdapterContext,
     builtin_positive_basis_registry,
     builtin_proof_adapter_registry,
+    repository_contract_quote_provenance,
 )
 from backlog_miner.proof_adapters.base import (
     environment_attestation,
@@ -312,7 +314,11 @@ def _within(path: Path, root: Path) -> bool:
 
 
 def _normalize_command(value: str) -> str:
-    return " ".join(value.split())
+    argv = _parse_argv_without_shell(value)
+    if argv is None:
+        return " ".join(value.split())
+    portable_argv, _changed = _portable_replay_path_argv(argv)
+    return json.dumps(portable_argv, ensure_ascii=False, separators=(",", ":"))
 
 
 def _normalize_path(value: str) -> str:
@@ -714,11 +720,9 @@ def _portable_replay_path_argv(argv: list[str]) -> tuple[list[str], bool]:
     changed = False
     for index in path_indexes:
         token = portable[index]
-        if "\\" not in token:
-            continue
         if pytest_paths:
             path_token, selector_separator, selector = token.partition("::")
-            normalized_path = path_token.replace("\\", "/")
+            normalized_path = path_token.replace("\\", "/").removeprefix("./")
             path_part = normalized_path.casefold()
             if not (
                 path_part.endswith(".py")
@@ -727,8 +731,8 @@ def _portable_replay_path_argv(argv: list[str]) -> tuple[list[str], bool]:
                 continue
             portable[index] = normalized_path + selector_separator + selector
         else:
-            portable[index] = token.replace("\\", "/")
-        changed = True
+            portable[index] = token.replace("\\", "/").removeprefix("./")
+        changed = changed or portable[index] != token
     return portable, changed
 
 
@@ -2235,6 +2239,506 @@ def _load_events(path: Path, errors: list[str]) -> list[dict[str, Any]]:
     return events
 
 
+_RESEARCH_ATTEMPT_EVENT_BINDING_FIELDS = (
+    "binding_version",
+    "binding_sha256",
+    "attempt_sha256",
+    "case_id",
+    "problem_id",
+    "repo_revision",
+    "workspace_dir",
+    "agent",
+    "agent_session_id",
+    "observed_agent_session_id",
+    "run_dir",
+    "target_ref_sha256",
+    "workspace_ref_sha256",
+    "normalized_events_path",
+    "normalized_events_sha256",
+    "normalized_events_size_bytes",
+    "codex_subscription_auth_sha256",
+)
+
+
+def _research_attempt_event_source_binding(
+    attempt: Mapping[str, Any],
+    *,
+    expected_case_id: str | None,
+    expected_problem_id: str | None,
+    expected_repo_revision: str | None,
+    expected_workspace: Path | None,
+    expected_agent_session_id: str | None,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    """Authenticate one prior attempt before its events enter a correction."""
+
+    error_count = len(errors)
+    attempt_copy = dict(attempt)
+    attempt_sha = _text(attempt.get("attempt_sha256"))
+    if attempt_sha is None or attempt_sha != research_attempt_sha256(attempt_copy):
+        errors.append("research_evidence_attempt_hash_invalid")
+
+    attempted_raw = attempt.get("attempted_dossier")
+    attempted = attempted_raw if isinstance(attempted_raw, Mapping) else {}
+    if attempt.get("attempted_dossier_sha256") != _canonical_json_sha256(attempted):
+        errors.append("research_evidence_attempt_dossier_hash_invalid")
+    case_id = _text(attempted.get("case_id"))
+    problem_id = _text(attempted.get("problem_id"))
+    agent_session_id = _text(attempt.get("agent_session_id"))
+    observed_agent_session_id = _text(attempt.get("observed_agent_session_id"))
+    if case_id != expected_case_id:
+        errors.append("research_evidence_attempt_case_mismatch")
+    if problem_id != expected_problem_id:
+        errors.append("research_evidence_attempt_problem_mismatch")
+    if (
+        expected_agent_session_id is None
+        or agent_session_id != expected_agent_session_id
+        or observed_agent_session_id != expected_agent_session_id
+    ):
+        errors.append("research_evidence_attempt_session_mismatch")
+
+    run_dir_raw = _text(attempt.get("run_dir"))
+    run_dir = (
+        Path(run_dir_raw).resolve()
+        if run_dir_raw is not None and Path(run_dir_raw).is_absolute()
+        else None
+    )
+    if run_dir is None or not run_dir.is_dir():
+        errors.append("research_evidence_attempt_run_dir_invalid")
+
+    artifacts_raw = attempt.get("attempt_artifacts")
+    artifacts = artifacts_raw if isinstance(artifacts_raw, list) else []
+    artifacts_by_kind: dict[str, list[Mapping[str, Any]]] = {}
+    for artifact in artifacts:
+        if not isinstance(artifact, Mapping):
+            continue
+        kind = _text(artifact.get("kind"))
+        if kind is not None:
+            artifacts_by_kind.setdefault(kind, []).append(artifact)
+    required_kinds = {
+        "report",
+        "workspace_ref",
+        "target_ref",
+        "normalized_events",
+        "codex_subscription_auth",
+    }
+    if any(len(artifacts_by_kind.get(kind, [])) != 1 for kind in required_kinds):
+        errors.append("research_evidence_attempt_artifact_contract_invalid")
+
+    def bound_artifact(kind: str, filename: str) -> tuple[Path | None, Mapping[str, Any] | None]:
+        candidates = artifacts_by_kind.get(kind, [])
+        artifact = candidates[0] if len(candidates) == 1 else None
+        path_raw = _text(artifact.get("path")) if artifact is not None else None
+        path = (
+            Path(path_raw).resolve()
+            if path_raw is not None and Path(path_raw).is_absolute()
+            else None
+        )
+        if (
+            artifact is None
+            or run_dir is None
+            or path != (run_dir / filename).resolve()
+            or artifact.get("exists") is not True
+            or path is None
+            or not path.is_file()
+            or artifact.get("sha256") != _sha256_path(path)
+            or artifact.get("size_bytes") != path.stat().st_size
+        ):
+            errors.append(f"research_evidence_attempt_artifact_invalid:{kind}")
+            return None, artifact
+        return path, artifact
+
+    report_path, _report_artifact = bound_artifact("report", "report.json")
+    if report_path is None or _text(attempt.get("report_path")) != str(report_path):
+        errors.append("research_evidence_attempt_report_path_invalid")
+    workspace_ref_path, workspace_ref_artifact = bound_artifact(
+        "workspace_ref", "workspace_ref.json"
+    )
+    target_ref_path, target_ref_artifact = bound_artifact("target_ref", "target_ref.json")
+    events_path, events_artifact = bound_artifact("normalized_events", "normalized_events.jsonl")
+    auth_path, auth_artifact = bound_artifact(
+        "codex_subscription_auth", "codex_execpolicy_overlay.json"
+    )
+
+    workspace_dir: Path | None = None
+    if workspace_ref_path is not None:
+        try:
+            workspace_ref_raw = json.loads(workspace_ref_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            workspace_ref_raw = None
+        workspace_raw = (
+            _text(workspace_ref_raw.get("workspace_dir"))
+            if isinstance(workspace_ref_raw, Mapping)
+            else None
+        )
+        workspace_dir = (
+            Path(workspace_raw).resolve()
+            if workspace_raw is not None and Path(workspace_raw).is_absolute()
+            else None
+        )
+    if (
+        workspace_dir is None
+        or expected_workspace is None
+        or workspace_dir != expected_workspace.resolve()
+    ):
+        errors.append("research_evidence_attempt_workspace_mismatch")
+
+    target_ref: Mapping[str, Any] | None = None
+    if target_ref_path is not None:
+        try:
+            target_ref_raw = json.loads(target_ref_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            target_ref_raw = None
+        target_ref = target_ref_raw if isinstance(target_ref_raw, Mapping) else None
+    agent_raw = _text(target_ref.get("agent")) if target_ref is not None else None
+    agent = agent_raw.casefold() if agent_raw is not None else None
+    repo_revision_raw = _text(target_ref.get("commit_sha")) if target_ref is not None else None
+    repo_revision = repo_revision_raw.casefold() if repo_revision_raw is not None else None
+    expected_revision = (
+        expected_repo_revision.casefold() if expected_repo_revision is not None else None
+    )
+    if agent != "codex":
+        errors.append("research_evidence_attempt_agent_not_codex")
+    if repo_revision is None or repo_revision != expected_revision:
+        errors.append("research_evidence_attempt_revision_mismatch")
+
+    if auth_path is not None:
+        auth_errors = verify_controlled_codex_execpolicy_receipt(auth_path)
+        errors.extend(f"research_evidence_attempt_{error}" for error in auth_errors)
+
+    if len(errors) != error_count:
+        return None
+    assert (
+        attempt_sha is not None
+        and run_dir is not None
+        and workspace_dir is not None
+        and repo_revision is not None
+        and events_path is not None
+        and events_artifact is not None
+        and target_ref_artifact is not None
+        and workspace_ref_artifact is not None
+        and auth_artifact is not None
+    )
+    binding = {
+        "binding_version": 1,
+        "attempt_sha256": attempt_sha,
+        "case_id": case_id,
+        "problem_id": problem_id,
+        "repo_revision": repo_revision,
+        "workspace_dir": str(workspace_dir),
+        "agent": "codex",
+        "agent_session_id": agent_session_id,
+        "observed_agent_session_id": observed_agent_session_id,
+        "run_dir": str(run_dir),
+        "target_ref_sha256": target_ref_artifact.get("sha256"),
+        "workspace_ref_sha256": workspace_ref_artifact.get("sha256"),
+        "normalized_events_path": str(events_path),
+        "normalized_events_sha256": events_artifact.get("sha256"),
+        "normalized_events_size_bytes": events_artifact.get("size_bytes"),
+        "codex_subscription_auth_sha256": auth_artifact.get("sha256"),
+    }
+    binding["binding_sha256"] = _canonical_json_sha256(binding)
+    return binding
+
+
+def _current_correction_lineage_binding(
+    *,
+    run_dir: Path,
+    expected_agent_session_id: str | None,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    """Bind an in-flight correction without requiring its future attempt hash."""
+
+    if expected_agent_session_id is None:
+        return None
+    error_count = len(errors)
+    run_dir = run_dir.resolve()
+    target_ref_path = run_dir / "target_ref.json"
+    auth_path = run_dir / "codex_execpolicy_overlay.json"
+    target_ref: Mapping[str, Any] | None = None
+    if target_ref_path.is_file():
+        try:
+            target_ref_raw = json.loads(target_ref_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            target_ref_raw = None
+        target_ref = target_ref_raw if isinstance(target_ref_raw, Mapping) else None
+    if target_ref is None:
+        errors.append("research_evidence_current_target_ref_invalid")
+    else:
+        agent_raw = _text(target_ref.get("agent"))
+        if agent_raw is None or agent_raw.casefold() != "codex":
+            errors.append("research_evidence_current_agent_not_codex")
+        if _text(target_ref.get("requested_codex_resume_session_id")) != expected_agent_session_id:
+            errors.append("research_evidence_current_resume_session_mismatch")
+    if not auth_path.is_file():
+        errors.append("research_evidence_current_codex_subscription_receipt_missing")
+    else:
+        errors.extend(
+            f"research_evidence_current_{error}"
+            for error in verify_controlled_codex_execpolicy_receipt(auth_path)
+        )
+    if len(errors) != error_count:
+        return None
+    binding = {
+        "binding_version": 1,
+        "agent": "codex",
+        "agent_session_id": expected_agent_session_id,
+        "requested_codex_resume_session_id": expected_agent_session_id,
+        "run_dir": str(run_dir),
+        "target_ref_path": str(target_ref_path),
+        "target_ref_sha256": _sha256_path(target_ref_path),
+        "codex_subscription_auth_path": str(auth_path),
+        "codex_subscription_auth_sha256": _sha256_path(auth_path),
+        "codex_subscription_auth_size_bytes": auth_path.stat().st_size,
+    }
+    binding["binding_sha256"] = _canonical_json_sha256(binding)
+    return binding
+
+
+def _load_evidence_event_stream(
+    *,
+    run_dir: Path,
+    evidence_attempts: Sequence[Mapping[str, Any]],
+    case_id: str,
+    problem_id: str,
+    repo_revision: str | None,
+    workspace: Path | None,
+    agent_session_id: str | None,
+    current_run_lineage: Mapping[str, Any] | None,
+    errors: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str]:
+    """Load prior authenticated attempts followed by the authoritative current run."""
+
+    current_run_dir = run_dir.resolve()
+    prior_bindings_by_run: dict[Path, dict[str, Any]] = {}
+    for attempt in evidence_attempts:
+        binding = _research_attempt_event_source_binding(
+            attempt,
+            expected_case_id=case_id,
+            expected_problem_id=problem_id,
+            expected_repo_revision=repo_revision,
+            expected_workspace=workspace,
+            expected_agent_session_id=agent_session_id,
+            errors=errors,
+        )
+        if binding is None:
+            continue
+        source_run_dir = Path(str(binding["run_dir"])).resolve()
+        if source_run_dir == current_run_dir:
+            continue
+        prior_bindings_by_run[source_run_dir] = binding
+
+    events: list[dict[str, Any]] = []
+    sources: list[dict[str, Any]] = []
+    for binding in prior_bindings_by_run.values():
+        events_path = Path(str(binding["normalized_events_path"]))
+        source_events = _load_events(events_path, errors)
+        start_index = len(events)
+        events.extend(source_events)
+        sources.append(
+            {
+                "source_kind": "prior_attempt",
+                "source_index": len(sources),
+                **binding,
+                "event_count": len(source_events),
+                "global_start_index": start_index,
+                "global_end_index_exclusive": len(events),
+            }
+        )
+
+    # The in-flight correction has no attempt_sha256 until after candidate
+    # verification. It is deliberately separate and last so its observations win.
+    events_path = current_run_dir / "normalized_events.jsonl"
+    current_events = _load_events(events_path, errors)
+    start_index = len(events)
+    events.extend(current_events)
+    events_exists = events_path.is_file()
+    sources.append(
+        {
+            "source_kind": "current_run",
+            "source_index": len(sources),
+            "case_id": case_id,
+            "problem_id": problem_id,
+            "repo_revision": repo_revision.casefold() if repo_revision is not None else None,
+            "workspace_dir": str(workspace.resolve()) if workspace is not None else None,
+            "agent_session_id": agent_session_id,
+            "current_run_lineage": (
+                dict(current_run_lineage) if current_run_lineage is not None else None
+            ),
+            "run_dir": str(current_run_dir),
+            "normalized_events_path": str(events_path),
+            "normalized_events_sha256": _sha256_path(events_path) if events_exists else None,
+            "normalized_events_size_bytes": events_path.stat().st_size if events_exists else None,
+            "event_count": len(current_events),
+            "global_start_index": start_index,
+            "global_end_index_exclusive": len(events),
+        }
+    )
+    return events, sources, _canonical_json_sha256(sources)
+
+
+def _load_persisted_evidence_event_stream(
+    receipt: Mapping[str, Any],
+    *,
+    current_run_dir: Path | None,
+    research_attempts: Sequence[Mapping[str, Any]],
+    errors: list[str],
+) -> list[dict[str, Any]]:
+    """Reconstruct and integrity-check a persisted cumulative event stream."""
+
+    if "evidence_event_sources" not in receipt:
+        # Backward compatibility for receipts written before cumulative evidence
+        # streams existed: their sole source is the authoritative current run.
+        if current_run_dir is None:
+            return []
+        return _load_events(current_run_dir / "normalized_events.jsonl", errors)
+
+    sources_raw = receipt.get("evidence_event_sources")
+    if not isinstance(sources_raw, list) or not sources_raw:
+        errors.append("research_evidence_event_sources_invalid")
+        return []
+    if receipt.get("evidence_event_sources_sha256") != _canonical_json_sha256(sources_raw):
+        errors.append("research_evidence_event_sources_hash_changed")
+
+    attempts_by_sha: dict[str, list[Mapping[str, Any]]] = {}
+    for attempt in research_attempts:
+        attempt_sha = _text(attempt.get("attempt_sha256"))
+        if attempt_sha is not None:
+            attempts_by_sha.setdefault(attempt_sha, []).append(attempt)
+
+    expected_workspace_raw = _text(receipt.get("workspace_dir"))
+    expected_workspace = (
+        Path(expected_workspace_raw).resolve() if expected_workspace_raw is not None else None
+    )
+    expected_case_id = _text(receipt.get("case_id"))
+    expected_problem_id = _text(receipt.get("problem_id"))
+    expected_repo_revision = _text(receipt.get("repo_revision"))
+    expected_agent_session_id = _text(receipt.get("evidence_agent_session_id"))
+
+    events: list[dict[str, Any]] = []
+    seen_run_dirs: set[Path] = set()
+    last_source_run_dir: Path | None = None
+    current_source_count = 0
+    for source_index, source_raw in enumerate(sources_raw):
+        if not isinstance(source_raw, dict):
+            errors.append(f"research_evidence_event_source_invalid:{source_index}")
+            continue
+        run_dir_raw = _text(source_raw.get("run_dir"))
+        events_path_raw = _text(source_raw.get("normalized_events_path"))
+        source_run_dir = (
+            Path(run_dir_raw).resolve()
+            if run_dir_raw is not None and Path(run_dir_raw).is_absolute()
+            else None
+        )
+        events_path = (
+            Path(events_path_raw).resolve()
+            if events_path_raw is not None and Path(events_path_raw).is_absolute()
+            else None
+        )
+        source_kind = _text(source_raw.get("source_kind"))
+        expected_events_path = (
+            source_run_dir / "normalized_events.jsonl" if source_run_dir else None
+        )
+        if source_kind == "prior_attempt":
+            attempt_sha = _text(source_raw.get("attempt_sha256"))
+            matches = attempts_by_sha.get(attempt_sha or "", [])
+            if len(matches) != 1:
+                errors.append(f"research_evidence_event_source_attempt_unmatched:{source_index}")
+            else:
+                binding_errors: list[str] = []
+                binding = _research_attempt_event_source_binding(
+                    matches[0],
+                    expected_case_id=expected_case_id,
+                    expected_problem_id=expected_problem_id,
+                    expected_repo_revision=expected_repo_revision,
+                    expected_workspace=expected_workspace,
+                    expected_agent_session_id=expected_agent_session_id,
+                    errors=binding_errors,
+                )
+                errors.extend(
+                    f"research_evidence_event_source_binding:{source_index}:{error}"
+                    for error in binding_errors
+                )
+                persisted_binding = {
+                    field: source_raw.get(field) for field in _RESEARCH_ATTEMPT_EVENT_BINDING_FIELDS
+                }
+                if binding is None or persisted_binding != binding:
+                    errors.append(f"research_evidence_event_source_binding_changed:{source_index}")
+        elif source_kind == "current_run":
+            current_source_count += 1
+            current_lineage_errors: list[str] = []
+            current_lineage = (
+                _current_correction_lineage_binding(
+                    run_dir=source_run_dir,
+                    expected_agent_session_id=expected_agent_session_id,
+                    errors=current_lineage_errors,
+                )
+                if source_run_dir is not None
+                else None
+            )
+            errors.extend(
+                f"research_evidence_event_current_source:{source_index}:{error}"
+                for error in current_lineage_errors
+            )
+            if (
+                source_index != len(sources_raw) - 1
+                or source_raw.get("case_id") != expected_case_id
+                or source_raw.get("problem_id") != expected_problem_id
+                or source_raw.get("repo_revision")
+                != (expected_repo_revision.casefold() if expected_repo_revision else None)
+                or source_raw.get("workspace_dir")
+                != (str(expected_workspace) if expected_workspace is not None else None)
+                or source_raw.get("agent_session_id") != expected_agent_session_id
+                or source_raw.get("current_run_lineage") != current_lineage
+            ):
+                errors.append(f"research_evidence_event_current_source_invalid:{source_index}")
+        else:
+            errors.append(f"research_evidence_event_source_kind_invalid:{source_index}")
+        source_structure_valid = (
+            source_raw.get("source_index") == source_index
+            and source_run_dir is not None
+            and events_path is not None
+            and events_path == expected_events_path
+            and source_run_dir not in seen_run_dirs
+        )
+        if not source_structure_valid:
+            errors.append(f"research_evidence_event_source_invalid:{source_index}")
+        if source_run_dir is not None:
+            seen_run_dirs.add(source_run_dir)
+            last_source_run_dir = source_run_dir
+
+        source_events: list[dict[str, Any]] = []
+        if events_path is not None:
+            source_errors: list[str] = []
+            source_events = _load_events(events_path, source_errors)
+            errors.extend(
+                f"research_evidence_event_source_error:{source_index}:{error}"
+                for error in source_errors
+            )
+        start_index = len(events)
+        events.extend(source_events)
+        end_index = len(events)
+        events_exists = events_path is not None and events_path.is_file()
+        actual_sha256 = _sha256_path(events_path) if events_exists and events_path else None
+        actual_size = events_path.stat().st_size if events_exists and events_path else None
+        if (
+            source_raw.get("normalized_events_sha256") != actual_sha256
+            or source_raw.get("normalized_events_size_bytes") != actual_size
+            or source_raw.get("event_count") != len(source_events)
+            or source_raw.get("global_start_index") != start_index
+            or source_raw.get("global_end_index_exclusive") != end_index
+        ):
+            errors.append(f"research_evidence_event_source_changed:{source_index}")
+
+    if (
+        current_run_dir is None
+        or last_source_run_dir != current_run_dir.resolve()
+        or current_source_count != 1
+    ):
+        errors.append("research_evidence_event_current_source_not_last")
+    return events
+
+
 def _resolve_evidence_path(
     raw_path: str,
     *,
@@ -2375,7 +2879,10 @@ def _experiment_receipts(
             )
             continue
 
-        event_index, event, data = matches[0]
+        # Sources are ordered prior-to-current. Prefer the newest matching observation
+        # so a correction can supersede an earlier duplicate while still inheriting
+        # observations it did not repeat.
+        event_index, event, data = matches[-1]
         used_event_indexes.add(event_index)
         clean_replay = clean_replays.get(experiment_id)
         if clean_replay is None:
@@ -3177,13 +3684,29 @@ def _harness_mechanism_touches(
         return None
 
     def assigned_names(call: ast.Call) -> set[str]:
-        parent = parents.get(call)
+        # Preserve direct provenance through immediate result-method chaining.  In
+        # ``result = mechanism(...).to_dict()`` the mechanism call is not itself the
+        # assignment value, but its result is still the receiver of the assigned call.
+        # Do not cross wrappers such as ``unrelated(mechanism(...))``: only an Attribute
+        # whose value is the current result and the corresponding zero-hop method call
+        # are eligible.
+        assigned_value: ast.AST = call
+        while True:
+            attribute = parents.get(assigned_value)
+            if not isinstance(attribute, ast.Attribute) or attribute.value is not assigned_value:
+                break
+            chained_call = parents.get(attribute)
+            if not isinstance(chained_call, ast.Call) or chained_call.func is not attribute:
+                break
+            assigned_value = chained_call
+
+        parent = parents.get(assigned_value)
         targets: list[ast.AST] = []
-        if isinstance(parent, ast.Assign) and parent.value is call:
+        if isinstance(parent, ast.Assign) and parent.value is assigned_value:
             targets.extend(parent.targets)
-        elif isinstance(parent, ast.AnnAssign) and parent.value is call:
+        elif isinstance(parent, ast.AnnAssign) and parent.value is assigned_value:
             targets.append(parent.target)
-        elif isinstance(parent, ast.NamedExpr) and parent.value is call:
+        elif isinstance(parent, ast.NamedExpr) and parent.value is assigned_value:
             targets.append(parent.target)
         names: set[str] = set()
         for target in targets:
@@ -7148,113 +7671,16 @@ def _semantic_basis_receipt(
             "evidence_role": "observation",
         }
     elif basis_kind == "repository_contract_quote":
-        if planning_workspace is None:
-            return None
-        path_raw = _text(basis.get("path"))
-        contract_type = basis.get("contract_type")
-        allowed_suffixes = {
-            "api_contract": {".py", ".pyi"},
-            "documentation": {".md", ".rst", ".txt"},
-            "schema": {".json", ".toml", ".yaml", ".yml"},
-        }
-        relative = Path(path_raw or "")
-        path = (planning_workspace / relative).resolve()
-        inspected = next(
-            (
-                dict(receipt)
-                for receipt in inspected_file_receipts
-                if receipt.get("path") == relative.as_posix()
-            ),
-            None,
+        provenance = repository_contract_quote_provenance(
+            basis,
+            planning_workspace=planning_workspace,
+            inspected_file_receipts=inspected_file_receipts,
+            inspected_symbol_receipts=inspected_symbol_receipts,
+            mechanism_symbols=mechanism_symbols,
+            config_value_resolver=_config_value_for_symbol,
         )
-        if (
-            path_raw is None
-            or contract_type not in allowed_suffixes
-            or relative.is_absolute()
-            or ".." in relative.parts
-            or path.suffix.casefold() not in allowed_suffixes[str(contract_type)]
-            or not _within(path, planning_workspace.resolve())
-            or not path.is_file()
-            or path.is_symlink()
-            or not isinstance(inspected, dict)
-        ):
+        if provenance is None:
             return None
-        try:
-            content = path.read_text(encoding="utf-8", errors="strict")
-        except (OSError, UnicodeDecodeError):
-            return None
-        if exact_quote not in content or inspected.get("sha256") != _sha256_path(path):
-            return None
-        locator: dict[str, Any]
-        if contract_type == "api_contract":
-            symbol = _text(basis.get("symbol"))
-            symbol_receipt = next(
-                (
-                    receipt
-                    for receipt in inspected_symbol_receipts
-                    if receipt.get("symbol") == symbol
-                    and receipt.get("path") == relative.as_posix()
-                ),
-                None,
-            )
-            try:
-                tree = ast.parse(content)
-            except SyntaxError:
-                return None
-            candidates = [
-                node
-                for node in ast.walk(tree)
-                if isinstance(
-                    node,
-                    (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
-                )
-                and symbol is not None
-                and symbol.replace(":", ".").replace("#", ".").endswith(node.name)
-            ]
-            segment = (
-                ast.get_source_segment(content, candidates[0]) if len(candidates) == 1 else None
-            )
-            if (
-                symbol not in mechanism_symbols
-                or not isinstance(symbol_receipt, Mapping)
-                or not isinstance(segment, str)
-                or exact_quote not in segment
-            ):
-                return None
-            locator = {"kind": "python_symbol", "symbol": symbol}
-        elif contract_type == "schema":
-            pointer = _text(basis.get("json_pointer"))
-            exists, schema_value, _ = _config_value_for_symbol(
-                path=path,
-                symbol=f"config:{pointer or ''}",
-            )
-            if pointer is None or not pointer.startswith("/") or not exists:
-                return None
-            locator = {
-                "kind": "schema_pointer",
-                "json_pointer": pointer,
-                "value_sha256": _canonical_json_sha256(schema_value),
-            }
-        else:
-            subject = _text(basis.get("contract_subject"))
-            allowed_subjects = mechanism_symbols | {
-                symbol.rsplit(".", 1)[-1] for symbol in mechanism_symbols
-            }
-            if subject not in allowed_subjects or subject not in exact_quote:
-                return None
-            locator = {"kind": "mechanism_subject", "subject": subject}
-        provenance = {
-            "kind": "repository_contract_quote",
-            "verification_method": "runner_researched_repository_contract_quote_v1",
-            "contract_type": contract_type,
-            "path": relative.as_posix(),
-            "sha256": inspected.get("sha256"),
-            "git_blob_sha": inspected.get("git_blob_sha"),
-            "read_event_sha256": inspected.get("read_event_sha256"),
-            "exact_quote": exact_quote,
-            "exact_quote_sha256": sha256(exact_quote.encode("utf-8")).hexdigest(),
-            "contract_locator": locator,
-        }
     else:
         # A metamorphic/invariant basis will be added only when the runner has an
         # actual input-equivalence receipt.  Model-authored control prose is not it.
@@ -9388,7 +9814,8 @@ def _experiment_atom_bindings(
         ):
             continue
         experiment_id = str(experiment.get("experiment_id") or "")
-        command = _normalize_command(str(experiment.get("command") or ""))
+        raw_command = str(experiment.get("command") or "")
+        command = _normalize_command(raw_command)
         assertion_raw = experiment.get("observable_assertion")
         assertion = assertion_raw if isinstance(assertion_raw, dict) else {}
         for atom_id in experiment.get("addresses_atom_ids", []):
@@ -9405,7 +9832,7 @@ def _experiment_atom_bindings(
                     atom_id=atom_id,
                     atom_receipt=atom_receipts.get(atom_id, {}),
                     assertion=assertion,
-                    command=command,
+                    command=raw_command,
                     errors=errors,
                 )
                 if explicit:
@@ -9617,6 +10044,72 @@ def _implementation_touchpoint_receipts(
     return [receipts[key] for key in sorted(receipts)], list(dict.fromkeys(diagnostics))
 
 
+def _resolved_proof_adapter_semantic_basis(
+    *,
+    experiment: Mapping[str, Any],
+    claim: Mapping[str, Any],
+    semantic_basis: Mapping[str, Any],
+    predicate: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Cross-bind a concise proof quote to the same experiment's full contract.
+
+    The live dossier correctly repeated the quote and path in ``proof_adapter`` while
+    retaining ``contract_type`` in ``positive_outcome_contract`` and the API symbol in
+    the proof's implementation touchpoint.  Resolve those declarations only when every
+    shared field agrees.  The repository binder still authenticates the file read, symbol
+    read, unique AST definition, and quote location; this function supplies no evidence.
+    """
+
+    resolved = dict(semantic_basis)
+    if semantic_basis.get("kind") != "repository_contract_quote":
+        return resolved
+
+    positive_contract = experiment.get("positive_outcome_contract")
+    retained_basis = (
+        positive_contract.get("semantic_basis") if isinstance(positive_contract, Mapping) else None
+    )
+    expected = predicate.get("expected") if predicate.get("kind") == "equals" else None
+    if (
+        not isinstance(positive_contract, Mapping)
+        or positive_contract.get("contract_kind") != "retained_harness_semantic_assertion"
+        or positive_contract.get("expected_value") != expected
+        or not isinstance(retained_basis, Mapping)
+        or retained_basis.get("kind") != "repository_contract_quote"
+        or any(
+            key in retained_basis and retained_basis.get(key) != value
+            for key, value in semantic_basis.items()
+        )
+        or any(
+            retained_basis.get(key) != semantic_basis.get(key)
+            for key in ("kind", "path", "exact_quote")
+        )
+    ):
+        return resolved
+
+    resolved = dict(retained_basis)
+    resolved.update(semantic_basis)
+    if resolved.get("contract_type") != "api_contract" or _text(resolved.get("symbol")):
+        return resolved
+
+    intervention = claim.get("intervention")
+    target = _text(intervention.get("target")) if isinstance(intervention, Mapping) else None
+    touchpoints_raw = claim.get("implementation_touchpoints")
+    candidates = {
+        str(symbol).strip()
+        for touchpoint in (touchpoints_raw if isinstance(touchpoints_raw, list) else [])
+        if isinstance(touchpoint, Mapping)
+        and _text(touchpoint.get("path")) == _text(resolved.get("path"))
+        and (_text(touchpoint.get("causal_locator")) or target) == target
+        for symbol in (
+            touchpoint.get("symbols") if isinstance(touchpoint.get("symbols"), list) else []
+        )
+        if _text(symbol) is not None
+    }
+    if len(candidates) == 1:
+        resolved["symbol"] = next(iter(candidates))
+    return resolved
+
+
 def _proof_adapter_receipts(
     dossier: Mapping[str, Any],
     *,
@@ -9634,11 +10127,24 @@ def _proof_adapter_receipts(
     registry = builtin_proof_adapter_registry()
     basis_registry = builtin_positive_basis_registry()
     hypotheses_raw = dossier.get("root_cause_hypotheses")
-    hypothesis_ids = (
-        {str(item.get("hypothesis_id")) for item in hypotheses_raw if isinstance(item, Mapping)}
+    hypotheses = (
+        [item for item in hypotheses_raw if isinstance(item, Mapping)]
         if isinstance(hypotheses_raw, list)
-        else set()
+        else []
     )
+    hypothesis_ids = {str(item.get("hypothesis_id")) for item in hypotheses}
+    mechanism_symbols_by_hypothesis = {
+        str(item.get("hypothesis_id")): frozenset(
+            symbol.strip()
+            for symbol in (
+                item.get("mechanism_symbols")
+                if isinstance(item.get("mechanism_symbols"), list)
+                else []
+            )
+            if isinstance(symbol, str) and symbol.strip()
+        )
+        for item in hypotheses
+    }
     receipts: list[dict[str, Any]] = []
     diagnostics: list[dict[str, Any]] = []
     for experiment_id, experiment in experiments.items():
@@ -9705,8 +10211,18 @@ def _proof_adapter_receipts(
             )
             continue
         positive = claim.get("positive_outcome")
-        semantic = positive.get("semantic_basis") if isinstance(positive, Mapping) else None
+        semantic_raw = positive.get("semantic_basis") if isinstance(positive, Mapping) else None
         predicate = positive.get("predicate") if isinstance(positive, Mapping) else None
+        semantic = (
+            _resolved_proof_adapter_semantic_basis(
+                experiment=experiment,
+                claim=claim,
+                semantic_basis=semantic_raw,
+                predicate=predicate,
+            )
+            if isinstance(semantic_raw, Mapping) and isinstance(predicate, Mapping)
+            else semantic_raw
+        )
 
         def evaluate_adapter(
             source_atom_ids: set[str],
@@ -9732,6 +10248,12 @@ def _proof_adapter_receipts(
                     planning_workspace=planning_workspace,
                     artifact_receipts=artifact_receipts,
                     symbol_receipts=symbol_receipts,
+                    inspected_file_receipts=inspected_file_receipts,
+                    mechanism_symbols=mechanism_symbols_by_hypothesis.get(
+                        resolved_hypothesis_id,
+                        frozenset(),
+                    ),
+                    config_value_resolver=_config_value_for_symbol,
                 )
             )
             if basis.basis is None:
@@ -9932,6 +10454,8 @@ def verify_research_evidence(
     replay_timeout_seconds: float | None,
     requested_repo_ref: str | None,
     resolved_repo_ref: str | None,
+    evidence_attempts: Sequence[Mapping[str, Any]] = (),
+    evidence_agent_session_id: str | None = None,
     replay_executor: ReplayExecutor | None = None,
 ) -> dict[str, Any]:
     """Return a runner-owned receipt binding dossier claims to retained evidence."""
@@ -9959,6 +10483,11 @@ def verify_research_evidence(
         errors.append("target_ref_acquisition_ref_mismatch")
     if target_ref.get("commit_sha") != repo_revision:
         errors.append("target_ref_commit_mismatch")
+    current_run_lineage = _current_correction_lineage_binding(
+        run_dir=run_dir,
+        expected_agent_session_id=evidence_agent_session_id,
+        errors=errors,
+    )
     if head is None:
         errors.append("workspace_revision_unverifiable")
     elif repo_revision is not None and head.casefold() != repo_revision.casefold():
@@ -10015,7 +10544,17 @@ def verify_research_evidence(
         )
 
     events_path = run_dir / "normalized_events.jsonl"
-    events = _load_events(events_path, errors)
+    events, evidence_event_sources, evidence_event_sources_sha256 = _load_evidence_event_stream(
+        run_dir=run_dir,
+        evidence_attempts=evidence_attempts,
+        case_id=case_id,
+        problem_id=problem_id,
+        repo_revision=repo_revision,
+        workspace=workspace,
+        agent_session_id=evidence_agent_session_id,
+        current_run_lineage=current_run_lineage,
+        errors=errors,
+    )
     clean_replays: dict[str, dict[str, Any]] = {}
     executor: ReplayExecutor = replay_executor or BlockedReplayExecutor()
     replay_isolation = executor.isolation_receipt(
@@ -10252,12 +10791,15 @@ def verify_research_evidence(
         "planning_workspace_head": planning_head,
         "planning_workspace_clean": planning_clean,
         "run_dir": str(run_dir),
+        "evidence_agent_session_id": evidence_agent_session_id,
         "origin_atom_ids": list(dict.fromkeys(evidence_atom_ids)),
         "assignment_sha256": evidence_assignment.get("assignment_sha256"),
         "claims_sha256": research_claims_sha256(dossier),
         "normalized_events_sha256": (
             _sha256_path(events_path) if events_path.exists() and events_path.is_file() else None
         ),
+        "evidence_event_sources": evidence_event_sources,
+        "evidence_event_sources_sha256": evidence_event_sources_sha256,
         "run_report_sha256": (
             _sha256_path(report_path) if report_path.exists() and report_path.is_file() else None
         ),
@@ -10586,10 +11128,18 @@ def verify_persisted_research_evidence(
 
     run_dir_raw = _text(receipt.get("run_dir"))
     run_dir = Path(run_dir_raw) if run_dir_raw is not None else None
-    events_path = run_dir / "normalized_events.jsonl" if run_dir is not None else None
-    persisted_events: list[dict[str, Any]] = []
-    if events_path is not None:
-        persisted_events = _load_events(events_path, errors)
+    attempts_raw = dossier.get("research_attempts")
+    research_attempts = (
+        [attempt for attempt in attempts_raw if isinstance(attempt, Mapping)]
+        if isinstance(attempts_raw, list)
+        else []
+    )
+    persisted_events = _load_persisted_evidence_event_stream(
+        receipt,
+        current_run_dir=run_dir,
+        research_attempts=research_attempts,
+        errors=errors,
+    )
     errors.extend(
         _persisted_origin_attachment_errors(
             assignment=assignment,

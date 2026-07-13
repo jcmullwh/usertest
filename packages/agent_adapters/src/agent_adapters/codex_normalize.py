@@ -35,6 +35,11 @@ _WINDOWS_DRIVE_POSIX_RE = re.compile(r"^/([a-zA-Z])/(.*)$")
 _WINDOWS_DRIVE_CLEAN_RE = re.compile(r"^([a-zA-Z]):/{2,}")
 _WINDOWS_ABS_PATH_RE = re.compile(r"[A-Za-z]:\\")
 _MAX_OUTPUT_EXCERPT_CHARS = 2_000
+_POWERSHELL_INERT_HOST_SWITCHES = {
+    "-nologo",
+    "-noninteractive",
+    "-noprofile",
+}
 
 
 def _excerpt_text(text: str, *, max_chars: int = _MAX_OUTPUT_EXCERPT_CHARS) -> tuple[str, bool]:
@@ -148,15 +153,26 @@ def _split_command(command: str) -> list[str]:
             return command.split()
 
 
+def _strip_wrapper_quotes(value: str) -> str:
+    stripped = value.strip()
+    while len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
+        stripped = stripped[1:-1].strip()
+    return stripped
+
+
+def _split_powershell_inner_command(command: str) -> list[str]:
+    """Split one PowerShell command while preserving relative Windows backslashes."""
+
+    try:
+        tokens = shlex.split(command, posix=False)
+    except ValueError:
+        return []
+    return [_strip_wrapper_quotes(token) for token in tokens]
+
+
 def _maybe_unwrap_shell_command(argv: list[str]) -> list[str]:
     if len(argv) < 3:
         return argv
-
-    def _strip_wrapper_quotes(value: str) -> str:
-        stripped = value.strip()
-        while len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {"'", '"'}:
-            stripped = stripped[1:-1].strip()
-        return stripped
 
     exe = _strip_wrapper_quotes(argv[0]).replace("\\", "/").lower()
     base = exe.rsplit("/", 1)[-1]
@@ -176,13 +192,24 @@ def _maybe_unwrap_shell_command(argv: list[str]) -> list[str]:
             return inner_argv or argv
         return argv
 
-    if base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"} and arg1 in {
-        "-command",
-        "-c",
-    }:
-        inner = _strip_wrapper_quotes(argv[2])
-        if isinstance(inner, str) and inner.strip():
-            inner_argv = _split_command(inner)
+    if base in {"powershell", "powershell.exe", "pwsh", "pwsh.exe"}:
+        command_index = 1
+        seen_host_switches: set[str] = set()
+        while command_index < len(argv):
+            host_switch = _strip_wrapper_quotes(argv[command_index]).casefold()
+            if host_switch not in _POWERSHELL_INERT_HOST_SWITCHES:
+                break
+            if host_switch in seen_host_switches:
+                return argv
+            seen_host_switches.add(host_switch)
+            command_index += 1
+        if command_index + 2 != len(argv) or _strip_wrapper_quotes(
+            argv[command_index]
+        ).casefold() not in {"-command", "-c"}:
+            return argv
+        inner = _strip_wrapper_quotes(argv[command_index + 1])
+        if inner:
+            inner_argv = _split_powershell_inner_command(inner)
             return inner_argv or argv
         return argv
 
