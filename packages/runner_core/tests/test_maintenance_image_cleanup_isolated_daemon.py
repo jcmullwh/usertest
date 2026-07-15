@@ -1,13 +1,15 @@
-"""Explicitly opt-in isolated-DIND evidence for maintenance-image cleanup.
+"""Opt-in, paired isolated-DIND evidence for maintenance-image cleanup.
 
-This module is intentionally excluded from ordinary test execution.  A future
-approved run provisions disposable Docker-in-Docker daemons through loopback
-TCP only, then exercises the real batch and resolver paths against them.
+This is deliberately not an ordinary Docker test.  It refuses every default or
+non-loopback route and provisions disposable, digest-pinned daemons only after
+an explicit opt-in.  The scenarios are retained as the live-evidence contract;
+they are not executed by the normal test suite.
 """
 
 import ipaddress
 import os
 import random
+import re
 import subprocess
 import time
 from collections.abc import Callable, Iterator
@@ -28,6 +30,13 @@ _ISOLATION_ACK = os.environ.get("USERTEST_ISOLATED_DOCKER_DAEMON") == "1"
 _PROVISIONER = os.environ.get("USERTEST_DIND_PROVISIONER_HOST")
 _DIND_IMAGE = os.environ.get("USERTEST_ISOLATED_DIND_IMAGE")
 _TMPFS_BYTES = os.environ.get("USERTEST_ISOLATED_DIND_TMPFS_BYTES")
+_NO_SPACE = re.compile(r"(?:no space left|enospc)", re.IGNORECASE)
+_DOCKER_ROUTING_VARS = (
+    "DOCKER_CONTEXT",
+    "BUILDX_BUILDER",
+    "DOCKER_TLS_VERIFY",
+    "DOCKER_CERT_PATH",
+)
 
 pytestmark = pytest.mark.skipif(
     not (_OPT_IN and _ISOLATION_ACK and _PROVISIONER and _DIND_IMAGE and _TMPFS_BYTES),
@@ -46,6 +55,7 @@ class _Daemon:
     container_id: str
     image_digest: str
     tmpfs_bytes: int
+    daemon_id: str
 
 
 @dataclass(frozen=True)
@@ -54,8 +64,19 @@ class _ArmSpec:
     tmpfs_bytes: int
     seed_bytes: int
     keep_count: int
-    protected_refs: tuple[str, ...]
-    inventory_refs: tuple[str, ...]
+    protected_alias_groups: tuple[tuple[str, ...], ...]
+    inventory_alias_groups: tuple[tuple[str, ...], ...]
+
+
+@dataclass(frozen=True)
+class _Seed:
+    spec: _ArmSpec
+    protected_ref_to_id: dict[str, str]
+    ordinary_ref_to_id: dict[str, str]
+    free_before_seed: int
+    free_after_seed: int
+    resolver_write_bytes: int
+    scratch_write_bytes: int
 
 
 def _loopback_tcp_endpoint(raw: str, *, label: str) -> str:
@@ -74,15 +95,26 @@ def _loopback_tcp_endpoint(raw: str, *, label: str) -> str:
 
 
 def _docker(
-    endpoint: str,
-    *args: str,
-    cwd: Path,
-    check: bool = True,
+    endpoint: str, *args: str, cwd: Path, check: bool = True
 ) -> subprocess.CompletedProcess[str]:
-    """Invoke Docker only within an explicitly opted-in test body or fixture."""
+    """Use an explicit endpoint for provisioner and independent attestations."""
 
     return subprocess.run(
         ["docker", "--host", endpoint, *args],
+        cwd=str(cwd),
+        capture_output=True,
+        check=check,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+
+def _plain_docker(*args: str, cwd: Path, check: bool = True) -> subprocess.CompletedProcess[str]:
+    """Production subprocesses use this route after _bind_arm_environment."""
+
+    return subprocess.run(
+        ["docker", *args],
         cwd=str(cwd),
         capture_output=True,
         check=check,
@@ -108,7 +140,7 @@ def _dind_parameters() -> tuple[str, str, int]:
 
 @contextmanager
 def _disposable_dind(*, cwd: Path) -> Iterator[_Daemon]:
-    """Provision a one-test DIND and expose only its loopback-published TCP API."""
+    """Provision one DIND via an explicit loopback TCP provisioner endpoint."""
 
     provisioner, image_digest, tmpfs_bytes = _dind_parameters()
     proc = _docker(
@@ -132,8 +164,16 @@ def _disposable_dind(*, cwd: Path) -> Iterator[_Daemon]:
         target = _loopback_tcp_endpoint(f"tcp://{mapping}", label="published DIND endpoint")
         deadline = time.monotonic() + 60
         while time.monotonic() < deadline:
-            if _docker(target, "info", cwd=cwd, check=False).returncode == 0:
-                yield _Daemon(provisioner, target, container_id, image_digest, tmpfs_bytes)
+            info = _docker(target, "info", "--format", "{{.ID}}", cwd=cwd, check=False)
+            if info.returncode == 0 and info.stdout.strip():
+                yield _Daemon(
+                    provisioner,
+                    target,
+                    container_id,
+                    image_digest,
+                    tmpfs_bytes,
+                    info.stdout.strip(),
+                )
                 return
             time.sleep(0.5)
         raise AssertionError(f"DIND daemon did not become ready at {target}")
@@ -143,9 +183,25 @@ def _disposable_dind(*, cwd: Path) -> Iterator[_Daemon]:
 
 @pytest.fixture
 def dind_factory(tmp_path: Path) -> Callable[[], Iterator[_Daemon]]:
-    """Return a context-manager factory so each arm gets a fresh daemon."""
-
     return lambda: _disposable_dind(cwd=tmp_path)
+
+
+def _bind_arm_environment(
+    monkeypatch: pytest.MonkeyPatch, daemon: _Daemon, arm_dir: Path
+) -> None:
+    """Make plain Docker/buildx calls, including production calls, target this DIND."""
+
+    docker_config = arm_dir / "empty-docker-config"
+    docker_config.mkdir(parents=True, exist_ok=False)
+    for key in _DOCKER_ROUTING_VARS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DOCKER_CONFIG", str(docker_config))
+    monkeypatch.setenv("DOCKER_HOST", daemon.endpoint)
+    plain_id = _plain_docker("info", "--format", "{{.ID}}", cwd=arm_dir).stdout.strip()
+    addressed_id = _docker(
+        daemon.endpoint, "info", "--format", "{{.ID}}", cwd=arm_dir
+    ).stdout.strip()
+    assert plain_id == addressed_id == daemon.daemon_id, "arm routing did not reach its DIND"
 
 
 def _write_payload(path: Path, *, byte_count: int, seed: int) -> None:
@@ -158,6 +214,17 @@ def _write_payload(path: Path, *, byte_count: int, seed: int) -> None:
             remaining -= chunk_size
 
 
+def _scratch_context(work_dir: Path, *, name: str, payload_bytes: int, seed: int) -> Path:
+    context = work_dir / name
+    context.mkdir(parents=True)
+    _write_payload(context / "payload", byte_count=payload_bytes, seed=seed)
+    (context / "Dockerfile").write_text(
+        "FROM scratch\nCOPY payload /payload\n",
+        encoding="utf-8",
+    )
+    return context
+
+
 def _build_scratch_identity(
     daemon: _Daemon,
     *,
@@ -167,24 +234,65 @@ def _build_scratch_identity(
     payload_bytes: int,
     seed: int,
 ) -> str:
-    context = work_dir / f"context-{tag}"
-    context.mkdir()
-    _write_payload(context / "payload", byte_count=payload_bytes, seed=seed)
-    (context / "Dockerfile").write_text(
-        f"FROM scratch\nCOPY payload /payload\nLABEL isolated_identity={tag!r}\n",
-        encoding="utf-8",
+    context = _scratch_context(
+        work_dir, name=f"context-{tag}", payload_bytes=payload_bytes, seed=seed
     )
     ref = f"{repository}:{tag}"
     _docker(daemon.endpoint, "build", "--no-cache", "--tag", ref, str(context), cwd=work_dir)
+    return _image_id(daemon, ref, cwd=work_dir)
+
+
+def _image_id(daemon: _Daemon, ref: str, *, cwd: Path) -> str:
     return _docker(
-        daemon.endpoint,
-        "image",
-        "inspect",
-        "--format",
-        "{{.Id}}",
-        ref,
-        cwd=work_dir,
+        daemon.endpoint, "image", "inspect", "--format", "{{.Id}}", ref, cwd=cwd
     ).stdout.strip()
+
+
+def _image_exists(daemon: _Daemon, image_id: str, *, cwd: Path) -> bool:
+    result = _docker(daemon.endpoint, "image", "inspect", image_id, cwd=cwd, check=False)
+    return result.returncode == 0
+
+
+def _free_bytes(daemon: _Daemon, *, cwd: Path) -> int:
+    output = _docker(
+        daemon.provisioner,
+        "exec",
+        daemon.container_id,
+        "sh",
+        "-ec",
+        "df -B1 --output=avail /var/lib/docker | tail -n 1",
+        cwd=cwd,
+    ).stdout.strip()
+    try:
+        return int(output)
+    except ValueError as exc:
+        raise AssertionError(f"could not measure DIND free bytes: {output!r}") from exc
+
+
+def _remove_image_only_cache(daemon: _Daemon, *, cwd: Path) -> None:
+    """Eliminate probe/seed build cache only inside the disposable fixture."""
+
+    _docker(daemon.endpoint, "builder", "prune", "--force", cwd=cwd, check=False)
+    _docker(daemon.endpoint, "buildx", "prune", "--force", cwd=cwd, check=False)
+
+
+def _attest_buildx_output(daemon: _Daemon, *, work_dir: Path) -> None:
+    """Prove buildx --load writes to the same daemon used by production calls."""
+
+    ref = f"usertest-isolated-attestation:{uuid4().hex[:12]}"
+    context = _scratch_context(
+        work_dir, name=f"buildx-{uuid4().hex}", payload_bytes=1024, seed=17
+    )
+    _plain_docker(
+        "buildx", "build", "--load", "--no-cache", "--tag", ref, str(context), cwd=work_dir
+    )
+    plain_id = _plain_docker(
+        "image", "inspect", "--format", "{{.Id}}", ref, cwd=work_dir
+    ).stdout.strip()
+    addressed_id = _image_id(daemon, ref, cwd=work_dir)
+    assert plain_id == addressed_id, "buildx output did not land on the arm target daemon"
+    _docker(daemon.endpoint, "image", "rm", "--force", ref, cwd=work_dir)
+    _remove_image_only_cache(daemon, cwd=work_dir)
 
 
 def _maintenance_config(*, keep_count: int, cleanup_enabled: bool) -> MaintenanceDockerConfig:
@@ -198,77 +306,30 @@ def _maintenance_config(*, keep_count: int, cleanup_enabled: bool) -> Maintenanc
         cleanup_enabled=cleanup_enabled,
         keep_local_count=keep_count,
         protect_tags=("required-latest", "protected-latest", "running-latest"),
-        cleanup_on_prepare=cleanup_enabled,
+        # Paired arms vary this single policy switch.  The configured prepare
+        # policy remains identical so neither arm gains a second intervention.
+        cleanup_on_prepare=True,
         cleanup_dry_run_default=False,
     )
 
 
-def _seed_burst(
-    daemon: _Daemon,
-    *,
-    work_dir: Path,
-    cfg: MaintenanceDockerConfig,
-) -> tuple[_ArmSpec, dict[str, str]]:
-    """Create deterministic paired aliases plus required/current safety identities."""
+def _ref_to_id(daemon: _Daemon, refs: list[str], *, cwd: Path) -> dict[str, str]:
+    return {ref: _image_id(daemon, ref, cwd=cwd) for ref in sorted(refs)}
 
-    work_dir.mkdir(parents=True, exist_ok=True)
-    # Three protected safety identities plus enough ordinary identities to exceed
-    # the identity budget in both baseline and recovery arms.
-    seed_count = cfg.keep_local_count + 6
-    # Leave only a small headroom margin so the baseline's first storage write is
-    # constrained, while reclaiming all but ``keep_count`` leaves recovery room.
-    seed_bytes = daemon.tmpfs_bytes * 95 // 100 // seed_count
-    identity_ids: dict[str, str] = {}
-    inventory_refs: list[str] = []
-    for number in range(seed_count):
-        tag = f"{number:016x}"
-        identity_ids[tag] = _build_scratch_identity(
-            daemon,
-            work_dir=work_dir,
-            repository=cfg.local_image_repo,
-            tag=tag,
-            payload_bytes=seed_bytes,
-            seed=number,
-        )
-        local_ref = f"{cfg.local_image_repo}:{tag}"
-        published_ref = f"{cfg.published_image_repo}:{tag}"
-        _docker(daemon.endpoint, "tag", local_ref, published_ref, cwd=work_dir)
-        inventory_refs.extend([local_ref, published_ref])
 
-    safety_refs: list[str] = []
-    for offset, alias in enumerate(("required-latest", "protected-latest", "running-latest")):
-        tag = f"{offset:016x}"
-        source_ref = f"{cfg.local_image_repo}:{tag}"
-        safety_ref = f"{cfg.local_image_repo}:{alias}"
-        _docker(daemon.endpoint, "tag", source_ref, safety_ref, cwd=work_dir)
-        safety_refs.append(safety_ref)
-        inventory_refs.append(safety_ref)
-
-    current_refs = (
-        f"{cfg.local_image_repo}:{0:016x}",
-        f"{cfg.published_image_repo}:{0:016x}",
-    )
-    spec = _ArmSpec(
-        image_digest=daemon.image_digest,
-        tmpfs_bytes=daemon.tmpfs_bytes,
-        seed_bytes=seed_bytes,
-        keep_count=cfg.keep_local_count,
-        protected_refs=tuple(sorted((*current_refs, *safety_refs))),
-        inventory_refs=tuple(sorted(inventory_refs)),
-    )
-    return spec, identity_ids
+def _alias_groups(ref_to_id: dict[str, str]) -> tuple[tuple[str, ...], ...]:
+    groups: dict[str, list[str]] = {}
+    for ref, image_id in ref_to_id.items():
+        groups.setdefault(image_id, []).append(ref)
+    return tuple(sorted(tuple(sorted(refs)) for refs in groups.values()))
 
 
 def _resolver_preparation(
-    *,
-    work_dir: Path,
-    cfg: MaintenanceDockerConfig,
-    payload_bytes: int,
+    *, work_dir: Path, cfg: MaintenanceDockerConfig, payload_bytes: int
 ) -> MaintenanceImagePreparation:
-    context = work_dir / "resolver-context"
-    context.mkdir()
-    _write_payload(context / "payload", byte_count=payload_bytes, seed=999)
-    (context / "Dockerfile").write_text("FROM scratch\nCOPY payload /payload\n", encoding="utf-8")
+    context = _scratch_context(
+        work_dir, name="resolver-context", payload_bytes=payload_bytes, seed=999
+    )
     tag = "f" * 16
     return MaintenanceImagePreparation(
         context_dir=context,
@@ -279,28 +340,234 @@ def _resolver_preparation(
     )
 
 
+def _measure_resolver_write_bytes(
+    daemon: _Daemon,
+    *,
+    work_dir: Path,
+    payload_bytes: int,
+    seed: int,
+) -> int:
+    """Measure the resolver's real two-tag ``docker build`` storage write."""
+
+    before = _free_bytes(daemon, cwd=work_dir)
+    context = _scratch_context(
+        work_dir, name=f"probe-{seed}", payload_bytes=payload_bytes, seed=seed
+    )
+    local_ref = "usertest-isolated-probe:resolver-local"
+    published_ref = "usertest-isolated-probe:resolver-published"
+    _plain_docker(
+        "build",
+        "--progress=plain",
+        "-t",
+        local_ref,
+        "-t",
+        published_ref,
+        "-f",
+        "Dockerfile",
+        ".",
+        cwd=context,
+    )
+    _remove_image_only_cache(daemon, cwd=work_dir)
+    after = _free_bytes(daemon, cwd=work_dir)
+    _docker(
+        daemon.endpoint,
+        "image",
+        "rm",
+        "--force",
+        local_ref,
+        published_ref,
+        cwd=work_dir,
+    )
+    _remove_image_only_cache(daemon, cwd=work_dir)
+    reclaimed = _free_bytes(daemon, cwd=work_dir)
+    if before <= after or reclaimed < after:
+        pytest.fail("invalid capacity calibration: probe did not consume measurable image storage")
+    return before - after
+
+
+def _measure_batch_scratch_write_bytes(daemon: _Daemon, *, work_dir: Path) -> int:
+    """Measure the exact buildx scratch operation used by batch preflight."""
+
+    before = _free_bytes(daemon, cwd=work_dir)
+    context = work_dir / "batch-scratch-probe"
+    context.mkdir()
+    (context / "Dockerfile").write_text("FROM scratch\nCOPY sentinel /sentinel\n", encoding="utf-8")
+    (context / "sentinel").write_text("ok\n", encoding="utf-8")
+    ref = "usertest-batch-preflight:latest"
+    _plain_docker(
+        "buildx", "build", "--progress=plain", "--load", "-t", ref, str(context), cwd=work_dir
+    )
+    _remove_image_only_cache(daemon, cwd=work_dir)
+    after = _free_bytes(daemon, cwd=work_dir)
+    _docker(daemon.endpoint, "image", "rm", "--force", ref, cwd=work_dir)
+    _remove_image_only_cache(daemon, cwd=work_dir)
+    reclaimed = _free_bytes(daemon, cwd=work_dir)
+    if before <= after or reclaimed < after:
+        pytest.fail("invalid capacity calibration: batch scratch did not consume image storage")
+    return before - after
+
+
+def _seed_burst(daemon: _Daemon, *, work_dir: Path, cfg: MaintenanceDockerConfig) -> _Seed:
+    """Calibrate measured image pressure; never rely on a fixed percentage payload."""
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    _attest_buildx_output(daemon, work_dir=work_dir)
+    free_before_seed = _free_bytes(daemon, cwd=work_dir)
+    probe_bytes = max(1024 * 1024, min(4 * 1024 * 1024, free_before_seed // 16))
+    resolver_write = _measure_resolver_write_bytes(
+        daemon,
+        work_dir=work_dir,
+        payload_bytes=probe_bytes,
+        seed=101,
+    )
+    scratch_write = _measure_batch_scratch_write_bytes(daemon, work_dir=work_dir)
+    write_requirement = max(resolver_write, scratch_write)
+    seed_count = cfg.keep_local_count + 6
+    target_consumption = free_before_seed - max(1, write_requirement // 2)
+    bytes_per_seed = probe_bytes * target_consumption // (resolver_write * seed_count)
+    if not 1024 <= bytes_per_seed < free_before_seed:
+        pytest.fail("invalid capacity calibration: seed payload cannot be constructed")
+
+    all_refs: list[str] = []
+    ordinary_refs: list[str] = []
+    for number in range(seed_count):
+        tag = f"{number:016x}"
+        _build_scratch_identity(
+            daemon,
+            work_dir=work_dir,
+            repository=cfg.local_image_repo,
+            tag=tag,
+            payload_bytes=bytes_per_seed,
+            seed=number,
+        )
+        local_ref = f"{cfg.local_image_repo}:{tag}"
+        published_ref = f"{cfg.published_image_repo}:{tag}"
+        _docker(daemon.endpoint, "tag", local_ref, published_ref, cwd=work_dir)
+        ordinary_refs.extend((local_ref, published_ref))
+        all_refs.extend((local_ref, published_ref))
+
+    safety_refs: list[str] = []
+    for offset, alias in enumerate(("required-latest", "protected-latest", "running-latest")):
+        source = f"{cfg.local_image_repo}:{offset:016x}"
+        safety_ref = f"{cfg.local_image_repo}:{alias}"
+        _docker(daemon.endpoint, "tag", source, safety_ref, cwd=work_dir)
+        safety_refs.append(safety_ref)
+        all_refs.append(safety_ref)
+    # The capacity condition is image-only: discard all seed-build cache before
+    # recording the headroom used by the paired baseline/recovery operations.
+    _remove_image_only_cache(daemon, cwd=work_dir)
+    protected_hash_aliases = [
+        ref
+        for number in range(3)
+        for ref in (
+            f"{cfg.local_image_repo}:{number:016x}",
+            f"{cfg.published_image_repo}:{number:016x}",
+        )
+    ]
+    protected_refs = [*protected_hash_aliases, *safety_refs]
+    protected_ref_to_id = _ref_to_id(daemon, protected_refs, cwd=work_dir)
+    ordinary_ref_to_id = _ref_to_id(daemon, ordinary_refs, cwd=work_dir)
+    free_after_seed = _free_bytes(daemon, cwd=work_dir)
+    if free_after_seed >= write_requirement:
+        pytest.fail(
+            "invalid capacity calibration: seed left enough space for the exact baseline write"
+        )
+    spec = _ArmSpec(
+        image_digest=daemon.image_digest,
+        tmpfs_bytes=daemon.tmpfs_bytes,
+        seed_bytes=bytes_per_seed,
+        keep_count=cfg.keep_local_count,
+        protected_alias_groups=_alias_groups(protected_ref_to_id),
+        inventory_alias_groups=_alias_groups(_ref_to_id(daemon, all_refs, cwd=work_dir)),
+    )
+    return _Seed(
+        spec=spec,
+        protected_ref_to_id=protected_ref_to_id,
+        ordinary_ref_to_id=ordinary_ref_to_id,
+        free_before_seed=free_before_seed,
+        free_after_seed=free_after_seed,
+        resolver_write_bytes=resolver_write,
+        scratch_write_bytes=scratch_write,
+    )
+
+
+def _assert_no_space_log(path: Path) -> None:
+    assert path.is_file(), f"missing operation log: {path}"
+    assert _NO_SPACE.search(path.read_text(encoding="utf-8", errors="replace")), (
+        f"baseline operation did not fail with ENOSPC/no-space evidence: {path}"
+    )
+
+
+def _assert_recovery_inventory(
+    daemon: _Daemon,
+    *,
+    work_dir: Path,
+    seed: _Seed,
+    cleanup: dict[str, object],
+) -> None:
+    """Independently inspect the live daemon rather than trusting cleanup claims."""
+
+    actual_protected = _ref_to_id(daemon, list(seed.protected_ref_to_id), cwd=work_dir)
+    assert actual_protected == seed.protected_ref_to_id
+    candidate_ids = cleanup["candidate_image_ids"]
+    assert isinstance(candidate_ids, list)
+    for image_id in candidate_ids:
+        assert not _image_exists(daemon, image_id, cwd=work_dir), (
+            f"eligible overflow identity still exists after recovery: {image_id}"
+        )
+    assert cleanup["physical_identity_bounded"] is True
+    assert cleanup["managed_tag_bounded"] is True
+    assert cleanup["errors"] == []
+    remaining = cleanup["remaining_ordinary_image_ids"]
+    assert isinstance(remaining, list)
+    assert len(remaining) <= seed.spec.keep_count
+
+
+def _assert_selected_aliases(daemon: _Daemon, *, cwd: Path, cfg: MaintenanceDockerConfig) -> None:
+    """The resolver's current local/published aliases must share one live ID."""
+
+    tag = "f" * 16
+    aliases = (
+        f"{cfg.local_image_repo}:{tag}",
+        f"{cfg.published_image_repo}:{tag}",
+    )
+    assert len(set(_ref_to_id(daemon, list(aliases), cwd=cwd).values())) == 1
+
+
 def _run_direct_resolver_arm(
     daemon: _Daemon,
     *,
     monkeypatch: pytest.MonkeyPatch,
     work_dir: Path,
     cleanup_enabled: bool,
-) -> tuple[_ArmSpec, backend_mod.MaintenanceImageResolution | Exception]:
+) -> tuple[_Seed, backend_mod.MaintenanceImageResolution | RuntimeError, list[int]]:
     cfg = _maintenance_config(keep_count=1, cleanup_enabled=cleanup_enabled)
-    spec, _ = _seed_burst(daemon, work_dir=work_dir, cfg=cfg)
-    monkeypatch.setenv("DOCKER_HOST", daemon.endpoint)
+    _bind_arm_environment(monkeypatch, daemon, work_dir)
+    seed = _seed_burst(daemon, work_dir=work_dir, cfg=cfg)
     monkeypatch.setattr(backend_mod, "_load_maintenance_docker_config", lambda **_kwargs: cfg)
-    preparation = _resolver_preparation(work_dir=work_dir, cfg=cfg, payload_bytes=spec.seed_bytes)
+    cleanup_headroom: list[int] = []
+    real_cleanup = backend_mod.cleanup_local_maintenance_images
+
+    def observed_cleanup(**kwargs: object) -> dict[str, object]:
+        result = real_cleanup(**kwargs)
+        cleanup_headroom.append(_free_bytes(daemon, cwd=work_dir))
+        return result
+
+    monkeypatch.setattr(backend_mod, "cleanup_local_maintenance_images", observed_cleanup)
+    preparation = _resolver_preparation(
+        work_dir=work_dir, cfg=cfg, payload_bytes=seed.spec.seed_bytes
+    )
     try:
-        return spec, backend_mod.resolve_maintenance_docker_image(
+        result = backend_mod.resolve_maintenance_docker_image(
             repo_root=work_dir,
             run_dir=work_dir / "run",
             force_rebuild=True,
             timeout_seconds=60,
             preparation=preparation,
         )
-    except Exception as exc:  # expected for the no-cleanup baseline
-        return spec, exc
+    except RuntimeError as exc:  # The calibrated baseline must fail its exact build write.
+        return seed, exc, cleanup_headroom
+    return seed, result, cleanup_headroom
 
 
 def test_direct_resolver_baseline_fails_but_prewrite_recovery_proceeds(
@@ -308,30 +575,96 @@ def test_direct_resolver_baseline_fails_but_prewrite_recovery_proceeds(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Compare identical constrained arms around the resolver's real cleanup path."""
+    """Only cleanup policy differs between calibrated direct-resolver arms."""
 
     with dind_factory() as baseline_daemon:
-        baseline_spec, baseline = _run_direct_resolver_arm(
+        baseline_seed, baseline, baseline_headroom = _run_direct_resolver_arm(
             baseline_daemon,
             monkeypatch=monkeypatch,
             work_dir=tmp_path / "baseline",
             cleanup_enabled=False,
         )
+        _assert_no_space_log(
+            tmp_path / "baseline" / "run" / "sandbox" / "maintenance_docker_build.log"
+        )
     with dind_factory() as recovery_daemon:
-        recovery_spec, recovery = _run_direct_resolver_arm(
+        recovery_seed, recovery, recovery_headroom = _run_direct_resolver_arm(
             recovery_daemon,
             monkeypatch=monkeypatch,
             work_dir=tmp_path / "recovery",
             cleanup_enabled=True,
         )
+        assert not isinstance(recovery, RuntimeError), "cleanup must restore resolver capacity"
+        assert recovery.image_source == "built"
+        cleanup = recovery.metadata["cleanup"]["prewrite"]
+        assert recovery_seed.free_after_seed < recovery_seed.resolver_write_bytes
+        assert recovery_headroom[0] >= recovery_seed.resolver_write_bytes
+        _assert_recovery_inventory(
+            recovery_daemon,
+            work_dir=tmp_path / "recovery",
+            seed=recovery_seed,
+            cleanup=cleanup,
+        )
+        _assert_selected_aliases(
+            recovery_daemon,
+            cwd=tmp_path / "recovery",
+            cfg=_maintenance_config(keep_count=1, cleanup_enabled=True),
+        )
 
-    assert baseline_spec == recovery_spec
-    assert isinstance(baseline, Exception), (
-        "baseline must fail its first constrained resolver write"
+    assert baseline_seed.spec == recovery_seed.spec
+    assert isinstance(baseline, RuntimeError), "baseline must fail the resolver storage write"
+    assert baseline_headroom == []
+
+
+def _run_batch_arm(
+    daemon: _Daemon,
+    *,
+    monkeypatch: pytest.MonkeyPatch,
+    arm_dir: Path,
+    cleanup_enabled: bool,
+) -> tuple[_Seed, dict[str, object], list[int]]:
+    cfg = _maintenance_config(keep_count=1, cleanup_enabled=cleanup_enabled)
+    _bind_arm_environment(monkeypatch, daemon, arm_dir)
+    seed = _seed_burst(daemon, work_dir=arm_dir, cfg=cfg)
+    preparation = _resolver_preparation(
+        work_dir=arm_dir, cfg=cfg, payload_bytes=seed.spec.seed_bytes
     )
-    assert not isinstance(recovery, Exception), "prewrite cleanup must recover resolver capacity"
-    assert recovery.image_source == "built"
-    assert recovery.metadata["cleanup"]["prewrite"]["managed_tag_bounded"] is True
+    monkeypatch.setattr(batch_preflight, "_load_maintenance_docker_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(backend_mod, "_load_maintenance_docker_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(batch_preflight, "_gitlab_registry_probe", lambda: None)
+    monkeypatch.setattr(batch_preflight, "_batch_remote_handoff_requested", lambda **_kwargs: False)
+    monkeypatch.setattr(batch_preflight, "_git_branch", lambda _root: "isolated")
+    monkeypatch.setattr(batch_preflight, "_git_head", lambda _root: "isolated-head")
+    monkeypatch.setattr(
+        batch_preflight, "prepare_maintenance_docker_image", lambda **_kwargs: preparation
+    )
+    cleanup_headroom: list[int] = []
+    real_cleanup = backend_mod.cleanup_local_maintenance_images
+
+    def observed_cleanup(**kwargs: object) -> dict[str, object]:
+        result = real_cleanup(**kwargs)
+        cleanup_headroom.append(_free_bytes(daemon, cwd=arm_dir))
+        return result
+
+    monkeypatch.setattr(backend_mod, "cleanup_local_maintenance_images", observed_cleanup)
+    monkeypatch.setattr(batch_preflight, "cleanup_local_maintenance_images", observed_cleanup)
+    result = batch_preflight.run_batch_preflight(
+        repo_root=arm_dir,
+        batch_dir=arm_dir / "batch",
+        batch_config={
+            "defaults": {
+                "require_clean_git": False,
+                "require_local_green": False,
+                "require_ci_green_for_base": False,
+            }
+        },
+        worker_roster=[],
+        exec_backend="docker",
+        exec_docker_profile="maintenance",
+        resolve_maintenance_image=True,
+        docker_timeout_seconds=60,
+    )
+    return seed, result, cleanup_headroom
 
 
 def test_batch_baseline_fails_scratch_write_but_prewrite_recovery_resolves(
@@ -339,76 +672,47 @@ def test_batch_baseline_fails_scratch_write_but_prewrite_recovery_resolves(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Exercise run_batch_preflight's actual scratch-build and resolver ordering."""
-
-    def run_arm(daemon: _Daemon, *, enabled: bool, arm_dir: Path):
-        cfg = _maintenance_config(keep_count=1, cleanup_enabled=enabled)
-        spec, _ = _seed_burst(daemon, work_dir=arm_dir, cfg=cfg)
-        monkeypatch.setenv("DOCKER_HOST", daemon.endpoint)
-        monkeypatch.setattr(
-            batch_preflight,
-            "_load_maintenance_docker_config",
-            lambda **_kwargs: cfg,
-        )
-        monkeypatch.setattr(
-            backend_mod,
-            "_load_maintenance_docker_config",
-            lambda **_kwargs: cfg,
-        )
-        monkeypatch.setattr(batch_preflight, "_gitlab_registry_probe", lambda: None)
-        monkeypatch.setattr(
-            batch_preflight,
-            "_batch_remote_handoff_requested",
-            lambda **_kwargs: False,
-        )
-        monkeypatch.setattr(batch_preflight, "_git_branch", lambda _root: "isolated")
-        monkeypatch.setattr(batch_preflight, "_git_head", lambda _root: "isolated-head")
-        preparation = _resolver_preparation(
-            work_dir=arm_dir,
-            cfg=cfg,
-            payload_bytes=spec.seed_bytes,
-        )
-        monkeypatch.setattr(
-            batch_preflight,
-            "prepare_maintenance_docker_image",
-            lambda **_kwargs: preparation,
-        )
-        return spec, batch_preflight.run_batch_preflight(
-            repo_root=arm_dir,
-            batch_dir=arm_dir / "batch",
-            batch_config={
-                "defaults": {
-                    "require_clean_git": False,
-                    "require_local_green": False,
-                    "require_ci_green_for_base": False,
-                }
-            },
-            worker_roster=[],
-            exec_backend="docker",
-            exec_docker_profile="maintenance",
-            resolve_maintenance_image=enabled,
-            docker_timeout_seconds=60,
-        )
+    """Both arms request resolution; cleanup policy is their sole intervention."""
 
     with dind_factory() as baseline_daemon:
-        baseline_spec, baseline = run_arm(
+        baseline_seed, baseline, baseline_headroom = _run_batch_arm(
             baseline_daemon,
-            enabled=False,
+            monkeypatch=monkeypatch,
             arm_dir=tmp_path / "baseline",
+            cleanup_enabled=False,
         )
+        assert any(
+            "Docker buildx scratch build failed" in item["summary"]
+            for item in baseline["blockers"]
+        )
+        _assert_no_space_log(tmp_path / "baseline" / "batch" / "preflight" / "docker_build.log")
     with dind_factory() as recovery_daemon:
-        recovery_spec, recovery = run_arm(
+        recovery_seed, recovery, recovery_headroom = _run_batch_arm(
             recovery_daemon,
-            enabled=True,
+            monkeypatch=monkeypatch,
             arm_dir=tmp_path / "recovery",
+            cleanup_enabled=True,
         )
+        assert recovery["blockers"] == []
+        metadata = recovery["maintenance_image_metadata"]
+        assert metadata["source"] == "built"
+        cleanup = metadata["batch_prewrite"]
+        assert recovery_headroom[0] >= recovery_seed.scratch_write_bytes
+        _assert_recovery_inventory(
+            recovery_daemon,
+            work_dir=tmp_path / "recovery",
+            seed=recovery_seed,
+            cleanup=cleanup,
+        )
+        _assert_selected_aliases(
+            recovery_daemon,
+            cwd=tmp_path / "recovery",
+            cfg=_maintenance_config(keep_count=1, cleanup_enabled=True),
+        )
+        assert (tmp_path / "recovery" / "batch" / "preflight" / "docker_build.log").is_file()
 
-    assert baseline_spec == recovery_spec
-    scratch_failure = "Docker buildx scratch build failed"
-    assert any(item["summary"].startswith(scratch_failure) for item in baseline["blockers"])
-    assert not any(item["summary"].startswith(scratch_failure) for item in recovery["blockers"])
-    assert recovery["maintenance_image_metadata"]["source"] == "built"
-    assert recovery["maintenance_image_metadata"]["batch_prewrite"]["managed_tag_bounded"] is True
+    assert baseline_seed.spec == recovery_seed.spec
+    assert baseline_headroom == []
 
 
 def test_external_and_container_references_remain_physical_reclamation_blockers(
@@ -416,37 +720,60 @@ def test_external_and_container_references_remain_physical_reclamation_blockers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """External tags and container references must be reported as mitigated blockers."""
+    """Assert the exact external and stopped-container causes of blocked cleanup."""
 
     with dind_factory() as daemon:
         cfg = _maintenance_config(keep_count=1, cleanup_enabled=True)
-        spec, identities = _seed_burst(daemon, work_dir=tmp_path, cfg=cfg)
-        monkeypatch.setenv("DOCKER_HOST", daemon.endpoint)
+        _bind_arm_environment(monkeypatch, daemon, tmp_path)
+        seed = _seed_burst(daemon, work_dir=tmp_path, cfg=cfg)
         monkeypatch.setattr(backend_mod, "_load_maintenance_docker_config", lambda **_kwargs: cfg)
+        external_tag = f"{3:016x}"
+        container_tag = f"{4:016x}"
+        external_source = f"{cfg.local_image_repo}:{external_tag}"
+        container_source = f"{cfg.local_image_repo}:{container_tag}"
         external_ref = "usertest-isolated-external:keep"
-        blocked_tag = f"{3:016x}"
-        blocked_ref = f"{cfg.local_image_repo}:{blocked_tag}"
-        _docker(daemon.endpoint, "tag", blocked_ref, external_ref, cwd=tmp_path)
+        _docker(daemon.endpoint, "tag", external_source, external_ref, cwd=tmp_path)
+        external_id = _image_id(daemon, external_ref, cwd=tmp_path)
+        assert external_id == seed.ordinary_ref_to_id[external_source]
         container_name = f"usertest-isolated-{uuid4().hex[:12]}"
         _docker(
             daemon.endpoint,
             "create",
             "--name",
             container_name,
-            f"{cfg.local_image_repo}:{4:016x}",
+            container_source,
+            "/explicit-stopped-container-command",
             cwd=tmp_path,
         )
+        container_id = _image_id(daemon, container_source, cwd=tmp_path)
+        container_image = _docker(
+            daemon.endpoint,
+            "inspect",
+            "--format",
+            "{{.Image}}",
+            container_name,
+            cwd=tmp_path,
+        ).stdout.strip()
+        assert container_image == container_id
         try:
             summary = backend_mod.cleanup_local_maintenance_images(
                 repo_root=tmp_path,
                 dry_run=False,
-                protected_refs=spec.protected_refs,
+                protected_refs=tuple(seed.protected_ref_to_id),
             )
         finally:
             _docker(daemon.endpoint, "rm", "--force", container_name, cwd=tmp_path, check=False)
 
-        assert identities[blocked_tag] in summary["externally_retained_image_ids"]
-        assert summary["externally_retained_refs"][identities[blocked_tag]] == [external_ref]
-        assert identities[f"{4:016x}"] in summary["retained_candidate_image_ids"]
+        assert external_id in summary["candidate_image_ids"]
+        assert container_id in summary["candidate_image_ids"]
+        assert summary["externally_retained_refs"][external_id] == [external_ref]
+        assert container_id in summary["retained_candidate_image_ids"]
+        assert summary["physical_candidate_status"][container_id]["exists"] is True
+        container_errors = [
+            error for error in summary["errors"] if container_source in error
+        ]
+        assert container_errors and any("container" in error.lower() for error in container_errors)
+        assert _image_exists(daemon, external_id, cwd=tmp_path)
+        assert _image_exists(daemon, container_id, cwd=tmp_path)
         assert summary["physical_identity_bounded"] is False
         assert summary["bounded"] is False
