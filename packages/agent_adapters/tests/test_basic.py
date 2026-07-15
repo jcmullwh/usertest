@@ -55,7 +55,7 @@ def test_normalize_codex_events_joins_begin_end(tmp_path: Path) -> None:
                 "msg": {
                     "type": "exec_command_begin",
                     "call_id": "call_1",
-                    "command": ["type", "USERS.md"],
+                    "command": ["cat", "USERS.md"],
                     "cwd": str(tmp_path),
                 },
             }
@@ -458,7 +458,7 @@ def test_codex_windows_powershell_noprofile_event_attests_relative_backslash_rea
 
 
 @pytest.mark.parametrize("extra_output", [False, True])
-def test_codex_powershell_exact_line_range_attests_only_exact_output(
+def test_codex_windows_powershell_relative_backslash_exact_line_range_attests_only_exact_output(
     tmp_path: Path,
     extra_output: bool,
 ) -> None:
@@ -470,7 +470,7 @@ def test_codex_powershell_exact_line_range_attests_only_exact_output(
     raw = tmp_path / "raw.jsonl"
     command = (
         '"C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe" '
-        '-Command "Get-Content -Encoding UTF8 -LiteralPath packages/runner.py '
+        '-Command "Get-Content -Encoding UTF8 -LiteralPath .\\packages\\runner.py '
         '| Select-Object -Skip 399 -First 40"'
     )
     output = selected + ("unrelated output\n" if extra_output else "")
