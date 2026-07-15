@@ -47,4 +47,11 @@ def test_cmd_maintenance_images_cleanup_passes_dry_run(monkeypatch, capsys, tmp_
     assert captured["repo_root"] == repo_root
     assert captured["timeout_seconds"] == 5.0
     assert captured["dry_run"] is True
-    assert json.loads(capsys.readouterr().out) == {"schema_version": 1, "deleted_tags": []}
+    assert "protected_refs" not in captured
+    assert json.loads(capsys.readouterr().out) == {
+        "schema_version": 1,
+        "kind": "manual_cleanup",
+        "cleanup": {"schema_version": 1, "deleted_tags": []},
+        "after_inventory": None,
+        "errors": [],
+    }

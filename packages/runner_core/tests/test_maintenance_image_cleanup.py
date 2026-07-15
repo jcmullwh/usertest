@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -147,8 +148,12 @@ def test_cleanup_dry_run_bounds_recent_identities_and_keeps_protected_tags(
     assert "usertest-maintenance:bench-dfc31ac" in summary["kept_tags"]
     assert "usertest-maintenance:aaaaaaaaaaaaaaaa" in summary["kept_tags"]
     assert "usertest-maintenance:bbbbbbbbbbbbbbbb" in summary["kept_tags"]
-    assert "ghcr.io/jcmullwh/usertest-maintenance:cccccccccccccccc" in summary["deleted_tags"]
-    assert "usertest-maintenance:dddddddddddddddd" in summary["deleted_tags"]
+    assert (
+        "ghcr.io/jcmullwh/usertest-maintenance:cccccccccccccccc"
+        in summary["projected_deleted_tags"]
+    )
+    assert "usertest-maintenance:dddddddddddddddd" in summary["projected_deleted_tags"]
+    assert summary["deleted_tags"] == []
     assert summary["deleted_image_ids"] == []
 
 
@@ -218,10 +223,104 @@ def test_cleanup_retains_all_aliases_for_selected_image_identities(
         "usertest-maintenance:aaaaaaaaaaaaaaaa",
         "ghcr.io/jcmullwh/usertest-maintenance:aaaaaaaaaaaaaaaa",
     }
-    assert set(summary["deleted_tags"]) == {
+    assert set(summary["projected_deleted_tags"]) == {
         "usertest-maintenance:bbbbbbbbbbbbbbbb",
         "ghcr.io/jcmullwh/usertest-maintenance:bbbbbbbbbbbbbbbb",
     }
+    assert summary["deleted_tags"] == []
+
+
+def test_cleanup_does_not_delete_when_ordinary_identities_are_below_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A count budget is a ceiling, not a mandate to delete retained identities."""
+
+    monkeypatch.setattr(backend_mod, "_load_maintenance_docker_config", lambda **_kwargs: _cfg())
+    monkeypatch.setattr(
+        backend_mod,
+        "list_local_maintenance_images",
+        lambda **_kwargs: {
+            "schema_version": 1,
+            "repos_scanned": [],
+            "protected_tags": [],
+            "entries": [
+                {
+                    "repository": "usertest-maintenance",
+                    "tag": "aaaaaaaaaaaaaaaa",
+                    "image_id": "sha256:a",
+                    "created_at": _created(0),
+                },
+                {
+                    "repository": "usertest-maintenance",
+                    "tag": "bbbbbbbbbbbbbbbb",
+                    "image_id": "sha256:b",
+                    "created_at": _created(1),
+                },
+            ],
+        },
+    )
+
+    summary = backend_mod.cleanup_local_maintenance_images(repo_root=tmp_path, dry_run=True)
+
+    assert summary["kept_image_ids"] == ["sha256:a", "sha256:b"]
+    assert summary["projected_deleted_tags"] == []
+    assert summary["deleted_tags"] == []
+
+
+def test_cleanup_protects_every_alias_of_configured_current_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Configured current aliases protect their complete image identity at budget zero."""
+
+    cfg = replace(_cfg(), keep_local_count=0)
+    monkeypatch.setattr(backend_mod, "_load_maintenance_docker_config", lambda **_kwargs: cfg)
+    monkeypatch.setattr(
+        backend_mod,
+        "list_local_maintenance_images",
+        lambda **_kwargs: {
+            "schema_version": 1,
+            "repos_scanned": [],
+            "protected_tags": [],
+            "entries": [
+                {
+                    "repository": cfg.local_image_repo,
+                    "tag": "aaaaaaaaaaaaaaaa",
+                    "image_id": "sha256:current",
+                    "created_at": _created(1),
+                },
+                {
+                    "repository": cfg.published_image_repo,
+                    "tag": "aaaaaaaaaaaaaaaa",
+                    "image_id": "sha256:current",
+                    "created_at": _created(1),
+                },
+                {
+                    "repository": cfg.local_image_repo,
+                    "tag": "bbbbbbbbbbbbbbbb",
+                    "image_id": "sha256:ordinary",
+                    "created_at": _created(0),
+                },
+            ],
+        },
+    )
+
+    summary = backend_mod.cleanup_local_maintenance_images(
+        repo_root=tmp_path,
+        dry_run=True,
+        protected_refs=(
+            "usertest-maintenance:aaaaaaaaaaaaaaaa",
+            "ghcr.io/jcmullwh/usertest-maintenance:aaaaaaaaaaaaaaaa",
+        ),
+    )
+
+    assert summary["kept_image_ids"] == ["sha256:current"]
+    assert set(summary["kept_tags"]) == {
+        "usertest-maintenance:aaaaaaaaaaaaaaaa",
+        "ghcr.io/jcmullwh/usertest-maintenance:aaaaaaaaaaaaaaaa",
+    }
+    assert summary["projected_deleted_tags"] == ["usertest-maintenance:bbbbbbbbbbbbbbbb"]
 
 
 def test_resolver_cleans_before_a_forced_build(
@@ -244,6 +343,18 @@ def test_resolver_cleans_before_a_forced_build(
     )
     monkeypatch.setattr(backend_mod, "compute_image_hash", lambda **_kwargs: "a" * 64)
     monkeypatch.setattr(backend_mod, "_git_remote_url", lambda **_kwargs: None)
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_image_inspect_rows",
+        lambda *_args, **_kwargs: [
+            {
+                "RepoTags": [
+                    "usertest-maintenance:" + ("a" * 16),
+                    "ghcr.io/jcmullwh/usertest-maintenance:" + ("a" * 16),
+                ]
+            }
+        ],
+    )
 
     def _fake_cleanup(**kwargs):
         calls.append("cleanup")
@@ -265,12 +376,14 @@ def test_resolver_cleans_before_a_forced_build(
     )
 
     tag = "a" * 16
-    assert calls == ["cleanup", "build"]
-    assert captured_cleanup["protected_refs"] == (
+    assert calls == ["cleanup", "build", "cleanup"]
+    assert set(captured_cleanup["protected_refs"]) == {
         f"usertest-maintenance:{tag}",
         f"ghcr.io/jcmullwh/usertest-maintenance:{tag}",
-    )
+    }
     assert resolution.metadata["cleanup"]["errors"] == []
+    assert resolution.metadata["cleanup"]["prewrite"] is not None
+    assert resolution.metadata["cleanup"]["postresolution"] is not None
 
 
 def test_cleanup_deletes_tags_and_unreferenced_image_ids(
@@ -355,6 +468,67 @@ def test_cleanup_deletes_tags_and_unreferenced_image_ids(
         "ghcr.io/jcmullwh/usertest-maintenance:bbbbbbbbbbbbbbbb",
     ) in removed
     assert ("docker", "image", "rm", "sha256:a") in removed
+
+
+def test_cleanup_reports_actual_post_inventory_after_partial_tag_deletion_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Actual remaining state must not be inferred from attempted Docker removals."""
+
+    cfg = replace(_cfg(), keep_local_count=0)
+    monkeypatch.setattr(backend_mod, "_load_maintenance_docker_config", lambda **_kwargs: cfg)
+    before_inventory = {
+        "schema_version": 1,
+        "repos_scanned": [cfg.local_image_repo, cfg.published_image_repo],
+        "protected_tags": [],
+        "entries": [
+            {
+                "repository": cfg.local_image_repo,
+                "tag": "aaaaaaaaaaaaaaaa",
+                "image_id": "sha256:failed",
+                "created_at": _created(0),
+            },
+            {
+                "repository": cfg.local_image_repo,
+                "tag": "bbbbbbbbbbbbbbbb",
+                "image_id": "sha256:deleted",
+                "created_at": _created(1),
+            },
+        ],
+    }
+    after_inventory = {
+        **before_inventory,
+        "entries": [before_inventory["entries"][0]],
+    }
+    inventories = [before_inventory, after_inventory]
+    monkeypatch.setattr(
+        backend_mod,
+        "list_local_maintenance_images",
+        lambda **_kwargs: inventories.pop(0),
+    )
+
+    def _fake_run(argv: list[str], **_kwargs):
+        if argv[-1] == "usertest-maintenance:aaaaaaaaaaaaaaaa":
+            return type("Proc", (), {"returncode": 1, "stdout": "", "stderr": "in use"})()
+        return type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(backend_mod, "_run_subprocess", _fake_run)
+    monkeypatch.setattr(backend_mod, "_docker_image_inspect_rows", lambda *_args, **_kwargs: [])
+
+    summary = backend_mod.cleanup_local_maintenance_images(repo_root=tmp_path, dry_run=False)
+
+    assert set(summary["attempted_deleted_tags"]) == {
+        "usertest-maintenance:aaaaaaaaaaaaaaaa",
+        "usertest-maintenance:bbbbbbbbbbbbbbbb",
+    }
+    assert summary["deleted_tags"] == ["usertest-maintenance:bbbbbbbbbbbbbbbb"]
+    assert summary["remaining_ordinary_image_ids"] == ["sha256:failed"]
+    assert summary["remaining_aliases"] == {
+        "sha256:failed": ["usertest-maintenance:aaaaaaaaaaaaaaaa"]
+    }
+    assert summary["bounded"] is False
+    assert any("usertest-maintenance:aaaaaaaaaaaaaaaa" in error for error in summary["errors"])
 
 
 def test_cleanup_writes_artifact(

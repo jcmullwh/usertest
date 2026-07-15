@@ -149,7 +149,11 @@ def test_batch_preflight_persists_resolved_maintenance_image_metadata(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
+    events: list[str] = []
+
     def fake_run(argv: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        if argv[:3] == ["docker", "buildx", "build"]:
+            events.append("scratch_build")
         return _completed(argv)
 
     class _Resolution:
@@ -164,6 +168,7 @@ def test_batch_preflight_persists_resolved_maintenance_image_metadata(
     captured: dict[str, object] = {}
 
     def fake_resolve(**kwargs):
+        events.append("resolve")
         captured.update(kwargs)
         kwargs["artifact_path"].write_text(
             '{"schema_version":1,"image":{"source":"local"}}\n',
@@ -175,6 +180,23 @@ def test_batch_preflight_persists_resolved_maintenance_image_metadata(
     monkeypatch.setattr(batch_preflight, "_git_branch", lambda _: "dev")
     monkeypatch.setattr(batch_preflight, "_git_head", lambda _: "abc123")
     monkeypatch.setattr(batch_preflight, "_gitlab_registry_probe", lambda: None)
+    def fake_prepare(**_kwargs):
+        events.append("prepare")
+        return type(
+            "Preparation",
+            (),
+            {
+                "local_ref": "usertest-maintenance:" + ("a" * 16),
+                "published_ref": "ghcr.io/jcmullwh/usertest-maintenance:" + ("a" * 16),
+            },
+        )()
+
+    monkeypatch.setattr(batch_preflight, "prepare_maintenance_docker_image", fake_prepare)
+    monkeypatch.setattr(
+        batch_preflight,
+        "cleanup_local_maintenance_images",
+        lambda **_kwargs: events.append("batch_prewrite") or {"schema_version": 1, "errors": []},
+    )
     monkeypatch.setattr(batch_preflight, "resolve_maintenance_docker_image", fake_resolve)
 
     result = batch_preflight.run_batch_preflight(
@@ -200,3 +222,4 @@ def test_batch_preflight_persists_resolved_maintenance_image_metadata(
     assert metadata["source"] == "local"
     assert Path(metadata["path"]).exists()
     assert captured["run_dir"] == tmp_path / "batch" / "preflight_maintenance_image"
+    assert events == ["prepare", "batch_prewrite", "scratch_build", "resolve"]
