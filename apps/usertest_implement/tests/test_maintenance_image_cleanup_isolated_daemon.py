@@ -1,4 +1,4 @@
-"""Opt-in, paired isolated-DIND evidence for maintenance-image cleanup.
+"""Opt-in, paired isolated-DIND application-integration evidence.
 
 This is deliberately not an ordinary Docker test.  It refuses every default or
 non-loopback route and provisions disposable, digest-pinned daemons only after
@@ -20,10 +20,10 @@ from urllib.parse import urlparse
 from uuid import uuid4
 
 import pytest
-from usertest_implement import batch_preflight
-
 import runner_core.execution_backend as backend_mod
 from runner_core.execution_backend import MaintenanceDockerConfig, MaintenanceImagePreparation
+
+from usertest_implement import batch_preflight
 
 # Capture the unpatched production callable at import time.  Paired arms must
 # never capture another arm's monkeypatched observer as their "real" cleanup.
