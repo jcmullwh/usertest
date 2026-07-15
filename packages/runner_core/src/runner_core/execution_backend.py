@@ -1291,7 +1291,10 @@ def resolve_maintenance_docker_image(
         },
     }
     if cleanup_summary is not None:
-        cleanup_metadata = dict(post_cleanup_summary or cleanup_summary)
+        # Keep the historical top-level cleanup summary tied to the pre-write
+        # cleanup artifact.  Post-resolution cleanup is a distinct later phase
+        # and must not overwrite the primary result/error contract.
+        cleanup_metadata = dict(cleanup_summary)
         cleanup_metadata["prewrite"] = cleanup_summary
         cleanup_metadata["postresolution"] = post_cleanup_summary
         metadata["cleanup"] = cleanup_metadata
