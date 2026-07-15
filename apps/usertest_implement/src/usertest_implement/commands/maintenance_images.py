@@ -18,7 +18,7 @@ def _cmd_maintenance_images_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_maintenance_images_cleanup(args: argparse.Namespace) -> int:
-    """Prune old local maintenance-image tags using the configured retention policy."""
+    """Prune local maintenance-image identities using the configured retention policy."""
 
     repo_root = _resolve_repo_root(getattr(args, "repo_root", None))
     dry_run = args.dry_run

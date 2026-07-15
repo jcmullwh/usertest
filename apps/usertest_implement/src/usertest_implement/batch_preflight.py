@@ -387,6 +387,7 @@ def run_batch_preflight(
             )
 
     if exec_backend == "docker":
+        maintenance_image_metadata: dict[str, Any] | None = None
         docker_version = _run(["docker", "version"], cwd=repo_root)
         _write_log(preflight_dir / "docker_version.log", docker_version)
         if docker_version.returncode != 0:
@@ -409,6 +410,41 @@ def run_batch_preflight(
                     evidence={"path": str(preflight_dir / "docker_buildx.log")},
                 )
             )
+        if resolve_maintenance_image and exec_docker_profile == "maintenance":
+            # Resolve (and therefore reclaim maintenance-image storage) before
+            # the scratch build performs its own Docker storage write.
+            maintenance_metadata_path = preflight_dir / "maintenance_image.json"
+            try:
+                resolution = resolve_maintenance_docker_image(
+                    repo_root=repo_root,
+                    run_dir=batch_dir / "preflight_maintenance_image",
+                    force_rebuild=False,
+                    timeout_seconds=docker_timeout_seconds,
+                    artifact_path=maintenance_metadata_path,
+                )
+                maintenance_image_metadata = {
+                    "path": str(maintenance_metadata_path),
+                    "env_hash": resolution.env_hash,
+                    "image_ref": resolution.image_ref,
+                    "source": resolution.image_source,
+                    "timings": resolution.metadata.get("timings", {}),
+                    "artifacts": resolution.metadata.get("artifacts", {}),
+                }
+            except Exception as exc:  # noqa: BLE001
+                blockers.append(
+                    _blocker(
+                        blocker_id="infra_transient",
+                        failure_class="infra_transient",
+                        summary=(
+                            "Maintenance Docker image resolution failed during batch preflight."
+                        ),
+                        evidence={
+                            "path": str(maintenance_metadata_path),
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    )
+                )
         with tempfile.TemporaryDirectory(prefix="usertest_batch_docker_preflight_") as temp_dir:
             temp_root = Path(temp_dir)
             (temp_root / "Dockerfile").write_text(
@@ -439,42 +475,6 @@ def run_batch_preflight(
                     evidence={"path": str(preflight_dir / "docker_build.log")},
                 )
             )
-        if resolve_maintenance_image and exec_docker_profile == "maintenance":
-            maintenance_metadata_path = preflight_dir / "maintenance_image.json"
-            try:
-                resolution = resolve_maintenance_docker_image(
-                    repo_root=repo_root,
-                    run_dir=batch_dir / "preflight_maintenance_image",
-                    force_rebuild=False,
-                    timeout_seconds=docker_timeout_seconds,
-                    artifact_path=maintenance_metadata_path,
-                )
-                maintenance_image_metadata = {
-                    "path": str(maintenance_metadata_path),
-                    "env_hash": resolution.env_hash,
-                    "image_ref": resolution.image_ref,
-                    "source": resolution.image_source,
-                    "timings": resolution.metadata.get("timings", {}),
-                    "artifacts": resolution.metadata.get("artifacts", {}),
-                }
-            except Exception as exc:  # noqa: BLE001
-                maintenance_image_metadata = None
-                blockers.append(
-                    _blocker(
-                        blocker_id="infra_transient",
-                        failure_class="infra_transient",
-                        summary=(
-                            "Maintenance Docker image resolution failed during batch preflight."
-                        ),
-                        evidence={
-                            "path": str(maintenance_metadata_path),
-                            "type": type(exc).__name__,
-                            "message": str(exc),
-                        },
-                    )
-                )
-        else:
-            maintenance_image_metadata = None
     else:
         maintenance_image_metadata = None
 

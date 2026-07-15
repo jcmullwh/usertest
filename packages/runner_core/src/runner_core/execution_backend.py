@@ -8,9 +8,9 @@ import subprocess
 import sys
 import time
 import tomllib
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
 
@@ -570,8 +570,20 @@ def cleanup_local_maintenance_images(
     dry_run: bool = False,
     timeout_seconds: float | None = None,
     artifact_path: Path | None = None,
+    protected_refs: Collection[str] = (),
 ) -> dict[str, Any]:
-    """Prune old local maintenance-image tags conservatively according to retention settings."""
+    """Prune local maintenance-image identities according to the retention settings.
+
+    ``keep_local_count`` is an identity budget, not a tag budget.  A built image is
+    normally tagged in both the local and published repositories, so selecting tags
+    independently can retain twice as many tags and, more importantly, allow the
+    age window to retain an unbounded number of image layers.  Select identities
+    first, then keep or delete all of each selected identity's managed aliases.
+
+    Callers that are about to use an image may pass its references in
+    ``protected_refs``.  This keeps an existing current image available while
+    cleanup runs before a pull, tag, or build writes to Docker storage.
+    """
 
     cfg = _load_maintenance_docker_config(repo_root=repo_root)
     inventory = list_local_maintenance_images(
@@ -579,23 +591,52 @@ def cleanup_local_maintenance_images(
         timeout_seconds=timeout_seconds,
     )
     protected_tags = set(cast(list[str], inventory.get("protected_tags", [])))
+    protected_refs_set = {str(ref).strip() for ref in protected_refs if str(ref).strip()}
     entries = [
         _normalize_maintenance_inventory_entry(cast(dict[str, Any], item))
         for item in inventory.get("entries", [])
         if isinstance(item, dict)
     ]
-    hash_entries = [entry for entry in entries if bool(entry.get("hash_tag"))]
-    hash_entries.sort(
-        key=lambda item: _parse_created_at_for_sort(item.get("created_at")),
-        reverse=True,
-    )
-    keep_cutoff = datetime.now(timezone.utc) - timedelta(days=cfg.keep_local_days)
-    kept_hash_refs: set[str] = set()
-    for index, entry in enumerate(hash_entries):
+    identities: dict[str, list[dict[str, Any]]] = {}
+    identity_order: dict[str, int] = {}
+    for index, entry in enumerate(entries):
+        image_id = str(entry.get("image_id") or "")
         ref = str(entry.get("ref") or "")
-        created_at = _parse_created_at_for_sort(entry.get("created_at"))
-        if index < cfg.keep_local_count or created_at >= keep_cutoff:
-            kept_hash_refs.add(ref)
+        # Docker normally supplies an ID.  Treat an anomalous unlabelled entry as
+        # its own identity so it cannot bypass the configured retention budget.
+        identity = image_id or f"ref:{ref}"
+        identities.setdefault(identity, []).append(entry)
+        identity_order.setdefault(identity, index)
+
+    protected_identity_keys: set[str] = set()
+    ordinary_identity_keys: list[str] = []
+    for identity, identity_entries in identities.items():
+        protected = any(
+            str(entry.get("tag") or "") in protected_tags
+            or str(entry.get("ref") or "") in protected_refs_set
+            # A non-hash alias (for example, ``main-latest``) keeps the image
+            # addressable, so it must protect the complete identity.
+            or not bool(entry.get("hash_tag"))
+            for entry in identity_entries
+        )
+        if protected:
+            protected_identity_keys.add(identity)
+        elif any(bool(entry.get("hash_tag")) for entry in identity_entries):
+            ordinary_identity_keys.append(identity)
+
+    def _identity_sort_key(identity: str) -> tuple[datetime, int]:
+        newest = max(
+            (_parse_created_at_for_sort(entry.get("created_at")) for entry in identities[identity]),
+            default=datetime.fromtimestamp(0, tz=timezone.utc),
+        )
+        # The negated timestamp gives newest first while retaining inventory order
+        # as a deterministic tie breaker.
+        return (newest, -identity_order[identity])
+
+    ordinary_identity_keys.sort(key=_identity_sort_key, reverse=True)
+    kept_identity_keys = protected_identity_keys | set(
+        ordinary_identity_keys[: cfg.keep_local_count]
+    )
 
     kept_tags: list[str] = []
     deleted_tags: list[str] = []
@@ -607,8 +648,9 @@ def cleanup_local_maintenance_images(
         ref = str(entry.get("ref") or "")
         tag = str(entry.get("tag") or "")
         image_id = str(entry.get("image_id") or "")
+        identity = image_id or f"ref:{ref}"
         is_hash = bool(entry.get("hash_tag"))
-        if tag in protected_tags or not is_hash or ref in kept_hash_refs:
+        if identity in kept_identity_keys or tag in protected_tags or not is_hash:
             if ref:
                 kept_tags.append(ref)
             continue
@@ -660,6 +702,11 @@ def cleanup_local_maintenance_images(
         "dry_run": bool(dry_run),
         "repos_scanned": inventory.get("repos_scanned", []),
         "protected_tags": sorted(protected_tags),
+        "protected_refs": sorted(protected_refs_set),
+        "keep_local_count": cfg.keep_local_count,
+        "kept_image_ids": sorted(
+            identity for identity in kept_identity_keys if not identity.startswith("ref:")
+        ),
         "kept_tags": sorted(set(kept_tags)),
         "deleted_tags": sorted(set(deleted_tags)),
         "deleted_image_ids": deleted_image_ids,
@@ -887,6 +934,36 @@ def resolve_maintenance_docker_image(
     tag_suffix = env_hash[:16]
     local_ref = f"{cfg.local_image_repo}:{tag_suffix}"
     published_ref = f"{cfg.published_image_repo}:{tag_suffix}"
+    cleanup_summary: dict[str, Any] | None = None
+    if cfg.cleanup_enabled and cfg.cleanup_on_prepare:
+        cleanup_artifact_path = sandbox_dir / "maintenance_image_cleanup.json"
+        try:
+            # Cleanup must reclaim space before a pull, tag, or build can fail
+            # because Docker's local store is full.  Protect both aliases of the
+            # image being resolved in case that identity already exists locally.
+            cleanup_summary = cleanup_local_maintenance_images(
+                repo_root=repo_root,
+                dry_run=cfg.cleanup_dry_run_default,
+                timeout_seconds=timeout_seconds,
+                artifact_path=cleanup_artifact_path,
+                protected_refs=(local_ref, published_ref),
+            )
+        except Exception as exc:  # noqa: BLE001
+            cleanup_summary = {
+                "schema_version": 1,
+                "cleanup_enabled": True,
+                "dry_run": bool(cfg.cleanup_dry_run_default),
+                "repos_scanned": list(_maintenance_repo_names(cfg=cfg)),
+                "protected_tags": list(_maintenance_protected_tags(cfg=cfg)),
+                "protected_refs": [local_ref, published_ref],
+                "keep_local_count": cfg.keep_local_count,
+                "kept_image_ids": [],
+                "kept_tags": [],
+                "deleted_tags": [],
+                "deleted_image_ids": [],
+                "errors": [f"Automatic maintenance image cleanup failed: {exc}"],
+            }
+            _write_json(cleanup_artifact_path, cleanup_summary)
     pull_attempted = False
     alias_pull_attempts: list[dict[str, Any]] = []
     build_cache_from: list[str] = []
@@ -991,28 +1068,7 @@ def resolve_maintenance_docker_image(
             "image_resolution_seconds": max(0.0, time.monotonic() - started),
         },
     }
-    if cfg.cleanup_enabled and cfg.cleanup_on_prepare:
-        cleanup_artifact_path = sandbox_dir / "maintenance_image_cleanup.json"
-        try:
-            cleanup_summary = cleanup_local_maintenance_images(
-                repo_root=repo_root,
-                dry_run=cfg.cleanup_dry_run_default,
-                timeout_seconds=timeout_seconds,
-                artifact_path=cleanup_artifact_path,
-            )
-        except Exception as exc:  # noqa: BLE001
-            cleanup_summary = {
-                "schema_version": 1,
-                "cleanup_enabled": True,
-                "dry_run": bool(cfg.cleanup_dry_run_default),
-                "repos_scanned": list(_maintenance_repo_names(cfg=cfg)),
-                "protected_tags": list(_maintenance_protected_tags(cfg=cfg)),
-                "kept_tags": [],
-                "deleted_tags": [],
-                "deleted_image_ids": [],
-                "errors": [f"Automatic maintenance image cleanup failed: {exc}"],
-            }
-            _write_json(cleanup_artifact_path, cleanup_summary)
+    if cleanup_summary is not None:
         metadata["cleanup"] = cleanup_summary
 
     if artifact_path is not None:
