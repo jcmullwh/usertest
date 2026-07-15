@@ -25,6 +25,10 @@ from usertest_implement import batch_preflight
 import runner_core.execution_backend as backend_mod
 from runner_core.execution_backend import MaintenanceDockerConfig, MaintenanceImagePreparation
 
+# Capture the unpatched production callable at import time.  Paired arms must
+# never capture another arm's monkeypatched observer as their "real" cleanup.
+_TRUE_PRODUCTION_CLEANUP = backend_mod.cleanup_local_maintenance_images
+
 _OPT_IN = os.environ.get("USERTEST_RUN_ISOLATED_DOCKER_TESTS") == "1"
 _ISOLATION_ACK = os.environ.get("USERTEST_ISOLATED_DOCKER_DAEMON") == "1"
 _PROVISIONER = os.environ.get("USERTEST_DIND_PROVISIONER_HOST")
@@ -538,6 +542,7 @@ def _run_direct_resolver_arm(
     daemon: _Daemon,
     *,
     monkeypatch: pytest.MonkeyPatch,
+    true_cleanup: Callable[..., dict[str, object]],
     work_dir: Path,
     cleanup_enabled: bool,
 ) -> tuple[_Seed, backend_mod.MaintenanceImageResolution | RuntimeError, list[int]]:
@@ -546,10 +551,11 @@ def _run_direct_resolver_arm(
     seed = _seed_burst(daemon, work_dir=work_dir, cfg=cfg)
     monkeypatch.setattr(backend_mod, "_load_maintenance_docker_config", lambda **_kwargs: cfg)
     cleanup_headroom: list[int] = []
-    real_cleanup = backend_mod.cleanup_local_maintenance_images
 
     def observed_cleanup(**kwargs: object) -> dict[str, object]:
-        result = real_cleanup(**kwargs)
+        # Exactly one call to the immutable production function per observer
+        # invocation; this observer only closes over its own live daemon/workdir.
+        result = true_cleanup(**kwargs)
         cleanup_headroom.append(_free_bytes(daemon, cwd=work_dir))
         return result
 
@@ -577,39 +583,45 @@ def test_direct_resolver_baseline_fails_but_prewrite_recovery_proceeds(
 ) -> None:
     """Only cleanup policy differs between calibrated direct-resolver arms."""
 
+    true_cleanup = _TRUE_PRODUCTION_CLEANUP
     with dind_factory() as baseline_daemon:
-        baseline_seed, baseline, baseline_headroom = _run_direct_resolver_arm(
-            baseline_daemon,
-            monkeypatch=monkeypatch,
-            work_dir=tmp_path / "baseline",
-            cleanup_enabled=False,
-        )
-        _assert_no_space_log(
-            tmp_path / "baseline" / "run" / "sandbox" / "maintenance_docker_build.log"
-        )
+        with monkeypatch.context() as baseline_patch:
+            baseline_seed, baseline, baseline_headroom = _run_direct_resolver_arm(
+                baseline_daemon,
+                monkeypatch=baseline_patch,
+                true_cleanup=true_cleanup,
+                work_dir=tmp_path / "baseline",
+                cleanup_enabled=False,
+            )
+            _assert_no_space_log(
+                tmp_path / "baseline" / "run" / "sandbox" / "maintenance_docker_build.log"
+            )
     with dind_factory() as recovery_daemon:
-        recovery_seed, recovery, recovery_headroom = _run_direct_resolver_arm(
-            recovery_daemon,
-            monkeypatch=monkeypatch,
-            work_dir=tmp_path / "recovery",
-            cleanup_enabled=True,
-        )
-        assert not isinstance(recovery, RuntimeError), "cleanup must restore resolver capacity"
-        assert recovery.image_source == "built"
-        cleanup = recovery.metadata["cleanup"]["prewrite"]
-        assert recovery_seed.free_after_seed < recovery_seed.resolver_write_bytes
-        assert recovery_headroom[0] >= recovery_seed.resolver_write_bytes
-        _assert_recovery_inventory(
-            recovery_daemon,
-            work_dir=tmp_path / "recovery",
-            seed=recovery_seed,
-            cleanup=cleanup,
-        )
-        _assert_selected_aliases(
-            recovery_daemon,
-            cwd=tmp_path / "recovery",
-            cfg=_maintenance_config(keep_count=1, cleanup_enabled=True),
-        )
+        with monkeypatch.context() as recovery_patch:
+            recovery_seed, recovery, recovery_headroom = _run_direct_resolver_arm(
+                recovery_daemon,
+                monkeypatch=recovery_patch,
+                true_cleanup=true_cleanup,
+                work_dir=tmp_path / "recovery",
+                cleanup_enabled=True,
+            )
+            assert not isinstance(recovery, RuntimeError), "cleanup must restore resolver capacity"
+            assert recovery.image_source == "built"
+            cleanup = recovery.metadata["cleanup"]["prewrite"]
+            assert recovery_seed.free_after_seed < recovery_seed.resolver_write_bytes
+            assert recovery_headroom[0] >= recovery_seed.resolver_write_bytes
+            assert len(recovery_headroom) == 2
+            _assert_recovery_inventory(
+                recovery_daemon,
+                work_dir=tmp_path / "recovery",
+                seed=recovery_seed,
+                cleanup=cleanup,
+            )
+            _assert_selected_aliases(
+                recovery_daemon,
+                cwd=tmp_path / "recovery",
+                cfg=_maintenance_config(keep_count=1, cleanup_enabled=True),
+            )
 
     assert baseline_seed.spec == recovery_seed.spec
     assert isinstance(baseline, RuntimeError), "baseline must fail the resolver storage write"
@@ -620,6 +632,7 @@ def _run_batch_arm(
     daemon: _Daemon,
     *,
     monkeypatch: pytest.MonkeyPatch,
+    true_cleanup: Callable[..., dict[str, object]],
     arm_dir: Path,
     cleanup_enabled: bool,
 ) -> tuple[_Seed, dict[str, object], list[int]]:
@@ -639,10 +652,11 @@ def _run_batch_arm(
         batch_preflight, "prepare_maintenance_docker_image", lambda **_kwargs: preparation
     )
     cleanup_headroom: list[int] = []
-    real_cleanup = backend_mod.cleanup_local_maintenance_images
 
     def observed_cleanup(**kwargs: object) -> dict[str, object]:
-        result = real_cleanup(**kwargs)
+        # Do not read a mutable module attribute: that can be a prior arm's
+        # observer after pytest's shared monkeypatch fixture has been used.
+        result = true_cleanup(**kwargs)
         cleanup_headroom.append(_free_bytes(daemon, cwd=arm_dir))
         return result
 
@@ -674,42 +688,50 @@ def test_batch_baseline_fails_scratch_write_but_prewrite_recovery_resolves(
 ) -> None:
     """Both arms request resolution; cleanup policy is their sole intervention."""
 
+    true_cleanup = _TRUE_PRODUCTION_CLEANUP
     with dind_factory() as baseline_daemon:
-        baseline_seed, baseline, baseline_headroom = _run_batch_arm(
-            baseline_daemon,
-            monkeypatch=monkeypatch,
-            arm_dir=tmp_path / "baseline",
-            cleanup_enabled=False,
-        )
-        assert any(
-            "Docker buildx scratch build failed" in item["summary"]
-            for item in baseline["blockers"]
-        )
-        _assert_no_space_log(tmp_path / "baseline" / "batch" / "preflight" / "docker_build.log")
+        with monkeypatch.context() as baseline_patch:
+            baseline_seed, baseline, baseline_headroom = _run_batch_arm(
+                baseline_daemon,
+                monkeypatch=baseline_patch,
+                true_cleanup=true_cleanup,
+                arm_dir=tmp_path / "baseline",
+                cleanup_enabled=False,
+            )
+            assert any(
+                "Docker buildx scratch build failed" in item["summary"]
+                for item in baseline["blockers"]
+            )
+            _assert_no_space_log(
+                tmp_path / "baseline" / "batch" / "preflight" / "docker_build.log"
+            )
     with dind_factory() as recovery_daemon:
-        recovery_seed, recovery, recovery_headroom = _run_batch_arm(
-            recovery_daemon,
-            monkeypatch=monkeypatch,
-            arm_dir=tmp_path / "recovery",
-            cleanup_enabled=True,
-        )
-        assert recovery["blockers"] == []
-        metadata = recovery["maintenance_image_metadata"]
-        assert metadata["source"] == "built"
-        cleanup = metadata["batch_prewrite"]
-        assert recovery_headroom[0] >= recovery_seed.scratch_write_bytes
-        _assert_recovery_inventory(
-            recovery_daemon,
-            work_dir=tmp_path / "recovery",
-            seed=recovery_seed,
-            cleanup=cleanup,
-        )
-        _assert_selected_aliases(
-            recovery_daemon,
-            cwd=tmp_path / "recovery",
-            cfg=_maintenance_config(keep_count=1, cleanup_enabled=True),
-        )
-        assert (tmp_path / "recovery" / "batch" / "preflight" / "docker_build.log").is_file()
+        with monkeypatch.context() as recovery_patch:
+            recovery_seed, recovery, recovery_headroom = _run_batch_arm(
+                recovery_daemon,
+                monkeypatch=recovery_patch,
+                true_cleanup=true_cleanup,
+                arm_dir=tmp_path / "recovery",
+                cleanup_enabled=True,
+            )
+            assert recovery["blockers"] == []
+            metadata = recovery["maintenance_image_metadata"]
+            assert metadata["source"] == "built"
+            cleanup = metadata["batch_prewrite"]
+            assert recovery_headroom[0] >= recovery_seed.scratch_write_bytes
+            assert len(recovery_headroom) == 2
+            _assert_recovery_inventory(
+                recovery_daemon,
+                work_dir=tmp_path / "recovery",
+                seed=recovery_seed,
+                cleanup=cleanup,
+            )
+            _assert_selected_aliases(
+                recovery_daemon,
+                cwd=tmp_path / "recovery",
+                cfg=_maintenance_config(keep_count=1, cleanup_enabled=True),
+            )
+            assert (tmp_path / "recovery" / "batch" / "preflight" / "docker_build.log").is_file()
 
     assert baseline_seed.spec == recovery_seed.spec
     assert baseline_headroom == []
@@ -736,7 +758,7 @@ def test_external_and_container_references_remain_physical_reclamation_blockers(
         external_id = _image_id(daemon, external_ref, cwd=tmp_path)
         assert external_id == seed.ordinary_ref_to_id[external_source]
         container_name = f"usertest-isolated-{uuid4().hex[:12]}"
-        _docker(
+        create_proc = _docker(
             daemon.endpoint,
             "create",
             "--name",
@@ -745,16 +767,18 @@ def test_external_and_container_references_remain_physical_reclamation_blockers(
             "/explicit-stopped-container-command",
             cwd=tmp_path,
         )
-        container_id = _image_id(daemon, container_source, cwd=tmp_path)
+        created_container_id = create_proc.stdout.strip()
+        assert created_container_id, "docker create did not return a container ID"
+        container_image_id = _image_id(daemon, container_source, cwd=tmp_path)
         container_image = _docker(
             daemon.endpoint,
             "inspect",
             "--format",
             "{{.Image}}",
-            container_name,
+            created_container_id,
             cwd=tmp_path,
         ).stdout.strip()
-        assert container_image == container_id
+        assert container_image == container_image_id
         try:
             summary = backend_mod.cleanup_local_maintenance_images(
                 repo_root=tmp_path,
@@ -762,18 +786,34 @@ def test_external_and_container_references_remain_physical_reclamation_blockers(
                 protected_refs=tuple(seed.protected_ref_to_id),
             )
         finally:
-            _docker(daemon.endpoint, "rm", "--force", container_name, cwd=tmp_path, check=False)
+            _docker(
+                daemon.endpoint,
+                "rm",
+                "--force",
+                created_container_id,
+                cwd=tmp_path,
+                check=False,
+            )
 
         assert external_id in summary["candidate_image_ids"]
-        assert container_id in summary["candidate_image_ids"]
+        assert container_image_id in summary["candidate_image_ids"]
         assert summary["externally_retained_refs"][external_id] == [external_ref]
-        assert container_id in summary["retained_candidate_image_ids"]
-        assert summary["physical_candidate_status"][container_id]["exists"] is True
+        assert container_image_id in summary["retained_candidate_image_ids"]
+        assert summary["physical_candidate_status"][container_image_id]["exists"] is True
+        container_prefix = created_container_id[:12]
+        candidate_aliases = {
+            container_source,
+            f"{cfg.published_image_repo}:{container_tag}",
+        }
         container_errors = [
-            error for error in summary["errors"] if container_source in error
+            error
+            for error in summary["errors"]
+            if "container" in error.lower()
+            and (created_container_id in error or container_prefix in error)
+            and any(alias in error for alias in candidate_aliases)
         ]
-        assert container_errors and any("container" in error.lower() for error in container_errors)
+        assert container_errors, "cleanup did not report the exact blocking container"
         assert _image_exists(daemon, external_id, cwd=tmp_path)
-        assert _image_exists(daemon, container_id, cwd=tmp_path)
+        assert _image_exists(daemon, container_image_id, cwd=tmp_path)
         assert summary["physical_identity_bounded"] is False
         assert summary["bounded"] is False
