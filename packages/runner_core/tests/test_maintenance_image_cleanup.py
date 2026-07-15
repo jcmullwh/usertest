@@ -514,7 +514,20 @@ def test_cleanup_reports_actual_post_inventory_after_partial_tag_deletion_failur
         return type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()
 
     monkeypatch.setattr(backend_mod, "_run_subprocess", _fake_run)
-    monkeypatch.setattr(backend_mod, "_docker_image_inspect_rows", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_image_inspect_rows",
+        lambda refs_or_ids, **_kwargs: (
+            [
+                {
+                    "Id": "sha256:failed",
+                    "RepoTags": ["usertest-maintenance:aaaaaaaaaaaaaaaa"],
+                }
+            ]
+            if refs_or_ids == ["sha256:failed"]
+            else []
+        ),
+    )
 
     summary = backend_mod.cleanup_local_maintenance_images(repo_root=tmp_path, dry_run=False)
 
@@ -529,6 +542,113 @@ def test_cleanup_reports_actual_post_inventory_after_partial_tag_deletion_failur
     }
     assert summary["bounded"] is False
     assert any("usertest-maintenance:aaaaaaaaaaaaaaaa" in error for error in summary["errors"])
+
+
+def test_cleanup_reports_last_managed_tag_as_implicit_physical_reclamation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Removing an image's final managed tag can reclaim its ID without an ID rm call."""
+
+    cfg = replace(_cfg(), keep_local_count=0)
+    monkeypatch.setattr(backend_mod, "_load_maintenance_docker_config", lambda **_kwargs: cfg)
+    before_inventory = {
+        "schema_version": 1,
+        "repos_scanned": [cfg.local_image_repo],
+        "protected_tags": [],
+        "entries": [
+            {
+                "repository": cfg.local_image_repo,
+                "tag": "aaaaaaaaaaaaaaaa",
+                "image_id": "sha256:implicit",
+                "created_at": _created(0),
+            }
+        ],
+    }
+    after_inventory = {**before_inventory, "entries": []}
+    inventories = [before_inventory, after_inventory]
+    monkeypatch.setattr(
+        backend_mod,
+        "list_local_maintenance_images",
+        lambda **_kwargs: inventories.pop(0),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    )
+    monkeypatch.setattr(backend_mod, "_docker_image_inspect_rows", lambda *_args, **_kwargs: [])
+
+    summary = backend_mod.cleanup_local_maintenance_images(repo_root=tmp_path, dry_run=False)
+
+    assert summary["deleted_image_ids"] == []
+    assert summary["reclaimed_image_ids"] == ["sha256:implicit"]
+    assert summary["retained_candidate_image_ids"] == []
+    assert summary["physical_candidate_status"] == {
+        "sha256:implicit": {"exists": False, "external_refs": []}
+    }
+    assert summary["physical_identity_bounded"] is True
+    assert summary["bounded"] is True
+
+
+def test_cleanup_reports_external_tags_that_block_physical_reclamation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A managed-tag budget cannot claim physical reclamation while external tags remain."""
+
+    cfg = replace(_cfg(), keep_local_count=0)
+    monkeypatch.setattr(backend_mod, "_load_maintenance_docker_config", lambda **_kwargs: cfg)
+    before_inventory = {
+        "schema_version": 1,
+        "repos_scanned": [cfg.local_image_repo],
+        "protected_tags": [],
+        "entries": [
+            {
+                "repository": cfg.local_image_repo,
+                "tag": "aaaaaaaaaaaaaaaa",
+                "image_id": "sha256:external",
+                "created_at": _created(0),
+            }
+        ],
+    }
+    after_inventory = {**before_inventory, "entries": []}
+    inventories = [before_inventory, after_inventory]
+    monkeypatch.setattr(
+        backend_mod,
+        "list_local_maintenance_images",
+        lambda **_kwargs: inventories.pop(0),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_run_subprocess",
+        lambda *_args, **_kwargs: type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    )
+    monkeypatch.setattr(
+        backend_mod,
+        "_docker_image_inspect_rows",
+        lambda *_args, **_kwargs: [
+            {"Id": "sha256:external", "RepoTags": ["example.test/external:keep"]}
+        ],
+    )
+
+    summary = backend_mod.cleanup_local_maintenance_images(repo_root=tmp_path, dry_run=False)
+
+    assert summary["managed_tag_bounded"] is True
+    assert summary["reclaimed_image_ids"] == []
+    assert summary["retained_candidate_image_ids"] == ["sha256:external"]
+    assert summary["externally_retained_image_ids"] == ["sha256:external"]
+    assert summary["externally_retained_refs"] == {
+        "sha256:external": ["example.test/external:keep"]
+    }
+    assert summary["physical_candidate_status"] == {
+        "sha256:external": {
+            "exists": True,
+            "external_refs": ["example.test/external:keep"],
+        }
+    }
+    assert summary["physical_identity_bounded"] is False
+    assert summary["bounded"] is False
 
 
 def test_cleanup_writes_artifact(

@@ -13,6 +13,7 @@ from urllib.request import Request, urlopen
 
 import yaml
 from runner_core.execution_backend import (
+    _load_maintenance_docker_config,
     cleanup_local_maintenance_images,
     prepare_maintenance_docker_image,
     resolve_maintenance_docker_image,
@@ -427,23 +428,35 @@ def run_batch_preflight(
                     timeout_seconds=docker_timeout_seconds,
                 )
                 prewrite_artifact_path = preflight_dir / "maintenance_image_batch_prewrite.json"
-                try:
-                    batch_prewrite = cleanup_local_maintenance_images(
-                        repo_root=repo_root,
-                        dry_run=False,
-                        timeout_seconds=docker_timeout_seconds,
-                        artifact_path=prewrite_artifact_path,
-                        protected_refs=(
-                            maintenance_preparation.local_ref,
-                            maintenance_preparation.published_ref,
-                        ),
-                    )
-                except Exception as exc:  # noqa: BLE001
+                cleanup_cfg = _load_maintenance_docker_config(repo_root=repo_root)
+                if not (cleanup_cfg.cleanup_enabled and cleanup_cfg.cleanup_on_prepare):
                     batch_prewrite = {
                         "schema_version": 1,
                         "phase": "batch_prewrite",
-                        "errors": [f"Batch prewrite maintenance cleanup failed: {exc}"],
+                        "skipped": True,
+                        "cleanup_enabled": cleanup_cfg.cleanup_enabled,
+                        "cleanup_on_prepare": cleanup_cfg.cleanup_on_prepare,
+                        "dry_run": cleanup_cfg.cleanup_dry_run_default,
+                        "errors": [],
                     }
+                else:
+                    try:
+                        batch_prewrite = cleanup_local_maintenance_images(
+                            repo_root=repo_root,
+                            dry_run=cleanup_cfg.cleanup_dry_run_default,
+                            timeout_seconds=docker_timeout_seconds,
+                            artifact_path=prewrite_artifact_path,
+                            protected_refs=(
+                                maintenance_preparation.local_ref,
+                                maintenance_preparation.published_ref,
+                            ),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        batch_prewrite = {
+                            "schema_version": 1,
+                            "phase": "batch_prewrite",
+                            "errors": [f"Batch prewrite maintenance cleanup failed: {exc}"],
+                        }
             except Exception as exc:  # noqa: BLE001
                 blockers.append(
                     _blocker(

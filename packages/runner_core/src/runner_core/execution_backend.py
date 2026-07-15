@@ -656,6 +656,18 @@ def cleanup_local_maintenance_images(
     deleted_image_ids: list[str] = []
     errors: list[str] = []
     deleted_candidate_ids: set[str] = set()
+    candidate_image_ids = sorted(
+        {
+            str(entry.get("image_id") or "")
+            for entry in entries
+            if (
+                (str(entry.get("image_id") or "") or f"ref:{entry.get('ref') or ''}")
+                not in kept_identity_keys
+                and bool(entry.get("hash_tag"))
+                and str(entry.get("image_id") or "")
+            )
+        }
+    )
 
     for entry in entries:
         ref = str(entry.get("ref") or "")
@@ -711,6 +723,55 @@ def cleanup_local_maintenance_images(
                 )
                 continue
             deleted_image_ids.append(image_id)
+
+    reclaimed_image_ids: list[str] = []
+    retained_candidate_image_ids: list[str] = []
+    externally_retained_image_ids: list[str] = []
+    externally_retained_refs: dict[str, list[str]] = {}
+    physical_identity_bounded: bool | None = None
+    physical_state_errors: list[str] = []
+    physical_candidate_status: dict[str, dict[str, Any]] = {}
+    if not dry_run:
+        managed_ref_prefixes = tuple(f"{repo}:" for repo in _maintenance_repo_names(cfg=cfg))
+        for image_id in candidate_image_ids:
+            try:
+                inspect_rows = _docker_image_inspect_rows(
+                    [image_id],
+                    timeout_seconds=timeout_seconds,
+                )
+            except Exception as exc:  # noqa: BLE001
+                message = (
+                    f"Failed to determine physical maintenance image state for {image_id}: {exc}"
+                )
+                physical_state_errors.append(message)
+                errors.append(message)
+                physical_candidate_status[image_id] = {"exists": None, "error": message}
+                continue
+            if not inspect_rows:
+                # Docker removes the image implicitly when the final managed tag is
+                # removed.  This is physical reclamation evidence even without a
+                # separate image-id remove command.
+                reclaimed_image_ids.append(image_id)
+                physical_candidate_status[image_id] = {"exists": False, "external_refs": []}
+                continue
+            retained_candidate_image_ids.append(image_id)
+            repo_tags = inspect_rows[0].get("RepoTags") or []
+            external_refs = sorted(
+                tag.strip()
+                for tag in repo_tags
+                if isinstance(tag, str)
+                and tag.strip()
+                and not tag.strip().startswith(managed_ref_prefixes)
+            )
+            if external_refs:
+                externally_retained_image_ids.append(image_id)
+                externally_retained_refs[image_id] = external_refs
+            physical_candidate_status[image_id] = {
+                "exists": True,
+                "external_refs": external_refs,
+            }
+        if not physical_state_errors:
+            physical_identity_bounded = not retained_candidate_image_ids
 
     def _inventory_state(payload: dict[str, Any]) -> dict[str, Any]:
         normalized = [
@@ -782,6 +843,16 @@ def cleanup_local_maintenance_images(
         "attempted_deleted_tags": sorted(set(attempted_deleted_tags)),
         "projected_deleted_tags": sorted(set(projected_deleted_tags)),
         "deleted_image_ids": deleted_image_ids,
+        "candidate_image_ids": candidate_image_ids,
+        "reclaimed_image_ids": sorted(reclaimed_image_ids),
+        "retained_candidate_image_ids": sorted(retained_candidate_image_ids),
+        "externally_retained_image_ids": sorted(externally_retained_image_ids),
+        "externally_retained_refs": externally_retained_refs,
+        "physical_identity_bounded": physical_identity_bounded,
+        "physical_candidate_status": physical_candidate_status,
+        "physical_state_errors": physical_state_errors,
+        "physical_reclamation_evidence": "image_id_existence_only",
+        "byte_reclamation": None,
         "errors": errors,
         "before_inventory": inventory,
         "before_state": before_state,
@@ -790,11 +861,15 @@ def cleanup_local_maintenance_images(
         "remaining_ordinary_image_ids": after_state["ordinary_image_ids"] if not dry_run else [],
         "remaining_protected_image_ids": after_state["protected_image_ids"] if not dry_run else [],
         "remaining_aliases": after_state["aliases"] if not dry_run else {},
-        "bounded": (
+        "managed_tag_bounded": (
             len(cast(list[str], after_state["ordinary_image_ids"])) <= cfg.keep_local_count
             if not dry_run and after_inventory is not None
             else None
         ),
+        # Preserve the historical field while making its claim conservative: an
+        # overflow candidate that remains due to an external tag is not bounded
+        # physically even when the managed-tag inventory is within budget.
+        "bounded": physical_identity_bounded,
         "state_kind": "projected" if dry_run else "actual",
     }
     if artifact_path is not None:
