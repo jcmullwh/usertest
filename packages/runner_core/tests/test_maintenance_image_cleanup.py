@@ -572,12 +572,23 @@ def test_cleanup_reports_last_managed_tag_as_implicit_physical_reclamation(
         "list_local_maintenance_images",
         lambda **_kwargs: inventories.pop(0),
     )
-    monkeypatch.setattr(
-        backend_mod,
-        "_run_subprocess",
-        lambda *_args, **_kwargs: type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
-    )
-    monkeypatch.setattr(backend_mod, "_docker_image_inspect_rows", lambda *_args, **_kwargs: [])
+    inspected_commands: list[list[str]] = []
+
+    def _fake_run(argv: list[str], **_kwargs):
+        if argv[:3] == ["docker", "image", "inspect"]:
+            inspected_commands.append(argv)
+            return type(
+                "Proc",
+                (),
+                {
+                    "returncode": 1,
+                    "stdout": "",
+                    "stderr": "Error response from daemon: No such image: sha256:implicit",
+                },
+            )()
+        return type("Proc", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    monkeypatch.setattr(backend_mod, "_run_subprocess", _fake_run)
 
     summary = backend_mod.cleanup_local_maintenance_images(repo_root=tmp_path, dry_run=False)
 
@@ -589,6 +600,10 @@ def test_cleanup_reports_last_managed_tag_as_implicit_physical_reclamation(
     }
     assert summary["physical_identity_bounded"] is True
     assert summary["bounded"] is True
+    assert inspected_commands == [
+        ["docker", "image", "inspect", "sha256:implicit"],
+        ["docker", "image", "inspect", "sha256:implicit"],
+    ]
 
 
 def test_cleanup_reports_external_tags_that_block_physical_reclamation(

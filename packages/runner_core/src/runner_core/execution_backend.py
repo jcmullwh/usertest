@@ -439,6 +439,7 @@ def _docker_image_inspect_rows(
     refs_or_ids: list[str],
     *,
     timeout_seconds: float | None,
+    allow_single_not_found: bool = False,
 ) -> list[dict[str, Any]]:
     """Inspect Docker image refs/IDs and return parsed JSON objects."""
 
@@ -448,6 +449,13 @@ def _docker_image_inspect_rows(
         ["docker", "image", "inspect", *refs_or_ids],
         timeout_seconds=timeout_seconds,
     )
+    if (
+        proc.returncode != 0
+        and allow_single_not_found
+        and len(refs_or_ids) == 1
+        and _docker_image_inspect_is_not_found(proc=proc, ref_or_id=refs_or_ids[0])
+    ):
+        return []
     if proc.returncode != 0:
         raise RuntimeError(
             "Failed to inspect Docker images.\n"
@@ -459,6 +467,15 @@ def _docker_image_inspect_rows(
     if not isinstance(parsed, list):
         raise RuntimeError("docker image inspect returned invalid JSON.")
     return [cast(dict[str, Any], item) for item in parsed if isinstance(item, dict)]
+
+
+def _docker_image_inspect_is_not_found(*, proc: Any, ref_or_id: str) -> bool:
+    """Return whether Docker reported the single requested image as absent."""
+
+    output = f"{proc.stdout}\n{proc.stderr}".casefold()
+    return ref_or_id.casefold() in output and bool(
+        re.search(r"\b(?:no such image|image not known)\b", output)
+    )
 
 
 def _coerce_iso8601_utc(value: object) -> str | None:
@@ -703,6 +720,7 @@ def cleanup_local_maintenance_images(
                 inspect_rows = _docker_image_inspect_rows(
                     [image_id],
                     timeout_seconds=timeout_seconds,
+                    allow_single_not_found=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 errors.append(f"Failed to inspect maintenance image id {image_id}: {exc}")
@@ -738,6 +756,7 @@ def cleanup_local_maintenance_images(
                 inspect_rows = _docker_image_inspect_rows(
                     [image_id],
                     timeout_seconds=timeout_seconds,
+                    allow_single_not_found=True,
                 )
             except Exception as exc:  # noqa: BLE001
                 message = (
