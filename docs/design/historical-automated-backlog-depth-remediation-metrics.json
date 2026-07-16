@@ -4,14 +4,14 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 1,
-    "as_of": "2026-07-16T07:40:46Z",
+    "as_of": "2026-07-16T08:15:40Z",
     "current_run_id": "controller-remediation-integration",
     "counting_rule": "One row is one meaningful pipeline or case lifecycle cycle, not one model turn or test command. Error and intervention counts use only explicitly retained events; unavailable totals are unknown. Automatic self-correction means the system continued an existing frontier without supervisor-authored content. Supervisor intervention means feedback, rerouting, process containment, lifecycle action, or code correction performed outside that automatic path.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "PR #216 open; local CI corrections green",
-        "detail": "Frozen qualification passed; initial PR CI exposed three branch-owned package-validation defects, all now corrected and verified at their owning local boundaries",
+        "value": "PR #216 review correction in progress",
+        "detail": "Replacement CI is 40/40 unique green; exact-head review accepted the causal mechanism and oracle but requested two provenance/reporting corrections",
         "tone": "warn"
       },
       {
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Green CI, review, and merge",
-        "detail": "Push the coherent CI correction, require replacement CI and system review, merge, then begin the first export-disabled full shadow cycle",
+        "value": "Same-reviewer correction, green CI, merge",
+        "detail": "Version the selected plan, clarify historical/current outcome evidence, return the delta to the same reviewer on the new exact head, then merge and begin shadow cycle 1",
         "tone": "warn"
       }
     ],
@@ -559,36 +559,36 @@
       {
         "run_id": "controller-remediation-integration",
         "label": "Controller remediation integration and qualification",
-        "scope": "Consolidated causal-depth, self-healing, planning, delivery, and outcome contracts plus the system-authored maintenance implementation; changed-project qualification before the remediation PR",
+        "scope": "Consolidated causal-depth, self-healing, planning, delivery, and outcome contracts plus the system-authored maintenance implementation; changed-project qualification and exact-head system review before merge",
         "timing": {
           "start_at": "2026-07-16T04:52:15Z",
           "end_at": null,
-          "elapsed_seconds": 10111,
+          "elapsed_seconds": 12206,
           "coverage": "active",
-          "display": "2 h 48 m 31 s so far",
+          "display": "3 h 23 m 25 s so far",
           "note": "Wall time from the completed PR #215 outcome row through this dashboard observation. This cycle remains in progress; the value will be finalized at its terminal PR disposition."
         },
-        "furthest_stage": "Draft PR #216; CI correction locally verified",
-        "current_state": "PR #216 is open as a draft against dev at first-CI head e94b6ce8. Frozen component and isolated-Docker qualification remains green. Both initial CI triggers failed the same three unique branch-owned package checks: backlog_miner import ordering, a Windows-only runner_core sandbox-revalidation fixture running on Linux, and usertest_backlog sibling fixtures imported through a monorepo-root path unavailable to isolated package CI. All three are corrected locally. Package-wide Ruff passes; the exact Windows runner test passes; and the exact CI-path usertest_backlog project suite passes in 334.2 seconds. Replacement CI, accepted system review, merge, and shadow-cycle proof do not yet exist.",
-        "outcome": "Local qualification and CI corrections green; replacement CI pending",
+        "furthest_stage": "System review; changes requested on two provenance/reporting findings",
+        "current_state": "PR #216 remains an open draft against dev at exact head 9190f49e. The two replacement CI triggers each passed all 40 jobs (40 unique checks observed twice). A 380.6-second Terra system review bound to that exact head found the approach aligned, the historical mechanism addressed, the composite original-scenario oracle exercised, and scope appropriate. It requested a versioned selected-intervention record and clearer separation between current outcome truth and explicitly superseded historical snapshots. The durable maintenance case remains mitigated with verified terminal provenance, not resolved. Accepted re-review, merge, and shadow-cycle proof do not yet exist.",
+        "outcome": "Replacement CI green; causal implementation accepted in substance; review correction required",
         "errors": {
-          "count": 5,
-          "count_kind": "high-level integration and qualification categories",
-          "summary": "The prior four categories remain: synthetic fixture/contract drift, semantic reconciliation, supervisor/result-capture instability, and one production postprocessing regression. Initial PR CI exposed a fifth category: local qualification did not reproduce every changed project's isolated package boundary. That single coverage gap produced three unique failures duplicated across push and pull-request runs; each was corrected at its owning boundary without changing production behavior."
+          "count": 8,
+          "count_kind": "high-level integration, runtime, and review categories encountered",
+          "summary": "The prior five categories remain: synthetic fixture/contract drift, semantic reconciliation, supervisor/result-capture instability, one production postprocessing regression, and missed isolated-package CI boundaries. A stale installed review runtime then selected obsolete npm Codex and misclassified the model/CLI rejection as a shell failure. The substantive review added two evidence-presentation findings: the selected controller plan was absent from git, and historical outcome snapshots were not unmistakably separated from current verified mitigated evidence."
         },
         "automatic_self_corrections": {
           "count": 0,
           "count_kind": "automatic pipeline corrections",
-          "summary": "This is deterministic integration qualification, not a model-stage correction cycle; all observed corrections were supervisor-owned and are counted separately."
+          "summary": "This remains controller integration and review qualification. The model reviewer diagnosed findings but did not automatically modify or correct the branch; every recovery and correction was supervisor-owned."
         },
         "supervisor_interventions": {
-          "count": 18,
-          "count_kind": "explicit interventions so far",
-          "summary": "The prior thirteen interventions covered semantic integration, fixture correction, evidence recovery, stable broad qualification, the production postprocessing fix, and the final live gate. Five later actions are explicit: publish draft PR #216; diagnose and correct backlog_miner import ordering; diagnose and correct the Windows-only runner fixture boundary; diagnose and restore package-local usertest_backlog fixture imports; and recover from an interrupted combined local-verification channel by rerunning only the exact owning boundary."
+          "count": 26,
+          "count_kind": "explicit material interventions so far",
+          "summary": "The prior eighteen interventions covered semantic integration, fixture/evidence correction, stable qualification, the production postprocessing fix, draft publication, initial CI diagnosis/correction, and exact-boundary recovery. Eight later actions were explicit: push and observe replacement CI; design and launch the controller-specific review; diagnose the stale-runtime failure; test the ineffective LOCALAPPDATA allowlist route; locate and live-probe the Desktop CLI; reroute the unchanged review through that CLI; add the missing durable plan record; and clarify/update the high-level dashboard without rewriting historical snapshots."
         },
-        "next_action": "Commit and push the coherent three-failure correction, require green replacement CI and accepted system review, merge PR #216, finalize this row, and then start the first export-disabled full shadow cycle as a new current row.",
+        "next_action": "Commit and push the plan/dashboard correction as one coherent review response, require green CI on the new exact head, return focused evidence to the same reviewer session, merge only if that reviewer accepts the current head, then finalize this row and open shadow cycle 1 as a new current row.",
         "tone": "warn",
-        "data_quality": "Exact git history; exact focused, frozen broad, and isolated-Docker transcripts; current wall duration and explicit intervention ledger; PR lifecycle still in progress",
+        "data_quality": "Exact git and GitHub CI state; retained failed pre-dispatch artifacts; exact-head Terra review report and session; exact focused, broad, isolated-Docker, outcome, and subscription receipts; active wall duration and explicit intervention ledger",
         "source_ids": [
           "controller_remediation_integration_git",
           "controller_remediation_integration_session",
@@ -3717,11 +3717,12 @@
     {
       "id": "controller_remediation_pr216",
       "url": "https://github.com/jcmullwh/usertest/pull/216",
-      "kind": "controller_remediation_pull_request_and_initial_ci",
+      "kind": "controller_remediation_pull_request_ci_and_system_review",
       "pr_number": 216,
       "base_branch": "dev",
       "head_branch": "codex/backlog-depth-remediation",
       "first_ci_head_revision": "e94b6ce8e217fa75aa04295ffa7c0488e78b0bc0",
+      "corrected_head_revision": "9190f49e6f483ace34f706c1e43645d5bdd5b397",
       "created_at": "2026-07-16T07:08:12Z",
       "draft": true,
       "ci_runs": [
@@ -3736,8 +3737,25 @@
           "event": "pull_request",
           "conclusion": "failure",
           "completed_at": "2026-07-16T07:11:54Z"
+        },
+        {
+          "run_id": 29480914169,
+          "event": "push",
+          "conclusion": "success",
+          "completed_at": "2026-07-16T07:47:48Z",
+          "head_revision": "9190f49e6f483ace34f706c1e43645d5bdd5b397",
+          "job_count": 40
+        },
+        {
+          "run_id": 29480916329,
+          "event": "pull_request",
+          "conclusion": "success",
+          "completed_at": "2026-07-16T07:48:59Z",
+          "head_revision": "9190f49e6f483ace34f706c1e43645d5bdd5b397",
+          "job_count": 40
         }
       ],
+      "replacement_ci_summary": "Both duplicate triggers passed all 40 jobs at the exact corrected head. This is 40 unique checks observed twice, not 80 independent checks.",
       "unique_failed_jobs": [
         "backlog_miner lint: Ruff I001 import ordering",
         "runner_core test: Windows-only legacy sandbox revalidation fixture ran on Linux",
@@ -3751,7 +3769,64 @@
           "elapsed_seconds": 334.2
         }
       },
-      "limitations": "All three initial CI failures are corrected and verified locally at their owning boundaries. Replacement CI, accepted review, merge, and shadow-cycle results do not yet exist."
+      "system_review": {
+        "reviewed_head_revision": "9190f49e6f483ace34f706c1e43645d5bdd5b397",
+        "model": "gpt-5.6-terra",
+        "successful_run_path": "I:\\code\\usertest_backlog_depth\\runs\\usertest\\usertest_backlog_depth\\20260716T080509Z\\codex\\216",
+        "wall_seconds": 380.634,
+        "review_decision": "changes_requested",
+        "approach_alignment": "aligned",
+        "mechanism_assessment": "mechanism_addressed",
+        "original_scenario_oracle": "exercised",
+        "scope_assessment": "appropriate",
+        "finding_count": 2,
+        "findings": [
+          "The selected controller intervention plan existed only in the ignored .agents tree and was absent from the reviewed commit.",
+          "The reviewer treated explicitly time-bounded historical outcome snapshots as contradictory with the current verified mitigated state; the correction must make the supersession boundary unmistakable without rewriting historical truth."
+        ],
+        "pre_dispatch_failures": [
+          {
+            "run_path": "I:\\code\\usertest_backlog_depth\\runs\\usertest\\usertest_backlog_depth\\20260716T075924Z\\codex\\216",
+            "wall_seconds": 34.48,
+            "actual_cause": "Stale installed adapter selected npm Codex 0.139.0, which gpt-5.6-terra rejected as obsolete.",
+            "misclassified_as": "shell_probe_failed",
+            "reviewer_dispatched": false
+          },
+          {
+            "run_path": "I:\\code\\usertest_backlog_depth\\runs\\usertest\\usertest_backlog_depth\\20260716T080245Z\\codex\\216",
+            "wall_seconds": 26.887,
+            "actual_cause": "Allowlisting LOCALAPPDATA did not alter the local runner environment; stale npm Codex 0.139.0 remained selected.",
+            "misclassified_as": "shell_probe_failed",
+            "reviewer_dispatched": false
+          }
+        ],
+        "subscription_route": "The successful reviewer used Desktop-managed codex-cli 0.144.2 through the host ChatGPT login. A live redacted probe reported exact ChatGPT login with all API/provider variables blank."
+      },
+      "current_outcome_evidence": {
+        "case_id": "case:maintenance-image-burst-retention-unbounded",
+        "fingerprint": "03f0d43eb78e28fa",
+        "disposition": "mitigated",
+        "implementation_commit": "2221377fc5ac6e56b99222e81b0485bad2887a03",
+        "verification_commit": "49d882520b50678ab5b394218cf4ea5868189d93",
+        "verification_amendment_id": "outcome_verification_amendment:2ffe9caee8fac1425f6db3d3e1317cf17d2e8c7988adddd0a9b30eea61e31f60",
+        "durable_record": "I:\\code\\usertest_backlog_depth\\.agents\\state\\backlog_implement_actions.yaml",
+        "original_scenario_receipts": [
+          "I:\\code\\usertest_backlog_depth\\runs\\usertest_implement\\_outcome_roles\\03f0d43eb78e28fa\\20260716T010201844189Z\\original_scenario\\outcome_role.json",
+          "I:\\code\\usertest_backlog_depth\\runs\\usertest_implement\\_outcome_roles\\03f0d43eb78e28fa\\20260716T040417596095Z\\original_scenario\\outcome_role.json"
+        ],
+        "live_receipt": "I:\\code\\usertest_backlog_depth\\runs\\usertest_implement\\_outcome_roles\\03f0d43eb78e28fa\\20260716T040424840035Z\\live\\outcome_role.json",
+        "mitigation_receipt": "I:\\code\\usertest_backlog_depth\\runs\\usertest_implement\\_outcome_roles\\03f0d43eb78e28fa\\20260716T041018447649Z\\mitigation_effect\\outcome_role.json",
+        "terminal_verification": {
+          "verified": true,
+          "provenance_status": "verified",
+          "errors": [],
+          "terminal_replay": "starting/final/expected=mitigated; status=complete; roles_run=[]",
+          "evidence_record": "docs/design/backlog-depth-supervision-issue-ledger.md#bds-054---newly-terminal-outcomes-bypassed-terminal-provenance-verification"
+        },
+        "remaining_risk": "The planned bounded-retention mitigation does not establish class-wide resolution."
+      },
+      "historical_snapshot_boundary": "The JSON intentionally retains point-in-time evidence. Objects marked historical_point_in_time, historical_point_in_time_superseded_for_current_operations, or historical_inventory_snapshot_not_current describe what proof existed at their own measured_at/generated_at timestamp. They do not override the operational_dashboard current row. The current maintenance truth is mitigated with original-scenario, live, mitigation-effect, and terminal provenance evidence; it is not resolved.",
+      "limitations": "Replacement CI is green at the exact corrected head. The first substantive system review accepted the implementation approach, causal mechanism, original-scenario exercise, and scope, but requested two provenance/presentation corrections. Accepted re-review, merge, and shadow-cycle results do not yet exist."
     },
     {
       "id": "execution_plan",
