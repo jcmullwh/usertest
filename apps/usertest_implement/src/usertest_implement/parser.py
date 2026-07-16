@@ -894,7 +894,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     maintenance_images_cleanup_p = maintenance_images_sub.add_parser(
         "cleanup",
-        help="Prune old local maintenance-image tags using the configured retention policy.",
+        help="Prune local maintenance-image identities using the configured retention policy.",
     )
     maintenance_images_cleanup_p.add_argument(
         "--dry-run",

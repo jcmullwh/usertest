@@ -258,6 +258,19 @@ def _resolve_candidate_path(
     return p if p.is_absolute() else (base_dir / p)
 
 
+def _portable_powershell_path_token(token: str) -> str:
+    """Render a PowerShell path token for the host doing offline normalization.
+
+    Codex traces can be normalized on a different operating system from the one
+    that produced them. PowerShell accepts backslashes as path separators on
+    Windows, while ``Path`` on a POSIX normalizer treats them as literal filename
+    characters. Restrict this conversion to already-recognized PowerShell path
+    operands rather than changing arbitrary command arguments.
+    """
+
+    return token.replace("\\", "/")
+
+
 def _infer_read_candidate_paths(
     *,
     argv: list[str],
@@ -337,7 +350,7 @@ def _maybe_emit_read_events(
         path_token, skip_lines, first_lines = range_read
         effective_cwd = cwd if cwd is not None else workspace_root
         candidate = _resolve_candidate_path(
-            path_token,
+            _portable_powershell_path_token(path_token),
             base_dir=effective_cwd,
             workspace_root=workspace_root,
             workspace_mount=workspace_mount,
@@ -415,7 +428,9 @@ def _maybe_emit_read_events(
                 return []
             path_token = token
             index += 1
-        path_tokens = [path_token] if path_token is not None else []
+        path_tokens = (
+            [_portable_powershell_path_token(path_token)] if path_token is not None else []
+        )
     else:
         return []
     if len(path_tokens) != 1:

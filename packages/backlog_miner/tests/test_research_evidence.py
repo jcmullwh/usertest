@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import stat
 import subprocess
 import sys
@@ -20,6 +21,53 @@ from backlog_miner.origin_evidence import (
     materialize_origin_attachments,
     origin_attachment_requirements,
 )
+
+
+def _required_powershell_executable() -> str:
+    """Select an installed PowerShell without silently weakening CI coverage."""
+
+    for executable in ("pwsh", "powershell.exe"):
+        if shutil.which(executable) is not None:
+            return executable
+    ci_value = os.environ.get("CI", "").strip().casefold()
+    if ci_value not in {"", "0", "false", "no"}:
+        pytest.fail("PowerShell replay tests require pwsh or powershell.exe in CI", pytrace=False)
+    pytest.skip("PowerShell replay tests require pwsh or powershell.exe")
+
+
+def test_required_powershell_executable_prefers_cross_platform_pwsh(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda executable: f"/bin/{executable}")
+
+    assert _required_powershell_executable() == "pwsh"
+
+
+def test_required_powershell_executable_fails_when_ci_has_no_capability(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(shutil, "which", lambda _executable: None)
+    monkeypatch.setenv("CI", "true")
+
+    with pytest.raises(pytest.fail.Exception, match="require pwsh or powershell.exe in CI"):
+        _required_powershell_executable()
+
+
+def test_trusted_host_replay_does_not_substitute_an_unavailable_executable(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    missing_executable = "usertest-intentionally-missing-replay-runtime"
+    assert shutil.which(missing_executable) is None
+
+    with pytest.raises(FileNotFoundError):
+        mod.TrustedHostReplayExecutor(approved_source_roots=[tmp_path]).execute(
+            [missing_executable, "--version"],
+            cwd=workspace,
+            source_workspace=workspace,
+            timeout_seconds=None,
+        )
 
 
 def _write_normalized_events(path: Path, events: list[dict[str, object]]) -> None:
@@ -4710,6 +4758,7 @@ def _runner_bound_atom_assignment(
 def test_powershell_environment_adapter_runs_through_production_replay_and_oracle(
     tmp_path: Path,
 ) -> None:
+    powershell = _required_powershell_executable()
     baseline = tmp_path / "baseline"
     baseline.mkdir()
     probe = baseline / "tools" / "environment_probe.ps1"
@@ -4720,7 +4769,7 @@ def test_powershell_environment_adapter_runs_through_production_replay_and_oracl
     )
     revision = _baseline_repo_commit_existing(baseline, "powershell environment probe")
     atom_id = "atom:powershell-environment"
-    command = "powershell.exe -NoProfile -File tools/environment_probe.ps1"
+    command = f"{powershell} -NoProfile -File tools/environment_probe.ps1"
     assignment = _runner_bound_atom_assignment(
         atom_id=atom_id,
         atom_snapshot={
@@ -5199,6 +5248,7 @@ def test_powershell_environment_adapter_runs_through_production_replay_and_oracl
 def test_filesystem_adapter_attests_disposable_state_without_tracked_mutation(
     tmp_path: Path,
 ) -> None:
+    powershell = _required_powershell_executable()
     baseline = tmp_path / "baseline"
     baseline.mkdir()
     probe = baseline / "tools" / "state_probe.ps1"
@@ -5215,8 +5265,8 @@ def test_filesystem_adapter_attests_disposable_state_without_tracked_mutation(
     )
     revision = _baseline_repo_commit_existing(baseline, "powershell state probe")
     atom_id = "atom:filesystem-state"
-    baseline_command = "powershell.exe -NoProfile -File tools/state_probe.ps1 -Mode absent"
-    challenge_command = "powershell.exe -NoProfile -File tools/state_probe.ps1 -Mode create"
+    baseline_command = f"{powershell} -NoProfile -File tools/state_probe.ps1 -Mode absent"
+    challenge_command = f"{powershell} -NoProfile -File tools/state_probe.ps1 -Mode create"
     assignment = _runner_bound_atom_assignment(
         atom_id=atom_id,
         atom_snapshot={
@@ -5476,6 +5526,7 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(mod, "verify_controlled_codex_execpolicy_receipt", lambda _path: [])
+    powershell = _required_powershell_executable()
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     probe = workspace / "tools" / "environment_probe.ps1"
@@ -5485,7 +5536,7 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
         encoding="utf-8",
     )
     revision = _baseline_repo_commit_existing(workspace, "top-level powershell proof")
-    command = "powershell.exe -NoProfile -File tools/environment_probe.ps1"
+    command = f"{powershell} -NoProfile -File tools/environment_probe.ps1"
     atom_id = "atom:top-level-powershell"
     atom = {
         "atom_id": atom_id,

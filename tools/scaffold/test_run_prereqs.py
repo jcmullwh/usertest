@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import importlib.util
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -114,6 +115,60 @@ def test_run_test_bootstraps_requirements_and_injects_pythonpath(
     pythonpath = task_envs[0].get("PYTHONPATH")
     assert pythonpath is not None
     assert str(project_dir / "src") in pythonpath
+
+
+def test_selected_project_test_uses_all_monorepo_source_trees(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_src = tmp_path / "app" / "src"
+    dependency_src = tmp_path / "dependency" / "src"
+    app_src.mkdir(parents=True)
+    dependency_src.mkdir(parents=True)
+    projects = [
+        {
+            "id": "app",
+            "path": "app",
+            "tasks": {"test": [sys.executable, "-c", "pass"]},
+        },
+        {
+            "id": "dependency",
+            "path": "dependency",
+            "tasks": {"test": [sys.executable, "-c", "pass"]},
+        },
+    ]
+    monkeypatch.setattr(scaffold, "_repo_root", lambda: tmp_path)
+    monkeypatch.setattr(scaffold, "_load_projects", lambda _: projects)
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+
+    task_calls: list[tuple[str, dict[str, str] | None]] = []
+
+    def fake_run_manifest_task(
+        *,
+        cmd: list[str],
+        cwd: Path,
+        task_name: str,
+        project_id: str,
+        extra_env: dict[str, str] | None = None,
+        force_install: bool = False,
+    ) -> subprocess.CompletedProcess[str]:
+        del cmd, cwd, task_name, force_install
+        task_calls.append((project_id, extra_env))
+        return subprocess.CompletedProcess(args=[sys.executable, "-c", "pass"], returncode=0)
+
+    monkeypatch.setattr(scaffold, "_run_manifest_task", fake_run_manifest_task)
+    args = _run_args(task="test")
+    args.all = False
+    args.project = ["app"]
+
+    assert scaffold.cmd_run(args) == 0
+    assert [project_id for project_id, _env in task_calls] == ["app"]
+    task_env = task_calls[0][1]
+    assert task_env is not None
+    assert task_env["PYTHONPATH"].split(os.pathsep) == [
+        str(app_src),
+        str(dependency_src),
+    ]
 
 
 def test_run_lint_bootstraps_requirements_and_injects_pythonpath(

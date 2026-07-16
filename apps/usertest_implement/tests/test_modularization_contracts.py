@@ -151,7 +151,7 @@ def test_extracted_modules_do_not_import_cli_facade(module_relpath: str) -> None
             [
                 "{list,cleanup}",
                 "List local maintenance-image tags retained on the Docker",
-                "Prune old local maintenance-image tags",
+                "Prune local maintenance-image identities",
             ],
         ),
     ],

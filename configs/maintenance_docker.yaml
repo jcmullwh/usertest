@@ -6,7 +6,7 @@ maintenance_docker:
   seed_root: "/opt/usertest_maint_seed"
   cache_root_subdir: "usertest_maint_venvs"
   cleanup_enabled: true
-  # Bound automatic history to two unique image IDs; current/running/protected IDs are exempt.
+  # Bound ordinary history to two identities; configured/current protection is separate.
   keep_local_count: 2
   keep_local_days: 7
   keep_branch_alias_tags: true
