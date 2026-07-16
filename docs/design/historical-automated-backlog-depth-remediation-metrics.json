@@ -4,15 +4,15 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 1,
-    "as_of": "2026-07-16T06:23:02Z",
+    "as_of": "2026-07-16T07:04:56Z",
     "current_run_id": "controller-remediation-integration",
     "counting_rule": "One row is one meaningful pipeline or case lifecycle cycle, not one model turn or test command. Error and intervention counts use only explicitly retained events; unavailable totals are unknown. Automatic self-correction means the system continued an existing frontier without supervisor-authored content. Supervisor intervention means feedback, rerouting, process containment, lifecycle action, or code correction performed outside that automatic path.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Controller PR qualification",
-        "detail": "The exact corrected tree is committed at 0dec442f; focused suites are green; final broad replays are next on frozen bytes",
-        "tone": "warn"
+        "value": "Qualification green; PR next",
+        "detail": "All three frozen non-Docker partitions and both digest-pinned isolated-Docker controls pass on f46d751b; no test container remains",
+        "tone": "good"
       },
       {
         "label": "Current case disposition",
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Finish suites and PR",
-        "detail": "Retain all changed-project and isolated-Docker results, then publish, review, and merge the controller remediation before the first full shadow cycle",
+        "value": "Publish and merge PR",
+        "detail": "Push the qualified controller remediation, obtain CI and review, merge it, then begin the first export-disabled full shadow cycle",
         "tone": "warn"
       }
     ],
@@ -563,14 +563,14 @@
         "timing": {
           "start_at": "2026-07-16T04:52:15Z",
           "end_at": null,
-          "elapsed_seconds": 5447,
+          "elapsed_seconds": 7961,
           "coverage": "active",
-          "display": "1 h 30 m 47 s so far",
+          "display": "2 h 12 m 41 s so far",
           "note": "Wall time from the completed PR #215 outcome row through this dashboard observation. This cycle remains in progress; the value will be finalized at its terminal PR disposition."
         },
-        "furthest_stage": "Integrated branch qualification",
-        "current_state": "Controller and outcome changes are committed; verified PR #213/#215 maintenance history is semantically reconciled; focused suites are green. The authoritative causal/readiness rerun passed 271 with one skip, and the remote-integration rerun passed 289 with two skips. Broad backlog baseline passed 1,734 with one skip before one stale fixture failure; its correction passed, while a replay was invalidated by a supervisor git-status change and the exact transaction then passed on stable bytes. Broad delivery/runtime passed 927 with four skips before one real postprocessing error-precedence regression; that correction and both healthy controls now pass four targeted checks. The exact corrected tree is committed at 0dec442f; final owning-partition replays are next with repository writes frozen. The remediation PR is not yet published.",
-        "outcome": "In progress; no production regression established",
+        "furthest_stage": "Component and live qualification green",
+        "current_state": "Controller and outcome changes are committed; verified PR #213/#215 maintenance history is semantically reconciled; focused suites are green. On frozen commit f46d751b, backlog passed 1,735 with one skip in 666.9 seconds, delivery/runtime passed 929 with four skips in 1,157.4 seconds, and CLI/tools passed 141 with three skips in 57.8 seconds. Both exact digest-pinned isolated-Docker controls passed in 954.4 seconds with endpoint attestation, causal baseline/recovery predicates, protected-reference controls, and empty provisioner DIND inventory before and after. The task-owned TCP relay was stopped and Docker has zero containers. The remediation PR is not yet published.",
+        "outcome": "Component and live qualification green; PR pending",
         "errors": {
           "count": 4,
           "count_kind": "high-level integration and qualification categories",
@@ -582,13 +582,13 @@
           "summary": "This is deterministic integration qualification, not a model-stage correction cycle; all observed corrections were supervisor-owned and are counted separately."
         },
         "supervisor_interventions": {
-          "count": 11,
+          "count": 13,
           "count_kind": "explicit interventions so far",
-          "summary": "One semantic merge decision; four initial fixture-only corrections; one authoritative sequential evidence-recovery action for the two indeterminate groups; one diagnosis and correction of the retained-review fixture; one backlog replay; one standalone delivery replay after the fail-fast harness discarded its output; one diagnosis and stable exact replay of the supervisor-invalidated qualification transaction; and one root-cause correction with targeted controls for the runner postprocessing regression."
+          "summary": "One semantic merge decision; four initial fixture-only corrections; one authoritative sequential evidence-recovery action for the two indeterminate groups; one diagnosis and correction of the retained-review fixture; one backlog replay; one standalone delivery replay after the fail-fast harness discarded its output; one diagnosis and stable exact replay of the supervisor-invalidated qualification transaction; one root-cause correction with targeted controls for the runner postprocessing regression; one independent frozen broad-qualification action; and one retained loopback-relay restoration plus final live gate."
         },
-        "next_action": "Commit the exact corrected tree so qualification inputs cannot move, replay only the backlog and delivery/runtime owning partitions plus the small CLI/tools partition with independently retained results, run the two exact isolated-Docker controls once on final bytes, then publish and merge the remediation PR before starting an export-disabled full shadow cycle.",
+        "next_action": "Publish the exact qualified branch as the controller remediation PR, retain CI and review results, merge it, finalize this row, and then start the first export-disabled full shadow cycle as a new current row.",
         "tone": "warn",
-        "data_quality": "Exact git history and focused/sequential test transcripts; current wall duration and intervention ledger; broad qualification still in progress",
+        "data_quality": "Exact git history; exact focused, frozen broad, and isolated-Docker transcripts; current wall duration and explicit intervention ledger; PR lifecycle still in progress",
         "source_ids": [
           "controller_remediation_integration_git",
           "controller_remediation_integration_session",
@@ -3690,13 +3690,20 @@
       "path": "I:\\code\\usertest_backlog_depth",
       "kind": "controller_remediation_integration_git_history",
       "branch": "codex/backlog-depth-remediation",
-      "head_revision_at_dashboard_snapshot": "0dec442f",
+      "head_revision_at_dashboard_snapshot": "f46d751b",
       "consolidation_commit": "b7244c2ae0063d0771e9b3a565073636b4b4ae6d",
       "operational_evidence_commit": "64a2f858",
       "verified_maintenance_history_merge": "e2614d225b96ff7d567751335bda2deafeec133f",
       "integration_fixture_commit": "efda056cfe8d380202b1def12b0572a19cc23698",
       "qualification_correction_commit": "0dec442f",
-      "limitations": "The exact corrected tree is committed, but final broad qualification, isolated-Docker controls, PR, CI, review, merge, and full shadow-cycle evidence do not yet exist."
+      "dashboard_commit": "f46d751b",
+      "frozen_non_docker_results": {
+        "backlog": {"passed": 1735, "skipped": 1, "failed": 0, "elapsed_seconds": 666.9},
+        "delivery_runtime": {"passed": 929, "skipped": 4, "failed": 0, "elapsed_seconds": 1157.4},
+        "cli_tools": {"passed": 141, "skipped": 3, "failed": 0, "elapsed_seconds": 57.8}
+      },
+      "isolated_docker_results": {"passed": 2, "failed": 0, "elapsed_seconds": 954.4, "containers_before": 0, "containers_after": 0},
+      "limitations": "The exact corrected tree has complete affected component and live-control qualification, but PR, CI, review, merge, and full shadow-cycle evidence do not yet exist."
     },
     {
       "id": "controller_remediation_integration_session",

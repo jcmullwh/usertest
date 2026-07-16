@@ -511,10 +511,10 @@
           <p>This is the current top-level run ledger. It tracks whether the pipeline is producing real, researched work and moving it to an honestly verified disposition. Detailed benchmark and contract evidence remains below; those lower sections preserve their own point-in-time snapshots and may describe an earlier lifecycle state.</p>
           <div class="notice info"><strong>Counting rule:</strong> One row is one meaningful pipeline or case lifecycle cycle, not one model turn or test command. Error and intervention counts use only explicitly retained events; unavailable totals are unknown. Automatic self-correction means the system continued an existing frontier without supervisor-authored content. Supervisor intervention means feedback, rerouting, process containment, lifecycle action, or code correction performed outside that automatic path.</div>
           <div class="status-grid ops-summary">
-            <div class="stat warn">
+            <div class="stat good">
               <span class="label">Current pipeline state</span>
-              <span class="value">Controller PR qualification</span>
-              <span class="detail">The exact corrected tree is committed at 0dec442f; focused suites are green; final broad replays are next on frozen bytes</span>
+              <span class="value">Qualification green; PR next</span>
+              <span class="detail">All three frozen non-Docker partitions and both digest-pinned isolated-Docker controls pass on f46d751b; no test container remains</span>
             </div>
             <div class="stat good">
               <span class="label">Current case disposition</span>
@@ -528,8 +528,8 @@
             </div>
             <div class="stat warn">
               <span class="label">Next delivery gate</span>
-              <span class="value">Finish suites and PR</span>
-              <span class="detail">Retain all changed-project and isolated-Docker results, then publish, review, and merge the controller remediation before the first full shadow cycle</span>
+              <span class="value">Publish and merge PR</span>
+              <span class="detail">Push the qualified controller remediation, obtain CI and review, merge it, then begin the first export-disabled full shadow cycle</span>
             </div>
           </div>
           <div class="table-wrap ops-table-wrap">
@@ -668,18 +668,18 @@
               </tr>
               <tr class="ops-current">
                 <td><strong>Controller remediation integration and qualification</strong><span class="ops-detail"><code>controller-remediation-integration</code><br>Consolidated causal-depth, self-healing, planning, delivery, and outcome contracts plus the system-authored maintenance implementation; changed-project qualification before the remediation PR</span></td>
-                <td><strong>1 h 30 m 47 s so far</strong><span class="ops-kind">active</span><span class="ops-detail">Wall time from the completed PR #215 outcome row through this dashboard observation. This cycle remains in progress; the value will be finalized at its terminal PR disposition.</span></td>
-                <td><span class="tag warn">Integrated branch qualification</span><span class="ops-detail">Controller and outcome changes are committed; verified PR #213/#215 maintenance history is semantically reconciled; focused suites are green. The authoritative causal/readiness rerun passed 271 with one skip, and the remote-integration rerun passed 289 with two skips. Broad backlog baseline passed 1,734 with one skip before one stale fixture failure; its correction passed, while a replay was invalidated by a supervisor git-status change and the exact transaction then passed on stable bytes. Broad delivery/runtime passed 927 with four skips before one real postprocessing error-precedence regression; that correction and both healthy controls now pass four targeted checks. The exact corrected tree is committed at 0dec442f; final owning-partition replays are next with repository writes frozen. The remediation PR is not yet published.</span></td>
-                <td><strong>In progress; no production regression established</strong><span class="ops-detail">Evidence: Exact git history and focused/sequential test transcripts; current wall duration and intervention ledger; broad qualification still in progress</span></td>
+                <td><strong>2 h 12 m 41 s so far</strong><span class="ops-kind">active</span><span class="ops-detail">Wall time from the completed PR #215 outcome row through this dashboard observation. This cycle remains in progress; the value will be finalized at its terminal PR disposition.</span></td>
+                <td><span class="tag warn">Component and live qualification green</span><span class="ops-detail">Controller and outcome changes are committed; verified PR #213/#215 maintenance history is semantically reconciled; focused suites are green. On frozen commit f46d751b, backlog passed 1,735 with one skip in 666.9 seconds, delivery/runtime passed 929 with four skips in 1,157.4 seconds, and CLI/tools passed 141 with three skips in 57.8 seconds. Both exact digest-pinned isolated-Docker controls passed in 954.4 seconds with endpoint attestation, causal baseline/recovery predicates, protected-reference controls, and empty provisioner DIND inventory before and after. The task-owned TCP relay was stopped and Docker has zero containers. The remediation PR is not yet published.</span></td>
+                <td><strong>Component and live qualification green; PR pending</strong><span class="ops-detail">Evidence: Exact git history; exact focused, frozen broad, and isolated-Docker transcripts; current wall duration and explicit intervention ledger; PR lifecycle still in progress</span></td>
                 <td><strong>4</strong> <span class="ops-kind">high-level integration and qualification categories</span><span class="ops-detail">Fixture/contract drift across five synthetic boundaries; one semantic reconciliation between the superseded supervisor prototype and the system-authored maintenance implementation; supervisor/result-capture instability that lost sibling summaries and changed sealed git status during a test; and one production postprocessing regression that overwrote a precise missing-artifact cause with a false binary-missing diagnosis. The production regression is corrected locally and awaits broad replay.</span></td>
                 <td><strong>0</strong> <span class="ops-kind">automatic pipeline corrections</span><span class="ops-detail">This is deterministic integration qualification, not a model-stage correction cycle; all observed corrections were supervisor-owned and are counted separately.</span></td>
-                <td><strong>11</strong> <span class="ops-kind">explicit interventions so far</span><span class="ops-detail">One semantic merge decision; four initial fixture-only corrections; one authoritative sequential evidence-recovery action for the two indeterminate groups; one diagnosis and correction of the retained-review fixture; one backlog replay; one standalone delivery replay after the fail-fast harness discarded its output; one diagnosis and stable exact replay of the supervisor-invalidated qualification transaction; and one root-cause correction with targeted controls for the runner postprocessing regression.</span></td>
-                <td>Commit the exact corrected tree so qualification inputs cannot move, replay only the backlog and delivery/runtime owning partitions plus the small CLI/tools partition with independently retained results, run the two exact isolated-Docker controls once on final bytes, then publish and merge the remediation PR before starting an export-disabled full shadow cycle.<span class="ops-sources">Sources: controller_remediation_integration_git, controller_remediation_integration_session, backlog_depth_supervision_issue_ledger</span></td>
+                <td><strong>13</strong> <span class="ops-kind">explicit interventions so far</span><span class="ops-detail">One semantic merge decision; four initial fixture-only corrections; one authoritative sequential evidence-recovery action for the two indeterminate groups; one diagnosis and correction of the retained-review fixture; one backlog replay; one standalone delivery replay after the fail-fast harness discarded its output; one diagnosis and stable exact replay of the supervisor-invalidated qualification transaction; one root-cause correction with targeted controls for the runner postprocessing regression; one independent frozen broad-qualification action; and one retained loopback-relay restoration plus final live gate.</span></td>
+                <td>Publish the exact qualified branch as the controller remediation PR, retain CI and review results, merge it, finalize this row, and then start the first export-disabled full shadow cycle as a new current row.<span class="ops-sources">Sources: controller_remediation_integration_git, controller_remediation_integration_session, backlog_depth_supervision_issue_ledger</span></td>
               </tr>
               </tbody>
             </table>
           </div>
-          <p class="small muted">Dashboard as of 2026-07-16T06:23:02Z. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
+          <p class="small muted">Dashboard as of 2026-07-16T07:04:56Z. Unknown means the retained evidence cannot support a count; it never means zero. Measured-substep durations are not comparable to complete wall time.</p>
         </section>
         <!-- END GENERATED OPERATIONAL DASHBOARD -->
         <section id="reading-rules">
