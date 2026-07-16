@@ -1,6 +1,6 @@
 # Backlog-depth supervision issue ledger
 
-Updated: 2026-07-16 00:52 America/New_York
+Updated: 2026-07-16 02:20 America/New_York
 
 This is the supervisor-owned ledger for defects and unresolved findings discovered while bringing the automated backlog pipeline to a working baseline. Generated atoms, dossiers, options, plans, and tickets remain system-owned evidence; this ledger records work that the supervising Codex process must ensure is addressed rather than silently losing it between reruns.
 
@@ -24,7 +24,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-044 - Premerge infrastructure failure overwrote an accepted causal review
 
-- Status: `local_correction_verified_pr_merged_commit_pending`
+- Status: `local_correction_committed_remediation_pr_pending`
 - Priority: delivery-blocking, outcome-integrity
 - Objective impact: a storage/setup failure before the original-scenario role ran was represented as proof that the implementation did not address the mechanism. This both blocks good throughput and corrupts the causal record with a fabricated critical finding.
 - Exact evidence: PR #213 remained open, cleanly mergeable, and green at exact reviewed head `c930a95f6e768ad0674df91a6b61c3c93d55380d`. The retained same-author `report.json` in review run `20260715T212016Z/codex/0` records `approved`, `mechanism_addressed`, `exercised`, and `closed`. `git worktree add` then failed with `No space left on device` before creating a role artifact. The former catch-all path wrote `premerge_original_scenario_failure.json` with `role_artifact_path: null`, replaced the accepted review with `changes_requested`, and added an unsupported finding titled `Original evidence-backed scenario still fails`.
@@ -46,7 +46,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-046 - Stage-5 fail-first binding produced an outcome oracle that ticket export rejected
 
-- Status: `local_correction_verified_pending_commit`
+- Status: `local_correction_committed_remediation_pr_pending`
 - Priority: delivery-blocking, contract-ownership
 - Objective impact: a case could complete research, optioning, selection, planning, and ticket readiness but then fail during export, preventing valid actionable evidence from reaching implementation.
 - Exact evidence: the full-chain causal-acceptance test reached ticket export and failed with `outcome_role_selected_outcome_contract_unexpected`. The Stage-5 binder added `selected_outcome_contract` directly to a retained ordinary `staged_replay` oracle, while the repository contract permits that prospective contract only on the derived `fail_first_contract` shape without active Stage-3 positive contracts.
@@ -56,16 +56,18 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-047 - Broad suites exposed shared fixture drift after causal-contract expansion
 
-- Status: `local_correction_verified_pending_commit`
+- Status: `corrections_verified_frozen_broad_replay_pending`
 - Priority: validation-integrity, intervention-cost
 - Objective impact: stale test producers obscured real regressions with many duplicate failures and made broad validation appear less stable than the production behavior.
 - Exact evidence: five core policy/assembly failures shared one missing outcome-strategy fixture; 35 problem-mining failures shared omitted reads of the new hash-bound origin-evidence index; two positive-path failures plus one qualification failure shared one missing Stage-5 strategy binding; one full-chain fixture used a stale atom snapshot and actionability shape; the research mission was one redundant blank line over its prompt budget. After shared-helper corrections, core passes 100%, problem mining passes 91/91, positive depth passes 9/9, qualification passes, and the mission budget test passes at 99 lines.
+- Integrated qualification update: the first complete changed-project backlog partition reached roughly 1,700 checks and exposed one additional stale synthetic review fixture. Its trusted review receipts omitted top-level `reviewed_head_oid`, although production review writers always retain that exact commit and terminal verification correctly requires it independently of immutable ticket identity. The two-field fixture correction passes the exact trusted and untrusted boundary test; only the owning backlog partition is being replayed. This is not a production-gate relaxation or a new pipeline stage.
+- Supervisor-interference update: the owning replay later failed only `test_materialized_repair_is_independently_readjudicated_and_records_final_cycle` because dashboard/ledger edits changed the tracked git-status fingerprint while the qualification bundle was sealed. The exact node passed 1/1 in 67.4 seconds once the worktree status remained stable. This was a valid test rejecting a moving supervisor input, not a product regression; the full owning partition must still pass once from a committed, write-frozen tree.
 - Required correction: keep fixture producers on the same public contract constructors as production artifacts where practical; when a contract expands, update shared producers once and preserve intentional negative tests through explicit opt-outs. Count duplicate failures by root cluster rather than as independent defects.
 - Closure proof: the affected full files and then the complete non-Docker component suites pass from the committed combined tree; subsequent contract changes fail in shared constructors rather than dozens of downstream tests.
 
 ### BDS-048 - Supervisor guidance overruled a correct immutable-outcome-contract rejection
 
-- Status: `case_correction_verified_systemic_gate_pending_commit`
+- Status: `case_correction_verified_systemic_gate_committed_pr_pending`
 - Priority: outcome-integrity, delivery-quality
 - Objective impact: PR #213 could merge production and ordinary regression work while its mandatory live and mitigation commands were impossible to execute. This allowed code/test throughput but prevented the system from proving that the selected solution actually produced the planned real-world outcome.
 - Exact merged defect: the completed plan requires `packages/runner_core/tests/test_maintenance_image_cleanup_isolated_daemon.py::test_protected_external_container_and_partial_error_controls` and `...::test_batch_and_direct_capacity_recovery_pairs`. Merge commit `2221377fc5ac6e56b99222e81b0485bad2887a03` instead contained three differently named tests under `apps/usertest_implement/tests`. Neither planned node had ever existed, and none of the fifteen required stdout evidence markers existed in the merged Python tree. The postmerge live role therefore exited before collection with `file or directory not found`, and outcome progression correctly remained `unverified`.
@@ -77,7 +79,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-049 - Ordinary review correction and stable-head PR progression required manual supervision
 
-- Status: `local_correction_verified_pending_commit`
+- Status: `local_correction_committed_remediation_pr_pending`
 - Priority: throughput, self-healing continuity
 - Objective impact: the system could produce a correctable review finding or an approved draft PR, but it did not carry either state forward autonomously. The supervisor had to resume the author, mark the PR ready, wait for CI, and trigger merge even when the reviewed head was unchanged. This added hours of handling without improving research, implementation, or outcome quality.
 - Exact evidence: PR #215 required two focused same-author corrections, a manual ready-for-review transition, and manual merge after 80/80 checks passed. The corrections retained author session `019f6766-c0f5-7253-b2f0-00b03d1c046a` and converged, so restarting or discarding them would have been wasteful. The final independent bounded review found zero blockers at head `c46c767b57c3a462094b40c84e7bb6173015fd0a`.
@@ -87,7 +89,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-050 - Verification-only correction could not be recorded without corrupting implementation provenance
 
-- Status: `local_correction_verified_pending_commit`
+- Status: `local_correction_committed_remediation_pr_pending`
 - Priority: outcome-integrity, current-case blocking
 - Objective impact: the original implementation is correctly recorded as PR #213 at merge commit `2221377fc5ac6e56b99222e81b0485bad2887a03`, while PR #215 only makes the already-selected verification contract executable. Existing outcome progression requires role execution at the immutable implementation commit, so it cannot execute the corrected checks at descendant `49d882520b50678ab5b394218cf4ea5868189d93` without either failing or falsely replacing the implementation provenance.
 - Exact evidence: Git proves `2221377` is an ancestor of `49d88252`, and `origin/codex/backlog-depth-remediation` points to `49d88252`. The ticket and implementation ledger both retain `merged_commit: 2221377...`, state `unverified`, and the successful original-scenario receipt from that implementation. PR #215 merged after 80/80 checks and contains only the outcome-verification correction required by the immutable plan.
@@ -97,16 +99,16 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-051 - Progress reporting was fragmented across detailed benchmark sections
 
-- Status: `local_correction_verified_pending_commit`
+- Status: `dashboard_committed_current_cycle_active`
 - Priority: supervision efficiency, observability
 - Objective impact: detailed benchmark and contract evidence existed, but there was no single lifecycle-level reference showing how long each meaningful cycle took, what failed, what the system corrected itself, what required supervisor intervention, and where the active run currently stood. This made it harder to distinguish objective progress from repeated hardening work.
 - Correction: the metrics companion now contains a top-level operational dashboard backed by a JSON ledger. It has one row per meaningful pipeline/case lifecycle cycle, explicit timing coverage, furthest/current state, outcome, concrete error categories, automatic correction count, supervisor intervention count, and next action. Unknown historical values remain `unknown`; detailed benchmark data stays below rather than being blended into a promotional score.
-- Current proof: 13 lifecycle rows cover the retained baseline through completed PR #215 outcome verification; exactly one row is current; four cards report only current state, current disposition, qualification progress, and the next gate. The current row records elapsed time, seven material system-defect categories, twelve explicit supervisor interventions, unknown automatic-correction count where the retained logs cannot support a number, and the verified `mitigated` disposition. The JSON-backed generator `--check`, JSON invariants, and diff checks pass.
-- Closure proof: commit the dashboard and update the same active row after the exact PR #215 outcome roles, then continue updating it from retained lifecycle receipts for subsequent cycles.
+- Current proof: 14 lifecycle rows cover the retained baseline through completed PR #215 outcome verification and the active controller-integration cycle; exactly one row is current; four cards report only current state, current disposition, qualification progress, and the next gate. The completed PR #215 row remains immutable. The active row records current wall time, four high-level integration/qualification error categories, eleven explicit supervisor interventions so far, zero automatic model-stage corrections for this deterministic integration cycle, retained component results, the supervisor-invalidated replay, and the newly corrected runner postprocessing regression. The JSON-backed generator and invariants remain the update boundary.
+- Closure proof: the dashboard and its generator are committed, the completed PR #215 row is preserved, and the new active row is updated rather than replaced as qualification, PR, and the later shadow cycle progress. Final closure requires the current row to reach an honest terminal disposition and the next cycle to become current.
 
 ### BDS-052 - Outcome lifecycle writes amplified Windows line endings and caused false plan drift
 
-- Status: `local_correction_verified_pending_commit`
+- Status: `local_correction_committed_remediation_pr_pending`
 - Priority: current-case blocking, provenance integrity
 - Objective impact: the verification-amendment binder correctly requires the completed ticket to remain bound to its immutable exported body and plan, but repeated lifecycle writes changed malformed Windows newline bytes without changing the plan text. The real bind therefore stopped before mutation with `Durable outcome ticket provenance is stale or cross-plan: ticket_body_sha256`.
 - Exact evidence: the completed ticket contains 15,355 repeated carriage-return-before-line-feed sequences, currently mostly `0D 0D 0D 0A`. Existing canonical normalization interprets the extra carriage returns as extra blank lines, yielding current body hash `983aa59f...` instead of stored/export hash `05352358...`. Normalizing one-or-more carriage returns immediately before line feed as one newline reproduces the immutable stored body hash `05352358a76a10fb6395ae252b2b476c67fea02f797992ad801cff4713d22f0f` and plan hash `349351ebc6d4afe69369575eee77c7fbc1a93e6727078c04a36bfda0fb90be1f` exactly. Actual content was not changed.
@@ -117,7 +119,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-053 - Successful outcome progression retained a disproven transient blocker
 
-- Status: `local_correction_verified_pending_commit`
+- Status: `local_correction_committed_remediation_pr_pending`
 - Priority: outcome integrity, current-case cleanup
 - Objective impact: all three amendment-bound outcome roles passed and the case correctly advanced to `mitigated`, but `remaining_risks` still included `Post-merge outcome verification is blocked: outcome_oracle_asset_missing`. A terminal successful disposition must not retain a runner-owned blocker that the later successful run disproved.
 - Exact evidence: the first centralized progression stopped before role execution because the trusted U: retained-runs override was omitted and recorded the transient blocker. The corrected foreground run completed in 984.7 seconds, produced passing schema-4 original, live, and mitigation receipts at execution commit `49d88252`, and left zero provisioner containers. The durable ticket and ledger agree on `state: mitigated`, yet the stale blocker remained alongside the legitimate plan residual that mitigation is not resolution.
@@ -127,7 +129,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-054 - Newly terminal outcomes bypassed terminal provenance verification
 
-- Status: `local_correction_verified_pending_commit`
+- Status: `local_correction_committed_remediation_pr_pending`
 - Priority: outcome integrity, current-case blocking
 - Objective impact: `progress_post_merge_outcome` verifies provenance when a record is already terminal on entry, but it returned `complete` immediately after newly transitioning this case to `mitigated` without calling the same verifier. All causal roles passed, yet the terminal provenance contract is not currently verifier-clean, so the dashboard cannot honestly treat the lifecycle as fully complete.
 - Exact evidence: a direct verifier call with both trusted roots (`I:\code\usertest_backlog_depth\runs` and `U:\usertest_backlog_component_validation\runs`) reports seven errors: newline-sensitive local-plan lookup; review ref and summary comparing pre-merge provenance to the later `verified_implementation_head` enrichment; schema-2 implementation provenance rejected as though only schema 1 existed; and three missing Stage-6 role contracts caused by failed plan lookup. The underlying artifacts exist and the three schema-4 role receipts bind implementation `2221377`, execution `49d88252`, and amendment `2ffe9cae...`.
@@ -135,6 +137,27 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Guardrail: this is not a new PR-scope or perfection gate. It enforces the already-promised outcome/branch/evidence provenance at the exact point where the system claims terminal completion.
 - Current proof: 49 focused provenance/progression tests pass, including substantive plan drift, forged reviewed heads, invalid schema-2 receipts, altered Stage-6 contracts, newly-terminal failure, and dual-root propagation. Ruff and diff checks pass. A direct verifier call using the explicit I: and U: roots returned `verified: true`, `provenance_status: verified`, and `errors: []`. A real terminal progression returned `starting_state=final_state=expected_state=mitigated`, `status=complete`, and `roles_run=[]`, so no expensive outcome role was repeated.
 - Closure proof: focused negative tests still reject changed plan bytes, forged reviewed heads, invalid schema-2 receipts, altered role contracts, and untrusted paths; the real mitigated record verifies with zero errors using the two explicit roots; and a progression regression cannot return `complete` for a newly terminal record whose provenance fails.
+
+### BDS-055 - Secondary postprocessing overwrote a precise missing-artifact failure
+
+- Status: `local_correction_verified_pending_commit`
+- Priority: validation integrity, self-healing feedback quality
+- Objective impact: a selected implementation attempt could pass its broker verification but lose a required retained artifact. The runner initially detected that exact evidence-integrity failure, then replaced it with `binary_or_command_missing`. Incorrect causal feedback can send the same author or supervisor toward Codex installation/authentication instead of repairing the actual missing artifact.
+- Exact evidence: the broad delivery/runtime partition passed 927 checks with four skips and failed this one node. The isolated node reproduced in 6.19 seconds. Its artifacts show agent exit 0, broker source `broker_reuse`, successful verification, matched workspace state, and no missing broker response artifacts. The fake agent deliberately removed only `raw_events.attempt1.jsonl`. `error_traceback.txt` shows all-attempt normalization reopened that missing path after final materialization had already written `selected_attempt_artifacts_incomplete`; the outer catch then overwrote `error.json`, and the generic text classifier mislabeled `No such file or directory` as a missing binary.
+- Root cause: all-attempt event normalization introduced after the selected-artifact fail-closed contract used the attempt path even after materialization had recorded it missing and created a canonical placeholder. The outer exception path treated any later postprocessing exception as the primary terminal cause.
+- Local correction: after a known selected-artifact materialization failure, normalize the canonical placeholder rather than reopening absent attempt paths. If later postprocessing still raises, retain the existing specific `error.json` and write the secondary exception to `postprocess_error.json`. Host `CODEX_HOME`, signed-in `.codex` data, host-login enforcement, API-key clearing, and subscription provenance are unchanged.
+- Current proof: the corrected missing-artifact path and an injected secondary-normalization failure both retain `selected_attempt_artifacts_incomplete`; the latter writes the secondary artifact without changing the primary cause. Both parametrized cases plus healthy broker-reuse and healthy multi-attempt aggregation controls pass 4/4 in 55.7 seconds.
+- Closure proof: the complete delivery/runtime partition passes on the committed tree and the remediation PR preserves both specific failure classification and successful multi-attempt normalization.
+
+### BDS-056 - Qualification supervision lost sibling results and mutated sealed inputs
+
+- Status: `operational_correction_active`
+- Priority: supervision efficiency, validation integrity
+- Objective impact: useful broad-suite work was discarded or invalidated even though the underlying system was making progress. This increases intervention cost and can create false product failures, directly opposing the throughput objective.
+- Exact evidence: a direct `Promise.all` rejected when the backlog partition failed, discarded the already-exited CLI summary, and severed the still-running delivery process from its result channel. The delivery process finished after about 19 minutes but produced no usable receipt, requiring one standalone replay. During the backlog replay, concurrent dashboard/ledger edits changed the sealed `git status --porcelain` hash; the exact transaction test passed on stable bytes.
+- Required operational correction: use independent result cells or all-settled capture with a durable per-partition result artifact; never rely on one combined fail-fast payload. Freeze and preferably commit the exact tree before git-status-sensitive qualification, and make no repository writes until each sealed partition exits. Treat lost or supervisor-invalidated results as unknown, never as pass or product failure.
+- Current proof: the lost delivery result was not counted; a standalone delivery replay retained its exact failure; the moving-status transaction passed in isolation on stable bytes; and the dashboard records both overhead sources as one high-level supervision/result-capture category.
+- Closure proof: final backlog, delivery/runtime, and CLI/tools partitions each retain independent exit/count evidence on one committed tree, with no concurrent writes or orphaned result channels. The future automated qualification runner should encode this ownership rather than depend on supervisor discipline.
 
 ### BDS-004 — Progressing research is prematurely restarted by a cost heuristic
 
@@ -521,13 +544,13 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-016 — Supervisor Docker prototype could be mistaken for system-authored implementation
 
-- Status: `monitoring`
+- Status: `superseded_and_reconciled`
 - Priority: objective-integrity, implementation-handoff blocking
-- Objective impact: the shared remediation worktree contains an uncommitted cleanup prototype in `runner_core.execution_backend`, its tests, and maintenance configuration. If research, planning, or outcome verification read those overlay bytes as the target implementation, the pipeline could appear to solve its own case even though the solution was supplied outside the requested system workflow.
-- Evidence: branch HEAD is `450a7332`, the research target remains committed revision `51e35fbc`, and the shared worktree diff already adds unique-ID capping, required/running/active protection, overflow reporting, and pre/post cleanup behavior. Those bytes predate the current system-authored Stage 4–6 and `usertest implement` work.
+- Objective impact: the shared remediation worktree formerly contained an uncommitted cleanup prototype in `runner_core.execution_backend`, its tests, and maintenance configuration. If research, planning, or outcome verification had read those overlay bytes as the target implementation, the pipeline could have appeared to solve its own case even though the solution was supplied outside the requested system workflow.
+- Historical evidence: at branch HEAD `450a7332`, while research remained pinned to committed revision `51e35fbc`, the shared worktree diff added unique-ID capping, required/running/active protection, overflow reporting, and pre/post cleanup behavior. Those bytes predated the system-authored Stage 4–6 and `usertest implement` work.
 - Required action: keep Stage 3, Stage 4, and Stage 5 pinned to their authenticated clean target revision/workspaces. When the plan is ready, run `usertest implement` in its own isolated target workspace and require its own patch, commit, tests, original-scenario replay, and live Docker evidence. Treat the shared prototype only as supervisor diagnostic material; compare and reconcile it after the system implementation without silently copying or counting it.
-- Current proof: the system path used the isolated retained workspace `U:\usertest_backlog_component_validation\runs\usertest_implement\_workspaces\usertest_20260715T143437Z_codex_0`, clean researched base `51e35fbcb50151590604611f10910a7fd13660e4`, branch `backlog/03f0d43eb78e`, exact Codex author session `019f6635-03a2-7f60-acab-3d97e277332f`, and eight commits ending at `e3f988b8e391ad020e746d3bc3937fca53cf6363`. The unchanged retained replay passed at the final head; the complete non-Docker affected-package gate and maintenance-specific PR jobs pass. This establishes system authorship and code/test separation from the supervisor worktree.
-- Closure proof: an implementation receipt identifies the system author/session, clean base revision, produced commit, exact diff, tests, original-scenario result, and live Docker result; the shared prototype is then explicitly superseded, discarded, or retained with a documented non-product disposition.
+- Current proof: the system path used the isolated retained workspace `U:\usertest_backlog_component_validation\runs\usertest_implement\_workspaces\usertest_20260715T143437Z_codex_0`, clean researched base `51e35fbcb50151590604611f10910a7fd13660e4`, branch `backlog/03f0d43eb78e`, exact Codex author session `019f6635-03a2-7f60-acab-3d97e277332f`, and eight commits ending at `e3f988b8e391ad020e746d3bc3937fca53cf6363`. PR #213 and correction PR #215 then supplied the verified system-authored implementation and live outcome evidence. Integration commit `e2614d225b96ff7d567751335bda2deafeec133f` explicitly selected that remote history as authoritative and did not reintroduce the supervisor prototype's age-window exception, `active_image_refs`, proactive running-container exemption, managed-prefix families, owner-label inventory, or local summary contract. Only the separately justified configured retention count of two and sandbox lifecycle controls remain.
+- Closure proof: the implementation receipt identifies the system author/session, clean base, produced commits, tests, original-scenario and live results; `e2614d22` records the semantic reconciliation; and the obsolete supervisor prototype is absent from the integrated product diff. This issue is closed unless those superseded semantics reappear.
 
 ### BDS-008 — Superseded session acquisition can retry without a useful bound
 

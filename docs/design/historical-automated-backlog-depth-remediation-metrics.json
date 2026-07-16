@@ -4,15 +4,15 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 1,
-    "as_of": "2026-07-16T04:52:15Z",
-    "current_run_id": "maintenance-outcome-correction-pr215",
+    "as_of": "2026-07-16T06:20:50Z",
+    "current_run_id": "controller-remediation-integration",
     "counting_rule": "One row is one meaningful pipeline or case lifecycle cycle, not one model turn or test command. Error and intervention counts use only explicitly retained events; unavailable totals are unknown. Automatic self-correction means the system continued an existing frontier without supervisor-authored content. Supervisor intervention means feedback, rerouting, process containment, lifecycle action, or code correction performed outside that automatic path.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Outcome cycle complete",
-        "detail": "All three exact roles passed, the real terminal record verifies with zero errors, and closure reused retained evidence without rerunning the roles",
-        "tone": "good"
+        "value": "Controller PR qualification",
+        "detail": "Integration is committed; focused suites are green; one real runner postprocessing regression is corrected; final broad replays await a frozen commit",
+        "tone": "warn"
       },
       {
         "label": "Current case disposition",
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Controller remediation PR",
-        "detail": "Consolidate the controller changes, run the affected suites on final bytes, and publish/review the remediation PR before another pipeline cycle",
+        "value": "Finish suites and PR",
+        "detail": "Retain all changed-project and isolated-Docker results, then publish, review, and merge the controller remediation before the first full shadow cycle",
         "tone": "warn"
       }
     ],
@@ -537,7 +537,7 @@
           "count_kind": "explicit interventions",
           "summary": "The prior five were false-green feedback, duplicate-process/orphan-container containment, safe-partial-control feedback, manual ready transition, and BDS-050 amendment routing. Six more were BDS-052 newline/provenance repair, three supervisor-command/setup corrections (unavailable GetRelativePath, Python -c quote loss, and omitted trusted U: runs root), BDS-053 stale-blocker reconciliation, and BDS-054 terminal-verifier routing. The twelfth was today's initial focused-suite invocation without repository PYTHONPATH: collection failed before tests, then the corrected invocation passed all 49 tests."
         },
-        "next_action": "Consolidate the controller changes, run the affected suites on the final bytes without artificial timeouts, and place the remediation in a reviewed PR. Do not rerun the already-passing outcome roles; the next pipeline execution comes after the controller changes are integrated.",
+        "next_action": "Historical checkpoint: controller changes were consolidated immediately afterward. Preserve this completed outcome row; qualification and PR work continue in the next lifecycle row.",
         "tone": "good",
         "data_quality": "exact PR/commit state, durable ticket and ledger, exact outcome-role artifacts, complete wall-time endpoints, direct verifier output, terminal progression result, and focused-suite transcript",
         "source_ids": [
@@ -555,10 +555,51 @@
           "maintenance_terminal_provenance_closure_session",
           "backlog_depth_supervision_issue_ledger"
         ]
+      },
+      {
+        "run_id": "controller-remediation-integration",
+        "label": "Controller remediation integration and qualification",
+        "scope": "Consolidated causal-depth, self-healing, planning, delivery, and outcome contracts plus the system-authored maintenance implementation; changed-project qualification before the remediation PR",
+        "timing": {
+          "start_at": "2026-07-16T04:52:15Z",
+          "end_at": null,
+          "elapsed_seconds": 5315,
+          "coverage": "active",
+          "display": "1 h 28 m 35 s so far",
+          "note": "Wall time from the completed PR #215 outcome row through this dashboard observation. This cycle remains in progress; the value will be finalized at its terminal PR disposition."
+        },
+        "furthest_stage": "Integrated branch qualification",
+        "current_state": "Controller and outcome changes are committed; verified PR #213/#215 maintenance history is semantically reconciled; focused suites are green. The authoritative causal/readiness rerun passed 271 with one skip, and the remote-integration rerun passed 289 with two skips. Broad backlog baseline passed 1,734 with one skip before one stale fixture failure; its correction passed, while a replay was invalidated by a supervisor git-status change and the exact transaction then passed on stable bytes. Broad delivery/runtime passed 927 with four skips before one real postprocessing error-precedence regression; that correction and both healthy controls now pass four targeted checks. Final owning-partition replays await a frozen commit. The remediation PR is not yet published.",
+        "outcome": "In progress; no production regression established",
+        "errors": {
+          "count": 4,
+          "count_kind": "high-level integration and qualification categories",
+          "summary": "Fixture/contract drift across five synthetic boundaries; one semantic reconciliation between the superseded supervisor prototype and the system-authored maintenance implementation; supervisor/result-capture instability that lost sibling summaries and changed sealed git status during a test; and one production postprocessing regression that overwrote a precise missing-artifact cause with a false binary-missing diagnosis. The production regression is corrected locally and awaits broad replay."
+        },
+        "automatic_self_corrections": {
+          "count": 0,
+          "count_kind": "automatic pipeline corrections",
+          "summary": "This is deterministic integration qualification, not a model-stage correction cycle; all observed corrections were supervisor-owned and are counted separately."
+        },
+        "supervisor_interventions": {
+          "count": 11,
+          "count_kind": "explicit interventions so far",
+          "summary": "One semantic merge decision; four initial fixture-only corrections; one authoritative sequential evidence-recovery action for the two indeterminate groups; one diagnosis and correction of the retained-review fixture; one backlog replay; one standalone delivery replay after the fail-fast harness discarded its output; one diagnosis and stable exact replay of the supervisor-invalidated qualification transaction; and one root-cause correction with targeted controls for the runner postprocessing regression."
+        },
+        "next_action": "Commit the exact corrected tree so qualification inputs cannot move, replay only the backlog and delivery/runtime owning partitions plus the small CLI/tools partition with independently retained results, run the two exact isolated-Docker controls once on final bytes, then publish and merge the remediation PR before starting an export-disabled full shadow cycle.",
+        "tone": "warn",
+        "data_quality": "Exact git history and focused/sequential test transcripts; current wall duration and intervention ledger; broad qualification still in progress",
+        "source_ids": [
+          "controller_remediation_integration_git",
+          "controller_remediation_integration_session",
+          "backlog_depth_supervision_issue_ledger"
+        ]
       }
     ]
   },
   "snapshot": {
+    "status": "historical_point_in_time_superseded_for_current_operations",
+    "superseded_by": "operational_dashboard",
     "generated_at": "2026-07-15T18:05:35Z",
     "branch": "codex/backlog-depth-remediation",
     "head_revision": "450a7332b1bf0b2e05fe1fc9dd7612e8998e59a9",
@@ -3645,6 +3686,25 @@
       "limitations": "Retains the initial missing-PYTHONPATH collection failure, the corrected 49-pass invocation, Ruff/diff results, direct real-record verification, and terminal progression with no role reruns. It proves this case's closure on the current working bytes, not full pipeline qualification or merged controller deployment."
     },
     {
+      "id": "controller_remediation_integration_git",
+      "path": "I:\\code\\usertest_backlog_depth",
+      "kind": "controller_remediation_integration_git_history",
+      "branch": "codex/backlog-depth-remediation",
+      "head_revision_at_dashboard_snapshot": "efda056cfe8d380202b1def12b0572a19cc23698",
+      "consolidation_commit": "b7244c2ae0063d0771e9b3a565073636b4b4ae6d",
+      "operational_evidence_commit": "64a2f858",
+      "verified_maintenance_history_merge": "e2614d225b96ff7d567751335bda2deafeec133f",
+      "integration_fixture_commit": "efda056cfe8d380202b1def12b0572a19cc23698",
+      "limitations": "The integration cycle is still in progress and has one fixture-only correction after this snapshot head. PR, CI, review, merge, and full shadow-cycle evidence do not yet exist."
+    },
+    {
+      "id": "controller_remediation_integration_session",
+      "path": "C:\\Users\\jason\\.codex\\sessions\\2026\\07\\16\\rollout-2026-07-16T01-18-44-019f695c-d53e-7db3-ba16-959861e0ddae.jsonl",
+      "kind": "controller_integration_and_qualification_session_log",
+      "file_sha256_at_dashboard_snapshot": "BDF84A15D6E36F4D933739DD04E5D02EFE7C78048A0925E21D0F7307455AA2A4",
+      "limitations": "Snapshot-specific appendable session log. It retains exact test commands, exits, findings, corrections, and timing, but the current broad qualification and PR lifecycle are incomplete."
+    },
+    {
       "id": "execution_plan",
       "path": ".agents/plans/3 - in_progress/20260709_historical_automated_backlog_depth_remediation.md",
       "kind": "in_progress_execution_record",
@@ -5672,6 +5732,9 @@
     "source_ids": ["shadow_1", "shadow_1_mining_receipt", "shadow_2", "shadow_2_mining_receipt", "shadow_2_research"]
   },
   "ticket_and_outcome_status": {
+    "status": "historical_inventory_snapshot_not_current",
+    "measured_at": "2026-07-15T18:05:35Z",
+    "superseded_for_current_operations_by": "operational_dashboard",
     "plan_file_inventory": {
       "total": 606,
       "classifications": [
@@ -5748,6 +5811,9 @@
     "source_ids": ["maintenance_ticket_export", "maintenance_ticket_materialization_receipt", "maintenance_exported_local_plan", "maintenance_implementation_initial_attempts", "maintenance_implementation_final_report", "maintenance_implementation_final_verification", "maintenance_implementation_final_git_ref", "maintenance_implementation_asset_staging", "execution_plan", "executive_summary"]
   },
   "current_status": {
+    "status_scope": "historical_point_in_time",
+    "measured_at": "2026-07-15T18:05:35Z",
+    "superseded_by": "operational_dashboard",
     "overall": "not_qualified",
     "objective_complete": false,
     "export_enabled": false,

@@ -1360,9 +1360,11 @@ def test_run_once_falls_back_to_post_agent_rerun_when_broker_response_is_incompl
     assert attempt_verification["broker_response_failure_reason"] == "incomplete_broker_response"
 
 
+@pytest.mark.parametrize("postprocess_failure", [False, True])
 def test_run_once_fails_closed_when_selected_attempt_artifact_is_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    postprocess_failure: bool,
 ) -> None:
     runner_root = _setup_runner_root(tmp_path)
     target = _setup_target_repo(tmp_path)
@@ -1385,6 +1387,12 @@ def test_run_once_fails_closed_when_selected_attempt_artifact_is_missing(
         return SimpleNamespace(exit_code=0, argv=["codex", "exec"])
 
     monkeypatch.setattr(runner_mod, "run_codex_exec", _fake_run_codex_exec)
+    if postprocess_failure:
+
+        def _fail_normalization(**_kwargs: object) -> None:
+            raise FileNotFoundError("secondary normalization failure")
+
+        monkeypatch.setattr(runner_mod, "normalize_codex_events", _fail_normalization)
 
     cfg = RunnerConfig(
         repo_root=runner_root,
@@ -1415,6 +1423,12 @@ def test_run_once_fails_closed_when_selected_attempt_artifact_is_missing(
         for item in details["errors"]
     )
     assert details["selected_verification_source"] == "broker_reuse"
+    secondary_error_path = result.run_dir / "postprocess_error.json"
+    assert secondary_error_path.exists() is postprocess_failure
+    if postprocess_failure:
+        secondary_error = json.loads(secondary_error_path.read_text(encoding="utf-8"))
+        assert secondary_error["preserved_terminal_error"] == "error.json"
+        assert secondary_error["message"] == "secondary normalization failure"
 
 
 def test_run_once_serializes_failed_terminal_reason_into_report(

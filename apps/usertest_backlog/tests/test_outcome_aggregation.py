@@ -244,6 +244,7 @@ def _retained_implemented_outcome(
             "schema_version": 2,
             "implementation_run_dir": str(implementation_run_dir),
             "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
+            "reviewed_head_oid": merged_commit,
             "ticket_provenance": ticket_provenance,
         },
     )
@@ -251,6 +252,7 @@ def _retained_implemented_outcome(
         review_run_dir / "review_summary.json",
         {
             "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
+            "reviewed_head_oid": merged_commit,
             "ticket_provenance": ticket_provenance,
         },
     )

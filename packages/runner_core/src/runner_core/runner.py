@@ -7899,28 +7899,33 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             if isinstance(attempt.get("raw_events_path"), str)
         ]
         normalization_source = raw_events_path
-        if len(attempt_event_sources) == 1:
-            normalization_source = attempt_event_sources[0]
-        elif len(attempt_event_sources) > 1:
-            normalization_source = run_dir / "raw_events.all_attempts.jsonl"
-            with normalization_source.open("wb") as cumulative_f:
-                for source_path in attempt_event_sources:
-                    content = source_path.read_bytes()
-                    cumulative_f.write(content)
-                    if content and not content.endswith(b"\n"):
-                        cumulative_f.write(b"\n")
-
-            attempt_ts_sources = [
-                source_path.with_suffix(".ts.jsonl") for source_path in attempt_event_sources
-            ]
-            if all(source_path.is_file() for source_path in attempt_ts_sources):
-                cumulative_ts_path = normalization_source.with_suffix(".ts.jsonl")
-                with cumulative_ts_path.open("wb") as cumulative_ts_f:
-                    for source_path in attempt_ts_sources:
+        # A missing selected-attempt artifact has already failed the run closed and
+        # produced a canonical empty placeholder above. Do not reopen the absent source
+        # here and replace that precise terminal cause with a generic FileNotFoundError.
+        if not materialization_errors:
+            if len(attempt_event_sources) == 1:
+                normalization_source = attempt_event_sources[0]
+            elif len(attempt_event_sources) > 1:
+                normalization_source = run_dir / "raw_events.all_attempts.jsonl"
+                with normalization_source.open("wb") as cumulative_f:
+                    for source_path in attempt_event_sources:
                         content = source_path.read_bytes()
-                        cumulative_ts_f.write(content)
+                        cumulative_f.write(content)
                         if content and not content.endswith(b"\n"):
-                            cumulative_ts_f.write(b"\n")
+                            cumulative_f.write(b"\n")
+
+                attempt_ts_sources = [
+                    source_path.with_suffix(".ts.jsonl")
+                    for source_path in attempt_event_sources
+                ]
+                if all(source_path.is_file() for source_path in attempt_ts_sources):
+                    cumulative_ts_path = normalization_source.with_suffix(".ts.jsonl")
+                    with cumulative_ts_path.open("wb") as cumulative_ts_f:
+                        for source_path in attempt_ts_sources:
+                            content = source_path.read_bytes()
+                            cumulative_ts_f.write(content)
+                            if content and not content.endswith(b"\n"):
+                                cumulative_ts_f.write(b"\n")
 
         _normalize_raw_events(
             source_path=normalization_source,
@@ -8087,15 +8092,23 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             else:
                 extra["hint"] = derived_hint
             user_errors.append(f"hint={derived_hint}")
-        _write_json(
-            run_dir / "error.json",
-            {
-                "type": type(e).__name__,
-                "message": message,
-                **({"subtype": subtype} if subtype is not None else {}),
-                **extra,
-            },
-        )
+        error_payload = {
+            "type": type(e).__name__,
+            "message": message,
+            **({"subtype": subtype} if subtype is not None else {}),
+            **extra,
+        }
+        error_path = run_dir / "error.json"
+        if error_path.exists():
+            _write_json(
+                run_dir / "postprocess_error.json",
+                {
+                    **error_payload,
+                    "preserved_terminal_error": error_path.name,
+                },
+            )
+        else:
+            _write_json(error_path, error_payload)
         return RunResult(
             run_dir=run_dir,
             exit_code=1,
