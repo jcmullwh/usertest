@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
+import usertest_implement.pipeline_efficiency as pipeline_efficiency
 from usertest_implement.resume_state import (
     LIFECYCLE_CI_FAILED,
     LIFECYCLE_COMPLETE,
@@ -95,6 +98,44 @@ def test_resume_state_records_required_identity_fields(tmp_path: Path) -> None:
     }
     assert state["source_evidence_paths"]["ticket_ref"] == str(run_dir / "ticket_ref.json")
     assert state["source_evidence_paths"]["raw_events"] == str(run_dir / "raw_events.jsonl")
+    telemetry = json.loads(
+        (run_dir / "pipeline_efficiency.json").read_text(encoding="utf-8")
+    )
+    assert telemetry["kind"] == "ticket_pipeline_efficiency"
+    assert telemetry["ticket"]["fingerprint"] == selected.fingerprint
+    assert telemetry["lifecycle"]["current_state"] == "implemented_local"
+    assert telemetry["lifecycle"]["resume_state_terminal"] is True
+    assert telemetry["lifecycle"]["implementation_workflow_terminal"] is False
+    assert telemetry["lifecycle"]["outcome_terminal"] is False
+    assert telemetry["measurement_scope"]["end_to_end"] is False
+
+
+def test_efficiency_telemetry_failure_does_not_block_resume_state(
+    tmp_path: Path, monkeypatch
+) -> None:
+    selected, run_dir, _workspace = _base_run(tmp_path)
+    _write_json(run_dir / "handoff_summary.json", {"final_status": "success"})
+
+    def fail_telemetry(**_kwargs: object) -> dict[str, object]:
+        raise RuntimeError("telemetry failed")
+
+    monkeypatch.setattr(
+        pipeline_efficiency,
+        "write_ticket_pipeline_efficiency",
+        fail_telemetry,
+    )
+
+    with pytest.warns(RuntimeWarning, match="pipeline efficiency telemetry"):
+        state = write_ticket_resume_state(
+            selected=selected,
+            run_dir=run_dir,
+            owner_root=tmp_path,
+            exit_code=0,
+        )
+
+    assert state["lifecycle_state"] == "implemented_local"
+    assert (run_dir / "ticket_resume_state.json").exists()
+    assert not (run_dir / "pipeline_efficiency.json").exists()
 
 
 def test_resume_state_never_claims_exact_continuity_for_malformed_thread_id(

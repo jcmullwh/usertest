@@ -1022,11 +1022,115 @@ def _is_fail_first_planned_replay(raw: Any) -> bool:
         return False
     baseline = raw.get("baseline")
     baseline_exit = baseline.get("exit_code") if isinstance(baseline, dict) else None
-    return bool(
+    if not (
         isinstance(baseline_exit, int)
         and not isinstance(baseline_exit, bool)
         and baseline_exit != 0
+    ):
+        return False
+    return _valid_retained_stage3_fail_first_source(raw)
+
+
+def _valid_retained_stage3_fail_first_source(raw: dict[str, Any]) -> bool:
+    """Validate the reversible Stage-3 source retained by new fail-first plans."""
+
+    retained = raw.get("retained_stage3_oracle")
+    source_ref = raw.get("stage5_fail_first_source")
+    if retained is None and source_ref is None:
+        return True
+    if not isinstance(retained, dict) or not isinstance(source_ref, dict):
+        return False
+    if (
+        retained.get("retained_stage3_oracle") is not None
+        or retained.get("stage5_fail_first_source") is not None
+        or retained.get("selected_outcome_contract") is not None
+    ):
+        return False
+    retained_id = retained.get("outcome_oracle_id")
+    retained_projection = {
+        key: value for key, value in retained.items() if key != "outcome_oracle_id"
+    }
+    retained_scenario = retained.get("scenario_kind")
+    retained_baseline = retained.get("baseline")
+    retained_exit = (
+        retained_baseline.get("exit_code")
+        if isinstance(retained_baseline, dict)
+        else None
     )
+    if (
+        retained_id != f"outcome_oracle:{_sha256_json(retained_projection)}"
+        or retained.get("schema_version") != 1
+        or retained.get("kind") != "staged_replay"
+        or retained.get("proof_scope") != "behavioral"
+        or retained_scenario
+        not in {
+            "original_replay",
+            "faithful_replay",
+            "live_runtime",
+            "fail_first_contract",
+        }
+        or isinstance(retained_exit, bool)
+        or not isinstance(retained_exit, int)
+        or retained_exit == 0
+    ):
+        return False
+    retained_contracts_raw = retained.get("positive_outcome_contracts")
+    if retained_contracts_raw is None:
+        retained_contracts: list[dict[str, Any]] = []
+    elif isinstance(retained_contracts_raw, list) and all(
+        isinstance(value, dict) for value in retained_contracts_raw
+    ):
+        retained_contracts = retained_contracts_raw
+    else:
+        return False
+    if retained_scenario == "fail_first_contract" and retained_contracts:
+        return False
+    retained_contract_ids = [
+        str(contract["positive_outcome_contract_id"])
+        for contract in retained_contracts
+        if isinstance(contract.get("positive_outcome_contract_id"), str)
+        and contract["positive_outcome_contract_id"]
+    ]
+    if (
+        len(retained_contract_ids) != len(retained_contracts)
+        or len(retained_contract_ids) != len(set(retained_contract_ids))
+    ):
+        return False
+    retained_contract_ids.sort()
+    if source_ref != {
+        "schema_version": 1,
+        "kind": "verified_stage3_fail_first_source",
+        "source_outcome_oracle_id": retained_id,
+        "source_scenario_kind": retained_scenario,
+        "source_positive_outcome_contract_ids": retained_contract_ids,
+    }:
+        return False
+    source_reversible = {
+        key: value
+        for key, value in retained.items()
+        if key not in {"outcome_oracle_id", "positive_outcome_contracts", "scenario_kind"}
+    }
+    derived_reversible = {
+        key: value
+        for key, value in raw.items()
+        if key
+        not in {
+            "outcome_oracle_id",
+            "positive_outcome_contracts",
+            "scenario_kind",
+            "selected_outcome_contract",
+            "retained_stage3_oracle",
+            "stage5_fail_first_source",
+        }
+    }
+    if source_reversible != derived_reversible:
+        return False
+    if retained_contracts:
+        try:
+            _normalize_outcome_oracle(retained)
+        except ValueError:
+            return False
+    return True
 
 
 def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:
@@ -1338,10 +1442,23 @@ def _verify_positive_contract_sources(
     workspace: Path,
     selected_contract_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Revalidate immutable repository contracts at the implementation head."""
+    """Revalidate immutable repository contracts at the implementation head.
+
+    A planned fail-first oracle keeps Stage-3 contracts as inert provenance rather
+    than active success semantics.  Their repository sources still need revalidation,
+    otherwise deriving the Stage-5 shape would silently remove tamper protection.
+    """
 
     receipts: list[dict[str, Any]] = []
-    for contract in oracle.get("positive_outcome_contracts", []):
+    contracts_raw = oracle.get("positive_outcome_contracts")
+    if contracts_raw in (None, []):
+        retained = oracle.get("retained_stage3_oracle")
+        contracts_raw = (
+            retained.get("positive_outcome_contracts", [])
+            if isinstance(retained, dict)
+            else []
+        )
+    for contract in contracts_raw if isinstance(contracts_raw, list) else []:
         if not isinstance(contract, dict):
             continue
         contract_id = contract.get("positive_outcome_contract_id")
@@ -2397,6 +2514,8 @@ def run_outcome_evidence_role(
     verification_contract_sha256: str,
     target_contract_sha256: str,
     verified_implementation_head: str,
+    execution_commit: str | None = None,
+    verification_amendment_id: str | None = None,
     timeout_seconds: float | None = None,
     recurrence_refresh_receipt_path: Path | None = None,
     recurrence_after: str | None = None,
@@ -2425,10 +2544,25 @@ def run_outcome_evidence_role(
         target_contract_sha256,
         field="target_contract_sha256",
     )
-    expected_commit = _resolve_commit(
+    implementation_commit = _resolve_commit(
         workspace,
         _required_text(merged_commit, field="merged_commit"),
     )
+    expected_commit = _resolve_commit(
+        workspace,
+        _required_text(
+            execution_commit or implementation_commit,
+            field="execution_commit",
+        ),
+    )
+    if expected_commit == implementation_commit:
+        if verification_amendment_id is not None:
+            raise ValueError("outcome_role_verification_amendment_unexpected")
+    elif (
+        not isinstance(verification_amendment_id, str)
+        or not verification_amendment_id.startswith("outcome_verification_amendment:")
+    ):
+        raise ValueError("outcome_role_verification_amendment_required")
     workspace_head = _resolved_head(workspace)
     if workspace_head != expected_commit:
         raise ValueError(
@@ -2444,8 +2578,14 @@ def run_outcome_evidence_role(
     _require_ancestor(
         workspace,
         ancestor=verified_head,
-        descendant=expected_commit,
+        descendant=implementation_commit,
         field="verified_implementation_head_to_merged_commit",
+    )
+    _require_ancestor(
+        workspace,
+        ancestor=implementation_commit,
+        descendant=expected_commit,
+        field="merged_commit_to_execution_commit",
     )
 
     recurrence_proof: dict[str, Any] | None = None
@@ -2530,10 +2670,12 @@ def run_outcome_evidence_role(
                 role_contract=child_contract,
                 case_id=case_id,
                 plan_revision_id=plan_revision_id,
-                merged_commit=expected_commit,
+                merged_commit=implementation_commit,
                 verification_contract_sha256=verification_hash,
                 target_contract_sha256=target_hash,
                 verified_implementation_head=verified_head,
+                execution_commit=expected_commit,
+                verification_amendment_id=verification_amendment_id,
                 timeout_seconds=timeout_seconds,
                 trusted_oracle_assets_root=trusted_oracle_assets_root,
             )
@@ -2764,7 +2906,7 @@ def run_outcome_evidence_role(
         "role": role,
         "case_id": case_id,
         "plan_revision_id": plan_revision_id,
-        "merged_commit": expected_commit,
+        "merged_commit": implementation_commit,
         "workspace": str(workspace),
         "workspace_head": workspace_head,
         "verification_contract_sha256": verification_hash,
@@ -2785,6 +2927,9 @@ def run_outcome_evidence_role(
         "execution_integrity": execution_integrity,
         "passed": passed,
     }
+    if expected_commit != implementation_commit:
+        artifact["execution_commit"] = expected_commit
+        artifact["verification_amendment_id"] = verification_amendment_id
     if materialization is not None:
         artifact["oracle_materialization"] = materialization
     if oracle_states:
@@ -2815,6 +2960,8 @@ def validate_outcome_evidence_role_artifact(
     target_contract_sha256: str,
     verified_implementation_head: str,
     role_contract: dict[str, Any],
+    execution_commit: str | None = None,
+    verification_amendment_id: str | None = None,
 ) -> dict[str, Any]:
     """Revalidate a retained runner artifact without trusting receipt claims."""
 
@@ -2837,6 +2984,20 @@ def validate_outcome_evidence_role_artifact(
         "role_contract_sha256": normalized_contract["role_contract_sha256"],
         "role_contract": normalized_contract,
     }
+    normalized_implementation = merged_commit.casefold()
+    normalized_execution = (execution_commit or merged_commit).casefold()
+    if normalized_execution != normalized_implementation:
+        if (
+            not isinstance(verification_amendment_id, str)
+            or not verification_amendment_id.startswith(
+                "outcome_verification_amendment:"
+            )
+        ):
+            raise ValueError("outcome_role_artifact_verification_amendment_required")
+        expected["execution_commit"] = normalized_execution
+        expected["verification_amendment_id"] = verification_amendment_id
+    elif verification_amendment_id is not None:
+        raise ValueError("outcome_role_artifact_verification_amendment_unexpected")
     for field, value in expected.items():
         observed = artifact.get(field)
         if isinstance(value, str) and field.endswith("sha256"):
@@ -3030,6 +3191,8 @@ def validate_outcome_evidence_role_artifact(
                     target_contract_sha256=target_contract_sha256,
                     verified_implementation_head=verified_implementation_head,
                     role_contract=stored["role_contract"],
+                    execution_commit=execution_commit,
+                    verification_amendment_id=verification_amendment_id,
                 )
     return dict(artifact)
 

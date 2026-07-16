@@ -9,8 +9,10 @@ from typing import Any
 
 import yaml
 from backlog_repo import (
+    bind_outcome_verification_amendment,
     extract_outcome_markdown,
     reconcile_outcome_records,
+    reconcile_terminal_outcome_stale_blockers,
     transition_outcome_record,
     upsert_outcome_markdown,
     validate_outcome_record,
@@ -304,6 +306,279 @@ def transition_outcome_files(
                     ) from rollback_exc
             raise
         return transitioned
+    finally:
+        for temporary in (staged_ticket, staged_ledger, rollback_ledger):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
+
+def bind_outcome_verification_amendment_files(
+    *,
+    ledger_path: Path,
+    ticket_path: Path,
+    fingerprint: str,
+    verification_commit: str,
+    verification_pr_url: str,
+    recorded_at: str,
+) -> dict[str, Any]:
+    """Atomically bind one write-once verification descendant in ticket and ledger."""
+
+    lock_path = _acquire_lock(ledger_path)
+    token = f"{os.getpid()}-{uuid.uuid4().hex}"
+    staged_ticket = ticket_path.with_name(f".{ticket_path.name}.{token}.tmp")
+    staged_ledger = ledger_path.with_name(f".{ledger_path.name}.{token}.tmp")
+    rollback_ledger = ledger_path.with_name(f".{ledger_path.name}.{token}.rollback")
+    try:
+        ticket_bytes = ticket_path.read_bytes()
+        try:
+            ticket_markdown = ticket_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Outcome ticket is not valid UTF-8: {ticket_path}") from exc
+        ticket_outcome = extract_outcome_markdown(ticket_markdown)
+        if ticket_outcome is None:
+            raise ValueError(f"Ticket has no durable outcome record: {ticket_path}")
+        from usertest_implement.tickets import parse_ticket_markdown_metadata
+
+        ticket_metadata = parse_ticket_markdown_metadata(ticket_markdown)
+        if ticket_metadata.get("fingerprint") != fingerprint:
+            raise ValueError(
+                "Outcome ticket fingerprint mismatch: "
+                f"expected={fingerprint!r} "
+                f"observed={ticket_metadata.get('fingerprint')!r}"
+            )
+        expected_case_id = ticket_metadata.get("case_id") or f"legacy-case:{fingerprint}"
+        expected_plan_revision_id = (
+            ticket_metadata.get("plan_revision_id") or f"legacy-plan:{fingerprint}"
+        )
+        if ticket_outcome.get("case_id") != expected_case_id:
+            raise ValueError(
+                "Outcome ticket case identity mismatch: "
+                f"metadata={expected_case_id!r} "
+                f"outcome={ticket_outcome.get('case_id')!r}"
+            )
+        if ticket_outcome.get("plan_revision_id") != expected_plan_revision_id:
+            raise ValueError(
+                "Outcome ticket plan identity mismatch: "
+                f"metadata={expected_plan_revision_id!r} "
+                f"outcome={ticket_outcome.get('plan_revision_id')!r}"
+            )
+
+        ledger_existed = ledger_path.exists()
+        ledger_bytes = ledger_path.read_bytes() if ledger_existed else b""
+        ledger_doc = load_ledger(ledger_path)
+        actions = ledger_doc.get("actions")
+        entry = actions.get(fingerprint) if isinstance(actions, dict) else None
+        ledger_outcome = entry.get("outcome") if isinstance(entry, dict) else None
+        if not isinstance(ledger_outcome, dict):
+            raise ValueError(
+                f"Ledger has no durable outcome for fingerprint {fingerprint!r}"
+            )
+        ledger_outcome = validate_outcome_record(ledger_outcome)
+        if ledger_outcome != ticket_outcome:
+            raise ValueError(
+                "Outcome stores disagree; refusing a non-atomic amendment: "
+                f"fingerprint={fingerprint!r}"
+            )
+
+        amended = bind_outcome_verification_amendment(
+            ticket_outcome,
+            verification_commit=verification_commit,
+            verification_pr_url=verification_pr_url,
+            recorded_at=recorded_at,
+        )
+        if amended == ticket_outcome:
+            return amended
+        updated_markdown = upsert_outcome_markdown(ticket_markdown, amended)
+        updated_at = _utc_now_z()
+        updated_actions = dict(actions)
+        updated_entry = dict(entry)
+        updated_entry["outcome"] = amended
+        updated_entry["updated_at"] = updated_at
+        updated_actions[fingerprint] = updated_entry
+        updated_ledger = {
+            **ledger_doc,
+            "schema_version": 1,
+            "updated_at": updated_at,
+            "actions": updated_actions,
+        }
+
+        staged_ticket.write_text(updated_markdown, encoding="utf-8")
+        staged_ledger.parent.mkdir(parents=True, exist_ok=True)
+        staged_ledger.write_text(
+            yaml.safe_dump(updated_ledger, sort_keys=True, allow_unicode=True),
+            encoding="utf-8",
+        )
+        if extract_outcome_markdown(staged_ticket.read_text(encoding="utf-8")) != amended:
+            raise OSError(f"Staged ticket amendment verification failed: {staged_ticket}")
+        staged_doc = load_ledger(staged_ledger)
+        staged_actions = staged_doc.get("actions")
+        staged_entry = (
+            staged_actions.get(fingerprint) if isinstance(staged_actions, dict) else None
+        )
+        if not isinstance(staged_entry, dict) or staged_entry.get("outcome") != amended:
+            raise OSError(f"Staged ledger amendment verification failed: {staged_ledger}")
+
+        ledger_replaced = False
+        try:
+            os.replace(staged_ledger, ledger_path)
+            ledger_replaced = True
+            os.replace(staged_ticket, ticket_path)
+        except Exception:
+            if ledger_replaced:
+                try:
+                    if ledger_existed:
+                        rollback_ledger.write_bytes(ledger_bytes)
+                        os.replace(rollback_ledger, ledger_path)
+                    else:
+                        ledger_path.unlink(missing_ok=True)
+                except Exception as rollback_exc:
+                    raise RuntimeError(
+                        "Outcome amendment failed and ledger rollback also failed: "
+                        f"{ledger_path}"
+                    ) from rollback_exc
+            raise
+        return amended
+    finally:
+        for temporary in (staged_ticket, staged_ledger, rollback_ledger):
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
+        try:
+            lock_path.unlink()
+        except OSError:
+            pass
+
+
+def reconcile_terminal_outcome_stale_blockers_files(
+    *,
+    ledger_path: Path,
+    ticket_path: Path,
+    fingerprint: str,
+) -> dict[str, Any]:
+    """Atomically remove only stale runner blockers from a terminal outcome."""
+
+    lock_path = _acquire_lock(ledger_path)
+    token = f"{os.getpid()}-{uuid.uuid4().hex}"
+    staged_ticket = ticket_path.with_name(f".{ticket_path.name}.{token}.tmp")
+    staged_ledger = ledger_path.with_name(f".{ledger_path.name}.{token}.tmp")
+    rollback_ledger = ledger_path.with_name(f".{ledger_path.name}.{token}.rollback")
+    try:
+        ticket_bytes = ticket_path.read_bytes()
+        try:
+            ticket_markdown = ticket_bytes.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"Outcome ticket is not valid UTF-8: {ticket_path}") from exc
+        ticket_outcome = extract_outcome_markdown(ticket_markdown)
+        if ticket_outcome is None:
+            raise ValueError(f"Ticket has no durable outcome record: {ticket_path}")
+        from usertest_implement.tickets import parse_ticket_markdown_metadata
+
+        metadata = parse_ticket_markdown_metadata(ticket_markdown)
+        if metadata.get("fingerprint") != fingerprint:
+            raise ValueError(
+                "Outcome ticket fingerprint mismatch: "
+                f"expected={fingerprint!r} observed={metadata.get('fingerprint')!r}"
+            )
+        expected_case_id = metadata.get("case_id") or f"legacy-case:{fingerprint}"
+        expected_plan_revision_id = (
+            metadata.get("plan_revision_id") or f"legacy-plan:{fingerprint}"
+        )
+        if ticket_outcome.get("case_id") != expected_case_id:
+            raise ValueError("Outcome ticket case identity mismatch")
+        if ticket_outcome.get("plan_revision_id") != expected_plan_revision_id:
+            raise ValueError("Outcome ticket plan identity mismatch")
+
+        ledger_existed = ledger_path.exists()
+        ledger_bytes = ledger_path.read_bytes() if ledger_existed else b""
+        ledger_doc = load_ledger(ledger_path)
+        actions = ledger_doc.get("actions")
+        entry = actions.get(fingerprint) if isinstance(actions, dict) else None
+        ledger_outcome = entry.get("outcome") if isinstance(entry, dict) else None
+        if not isinstance(ledger_outcome, dict):
+            raise ValueError(
+                f"Ledger has no durable outcome for fingerprint {fingerprint!r}"
+            )
+        ledger_outcome = validate_outcome_record(ledger_outcome)
+        if ledger_outcome != ticket_outcome:
+            raise ValueError(
+                "Outcome stores disagree; refusing a non-atomic stale-blocker "
+                f"reconciliation: fingerprint={fingerprint!r}"
+            )
+
+        reconciled = reconcile_terminal_outcome_stale_blockers(ticket_outcome)
+        if reconciled == ticket_outcome:
+            return reconciled
+        if {
+            key: value
+            for key, value in reconciled.items()
+            if key != "remaining_risks"
+        } != {
+            key: value
+            for key, value in ticket_outcome.items()
+            if key != "remaining_risks"
+        }:
+            raise RuntimeError(
+                "Terminal stale-blocker reconciliation changed protected outcome fields"
+            )
+
+        updated_markdown = upsert_outcome_markdown(ticket_markdown, reconciled)
+        updated_at = _utc_now_z()
+        updated_actions = dict(actions)
+        updated_entry = dict(entry)
+        updated_entry["outcome"] = reconciled
+        updated_entry["updated_at"] = updated_at
+        updated_actions[fingerprint] = updated_entry
+        updated_ledger = {
+            **ledger_doc,
+            "schema_version": 1,
+            "updated_at": updated_at,
+            "actions": updated_actions,
+        }
+
+        staged_ticket.write_bytes(updated_markdown.encode("utf-8"))
+        staged_ledger.write_text(
+            yaml.safe_dump(updated_ledger, sort_keys=True, allow_unicode=True),
+            encoding="utf-8",
+        )
+        if extract_outcome_markdown(
+            staged_ticket.read_bytes().decode("utf-8")
+        ) != reconciled:
+            raise OSError(f"Staged ticket reconciliation verification failed: {staged_ticket}")
+        staged_doc = load_ledger(staged_ledger)
+        staged_actions = staged_doc.get("actions")
+        staged_entry = (
+            staged_actions.get(fingerprint) if isinstance(staged_actions, dict) else None
+        )
+        if not isinstance(staged_entry, dict) or staged_entry.get("outcome") != reconciled:
+            raise OSError(f"Staged ledger reconciliation verification failed: {staged_ledger}")
+
+        ledger_replaced = False
+        try:
+            os.replace(staged_ledger, ledger_path)
+            ledger_replaced = True
+            os.replace(staged_ticket, ticket_path)
+        except Exception:
+            if ledger_replaced:
+                try:
+                    if ledger_existed:
+                        rollback_ledger.write_bytes(ledger_bytes)
+                        os.replace(rollback_ledger, ledger_path)
+                    else:
+                        ledger_path.unlink(missing_ok=True)
+                except Exception as rollback_exc:
+                    raise RuntimeError(
+                        "Outcome reconciliation failed and ledger rollback also failed: "
+                        f"{ledger_path}"
+                    ) from rollback_exc
+            raise
+        return reconciled
     finally:
         for temporary in (staged_ticket, staged_ledger, rollback_ledger):
             try:

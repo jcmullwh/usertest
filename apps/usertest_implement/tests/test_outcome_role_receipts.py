@@ -126,3 +126,89 @@ def test_role_receipt_is_bound_to_case_plan_commit_and_scope(tmp_path: Path) -> 
             trusted_runs_root=runs_root,
             expected_role_artifact_sha256=str(receipt["role_artifact_sha256"]),
         )
+
+
+def test_amended_role_receipt_retains_implementation_and_execution_commits(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _git(workspace, "init")
+    _git(workspace, "config", "user.email", "tests@example.com")
+    _git(workspace, "config", "user.name", "Tests")
+    (workspace / "probe.py").write_text("print('original passed')\n", encoding="utf-8")
+    _git(workspace, "add", "probe.py")
+    _git(workspace, "commit", "-m", "implementation")
+    implementation_commit = _git(workspace, "rev-parse", "HEAD")
+    (workspace / "verification.txt").write_text("correction\n", encoding="utf-8")
+    _git(workspace, "add", "verification.txt")
+    _git(workspace, "commit", "-m", "verification correction")
+    execution_commit = _git(workspace, "rev-parse", "HEAD")
+    amendment_id = "outcome_verification_amendment:" + "d" * 64
+    verification_contract = verification_contract_payload(
+        ["python -m pytest tests/test_feature.py -q"],
+        outcome_roles=_roles(),
+    )
+    provenance = {
+        "schema_version": 1,
+        "fingerprint": "0123456789abcdef",
+        "case_id": "case:one",
+        "plan_revision_id": "plan:one:v1",
+        "ticket_body_sha256": "a" * 64,
+        "local_plan_sha256": "b" * 64,
+        "local_plan_filename": "plan.md",
+        "verification_contract": verification_contract,
+        "verification_contract_sha256": verification_contract["contract_sha256"],
+        "target_contract_sha256": "c" * 64,
+        "verified_implementation_head": implementation_commit,
+    }
+    runs_root = tmp_path / "runs"
+    artifact_path = runs_root / "amended" / "outcome_role.json"
+    role_contract = verification_contract["outcome_roles"]["original_scenario"]
+    assert isinstance(role_contract, dict)
+
+    artifact = run_outcome_evidence_role(
+        workspace=workspace,
+        output_path=artifact_path,
+        role="original_scenario",
+        role_contract=role_contract,
+        case_id="case:one",
+        plan_revision_id="plan:one:v1",
+        merged_commit=implementation_commit,
+        verification_contract_sha256=str(verification_contract["contract_sha256"]),
+        target_contract_sha256="c" * 64,
+        verified_implementation_head=implementation_commit,
+        execution_commit=execution_commit,
+        verification_amendment_id=amendment_id,
+    )
+    receipt = validate_bound_outcome_role_receipt(
+        role_artifact_path=artifact_path,
+        evidence_kind="original_scenario",
+        case_id="case:one",
+        plan_revision_id="plan:one:v1",
+        merged_commit=implementation_commit,
+        expected_ticket_provenance=provenance,
+        trusted_runs_root=runs_root,
+        execution_commit=execution_commit,
+        verification_amendment_id=amendment_id,
+    )
+
+    assert artifact["merged_commit"] == implementation_commit
+    assert artifact["execution_commit"] == execution_commit
+    assert receipt["receipt_schema_version"] == 4
+    assert receipt["merged_commit"] == implementation_commit
+    assert receipt["execution_commit"] == execution_commit
+    assert receipt["verification_amendment_id"] == amendment_id
+
+    with pytest.raises(ValueError, match="artifact_identity_mismatch:execution_commit"):
+        validate_bound_outcome_role_receipt(
+            role_artifact_path=artifact_path,
+            evidence_kind="original_scenario",
+            case_id="case:one",
+            plan_revision_id="plan:one:v1",
+            merged_commit=implementation_commit,
+            expected_ticket_provenance=provenance,
+            trusted_runs_root=runs_root,
+            execution_commit="e" * 40,
+            verification_amendment_id=amendment_id,
+        )

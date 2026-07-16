@@ -23,6 +23,7 @@ from backlog_core import (
     bind_plan_outcome_oracle,
     evidence_assignment_sha256,
     infer_live_verification_requirement,
+    source_evidence_atom_projection,
 )
 from backlog_repo import (
     canonical_plan_sha256,
@@ -52,7 +53,7 @@ from backlog_miner.research_evidence import (
     verify_persisted_research_evidence,
 )
 
-ORIGINAL_COMMAND = "python -m pytest -q --tb=native tests/test_core.py::test_reported_failure"
+ORIGINAL_COMMAND = "python -m pytest -q -s --tb=native tests/test_core.py::test_reported_failure"
 
 
 def _write_json(path: Path, value: object) -> None:
@@ -83,8 +84,11 @@ def _init_reproduced_problem(workspace: Path) -> str:
     (workspace / "tests").mkdir()
     (workspace / "tests" / "test_core.py").write_text(
         "from src.core import run\n\n"
+        "def _report_result(result):\n"
+        "    print(f'core.run result={result}')\n"
+        "    return result\n\n"
         "def _assert_default_contract():\n"
-        "    assert run() is True\n\n"
+        "    assert _report_result(run()) is True\n\n"
         "def test_reported_failure():\n"
         "    _assert_default_contract()\n\n"
         "def test_guarded_control():\n"
@@ -230,6 +234,14 @@ def _research_claims(revision: str) -> dict[str, object]:
             "facets": [],
             "material_unknowns": [],
         },
+        "actionability_assessment": {
+            "disposition": "requires_change",
+            "rationale": (
+                "The pinned revision still raises on the original default-path replay, "
+                "while the guarded control verifies the corrective mechanism."
+            ),
+            "evidence_refs": ["experiment:original", "experiment:control"],
+        },
         "material_unknowns": [],
         "blocking_reasons": [],
         "evidence_boundaries": [],
@@ -247,6 +259,7 @@ def _problem_payload(tmp_path: Path) -> dict[str, object]:
         "evidence_role": "observation",
         "origin_stage": "runtime",
     }
+    atom_snapshot = source_evidence_atom_projection(atom)
     assignment: dict[str, object] = {
         "status": "complete",
         "errors": [],
@@ -257,9 +270,11 @@ def _problem_payload(tmp_path: Path) -> dict[str, object]:
             {
                 "atom_id": "atom:origin",
                 "atom_sha256": sha256(
-                    json.dumps(atom, sort_keys=True, separators=(",", ":")).encode()
+                    json.dumps(
+                        atom_snapshot, sort_keys=True, separators=(",", ":")
+                    ).encode()
                 ).hexdigest(),
-                "atom_snapshot": atom,
+                "atom_snapshot": atom_snapshot,
                 "artifact_receipts": [
                     {
                         "path": str(origin),
@@ -274,7 +289,7 @@ def _problem_payload(tmp_path: Path) -> dict[str, object]:
     return {
         "case_id": "case:causal-acceptance",
         "problem_id": "problem:causal-acceptance",
-        "evidence_atoms": [{"atom_id": "atom:origin"}],
+        "evidence_atoms": [atom],
         "evidence_assignment": assignment,
     }
 
@@ -317,7 +332,10 @@ def _run_stage_three(
                 "agent": request.agent,
             },
         )
-        _write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+        _write_json(
+            run_dir / "workspace_ref.json",
+            {"workspace_dir": str(request.resume_workspace_dir)},
+        )
         events = [
             {
                 "type": "run_command",
@@ -353,6 +371,33 @@ def _run_stage_three(
                 },
             },
         ]
+        assert request.resume_workspace_dir is not None
+        assigned_index = (
+            request.resume_workspace_dir
+            / ".usertest_research"
+            / "origin_evidence"
+            / "assigned"
+            / "index.json"
+        )
+        assert assigned_index.is_file()
+        events.append(
+            {
+                "type": "read_file",
+                "data": {
+                    "path": assigned_index.relative_to(
+                        request.resume_workspace_dir
+                    ).as_posix(),
+                    "read_source": "tool",
+                    "source_exit_code": 0,
+                    **observed_read_attestation(
+                        path=assigned_index,
+                        observed_text=assigned_index.read_text(encoding="utf-8"),
+                        source_exit_code=0,
+                        allow_partial=False,
+                    ),
+                },
+            }
+        )
         (run_dir / "normalized_events.jsonl").write_text(
             "\n".join(json.dumps(event) for event in events) + "\n",
             encoding="utf-8",
@@ -495,6 +540,19 @@ def test_real_causal_evidence_reaches_durable_resolution(
                 "before": "The exact original replay fails.",
                 "after": "The exact replay passes and asserts True.",
             },
+            "outcome_strategy": {
+                "intended_operation": (
+                    "The default core.run call returns its required True value."
+                ),
+                "success_properties": [
+                    "The unchanged original replay passes its existing return-value assertion."
+                ],
+                "safety_constraints": [
+                    "The guarded core.run call continues to return True."
+                ],
+                "post_change_replay_mode": "verified_fail_first",
+                "original_scenario_experiment_ids": ["experiment:original"],
+            },
         },
         "scope_evidence": {
             "scope_level": "single_path",
@@ -555,6 +613,17 @@ def test_real_causal_evidence_reaches_durable_resolution(
                     "evidence_refs": [mechanism_evidence["mechanism_evidence_id"]],
                 }
             ],
+            "outcome_strategy_review": {
+                "verdict": "sufficient",
+                "semantic_relation_assessment": (
+                    "The strategy requires the useful True return on the unchanged "
+                    "verified fail-first replay, not merely removal of the exception."
+                ),
+                "proves_intended_operation": True,
+                "problem_coverage": "full",
+                "residual_untested_paths": [],
+                "evidence_refs": [mechanism_evidence["mechanism_evidence_id"]],
+            },
         },
         problem_id=persisted["problem_id"],
         selected_option=option,
@@ -655,6 +724,11 @@ def test_real_causal_evidence_reaches_durable_resolution(
                 "expected_result": "The default call returns True and the test passes.",
                 "observable_assertions": [
                     {"source": "exit_code", "operator": "equals", "expected": 0},
+                    {
+                        "source": "stdout",
+                        "operator": "contains",
+                        "expected": "core.run result=True",
+                    },
                 ],
             },
             "proof_limitation": None,
@@ -676,7 +750,9 @@ def test_real_causal_evidence_reaches_durable_resolution(
         "related_change_plan_ids": [],
     }
     plan["target_contract"] = build_plan_target_contract(plan, repo_root=workspace)
-    plan = assign_plan_revision_id(bind_plan_outcome_oracle(plan, research=persisted))
+    plan = assign_plan_revision_id(
+        bind_plan_outcome_oracle(plan, research=persisted, selection=selection)
+    )
     selection_for_plan = {**selection, "selected_option": option}
     plan_ready, plan_reasons = assess_change_plan_readiness(
         plan,
@@ -957,7 +1033,7 @@ def test_real_causal_evidence_reaches_durable_resolution(
     # The implementation cannot weaken a reachable helper assertion that granted
     # semantic readiness while leaving the selected test function unchanged.
     test_path.write_text(
-        original_test.replace("assert run() is True", "assert True", 1),
+        original_test.replace("assert _report_result(run()) is True", "assert True", 1),
         encoding="utf-8",
     )
     original_role = verification_contract["outcome_roles"]["original_scenario"]

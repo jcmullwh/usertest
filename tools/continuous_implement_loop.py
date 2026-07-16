@@ -25,6 +25,7 @@ if str(_IMPLEMENT_SRC) not in sys.path:
 from backlog_repo import is_generated_backlog_ticket  # noqa: E402
 
 from usertest_implement.batch_state import latest_batch_dir, load_json  # noqa: E402
+from usertest_implement.ledger import update_ledger_file  # noqa: E402
 
 _SEVERITY_PATTERN = re.compile(r"^- Severity:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
 _EXPORT_KIND_PATTERN = re.compile(r"^- Export kind:\s*`?([^`\r\n]+)`?\s*$", re.MULTILINE)
@@ -304,7 +305,7 @@ def _gh_pr_view(ctx: LoopContext, pr_url: str) -> dict[str, Any] | None:
             "view",
             pr_url,
             "--json",
-            "url,state,mergedAt",
+            "url,state,mergedAt,isDraft,headRefOid,mergeable,statusCheckRollup",
         ],
         cwd=ctx.owner_root,
         label=f"gh pr view {pr_url}",
@@ -316,6 +317,323 @@ def _gh_pr_view(ctx: LoopContext, pr_url: str) -> dict[str, Any] | None:
     except json.JSONDecodeError:
         return None
     return doc if isinstance(doc, dict) else None
+
+
+def _mark_pr_ready(ctx: LoopContext, pr_url: str) -> bool:
+    """Publish an already-approved draft without invoking another model review."""
+
+    proc = _run_captured(
+        ctx,
+        [ctx.gh_bin, "pr", "ready", pr_url],
+        cwd=ctx.owner_root,
+        label=f"gh pr ready {pr_url}",
+    )
+    return proc.returncode == 0
+
+
+def _approved_review_matches_current_head(
+    entry: object,
+    *,
+    pr_url: str,
+    current_head_oid: str,
+) -> bool:
+    """Return True when causal approval is bound to the current PR commit."""
+
+    if not isinstance(entry, dict) or not current_head_oid:
+        return False
+    reviewed_head_oid = str(entry.get("last_reviewed_head_oid") or "").strip()
+    if (
+        entry.get("last_review_pr_url") != pr_url
+        or str(entry.get("last_review_decision") or "").strip().lower() != "approved"
+        or reviewed_head_oid.lower() != current_head_oid.lower()
+    ):
+        return False
+    causal_acceptance = entry.get("last_review_causal_acceptance")
+    if causal_acceptance is True:
+        return True
+    # Reviews recorded before causal acceptance was persisted remain usable only
+    # when their exact-head record had already satisfied every merge-ready gate.
+    return causal_acceptance is None and entry.get("last_review_merge_ready") is True
+
+
+def _pr_checks_state(pr_doc: dict[str, Any]) -> str:
+    """Classify current status checks as success, pending, or failure."""
+
+    checks_raw = pr_doc.get("statusCheckRollup")
+    checks = checks_raw if isinstance(checks_raw, list) else []
+    if not checks:
+        return "pending"
+    failure_states = {
+        "ACTION_REQUIRED",
+        "CANCELLED",
+        "ERROR",
+        "FAILURE",
+        "STALE",
+        "STARTUP_FAILURE",
+        "TIMED_OUT",
+    }
+    pending_states = {
+        "EXPECTED",
+        "IN_PROGRESS",
+        "PENDING",
+        "QUEUED",
+        "REQUESTED",
+        "WAITING",
+    }
+    accepted_terminal_states = {"NEUTRAL", "SKIPPED", "SUCCESS"}
+    saw_success = False
+    saw_pending = False
+    for check_raw in checks:
+        if not isinstance(check_raw, dict):
+            saw_pending = True
+            continue
+        conclusion = str(check_raw.get("conclusion") or "").strip().upper()
+        state = str(check_raw.get("state") or "").strip().upper()
+        status = str(check_raw.get("status") or "").strip().upper()
+        result = conclusion or state
+        if result in failure_states:
+            return "failure"
+        if result == "SUCCESS":
+            saw_success = True
+            continue
+        if result in pending_states or status in pending_states:
+            saw_pending = True
+            continue
+        if result in accepted_terminal_states:
+            continue
+        # A completed check without a recognized conclusion is not evidence of
+        # a terminal-green gate. Unknown provider states are likewise pending.
+        saw_pending = True
+    if saw_pending or not saw_success:
+        return "pending"
+    return "success"
+
+
+def _operational_blocker_evidence(
+    *,
+    pr_doc: dict[str, Any],
+    pr_url: str,
+    classification: str,
+) -> dict[str, Any]:
+    """Build a stable identity for one actionable live PR blocker."""
+
+    checks_raw = pr_doc.get("statusCheckRollup")
+    checks = checks_raw if isinstance(checks_raw, list) else []
+    normalized_checks: list[dict[str, Any]] = []
+    stable_failing_checks: list[dict[str, Any]] = []
+    failure_states = {
+        "ACTION_REQUIRED",
+        "CANCELLED",
+        "ERROR",
+        "FAILURE",
+        "STALE",
+        "STARTUP_FAILURE",
+        "TIMED_OUT",
+    }
+    for raw in checks:
+        if not isinstance(raw, dict):
+            continue
+        normalized = {
+            key: raw.get(key)
+            for key in (
+                "name",
+                "context",
+                "status",
+                "state",
+                "conclusion",
+                "detailsUrl",
+                "targetUrl",
+                "workflowName",
+            )
+            if raw.get(key) is not None
+        }
+        if normalized:
+            normalized_checks.append(normalized)
+        conclusion = str(raw.get("conclusion") or "").strip().upper()
+        state = str(raw.get("state") or "").strip().upper()
+        result = conclusion or state
+        if result in failure_states:
+            stable_failing_checks.append(
+                {
+                    key: value
+                    for key, value in {
+                        "name": str(raw.get("name") or "").strip() or None,
+                        "context": str(raw.get("context") or "").strip() or None,
+                        "workflow_name": (
+                            str(raw.get("workflowName") or "").strip() or None
+                        ),
+                        "result": result,
+                    }.items()
+                    if value is not None
+                }
+            )
+    normalized_checks.sort(
+        key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False)
+    )
+    stable_failing_checks.sort(
+        key=lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False)
+    )
+    evidence_payload = {
+        "schema_version": 1,
+        "classification": classification,
+        "pr_url": pr_url,
+        "head_oid": str(pr_doc.get("headRefOid") or "").strip().lower(),
+        "mergeable": str(pr_doc.get("mergeable") or "").strip().upper() or "UNKNOWN",
+        "checks_state": _pr_checks_state(pr_doc),
+        "checks": normalized_checks,
+    }
+    # URLs remain in evidence for the correcting author, but they are not
+    # progress identity: GitHub frequently issues a new details URL for the
+    # same failing check rerun. Failure membership/result and exact head are.
+    identity_payload = {
+        "schema_version": 1,
+        "classification": classification,
+        "head_oid": evidence_payload["head_oid"],
+        "failing_checks": stable_failing_checks,
+    }
+    encoded = json.dumps(
+        identity_payload,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return {
+        **evidence_payload,
+        "identity_basis": identity_payload,
+        "evidence_id": "pr_operational_blocker:" + hashlib.sha256(encoded).hexdigest(),
+    }
+
+
+def _record_operational_correction(
+    ctx: LoopContext,
+    *,
+    fingerprint: str,
+    entry: dict[str, Any],
+    evidence: dict[str, Any],
+    status: str,
+    reason: str | None = None,
+) -> None:
+    """Persist correction lineage without rewriting the accepted review record."""
+
+    recorded_at = _utc_now_z()
+    record = {
+        **evidence,
+        "status": status,
+        "recorded_at_utc": recorded_at,
+        "reason": reason,
+    }
+    update_ledger_file(
+        ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml",
+        fingerprint=fingerprint,
+        updates={
+            "last_operational_correction": record,
+            "last_review_approval_invalidation": {
+                "status": "invalidated_while_operationally_blocked",
+                "evidence_id": evidence["evidence_id"],
+                "classification": evidence["classification"],
+                "pr_url": evidence["pr_url"],
+                "head_oid": evidence["head_oid"],
+                "prior_review_decision": entry.get("last_review_decision"),
+                "prior_causal_acceptance": entry.get("last_review_causal_acceptance"),
+                "prior_reviewed_head_oid": entry.get("last_reviewed_head_oid"),
+                "recorded_at_utc": recorded_at,
+            },
+        },
+    )
+
+
+def _operational_correction_instruction(evidence: dict[str, Any]) -> str:
+    classification = str(evidence.get("classification") or "")
+    if classification == "terminal_ci_failure":
+        action = (
+            "The previously accepted PR head now has a terminal CI failure. Inspect the "
+            "named failing checks and their logs, correct the underlying code/test/configuration "
+            "on this existing PR, and rerun the relevant verification."
+        )
+    else:
+        action = (
+            "The previously accepted PR head is now definitively CONFLICTING with its target "
+            "branch. Reconcile the target branch into this retained PR workspace, resolve the "
+            "actual conflicts without discarding accepted work, and rerun affected verification."
+        )
+    return (
+        f"{action}\n\nRunner-owned operational blocker evidence:\n"
+        + json.dumps(evidence, indent=2, ensure_ascii=False)
+    )
+
+
+def _route_operational_correction(
+    ctx: LoopContext,
+    *,
+    fingerprint: str,
+    entry: dict[str, Any],
+    evidence: dict[str, Any],
+) -> bool:
+    """Run at most one same-author correction for one exact-head blocker."""
+
+    previous = entry.get("last_operational_correction")
+    if (
+        isinstance(previous, dict)
+        and previous.get("evidence_id") == evidence.get("evidence_id")
+        and str(previous.get("status") or "").strip().lower()
+        in {"scheduled", "resume_completed", "blocked_nonprogress"}
+    ):
+        status = str(previous.get("status") or "").strip().lower()
+        if status != "blocked_nonprogress":
+            _record_operational_correction(
+                ctx,
+                fingerprint=fingerprint,
+                entry=entry,
+                evidence=evidence,
+                status="blocked_nonprogress",
+                reason=(
+                    "The same terminal blocker remained on the same PR head after the bounded "
+                    "same-author correction attempt. Automatic repetition is suppressed."
+                ),
+            )
+        _append_log(
+            ctx,
+            "Operational correction made no observable progress on the same PR head; "
+            f"state=blocked_nonprogress evidence={evidence['evidence_id']} "
+            f"ticket={fingerprint}",
+        )
+        return True
+
+    _record_operational_correction(
+        ctx,
+        fingerprint=fingerprint,
+        entry=entry,
+        evidence=evidence,
+        status="scheduled",
+    )
+    succeeded = _resume_review_changes_requested(
+        ctx,
+        fingerprint,
+        label=f"resume {evidence['classification']}",
+        allowed_lifecycles={
+            "awaiting_review",
+            "ci_failed",
+            "merge_ready",
+            "review_changes_requested",
+        },
+        supervisor_instructions=[_operational_correction_instruction(evidence)],
+    )
+    refreshed = _load_ledger(ctx)
+    actions = refreshed.get("actions")
+    refreshed_entry = (
+        actions.get(fingerprint)
+        if isinstance(actions, dict) and isinstance(actions.get(fingerprint), dict)
+        else entry
+    )
+    _record_operational_correction(
+        ctx,
+        fingerprint=fingerprint,
+        entry=refreshed_entry,
+        evidence=evidence,
+        status="resume_completed" if succeeded else "resume_failed",
+        reason=None if succeeded else "The same-author resume command returned nonzero.",
+    )
+    return succeeded
 
 
 def _move_ticket(ctx: LoopContext, fingerprint: str, to_bucket: str) -> bool:
@@ -383,8 +701,15 @@ def _run_review(ctx: LoopContext, fingerprint: str) -> bool:
     return proc.returncode == 0
 
 
-def _resume_failed_original_scenario(ctx: LoopContext, fingerprint: str) -> bool:
-    """Send a failed causal replay back through the existing PR resume path."""
+def _resume_review_changes_requested(
+    ctx: LoopContext,
+    fingerprint: str,
+    *,
+    label: str = "resume review changes requested",
+    allowed_lifecycles: set[str] | None = None,
+    supervisor_instructions: list[str] | None = None,
+) -> bool:
+    """Send requested review changes through the existing durable PR resume path."""
 
     ledger = _load_ledger(ctx)
     actions_raw = ledger.get("actions")
@@ -393,10 +718,11 @@ def _resume_failed_original_scenario(ctx: LoopContext, fingerprint: str) -> bool
         return False
     run_dir_raw = entry.get("last_run_dir")
     lifecycle = str(entry.get("last_resume_lifecycle_state") or "").strip().lower()
+    accepted_lifecycles = allowed_lifecycles or {"review_changes_requested"}
     if (
         not isinstance(run_dir_raw, str)
         or not run_dir_raw.strip()
-        or lifecycle != "review_changes_requested"
+        or lifecycle not in accepted_lifecycles
     ):
         return False
     argv = [
@@ -412,18 +738,38 @@ def _resume_failed_original_scenario(ctx: LoopContext, fingerprint: str) -> bool
         ctx.repo_input,
         "--agent",
         ctx.implementation_agent,
+        "--correction-origin",
+        "system_self_correction",
         "--ledger",
         str(ctx.owner_root / ".agents" / "state" / "backlog_implement_actions.yaml"),
     ]
     if ctx.implementation_model:
         argv.extend(["--model", ctx.implementation_model])
+    for instruction in supervisor_instructions or []:
+        if instruction.strip():
+            argv.extend(["--supervisor-instruction", instruction.strip()])
     proc = _run_logged(
         ctx,
         argv,
         cwd=ctx.repo_root,
-        label=f"resume failed original scenario {fingerprint}",
+        label=f"{label} {fingerprint}",
     )
     return proc.returncode == 0
+
+
+def _review_changes_requested(entry: object, pr_url: str) -> bool:
+    """Return True only for an unconsumed changes-requested review decision."""
+
+    if not isinstance(entry, dict):
+        return False
+    return bool(
+        entry.get("last_review_pr_url") == pr_url
+        and str(entry.get("last_review_decision") or "").strip().lower()
+        == "changes_requested"
+        and entry.get("last_review_merge_ready") is not True
+        and str(entry.get("last_resume_lifecycle_state") or "").strip().lower()
+        == "review_changes_requested"
+    )
 
 
 def _merge_review(ctx: LoopContext, fingerprint: str) -> bool:
@@ -450,7 +796,11 @@ def _merge_review(ctx: LoopContext, fingerprint: str) -> bool:
         label=f"review merge {fingerprint}",
     )
     if proc.returncode == 4:
-        return _resume_failed_original_scenario(ctx, fingerprint)
+        return _resume_review_changes_requested(
+            ctx,
+            fingerprint,
+            label="resume failed original scenario",
+        )
     return proc.returncode == 0
 
 
@@ -548,33 +898,103 @@ def _reconcile_review_queue(ctx: LoopContext) -> bool:
             continue
         if ticket_path.parent.name != "4 - for_review":
             _move_ticket(ctx, fingerprint, "4 - for_review")
-        merge_ready = (
-            entry_raw.get("last_review_pr_url") == pr_url
-            and entry_raw.get("last_review_merge_ready") is True
+        current_head_oid = str(pr_doc.get("headRefOid") or "").strip()
+        causal_approval_current = _approved_review_matches_current_head(
+            entry_raw,
+            pr_url=pr_url,
+            current_head_oid=current_head_oid,
         )
-        if not merge_ready:
-            _run_review(ctx, fingerprint)
+        if not causal_approval_current and _review_changes_requested(entry_raw, pr_url):
+            if not _resume_review_changes_requested(ctx, fingerprint):
+                return False
+            # One correction transition is enough for this reconciliation pass.
+            # The next pass reviews the new head written by the resumed author.
+            continue
+        if not causal_approval_current:
+            if not _run_review(ctx, fingerprint):
+                continue
+            refreshed_pr_doc = _gh_pr_view(ctx, pr_url)
+            if isinstance(refreshed_pr_doc, dict):
+                pr_doc = refreshed_pr_doc
+                current_head_oid = str(pr_doc.get("headRefOid") or "").strip()
             ledger = _load_ledger(ctx)
             entry_raw = (
                 ledger.get("actions", {}).get(fingerprint, {})
                 if isinstance(ledger.get("actions"), dict)
                 else {}
             )
-            merge_ready = (
-                isinstance(entry_raw, dict)
-                and entry_raw.get("last_review_pr_url") == pr_url
-                and entry_raw.get("last_review_merge_ready") is True
+            causal_approval_current = _approved_review_matches_current_head(
+                entry_raw,
+                pr_url=pr_url,
+                current_head_oid=current_head_oid,
             )
-        if merge_ready:
-            if not _merge_review(ctx, fingerprint):
-                if merged_outcome_pending(fingerprint, pr_url):
-                    _append_log(
-                        ctx,
-                        "Merged PR outcome progression remains case-locally pending; "
-                        f"continuing unrelated backlog work for {fingerprint}",
-                    )
-                    continue
+            if not causal_approval_current and _review_changes_requested(entry_raw, pr_url):
+                if not _resume_review_changes_requested(ctx, fingerprint):
+                    return False
+                # Do not immediately review the correction in an inner loop.
+                continue
+        if not causal_approval_current:
+            continue
+        if pr_doc.get("isDraft") is True:
+            if not _mark_pr_ready(ctx, pr_url):
+                _append_log(
+                    ctx,
+                    f"Approved draft PR could not be marked ready; will retry {fingerprint}",
+                )
+            continue
+        checks_state = _pr_checks_state(pr_doc)
+        if checks_state == "failure":
+            evidence = _operational_blocker_evidence(
+                pr_doc=pr_doc,
+                pr_url=pr_url,
+                classification="terminal_ci_failure",
+            )
+            if not _route_operational_correction(
+                ctx,
+                fingerprint=fingerprint,
+                entry=entry_raw,
+                evidence=evidence,
+            ):
                 return False
+            continue
+        if checks_state != "success":
+            _append_log(
+                ctx,
+                "Approved unchanged PR head is waiting for terminal-green CI; "
+                f"state={checks_state} ticket={fingerprint}",
+            )
+            continue
+        mergeable = str(pr_doc.get("mergeable") or "").strip().upper()
+        if mergeable == "CONFLICTING":
+            evidence = _operational_blocker_evidence(
+                pr_doc=pr_doc,
+                pr_url=pr_url,
+                classification="merge_conflict",
+            )
+            if not _route_operational_correction(
+                ctx,
+                fingerprint=fingerprint,
+                entry=entry_raw,
+                evidence=evidence,
+            ):
+                return False
+            continue
+        if mergeable != "MERGEABLE":
+            _append_log(
+                ctx,
+                "Approved unchanged PR head has green CI but is not currently mergeable; "
+                f"state={mergeable or 'UNKNOWN'} ticket={fingerprint}",
+            )
+            continue
+        if not _merge_review(ctx, fingerprint):
+            if merged_outcome_pending(fingerprint, pr_url):
+                _append_log(
+                    ctx,
+                    "Merged PR outcome progression remains case-locally pending; "
+                    f"continuing unrelated backlog work for {fingerprint}",
+                )
+                continue
+            return False
     return True
 
 

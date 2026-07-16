@@ -214,6 +214,18 @@ def _option(pid: str) -> dict[str, Any]:
             "residual_recurrence_paths": [],
             "compatibility_risks": [],
             "testability": {"before": "pytest fails", "after": "pytest passes"},
+            "outcome_strategy": {
+                "intended_operation": (
+                    "The guarded original scenario completes and reports `guard applied`."
+                ),
+                "success_properties": [
+                    "The unchanged original replay exits successfully.",
+                    "The replay reports the origin-bound `guard applied` result.",
+                ],
+                "safety_constraints": ["The guarded control remains successful."],
+                "post_change_replay_mode": "verified_fail_first",
+                "original_scenario_experiment_ids": ["exp-1"],
+            },
         },
         "scope_evidence": {
             "scope_level": "single_path",
@@ -284,6 +296,20 @@ def _selection(pid: str) -> dict[str, Any]:
                     ],
                 }
             ],
+            "outcome_strategy_review": {
+                "verdict": "sufficient",
+                "semantic_relation_assessment": (
+                    "The unchanged fail-first replay must both exit successfully and emit "
+                    "the origin-bound result, proving the selected guard restores the "
+                    "intended operation rather than merely hiding the failure."
+                ),
+                "proves_intended_operation": True,
+                "problem_coverage": "full",
+                "residual_untested_paths": [],
+                "evidence_refs": [
+                    verification["mechanism_evidence"][0]["mechanism_evidence_id"]
+                ],
+            },
         },
         "change_surface": {"user_visible": True, "kinds": ["docs_change"], "notes": "n"},
         "component": "docs",
@@ -405,7 +431,11 @@ def _plan(pid: str, number: int) -> dict[str, Any]:
         "repo_revision": plan["repo_revision"],
         "targets": [dict(target) for target in plan["change_targets"]],
     }
-    plan = bind_plan_outcome_oracle(plan, research=_research_proof(pid))
+    plan = bind_plan_outcome_oracle(
+        plan,
+        research=_research_proof(pid),
+        selection=_selection(pid),
+    )
     return assign_plan_revision_id(plan)
 
 

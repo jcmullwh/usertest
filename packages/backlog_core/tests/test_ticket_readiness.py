@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -2966,6 +2967,212 @@ def test_option_strategy_prefers_verified_fail_first_over_exit_zero_old_behavior
     assert normalized["post_change_replay_mode"] == "stage6_planned_unverified"
 
 
+def _stage5_contract_fixture() -> dict[str, object]:
+    contract: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "selected_option_outcome_strategy",
+        "outcome_contract_status": "approved_for_planning",
+        "post_change_evidence_status": "unverified",
+        "strategy": {"intended_operation": "Return the useful value."},
+        "review": {"verdict": "sufficient"},
+    }
+    contract["outcome_contract_id"] = _content_id(
+        "stage5_outcome_contract",
+        contract,
+        "outcome_contract_id",
+    )
+    return contract
+
+
+def _ordinary_fail_first_oracle_fixture() -> dict[str, object]:
+    positive_contract = {
+        "positive_outcome_contract_id": "positive_outcome_contract:baseline",
+        "kind": "repository_test_assertion",
+    }
+    argv = ["python", "-m", "pytest", "tests/test_feature.py::test_original"]
+    oracle: dict[str, object] = {
+        "schema_version": 1,
+        "case_id": "case:test",
+        "repo_revision": "a" * 40,
+        "research_experiment_id": "experiment:original",
+        "scenario_kind": "original_replay",
+        "origin_atom_ids": ["atom:original"],
+        "mechanism_evidence_ids": ["mechanism_evidence:original"],
+        "baseline": {"exit_code": 1},
+        "kind": "staged_replay",
+        "proof_scope": "behavioral",
+        "execution": {
+            "argv": argv,
+            "command_authorization": {
+                "authorization_kind": "immutable_source_command",
+                "executed_argv_sha256": _canonical_hash(argv),
+                "shell": False,
+                "workspace_confined": True,
+            },
+            "platform_requirement": "any",
+            "shell": False,
+        },
+        "asset": None,
+        "positive_outcome_contracts": [positive_contract],
+    }
+    oracle["outcome_oracle_id"] = _content_id(
+        "outcome_oracle", oracle, "outcome_oracle_id"
+    )
+    return oracle
+
+
+def _direct_fail_first_research_fixture() -> dict[str, object]:
+    oracle = _ordinary_fail_first_oracle_fixture()
+    execution = oracle["execution"]
+    assert isinstance(execution, dict)
+    argv = execution["argv"]
+    assert isinstance(argv, list)
+    command = " ".join(str(value) for value in argv)
+    experiment = {
+        "experiment_id": "experiment:original",
+        "scenario_kind": "original_replay",
+        "command": command,
+        "outcome": "supports",
+        "addresses_atom_ids": ["atom:original"],
+    }
+    receipt = {
+        **experiment,
+        "exit_code": 1,
+        "assertion_passed": True,
+        "executed_argv": argv,
+        "post_replay_mutations": False,
+        "command_authorization": {
+            **execution["command_authorization"],
+            "runner_attested": True,
+        },
+    }
+    return {
+        "experiments": [experiment],
+        "evidence_verification": {
+            "status": "verified",
+            "experiments": [receipt],
+            "outcome_oracles": [oracle],
+        },
+    }
+
+
+def test_stage5_fail_first_bridge_preserves_stage3_oracle_without_relabeling_it() -> None:
+    source = _ordinary_fail_first_oracle_fixture()
+    retained_source = json.loads(json.dumps(source))
+    contract = _stage5_contract_fixture()
+
+    derived = ticket_readiness._derive_stage5_fail_first_oracle(
+        source,
+        selected_outcome_contract=contract,
+    )
+
+    assert source == retained_source
+    assert derived["scenario_kind"] == "fail_first_contract"
+    assert "positive_outcome_contracts" not in derived
+    assert derived["selected_outcome_contract"] == contract
+    assert derived["retained_stage3_oracle"] == retained_source
+    assert derived["retained_stage3_oracle"]["scenario_kind"] == "original_replay"
+    assert derived["stage5_fail_first_source"] == {
+        "schema_version": 1,
+        "kind": "verified_stage3_fail_first_source",
+        "source_outcome_oracle_id": retained_source["outcome_oracle_id"],
+        "source_scenario_kind": "original_replay",
+        "source_positive_outcome_contract_ids": [
+            "positive_outcome_contract:baseline"
+        ],
+    }
+
+
+def test_stage5_fail_first_bridge_accepts_direct_repository_replay_without_asset() -> None:
+    research = _direct_fail_first_research_fixture()
+    source = research["evidence_verification"]["outcome_oracles"][0]
+    contract = _stage5_contract_fixture()
+    derived = ticket_readiness._derive_stage5_fail_first_oracle(
+        source,
+        selected_outcome_contract=contract,
+    )
+    derived["outcome_oracle_id"] = _content_id(
+        "outcome_oracle", derived, "outcome_oracle_id"
+    )
+
+    binding = ticket_readiness._validated_fail_first_staged_replay(
+        derived,
+        research=research,
+    )
+
+    assert binding is not None
+    assert binding["asset_paths"] == set()
+    assert binding["oracle"] == derived
+
+
+@pytest.mark.parametrize("tamper", ["outer_positive_contract", "retained_source"])
+def test_stage5_fail_first_bridge_rejects_post_derivation_tampering(tamper: str) -> None:
+    research = _direct_fail_first_research_fixture()
+    source = research["evidence_verification"]["outcome_oracles"][0]
+    derived = ticket_readiness._derive_stage5_fail_first_oracle(
+        source,
+        selected_outcome_contract=_stage5_contract_fixture(),
+    )
+    if tamper == "outer_positive_contract":
+        derived["positive_outcome_contracts"] = [
+            {"positive_outcome_contract_id": "positive_outcome_contract:reintroduced"}
+        ]
+    else:
+        retained = derived["retained_stage3_oracle"]
+        assert isinstance(retained, dict)
+        retained["scenario_kind"] = "faithful_replay"
+        retained["outcome_oracle_id"] = _content_id(
+            "outcome_oracle", retained, "outcome_oracle_id"
+        )
+    derived["outcome_oracle_id"] = _content_id(
+        "outcome_oracle", derived, "outcome_oracle_id"
+    )
+
+    assert (
+        ticket_readiness._validated_fail_first_staged_replay(
+            derived,
+            research=research,
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "error"),
+    [
+        (
+            lambda oracle: oracle["baseline"].update({"exit_code": 0}),
+            "stage5_outcome_fail_first_source_oracle_invalid",
+        ),
+        (
+            lambda oracle: oracle.update(
+                {"selected_outcome_contract": _stage5_contract_fixture()}
+            ),
+            "stage5_outcome_fail_first_source_already_planned",
+        ),
+        (
+            lambda oracle: oracle.update({"scenario_kind": "fail_first_contract"}),
+            "stage5_outcome_fail_first_source_contract_shape_invalid",
+        ),
+    ],
+)
+def test_stage5_fail_first_bridge_rejects_non_source_or_ambiguous_oracles(
+    mutation: Callable[[dict[str, object]], None],
+    error: str,
+) -> None:
+    source = _ordinary_fail_first_oracle_fixture()
+    mutation(source)
+    source["outcome_oracle_id"] = _content_id(
+        "outcome_oracle", source, "outcome_oracle_id"
+    )
+
+    with pytest.raises(ValueError, match=error):
+        ticket_readiness._derive_stage5_fail_first_oracle(
+            source,
+            selected_outcome_contract=_stage5_contract_fixture(),
+        )
+
+
 def test_stage5_fail_first_mode_reuses_retained_oracle_without_rewriting_asset() -> None:
     research, paths = _runner_research()
     research["case_id"] = "case:test"
@@ -3103,6 +3310,17 @@ def test_stage5_fail_first_mode_reuses_retained_oracle_without_rewriting_asset()
         ),
         "retained_asset_source_outcome_oracle_id": oracle["outcome_oracle_id"],
     }
+    rebound = bind_plan_outcome_oracle(
+        bound,
+        research=research,
+        selection=selection,
+    )
+    assert rebound["outcome_verification_roles"]["original_scenario"]["oracle"] == (
+        original["oracle"]
+    )
+    assert "retained_stage3_oracle" not in original["oracle"][
+        "retained_stage3_oracle"
+    ]
     assert original["commands"] == []
     assert ticket_readiness.verified_staged_replay_command_asset_paths(
         bound,

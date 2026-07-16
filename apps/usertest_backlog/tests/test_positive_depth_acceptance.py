@@ -1087,6 +1087,7 @@ def _option(research: dict[str, Any]) -> dict[str, Any]:
                 "safety_constraints": [
                     "True policy-block inputs retain their existing classification."
                 ],
+                "post_change_replay_mode": "stage6_planned_unverified",
                 "original_scenario_experiment_ids": ["exp-support"],
             },
         },
@@ -1160,8 +1161,9 @@ def _selection(research: dict[str, Any], option: dict[str, Any]) -> dict[str, An
             "outcome_strategy_review": {
                 "verdict": "sufficient",
                 "semantic_relation_assessment": (
-                    "The option strategy proves the useful lifecycle classification on the "
-                    "retained replay while preserving genuine policy blocks."
+                    "The retained scenario is bound to the selected mechanism evidence, and "
+                    "the strategy's positive properties would prove its intended operation "
+                    "rather than merely remove the observed symptom."
                 ),
                 "proves_intended_operation": True,
                 "problem_coverage": "full",
@@ -1962,6 +1964,7 @@ def test_action_create_through_an_inspected_boundary_reaches_ready_plan() -> Non
                     "safety_constraints": [
                         "Existing declared adapters retain their resolution behavior."
                     ],
+                    "post_change_replay_mode": "stage6_planned_unverified",
                     "original_scenario_experiment_ids": ["exp-support"],
                 },
             },

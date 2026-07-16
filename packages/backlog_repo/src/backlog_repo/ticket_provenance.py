@@ -59,7 +59,12 @@ def sha256_file(path: Path) -> str:
 
 
 def _normalize_markdown(value: str) -> str:
-    normalized = value.replace("\r\n", "\n").replace("\r", "\n")
+    # Outcome lifecycle writers historically decoded raw Windows bytes and then
+    # wrote them through newline translation again.  Each update could therefore
+    # turn CRLF into CRCRLF (and later CRCRCRLF).  Treat one-or-more carriage
+    # returns immediately before LF as the same single line ending while retaining
+    # normal support for lone-CR text.
+    normalized = re.sub(r"\r+\n", "\n", value).replace("\r", "\n")
     return normalized.rstrip() + "\n"
 
 
@@ -366,11 +371,143 @@ def _is_fail_first_planned_replay(raw: Any) -> bool:
         return False
     baseline = raw.get("baseline")
     baseline_exit = baseline.get("exit_code") if isinstance(baseline, dict) else None
-    return bool(
+    if not (
         isinstance(baseline_exit, int)
         and not isinstance(baseline_exit, bool)
         and baseline_exit != 0
+    ):
+        return False
+    return _valid_retained_stage3_fail_first_source(raw)
+
+
+def _valid_retained_stage3_fail_first_source(raw: dict[str, Any]) -> bool:
+    """Validate an optional reversible Stage-3 provenance envelope.
+
+    Older exported fail-first plans predate this envelope and remain readable.  New
+    bridges retain the exact content-addressed Stage-3 oracle so baseline semantics can
+    be authenticated without making them active post-change outcome contracts.
+    """
+
+    retained = raw.get("retained_stage3_oracle")
+    source_ref = raw.get("stage5_fail_first_source")
+    if retained is None and source_ref is None:
+        return True
+    if not isinstance(retained, dict) or not isinstance(source_ref, dict):
+        return False
+    if (
+        retained.get("retained_stage3_oracle") is not None
+        or retained.get("stage5_fail_first_source") is not None
+        or retained.get("selected_outcome_contract") is not None
+    ):
+        return False
+    retained_id = retained.get("outcome_oracle_id")
+    retained_projection = {
+        key: value for key, value in retained.items() if key != "outcome_oracle_id"
+    }
+    retained_scenario = retained.get("scenario_kind")
+    retained_baseline = retained.get("baseline")
+    retained_exit = (
+        retained_baseline.get("exit_code")
+        if isinstance(retained_baseline, dict)
+        else None
     )
+    if (
+        retained_id != f"outcome_oracle:{sha256_text(_canonical_json(retained_projection))}"
+        or retained.get("schema_version") != 1
+        or retained.get("kind") != "staged_replay"
+        or retained.get("proof_scope") != "behavioral"
+        or retained_scenario
+        not in {
+            "original_replay",
+            "faithful_replay",
+            "live_runtime",
+            "fail_first_contract",
+        }
+        or isinstance(retained_exit, bool)
+        or not isinstance(retained_exit, int)
+        or retained_exit == 0
+    ):
+        return False
+    retained_contracts_raw = retained.get("positive_outcome_contracts")
+    if retained_contracts_raw is None:
+        retained_contracts: list[dict[str, Any]] = []
+    elif isinstance(retained_contracts_raw, list) and all(
+        isinstance(value, dict) for value in retained_contracts_raw
+    ):
+        retained_contracts = retained_contracts_raw
+    else:
+        return False
+    if retained_scenario == "fail_first_contract" and retained_contracts:
+        return False
+    retained_contract_ids = [
+        str(contract["positive_outcome_contract_id"])
+        for contract in retained_contracts
+        if isinstance(contract.get("positive_outcome_contract_id"), str)
+        and contract["positive_outcome_contract_id"]
+    ]
+    if (
+        len(retained_contract_ids) != len(retained_contracts)
+        or len(retained_contract_ids) != len(set(retained_contract_ids))
+    ):
+        return False
+    for contract in retained_contracts:
+        contract_id = contract.get("positive_outcome_contract_id")
+        contract_projection = {
+            key: value
+            for key, value in contract.items()
+            if key != "positive_outcome_contract_id"
+        }
+        postconditions = contract.get("postconditions")
+        if (
+            contract_id
+            != f"positive_outcome_contract:{sha256_text(_canonical_json(contract_projection))}"
+            or contract.get("kind")
+            not in {
+                "repository_test_assertion",
+                "retained_research_harness_assertion",
+                "origin_evidence_semantic_contract",
+                "causal_proof_predicate",
+            }
+            or not isinstance(postconditions, list)
+            or not postconditions
+            or any(not isinstance(value, dict) for value in postconditions)
+        ):
+            return False
+    retained_contract_ids.sort()
+    if source_ref != {
+        "schema_version": 1,
+        "kind": "verified_stage3_fail_first_source",
+        "source_outcome_oracle_id": retained_id,
+        "source_scenario_kind": retained_scenario,
+        "source_positive_outcome_contract_ids": retained_contract_ids,
+    }:
+        return False
+    source_reversible = {
+        key: value
+        for key, value in retained.items()
+        if key not in {"outcome_oracle_id", "positive_outcome_contracts", "scenario_kind"}
+    }
+    derived_reversible = {
+        key: value
+        for key, value in raw.items()
+        if key
+        not in {
+            "outcome_oracle_id",
+            "positive_outcome_contracts",
+            "scenario_kind",
+            "selected_outcome_contract",
+            "retained_stage3_oracle",
+            "stage5_fail_first_source",
+        }
+    }
+    if source_reversible != derived_reversible:
+        return False
+    if retained_contracts:
+        try:
+            _normalize_outcome_oracle(retained)
+        except ValueError:
+            return False
+    return True
 
 
 def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:

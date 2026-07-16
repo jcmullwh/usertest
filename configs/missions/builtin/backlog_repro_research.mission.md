@@ -13,7 +13,6 @@ requires_edits: true
 # Mission: reproduce and establish the causal mechanism
 
 You are researching one automatically mined backlog case at a pinned repository revision.
-
 ## Goal
 
 Determine whether the assigned source evidence describes a real, unactioned problem. Establish the

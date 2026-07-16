@@ -11,7 +11,9 @@ from backlog_repo import (
 )
 
 from usertest_implement.ledger import (
+    bind_outcome_verification_amendment_files,
     load_ledger,
+    reconcile_terminal_outcome_stale_blockers_files,
     transition_outcome_files,
     update_ledger_file,
 )
@@ -255,3 +257,138 @@ def test_transition_outcome_files_rejects_ticket_outcome_case_mismatch(
                 ]
             },
         )
+
+
+def test_bind_verification_amendment_updates_both_stores_once(tmp_path: Path) -> None:
+    fingerprint = "feedfacefeedface"
+    ticket_path = tmp_path / f"20260710_{fingerprint}_ticket.md"
+    ledger_path = tmp_path / "ledger.yaml"
+    current = {
+        **_tests_verified_outcome(),
+        "merged_commit": "1" * 40,
+        "pr_url": "https://example.invalid/pull/10",
+    }
+    ticket_path.write_text(
+        upsert_outcome_markdown(
+            "# Ticket\n"
+            f"- Fingerprint: `{fingerprint}`\n"
+            "- Case ID: `case:ledger`\n"
+            "- Plan revision ID: `plan:ledger:v1`\n",
+            current,
+        ),
+        encoding="utf-8",
+    )
+    update_ledger_file(
+        ledger_path,
+        fingerprint=fingerprint,
+        updates={"outcome": current, "last_outcome_state": "tests_verified"},
+    )
+
+    amended = bind_outcome_verification_amendment_files(
+        ledger_path=ledger_path,
+        ticket_path=ticket_path,
+        fingerprint=fingerprint,
+        verification_commit="2" * 40,
+        verification_pr_url="https://example.invalid/pull/11",
+        recorded_at="2026-07-15T12:00:00Z",
+    )
+    ticket_after = ticket_path.read_bytes()
+    ledger_after = ledger_path.read_bytes()
+
+    assert amended["merged_commit"] == "1" * 40
+    assert amended["pr_url"] == "https://example.invalid/pull/10"
+    assert load_ledger(ledger_path)["actions"][fingerprint]["outcome"] == amended
+    assert extract_outcome_markdown(ticket_path.read_text(encoding="utf-8")) == amended
+
+    rebound = bind_outcome_verification_amendment_files(
+        ledger_path=ledger_path,
+        ticket_path=ticket_path,
+        fingerprint=fingerprint,
+        verification_commit="2" * 40,
+        verification_pr_url="https://example.invalid/pull/11",
+        recorded_at="2026-07-16T12:00:00Z",
+    )
+    assert rebound == amended
+    assert ticket_path.read_bytes() == ticket_after
+    assert ledger_path.read_bytes() == ledger_after
+
+    with pytest.raises(ValueError, match="already_bound"):
+        bind_outcome_verification_amendment_files(
+            ledger_path=ledger_path,
+            ticket_path=ticket_path,
+            fingerprint=fingerprint,
+            verification_commit="3" * 40,
+            verification_pr_url="https://example.invalid/pull/12",
+            recorded_at="2026-07-16T12:00:00Z",
+        )
+    assert ticket_path.read_bytes() == ticket_after
+    assert ledger_path.read_bytes() == ledger_after
+
+
+def test_terminal_stale_blocker_reconciliation_is_atomic_and_idempotent(
+    tmp_path: Path,
+) -> None:
+    fingerprint = "feedfacefeedface"
+    ticket_path = tmp_path / f"20260710_{fingerprint}_ticket.md"
+    ledger_path = tmp_path / "ledger.yaml"
+    terminal = transition_outcome_record(
+        _tests_verified_outcome(),
+        state="mitigated",
+        recorded_at="2026-07-16T00:00:00Z",
+        updates={
+            "original_scenario_evidence": [
+                _passed("original_scenario", "runs/original")
+            ],
+            "mitigation_evidence": [_passed("mitigation_effect", "runs/mitigation")],
+            "remaining_risks": [
+                "Post-merge outcome verification is blocked: transport_missing",
+                "The underlying failure mechanism is not claimed resolved.",
+            ],
+        },
+    )
+    ticket_path.write_text(
+        upsert_outcome_markdown(
+            "# Ticket\n"
+            f"- Fingerprint: `{fingerprint}`\n"
+            "- Case ID: `case:ledger`\n"
+            "- Plan revision ID: `plan:ledger:v1`\n",
+            terminal,
+        ),
+        encoding="utf-8",
+    )
+    update_ledger_file(
+        ledger_path,
+        fingerprint=fingerprint,
+        updates={"outcome": terminal, "last_outcome_state": "mitigated"},
+    )
+
+    reconciled = reconcile_terminal_outcome_stale_blockers_files(
+        ledger_path=ledger_path,
+        ticket_path=ticket_path,
+        fingerprint=fingerprint,
+    )
+    ticket_after = ticket_path.read_bytes()
+    ledger_after = ledger_path.read_bytes()
+
+    assert reconciled["state"] == "mitigated"
+    assert reconciled["remaining_risks"] == [
+        "The underlying failure mechanism is not claimed resolved."
+    ]
+    assert {
+        key: value for key, value in reconciled.items() if key != "remaining_risks"
+    } == {key: value for key, value in terminal.items() if key != "remaining_risks"}
+    assert extract_outcome_markdown(
+        ticket_path.read_text(encoding="utf-8")
+    ) == reconciled
+    assert load_ledger(ledger_path)["actions"][fingerprint]["outcome"] == reconciled
+
+    assert (
+        reconcile_terminal_outcome_stale_blockers_files(
+            ledger_path=ledger_path,
+            ticket_path=ticket_path,
+            fingerprint=fingerprint,
+        )
+        == reconciled
+    )
+    assert ticket_path.read_bytes() == ticket_after
+    assert ledger_path.read_bytes() == ledger_after

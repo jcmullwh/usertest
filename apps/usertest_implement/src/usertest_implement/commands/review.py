@@ -17,6 +17,7 @@ from usertest_implement.outcome_evidence import (
     validate_runner_ticket_ref,
 )
 from usertest_implement.outcome_progression import (
+    OutcomeContractNotExecutable,
     OutcomeRoleDidNotPass,
     progress_post_merge_outcome,
     verify_premerge_original_scenario,
@@ -1557,6 +1558,9 @@ def _run_review_for_selected_ticket(
             "last_review_run_dir": str(review_run_dir),
             "last_review_pr_url": pr_url,
             "last_review_decision": review_summary["review_decision"],
+            "last_review_causal_acceptance": bool(
+                review_summary.get("causal_acceptance") is True
+            ),
             "last_review_merge_ready": bool(review_summary["merge_ready"]),
             "last_review_ci_conclusion": review_summary.get("ci_conclusion"),
             "last_reviewed_head_oid": review_summary.get("reviewed_head_oid"),
@@ -1890,6 +1894,9 @@ def _recover_noncausal_premerge_rejection(
         fingerprint=selected.fingerprint,
         updates={
             "last_review_decision": restored["review_decision"],
+            "last_review_causal_acceptance": bool(
+                restored.get("causal_acceptance") is True
+            ),
             "last_review_merge_ready": bool(restored["merge_ready"]),
             "last_premerge_original_scenario_status": "blocked_infrastructure",
             "last_premerge_original_scenario_block": str(reclassification_path),
@@ -2034,6 +2041,96 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
                 current=preflight_outcome,
                 selected_provenance=selected_provenance,
             )
+        except OutcomeContractNotExecutable as exc:
+            detail = str(exc)
+            correction_path = (
+                review_run_dir / "premerge_outcome_contract_not_executable.json"
+            )
+            correction = {
+                "schema_version": 1,
+                "status": "changes_requested",
+                "classification": "outcome_contract_not_executable",
+                "causal_result": "not_run",
+                "ticket_fingerprint": selected.fingerprint,
+                "case_id": selected_provenance["case_id"],
+                "plan_revision_id": selected_provenance["plan_revision_id"],
+                "verified_implementation_head": reviewed_head_oid,
+                "detail": detail,
+                "executability_receipt_path": str(exc.receipt_path),
+                "failures": [dict(item) for item in exc.failures],
+                "recorded_at_utc": _utc_now_z(),
+            }
+            _write_json(correction_path, correction)
+            existing_findings_raw = review_summary.get("findings")
+            existing_findings = (
+                [item for item in existing_findings_raw if isinstance(item, dict)]
+                if isinstance(existing_findings_raw, list)
+                else []
+            )
+            executability_finding = {
+                "severity": "critical",
+                "title": "Mandatory outcome role command is not executable",
+                "details": detail,
+                "evidence": str(exc.receipt_path),
+                "suggested_fix": (
+                    "Correct the implementation on the same PR so every recognized, "
+                    "mandatory plan-bound pytest path and node exists on the verified "
+                    "head. Re-run the exact role command; do not weaken the outcome "
+                    "contract or satisfy it with a skip."
+                ),
+            }
+            updated_findings = [*existing_findings, executability_finding]
+            previous_paths_raw = review_summary.get("remaining_causal_paths")
+            previous_paths = (
+                [str(item) for item in previous_paths_raw if str(item).strip()]
+                if isinstance(previous_paths_raw, list)
+                else []
+            )
+            updated_review_summary = {
+                **review_summary,
+                "review_decision": "changes_requested",
+                "causal_acceptance": False,
+                "merge_ready": False,
+                "causal_path_assessment": "residual",
+                "remaining_causal_paths": [*previous_paths, detail],
+                "rationale": detail,
+                "findings": updated_findings,
+                "blocking_finding_count": sum(
+                    1
+                    for item in updated_findings
+                    if str(item.get("severity") or "").strip().casefold()
+                    in {"error", "high", "critical", "blocker", "fatal"}
+                ),
+            }
+            _write_json(
+                review_run_dir / "review_summary.json",
+                updated_review_summary,
+            )
+            resume_state = write_ticket_resume_state(
+                selected=selected,
+                run_dir=implementation_run_dir,
+                owner_root=selected.owner_root,
+                branch=str(pr_meta.get("headRefName") or "").strip() or None,
+                exit_code=4,
+                review_run_dir=review_run_dir,
+            )
+            update_ledger_file(
+                ledger_path,
+                fingerprint=selected.fingerprint,
+                updates={
+                    "last_review_decision": "changes_requested",
+                    "last_review_causal_acceptance": False,
+                    "last_review_merge_ready": False,
+                    "last_premerge_outcome_contract_status": "correction_required",
+                    "last_premerge_outcome_contract_failure": str(correction_path),
+                    "last_resume_state_path": str(
+                        implementation_run_dir / RESUME_STATE_ARTIFACT_NAME
+                    ),
+                    "last_resume_lifecycle_state": resume_state.get("lifecycle_state"),
+                },
+            )
+            print(detail, file=sys.stderr)
+            return 4
         except OutcomeRoleDidNotPass as exc:
             detail = (
                 "Runner-owned original-scenario proof failed on the exact verified PR "
@@ -2108,6 +2205,7 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
                 fingerprint=selected.fingerprint,
                 updates={
                     "last_review_decision": "changes_requested",
+                    "last_review_causal_acceptance": False,
                     "last_review_merge_ready": False,
                     "last_premerge_original_scenario_status": "failed",
                     "last_premerge_original_scenario_failure": str(
@@ -2152,6 +2250,9 @@ def _cmd_review_merge(args: argparse.Namespace) -> int:
                     "last_premerge_original_scenario_status": "blocked_infrastructure",
                     "last_premerge_original_scenario_block": str(blocked_path),
                     "last_review_decision": review_summary["review_decision"],
+                    "last_review_causal_acceptance": bool(
+                        review_summary.get("causal_acceptance") is True
+                    ),
                     "last_review_merge_ready": bool(review_summary["merge_ready"]),
                 },
             )

@@ -26,7 +26,10 @@ from usertest_implement.commands.review import (
 )
 from usertest_implement.commands.run import _run_selected_ticket
 from usertest_implement.outcome_evidence import build_verification_binding
-from usertest_implement.outcome_progression import OutcomeRoleDidNotPass
+from usertest_implement.outcome_progression import (
+    OutcomeContractNotExecutable,
+    OutcomeRoleDidNotPass,
+)
 from usertest_implement.review_context import (
     _build_final_review_summary,
     _build_pr_review_body,
@@ -816,6 +819,61 @@ def test_review_merge_classifies_failed_outcome_role_as_causal_rejection(
     ledger_text = case["ledger_path"].read_text(encoding="utf-8")
     assert "last_premerge_original_scenario_status: failed" in ledger_text
     assert "last_review_decision: changes_requested" in ledger_text
+    assert "last_review_causal_acceptance: false" in ledger_text
+
+
+def test_review_merge_routes_nonexecutable_outcome_contract_to_same_author_correction(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    receipt_path = tmp_path / "roles" / "outcome_contract_executability.json"
+    failure = {
+        "role": "live",
+        "command_index": 0,
+        "command": "python -m pytest tests/missing.py::test_live",
+        "reason": "pytest_target_path_missing",
+    }
+    case = _prepare_premerge_failure_case(
+        monkeypatch,
+        tmp_path,
+        raised=OutcomeContractNotExecutable(
+            receipt_path=receipt_path,
+            failures=[failure],
+        ),
+    )
+
+    exit_code = _cmd_review_merge(
+        _review_simple_args(
+            repo_root=case["repo_root"],
+            owner_root=case["repo_root"],
+            ticket_path=case["ticket_path"],
+            ledger=case["ledger_path"],
+        )
+    )
+
+    assert exit_code == 4
+    review_run_dir = case["review_run_dir"]
+    correction = _read_json(
+        review_run_dir / "premerge_outcome_contract_not_executable.json"
+    )
+    assert isinstance(correction, dict)
+    assert correction["status"] == "changes_requested"
+    assert correction["classification"] == "outcome_contract_not_executable"
+    assert correction["causal_result"] == "not_run"
+    assert correction["executability_receipt_path"] == str(receipt_path)
+    assert correction["failures"] == [failure]
+    assert not (review_run_dir / "premerge_original_scenario_blocked.json").exists()
+    summary = _read_json(review_run_dir / "review_summary.json")
+    assert isinstance(summary, dict)
+    assert summary["review_decision"] == "changes_requested"
+    assert summary["merge_ready"] is False
+    assert summary["mechanism_assessment"] == "mechanism_addressed"
+    assert summary["findings"][-1]["title"] == (
+        "Mandatory outcome role command is not executable"
+    )
+    ledger_text = case["ledger_path"].read_text(encoding="utf-8")
+    assert "last_premerge_outcome_contract_status: correction_required" in ledger_text
+    assert "last_resume_lifecycle_state: review_changes_requested" in ledger_text
 
 
 @pytest.mark.parametrize(
@@ -907,6 +965,7 @@ def test_legacy_enospc_recovery_restores_approved_review_and_is_idempotent(
     assert (review_run_dir / "premerge_original_scenario_failure.json").exists()
     ledger_text = case["ledger_path"].read_text(encoding="utf-8")
     assert "last_review_decision: approved" in ledger_text
+    assert "last_review_causal_acceptance: true" in ledger_text
     assert "last_premerge_original_scenario_status: blocked_infrastructure" in ledger_text
     assert "last_resume_lifecycle_state: awaiting_merge" in ledger_text
 
@@ -1737,6 +1796,7 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
 
     ledger_text = ledger_path.read_text(encoding="utf-8")
     assert "last_review_run_dir" in ledger_text
+    assert "last_review_causal_acceptance: true" in ledger_text
     assert "last_review_merge_ready: true" in ledger_text.lower()
 
 

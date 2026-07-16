@@ -1076,6 +1076,103 @@ def _selected_stage5_outcome_contract(
     return _validated_stage5_outcome_contract(raw)
 
 
+def _derive_stage5_fail_first_oracle(
+    source_oracle: Mapping[str, Any],
+    *,
+    selected_outcome_contract: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Derive a post-change fail-first oracle without rewriting Stage-3 evidence.
+
+    An ordinary Stage-3 original replay may be an exact fail-first command and may also
+    carry baseline positive contracts.  Stage 5 must not attach its prospective contract
+    directly to that baseline oracle: downstream validators intentionally distinguish an
+    observed original scenario from a planned post-change fail-first contract.  Instead,
+    retain the content-addressed Stage-3 source and derive a new oracle whose active
+    semantics come only from the selected Stage-5 contract.
+    """
+
+    source_id = _string(source_oracle.get("outcome_oracle_id"))
+    source_projection = {
+        key: value for key, value in source_oracle.items() if key != "outcome_oracle_id"
+    }
+    source_scenario = _string(source_oracle.get("scenario_kind"))
+    baseline = source_oracle.get("baseline")
+    baseline_exit = baseline.get("exit_code") if isinstance(baseline, Mapping) else None
+    if (
+        source_id != f"outcome_oracle:{_canonical_sha256(source_projection)}"
+        or source_oracle.get("schema_version") != 1
+        or source_oracle.get("kind") != "staged_replay"
+        or source_oracle.get("proof_scope") != "behavioral"
+        or source_scenario
+        not in {
+            "original_replay",
+            "faithful_replay",
+            "live_runtime",
+            "fail_first_contract",
+        }
+        or isinstance(baseline_exit, bool)
+        or not isinstance(baseline_exit, int)
+        or baseline_exit == 0
+    ):
+        raise ValueError("stage5_outcome_fail_first_source_oracle_invalid")
+    if (
+        source_oracle.get("selected_outcome_contract") is not None
+        or source_oracle.get("retained_stage3_oracle") is not None
+    ):
+        raise ValueError("stage5_outcome_fail_first_source_already_planned")
+    if _validated_stage5_outcome_contract(selected_outcome_contract) is None:
+        raise ValueError("stage5_outcome_fail_first_selected_contract_invalid")
+
+    positive_contracts_raw = source_oracle.get("positive_outcome_contracts")
+    if positive_contracts_raw is None:
+        positive_contracts: list[dict[str, Any]] = []
+    elif isinstance(positive_contracts_raw, list) and all(
+        isinstance(value, Mapping) for value in positive_contracts_raw
+    ):
+        positive_contracts = [deepcopy(dict(value)) for value in positive_contracts_raw]
+    else:
+        raise ValueError("stage5_outcome_fail_first_source_contracts_invalid")
+    if source_scenario == "fail_first_contract" and positive_contracts:
+        raise ValueError("stage5_outcome_fail_first_source_contract_shape_invalid")
+    positive_contract_ids = [
+        str(contract["positive_outcome_contract_id"])
+        for contract in positive_contracts
+        if _string(contract.get("positive_outcome_contract_id")) is not None
+    ]
+    if (
+        len(positive_contract_ids) != len(positive_contracts)
+        or len(positive_contract_ids) != len(set(positive_contract_ids))
+    ):
+        raise ValueError("stage5_outcome_fail_first_source_contracts_invalid")
+
+    derived = {
+        key: deepcopy(value)
+        for key, value in source_oracle.items()
+        if key
+        not in {
+            "outcome_oracle_id",
+            "positive_outcome_contracts",
+            "selected_outcome_contract",
+            "retained_stage3_oracle",
+            "stage5_fail_first_source",
+        }
+    }
+    derived["scenario_kind"] = "fail_first_contract"
+    derived["selected_outcome_contract"] = deepcopy(dict(selected_outcome_contract))
+    derived["stage5_fail_first_source"] = {
+        "schema_version": 1,
+        "kind": "verified_stage3_fail_first_source",
+        "source_outcome_oracle_id": source_id,
+        "source_scenario_kind": source_scenario,
+        "source_positive_outcome_contract_ids": sorted(positive_contract_ids),
+    }
+    # Preserve the exact signed Stage-3 semantics as provenance and, when present, as
+    # source-integrity contracts.  They are intentionally nested, not active post-change
+    # outcome contracts, so they cannot substitute for the Stage-5 selection.
+    derived["retained_stage3_oracle"] = deepcopy(dict(source_oracle))
+    return derived
+
+
 def _normalized_retained_asset_path(raw: Any) -> str | None:
     value = _string(raw)
     if value is None:
@@ -1117,21 +1214,23 @@ def _validated_fail_first_staged_replay(
     if oracle_id != f"outcome_oracle:{_canonical_sha256(oracle_projection)}":
         return None
     experiment_id = _string(raw.get("research_experiment_id"))
+    contract = _validated_stage5_outcome_contract(raw.get("selected_outcome_contract"))
+    if contract is None:
+        return None
     expected = _verified_fail_first_outcome_oracles(research).get(experiment_id or "")
     if not isinstance(expected, Mapping) or "selected_outcome_contract" in expected:
         return None
-    expected_projection = {
-        key: value for key, value in expected.items() if key != "outcome_oracle_id"
-    }
-    retained_projection = {
-        key: value
-        for key, value in raw.items()
-        if key not in {"outcome_oracle_id", "selected_outcome_contract"}
-    }
-    if retained_projection != expected_projection:
+    try:
+        expected_derived = _derive_stage5_fail_first_oracle(
+            expected,
+            selected_outcome_contract=contract,
+        )
+    except ValueError:
         return None
-    contract = _validated_stage5_outcome_contract(raw.get("selected_outcome_contract"))
-    if contract is None:
+    expected_derived["outcome_oracle_id"] = (
+        "outcome_oracle:" + _canonical_sha256(expected_derived)
+    )
+    if dict(raw) != expected_derived:
         return None
 
     execution = raw.get("execution")
@@ -1144,7 +1243,17 @@ def _validated_fail_first_staged_replay(
         or not isinstance(argv, list)
         or not argv
         or any(not isinstance(token, str) or not token for token in argv)
-        or not isinstance(asset, Mapping)
+    ):
+        return None
+    needs_asset = any(
+        token.replace("\\", "/").startswith(".usertest_research/") for token in argv
+    )
+    if asset is None:
+        if needs_asset:
+            return None
+        manifest = {}
+    elif (
+        not isinstance(asset, Mapping)
         or not isinstance(manifest, Mapping)
         or not manifest
         or asset.get("manifest_sha256") != _canonical_sha256(manifest)
@@ -1546,12 +1655,10 @@ def _bind_stage5_planned_outcome(
             raise ValueError("stage5_outcome_fail_first_oracle_unavailable")
         if verified_command != " ".join(command.split()):
             raise ValueError("stage5_outcome_fail_first_command_changed")
-        oracle = {
-            key: deepcopy(value)
-            for key, value in fail_first_oracle.items()
-            if key != "outcome_oracle_id"
-        }
-        oracle["selected_outcome_contract"] = contract
+        oracle = _derive_stage5_fail_first_oracle(
+            fail_first_oracle,
+            selected_outcome_contract=contract,
+        )
         original_commands: list[str] = []
         original_description = (
             "Post-change execution of the unchanged runner-verified fail-first replay "
@@ -2429,10 +2536,28 @@ def _outcome_role_contract_errors(
                 for scenario in original_oracle.get("scenarios", [])
             )
         )
+        selected_planned_contract = (
+            original_oracle.get("selected_outcome_contract")
+            if isinstance(original_oracle, Mapping)
+            else None
+        )
         planned_outcome_positive = bool(
             isinstance(original_oracle, Mapping)
-            and original_oracle.get("kind") == "stage5_planned_outcome"
-            and isinstance(original_oracle.get("selected_outcome_contract"), Mapping)
+            and (
+                (
+                    original_oracle.get("kind") == "stage5_planned_outcome"
+                    and isinstance(selected_planned_contract, Mapping)
+                )
+                or (
+                    _validated_fail_first_staged_replay(
+                        original_oracle,
+                        research=research,
+                    )
+                    is not None
+                    and _validated_stage5_outcome_contract(selected_planned_contract)
+                    is not None
+                )
+            )
             and any(
                 isinstance(predicate, Mapping) and _positive_outcome_predicate(predicate)
                 for predicate in original_predicates

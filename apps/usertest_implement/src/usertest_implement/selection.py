@@ -37,7 +37,11 @@ def _case_plan_fingerprint(*, case_id: str, plan_revision_id: str) -> str:
 
 def _strict_ticket_text(path: Path) -> str:
     try:
-        text = path.read_text(encoding="utf-8")
+        # Preserve raw newline bytes until canonical provenance normalization.
+        # Universal-newline reads would turn CRCRLF into two logical newlines and
+        # make the historical Windows outcome-writer artifact indistinguishable
+        # from real ticket-body whitespace drift.
+        text = path.read_bytes().decode("utf-8")
     except UnicodeDecodeError as exc:
         raise ValueError(f"Ticket Markdown is not valid UTF-8: {path}") from exc
     if "\x00" in text:

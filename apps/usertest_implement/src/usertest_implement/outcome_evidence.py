@@ -536,6 +536,8 @@ def validate_bound_outcome_role_receipt(
     expected_ticket_provenance: dict[str, Any],
     trusted_runs_root: Path,
     expected_role_artifact_sha256: str | None = None,
+    execution_commit: str | None = None,
+    verification_amendment_id: str | None = None,
 ) -> dict[str, Any]:
     """Re-open and verify a dedicated runner-owned post-merge evidence role."""
 
@@ -584,9 +586,15 @@ def validate_bound_outcome_role_receipt(
         target_contract_sha256=target_contract_hash,
         verified_implementation_head=verified_implementation_head,
         role_contract=role_contract,
+        execution_commit=execution_commit,
+        verification_amendment_id=verification_amendment_id,
+    )
+    amended_execution = (
+        isinstance(execution_commit, str)
+        and execution_commit.strip().casefold() != merged_commit.strip().casefold()
     )
     return {
-        "receipt_schema_version": 3,
+        "receipt_schema_version": 4 if amended_execution else 3,
         "producer": "usertest_implement",
         "verification_producer": "runner_core",
         "evidence_kind": role,
@@ -617,6 +625,14 @@ def validate_bound_outcome_role_receipt(
         "role_contract_sha256": str(normalized["role_contract_sha256"]),
         "outcome_oracle_id": normalized.get("outcome_oracle_id"),
         "proof_scope": normalized.get("proof_scope"),
+        **(
+            {
+                "execution_commit": str(normalized["execution_commit"]),
+                "verification_amendment_id": verification_amendment_id,
+            }
+            if amended_execution
+            else {}
+        ),
     }
 
 

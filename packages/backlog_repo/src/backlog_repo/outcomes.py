@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from typing import Any
@@ -20,6 +21,7 @@ OUTCOME_STATES: frozenset[str] = frozenset(
     }
 )
 OUTCOME_SCOPES: frozenset[str] = frozenset({"case", "plan_copy"})
+STALE_OUTCOME_BLOCKER_RISK_PREFIX = "Post-merge outcome verification is blocked:"
 
 _IMPLEMENTED_STATES = frozenset(
     {
@@ -85,6 +87,7 @@ _TRANSITION_CONTROLLED_FIELDS = frozenset(
         "state",
         "recorded_at",
         "history",
+        "verification_amendment",
     }
 )
 _WRITE_ONCE_PROVENANCE_FIELDS = frozenset(
@@ -101,6 +104,26 @@ _STATES_AT_OR_BEYOND_TESTS_VERIFIED = frozenset(
         "live_verified",
         "resolved",
         "mitigated",
+    }
+)
+_VERIFICATION_AMENDMENT_RECORD_STATES = frozenset(
+    {
+        "implemented",
+        "tests_verified",
+        "original_scenario_verified",
+        "live_verified",
+        "resolved",
+        "mitigated",
+        "unverified",
+    }
+)
+_VERIFICATION_AMENDMENT_BINDABLE_STATES = frozenset(
+    {
+        "implemented",
+        "tests_verified",
+        "original_scenario_verified",
+        "live_verified",
+        "unverified",
     }
 )
 
@@ -128,6 +151,84 @@ def _string_list(record: dict[str, Any], field: str) -> list[str]:
     return out
 
 
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _verification_amendment(
+    raw: Any,
+    *,
+    merged_commit: Any,
+    target_branch: Any,
+    implementation_pr_url: Any,
+) -> dict[str, Any] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("outcome_record_verification_amendment_must_be_object")
+    allowed = {
+        "schema_version",
+        "kind",
+        "implementation_merged_commit",
+        "target_branch",
+        "verification_commit",
+        "verification_pr_url",
+        "recorded_at",
+        "amendment_id",
+    }
+    if set(raw) != allowed:
+        raise ValueError("outcome_record_verification_amendment_fields_invalid")
+    normalized = {
+        "schema_version": raw.get("schema_version"),
+        "kind": raw.get("kind"),
+        "implementation_merged_commit": str(
+            raw.get("implementation_merged_commit") or ""
+        )
+        .strip()
+        .casefold(),
+        "target_branch": str(raw.get("target_branch") or "").strip(),
+        "verification_commit": str(raw.get("verification_commit") or "")
+        .strip()
+        .casefold(),
+        "verification_pr_url": str(raw.get("verification_pr_url") or "").strip(),
+        "recorded_at": str(raw.get("recorded_at") or "").strip(),
+    }
+    amendment_id = str(raw.get("amendment_id") or "").strip()
+    if (
+        normalized["schema_version"] != 1
+        or normalized["kind"] != "outcome_verification_amendment"
+        or re.fullmatch(
+            r"[0-9a-f]{40}", normalized["implementation_merged_commit"]
+        )
+        is None
+        or re.fullmatch(r"[0-9a-f]{40}", normalized["verification_commit"])
+        is None
+        or not normalized["target_branch"]
+        or not normalized["verification_pr_url"]
+        or not normalized["recorded_at"]
+    ):
+        raise ValueError("outcome_record_verification_amendment_invalid")
+    if normalized["implementation_merged_commit"] != str(
+        merged_commit or ""
+    ).strip().casefold():
+        raise ValueError("outcome_record_verification_amendment_implementation_mismatch")
+    if normalized["target_branch"] != str(target_branch or "").strip():
+        raise ValueError("outcome_record_verification_amendment_branch_mismatch")
+    if normalized["verification_commit"] == normalized["implementation_merged_commit"]:
+        raise ValueError("outcome_record_verification_amendment_commit_not_distinct")
+    if normalized["verification_pr_url"] == str(implementation_pr_url or "").strip():
+        raise ValueError("outcome_record_verification_amendment_pr_not_distinct")
+    if amendment_id != "outcome_verification_amendment:" + _canonical_sha256(normalized):
+        raise ValueError("outcome_record_verification_amendment_hash_invalid")
+    return {**normalized, "amendment_id": amendment_id}
+
+
 def _runner_receipt(
     item: dict[str, Any],
     *,
@@ -143,9 +244,10 @@ def _runner_receipt(
         return None
     if not isinstance(raw, dict):
         raise ValueError(f"outcome_record_runner_receipt_required: {field}[{index}]")
-    expected_schema = 2 if evidence_kind == "test" else 3
+    receipt_schema = raw.get("receipt_schema_version")
+    expected_schemas = {2} if evidence_kind == "test" else {3, 4}
     if (
-        raw.get("receipt_schema_version") != expected_schema
+        receipt_schema not in expected_schemas
         or raw.get("producer") != "usertest_implement"
         or raw.get("verification_producer") != "runner_core"
     ):
@@ -212,6 +314,20 @@ def _runner_receipt(
                 raise ValueError(
                     "outcome_record_runner_receipt_field_invalid: "
                     f"{field}[{index}].{receipt_field}"
+                )
+        if receipt_schema == 4:
+            execution_commit = raw.get("execution_commit")
+            amendment_id = raw.get("verification_amendment_id")
+            if (
+                not isinstance(merged_commit, str)
+                or re.fullmatch(r"[0-9a-fA-F]{40}", merged_commit.strip()) is None
+                or not isinstance(execution_commit, str)
+                or re.fullmatch(r"[0-9a-fA-F]{40}", execution_commit.strip()) is None
+                or not isinstance(amendment_id, str)
+                or not amendment_id.startswith("outcome_verification_amendment:")
+            ):
+                raise ValueError(
+                    f"outcome_record_runner_receipt_amendment_invalid: {field}[{index}]"
                 )
         oracle_id = raw.get("outcome_oracle_id")
         proof_scope = raw.get("proof_scope")
@@ -322,6 +438,29 @@ def _ticket_provenance(
     return dict(raw)
 
 
+def _has_effective_amended_role_evidence(
+    items: list[dict[str, Any]],
+    *,
+    merged_commit: Any,
+    amendment: dict[str, Any],
+) -> bool:
+    expected_implementation = str(merged_commit or "").strip().casefold()
+    expected_execution = str(amendment["verification_commit"]).casefold()
+    expected_amendment = amendment["amendment_id"]
+    return any(
+        str(item.get("result") or "").strip().lower() == "passed"
+        and isinstance(item.get("runner_receipt"), dict)
+        and item["runner_receipt"].get("receipt_schema_version") == 4
+        and str(item["runner_receipt"].get("merged_commit") or "").casefold()
+        == expected_implementation
+        and str(item["runner_receipt"].get("execution_commit") or "").casefold()
+        == expected_execution
+        and item["runner_receipt"].get("verification_amendment_id")
+        == expected_amendment
+        for item in items
+    )
+
+
 def validate_outcome_record(record: dict[str, Any]) -> dict[str, Any]:
     """Validate and normalize the durable outcome contract.
 
@@ -426,7 +565,7 @@ def validate_outcome_record(record: dict[str, Any]) -> dict[str, Any]:
                         f"{evidence_field}[{index}].{provenance_field}"
                     )
             if (
-                receipt.get("receipt_schema_version") == 3
+                receipt.get("receipt_schema_version") in {3, 4}
                 and receipt.get("verified_implementation_head")
                 != ticket_provenance.get("verified_implementation_head")
             ):
@@ -459,6 +598,75 @@ def validate_outcome_record(record: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("outcome_record_target_branch_required_after_implementation")
         if not isinstance(merged_commit, str) or not merged_commit.strip():
             raise ValueError("outcome_record_merged_commit_required_after_implementation")
+    verification_amendment = _verification_amendment(
+        record.get("verification_amendment"),
+        merged_commit=merged_commit,
+        target_branch=target_branch,
+        implementation_pr_url=record.get("pr_url"),
+    )
+    all_role_evidence = (
+        *original_evidence,
+        *live_evidence,
+        *mitigation_evidence,
+    )
+    if verification_amendment is None and any(
+        isinstance(item.get("runner_receipt"), dict)
+        and item["runner_receipt"].get("receipt_schema_version") == 4
+        for item in all_role_evidence
+    ):
+        raise ValueError("outcome_record_verification_amendment_missing_for_receipt")
+    if verification_amendment is not None:
+        if state not in _VERIFICATION_AMENDMENT_RECORD_STATES:
+            raise ValueError("outcome_record_verification_amendment_state_invalid")
+        for evidence_field, evidence_items in (
+            ("original_scenario_evidence", original_evidence),
+            ("live_evidence", live_evidence),
+            ("mitigation_evidence", mitigation_evidence),
+        ):
+            for index, item in enumerate(evidence_items):
+                receipt = item.get("runner_receipt")
+                if not isinstance(receipt, dict) or receipt.get(
+                    "receipt_schema_version"
+                ) != 4:
+                    continue
+                if (
+                    str(receipt.get("merged_commit") or "").casefold()
+                    != str(merged_commit or "").casefold()
+                    or str(receipt.get("execution_commit") or "").casefold()
+                    != verification_amendment["verification_commit"]
+                    or receipt.get("verification_amendment_id")
+                    != verification_amendment["amendment_id"]
+                ):
+                    raise ValueError(
+                        "outcome_record_verification_amendment_receipt_mismatch:"
+                        f"{evidence_field}[{index}]"
+                    )
+        for evidence_field, evidence_items, required in (
+            (
+                "original_scenario_evidence",
+                original_evidence,
+                state in _ORIGINAL_SCENARIO_STATES,
+            ),
+            (
+                "live_evidence",
+                live_evidence,
+                state == "live_verified" or (state == "resolved" and requires_live),
+            ),
+            (
+                "mitigation_evidence",
+                mitigation_evidence,
+                state == "mitigated",
+            ),
+        ):
+            if required and not _has_effective_amended_role_evidence(
+                evidence_items,
+                merged_commit=merged_commit,
+                amendment=verification_amendment,
+            ):
+                raise ValueError(
+                    "outcome_record_verification_amendment_evidence_required:"
+                    f"{evidence_field}"
+                )
 
     recurrence_check = record.get("recurrence_check")
     if not isinstance(recurrence_check, dict):
@@ -474,6 +682,24 @@ def validate_outcome_record(record: dict[str, Any]) -> dict[str, Any]:
         case_id=case_id,
         plan_revision_id=plan_revision_id,
     )
+    for index, item in enumerate(recurrence_evidence):
+        receipt = item.get("runner_receipt")
+        if not isinstance(receipt, dict) or receipt.get("receipt_schema_version") != 4:
+            continue
+        if verification_amendment is None:
+            raise ValueError("outcome_record_verification_amendment_missing_for_receipt")
+        if (
+            str(receipt.get("merged_commit") or "").casefold()
+            != str(merged_commit or "").casefold()
+            or str(receipt.get("execution_commit") or "").casefold()
+            != verification_amendment["verification_commit"]
+            or receipt.get("verification_amendment_id")
+            != verification_amendment["amendment_id"]
+        ):
+            raise ValueError(
+                "outcome_record_verification_amendment_receipt_mismatch:"
+                f"recurrence_check.evidence[{index}]"
+            )
 
     if state in {"duplicate", "superseded"}:
         related_case = record.get("related_case_id")
@@ -526,6 +752,15 @@ def validate_outcome_record(record: dict[str, Any]) -> dict[str, Any]:
                 for item in recurrence_evidence
             ):
                 raise ValueError("outcome_record_resolved_requires_passing_recurrence_evidence")
+            if verification_amendment is not None and not _has_effective_amended_role_evidence(
+                recurrence_evidence,
+                merged_commit=merged_commit,
+                amendment=verification_amendment,
+            ):
+                raise ValueError(
+                    "outcome_record_verification_amendment_evidence_required:"
+                    "recurrence_check.evidence"
+                )
         if requires_live and not any(
             item.get("result", "").strip().lower() == "passed" for item in live_evidence
         ):
@@ -546,6 +781,11 @@ def validate_outcome_record(record: dict[str, Any]) -> dict[str, Any]:
         "original_scenario_evidence": original_evidence,
         "live_evidence": live_evidence,
         "mitigation_evidence": mitigation_evidence,
+        **(
+            {"verification_amendment": verification_amendment}
+            if verification_amendment is not None
+            else {}
+        ),
         "recurrence_check": {
             **recurrence_check,
             "status": recurrence_status.strip().lower(),
@@ -568,6 +808,84 @@ def outcome_suppresses_new_case_discovery(record: dict[str, Any]) -> bool:
         "duplicate",
         "superseded",
     }
+
+
+def effective_outcome_verification_commit(record: dict[str, Any]) -> str:
+    """Return the immutable implementation merge or its bound verification descendant."""
+
+    normalized = validate_outcome_record(record)
+    amendment = normalized.get("verification_amendment")
+    if isinstance(amendment, dict):
+        return str(amendment["verification_commit"])
+    merged_commit = normalized.get("merged_commit")
+    if not isinstance(merged_commit, str) or not merged_commit.strip():
+        raise ValueError("outcome_record_effective_verification_commit_missing")
+    return merged_commit.strip().casefold()
+
+
+def bind_outcome_verification_amendment(
+    current: dict[str, Any],
+    *,
+    verification_commit: str,
+    verification_pr_url: str,
+    recorded_at: str,
+) -> dict[str, Any]:
+    """Bind one immutable correction commit without rewriting implementation provenance."""
+
+    previous = validate_outcome_record(current)
+    if previous["state"] not in _VERIFICATION_AMENDMENT_BINDABLE_STATES:
+        raise ValueError(
+            "outcome_verification_amendment_not_allowed_for_state:"
+            f"{previous['state']}"
+        )
+    existing = previous.get("verification_amendment")
+    normalized_commit = verification_commit.strip().casefold()
+    normalized_pr = verification_pr_url.strip()
+    if isinstance(existing, dict):
+        if (
+            existing.get("verification_commit") == normalized_commit
+            and existing.get("verification_pr_url") == normalized_pr
+        ):
+            return previous
+        raise ValueError("outcome_verification_amendment_already_bound")
+    projection = {
+        "schema_version": 1,
+        "kind": "outcome_verification_amendment",
+        "implementation_merged_commit": str(previous.get("merged_commit") or "")
+        .strip()
+        .casefold(),
+        "target_branch": str(previous.get("target_branch") or "").strip(),
+        "verification_commit": normalized_commit,
+        "verification_pr_url": normalized_pr,
+        "recorded_at": recorded_at.strip(),
+    }
+    amendment = {
+        **projection,
+        "amendment_id": "outcome_verification_amendment:"
+        + _canonical_sha256(projection),
+    }
+    return validate_outcome_record({**previous, "verification_amendment": amendment})
+
+
+def reconcile_terminal_outcome_stale_blockers(
+    current: dict[str, Any],
+) -> dict[str, Any]:
+    """Remove only obsolete runner-owned blockers from a proven terminal outcome."""
+
+    previous = validate_outcome_record(current)
+    if previous["state"] not in {"resolved", "mitigated"}:
+        raise ValueError(
+            "outcome_stale_blocker_reconciliation_requires_terminal_state:"
+            f"{previous['state']}"
+        )
+    retained_risks = [
+        risk
+        for risk in previous["remaining_risks"]
+        if not risk.startswith(STALE_OUTCOME_BLOCKER_RISK_PREFIX)
+    ]
+    if retained_risks == previous["remaining_risks"]:
+        return previous
+    return validate_outcome_record({**previous, "remaining_risks": retained_risks})
 
 
 def transition_outcome_record(
@@ -654,6 +972,12 @@ def reconcile_outcome_records(
         candidate_value = candidate.get(field)
         if previous_value is not None and candidate_value != previous_value:
             raise ValueError(f"outcome_reconcile_provenance_mismatch: {field}")
+    if previous.get("verification_amendment") != candidate.get(
+        "verification_amendment"
+    ):
+        raise ValueError(
+            "outcome_reconcile_provenance_mismatch: verification_amendment"
+        )
 
     if previous == candidate or previous["state"] == candidate["state"]:
         return previous

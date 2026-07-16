@@ -160,6 +160,7 @@ def _write_required_workspace_read_events(
     manifest: dict[str, object],
     append: bool = False,
     include_chunks: bool = True,
+    include_origin_attachments: bool = True,
 ) -> None:
     relative_paths = [
         "atoms.json",
@@ -169,6 +170,22 @@ def _write_required_workspace_read_events(
         relative_paths.extend(
             str(chunk["text_file"]) for chunk in manifest["chunks"] if isinstance(chunk, dict)
         )
+    origin_manifest = manifest.get("origin_attachment_evidence")
+    if include_origin_attachments and isinstance(origin_manifest, dict):
+        workspace_atom_ids = [
+            str(atom_id)
+            for key in ("assigned_atom_ids", "context_atom_ids")
+            for atom_id in manifest.get(key, [])
+            if isinstance(atom_id, str)
+        ]
+        relative_paths.extend(
+            str(requirement["file"])
+            for requirement in origin_attachment_requirements(
+                origin_manifest,
+                atom_ids=workspace_atom_ids,
+            )
+        )
+    relative_paths = list(dict.fromkeys(relative_paths))
     should_append = append
     for relative_path in relative_paths:
         _write_full_read_event(
@@ -205,6 +222,27 @@ def _write_fake_codex_attempt_artifacts(
     relative_paths = ["atoms.json", str(manifest["index_file"])]
     if read_chunks:
         relative_paths.extend(str(chunk["text_file"]) for chunk in manifest["chunks"])
+    origin_summary = manifest.get("origin_attachment_evidence")
+    if isinstance(origin_summary, dict):
+        origin_manifest_file = origin_summary.get("manifest_file")
+        if isinstance(origin_manifest_file, str):
+            origin_manifest = json.loads(
+                (workspace / origin_manifest_file).read_text(encoding="utf-8")
+            )
+            assigned_atom_ids = [
+                str(atom_id)
+                for key in ("assigned_atom_ids", "context_atom_ids")
+                for atom_id in manifest.get(key, [])
+                if isinstance(atom_id, str)
+            ]
+            relative_paths.extend(
+                str(requirement["file"])
+                for requirement in origin_attachment_requirements(
+                    origin_manifest,
+                    atom_ids=assigned_atom_ids,
+                )
+            )
+    relative_paths = list(dict.fromkeys(relative_paths))
     session_id = (
         str(
             kwargs.get("resume_session_id")
@@ -1873,6 +1911,13 @@ def test_codex_raw_chunk_read_normalizes_into_live_receipt(tmp_path: Path) -> No
     chunk = manifest["chunks"][0]
     raw_events = tmp_path / "raw_events.jsonl"
     required_paths = ["atoms.json", str(manifest["index_file"]), str(chunk["text_file"])]
+    required_paths.extend(
+        str(requirement["file"])
+        for requirement in origin_attachment_requirements(
+            manifest["origin_attachment_evidence"],
+            atom_ids=["atom:one", "atom:two"],
+        )
+    )
     raw_events.write_text(
         "".join(
             json.dumps(
@@ -3268,6 +3313,7 @@ def test_problem_mining_reads_middle_of_large_materialized_attachment(
         workspace=workspace,
         manifest=manifest,
         append=True,
+        include_origin_attachments=False,
     )
     for requirement in requirements:
         _write_full_read_event(
@@ -5423,6 +5469,7 @@ def test_context_origin_attachment_requires_a_full_read(tmp_path: Path) -> None:
         normalized,
         workspace=workspace,
         manifest=manifest,
+        include_origin_attachments=False,
     )
 
     with pytest.raises(ValueError, match="problem_mining_origin_attachment_not_read_in_full"):

@@ -3,9 +3,12 @@ from __future__ import annotations
 import pytest
 
 from backlog_repo.outcomes import (
+    bind_outcome_verification_amendment,
+    effective_outcome_verification_commit,
     extract_outcome_markdown,
     outcome_suppresses_new_case_discovery,
     reconcile_outcome_records,
+    reconcile_terminal_outcome_stale_blockers,
     transition_outcome_record,
     upsert_outcome_markdown,
     validate_outcome_record,
@@ -205,6 +208,40 @@ def test_mitigated_requires_tests_and_dedicated_effect_role() -> None:
         validate_outcome_record(record)
 
 
+def test_terminal_stale_blocker_reconciliation_changes_only_runner_owned_risk() -> None:
+    terminal = validate_outcome_record(
+        _record(
+            state="mitigated",
+            target_branch="dev",
+            merged_commit="abc123",
+            requires_live_verification=False,
+            test_evidence=[_passed("test", "tests/test_x.py")],
+            original_scenario_evidence=[
+                _passed("original_scenario", "runs/original/outcome_role.json")
+            ],
+            mitigation_evidence=[
+                _passed("mitigation_effect", "runs/mitigation/outcome_role.json")
+            ],
+            remaining_risks=[
+                "Post-merge outcome verification is blocked: asset_missing",
+                "The underlying failure mechanism is not claimed resolved.",
+            ],
+        )
+    )
+
+    reconciled = reconcile_terminal_outcome_stale_blockers(terminal)
+
+    assert reconciled["remaining_risks"] == [
+        "The underlying failure mechanism is not claimed resolved."
+    ]
+    assert {
+        key: value for key, value in reconciled.items() if key != "remaining_risks"
+    } == {key: value for key, value in terminal.items() if key != "remaining_risks"}
+    assert reconcile_terminal_outcome_stale_blockers(reconciled) == reconciled
+    with pytest.raises(ValueError, match="requires_terminal_state"):
+        reconcile_terminal_outcome_stale_blockers(_record(state="unverified"))
+
+
 def test_outcome_markdown_round_trip_replaces_previous_record() -> None:
     first = upsert_outcome_markdown("# Ticket\n", _record())
     second_record = _record(state="unverified", remaining_risks=["Original replay unavailable"])
@@ -310,3 +347,100 @@ def test_reconcile_preserves_advanced_outcome_during_tests_verified_retry() -> N
     changed_identity["case_id"] = "case:other"
     with pytest.raises(ValueError, match="identity_mismatch"):
         reconcile_outcome_records(resolved, changed_identity)
+
+
+def test_verification_amendment_is_write_once_and_requires_effective_role_receipts() -> None:
+    implementation_commit = "1" * 40
+    verification_commit = "2" * 40
+    current = _record(
+        state="unverified",
+        target_branch="dev",
+        merged_commit=implementation_commit,
+        pr_url="https://example.invalid/pull/10",
+        test_evidence=[_passed("test", "tests/test_x.py")],
+    )
+    amended = bind_outcome_verification_amendment(
+        current,
+        verification_commit=verification_commit,
+        verification_pr_url="https://example.invalid/pull/11",
+        recorded_at="2026-07-15T12:00:00Z",
+    )
+
+    assert amended["merged_commit"] == implementation_commit
+    assert amended["pr_url"] == "https://example.invalid/pull/10"
+    assert effective_outcome_verification_commit(amended) == verification_commit
+    assert (
+        bind_outcome_verification_amendment(
+            amended,
+            verification_commit=verification_commit,
+            verification_pr_url="https://example.invalid/pull/11",
+            recorded_at="2026-07-16T12:00:00Z",
+        )
+        == amended
+    )
+    with pytest.raises(ValueError, match="already_bound"):
+        bind_outcome_verification_amendment(
+            amended,
+            verification_commit="3" * 40,
+            verification_pr_url="https://example.invalid/pull/12",
+            recorded_at="2026-07-16T12:00:00Z",
+        )
+
+    amendment = amended["verification_amendment"]
+    assert isinstance(amendment, dict)
+
+    def _amended_role(kind: str) -> dict[str, object]:
+        item = _passed(kind, f"runs/{kind}")
+        receipt = item["runner_receipt"]
+        assert isinstance(receipt, dict)
+        receipt.update(
+            {
+                "receipt_schema_version": 4,
+                "merged_commit": implementation_commit,
+                "execution_commit": verification_commit,
+                "verification_amendment_id": amendment["amendment_id"],
+            }
+        )
+        return item
+
+    mitigated = validate_outcome_record(
+        {
+            **amended,
+            "state": "mitigated",
+            "original_scenario_evidence": [_amended_role("original_scenario")],
+            "mitigation_evidence": [_amended_role("mitigation_effect")],
+        }
+    )
+    assert mitigated["state"] == "mitigated"
+    wrong = dict(mitigated)
+    wrong_mitigation = _amended_role("mitigation_effect")
+    wrong_receipt = wrong_mitigation["runner_receipt"]
+    assert isinstance(wrong_receipt, dict)
+    wrong_receipt["execution_commit"] = "3" * 40
+    wrong["mitigation_evidence"] = [wrong_mitigation]
+    with pytest.raises(ValueError, match="amendment_receipt_mismatch"):
+        validate_outcome_record(wrong)
+
+
+def test_schema_four_role_receipt_requires_a_verification_amendment() -> None:
+    item = _passed("original_scenario", "runs/original_scenario")
+    receipt = item["runner_receipt"]
+    assert isinstance(receipt, dict)
+    receipt.update(
+        {
+            "receipt_schema_version": 4,
+            "merged_commit": "1" * 40,
+            "execution_commit": "2" * 40,
+            "verification_amendment_id": (
+                "outcome_verification_amendment:" + "a" * 64
+            ),
+        }
+    )
+    with pytest.raises(ValueError, match="verification_amendment_missing_for_receipt"):
+        validate_outcome_record(
+            _record(
+                state="unverified",
+                merged_commit="1" * 40,
+                original_scenario_evidence=[item],
+            )
+        )

@@ -29,6 +29,16 @@ _EXTERNALLY_VERIFIED_STATES = frozenset(
 _RELATIONSHIP_STATES = frozenset({"duplicate", "superseded"})
 _SHA256_RE = re.compile(r"[0-9a-fA-F]{64}")
 _SAFE_BRANCH_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*")
+_IMMUTABLE_TICKET_PROVENANCE_FIELDS = (
+    "fingerprint",
+    "case_id",
+    "plan_revision_id",
+    "ticket_body_sha256",
+    "local_plan_sha256",
+    "local_plan_filename",
+    "verification_contract_sha256",
+    "target_contract_sha256",
+)
 
 
 def _canonical_json(value: Any) -> str:
@@ -50,6 +60,52 @@ def _sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _read_utf8_raw(path: Path) -> str:
+    """Decode UTF-8 without universal-newline translation.
+
+    Historical outcome writers could produce CRCRLF.  The canonical markdown
+    normalizer deliberately collapses that sequence, but ``Path.read_text`` first
+    translates it into two logical newlines on Windows and irreversibly changes
+    the content being hashed.
+    """
+
+    return path.read_bytes().decode("utf-8")
+
+
+def _immutable_ticket_provenance(
+    value: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Project provenance to the identity fixed before implementation review.
+
+    Review artifacts predate the later binding of ``verified_implementation_head``.
+    Comparing their whole object to the enriched durable record therefore rejects a
+    valid handoff.  The reviewed head remains mandatory, but is checked separately
+    against the review artifact's own ``reviewed_head_oid`` field.
+    """
+
+    return {field: value.get(field) for field in _IMMUTABLE_TICKET_PROVENANCE_FIELDS}
+
+
+def _verify_review_ticket_binding(
+    review: Mapping[str, Any],
+    *,
+    label: str,
+    provenance: Mapping[str, Any],
+    errors: list[str],
+) -> None:
+    reviewed_provenance = review.get("ticket_provenance")
+    if not isinstance(reviewed_provenance, Mapping) or (
+        _immutable_ticket_provenance(reviewed_provenance)
+        != _immutable_ticket_provenance(provenance)
+    ):
+        errors.append(f"{label}_ticket_provenance_mismatch")
+
+    reviewed_head = str(review.get("reviewed_head_oid") or "").casefold()
+    verified_head = str(provenance.get("verified_implementation_head") or "").casefold()
+    if not reviewed_head or reviewed_head != verified_head:
+        errors.append(f"{label}_verified_implementation_head_mismatch")
 
 
 def _read_json(path: Path, *, label: str, errors: list[str]) -> dict[str, Any] | None:
@@ -150,7 +206,7 @@ def _find_verified_plan(
     matching: list[tuple[Path, Path]] = []
     for root, candidate in candidates:
         try:
-            markdown = candidate.read_text(encoding="utf-8")
+            markdown = _read_utf8_raw(candidate)
         except (OSError, UnicodeError):
             continue
         if "\x00" in markdown:
@@ -181,11 +237,37 @@ def _find_verified_plan(
     return matching[0]
 
 
+def _role_contracts_from_verified_plan(
+    plan_path: Path,
+    *,
+    provenance: Mapping[str, Any],
+    errors: list[str],
+) -> Mapping[str, Any]:
+    try:
+        verification_contract = parse_verification_contract_markdown(
+            _read_utf8_raw(plan_path)
+        )
+    except (OSError, UnicodeError, ValueError) as exc:
+        errors.append(f"outcome_plan_verification_contract_invalid:{type(exc).__name__}")
+        return {}
+    if not isinstance(verification_contract, dict):
+        errors.append("outcome_plan_verification_contract_invalid:missing")
+        return {}
+    if verification_contract.get("contract_sha256") != provenance.get(
+        "verification_contract_sha256"
+    ):
+        errors.append("outcome_plan_verification_contract_hash_mismatch")
+        return {}
+    roles_raw = verification_contract.get("outcome_roles")
+    return roles_raw if isinstance(roles_raw, Mapping) else {}
+
+
 def _verify_ticket_ref(
     ticket_ref: dict[str, Any],
     *,
     provenance: dict[str, Any],
     record: dict[str, Any],
+    implementation_run_dir: Path | None = None,
     errors: list[str],
 ) -> dict[str, Any] | None:
     if ticket_ref.get("schema_version") != 2:
@@ -216,11 +298,30 @@ def _verify_ticket_ref(
             errors.append(f"outcome_ticket_ref_provenance_{field}_mismatch")
 
     implementation = ticket_ref.get("implementation_provenance")
-    if provenance.get("target_contract_sha256") is not None and (
-        not isinstance(implementation, dict) or implementation.get("schema_version") != 1
-    ):
+    implementation_schema = (
+        implementation.get("schema_version")
+        if isinstance(implementation, dict)
+        else None
+    )
+    if implementation is not None and implementation_schema not in {1, 2}:
+        errors.append("outcome_ticket_ref_implementation_provenance_schema_invalid")
+    elif provenance.get("target_contract_sha256") is not None and implementation is None:
         errors.append("outcome_ticket_ref_implementation_provenance_missing")
     elif isinstance(implementation, dict):
+        required_fields = {
+            "schema_version",
+            "repo_revision",
+            "execution_base_revision",
+            "verified_implementation_head",
+            "verification_sha256",
+            "target_ref_sha256",
+            "git_ref_sha256",
+            "receipt_sha256",
+        }
+        if implementation_schema == 2:
+            required_fields.update({"provenance_mode", "workspace_ref_sha256"})
+        if set(implementation) != required_fields:
+            errors.append("outcome_ticket_ref_implementation_provenance_fields_invalid")
         receipt_hash = implementation.get("receipt_sha256")
         unsigned_receipt = {
             key: value for key, value in implementation.items() if key != "receipt_sha256"
@@ -228,10 +329,118 @@ def _verify_ticket_ref(
         if not isinstance(receipt_hash, str) or _sha256_json(unsigned_receipt) != receipt_hash:
             errors.append("outcome_ticket_ref_implementation_provenance_hash_mismatch")
         for field in ("verified_implementation_head",):
-            if implementation.get(field) != provenance.get(field):
+            if str(implementation.get(field) or "").casefold() != str(
+                provenance.get(field) or ""
+            ).casefold():
                 errors.append(
                     f"outcome_ticket_ref_implementation_provenance_{field}_mismatch"
                 )
+        target_contract = stored_provenance.get("target_contract")
+        if not isinstance(target_contract, Mapping):
+            errors.append(
+                "outcome_ticket_ref_implementation_provenance_target_contract_missing"
+            )
+        else:
+            if target_contract.get("contract_sha256") != provenance.get(
+                "target_contract_sha256"
+            ):
+                errors.append(
+                    "outcome_ticket_ref_implementation_provenance_target_contract_hash_mismatch"
+                )
+            if implementation.get("repo_revision") != target_contract.get(
+                "repo_revision"
+            ):
+                errors.append(
+                    "outcome_ticket_ref_implementation_provenance_repo_revision_mismatch"
+                )
+        if implementation_schema == 2 and implementation.get(
+            "provenance_mode"
+        ) != "existing_clean_head":
+            errors.append("outcome_ticket_ref_implementation_provenance_mode_invalid")
+        if implementation_run_dir is not None:
+            artifact_hashes = [
+                ("verification_sha256", "verification.json"),
+                ("target_ref_sha256", "target_ref.json"),
+                ("git_ref_sha256", "git_ref.json"),
+            ]
+            if implementation_schema == 2:
+                artifact_hashes.append(("workspace_ref_sha256", "workspace_ref.json"))
+            for hash_field, filename in artifact_hashes:
+                artifact_path = implementation_run_dir / filename
+                if not artifact_path.is_file():
+                    errors.append(
+                        "outcome_ticket_ref_implementation_provenance_artifact_missing:"
+                        f"{filename}"
+                    )
+                elif _sha256_file(artifact_path) != implementation.get(hash_field):
+                    errors.append(
+                        "outcome_ticket_ref_implementation_provenance_artifact_hash_mismatch:"
+                        f"{filename}"
+                    )
+
+            verification = _read_json(
+                implementation_run_dir / "verification.json",
+                label="outcome_implementation_verification",
+                errors=errors,
+            )
+            target_ref = _read_json(
+                implementation_run_dir / "target_ref.json",
+                label="outcome_implementation_target_ref",
+                errors=errors,
+            )
+            git_ref = _read_json(
+                implementation_run_dir / "git_ref.json",
+                label="outcome_implementation_git_ref",
+                errors=errors,
+            )
+            workspace_ref = (
+                _read_json(
+                    implementation_run_dir / "workspace_ref.json",
+                    label="outcome_implementation_workspace_ref",
+                    errors=errors,
+                )
+                if implementation_schema == 2
+                else None
+            )
+            if verification is not None and verification.get("passed") is not True:
+                errors.append(
+                    "outcome_ticket_ref_implementation_provenance_verification_not_passed"
+                )
+            if target_ref is not None and str(
+                target_ref.get("commit_sha") or ""
+            ).casefold() != str(
+                implementation.get("execution_base_revision") or ""
+            ).casefold():
+                errors.append(
+                    "outcome_ticket_ref_implementation_provenance_execution_base_mismatch"
+                )
+            if git_ref is not None:
+                verified_head = str(
+                    implementation.get("verified_implementation_head") or ""
+                ).casefold()
+                if str(git_ref.get("head_commit") or "").casefold() != verified_head:
+                    errors.append(
+                        "outcome_ticket_ref_implementation_provenance_git_head_mismatch"
+                    )
+                if implementation_schema == 2 and (
+                    git_ref.get("commit_attempted") is not False
+                    or git_ref.get("commit_performed") is not False
+                    or git_ref.get("commit_observed") is not True
+                    or str(git_ref.get("base_commit") or "").casefold()
+                    != verified_head
+                ):
+                    errors.append(
+                        "outcome_ticket_ref_implementation_provenance_existing_head_invalid"
+                    )
+            if implementation_schema == 2 and workspace_ref is not None:
+                if (
+                    workspace_ref.get("schema_version") != 1
+                    or workspace_ref.get("workspace_strategy")
+                    != implementation.get("provenance_mode")
+                ):
+                    errors.append(
+                        "outcome_ticket_ref_implementation_provenance_workspace_invalid"
+                    )
 
     binding = ticket_ref.get("verification_binding")
     if not isinstance(binding, dict) or binding.get("schema_version") != 1:
@@ -315,6 +524,7 @@ def _verify_receipt(
             ticket_ref,
             provenance=provenance,
             record=record,
+            implementation_run_dir=run_dir,
             errors=errors,
         )
         if ticket_ref is not None
@@ -423,6 +633,19 @@ def _verify_role_receipt(
         errors.append(f"{prefix}_stage6_role_contract_missing")
         return
     role_contract_hash = role_contract.get("role_contract_sha256")
+    receipt_schema = receipt.get("receipt_schema_version")
+    amendment = record.get("verification_amendment")
+    amended_receipt = receipt_schema == 4
+    execution_commit = (
+        amendment.get("verification_commit")
+        if amended_receipt and isinstance(amendment, Mapping)
+        else None
+    )
+    amendment_id = (
+        amendment.get("amendment_id")
+        if amended_receipt and isinstance(amendment, Mapping)
+        else None
+    )
     expected = {
         "schema_version": 1,
         "producer": "runner_core",
@@ -436,18 +659,22 @@ def _verify_role_receipt(
         "role_contract_sha256": role_contract_hash,
         "role_contract": dict(role_contract),
     }
+    if amended_receipt:
+        expected["execution_commit"] = execution_commit
+        expected["verification_amendment_id"] = amendment_id
     for field, expected_value in expected.items():
         observed = artifact.get(field)
         if isinstance(expected_value, str) and (
             field.endswith("sha256")
-            or field in {"merged_commit", "verified_implementation_head"}
+            or field
+            in {"merged_commit", "execution_commit", "verified_implementation_head"}
         ):
             observed = str(observed or "").casefold()
             expected_value = expected_value.casefold()
         if observed != expected_value:
             errors.append(f"{prefix}_{field}_mismatch")
-    for field, expected_value in (
-        ("receipt_schema_version", 3),
+    receipt_expected = [
+        ("receipt_schema_version", receipt_schema),
         ("producer", "usertest_implement"),
         ("verification_producer", "runner_core"),
         ("evidence_kind", evidence_kind),
@@ -465,11 +692,22 @@ def _verify_role_receipt(
             provenance.get("verified_implementation_head"),
         ),
         ("role_contract_sha256", role_contract_hash),
-    ):
+    ]
+    if amended_receipt:
+        receipt_expected.extend(
+            [
+                ("execution_commit", execution_commit),
+                ("verification_amendment_id", amendment_id),
+            ]
+        )
+    if receipt_schema not in {3, 4}:
+        errors.append(f"{prefix}_receipt_schema_version_mismatch")
+    for field, expected_value in receipt_expected:
         observed = receipt.get(field)
         if isinstance(expected_value, str) and (
             field.endswith("sha256")
-            or field in {"merged_commit", "verified_implementation_head"}
+            or field
+            in {"merged_commit", "execution_commit", "verified_implementation_head"}
         ):
             observed = str(observed or "").casefold()
             expected_value = expected_value.casefold()
@@ -602,21 +840,57 @@ def _verify_merge_provenance(
                     "outcome_verified_implementation_head_not_in_merged_commit:"
                     f"{verified_head}:{commit}"
                 )
-    target_commit: str | None = None
+    target_commits: list[str] = []
     for ref in (f"refs/heads/{branch}", f"refs/remotes/origin/{branch}"):
         rc, value = _git_output(owner_root, ["rev-parse", "--verify", f"{ref}^{{commit}}"])
-        if rc == 0 and value:
-            target_commit = value
-            break
-    if target_commit is None:
+        if rc == 0 and value and value not in target_commits:
+            target_commits.append(value)
+    if not target_commits:
         errors.append(f"outcome_target_branch_missing:{branch}")
         return
-    ancestor_rc, _ = _git_output(
-        owner_root,
-        ["merge-base", "--is-ancestor", resolved_commit, target_commit],
-    )
-    if ancestor_rc != 0:
+    if not any(
+        _git_output(
+            owner_root,
+            ["merge-base", "--is-ancestor", resolved_commit, target_commit],
+        )[0]
+        == 0
+        for target_commit in target_commits
+    ):
         errors.append(f"outcome_merged_commit_not_on_target_branch:{commit}:{branch}")
+    amendment = record.get("verification_amendment")
+    if not isinstance(amendment, Mapping):
+        return
+    verification_commit = str(amendment.get("verification_commit") or "").strip()
+    verification_rc, resolved_verification = _git_output(
+        owner_root,
+        ["rev-parse", "--verify", f"{verification_commit}^{{commit}}"],
+    )
+    if verification_rc != 0 or not resolved_verification:
+        errors.append(
+            f"outcome_verification_amendment_commit_missing:{verification_commit}"
+        )
+        return
+    implementation_ancestor_rc, _ = _git_output(
+        owner_root,
+        ["merge-base", "--is-ancestor", resolved_commit, resolved_verification],
+    )
+    if implementation_ancestor_rc != 0 or resolved_commit == resolved_verification:
+        errors.append(
+            "outcome_verification_amendment_not_descendant:"
+            f"{commit}:{verification_commit}"
+        )
+    if not any(
+        _git_output(
+            owner_root,
+            ["merge-base", "--is-ancestor", resolved_verification, target_commit],
+        )[0]
+        == 0
+        for target_commit in target_commits
+    ):
+        errors.append(
+            "outcome_verification_amendment_not_on_target_branch:"
+            f"{verification_commit}:{branch}"
+        )
 
 
 def _registry_relation_target(entry: Mapping[str, Any]) -> tuple[str | None, list[str]]:
@@ -937,8 +1211,12 @@ def verify_outcome_record_provenance(
                     roots=trusted_roots,
                     errors=errors,
                 )
-                if review_ref.get("ticket_provenance") != provenance:
-                    errors.append("outcome_review_ref_ticket_provenance_mismatch")
+                _verify_review_ticket_binding(
+                    review_ref,
+                    label="outcome_review_ref",
+                    provenance=provenance,
+                    errors=errors,
+                )
                 if implementation_run_dir is not None:
                     ticket_ref_path = implementation_run_dir / "ticket_ref.json"
                     if not ticket_ref_path.is_file():
@@ -957,11 +1235,16 @@ def verify_outcome_record_provenance(
                                 ticket_ref,
                                 provenance=provenance,
                                 record=normalized,
+                                implementation_run_dir=implementation_run_dir,
                                 errors=errors,
                             )
             if review_summary is not None:
-                if review_summary.get("ticket_provenance") != provenance:
-                    errors.append("outcome_review_summary_ticket_provenance_mismatch")
+                _verify_review_ticket_binding(
+                    review_summary,
+                    label="outcome_review_summary",
+                    provenance=provenance,
+                    errors=errors,
+                )
                 if review_ref is not None and (
                     review_summary.get("implementation_ticket_ref_sha256")
                     != review_ref.get("implementation_ticket_ref_sha256")
@@ -980,25 +1263,13 @@ def verify_outcome_record_provenance(
         _verify_merge_provenance(normalized, owner_root=owner_root, errors=errors)
 
     role_contracts: Mapping[str, Any] = {}
-    if verified_plan is not None:
+    if verified_plan is not None and provenance is not None:
         _owner_root, plan_path = verified_plan
-        try:
-            plan_markdown = plan_path.read_text(encoding="utf-8")
-            verification_contract = parse_verification_contract_markdown(plan_markdown)
-        except (OSError, UnicodeError, ValueError) as exc:
-            errors.append(f"outcome_plan_verification_contract_invalid:{type(exc).__name__}")
-            verification_contract = None
-        if isinstance(verification_contract, dict):
-            expected_contract_hash = (
-                provenance.get("verification_contract_sha256")
-                if provenance is not None
-                else None
-            )
-            if verification_contract.get("contract_sha256") != expected_contract_hash:
-                errors.append("outcome_plan_verification_contract_hash_mismatch")
-            roles_raw = verification_contract.get("outcome_roles")
-            if isinstance(roles_raw, Mapping):
-                role_contracts = roles_raw
+        role_contracts = _role_contracts_from_verified_plan(
+            plan_path,
+            provenance=provenance,
+            errors=errors,
+        )
 
     if provenance is not None and trusted_roots:
         evidence_groups = (

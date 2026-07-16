@@ -258,6 +258,53 @@ def test_repository_semantic_basis_allows_unrelated_file_edits_but_preserves_quo
         outcome_roles._verify_positive_contract_sources(oracle, workspace=tmp_path)
 
 
+def test_fail_first_derivation_revalidates_retained_stage3_source_contract(
+    tmp_path: Path,
+) -> None:
+    contract_path = tmp_path / "docs" / "contract.md"
+    contract_path.parent.mkdir()
+    subject = "useful default-path result"
+    quote = f"The {subject} remains True."
+    contract_path.write_text(quote + "\n", encoding="utf-8")
+    contract = {
+        "positive_outcome_contract_id": "positive_outcome_contract:retained",
+        "kind": "retained_research_harness_assertion",
+        "semantic_basis": {
+            "provenance": {
+                "kind": "repository_contract_quote",
+                "path": "docs/contract.md",
+                "sha256": hashlib.sha256(contract_path.read_bytes()).hexdigest(),
+                "exact_quote": quote,
+                "contract_locator": {
+                    "kind": "mechanism_subject",
+                    "subject": subject,
+                },
+            }
+        },
+    }
+    oracle = {
+        "retained_stage3_oracle": {"positive_outcome_contracts": [contract]},
+    }
+
+    receipts = outcome_roles._verify_positive_contract_sources(
+        oracle,
+        workspace=tmp_path,
+    )
+
+    assert receipts == [
+        {
+            "positive_outcome_contract_id": "positive_outcome_contract:retained",
+            "path": "docs/contract.md",
+            "expected_sha256": hashlib.sha256(contract_path.read_bytes()).hexdigest(),
+            "observed_sha256": hashlib.sha256(contract_path.read_bytes()).hexdigest(),
+            "status": "verified",
+        }
+    ]
+    contract_path.write_text("The contract was removed.\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="outcome_role_semantic_basis_source_changed"):
+        outcome_roles._verify_positive_contract_sources(oracle, workspace=tmp_path)
+
+
 def test_repository_schema_basis_revalidates_pointer_value(tmp_path: Path) -> None:
     schema_path = tmp_path / "schemas" / "config.json"
     schema_path.parent.mkdir()
@@ -410,6 +457,68 @@ def test_role_executor_binds_commit_and_machine_predicates(tmp_path: Path) -> No
         verification_contract_sha256="a" * 64,
         target_contract_sha256="b" * 64,
         verified_implementation_head=commit,
+        role_contract=contract,
+    )["passed"] is True
+
+
+def test_role_executor_retains_implementation_commit_at_amended_execution_commit(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _git(workspace, "init")
+    _git(workspace, "config", "user.email", "tests@example.com")
+    _git(workspace, "config", "user.name", "Tests")
+    (workspace / "probe.py").write_text("print('passed')\n", encoding="utf-8")
+    _git(workspace, "add", "probe.py")
+    _git(workspace, "commit", "-m", "implementation")
+    implementation_commit = _git(workspace, "rev-parse", "HEAD")
+    (workspace / "correction.txt").write_text("correction\n", encoding="utf-8")
+    _git(workspace, "add", "correction.txt")
+    _git(workspace, "commit", "-m", "verification correction")
+    execution_commit = _git(workspace, "rev-parse", "HEAD")
+    amendment_id = "outcome_verification_amendment:" + "d" * 64
+    unsigned_contract = {
+        "description": "Replay the exact scenario after the correction merge.",
+        "research_experiment_id": "experiment:original",
+        "commands": ["python probe.py"],
+        "predicates": [
+            {"type": "command_exit_code", "command_index": 0, "equals": 0}
+        ],
+    }
+    contract = {**unsigned_contract, "role_contract_sha256": _sha(unsigned_contract)}
+    output_path = tmp_path / "runs" / "amended" / "outcome_role.json"
+
+    artifact = run_outcome_evidence_role(
+        workspace=workspace,
+        output_path=output_path,
+        role="original_scenario",
+        role_contract=contract,
+        case_id="case:one",
+        plan_revision_id="plan:one:v1",
+        merged_commit=implementation_commit,
+        execution_commit=execution_commit,
+        verification_amendment_id=amendment_id,
+        verification_contract_sha256="a" * 64,
+        target_contract_sha256="b" * 64,
+        verified_implementation_head=implementation_commit,
+    )
+
+    assert artifact["passed"] is True
+    assert artifact["merged_commit"] == implementation_commit
+    assert artifact["execution_commit"] == execution_commit
+    assert artifact["verification_amendment_id"] == amendment_id
+    assert validate_outcome_evidence_role_artifact(
+        artifact,
+        role="original_scenario",
+        case_id="case:one",
+        plan_revision_id="plan:one:v1",
+        merged_commit=implementation_commit,
+        execution_commit=execution_commit,
+        verification_amendment_id=amendment_id,
+        verification_contract_sha256="a" * 64,
+        target_contract_sha256="b" * 64,
+        verified_implementation_head=implementation_commit,
         role_contract=contract,
     )["passed"] is True
 

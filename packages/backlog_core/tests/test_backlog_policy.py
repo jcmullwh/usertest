@@ -1051,6 +1051,17 @@ def _strict_ticket(*, kinds: list[str], breadth: dict[str, int]) -> dict[str, ob
             "residual_recurrence_paths": [],
             "compatibility_risks": [],
             "testability": {"before": "fails", "after": "passes"},
+            "outcome_strategy": {
+                "intended_operation": (
+                    "The original scenario applies the guard and emits the expected output."
+                ),
+                "success_properties": [
+                    "The unchanged original replay exits successfully and reports guard applied."
+                ],
+                "safety_constraints": ["The guarded control remains successful."],
+                "post_change_replay_mode": "verified_fail_first",
+                "original_scenario_experiment_ids": ["exp-1"],
+            },
         },
         "scope_evidence": {
             "scope_level": "single_path",
@@ -1112,6 +1123,17 @@ def _strict_ticket(*, kinds: list[str], breadth: dict[str, int]) -> dict[str, ob
                     "evidence_refs": [mechanism_evidence["mechanism_evidence_id"]],
                 }
             ],
+            "outcome_strategy_review": {
+                "verdict": "sufficient",
+                "semantic_relation_assessment": (
+                    "The strategy requires the useful guard result on the unchanged "
+                    "verified fail-first replay, not merely removal of the failure marker."
+                ),
+                "proves_intended_operation": True,
+                "problem_coverage": "full",
+                "residual_untested_paths": [],
+                "evidence_refs": [mechanism_evidence["mechanism_evidence_id"]],
+            },
         },
         "change_surface": {"user_visible": True, "kinds": kinds, "notes": "Grounded"},
     }
@@ -1222,7 +1244,7 @@ def _strict_ticket(*, kinds: list[str], breadth: dict[str, int]) -> dict[str, ob
         "repo_revision": plan["repo_revision"],
         "targets": [dict(target) for target in plan["change_targets"]],
     }
-    plan = bind_plan_outcome_oracle(plan, research=research)
+    plan = bind_plan_outcome_oracle(plan, research=research, selection=selection)
     plan = assign_plan_revision_id(plan)
     return {
         "title": "Grounded change",

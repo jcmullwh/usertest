@@ -213,6 +213,169 @@ def test_outcome_role_alignment_rejects_live_or_mitigation_reclassification() ->
         )
 
 
+@pytest.mark.parametrize(
+    ("requires_live", "expected_state", "expected_roles"),
+    [
+        (False, "resolved", ("original_scenario",)),
+        (True, "resolved", ("original_scenario", "live")),
+        (
+            False,
+            "mitigated",
+            ("original_scenario", "mitigation_effect"),
+        ),
+        (
+            True,
+            "mitigated",
+            ("original_scenario", "live", "mitigation_effect"),
+        ),
+    ],
+)
+def test_premerge_executability_selects_only_mandatory_outcome_roles(
+    requires_live: bool,
+    expected_state: str,
+    expected_roles: tuple[str, ...],
+) -> None:
+    assert progression._mandatory_premerge_outcome_roles(
+        requires_live=requires_live,
+        expected_state=expected_state,
+    ) == expected_roles
+
+
+def _outcome_roles_with_commands(**commands: str) -> dict[str, object]:
+    return {
+        "verification_contract": {
+            "outcome_roles": {
+                role: {"commands": [command]}
+                for role, command in commands.items()
+            }
+        }
+    }
+
+
+@pytest.mark.parametrize(
+    ("command", "expected_reason"),
+    [
+        (
+            "python -B -m pytest -q tests/missing.py::test_expected",
+            "pytest_target_path_missing",
+        ),
+        (
+            "python -m pytest -q tests/test_contract.py::test_missing",
+            "pytest_node_missing",
+        ),
+    ],
+)
+def test_premerge_executability_blocks_missing_mandatory_pytest_path_or_node(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command: str,
+    expected_reason: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    test_path = workspace / "tests" / "test_contract.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text("def test_present():\n    assert True\n", encoding="utf-8")
+    monkeypatch.setattr(
+        progression,
+        "_git",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="a" * 40 + "\n"),
+    )
+    receipt_path = tmp_path / "runs" / "outcome_contract_executability.json"
+
+    with pytest.raises(progression.OutcomeContractNotExecutable) as raised:
+        progression._require_mandatory_outcome_commands_executable(
+            workspace=workspace,
+            selected_provenance=_outcome_roles_with_commands(live=command),
+            mandatory_roles=("live",),
+            verified_implementation_head="a" * 40,
+            receipt_path=receipt_path,
+        )
+
+    assert raised.value.receipt_path == receipt_path
+    assert raised.value.failures[0]["reason"] == expected_reason
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    assert receipt["status"] == "correction_required"
+    assert receipt["failure_count"] == 1
+    assert receipt["mandatory_roles"] == ["live"]
+
+
+def test_premerge_executability_accepts_existing_static_pytest_node_without_collection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    test_path = workspace / "tests" / "test_contract.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text(
+        "class TestContract:\n"
+        "    def test_exact(self):\n"
+        "        assert True\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        progression,
+        "_git",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="b" * 40 + "\n"),
+    )
+    monkeypatch.setattr(
+        progression,
+        "_collect_only_node_status",
+        lambda **_: pytest.fail("static node must not invoke collect-only"),
+    )
+    receipt_path = tmp_path / "runs" / "outcome_contract_executability.json"
+
+    receipt = progression._require_mandatory_outcome_commands_executable(
+        workspace=workspace,
+        selected_provenance=_outcome_roles_with_commands(
+            original_scenario=(
+                "python -B -m pytest -q "
+                "tests/test_contract.py::TestContract::test_exact"
+            )
+        ),
+        mandatory_roles=("original_scenario",),
+        verified_implementation_head="b" * 40,
+        receipt_path=receipt_path,
+    )
+
+    assert receipt["status"] == "passed"
+    assert receipt["failure_count"] == 0
+    assert receipt["checks"][0]["status"] == "verified_static"
+
+
+def test_premerge_executability_retains_unknown_command_forms_without_overblocking(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setattr(
+        progression,
+        "_git",
+        lambda *_args, **_kwargs: SimpleNamespace(stdout="c" * 40 + "\n"),
+    )
+    receipt_path = tmp_path / "runs" / "outcome_contract_executability.json"
+
+    receipt = progression._require_mandatory_outcome_commands_executable(
+        workspace=workspace,
+        selected_provenance=_outcome_roles_with_commands(
+            mitigation_effect="custom-verifier verify --live"
+        ),
+        mandatory_roles=("mitigation_effect",),
+        verified_implementation_head="c" * 40,
+        receipt_path=receipt_path,
+    )
+
+    assert receipt["status"] == "passed"
+    assert receipt["checks"] == [
+        {
+            "role": "mitigation_effect",
+            "command_index": 0,
+            "command": "custom-verifier verify --live",
+            "status": "reviewable_unknown_command_form",
+        }
+    ]
+
+
 def _install_progression_fakes(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -285,6 +448,13 @@ def _install_progression_fakes(
         return dict(current_state)
 
     monkeypatch.setattr(progression, "_transition", _fake_transition)
+    # These tests isolate role selection and state movement. Terminal provenance
+    # itself has dedicated coverage below, including the newly-terminal call site.
+    monkeypatch.setattr(
+        progression,
+        "_require_terminal_outcome_provenance",
+        lambda **_: None,
+    )
 
     @contextmanager
     def _fake_worktree(**_kwargs):
@@ -482,6 +652,96 @@ def test_progression_runs_only_causally_required_roles(
         assert any("not claimed resolved" in risk for risk in state["remaining_risks"])
 
 
+def test_amended_progression_reruns_roles_at_correction_and_finishes_mitigated(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state, roles, ticket_path = _install_progression_fakes(
+        monkeypatch,
+        tmp_path,
+        expected_state="mitigated",
+        requires_live=False,
+    )
+    implementation_commit = "a" * 40
+    execution_commit = "b" * 40
+    amendment_id = "outcome_verification_amendment:" + "c" * 64
+    state["state"] = "unverified"
+    state["verification_amendment"] = {
+        "schema_version": 1,
+        "kind": "outcome_verification_amendment",
+        "implementation_merged_commit": implementation_commit,
+        "target_branch": "dev",
+        "verification_commit": execution_commit,
+        "verification_pr_url": "https://example.invalid/pull/215",
+        "recorded_at": "2026-07-15T12:00:00Z",
+        "amendment_id": amendment_id,
+    }
+    state["original_scenario_evidence"] = [
+        {
+            "kind": "runner_outcome_role",
+            "reference": "legacy-implementation-receipt",
+            "result": "passed",
+        }
+    ]
+    observed_worktree: dict[str, object] = {}
+    observed_provenance: list[tuple[str, str, str | None]] = []
+
+    @contextmanager
+    def _capture_worktree(**kwargs):
+        observed_worktree.update(kwargs)
+        yield tmp_path / "workspace"
+
+    def _capture_role(*, role: str, current: dict[str, object], **_kwargs):
+        roles.append(role)
+        observed_provenance.append(
+            progression._verification_execution_provenance(current)
+        )
+        return {
+            "kind": "runner_outcome_role",
+            "reference": f"amended-{role}",
+            "result": "passed",
+        }
+
+    monkeypatch.setattr(
+        progression,
+        "clean_merged_commit_worktree",
+        _capture_worktree,
+    )
+    monkeypatch.setattr(progression, "_run_role", _capture_role)
+
+    result = progression.progress_post_merge_outcome(
+        repo_root=tmp_path,
+        owner_root=tmp_path,
+        ticket_path=ticket_path,
+        ledger_path=tmp_path / "ledger.yaml",
+    )
+
+    assert result.complete is True
+    assert result.final_state == "mitigated"
+    assert roles == ["original_scenario", "mitigation_effect"]
+    assert observed_worktree["merged_commit"] == execution_commit
+    assert observed_provenance == [
+        (implementation_commit, execution_commit, amendment_id),
+        (implementation_commit, execution_commit, amendment_id),
+    ]
+
+
+def test_successful_role_removes_stale_generic_blocker_but_retains_plan_residual() -> None:
+    retained = progression._remaining_risks_after_role(
+        {
+            "remaining_risks": [
+                "Post-merge outcome verification is blocked: outcome_oracle_asset_missing",
+                "Protected external identities can still prevent physical reclamation.",
+            ]
+        },
+        completed_role="mitigation_effect",
+    )
+
+    assert retained == [
+        "Protected external identities can still prevent physical reclamation."
+    ]
+
+
 def test_failed_original_scenario_is_retained_as_unverified_not_success(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -540,6 +800,106 @@ def test_structural_terminal_state_is_not_reported_complete_without_provenance(
     assert result.final_state == "resolved"
     assert roles == []
     assert "artifact hash mismatch" in str(result.detail)
+
+
+def test_new_terminal_transition_is_verified_before_reporting_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state, roles, ticket_path = _install_progression_fakes(
+        monkeypatch,
+        tmp_path,
+        expected_state="resolved",
+        requires_live=False,
+    )
+    verified_states: list[str] = []
+
+    def _capture_terminal(*, current: dict[str, object], **_kwargs) -> None:
+        verified_states.append(str(current["state"]))
+
+    monkeypatch.setattr(
+        progression,
+        "_require_terminal_outcome_provenance",
+        _capture_terminal,
+    )
+
+    result = progression.progress_post_merge_outcome(
+        repo_root=tmp_path,
+        owner_root=tmp_path,
+        ticket_path=ticket_path,
+        ledger_path=tmp_path / "ledger.yaml",
+    )
+
+    assert result.complete is True
+    assert roles == ["original_scenario"]
+    assert state["state"] == "resolved"
+    assert verified_states == ["resolved"]
+
+
+def test_new_terminal_transition_with_failed_provenance_is_blocked_not_complete(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    state, roles, ticket_path = _install_progression_fakes(
+        monkeypatch,
+        tmp_path,
+        expected_state="resolved",
+        requires_live=False,
+    )
+    monkeypatch.setattr(
+        progression,
+        "_require_terminal_outcome_provenance",
+        lambda **_: (_ for _ in ()).throw(ValueError("retained review head mismatch")),
+    )
+
+    result = progression.progress_post_merge_outcome(
+        repo_root=tmp_path,
+        owner_root=tmp_path,
+        ticket_path=ticket_path,
+        ledger_path=tmp_path / "ledger.yaml",
+    )
+
+    assert result.complete is False
+    assert result.status == "blocked"
+    assert result.final_state == "resolved"
+    assert state["state"] == "resolved"
+    assert roles == ["original_scenario"]
+    assert "retained review head mismatch" in str(result.detail)
+
+
+def test_terminal_provenance_uses_local_and_configured_trusted_run_roots(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = (tmp_path / "controller").resolve()
+    owner_root = (tmp_path / "owner").resolve()
+    configured_root = (tmp_path / "retained-on-other-volume").resolve()
+    monkeypatch.setenv(
+        progression._OUTCOME_TRUSTED_RUNS_ROOT_ENV,
+        str(configured_root),
+    )
+    observed: dict[str, object] = {}
+
+    def _capture(record, **kwargs):
+        observed["record"] = record
+        observed.update(kwargs)
+        return {"verified": True, "errors": []}
+
+    monkeypatch.setattr(progression, "verify_outcome_record_provenance", _capture)
+    current = {"state": "mitigated"}
+
+    progression._require_terminal_outcome_provenance(
+        current=current,
+        repo_root=repo_root,
+        owner_root=owner_root,
+    )
+
+    assert observed["record"] is current
+    assert observed["trusted_runs_roots"] == [
+        (repo_root / "runs").resolve(),
+        configured_root,
+    ]
+    assert observed["owner_roots"] == [owner_root]
 
 
 def test_unverified_retry_reuses_passed_original_and_runs_only_missing_live_role(
@@ -776,10 +1136,19 @@ def test_refresh_continues_unrelated_work_when_merged_outcome_is_unverified(
     ],
 )
 def test_real_post_merge_replay_requires_positive_behavior_for_resolution(
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     implemented_source: str,
     expected_status: str,
 ) -> None:
+    # This integration test exercises the causal replay runner. Retained review and
+    # merge provenance are independently covered by backlog_repo and progression
+    # terminal-gate tests.
+    monkeypatch.setattr(
+        progression,
+        "_require_terminal_outcome_provenance",
+        lambda **_: None,
+    )
     owner_root = tmp_path / "owner"
     owner_root.mkdir()
     subprocess.run(["git", "init"], cwd=owner_root, check=True, capture_output=True)

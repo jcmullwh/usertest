@@ -10,8 +10,10 @@ from runner_core.verification_prompts import _build_verification_followup_prompt
 from usertest_implement.ci import _ci_timeout_seconds_arg, _git_head_sha, _wait_for_ci_success
 from usertest_implement.implementation_provenance import record_verified_implementation_head
 from usertest_implement.resume_state import (
+    LIFECYCLE_AWAITING_REVIEW,
     LIFECYCLE_CI_FAILED,
     LIFECYCLE_IMPLEMENTED_LOCAL,
+    LIFECYCLE_MERGE_READY,
     LIFECYCLE_REVIEW_CHANGES_REQUESTED,
     LIFECYCLE_VERIFICATION_FAILED,
     LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
@@ -41,7 +43,14 @@ _VALID_VERIFICATION_RESUME_STATES = {
     LIFECYCLE_IMPLEMENTED_LOCAL,
 }
 _VALID_PR_RESUME_STATES = {
+    # An approved review observed while CI was still pending is represented by
+    # awaiting_review; a later terminal gate can still require the same author.
+    LIFECYCLE_AWAITING_REVIEW,
     LIFECYCLE_CI_FAILED,
+    # A previously accepted exact head can become operationally blocked by a
+    # terminal CI failure or a real merge conflict. The live-gate refresh in
+    # _cmd_resume_pr still no-ops when that condition has already recovered.
+    LIFECYCLE_MERGE_READY,
     LIFECYCLE_REVIEW_CHANGES_REQUESTED,
 }
 _PROMPT_ARTIFACT_MAX_CHARS = 5000
@@ -1130,6 +1139,7 @@ def _cmd_resume_pr(
         raise SystemExit("Cannot resume PR-backed run: ticket_ref.json must contain an object.")
 
     selected = _selected_from_resume_state(resume_state=resume_state, ticket_ref=ticket_ref)
+    correction_origin = _clean_str(getattr(args, "correction_origin", None))
     supervisor_instructions = _resume_supervisor_instructions(
         args=args,
         ticket_ref=ticket_ref,
@@ -1334,6 +1344,7 @@ def _cmd_resume_pr(
                     "unresolved_review_findings": _review_findings_for_resume(review_summary),
                     "failing_check_pointers": _failing_check_pointers(pr_context),
                     "supervisor_instructions": supervisor_instructions,
+                    "correction_origin": correction_origin,
                     "run_request": {
                         "repo": request.repo,
                         "ref": request.ref,
@@ -1386,6 +1397,7 @@ def _cmd_resume_pr(
             "branch": ref,
             "implementation_author_continuity": author_continuity,
             "supervisor_instructions": supervisor_instructions,
+            "correction_origin": correction_origin,
             "runs_dir": str(effective_runs_dir),
             "source_evidence_paths": _artifact_path_map_for_pr_resume(
                 run_dir=run_dir,
@@ -1651,6 +1663,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             f"{allowed!r}; got {lifecycle!r} in {state_path}."
         )
     implemented_local_correction = lifecycle == LIFECYCLE_IMPLEMENTED_LOCAL
+    correction_origin = _clean_str(getattr(args, "correction_origin", None))
 
     missing = [name for name in _REQUIRED_RESUME_ARTIFACTS if not (run_dir / name).exists()]
     if missing:
@@ -1860,6 +1873,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
                             retained_oracle_transport_summary
                         ),
                         "supervisor_instructions": supervisor_instructions,
+                        "correction_origin": correction_origin,
                         "runs_dir": str(effective_runs_dir),
                         "commit": bool(getattr(args, "commit", False)),
                     },
@@ -1891,6 +1905,7 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             "workspace_strategy": workspace_strategy,
             "implementation_author_continuity": author_continuity,
             "supervisor_instructions": supervisor_instructions,
+            "correction_origin": correction_origin,
             "retained_oracle_asset_transport": retained_oracle_transport_summary,
             "runs_dir": str(effective_runs_dir),
             "source_evidence_paths": {

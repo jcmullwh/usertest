@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any
 from uuid import UUID
@@ -497,4 +498,20 @@ def write_ticket_resume_state(
         ticket_path_override=ticket_path_override,
     )
     _write_json(run_dir / RESUME_STATE_ARTIFACT_NAME, state)
+    try:
+        from usertest_implement.pipeline_efficiency import (
+            write_ticket_pipeline_efficiency,
+        )
+
+        write_ticket_pipeline_efficiency(
+            run_dir=run_dir,
+            review_run_dir=review_run_dir,
+            resume_state=state,
+        )
+    except Exception as exc:  # noqa: BLE001 - telemetry must never become a lifecycle gate
+        warnings.warn(
+            f"Failed to write observational pipeline efficiency telemetry: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return state

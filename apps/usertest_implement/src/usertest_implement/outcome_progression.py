@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
+import sys
 import uuid
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
@@ -13,7 +16,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from backlog_repo import extract_outcome_markdown, verify_outcome_record_provenance
+from backlog_repo import (
+    STALE_OUTCOME_BLOCKER_RISK_PREFIX,
+    extract_outcome_markdown,
+    verify_outcome_record_provenance,
+)
 from backlog_repo.ticket_provenance import is_generated_backlog_ticket
 from runner_core import run_outcome_evidence_role
 
@@ -80,6 +87,30 @@ class OutcomeRoleDidNotPass(RuntimeError):
         reason = "timed out" if timed_out else "did not satisfy its causal predicates"
         super().__init__(
             f"Post-merge {role} role {reason}; retained artifact: {artifact_path}"
+        )
+
+
+class OutcomeContractNotExecutable(RuntimeError):
+    """A mandatory, recognized outcome command cannot run on the reviewed head."""
+
+    def __init__(
+        self,
+        *,
+        receipt_path: Path,
+        failures: list[dict[str, Any]],
+    ) -> None:
+        self.receipt_path = receipt_path
+        self.failures = tuple(dict(item) for item in failures)
+        first = self.failures[0] if self.failures else {}
+        role = str(first.get("role") or "unknown")
+        command = str(first.get("command") or "unknown")
+        reason = str(first.get("reason") or "mandatory command is not executable")
+        remaining = len(self.failures) - 1
+        suffix = f"; {remaining} additional failure(s)" if remaining > 0 else ""
+        super().__init__(
+            "Mandatory outcome command is not executable on the exact reviewed head: "
+            f"role={role}; command={command!r}; reason={reason}{suffix}; "
+            f"retained receipt: {receipt_path}"
         )
 
 
@@ -355,16 +386,21 @@ def _has_bound_passing_role_evidence(
             continue
         if bound is None:
             bound = _bound_provenance(selected_provenance, current)
+        implementation_commit, execution_commit, amendment_id = (
+            _verification_execution_provenance(current)
+        )
         try:
             revalidated = validate_bound_outcome_role_receipt(
                 role_artifact_path=Path(artifact_path),
                 evidence_kind=role,
                 case_id=str(current["case_id"]),
                 plan_revision_id=str(current["plan_revision_id"]),
-                merged_commit=str(current["merged_commit"]),
+                merged_commit=implementation_commit,
                 expected_ticket_provenance=bound,
                 trusted_runs_root=trusted_runs_root,
                 expected_role_artifact_sha256=artifact_sha256,
+                execution_commit=execution_commit,
+                verification_amendment_id=amendment_id,
             )
         except (OSError, ValueError):
             continue
@@ -379,9 +415,16 @@ def _require_terminal_outcome_provenance(
     repo_root: Path,
     owner_root: Path,
 ) -> None:
+    trusted_runs_roots: list[Path] = []
+    for candidate in (
+        (repo_root / "runs").resolve(),
+        _resolve_outcome_trusted_runs_root(repo_root=repo_root),
+    ):
+        if candidate not in trusted_runs_roots:
+            trusted_runs_roots.append(candidate)
     verification = verify_outcome_record_provenance(
         current,
-        trusted_runs_roots=[(repo_root / "runs").resolve()],
+        trusted_runs_roots=trusted_runs_roots,
         owner_roots=[owner_root.resolve()],
     )
     if verification.get("verified") is not True:
@@ -419,10 +462,11 @@ def _remaining_risks_after_role(
             continue
         if risk.startswith(f"Post-merge {completed_role} verification did not pass"):
             continue
-        if (
-            risk.startswith("Post-merge outcome verification is blocked:")
-            and completed_role in risk
-        ):
+        # This prefix is runner-owned transient blockage, not a researched plan
+        # residual.  Reaching this function means a required role has now passed,
+        # so any earlier setup, transport, or role-specific blocker is stale even
+        # when its detail did not contain the eventual role name.
+        if risk.startswith(STALE_OUTCOME_BLOCKER_RISK_PREFIX):
             continue
         if risk and risk not in kept:
             kept.append(risk)
@@ -486,6 +530,22 @@ def _bound_provenance(
     return {**selected_provenance, "verified_implementation_head": verified_head.strip()}
 
 
+def _verification_execution_provenance(
+    current: dict[str, Any],
+) -> tuple[str, str, str | None]:
+    implementation_commit = str(current.get("merged_commit") or "").strip().casefold()
+    if not implementation_commit:
+        raise ValueError("Durable outcome is missing merged_commit")
+    amendment = current.get("verification_amendment")
+    if not isinstance(amendment, dict):
+        return implementation_commit, implementation_commit, None
+    execution_commit = str(amendment.get("verification_commit") or "").strip().casefold()
+    amendment_id = str(amendment.get("amendment_id") or "").strip()
+    if not execution_commit or not amendment_id:
+        raise ValueError("Durable outcome verification amendment is incomplete")
+    return implementation_commit, execution_commit, amendment_id
+
+
 def _run_role(
     *,
     role: str,
@@ -503,9 +563,15 @@ def _run_role(
     if not isinstance(role_contract, dict):
         raise ValueError(f"Selected stage-6 plan does not define outcome role: {role}")
     bound = _bound_provenance(selected_provenance, current)
+    implementation_commit, execution_commit, amendment_id = (
+        _verification_execution_provenance(current)
+    )
     runner_kwargs: dict[str, Any] = {}
     if isinstance(role_contract.get("oracle"), dict):
         runner_kwargs["trusted_oracle_assets_root"] = trusted_oracle_assets_root
+    if amendment_id is not None:
+        runner_kwargs["execution_commit"] = execution_commit
+        runner_kwargs["verification_amendment_id"] = amendment_id
     artifact = role_runner(
         workspace=workspace,
         output_path=output_path,
@@ -513,7 +579,7 @@ def _run_role(
         role_contract=role_contract,
         case_id=str(current["case_id"]),
         plan_revision_id=str(current["plan_revision_id"]),
-        merged_commit=str(current["merged_commit"]),
+        merged_commit=implementation_commit,
         verification_contract_sha256=str(
             selected_provenance["verification_contract_sha256"]
         ),
@@ -533,9 +599,17 @@ def _run_role(
         evidence_kind=role,
         case_id=str(current["case_id"]),
         plan_revision_id=str(current["plan_revision_id"]),
-        merged_commit=str(current["merged_commit"]),
+        merged_commit=implementation_commit,
         expected_ticket_provenance=bound,
         trusted_runs_root=trusted_runs_root,
+        **(
+            {
+                "execution_commit": execution_commit,
+                "verification_amendment_id": amendment_id,
+            }
+            if amendment_id is not None
+            else {}
+        ),
     )
     return {
         "kind": "runner_outcome_role",
@@ -545,6 +619,262 @@ def _run_role(
         "proof_scope": receipt.get("proof_scope"),
         "runner_receipt": receipt,
     }
+
+
+def _mandatory_premerge_outcome_roles(
+    *,
+    requires_live: bool,
+    expected_state: str,
+) -> tuple[str, ...]:
+    roles = ["original_scenario"]
+    if requires_live:
+        roles.append("live")
+    if expected_state == "mitigated":
+        roles.append("mitigation_effect")
+    return tuple(roles)
+
+
+def _python_pytest_node_targets(command: str) -> tuple[str, ...] | None:
+    """Return pytest node targets only for the narrow command form we understand.
+
+    Other command forms remain a semantic-review concern. This preflight must not
+    turn parser incompleteness into a hard merge gate.
+    """
+
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if not argv:
+        return None
+    executable = Path(argv[0]).name.casefold()
+    if not (
+        executable in {"python", "python.exe", "python3", "python3.exe", "py", "py.exe"}
+        or re.fullmatch(r"python\d+(?:\.\d+)?(?:\.exe)?", executable)
+    ):
+        return None
+    try:
+        module_index = argv.index("-m")
+    except ValueError:
+        return None
+    if module_index + 1 >= len(argv) or argv[module_index + 1] != "pytest":
+        return None
+    targets = tuple(
+        token
+        for token in argv[module_index + 2 :]
+        if "::" in token and token.split("::", 1)[0].casefold().endswith(".py")
+    )
+    return targets or None
+
+
+def _static_python_node_present(path: Path, node_id: str) -> bool | None:
+    """Return true/false for a statically decidable node, else unknown."""
+
+    try:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+    except (OSError, SyntaxError, UnicodeError):
+        return None
+    parts = [part.split("[", 1)[0] for part in node_id.split("::")]
+    if not parts or any(not part for part in parts):
+        return None
+    body: list[ast.stmt] = tree.body
+    for index, part in enumerate(parts):
+        match = next(
+            (
+                node
+                for node in body
+                if isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == part
+            ),
+            None,
+        )
+        if match is None:
+            return False
+        if index < len(parts) - 1:
+            if not isinstance(match, ast.ClassDef):
+                return False
+            body = match.body
+    return True
+
+
+def _collect_only_node_status(*, workspace: Path, target: str) -> dict[str, Any]:
+    """Disambiguate dynamically generated nodes without executing their test bodies."""
+
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", "--collect-only", "-q", target],
+            cwd=str(workspace),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except OSError as exc:
+        return {
+            "status": "reviewable_unknown",
+            "detail": f"collect-only could not start: {type(exc).__name__}: {exc}",
+        }
+    stdout = proc.stdout or ""
+    stderr = proc.stderr or ""
+    if proc.returncode == 0:
+        return {
+            "status": "verified_collect_only",
+            "collect_only_exit_code": 0,
+        }
+    diagnostic = f"{stdout}\n{stderr}".casefold()
+    definite_missing = "not found:" in diagnostic and (
+        "no match in any of" in diagnostic or "found no collectors" in diagnostic
+    )
+    if definite_missing:
+        return {
+            "status": "correction_required",
+            "reason": "pytest_node_missing",
+            "collect_only_exit_code": int(proc.returncode),
+            "collect_only_output_excerpt": (stdout + stderr)[-4000:],
+        }
+    return {
+        "status": "reviewable_unknown",
+        "detail": "collect-only did not establish whether the node exists",
+        "collect_only_exit_code": int(proc.returncode),
+        "collect_only_output_excerpt": (stdout + stderr)[-4000:],
+    }
+
+
+def _inspect_python_pytest_target(
+    *,
+    workspace: Path,
+    target: str,
+) -> dict[str, Any]:
+    path_text, node_id = target.split("::", 1)
+    candidate = Path(path_text)
+    if candidate.is_absolute():
+        return {
+            "status": "correction_required",
+            "reason": "pytest_target_outside_workspace",
+            "path": path_text,
+            "node_id": node_id,
+        }
+    resolved = (workspace / candidate).resolve()
+    if not resolved.is_relative_to(workspace):
+        return {
+            "status": "correction_required",
+            "reason": "pytest_target_outside_workspace",
+            "path": path_text,
+            "node_id": node_id,
+        }
+    relative_path = resolved.relative_to(workspace).as_posix()
+    if not resolved.is_file():
+        return {
+            "status": "correction_required",
+            "reason": "pytest_target_path_missing",
+            "path": relative_path,
+            "node_id": node_id,
+        }
+    static_present = _static_python_node_present(resolved, node_id)
+    if static_present is True:
+        return {
+            "status": "verified_static",
+            "path": relative_path,
+            "node_id": node_id,
+        }
+    collected = _collect_only_node_status(workspace=workspace, target=target)
+    return {
+        **collected,
+        "path": relative_path,
+        "node_id": node_id,
+        **(
+            {"static_result": "missing"}
+            if static_present is False
+            else {"static_result": "unresolved"}
+        ),
+    }
+
+
+def _write_outcome_executability_receipt(path: Path, receipt: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    temporary.write_text(
+        json.dumps(receipt, indent=2, ensure_ascii=False, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporary, path)
+
+
+def _require_mandatory_outcome_commands_executable(
+    *,
+    workspace: Path,
+    selected_provenance: dict[str, Any],
+    mandatory_roles: tuple[str, ...],
+    verified_implementation_head: str,
+    receipt_path: Path,
+) -> dict[str, Any]:
+    """Check recognized mandatory commands on the exact clean reviewed head."""
+
+    workspace = workspace.expanduser().resolve()
+    contract = selected_provenance.get("verification_contract")
+    roles_raw = contract.get("outcome_roles") if isinstance(contract, dict) else None
+    roles = roles_raw if isinstance(roles_raw, dict) else {}
+    checks: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for role in mandatory_roles:
+        role_contract = roles.get(role)
+        commands_raw = role_contract.get("commands") if isinstance(role_contract, dict) else None
+        commands = commands_raw if isinstance(commands_raw, list) else []
+        if not commands:
+            checks.append(
+                {
+                    "role": role,
+                    "status": "reviewable_no_recognized_command",
+                    "detail": "Role has no command requiring this narrow pytest-node check.",
+                }
+            )
+            continue
+        for command_index, command_raw in enumerate(commands):
+            command = command_raw if isinstance(command_raw, str) else ""
+            targets = _python_pytest_node_targets(command)
+            if targets is None:
+                checks.append(
+                    {
+                        "role": role,
+                        "command_index": command_index,
+                        "command": command,
+                        "status": "reviewable_unknown_command_form",
+                    }
+                )
+                continue
+            for target in targets:
+                result = _inspect_python_pytest_target(
+                    workspace=workspace,
+                    target=target,
+                )
+                check = {
+                    "role": role,
+                    "command_index": command_index,
+                    "command": command,
+                    "recognized_form": "python_-m_pytest_node",
+                    "target": target,
+                    **result,
+                }
+                checks.append(check)
+                if result.get("status") == "correction_required":
+                    failures.append(check)
+    receipt = {
+        "schema_version": 1,
+        "status": "correction_required" if failures else "passed",
+        "verified_implementation_head": verified_implementation_head,
+        # ``clean_merged_commit_worktree`` already verifies HEAD before yielding.
+        "workspace_head": verified_implementation_head,
+        "mandatory_roles": list(mandatory_roles),
+        "checks": checks,
+        "failure_count": len(failures),
+        "recorded_at_utc": _utc_now_z(),
+    }
+    _write_outcome_executability_receipt(receipt_path, receipt)
+    if failures:
+        raise OutcomeContractNotExecutable(
+            receipt_path=receipt_path,
+            failures=failures,
+        )
+    return receipt
 
 
 def verify_premerge_original_scenario(
@@ -592,13 +922,27 @@ def verify_premerge_original_scenario(
         / "original_scenario"
         / "outcome_role.json"
     )
+    mandatory_roles = _mandatory_premerge_outcome_roles(
+        requires_live=_requires_live_from_markdown(ticket_markdown),
+        expected_state=expected_state,
+    )
+    executability_receipt_path = (
+        output_path.parent.parent / "outcome_contract_executability.json"
+    )
     with clean_merged_commit_worktree(
         repository=owner_root,
         merged_commit=verified_head,
         worktrees_root=_resolve_outcome_worktrees_root(repo_root=repo_root),
         fingerprint=fingerprint,
     ) as workspace:
-        return _run_role(
+        _require_mandatory_outcome_commands_executable(
+            workspace=workspace,
+            selected_provenance=selected_provenance,
+            mandatory_roles=mandatory_roles,
+            verified_implementation_head=verified_head.strip(),
+            receipt_path=executability_receipt_path,
+        )
+        evidence = _run_role(
             role="original_scenario",
             workspace=workspace,
             output_path=output_path,
@@ -608,6 +952,12 @@ def verify_premerge_original_scenario(
             trusted_oracle_assets_root=_resolve_outcome_trusted_runs_root(repo_root=repo_root),
             role_runner=role_runner or run_outcome_evidence_role,
         )
+        return {
+            **evidence,
+            "outcome_contract_executability_receipt": str(
+                executability_receipt_path
+            ),
+        }
 
 
 def _restore_test_verified_baseline(
@@ -745,9 +1095,10 @@ def progress_post_merge_outcome(
         worktrees_root = _resolve_outcome_worktrees_root(repo_root=repo_root)
         runner = role_runner or run_outcome_evidence_role
         if roles_needed:
+            _, execution_commit, _ = _verification_execution_provenance(current)
             with clean_merged_commit_worktree(
                 repository=owner_root,
-                merged_commit=str(current["merged_commit"]),
+                merged_commit=execution_commit,
                 worktrees_root=worktrees_root,
                 fingerprint=selected.fingerprint,
             ) as workspace:
@@ -879,6 +1230,11 @@ def progress_post_merge_outcome(
                 "Post-merge roles passed but did not reach the researched outcome: "
                 f"expected={expected_state} observed={current['state']}"
             )
+        _require_terminal_outcome_provenance(
+            current=current,
+            repo_root=repo_root,
+            owner_root=owner_root,
+        )
         return OutcomeProgressionResult(
             fingerprint=selected.fingerprint,
             ticket_path=ticket_path,
@@ -950,6 +1306,7 @@ def progress_pending_outcomes_before_refresh(
 
 
 __all__ = [
+    "OutcomeContractNotExecutable",
     "OutcomeProgressionResult",
     "clean_merged_commit_worktree",
     "expected_outcome_state_from_markdown",

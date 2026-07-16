@@ -918,7 +918,11 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
         productive_research,
         productive_option,
     )
-    productive_plan = _productive_plan(productive_research, productive_option)
+    productive_plan = _productive_plan(
+        productive_research,
+        productive_option,
+        productive_selection,
+    )
     productive_plan["target_contract"] = _target_contract(productive_plan)
     productive_plan = assign_plan_revision_id(productive_plan)
     productive_problem = _source_problem_record(

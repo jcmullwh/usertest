@@ -299,7 +299,14 @@ def test_implemented_local_resume_rejects_unavailable_author_session(
     )
     parser = build_parser()
     args = parser.parse_args(
-        ["--repo-root", str(tmp_path), "resume", "--run-dir", str(run_dir), "--no-docker"]
+        [
+            "--repo-root",
+            str(tmp_path),
+            "resume",
+            "--run-dir",
+            str(run_dir),
+            "--no-docker",
+        ]
     )
 
     with pytest.raises(SystemExit, match="exact Codex author session"):
@@ -1014,13 +1021,13 @@ def test_pr_resume_restarts_only_after_retained_same_author_context_exhaustion(
     assert "justified fresh-author continuation" in payload["prompt"]
 
 
-def test_pr_resume_ci_failure_prompt_includes_failing_check_pointers(
+def test_pr_resume_previously_merge_ready_prompt_includes_new_failing_check_pointers(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     run_dir, _, _, _ = _make_pr_resume_run(
-        tmp_path, lifecycle_state="ci_failed", review_decision="approved"
+        tmp_path, lifecycle_state="merge_ready", review_decision="approved"
     )
     monkeypatch.setattr(
         resume_commands, "_collect_pr_review_context", lambda **_: _pr_context(check_state="ERROR")
@@ -1053,6 +1060,41 @@ def test_pr_resume_ci_failure_prompt_includes_failing_check_pointers(
     ]
     assert "Failing check/log pointers" in payload["prompt"]
     assert "https://example.invalid/runs/current" in payload["prompt"]
+
+
+def test_pr_resume_approved_pending_state_can_correct_later_terminal_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    run_dir, _, _, _ = _make_pr_resume_run(
+        tmp_path,
+        lifecycle_state="awaiting_review",
+        review_decision="approved",
+    )
+    monkeypatch.setattr(
+        resume_commands,
+        "_collect_pr_review_context",
+        lambda **_: _pr_context(check_state="FAILURE"),
+    )
+    parser = build_parser()
+    args = parser.parse_args(
+        [
+            "--repo-root",
+            str(tmp_path),
+            "resume",
+            "--run-dir",
+            str(run_dir),
+            "--no-docker",
+            "--dry-run",
+        ]
+    )
+
+    assert resume_commands._cmd_resume(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["resume_kind"] == "pr"
+    assert payload["failing_check_pointers"][0]["state"] == "FAILURE"
+    assert "Lifecycle state: awaiting_review" in payload["prompt"]
 
 
 def test_pr_resume_noops_when_stale_ci_failure_is_currently_green(
@@ -1187,7 +1229,16 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
     )
     parser = build_parser()
     args = parser.parse_args(
-        ["--repo-root", str(tmp_path), "resume", "--run-dir", str(run_dir), "--no-docker"]
+        [
+            "--repo-root",
+            str(tmp_path),
+            "resume",
+            "--run-dir",
+            str(run_dir),
+            "--no-docker",
+            "--correction-origin",
+            "system_self_correction",
+        ]
     )
 
     assert resume_commands._cmd_resume(args) == 0
@@ -1209,3 +1260,5 @@ def test_pr_resume_runs_agent_then_commits_and_pushes_existing_pr_branch(
     handoff = json.loads((resumed_run / "handoff_summary.json").read_text(encoding="utf-8"))
     assert handoff["pr_created"] is True
     assert handoff["review_required"] is True
+    resume_ref = json.loads((resumed_run / "resume_ref.json").read_text(encoding="utf-8"))
+    assert resume_ref["correction_origin"] == "system_self_correction"

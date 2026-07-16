@@ -213,6 +213,54 @@ def _fail_first_stage5_roles() -> dict[str, object]:
     return roles
 
 
+def _derived_fail_first_stage5_roles() -> dict[str, object]:
+    roles = _fail_first_stage5_roles()
+    original = roles["original_scenario"]
+    assert isinstance(original, dict)
+    planned = original["oracle"]
+    assert isinstance(planned, dict)
+    selected = planned["selected_outcome_contract"]
+    assert isinstance(selected, dict)
+    positive = _origin_positive_contract(
+        experiment_id="experiment:original",
+        atom_id="atom:original",
+    )
+    retained = _staged_replay_oracle(
+        case_id="case:original",
+        experiment_id="experiment:original",
+        atom_id="atom:original",
+        contract=positive,
+    )
+    retained["repo_revision"] = planned["repo_revision"]
+    retained["outcome_oracle_id"] = "outcome_oracle:" + _sha256_json(
+        {
+            key: value
+            for key, value in retained.items()
+            if key != "outcome_oracle_id"
+        }
+    )
+    derived = {
+        key: value
+        for key, value in retained.items()
+        if key not in {"outcome_oracle_id", "positive_outcome_contracts"}
+    }
+    derived["scenario_kind"] = "fail_first_contract"
+    derived["selected_outcome_contract"] = selected
+    derived["stage5_fail_first_source"] = {
+        "schema_version": 1,
+        "kind": "verified_stage3_fail_first_source",
+        "source_outcome_oracle_id": retained["outcome_oracle_id"],
+        "source_scenario_kind": "original_replay",
+        "source_positive_outcome_contract_ids": [
+            positive["positive_outcome_contract_id"]
+        ],
+    }
+    derived["retained_stage3_oracle"] = retained
+    derived["outcome_oracle_id"] = "outcome_oracle:" + _sha256_json(derived)
+    original["oracle"] = derived
+    return roles
+
+
 def _sha256_json(value: object) -> str:
     return hashlib.sha256(
         json.dumps(
@@ -471,6 +519,106 @@ def test_fail_first_plan_export_uses_stage5_contract_without_inventing_positive_
     assert parsed["outcome_roles"]["mitigation_effect"]["command_bindings"][0][
         "selected_outcome_contract_id"
     ] == selected_id
+
+
+def test_derived_fail_first_round_trip_preserves_authenticated_stage3_source() -> None:
+    roles = _derived_fail_first_stage5_roles()
+
+    markdown = render_verification_contract_markdown(
+        ["python -m pytest tests/test_feature.py -q"],
+        outcome_roles=roles,
+    )
+    parsed = parse_verification_contract_markdown(markdown)
+
+    assert parsed is not None
+    oracle = parsed["outcome_roles"]["original_scenario"]["oracle"]
+    retained = oracle["retained_stage3_oracle"]
+    assert oracle["scenario_kind"] == "fail_first_contract"
+    assert "positive_outcome_contracts" not in oracle
+    assert retained["scenario_kind"] == "original_replay"
+    assert retained["positive_outcome_contracts"]
+    assert oracle["stage5_fail_first_source"]["source_outcome_oracle_id"] == (
+        retained["outcome_oracle_id"]
+    )
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        "outer_positive_contract",
+        "retained_contract",
+        "retained_execution",
+        "source_kind",
+    ],
+)
+def test_derived_fail_first_export_rejects_non_reversible_source_tampering(
+    tamper: str,
+) -> None:
+    roles = _derived_fail_first_stage5_roles()
+    original = roles["original_scenario"]
+    assert isinstance(original, dict)
+    oracle = original["oracle"]
+    assert isinstance(oracle, dict)
+    retained = oracle["retained_stage3_oracle"]
+    assert isinstance(retained, dict)
+    if tamper == "outer_positive_contract":
+        oracle["positive_outcome_contracts"] = retained["positive_outcome_contracts"]
+    elif tamper == "retained_contract":
+        contracts = retained["positive_outcome_contracts"]
+        assert isinstance(contracts, list)
+        contract = contracts[0]
+        assert isinstance(contract, dict)
+        contract["postconditions"] = []
+        contract["positive_outcome_contract_id"] = (
+            "positive_outcome_contract:"
+            + _sha256_json(
+                {
+                    key: value
+                    for key, value in contract.items()
+                    if key != "positive_outcome_contract_id"
+                }
+            )
+        )
+        retained["outcome_oracle_id"] = "outcome_oracle:" + _sha256_json(
+            {
+                key: value
+                for key, value in retained.items()
+                if key != "outcome_oracle_id"
+            }
+        )
+        source = oracle["stage5_fail_first_source"]
+        assert isinstance(source, dict)
+        source["source_outcome_oracle_id"] = retained["outcome_oracle_id"]
+        source["source_positive_outcome_contract_ids"] = [
+            contract["positive_outcome_contract_id"]
+        ]
+    elif tamper == "retained_execution":
+        execution = retained["execution"]
+        assert isinstance(execution, dict)
+        execution["argv"] = ["python", "tests/unrelated.py"]
+        retained["outcome_oracle_id"] = "outcome_oracle:" + _sha256_json(
+            {
+                key: value
+                for key, value in retained.items()
+                if key != "outcome_oracle_id"
+            }
+        )
+        source = oracle["stage5_fail_first_source"]
+        assert isinstance(source, dict)
+        source["source_outcome_oracle_id"] = retained["outcome_oracle_id"]
+    else:
+        source = oracle["stage5_fail_first_source"]
+        assert isinstance(source, dict)
+        source["source_scenario_kind"] = "faithful_replay"
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _sha256_json(
+        {key: value for key, value in oracle.items() if key != "outcome_oracle_id"}
+    )
+
+    with pytest.raises(ValueError, match="fail_first_planned_oracle_invalid"):
+        render_verification_contract_markdown(
+            ["python -m pytest tests/test_feature.py -q"],
+            outcome_roles=roles,
+        )
 
 
 def test_fail_first_plan_export_rejects_missing_stage5_contract() -> None:

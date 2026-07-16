@@ -4,7 +4,10 @@ from __future__ import annotations
 from backlog_repo import extract_outcome_markdown
 from runner_core import run_outcome_evidence_role
 
-from usertest_implement.ledger import transition_outcome_files
+from usertest_implement.ledger import (
+    bind_outcome_verification_amendment_files,
+    transition_outcome_files,
+)
 from usertest_implement.outcome_evidence import (
     validate_bound_outcome_role_receipt,
     validate_bound_runner_verification,
@@ -34,6 +37,86 @@ _OUTCOME_UPDATE_FIELDS = frozenset(
         "recurrence_check",
     }
 )
+
+
+def _resolve_git_commit(repository: Path, commit: str, *, label: str) -> str:
+    proc = subprocess.run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-C",
+            str(repository),
+            "rev-parse",
+            "--verify",
+            f"{commit.strip()}^{{commit}}",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    resolved = str(proc.stdout or "").strip().casefold()
+    if proc.returncode != 0 or re.fullmatch(r"[0-9a-f]{40}", resolved) is None:
+        raise ValueError(f"Outcome verification {label} commit is unavailable: {commit}")
+    return resolved
+
+
+def _git_is_ancestor(repository: Path, *, ancestor: str, descendant: str) -> bool:
+    proc = subprocess.run(
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository}",
+            "-C",
+            str(repository),
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return proc.returncode == 0
+
+
+def _verification_commit_on_target_branch(
+    repository: Path,
+    *,
+    verification_commit: str,
+    target_branch: str,
+) -> bool:
+    if re.fullmatch(r"[A-Za-z0-9._/-]+", target_branch) is None:
+        return False
+    for ref in (f"refs/heads/{target_branch}", f"refs/remotes/origin/{target_branch}"):
+        try:
+            branch_commit = _resolve_git_commit(repository, ref, label="target branch")
+        except ValueError:
+            continue
+        if _git_is_ancestor(
+            repository,
+            ancestor=verification_commit,
+            descendant=branch_commit,
+        ):
+            return True
+    return False
+
+
+def _outcome_execution_provenance(
+    current: dict[str, Any],
+) -> tuple[str, str, str | None]:
+    implementation_commit = str(current.get("merged_commit") or "").strip().casefold()
+    if not implementation_commit:
+        raise ValueError("Outcome record is missing merged_commit for role evidence")
+    amendment = current.get("verification_amendment")
+    if not isinstance(amendment, dict):
+        return implementation_commit, implementation_commit, None
+    execution_commit = str(amendment.get("verification_commit") or "").strip().casefold()
+    amendment_id = str(amendment.get("amendment_id") or "").strip()
+    if not execution_commit or not amendment_id:
+        raise ValueError("Outcome verification amendment is incomplete")
+    return implementation_commit, execution_commit, amendment_id
 def _validate_evidence_receipt(
     item: dict[str, Any],
     *,
@@ -88,9 +171,9 @@ def _validate_evidence_receipt(
             raise ValueError(
                 "Outcome runner_receipt.role_artifact_sha256 must be a SHA-256 digest"
             )
-        merged_commit = current.get("merged_commit")
-        if not isinstance(merged_commit, str) or not merged_commit.strip():
-            raise ValueError("Outcome record is missing merged_commit for role evidence")
+        merged_commit, execution_commit, amendment_id = _outcome_execution_provenance(
+            current
+        )
         normalized_receipt = validate_bound_outcome_role_receipt(
             role_artifact_path=Path(role_path),
             evidence_kind=evidence_kind,
@@ -100,6 +183,8 @@ def _validate_evidence_receipt(
             expected_ticket_provenance=expected_ticket_provenance,
             trusted_runs_root=trusted_runs_root,
             expected_role_artifact_sha256=role_hash,
+            execution_commit=execution_commit,
+            verification_amendment_id=amendment_id,
         )
     return {**item, "result": "passed", "runner_receipt": normalized_receipt}
 
@@ -244,6 +329,109 @@ def _load_outcome_updates(
     return updates
 
 
+def _cmd_outcome_bind_verification_amendment(args: argparse.Namespace) -> int:
+    """Bind a merged correction PR without rewriting implementation provenance."""
+
+    repo_root = _resolve_repo_root(args.repo_root)
+    owner_root = args.owner_root.resolve()
+    selected = _select_review_ticket(
+        owner_root=owner_root,
+        ticket_path=args.ticket_path,
+        fingerprint=args.fingerprint,
+    )
+    ticket_path = selected.idea_path
+    if ticket_path is None:
+        raise SystemExit("Outcome amendment requires a durable local ticket path.")
+    completed_root = (owner_root / ".agents" / "plans" / "5 - complete").resolve()
+    ticket_path = ticket_path.resolve()
+    if not ticket_path.is_relative_to(completed_root):
+        raise SystemExit(
+            "Outcome amendment requires a completed ticket under "
+            f"{completed_root}: {ticket_path}"
+        )
+    try:
+        current = extract_outcome_markdown(ticket_path.read_text(encoding="utf-8"))
+        if current is None:
+            raise ValueError(f"Ticket has no durable outcome record: {ticket_path}")
+        selected_provenance = _selected_ticket_provenance(
+            selected,
+            require_local_plan=True,
+        )
+        current_ticket_provenance = current.get("ticket_provenance")
+        if not isinstance(current_ticket_provenance, dict):
+            raise ValueError("Durable outcome ticket provenance is missing")
+        for field in (
+            "fingerprint",
+            "case_id",
+            "plan_revision_id",
+            "ticket_body_sha256",
+            "local_plan_sha256",
+            "local_plan_filename",
+            "verification_contract_sha256",
+            "target_contract_sha256",
+        ):
+            if current_ticket_provenance.get(field) != selected_provenance.get(field):
+                raise ValueError(
+                    "Durable outcome ticket provenance is stale or cross-plan: "
+                    f"{field}"
+                )
+        implementation_commit = _resolve_git_commit(
+            owner_root,
+            str(current.get("merged_commit") or ""),
+            label="implementation",
+        )
+        verification_commit = _resolve_git_commit(
+            owner_root,
+            str(args.verification_commit),
+            label="amendment",
+        )
+        if implementation_commit == verification_commit or not _git_is_ancestor(
+            owner_root,
+            ancestor=implementation_commit,
+            descendant=verification_commit,
+        ):
+            raise ValueError(
+                "Outcome verification amendment must be a distinct descendant of the "
+                "implementation merged_commit"
+            )
+        target_branch = str(current.get("target_branch") or "").strip()
+        if not _verification_commit_on_target_branch(
+            owner_root,
+            verification_commit=verification_commit,
+            target_branch=target_branch,
+        ):
+            raise ValueError(
+                "Outcome verification amendment commit is not on target branch: "
+                f"{verification_commit}:{target_branch}"
+            )
+        amended = bind_outcome_verification_amendment_files(
+            ledger_path=_resolve_ledger_path(repo_root=repo_root, raw=args.ledger),
+            ticket_path=ticket_path,
+            fingerprint=selected.fingerprint,
+            verification_commit=verification_commit,
+            verification_pr_url=str(args.verification_pr_url),
+            recorded_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    print(
+        json.dumps(
+            {
+                "fingerprint": selected.fingerprint,
+                "case_id": amended["case_id"],
+                "implementation_merged_commit": amended["merged_commit"],
+                "implementation_pr_url": amended.get("pr_url"),
+                "verification_amendment": amended["verification_amendment"],
+                "ticket_path": str(ticket_path),
+            },
+            indent=2,
+            ensure_ascii=False,
+        )
+    )
+    return 0
+
+
 def _cmd_outcome_run_role(args: argparse.Namespace) -> int:
     """Run one post-merge stage-6 evidence role with runner-owned predicates."""
 
@@ -308,9 +496,9 @@ def _cmd_outcome_run_role(args: argparse.Namespace) -> int:
         role_contract = roles.get(role) if isinstance(roles, dict) else None
         if not isinstance(role_contract, dict):
             raise ValueError(f"Selected stage-6 plan does not define outcome role: {role}")
-        merged_commit = current.get("merged_commit")
-        if not isinstance(merged_commit, str) or not merged_commit.strip():
-            raise ValueError("Durable outcome is missing merged_commit")
+        merged_commit, execution_commit, amendment_id = _outcome_execution_provenance(
+            current
+        )
         workspace = (
             args.workspace.resolve() if args.workspace is not None else repo_root
         )
@@ -343,6 +531,14 @@ def _cmd_outcome_run_role(args: argparse.Namespace) -> int:
                 "Recurrence refresh receipt must stay under configured runs root: "
                 f"{trusted_runs_root}"
             )
+        amendment_kwargs = (
+            {
+                "execution_commit": execution_commit,
+                "verification_amendment_id": amendment_id,
+            }
+            if amendment_id is not None
+            else {}
+        )
         artifact = run_outcome_evidence_role(
             workspace=workspace,
             output_path=artifact_path,
@@ -361,6 +557,7 @@ def _cmd_outcome_run_role(args: argparse.Namespace) -> int:
             recurrence_after=(
                 str(current["recorded_at"]) if role == "recurrence" else None
             ),
+            **amendment_kwargs,
         )
         if artifact.get("passed") is not True:
             print(
@@ -383,6 +580,7 @@ def _cmd_outcome_run_role(args: argparse.Namespace) -> int:
             merged_commit=merged_commit,
             expected_ticket_provenance=bound_provenance,
             trusted_runs_root=trusted_runs_root,
+            **amendment_kwargs,
         )
         evidence_item = {
             "kind": "runner_outcome_role",
@@ -519,4 +717,8 @@ def _cmd_outcome_advance(args: argparse.Namespace) -> int:
     return 0
 
 
-__all__ = ["_cmd_outcome_advance", "_cmd_outcome_run_role"]
+__all__ = [
+    "_cmd_outcome_advance",
+    "_cmd_outcome_bind_verification_amendment",
+    "_cmd_outcome_run_role",
+]

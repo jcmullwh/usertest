@@ -12,6 +12,7 @@ from usertest_implement.commands.maintenance_images import (
 )
 from usertest_implement.commands.outcome import (
     _cmd_outcome_advance,
+    _cmd_outcome_bind_verification_amendment,
     _cmd_outcome_run_role,
 )
 from usertest_implement.commands.reports import _cmd_reports_summarize
@@ -436,6 +437,15 @@ def _add_resume_execution_args(parser: argparse.ArgumentParser) -> None:
             "remain in force."
         ),
     )
+    parser.add_argument(
+        "--correction-origin",
+        choices=["system_self_correction", "external_manual"],
+        default=None,
+        help=(
+            "Explicit provenance for who initiated this correction. Omit when the "
+            "origin is not durably known."
+        ),
+    )
 
     exec_backend_group = parser.add_mutually_exclusive_group()
     exec_backend_group.add_argument(
@@ -743,6 +753,33 @@ def build_parser() -> argparse.ArgumentParser:
         help="Advance evidence-backed implementation outcomes without conflating merge and resolution.",
     )
     outcome_sub = outcome_p.add_subparsers(dest="outcome_cmd", required=True)
+    outcome_amendment_p = outcome_sub.add_parser(
+        "bind-verification-amendment",
+        help=(
+            "Bind one merged descendant correction PR for outcome-role execution without "
+            "rewriting the implementation merge provenance."
+        ),
+    )
+    outcome_amendment_p.add_argument("--owner-root", type=Path, default=Path.cwd())
+    outcome_amendment_group = outcome_amendment_p.add_mutually_exclusive_group(
+        required=True
+    )
+    outcome_amendment_group.add_argument("--ticket-path", dest="ticket_path", type=Path)
+    outcome_amendment_group.add_argument("--fingerprint")
+    outcome_amendment_p.add_argument("--verification-commit", required=True)
+    outcome_amendment_p.add_argument("--verification-pr-url", required=True)
+    outcome_amendment_p.add_argument(
+        "--ledger",
+        nargs="?",
+        const=_DEFAULT_LEDGER_PATH,
+        type=Path,
+        help=(
+            "Optional attempt ledger YAML. If provided without a value, defaults to "
+            "<repo_root>/.agents/state/backlog_implement_actions.yaml."
+        ),
+    )
+    outcome_amendment_p.set_defaults(func=_cmd_outcome_bind_verification_amendment)
+
     outcome_role_p = outcome_sub.add_parser(
         "run-role",
         help=(
@@ -762,7 +799,10 @@ def build_parser() -> argparse.ArgumentParser:
     outcome_role_p.add_argument(
         "--workspace",
         type=Path,
-        help="Git checkout whose HEAD must equal the outcome's merged commit.",
+        help=(
+            "Git checkout whose HEAD must equal the outcome's effective verification "
+            "commit (the implementation merge unless an amendment is bound)."
+        ),
     )
     outcome_role_p.add_argument(
         "--out-dir",
