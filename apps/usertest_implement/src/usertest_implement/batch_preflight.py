@@ -3,6 +3,7 @@
 import base64
 import json
 import os
+import random
 import shutil
 import subprocess
 import tempfile
@@ -216,6 +217,7 @@ def run_batch_preflight(
     exec_docker_profile: str = "standard",
     resolve_maintenance_image: bool = False,
     docker_timeout_seconds: float | None = None,
+    docker_scratch_payload_bytes: int = 3,
 ) -> dict[str, Any]:
     defaults = batch_config.get("defaults", {})
     blockers: list[dict[str, Any]] = []
@@ -472,13 +474,25 @@ def run_batch_preflight(
                         },
                     )
                 )
+        if docker_scratch_payload_bytes < 1:
+            raise ValueError("docker_scratch_payload_bytes must be at least one byte")
         with tempfile.TemporaryDirectory(prefix="usertest_batch_docker_preflight_") as temp_dir:
             temp_root = Path(temp_dir)
             (temp_root / "Dockerfile").write_text(
                 "FROM scratch\nCOPY sentinel /sentinel\n",
                 encoding="utf-8",
             )
-            (temp_root / "sentinel").write_text("ok\n", encoding="utf-8")
+            sentinel = temp_root / "sentinel"
+            if docker_scratch_payload_bytes == 3:
+                sentinel.write_text("ok\n", encoding="utf-8")
+            else:
+                rng = random.Random(0)
+                with sentinel.open("wb") as handle:
+                    remaining = docker_scratch_payload_bytes
+                    while remaining:
+                        size = min(1024 * 1024, remaining)
+                        handle.write(rng.randbytes(size))
+                        remaining -= size
             docker_build = _run(
                 [
                     "docker",
