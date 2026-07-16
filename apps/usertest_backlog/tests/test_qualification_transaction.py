@@ -873,20 +873,20 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
 ) -> None:
     # Reuse the repository's fully productive semantic fixture, but keep the
     # transaction/materializer/template/finalizer/scorer/state path real.
-    from apps.usertest_backlog.tests.test_positive_depth_acceptance import (
+    from test_positive_depth_acceptance import (
         _option as _productive_option,
     )
-    from apps.usertest_backlog.tests.test_positive_depth_acceptance import (
+    from test_positive_depth_acceptance import (
         _plan as _productive_plan,
     )
-    from apps.usertest_backlog.tests.test_positive_depth_acceptance import (
+    from test_positive_depth_acceptance import (
         _selection as _productive_selection,
     )
-    from apps.usertest_backlog.tests.test_positive_depth_acceptance import (
+    from test_positive_depth_acceptance import (
         _source_problem_record,
         _verified_research_proof,
     )
-    from apps.usertest_backlog.tests.test_shadow_validation import (
+    from test_shadow_validation import (
         _accept_productive_fixture_contracts,
         _mixed_productive_inputs,
         _target_contract,

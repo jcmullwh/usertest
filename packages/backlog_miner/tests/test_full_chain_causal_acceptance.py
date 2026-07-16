@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import runner_core.outcome_roles as outcome_roles
+import usertest_implement.outcome_progression as outcome_progression
 import yaml
 from agent_adapters.read_attestation import observed_read_attestation
 from backlog_core import (
@@ -44,7 +45,6 @@ from usertest_implement.outcome_evidence import (
     build_verification_binding,
     validate_bound_runner_verification,
 )
-import usertest_implement.outcome_progression as outcome_progression
 from usertest_implement.outcome_progression import progress_post_merge_outcome
 from usertest_implement.selection import _case_plan_fingerprint
 

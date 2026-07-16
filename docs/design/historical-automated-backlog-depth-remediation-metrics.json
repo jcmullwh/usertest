@@ -4,15 +4,15 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 1,
-    "as_of": "2026-07-16T07:04:56Z",
+    "as_of": "2026-07-16T07:40:46Z",
     "current_run_id": "controller-remediation-integration",
     "counting_rule": "One row is one meaningful pipeline or case lifecycle cycle, not one model turn or test command. Error and intervention counts use only explicitly retained events; unavailable totals are unknown. Automatic self-correction means the system continued an existing frontier without supervisor-authored content. Supervisor intervention means feedback, rerouting, process containment, lifecycle action, or code correction performed outside that automatic path.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "Qualification green; PR next",
-        "detail": "All three frozen non-Docker partitions and both digest-pinned isolated-Docker controls pass on f46d751b; no test container remains",
-        "tone": "good"
+        "value": "PR #216 open; local CI corrections green",
+        "detail": "Frozen qualification passed; initial PR CI exposed three branch-owned package-validation defects, all now corrected and verified at their owning local boundaries",
+        "tone": "warn"
       },
       {
         "label": "Current case disposition",
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Publish and merge PR",
-        "detail": "Push the qualified controller remediation, obtain CI and review, merge it, then begin the first export-disabled full shadow cycle",
+        "value": "Green CI, review, and merge",
+        "detail": "Push the coherent CI correction, require replacement CI and system review, merge, then begin the first export-disabled full shadow cycle",
         "tone": "warn"
       }
     ],
@@ -563,18 +563,18 @@
         "timing": {
           "start_at": "2026-07-16T04:52:15Z",
           "end_at": null,
-          "elapsed_seconds": 7961,
+          "elapsed_seconds": 10111,
           "coverage": "active",
-          "display": "2 h 12 m 41 s so far",
+          "display": "2 h 48 m 31 s so far",
           "note": "Wall time from the completed PR #215 outcome row through this dashboard observation. This cycle remains in progress; the value will be finalized at its terminal PR disposition."
         },
-        "furthest_stage": "Component and live qualification green",
-        "current_state": "Controller and outcome changes are committed; verified PR #213/#215 maintenance history is semantically reconciled; focused suites are green. On frozen commit f46d751b, backlog passed 1,735 with one skip in 666.9 seconds, delivery/runtime passed 929 with four skips in 1,157.4 seconds, and CLI/tools passed 141 with three skips in 57.8 seconds. Both exact digest-pinned isolated-Docker controls passed in 954.4 seconds with endpoint attestation, causal baseline/recovery predicates, protected-reference controls, and empty provisioner DIND inventory before and after. The task-owned TCP relay was stopped and Docker has zero containers. The remediation PR is not yet published.",
-        "outcome": "Component and live qualification green; PR pending",
+        "furthest_stage": "Draft PR #216; CI correction locally verified",
+        "current_state": "PR #216 is open as a draft against dev at first-CI head e94b6ce8. Frozen component and isolated-Docker qualification remains green. Both initial CI triggers failed the same three unique branch-owned package checks: backlog_miner import ordering, a Windows-only runner_core sandbox-revalidation fixture running on Linux, and usertest_backlog sibling fixtures imported through a monorepo-root path unavailable to isolated package CI. All three are corrected locally. Package-wide Ruff passes; the exact Windows runner test passes; and the exact CI-path usertest_backlog project suite passes in 334.2 seconds. Replacement CI, accepted system review, merge, and shadow-cycle proof do not yet exist.",
+        "outcome": "Local qualification and CI corrections green; replacement CI pending",
         "errors": {
-          "count": 4,
+          "count": 5,
           "count_kind": "high-level integration and qualification categories",
-          "summary": "Fixture/contract drift across five synthetic boundaries; one semantic reconciliation between the superseded supervisor prototype and the system-authored maintenance implementation; supervisor/result-capture instability that lost sibling summaries and changed sealed git status during a test; and one production postprocessing regression that overwrote a precise missing-artifact cause with a false binary-missing diagnosis. The production regression is corrected locally and awaits broad replay."
+          "summary": "The prior four categories remain: synthetic fixture/contract drift, semantic reconciliation, supervisor/result-capture instability, and one production postprocessing regression. Initial PR CI exposed a fifth category: local qualification did not reproduce every changed project's isolated package boundary. That single coverage gap produced three unique failures duplicated across push and pull-request runs; each was corrected at its owning boundary without changing production behavior."
         },
         "automatic_self_corrections": {
           "count": 0,
@@ -582,16 +582,17 @@
           "summary": "This is deterministic integration qualification, not a model-stage correction cycle; all observed corrections were supervisor-owned and are counted separately."
         },
         "supervisor_interventions": {
-          "count": 13,
+          "count": 18,
           "count_kind": "explicit interventions so far",
-          "summary": "One semantic merge decision; four initial fixture-only corrections; one authoritative sequential evidence-recovery action for the two indeterminate groups; one diagnosis and correction of the retained-review fixture; one backlog replay; one standalone delivery replay after the fail-fast harness discarded its output; one diagnosis and stable exact replay of the supervisor-invalidated qualification transaction; one root-cause correction with targeted controls for the runner postprocessing regression; one independent frozen broad-qualification action; and one retained loopback-relay restoration plus final live gate."
+          "summary": "The prior thirteen interventions covered semantic integration, fixture correction, evidence recovery, stable broad qualification, the production postprocessing fix, and the final live gate. Five later actions are explicit: publish draft PR #216; diagnose and correct backlog_miner import ordering; diagnose and correct the Windows-only runner fixture boundary; diagnose and restore package-local usertest_backlog fixture imports; and recover from an interrupted combined local-verification channel by rerunning only the exact owning boundary."
         },
-        "next_action": "Publish the exact qualified branch as the controller remediation PR, retain CI and review results, merge it, finalize this row, and then start the first export-disabled full shadow cycle as a new current row.",
+        "next_action": "Commit and push the coherent three-failure correction, require green replacement CI and accepted system review, merge PR #216, finalize this row, and then start the first export-disabled full shadow cycle as a new current row.",
         "tone": "warn",
         "data_quality": "Exact git history; exact focused, frozen broad, and isolated-Docker transcripts; current wall duration and explicit intervention ledger; PR lifecycle still in progress",
         "source_ids": [
           "controller_remediation_integration_git",
           "controller_remediation_integration_session",
+          "controller_remediation_pr216",
           "backlog_depth_supervision_issue_ledger"
         ]
       }
@@ -3712,6 +3713,45 @@
       "file_length_at_dashboard_snapshot": 247815292,
       "snapshot_at": "2026-07-16T06:23:02Z",
       "limitations": "Live appendable root task log; a stable hash cannot be taken while Codex owns the file. It retains exact test commands, exits, findings, corrections, and timing, but the current broad qualification and PR lifecycle are incomplete."
+    },
+    {
+      "id": "controller_remediation_pr216",
+      "url": "https://github.com/jcmullwh/usertest/pull/216",
+      "kind": "controller_remediation_pull_request_and_initial_ci",
+      "pr_number": 216,
+      "base_branch": "dev",
+      "head_branch": "codex/backlog-depth-remediation",
+      "first_ci_head_revision": "e94b6ce8e217fa75aa04295ffa7c0488e78b0bc0",
+      "created_at": "2026-07-16T07:08:12Z",
+      "draft": true,
+      "ci_runs": [
+        {
+          "run_id": 29478853671,
+          "event": "push",
+          "conclusion": "failure",
+          "completed_at": "2026-07-16T07:10:36Z"
+        },
+        {
+          "run_id": 29478913132,
+          "event": "pull_request",
+          "conclusion": "failure",
+          "completed_at": "2026-07-16T07:11:54Z"
+        }
+      ],
+      "unique_failed_jobs": [
+        "backlog_miner lint: Ruff I001 import ordering",
+        "runner_core test: Windows-only legacy sandbox revalidation fixture ran on Linux",
+        "usertest_backlog test: package-local execution could not resolve monorepo-root apps import"
+      ],
+      "local_correction_evidence": {
+        "package_wide_ruff": "passed",
+        "runner_core_exact_windows_test": "passed",
+        "usertest_backlog_exact_ci_path_project_suite": {
+          "status": "passed",
+          "elapsed_seconds": 334.2
+        }
+      },
+      "limitations": "All three initial CI failures are corrected and verified locally at their owning boundaries. Replacement CI, accepted review, merge, and shadow-cycle results do not yet exist."
     },
     {
       "id": "execution_plan",

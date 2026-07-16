@@ -769,6 +769,10 @@ def test_read_only_activation_probe_verifies_requested_controlled_sandbox(
     assert verify_controlled_codex_execpolicy_receipt(overlay.receipt_path) == []
 
 
+@pytest.mark.skipif(
+    os.name != "nt",
+    reason="sandbox-mode mismatch is enforced only by native Windows Codex execution",
+)
 def test_failed_legacy_sandbox_expectation_can_be_revalidated_without_mutation(
     tmp_path: Path,
 ) -> None:
