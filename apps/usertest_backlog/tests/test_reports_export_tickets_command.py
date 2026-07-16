@@ -1244,6 +1244,14 @@ def _with_strict_readiness(
         "residual_recurrence_paths": [],
         "compatibility_risks": [],
         "testability": {"before": "Focused test fails", "after": "Focused test passes"},
+        "outcome_strategy": {
+            "intended_operation": "The focused operation completes with the required guard.",
+            "success_properties": [
+                "The retained original replay reports that the guard was applied."
+            ],
+            "safety_constraints": ["The existing successful path remains unchanged."],
+            "original_scenario_experiment_ids": ["exp-1"],
+        },
     }
     option = {
         "case_id": case_id,
@@ -1303,6 +1311,16 @@ def _with_strict_readiness(
             "evidence_that_would_change_verdict": "A contrary trace",
             "material_risk_dispositions": [],
             "critical_findings": [],
+            "outcome_strategy_review": {
+                "verdict": "sufficient",
+                "semantic_relation_assessment": (
+                    "The strategy requires the useful guarded operation on the retained replay."
+                ),
+                "proves_intended_operation": True,
+                "problem_coverage": "full",
+                "residual_untested_paths": [],
+                "evidence_refs": ["exp-1"],
+            },
         },
         "change_surface": selection_surface,
     }
@@ -1444,6 +1462,14 @@ def _with_strict_readiness(
         "material_unknowns": [],
         "blocking_reasons": [],
         "evidence_boundaries": [],
+        "case_relation_assessment": {
+            "disposition": "retain",
+            "rationale": (
+                "The signed occurrence and traced local mechanism remain one work unit."
+            ),
+            "facets": [],
+            "material_unknowns": [],
+        },
     }
     _SYNTHETIC_RESEARCH_IDS.add((case_id, pid))
     assignment = {
@@ -2329,6 +2355,9 @@ def _with_strict_readiness(
             "finding": "The verified control bounds the local guard mechanism.",
         }
     ]
+    selection["falsification_review"]["outcome_strategy_review"]["evidence_refs"] = [
+        mechanism_evidence["mechanism_evidence_id"]
+    ]
     selection["falsification_review"]["selected_positive_outcome_contract_id"] = positive_contract[
         "positive_outcome_contract_id"
     ]
@@ -2393,6 +2422,7 @@ def _with_strict_readiness(
             "mitigation_effect": None,
             "recurrence": {
                 "description": "Probe the canonical case for fresh recurrence evidence.",
+                "verification_owner": "centralized_case_refresh",
                 "commands": [],
                 "predicates": [],
             },
@@ -2497,7 +2527,7 @@ def _with_strict_readiness(
             "solution_options": [option],
             "selected_solution": selection,
             "change_plan": assign_plan_revision_id(
-                bind_plan_outcome_oracle(plan, research=research)
+                bind_plan_outcome_oracle(plan, research=research, selection=selection)
             ),
         }
     )

@@ -1307,3 +1307,753 @@ def test_positive_gate_fails_clearly_without_independent_labels() -> None:
     )
 
     assert report["failures"] == ["independent_qualification_manifest_missing"]
+
+
+@pytest.mark.parametrize(
+    ("resolution_status", "expected_status", "expected_failure"),
+    [
+        (
+            None,
+            "failed",
+            "independent_qualification_source_correction_resolution_missing:",
+        ),
+        (
+            "partially_resolved",
+            "failed",
+            "independent_qualification_source_correction_partially_resolved:",
+        ),
+        (
+            "unresolved",
+            "failed",
+            "independent_qualification_source_correction_unresolved:",
+        ),
+        ("resolved", "verified", None),
+        ("superseded", "verified", None),
+    ],
+)
+def test_repaired_output_must_resolve_each_immutable_source_finding(
+    resolution_status: str | None,
+    expected_status: str,
+    expected_failure: str | None,
+) -> None:
+    atoms = [_atom("atom:one")]
+    manifest = _manifest(
+        atoms,
+        _labels(("label:one", "actionable", ["atom:one"])),
+    )
+    ticket = _output("case:one")
+    source_adjudication = _adjudication(
+        manifest=manifest,
+        outputs=[ticket],
+        qualities=[("bad", "not_repaired", ["label:one"])],
+    )
+    source_routes = qualification_mod._qualification_correction_routes(
+        source_adjudication["output_adjudications"],
+        output_author_provenance=None,
+    )
+    source_adjudication_sha256 = "e" * 64
+    findings = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=source_adjudication,
+        source_adjudication_sha256=source_adjudication_sha256,
+        manifest=manifest,
+        correction_routes=source_routes,
+    )
+    resolutions = (
+        []
+        if resolution_status is None
+        else [
+            {
+                "finding_id": findings[0]["finding_id"],
+                "status": resolution_status,
+                "rationale": (
+                    "Fresh independent review states exactly how much of the original "
+                    "finding the repaired ticket addresses."
+                ),
+                "repaired_output_refs": [
+                    {
+                        "output_kind": "ticket",
+                        "output_sha256": _canonical_hash(ticket),
+                    }
+                ],
+            }
+        ]
+    )
+    repaired_adjudication = build_qualification_output_adjudication(
+        manifest=manifest,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        output_adjudications=[
+            {
+                "output_kind": "ticket",
+                "output_sha256": _canonical_hash(ticket),
+                "quality": "good",
+                "actionable_label_ids": ["label:one"],
+                "repair_status": "repaired",
+                "rationale": "Fresh review finds the repaired ticket useful overall.",
+            }
+        ],
+        pending_run_sha256="d" * 64,
+        adjudicator="fresh-post-repair-reviewer",
+        method="independent source-finding resolution review",
+        source_adjudication_sha256=source_adjudication_sha256,
+        source_correction_findings=findings,
+        source_correction_resolutions=resolutions,
+    )
+
+    report = evaluate_independent_qualification(
+        atoms=atoms,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        manifest=manifest,
+        qualification_manifest_sha256_expected="a" * 64,
+        qualification_manifest_sha256_observed="a" * 64,
+        output_adjudication=repaired_adjudication,
+        output_adjudication_sha256_pre_run=None,
+        output_adjudication_sha256_post_run="b" * 64,
+        pending_run_sha256="d" * 64,
+        same_corpus_feedback_exposed=True,
+        source_adjudication_sha256_expected=source_adjudication_sha256,
+        source_correction_findings_expected=findings,
+        positive_throughput_required=True,
+    )
+
+    assert report["status"] == expected_status
+    assert report["counts"]["source_correction_findings_total"] == 1
+    expected_outstanding = int(
+        resolution_status in {None, "partially_resolved", "unresolved"}
+    )
+    assert (
+        report["counts"]["source_correction_findings_outstanding"]
+        == expected_outstanding
+    )
+    if expected_failure is None:
+        assert report["failures"] == []
+        assert report["correction_routes"] == []
+    else:
+        assert any(
+            str(failure).startswith(expected_failure)
+            for failure in report["failures"]
+        )
+        assert report["correction_routes"]
+        assert report["correction_routes"][0]["source_correction_finding_ids"] == [
+            findings[0]["finding_id"]
+        ]
+
+
+def test_unresolved_false_rejection_can_route_without_inventing_repaired_output_ref() -> None:
+    atoms = [_atom("atom:one")]
+    manifest = _manifest(
+        atoms,
+        _labels(("label:one", "actionable", ["atom:one"])),
+    )
+    source_adjudication = build_qualification_output_adjudication(
+        manifest=manifest,
+        accepted_outputs_by_kind={},
+        output_adjudications=[],
+        false_rejections=[
+            {
+                "label_id": "label:one",
+                "rationale": "The actionable source group was not recovered.",
+            }
+        ],
+        pending_run_sha256="c" * 64,
+        adjudicator="source-reviewer",
+        method="independent source review",
+    )
+    source_routes = qualification_mod._qualification_correction_routes(
+        [],
+        output_author_provenance=None,
+        false_rejections=source_adjudication["false_rejections"],
+    )
+    source_adjudication_sha256 = "e" * 64
+    findings = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=source_adjudication,
+        source_adjudication_sha256=source_adjudication_sha256,
+        manifest=manifest,
+        correction_routes=source_routes,
+    )
+    ticket = _output("case:one")
+    repaired_adjudication = build_qualification_output_adjudication(
+        manifest=manifest,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        output_adjudications=[
+            {
+                "output_kind": "ticket",
+                "output_sha256": _canonical_hash(ticket),
+                "quality": "good",
+                "actionable_label_ids": ["label:one"],
+                "repair_status": "repaired",
+                "rationale": "The new ticket is useful but does not prove the omission resolved.",
+            }
+        ],
+        pending_run_sha256="d" * 64,
+        adjudicator="fresh-reviewer",
+        method="independent repaired-output review",
+        source_adjudication_sha256=source_adjudication_sha256,
+        source_correction_findings=findings,
+        source_correction_resolutions=[
+            {
+                "finding_id": findings[0]["finding_id"],
+                "status": "unresolved",
+                "rationale": (
+                    "The reviewer cannot yet bind this omission to any repaired output."
+                ),
+            }
+        ],
+    )
+
+    report = evaluate_independent_qualification(
+        atoms=atoms,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        manifest=manifest,
+        qualification_manifest_sha256_expected="a" * 64,
+        qualification_manifest_sha256_observed="a" * 64,
+        output_adjudication=repaired_adjudication,
+        output_adjudication_sha256_post_run="b" * 64,
+        pending_run_sha256="d" * 64,
+        same_corpus_feedback_exposed=True,
+        source_adjudication_sha256_expected=source_adjudication_sha256,
+        source_correction_findings_expected=findings,
+        positive_throughput_required=True,
+    )
+
+    assert report["status"] == "failed"
+    assert report["counts"]["source_correction_findings_unresolved"] == 1
+    assert report["counts"]["source_correction_findings_outstanding"] == 1
+    assert report["correction_routes"]
+    assert report["correction_routes"][0]["source_correction_finding_ids"] == [
+        findings[0]["finding_id"]
+    ]
+
+
+def test_followup_repair_rebinds_nonterminal_finding_and_preserves_route_lineage() -> None:
+    atoms = [_atom("atom:one")]
+    manifest = _manifest(
+        atoms,
+        _labels(("label:one", "actionable", ["atom:one"])),
+    )
+    source_ticket = _output("case:one")
+    original = _adjudication(
+        manifest=manifest,
+        outputs=[source_ticket],
+        qualities=[("bad", "not_repaired", ["label:one"])],
+    )
+    original_routes = qualification_mod._qualification_correction_routes(
+        original["output_adjudications"],
+        output_author_provenance=None,
+    )
+    original_findings = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=original,
+        source_adjudication_sha256="e" * 64,
+        manifest=manifest,
+        correction_routes=original_routes,
+    )
+    ticket = deepcopy(source_ticket)
+    ticket["change_plan"] = {
+        "mechanism": "mechanism:case:one",
+        "revision": "content-changing repair",
+    }
+    assert _canonical_hash(ticket) != _canonical_hash(source_ticket)
+    partial = build_qualification_output_adjudication(
+        manifest=manifest,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        output_adjudications=[
+            {
+                "output_kind": "ticket",
+                "output_sha256": _canonical_hash(ticket),
+                "quality": "good",
+                "actionable_label_ids": ["label:one"],
+                "repair_status": "repaired",
+                "rationale": "The revised ticket is useful but the source finding remains.",
+            }
+        ],
+        pending_run_sha256="d" * 64,
+        adjudicator="fresh-reviewer",
+        method="independent partial-resolution review",
+        source_adjudication_sha256="e" * 64,
+        source_correction_findings=original_findings,
+        source_correction_resolutions=[
+            {
+                "finding_id": original_findings[0]["finding_id"],
+                "status": "partially_resolved",
+                "rationale": "One recurrence path remains unaddressed.",
+                "repaired_output_refs": [
+                    {
+                        "output_kind": "ticket",
+                        "output_sha256": _canonical_hash(ticket),
+                    }
+                ],
+            }
+        ],
+    )
+    partial_report = evaluate_independent_qualification(
+        atoms=atoms,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        manifest=manifest,
+        qualification_manifest_sha256_expected="a" * 64,
+        qualification_manifest_sha256_observed="a" * 64,
+        output_adjudication=partial,
+        output_adjudication_sha256_post_run="b" * 64,
+        pending_run_sha256="d" * 64,
+        same_corpus_feedback_exposed=True,
+        source_adjudication_sha256_expected="e" * 64,
+        source_correction_findings_expected=original_findings,
+        positive_throughput_required=True,
+    )
+
+    rebound = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=partial,
+        source_adjudication_sha256="f" * 64,
+        manifest=manifest,
+        correction_routes=partial_report["correction_routes"],
+    )
+
+    assert len(rebound) == 1
+    assert rebound[0]["finding_kind"] == "inherited_source_correction"
+    assert rebound[0]["origin_finding_ids"] == [original_findings[0]["finding_id"]]
+    assert rebound[0]["route_sha256s"] == [
+        partial_report["correction_routes"][0]["route_sha256"]
+    ]
+    assert rebound[0]["source_adjudication_sha256"] == "f" * 64
+
+
+def test_repeated_same_residual_is_one_finding_route_and_measured_error() -> None:
+    atoms = [_atom("atom:one")]
+    manifest = _manifest(
+        atoms,
+        _labels(("label:one", "actionable", ["atom:one"])),
+    )
+    source_ticket = _output("case:one")
+    original = _adjudication(
+        manifest=manifest,
+        outputs=[source_ticket],
+        qualities=[("bad", "not_repaired", ["label:one"])],
+    )
+    original_routes = qualification_mod._qualification_correction_routes(
+        original["output_adjudications"],
+        output_author_provenance=None,
+    )
+    original_findings = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=original,
+        source_adjudication_sha256="e" * 64,
+        manifest=manifest,
+        correction_routes=original_routes,
+    )
+    ticket = deepcopy(source_ticket)
+    ticket["change_plan"] = {
+        "mechanism": "mechanism:case:one",
+        "revision": "content-changing bad residual",
+    }
+    assert _canonical_hash(ticket) != _canonical_hash(source_ticket)
+    residual = build_qualification_output_adjudication(
+        manifest=manifest,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        output_adjudications=[
+            {
+                "output_kind": "ticket",
+                "output_sha256": _canonical_hash(ticket),
+                "quality": "bad",
+                "bad_severity": "noncritical",
+                "bad_categories": ["limited_causal_coverage"],
+                "actionable_label_ids": ["label:one"],
+                "source_correction_finding_ids": [
+                    original_findings[0]["finding_id"]
+                ],
+                "repair_status": "repaired",
+                "rationale": "The same causal gap remains in the repaired ticket.",
+            }
+        ],
+        pending_run_sha256="d" * 64,
+        adjudicator="fresh-reviewer",
+        method="independent residual review",
+        source_adjudication_sha256="e" * 64,
+        source_correction_findings=original_findings,
+        source_correction_resolutions=[
+            {
+                "finding_id": original_findings[0]["finding_id"],
+                "status": "partially_resolved",
+                "rationale": "The original recurrence path remains.",
+                "repaired_output_refs": [
+                    {
+                        "output_kind": "ticket",
+                        "output_sha256": _canonical_hash(ticket),
+                    }
+                ],
+            }
+        ],
+    )
+    report = evaluate_independent_qualification(
+        atoms=atoms,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        manifest=manifest,
+        qualification_manifest_sha256_expected="a" * 64,
+        qualification_manifest_sha256_observed="a" * 64,
+        output_adjudication=residual,
+        output_adjudication_sha256_post_run="b" * 64,
+        pending_run_sha256="d" * 64,
+        same_corpus_feedback_exposed=True,
+        source_adjudication_sha256_expected="e" * 64,
+        source_correction_findings_expected=original_findings,
+        positive_throughput_required=True,
+    )
+
+    assert len(report["correction_routes"]) == 1
+    assert report["counts"]["accepted_bad"] == 1
+    assert report["counts"]["source_correction_findings_outstanding"] == 1
+    assert (
+        report["counts"][
+            "source_correction_findings_outstanding_already_counted_outputs"
+        ]
+        == 1
+    )
+    rebound = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=residual,
+        source_adjudication_sha256="f" * 64,
+        manifest=manifest,
+        correction_routes=report["correction_routes"],
+    )
+    assert len(rebound) == 1
+    assert rebound[0]["origin_finding_ids"] == [
+        original_findings[0]["finding_id"]
+    ]
+
+
+def test_same_category_without_explicit_lineage_remains_a_distinct_defect() -> None:
+    atoms = [_atom("atom:one")]
+    manifest = _manifest(
+        atoms,
+        _labels(("label:one", "actionable", ["atom:one"])),
+    )
+    ticket = _output("case:one")
+    original = _adjudication(
+        manifest=manifest,
+        outputs=[ticket],
+        qualities=[("bad", "not_repaired", ["label:one"])],
+    )
+    original_routes = qualification_mod._qualification_correction_routes(
+        original["output_adjudications"],
+        output_author_provenance=None,
+    )
+    findings = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=original,
+        source_adjudication_sha256="e" * 64,
+        manifest=manifest,
+        correction_routes=original_routes,
+    )
+    changed = build_qualification_output_adjudication(
+        manifest=manifest,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        output_adjudications=[
+            {
+                "output_kind": "ticket",
+                "output_sha256": _canonical_hash(ticket),
+                "quality": "bad",
+                "bad_severity": "noncritical",
+                "bad_categories": ["limited_causal_coverage"],
+                "actionable_label_ids": ["label:one"],
+                "repair_status": "repaired",
+                "rationale": (
+                    "A different defect happens to share the broad source category."
+                ),
+            }
+        ],
+        pending_run_sha256="d" * 64,
+        adjudicator="fresh-reviewer",
+        method="independent changed-defect review",
+        source_adjudication_sha256="e" * 64,
+        source_correction_findings=findings,
+        source_correction_resolutions=[
+            {
+                "finding_id": findings[0]["finding_id"],
+                "status": "unresolved",
+                "rationale": (
+                    "No current output is explicitly linked to the original defect."
+                ),
+            }
+        ],
+    )
+    report = evaluate_independent_qualification(
+        atoms=atoms,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        manifest=manifest,
+        qualification_manifest_sha256_expected="a" * 64,
+        qualification_manifest_sha256_observed="a" * 64,
+        output_adjudication=changed,
+        output_adjudication_sha256_post_run="b" * 64,
+        pending_run_sha256="d" * 64,
+        same_corpus_feedback_exposed=True,
+        source_adjudication_sha256_expected="e" * 64,
+        source_correction_findings_expected=findings,
+        positive_throughput_required=True,
+    )
+
+    assert len(report["correction_routes"]) == 2
+    assert (
+        report["counts"][
+            "source_correction_findings_outstanding_already_counted_outputs"
+        ]
+        == 0
+    )
+    rebound = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=changed,
+        source_adjudication_sha256="f" * 64,
+        manifest=manifest,
+        correction_routes=report["correction_routes"],
+    )
+    assert len(rebound) == 2
+
+
+def test_terminal_resolution_rejects_unrelated_labeled_good_output() -> None:
+    atoms = [_atom("atom:one"), _atom("atom:two")]
+    manifest = _manifest(
+        atoms,
+        _labels(
+            ("label:one", "actionable", ["atom:one"]),
+            ("label:two", "actionable", ["atom:two"]),
+        ),
+    )
+    source_ticket = _output("case:one")
+    source = _adjudication(
+        manifest=manifest,
+        outputs=[source_ticket],
+        qualities=[("bad", "not_repaired", ["label:one"])],
+        false_rejections=["label:two"],
+    )
+    routes = qualification_mod._qualification_correction_routes(
+        source["output_adjudications"],
+        output_author_provenance=None,
+        false_rejections=source["false_rejections"],
+    )
+    findings = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=source,
+        source_adjudication_sha256="e" * 64,
+        manifest=manifest,
+        correction_routes=routes,
+    )
+    labeled_finding = next(
+        finding
+        for finding in findings
+        if finding["source_output_ref"] is not None
+    )
+    unrelated = _output("case:two")
+
+    with pytest.raises(
+        ValueError,
+        match="qualification_source_correction_resolution_ref_causally_unbound",
+    ):
+        build_qualification_output_adjudication(
+            manifest=manifest,
+            accepted_outputs_by_kind={"ticket": [unrelated]},
+            output_adjudications=[
+                {
+                    "output_kind": "ticket",
+                    "output_sha256": _canonical_hash(unrelated),
+                    "quality": "good",
+                    "actionable_label_ids": ["label:two"],
+                    "repair_status": "repaired",
+                    "rationale": "This is useful for another case only.",
+                }
+            ],
+            pending_run_sha256="d" * 64,
+            adjudicator="fresh-reviewer",
+            method="independent causal-binding review",
+            source_adjudication_sha256="e" * 64,
+            source_correction_findings=[labeled_finding],
+            source_correction_resolutions=[
+                {
+                    "finding_id": labeled_finding["finding_id"],
+                    "status": "resolved",
+                    "rationale": "Incorrectly cites an unrelated good output.",
+                    "repaired_output_refs": [
+                        {
+                            "output_kind": "ticket",
+                            "output_sha256": _canonical_hash(unrelated),
+                        }
+                    ],
+                }
+            ],
+        )
+
+
+def test_unlabeled_resolution_requires_output_lineage_or_causal_target() -> None:
+    atoms = [_atom("atom:one")]
+    manifest = _manifest(
+        atoms,
+        _labels(("label:one", "actionable", ["atom:one"])),
+    )
+    source_plan = {
+        "problem_id": "problem:one",
+        "plan_revision_id": "plan:one",
+        "change_plan": {"mechanism": "one"},
+    }
+    source = build_qualification_output_adjudication(
+        manifest=manifest,
+        accepted_outputs_by_kind={"plan": [source_plan]},
+        output_adjudications=[
+            {
+                "output_kind": "plan",
+                "output_sha256": _canonical_hash(source_plan),
+                "quality": "bad",
+                "bad_severity": "noncritical",
+                "bad_categories": ["root_cause_unaddressed"],
+                "actionable_label_ids": [],
+                "repair_status": "not_repaired",
+                "rationale": "The unlabeled plan misses its causal mechanism.",
+            }
+        ],
+        pending_run_sha256="c" * 64,
+        adjudicator="source-reviewer",
+        method="independent source review",
+    )
+    routes = qualification_mod._qualification_correction_routes(
+        source["output_adjudications"],
+        output_author_provenance=None,
+        output_causal_targets=qualification_mod._accepted_output_causal_targets(
+            {"plan": [source_plan]}
+        ),
+    )
+    findings = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=source,
+        source_adjudication_sha256="e" * 64,
+        manifest=manifest,
+        correction_routes=routes,
+    )
+    unrelated = {
+        "problem_id": "problem:two",
+        "plan_revision_id": "plan:two",
+        "change_plan": {"mechanism": "two"},
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="qualification_source_correction_resolution_ref_causally_unbound",
+    ):
+        build_qualification_output_adjudication(
+            manifest=manifest,
+            accepted_outputs_by_kind={"plan": [unrelated]},
+            output_adjudications=[
+                {
+                    "output_kind": "plan",
+                    "output_sha256": _canonical_hash(unrelated),
+                    "quality": "good",
+                    "actionable_label_ids": ["label:one"],
+                    "repair_status": "repaired",
+                    "rationale": "A good but causally unrelated plan.",
+                }
+            ],
+            pending_run_sha256="d" * 64,
+            adjudicator="fresh-reviewer",
+            method="independent causal-binding review",
+            source_adjudication_sha256="e" * 64,
+            source_correction_findings=findings,
+            source_correction_resolutions=[
+                {
+                    "finding_id": findings[0]["finding_id"],
+                    "status": "superseded",
+                    "rationale": "Incorrectly claims a different causal target supersedes it.",
+                    "repaired_output_refs": [
+                        {
+                            "output_kind": "plan",
+                            "output_sha256": _canonical_hash(unrelated),
+                        }
+                    ],
+                }
+            ],
+        )
+
+
+def test_uncorrectable_source_residual_is_terminal_risk_not_retryable_work() -> None:
+    atoms = [_atom("atom:one")]
+    manifest = _manifest(
+        atoms,
+        _labels(("label:one", "actionable", ["atom:one"])),
+    )
+    ticket = _output("case:one")
+    source = build_qualification_output_adjudication(
+        manifest=manifest,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        output_adjudications=[
+            {
+                "output_kind": "ticket",
+                "output_sha256": _canonical_hash(ticket),
+                "quality": "bad",
+                "bad_severity": "noncritical",
+                "bad_categories": ["external_precondition_unavailable"],
+                "actionable_label_ids": ["label:one"],
+                "repair_status": "not_repaired",
+                "correctability": "uncorrectable",
+                "rationale": "The retained evidence proves no author edit can fix this.",
+            }
+        ],
+        pending_run_sha256="c" * 64,
+        adjudicator="source-reviewer",
+        method="independent source review",
+    )
+    routes = qualification_mod._qualification_correction_routes(
+        source["output_adjudications"],
+        output_author_provenance=None,
+    )
+    findings = qualification_mod.qualification_source_correction_findings(
+        source_adjudication=source,
+        source_adjudication_sha256="e" * 64,
+        manifest=manifest,
+        correction_routes=routes,
+    )
+    assert findings[0]["correctability"] == "uncorrectable"
+    residual = build_qualification_output_adjudication(
+        manifest=manifest,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        output_adjudications=[
+            {
+                "output_kind": "ticket",
+                "output_sha256": _canonical_hash(ticket),
+                "quality": "bad",
+                "bad_severity": "noncritical",
+                "bad_categories": ["external_precondition_unavailable"],
+                "actionable_label_ids": ["label:one"],
+                "source_correction_finding_ids": [findings[0]["finding_id"]],
+                "repair_status": "not_repaired",
+                "correctability": "uncorrectable",
+                "rationale": "Fresh review confirms the terminal residual risk.",
+            }
+        ],
+        pending_run_sha256="d" * 64,
+        adjudicator="fresh-reviewer",
+        method="independent terminal-risk review",
+        source_adjudication_sha256="e" * 64,
+        source_correction_findings=findings,
+        source_correction_resolutions=[
+            {
+                "finding_id": findings[0]["finding_id"],
+                "status": "unresolved",
+                "rationale": "The problem remains but cannot be corrected by this author.",
+                "repaired_output_refs": [
+                    {
+                        "output_kind": "ticket",
+                        "output_sha256": _canonical_hash(ticket),
+                    }
+                ],
+            }
+        ],
+    )
+    report = evaluate_independent_qualification(
+        atoms=atoms,
+        accepted_outputs_by_kind={"ticket": [ticket]},
+        manifest=manifest,
+        qualification_manifest_sha256_expected="a" * 64,
+        qualification_manifest_sha256_observed="a" * 64,
+        output_adjudication=residual,
+        output_adjudication_sha256_post_run="b" * 64,
+        pending_run_sha256="d" * 64,
+        same_corpus_feedback_exposed=True,
+        source_adjudication_sha256_expected="e" * 64,
+        source_correction_findings_expected=findings,
+        positive_throughput_required=True,
+    )
+
+    assert report["status"] == "failed"
+    assert len(report["correction_routes"]) == 1
+    assert report["correction_routes"][0]["route_status"] == "uncorrectable"
+    assert report["correction_routing_status"] == "terminal_residual_risk"
+    assert report["counts"]["source_correction_terminal_residual_risks"] == 1
+    assert report["terminal_residual_risks"][0]["finding_id"] == findings[0][
+        "finding_id"
+    ]

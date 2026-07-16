@@ -52,6 +52,7 @@ from usertest_backlog.workflows.pipeline_provenance import (
     first_party_module_binding_errors,
 )
 from usertest_backlog.workflows.post_research_relations import (
+    apply_post_research_relation_assessments,
     collapse_post_research_verified_mechanisms,
 )
 from usertest_backlog.workflows.prioritization import (
@@ -731,6 +732,31 @@ def _stage3_completed_stage(
         stage_doc,
         expected_compatibility_contract=expected_compatibility_contract,
     )
+
+
+def _annotate_completed_stage3_document(
+    stage_doc: Mapping[str, Any],
+    *,
+    input_meta_updates: Mapping[str, Any],
+    artifact_updates: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Attach post-research lineage without rewriting hash-bound Stage-3 proofs.
+
+    Canonicalized/split dossier lists are downstream in-memory views.  The completed
+    Stage-3 artifact remains the authored proof sequence bound by its progress and
+    completion checkpoints, so a mixed split/non-split run can resume itself.
+    """
+
+    annotated = dict(stage_doc)
+    meta_raw = annotated.get("input_meta")
+    meta = dict(meta_raw) if isinstance(meta_raw, Mapping) else {}
+    meta.update(dict(input_meta_updates))
+    annotated["input_meta"] = meta
+    artifacts_raw = annotated.get("artifacts")
+    artifacts = dict(artifacts_raw) if isinstance(artifacts_raw, Mapping) else {}
+    artifacts.update(dict(artifact_updates))
+    annotated["artifacts"] = artifacts
+    return annotated
 
 
 def _stage3_resume_file_receipt(path: Path) -> dict[str, Any]:
@@ -6964,6 +6990,31 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             )
             return 2
 
+        post_research_split_dir = artifacts_dir / "repro_research" / "post_research_case_splits_001"
+        post_research_splits = apply_post_research_relation_assessments(
+            problem_records=problem_records,
+            priority_decisions=priority_decisions,
+            research_dossiers=research_dossiers,
+            atoms=atoms,
+            receipt_dir=post_research_split_dir,
+        )
+        post_research_split_groups = post_research_splits["split_groups"]
+        split_parent_dossiers = post_research_splits["split_parent_dossiers"]
+        if post_research_split_groups:
+            problem_records = post_research_splits["problem_records"]
+            priority_decisions = post_research_splits["priority_decisions"]
+            research_dossiers = post_research_splits["research_dossiers"]
+            atoms = post_research_splits["atoms"]
+            atoms_doc["atoms"] = atoms
+            atoms_doc["atom_dispositions"] = atom_disposition_summary(atoms)
+            write_backlog_atoms(atoms_doc, atoms_jsonl)
+            case_registry = build_case_registry(
+                problem_records,
+                previous=case_registry,
+                supporting_atoms=atoms,
+            )
+            write_case_registry(case_registry_json, case_registry)
+
         post_research_relations = collapse_post_research_verified_mechanisms(
             problem_records=problem_records,
             priority_decisions=priority_decisions,
@@ -6971,6 +7022,8 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
             case_registry=case_registry,
         )
         post_research_groups = post_research_relations["groups"]
+        response_path: Path | None = None
+        relation_receipt_path: Path | None = None
         if post_research_groups:
             problem_records = post_research_relations["problem_records"]
             priority_decisions = post_research_relations["priority_decisions"]
@@ -7009,31 +7062,37 @@ def _cmd_reports_backlog(args: argparse.Namespace) -> int:
                 stage="repro_research",
             )
             write_case_registry(case_registry_json, case_registry)
-            stage3_doc = dict(stage3_doc)
-            stage3_doc["items"] = research_dossiers
-            stage3_meta_raw = stage3_doc.get("input_meta")
-            stage3_meta = dict(stage3_meta_raw) if isinstance(stage3_meta_raw, dict) else {}
-            stage3_meta.update(
-                {
-                    "post_research_relation_review": ("runner_verified_mechanism_identity_v2"),
+
+        if post_research_groups or post_research_split_groups:
+            stage3_artifact_updates: dict[str, Any] = {}
+            if post_research_split_groups:
+                stage3_artifact_updates["post_research_split_receipt_dir"] = str(
+                    post_research_split_dir
+                )
+            if response_path is not None and relation_receipt_path is not None:
+                stage3_artifact_updates.update(
+                    {
+                        "post_research_relation_response": str(response_path),
+                        "post_research_relation_receipt": str(relation_receipt_path),
+                    }
+                )
+            stage3_doc = _annotate_completed_stage3_document(
+                stage3_doc,
+                input_meta_updates={
+                    "post_research_relation_review": (
+                        "runner_authenticated_relation_assessment_v1;"
+                        "runner_verified_mechanism_identity_v2"
+                    ),
+                    "post_research_split_groups": post_research_split_groups,
+                    "post_research_split_receipts": post_research_splits["split_receipts"],
+                    "post_research_split_parent_count": len(split_parent_dossiers),
                     "post_research_relation_groups": post_research_groups,
                     "post_research_case_aliases": post_research_relations["case_aliases"],
                     "post_research_canonical_case_count": len(problem_records),
                     "post_research_canonical_research_count": len(research_dossiers),
-                }
+                },
+                artifact_updates=stage3_artifact_updates,
             )
-            stage3_doc["input_meta"] = stage3_meta
-            stage3_artifacts_raw = stage3_doc.get("artifacts")
-            stage3_artifacts = (
-                dict(stage3_artifacts_raw) if isinstance(stage3_artifacts_raw, dict) else {}
-            )
-            stage3_artifacts.update(
-                {
-                    "post_research_relation_response": str(response_path),
-                    "post_research_relation_receipt": str(relation_receipt_path),
-                }
-            )
-            stage3_doc["artifacts"] = stage3_artifacts
             research_json.write_text(
                 json.dumps(stage3_doc, ensure_ascii=False, indent=2) + "\n",
                 encoding="utf-8",

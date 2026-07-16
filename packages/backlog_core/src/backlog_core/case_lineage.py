@@ -45,6 +45,7 @@ ATOM_DISPOSITION_SOURCES: frozenset[str] = frozenset(
         "canonical_problem_evidence",
         "case_registry_membership",
         "problem_mining_evidence_partition",
+        "post_research_split",
         "runner_evidence_assignment",
         "runner_novel_case_classification",
         "runner_parent_lineage",
@@ -1386,6 +1387,8 @@ def assign_problem_case_ids(
         case_registry,
         "operational_signature_to_case_id",
     )
+    registry_cases_raw = case_registry.get("cases") if isinstance(case_registry, Mapping) else None
+    registry_cases = registry_cases_raw if isinstance(registry_cases_raw, Mapping) else {}
 
     assigned: list[dict[str, Any]] = []
     seen_problem_ids: set[str] = set()
@@ -1488,6 +1491,17 @@ def assign_problem_case_ids(
         else:
             seeds = _evidence_seed_ids(evidence_ids, atoms_by_id)
             case_id = mint_case_id(seeds or evidence_ids)
+
+        persisted_case_raw = registry_cases.get(case_id)
+        persisted_case = persisted_case_raw if isinstance(persisted_case_raw, Mapping) else {}
+        split_child_case_ids = _clean_string_list(persisted_case.get("child_case_ids"))
+        if _clean_string(persisted_case.get("state")) == "split" and split_child_case_ids:
+            # A broad signature which was previously split is still evidence for the
+            # durable parent relation node. It must not silently select whichever child
+            # sorts first (or reopen the parent as if the split never happened).
+            identity_status = "pending_relation"
+            identity_candidates = sorted(split_child_case_ids)
+            related_parent_cases.update(split_child_case_ids)
 
         record["case_id"] = case_id
         record["case_identity_status"] = identity_status
@@ -1898,9 +1912,7 @@ def build_case_registry(
             source_evidence_ids,
             supporting_atoms,
         )
-        previous_source_hashes_raw = previous_entry.get(
-            "source_evidence_atom_sha256_by_id"
-        )
+        previous_source_hashes_raw = previous_entry.get("source_evidence_atom_sha256_by_id")
         previous_source_hashes = (
             {
                 str(atom_id): str(atom_sha256).casefold()
@@ -1922,8 +1934,7 @@ def build_case_registry(
             and previous_source_hashes != current_source_hashes
         )
         evidence_changed = bool(previous_entry) and (
-            bool(set(evidence_ids) - set(previous_evidence_list))
-            or source_content_changed
+            bool(set(evidence_ids) - set(previous_evidence_list)) or source_content_changed
         )
         case_revision = max(requested_revision, previous_revision)
         if evidence_changed:
@@ -1945,14 +1956,10 @@ def build_case_registry(
             "problem_ids": member_problem_ids,
             "evidence_atom_ids": evidence_ids,
             "source_evidence_atom_ids": source_evidence_ids,
-            "source_evidence_projection_version": source_snapshot[
-                "source_projection_version"
-            ],
+            "source_evidence_projection_version": source_snapshot["source_projection_version"],
             "source_evidence_atom_sha256_by_id": current_source_hashes,
             "source_evidence_snapshot_complete": source_snapshot["complete"],
-            "source_evidence_snapshot_missing_atom_ids": source_snapshot[
-                "missing_atom_ids"
-            ],
+            "source_evidence_snapshot_missing_atom_ids": source_snapshot["missing_atom_ids"],
             "source_evidence_snapshot_sha256": source_snapshot["snapshot_sha256"],
             "case_revision": case_revision,
             "same_cause_group_id": _clean_string(record.get("same_cause_group_id"))
@@ -1991,11 +1998,23 @@ def build_case_registry(
                 )
             ),
             "derived_evidence_atom_ids": derived_evidence_ids,
+            "occurrence_evidence_atom_ids": list(
+                dict.fromkeys(
+                    _clean_string_list(previous_entry.get("occurrence_evidence_atom_ids"))
+                    + _clean_string_list(record.get("occurrence_evidence_atom_ids"))
+                )
+            ),
             "split_from_case_id": _clean_string(record.get("split_from_case_id"))
             or _clean_string(previous_entry.get("split_from_case_id")),
             "split_parent_problem_id": _clean_string(record.get("split_parent_problem_id"))
             or _clean_string(previous_entry.get("split_parent_problem_id")),
         }
+        split_receipt_raw = record.get("post_research_split_receipt")
+        previous_split_receipt_raw = previous_entry.get("post_research_split_receipt")
+        if isinstance(split_receipt_raw, Mapping):
+            entry["post_research_split_receipt"] = deepcopy(dict(split_receipt_raw))
+        elif isinstance(previous_split_receipt_raw, Mapping):
+            entry["post_research_split_receipt"] = deepcopy(dict(previous_split_receipt_raw))
         causal_signature = _clean_string(record.get("verified_causal_signature_sha256"))
         causal_signature_source = _clean_string(record.get("verified_causal_signature_source"))
         if (
@@ -2097,6 +2116,11 @@ def build_case_registry(
                     operational_signature,
                     set(),
                 ).add(case_id)
+        # Split children cite original occurrences through a separate immutable
+        # receipt; those observations are support membership, not child-owned
+        # canonical evidence and must not be hidden behind only the facet context.
+        for atom_id in _clean_string_list(record.get("occurrence_evidence_atom_ids")):
+            current_atom_memberships.setdefault(atom_id, set()).add(case_id)
         for fingerprint in _clean_string_list(record.get("ticket_fingerprints")):
             fingerprint_map[fingerprint] = case_id
         for absorbed_case_id in _clean_string_list(record.get("absorbed_case_ids")):
@@ -2126,6 +2150,7 @@ def build_case_registry(
     # graph node but is no longer an active work unit; its original problem aliases
     # continue resolving to the parent rather than arbitrarily choosing one child.
     split_children_by_parent: dict[str, list[dict[str, Any]]] = {}
+    superseded_split_child_case_ids: set[str] = set()
     for record in problem_cases:
         parent_case_id = _clean_string(record.get("split_from_case_id"))
         if parent_case_id is not None:
@@ -2145,17 +2170,99 @@ def build_case_registry(
         ) or _clean_string(parent_entry.get("canonical_problem_id"))
         if parent_problem_id is not None and parent_problem_id not in parent_problem_ids:
             parent_problem_ids.insert(0, parent_problem_id)
-        child_case_ids = list(
+        previous_child_case_ids = _clean_string_list(parent_entry.get("child_case_ids"))
+        child_case_ids = [
+            child_case_id
+            for child in child_records
+            for child_case_id in [_clean_string(child.get("case_id"))]
+            if child_case_id is not None
+        ]
+        child_case_ids = list(dict.fromkeys(child_case_ids))
+        historical_child_case_ids = list(
             dict.fromkeys(
-                _clean_string_list(parent_entry.get("child_case_ids"))
-                + [
-                    child_case_id
-                    for child in child_records
-                    for child_case_id in [_clean_string(child.get("case_id"))]
-                    if child_case_id is not None
-                ]
+                _clean_string_list(parent_entry.get("historical_child_case_ids"))
+                + previous_child_case_ids
+                + child_case_ids
             )
         )
+        current_children_by_id = {
+            child_case_id: child
+            for child in child_records
+            for child_case_id in [_clean_string(child.get("case_id"))]
+            if child_case_id is not None
+        }
+        split_receipts = [
+            deepcopy(dict(receipt))
+            for child in child_records
+            for receipt in [child.get("post_research_split_receipt")]
+            if isinstance(receipt, Mapping)
+        ]
+        unique_current_receipts = {
+            json.dumps(receipt, sort_keys=True, separators=(",", ":")): receipt
+            for receipt in split_receipts
+        }
+        if len(unique_current_receipts) > 1:
+            raise ValueError(
+                f"build_case_registry: split children disagree on receipt for {parent_case_id}"
+            )
+        current_split_receipt = (
+            next(iter(unique_current_receipts.values())) if unique_current_receipts else None
+        )
+        previous_current_receipt = parent_entry.get("current_post_research_split_receipt")
+        if not isinstance(previous_current_receipt, Mapping):
+            historical_receipts_raw = parent_entry.get("post_research_split_receipts")
+            historical_receipts = (
+                [receipt for receipt in historical_receipts_raw if isinstance(receipt, Mapping)]
+                if isinstance(historical_receipts_raw, list)
+                else []
+            )
+            previous_current_receipt = historical_receipts[-1] if historical_receipts else None
+        previous_split_revision = max(
+            0,
+            int(parent_entry.get("split_revision") or 0),
+            1 if isinstance(previous_current_receipt, Mapping) else 0,
+        )
+        split_revision = previous_split_revision or 1
+        if (
+            isinstance(current_split_receipt, Mapping)
+            and isinstance(previous_current_receipt, Mapping)
+            and dict(current_split_receipt) != dict(previous_current_receipt)
+        ):
+            split_revision = previous_split_revision + 1
+
+        for current_child_case_id in child_case_ids:
+            current_raw = cases.get(current_child_case_id)
+            if not isinstance(current_raw, Mapping):
+                continue
+            current_entry = dict(current_raw)
+            current_entry["state"] = "active"
+            current_entry.pop("superseded_by_case_ids", None)
+            current_entry.pop("superseded_by_split_receipt", None)
+            current_entry.pop("superseded_by_split_revision", None)
+            cases[current_child_case_id] = current_entry
+
+        for old_child_case_id in previous_child_case_ids:
+            if old_child_case_id in current_children_by_id:
+                continue
+            old_raw = cases.get(old_child_case_id)
+            if not isinstance(old_raw, Mapping):
+                continue
+            old_entry = dict(old_raw)
+            old_occurrences = set(_clean_string_list(old_entry.get("occurrence_evidence_atom_ids")))
+            replacements = [
+                current_child_case_id
+                for current_child_case_id, current_child in current_children_by_id.items()
+                if old_occurrences.intersection(
+                    _clean_string_list(current_child.get("occurrence_evidence_atom_ids"))
+                )
+            ]
+            old_entry["state"] = "superseded"
+            old_entry["superseded_by_case_ids"] = replacements or child_case_ids
+            old_entry["superseded_by_split_revision"] = split_revision
+            if isinstance(current_split_receipt, Mapping):
+                old_entry["superseded_by_split_receipt"] = deepcopy(dict(current_split_receipt))
+            cases[old_child_case_id] = old_entry
+            superseded_split_child_case_ids.add(old_child_case_id)
         parent_entry.update(
             {
                 "case_id": parent_case_id,
@@ -2163,6 +2270,8 @@ def build_case_registry(
                 "problem_ids": parent_problem_ids,
                 "state": "split",
                 "child_case_ids": child_case_ids,
+                "historical_child_case_ids": historical_child_case_ids,
+                "split_revision": split_revision,
                 "title": _clean_string(parent_entry.get("title"))
                 or _clean_string(first_child.get("title")),
                 "problem": _clean_string(parent_entry.get("problem"))
@@ -2171,6 +2280,27 @@ def build_case_registry(
                 or _clean_string(first_child.get("user_impact")),
             }
         )
+        if isinstance(current_split_receipt, Mapping):
+            parent_entry["current_post_research_split_receipt"] = deepcopy(
+                dict(current_split_receipt)
+            )
+        if split_receipts:
+            previous_receipts_raw = parent_entry.get("post_research_split_receipts")
+            previous_receipts = (
+                [
+                    deepcopy(dict(receipt))
+                    for receipt in previous_receipts_raw
+                    if isinstance(receipt, Mapping)
+                ]
+                if isinstance(previous_receipts_raw, list)
+                else []
+            )
+            parent_entry["post_research_split_receipts"] = list(
+                {
+                    json.dumps(receipt, sort_keys=True, separators=(",", ":")): receipt
+                    for receipt in [*previous_receipts, *split_receipts]
+                }.values()
+            )
         cases[parent_case_id] = parent_entry
         for problem_id in parent_problem_ids:
             problem_map[problem_id] = parent_case_id
@@ -2263,6 +2393,7 @@ def build_case_registry(
         persisted_case_ids = {
             _canonical_registry_case_id(case_id)
             for case_id in previous_memberships.get(atom_id, [])
+            if case_id not in superseded_split_child_case_ids
         }
         # A split is an explicit evidence partition, so the split parent ceases to be
         # a membership for atoms now assigned to one of its children.
@@ -2621,9 +2752,7 @@ def _exact_stage_json_ref(
     refs = [
         deepcopy(dict(ref))
         for ref in (
-            snapshot.get("artifact_refs")
-            if isinstance(snapshot.get("artifact_refs"), list)
-            else []
+            snapshot.get("artifact_refs") if isinstance(snapshot.get("artifact_refs"), list) else []
         )
         if isinstance(ref, Mapping)
         and _clean_string(ref.get("path")) is not None
@@ -2690,14 +2819,11 @@ def _research_proof_summary(
     research_json_refs = [
         deepcopy(dict(ref))
         for ref in (
-            snapshot.get("artifact_refs")
-            if isinstance(snapshot.get("artifact_refs"), list)
-            else []
+            snapshot.get("artifact_refs") if isinstance(snapshot.get("artifact_refs"), list) else []
         )
         if isinstance(ref, Mapping)
         and _clean_string(ref.get("path")) is not None
-        and _clean_string(ref.get("name"))
-        in {"research_json", "repro_research_json"}
+        and _clean_string(ref.get("name")) in {"research_json", "repro_research_json"}
     ]
     summary: dict[str, Any] = {
         "stage_snapshot_id": snapshot.get("stage_snapshot_id"),
@@ -2730,6 +2856,9 @@ def _research_proof_summary(
         if isinstance(record.get("artifact_refs"), list)
         else [],
     }
+    actionability_raw = record.get("actionability_assessment")
+    if isinstance(actionability_raw, Mapping):
+        summary["actionability_assessment"] = deepcopy(dict(actionability_raw))
     hypotheses = record.get("root_cause_hypotheses")
     if isinstance(hypotheses, list):
         summary["root_cause_hypothesis_ids"] = [
@@ -2946,9 +3075,7 @@ def _update_optioning_stage_summary(
     if status is None:
         status = "options_produced" if records else "not_produced"
     current_research_raw = entry.get("current_research_proof")
-    current_research = (
-        current_research_raw if isinstance(current_research_raw, Mapping) else {}
-    )
+    current_research = current_research_raw if isinstance(current_research_raw, Mapping) else {}
     option_records_sha256 = _canonical_content_sha256([dict(record) for record in records])
     source_evidence_atom_ids = _clean_string_list(entry.get("source_evidence_atom_ids"))
     summary: dict[str, Any] = {
@@ -2968,9 +3095,7 @@ def _update_optioning_stage_summary(
             source_evidence_snapshot_sha256=_clean_string(
                 entry.get("source_evidence_snapshot_sha256")
             ),
-            research_dossier_sha256=_clean_string(
-                current_research.get("full_dossier_sha256")
-            ),
+            research_dossier_sha256=_clean_string(current_research.get("full_dossier_sha256")),
         ),
         "problem_id": _clean_string(records[0].get("problem_id")) if records else None,
         "optioning_status": status,
@@ -2989,6 +3114,14 @@ def _update_optioning_stage_summary(
             )
         ),
     }
+    actionability_disposition = _clean_string(
+        outcome.get("research_actionability_disposition")
+    )
+    if actionability_disposition is not None:
+        summary["research_actionability_disposition"] = actionability_disposition
+    evidence_refs = _clean_string_list(outcome.get("evidence_refs"))
+    if evidence_refs:
+        summary["actionability_evidence_refs"] = evidence_refs
     blockers = _clean_string_list(outcome.get("research_readiness_blockers"))
     if blockers:
         summary["research_readiness_blockers"] = blockers
@@ -3029,9 +3162,7 @@ def _selection_summary(
     ):
         material_risks.extend(_clean_string_list(coverage.get(risk_field)))
     current_research_raw = entry.get("current_research_proof")
-    current_research = (
-        current_research_raw if isinstance(current_research_raw, Mapping) else {}
-    )
+    current_research = current_research_raw if isinstance(current_research_raw, Mapping) else {}
     current_options_raw = entry.get("current_option_set")
     current_options = current_options_raw if isinstance(current_options_raw, Mapping) else {}
     selection_records = [dict(record)] if record else []
@@ -3048,18 +3179,12 @@ def _selection_summary(
             stage="solution_selection",
             case_id=_clean_string(entry.get("case_id")),
             case_revision=max(1, int(entry.get("case_revision") or 1)),
-            source_evidence_atom_ids=_clean_string_list(
-                entry.get("source_evidence_atom_ids")
-            ),
+            source_evidence_atom_ids=_clean_string_list(entry.get("source_evidence_atom_ids")),
             source_evidence_snapshot_sha256=_clean_string(
                 entry.get("source_evidence_snapshot_sha256")
             ),
-            research_dossier_sha256=_clean_string(
-                current_research.get("full_dossier_sha256")
-            ),
-            option_records_sha256=_clean_string(
-                current_options.get("full_records_sha256")
-            ),
+            research_dossier_sha256=_clean_string(current_research.get("full_dossier_sha256")),
+            option_records_sha256=_clean_string(current_options.get("full_records_sha256")),
         ),
         "problem_id": _clean_string(record.get("problem_id"))
         or _clean_string(outcome.get("problem_id")),
@@ -3185,22 +3310,16 @@ def _update_planning_stage_summary(
     entry["plan_revision_ids"] = sorted(revisions)
     entry["current_plan_revision_ids"] = list(dict.fromkeys(current_revision_ids))
     current_research_raw = entry.get("current_research_proof")
-    current_research = (
-        current_research_raw if isinstance(current_research_raw, Mapping) else {}
-    )
+    current_research = current_research_raw if isinstance(current_research_raw, Mapping) else {}
     current_options_raw = entry.get("current_option_set")
     current_options = current_options_raw if isinstance(current_options_raw, Mapping) else {}
     current_selection_raw = entry.get("current_selection")
-    current_selection = (
-        current_selection_raw if isinstance(current_selection_raw, Mapping) else {}
-    )
+    current_selection = current_selection_raw if isinstance(current_selection_raw, Mapping) else {}
     planning_summary = {
         "stage_snapshot_id": snapshot.get("stage_snapshot_id"),
         "artifact_refs": deepcopy(snapshot.get("artifact_refs", [])),
         "downstream_contract_revision": DOWNSTREAM_CHAIN_CONTRACT_REVISION,
-        "full_records_sha256": _canonical_content_sha256(
-            [dict(record) for record in records]
-        ),
+        "full_records_sha256": _canonical_content_sha256([dict(record) for record in records]),
         "stage_artifact_ref": _exact_stage_json_ref(
             snapshot,
             allowed_names={"change_plans_json"},
@@ -3209,21 +3328,13 @@ def _update_planning_stage_summary(
             stage="implementation_planning",
             case_id=_clean_string(entry.get("case_id")),
             case_revision=max(1, int(entry.get("case_revision") or 1)),
-            source_evidence_atom_ids=_clean_string_list(
-                entry.get("source_evidence_atom_ids")
-            ),
+            source_evidence_atom_ids=_clean_string_list(entry.get("source_evidence_atom_ids")),
             source_evidence_snapshot_sha256=_clean_string(
                 entry.get("source_evidence_snapshot_sha256")
             ),
-            research_dossier_sha256=_clean_string(
-                current_research.get("full_dossier_sha256")
-            ),
-            option_records_sha256=_clean_string(
-                current_options.get("full_records_sha256")
-            ),
-            selection_records_sha256=_clean_string(
-                current_selection.get("full_records_sha256")
-            ),
+            research_dossier_sha256=_clean_string(current_research.get("full_dossier_sha256")),
+            option_records_sha256=_clean_string(current_options.get("full_records_sha256")),
+            selection_records_sha256=_clean_string(current_selection.get("full_records_sha256")),
         ),
         "problem_id": _clean_string(records[0].get("problem_id")) if records else None,
         "plan_revision_ids": list(dict.fromkeys(current_revision_ids)),
@@ -3489,7 +3600,10 @@ def problem_case_records_from_registry(
         if case_id is None or problem_id is None:
             continue
         state = _clean_string(raw_entry.get("state")) or "active"
-        if state in {"alias", "split"} or _clean_string(raw_entry.get("alias_of")) is not None:
+        if (
+            state in {"alias", "split", "superseded"}
+            or _clean_string(raw_entry.get("alias_of")) is not None
+        ):
             continue
         evidence_atom_ids = _clean_string_list(raw_entry.get("evidence_atom_ids"))
         derived_evidence_atom_ids = _clean_string_list(raw_entry.get("derived_evidence_atom_ids"))
@@ -3516,9 +3630,7 @@ def problem_case_records_from_registry(
             )
             if isinstance(raw_entry.get("source_evidence_atom_sha256_by_id"), Mapping)
             else {},
-            "source_evidence_snapshot_complete": raw_entry.get(
-                "source_evidence_snapshot_complete"
-            )
+            "source_evidence_snapshot_complete": raw_entry.get("source_evidence_snapshot_complete")
             is True,
             "source_evidence_snapshot_missing_atom_ids": _clean_string_list(
                 raw_entry.get("source_evidence_snapshot_missing_atom_ids")
@@ -3548,9 +3660,7 @@ def problem_case_records_from_registry(
         identity_status = _clean_string(raw_entry.get("case_identity_status"))
         if identity_status is not None:
             record["case_identity_status"] = identity_status
-        identity_candidates = _clean_string_list(
-            raw_entry.get("case_identity_candidate_ids")
-        )
+        identity_candidates = _clean_string_list(raw_entry.get("case_identity_candidate_ids"))
         if identity_candidates:
             record["case_identity_candidate_ids"] = identity_candidates
         provisional_group = raw_entry.get("provisional_same_cause_group")
@@ -3631,6 +3741,14 @@ def problem_case_records_from_registry(
         split_parent_problem = _clean_string(raw_entry.get("split_parent_problem_id"))
         if split_parent_problem is not None:
             record["split_parent_problem_id"] = split_parent_problem
+        occurrence_evidence_atom_ids = _clean_string_list(
+            raw_entry.get("occurrence_evidence_atom_ids")
+        )
+        if occurrence_evidence_atom_ids:
+            record["occurrence_evidence_atom_ids"] = occurrence_evidence_atom_ids
+        split_receipt = raw_entry.get("post_research_split_receipt")
+        if isinstance(split_receipt, Mapping):
+            record["post_research_split_receipt"] = deepcopy(dict(split_receipt))
         suggested_owner = _clean_string(raw_entry.get("suggested_owner"))
         if suggested_owner is not None:
             record["suggested_owner"] = suggested_owner

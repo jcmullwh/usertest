@@ -80,6 +80,7 @@ def test_one_old_error_to_one_new_error_advances_current_not_objective_best() ->
 
     assert assessment.reason == "prior_error_resolved"
     assert assessment.global_best_updated is False
+    assert assessment.reset_progress_clock is True
     assert tracker.current.payload == "latest"
     assert tracker.best.payload == "initial"
 
@@ -271,9 +272,137 @@ def test_unknown_validator_identity_is_repairable_without_allowlist() -> None:
     assert assessment.reason == "prior_error_resolved"
     assert assessment.safe_frontier_updated is True
     assert assessment.global_best_updated is False
-    assert assessment.reset_progress_clock is False
+    assert assessment.reset_progress_clock is True
     assert assessment.resolved_error_identities == (
         "future_validator_alpha: unforeseen shape",
+    )
+
+
+def test_replaced_error_resets_cost_clock_until_identity_progress_stops() -> None:
+    initial = _observation("initial", ["old:error"], cost=50.0)
+    candidates = iter(
+        [
+            _observation("replacement", ["new:error"], cost=40.0),
+            _observation("same-frontier-new-shape", ["new:error"], cost=50.0),
+        ]
+    )
+
+    result = run_progressive_correction(
+        initial=initial,
+        invoke_correction=lambda _current, _number, _feedback: next(candidates),
+        pause_policy=lambda _current, _assessment, since_progress, _total: (
+            "correction_cost_reached_original" if since_progress >= initial.cost_seconds else None
+        ),
+    )
+
+    assert result.status == "repairable_paused:correction_cost_reached_original"
+    assert result.assessments[0].reason == "prior_error_resolved"
+    assert result.assessments[0].reset_progress_clock is True
+    assert result.assessments[1].reason == "new_state_remains_repairable"
+    assert result.assessments[1].reset_progress_clock is False
+    assert result.correction_cost_since_progress == 50.0
+    assert result.total_correction_cost == 90.0
+
+
+def test_distinct_contract_churn_pauses_and_retains_the_complete_frontier() -> None:
+    initial = _observation("initial", ["contract:original"], cost=5.0)
+    candidates = iter(
+        [
+            _observation("revision-one", ["contract:replacement-one"], cost=1.0),
+            _observation("revision-two", ["contract:replacement-two"], cost=1.0),
+            _observation("revision-three", ["contract:replacement-three"], cost=1.0),
+        ]
+    )
+
+    result = run_progressive_correction(
+        initial=initial,
+        invoke_correction=lambda _current, _number, _feedback: next(candidates),
+    )
+
+    assert result.status == (
+        "repairable_paused:"
+        "consecutive_nonadvancing_corrections_require_adjudication"
+    )
+    assert [attempt.payload for attempt in result.attempts] == [
+        "initial",
+        "revision-one",
+        "revision-two",
+        "revision-three",
+    ]
+    assert result.current.payload == "revision-three"
+    assert result.best.payload == "initial"
+    assert len(result.assessments) == 3
+    assert result.total_correction_cost == 3.0
+
+    resumed = run_progressive_correction(
+        initial=result.current,
+        resume_from=result,
+        invoke_correction=lambda _current, _number, _feedback: _observation(
+            "schema-corrected",
+            [],
+            cost=1.0,
+        ),
+    )
+
+    assert resumed.status == "corrected"
+    assert [attempt.payload for attempt in resumed.attempts][-2:] == [
+        "revision-three",
+        "schema-corrected",
+    ]
+
+
+def test_stage5_shape_accepts_valid_fourth_output_after_two_replacement_errors() -> None:
+    candidates = iter(
+        [
+            _observation("stage5-revision-one", ["selection:replacement-one"]),
+            _observation("stage5-revision-two", ["selection:replacement-two"]),
+            _observation("stage5-valid", []),
+        ]
+    )
+
+    result = run_progressive_correction(
+        initial=_observation("stage5-initial", ["selection:initial"]),
+        invoke_correction=lambda _current, _number, _feedback: next(candidates),
+    )
+
+    assert result.status == "corrected"
+    assert [attempt.payload for attempt in result.attempts] == [
+        "stage5-initial",
+        "stage5-revision-one",
+        "stage5-revision-two",
+        "stage5-valid",
+    ]
+    assert [assessment.reason for assessment in result.assessments] == [
+        "prior_error_resolved",
+        "prior_error_resolved",
+        "output_contract_satisfied",
+    ]
+
+
+def test_material_current_progress_has_no_low_correction_turn_cap() -> None:
+    initial_errors = [f"contract:{index}" for index in range(6)]
+    candidates = iter(
+        [
+            _observation(
+                f"revision-{remaining}",
+                [f"replacement:{index}" for index in range(remaining)],
+                cost=1.0,
+            )
+            for remaining in range(5, -1, -1)
+        ]
+    )
+
+    result = run_progressive_correction(
+        initial=_observation("initial", initial_errors, cost=5.0),
+        invoke_correction=lambda _current, _number, _feedback: next(candidates),
+    )
+
+    assert result.status == "corrected"
+    assert len(result.attempts) == 7
+    assert len(result.assessments) == 6
+    assert all(
+        assessment.after_error_count < assessment.before_error_count
+        for assessment in result.assessments[:-1]
     )
 
 

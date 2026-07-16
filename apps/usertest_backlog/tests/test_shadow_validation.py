@@ -4240,7 +4240,7 @@ def test_shadow_case_conservation_rejects_silent_stage_disappearance(
 
 @pytest.mark.parametrize(
     "explicit_stop",
-    ["research_block", "no_safe_option", "selection_reject", "plan_block"],
+    ["research_block", "no_safe_option", "not_required", "selection_reject", "plan_block"],
 )
 def test_shadow_case_conservation_accepts_only_explicit_stops(
     tmp_path: Path, explicit_stop: str
@@ -4261,6 +4261,27 @@ def test_shadow_case_conservation_accepts_only_explicit_stops(
                         "problem_id": "problem:one",
                         "optioning_status": "no_safe_option",
                         "decision_rationale": "Every mechanism has unacceptable risk.",
+                    }
+                ]
+            },
+        }
+    elif explicit_stop == "not_required":
+        inputs["stage3"]["items"][0]["actionability_assessment"] = {  # type: ignore[index]
+            "disposition": "already_addressed",
+            "rationale": "The pinned revision already contains the verified fix.",
+            "evidence_refs": ["experiment:current"],
+        }
+        inputs["stage4"] = {
+            "items": [],
+            "input_meta": {
+                "optioning_outcomes": [
+                    {
+                        "case_id": "case:one",
+                        "problem_id": "problem:one",
+                        "optioning_status": "not_required",
+                        "research_actionability_disposition": "already_addressed",
+                        "decision_rationale": "The pinned revision already contains the fix.",
+                        "evidence_refs": ["experiment:current"],
                     }
                 ]
             },

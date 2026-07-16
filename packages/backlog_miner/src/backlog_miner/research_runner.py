@@ -44,7 +44,9 @@ from runner_core.target_acquire import acquire_target
 
 from backlog_miner.origin_evidence import (
     materialize_origin_attachments,
+    origin_attachment_read_scope,
     origin_attachment_requirements,
+    source_observation_classification,
     verify_materialized_origin_attachments,
 )
 from backlog_miner.research_evidence import (
@@ -69,6 +71,17 @@ _REPO_INTENT_PATH = Path("configs") / "repo_intent.md"
 
 _EXTENSION_KEY = "backlog_repro_research"
 _REPEATED_CORRECTION_STATE_RESTART_COUNT = 3
+_CONSECUTIVE_ADVANCEMENT_REGRESSION_PAUSE_COUNT = 3
+_CONSECUTIVE_SUBSTANTIVE_REGRESSION_PAUSE_COUNT = 3
+_CONSECUTIVE_ORDINARY_NONADVANCING_PAUSE_COUNT = 3
+_EXTERNAL_FEEDBACK_VALIDATION_FRONTIER = "external_feedback"
+_MODEL_OUTPUT_VALIDATION_FRONTIER = "model_output_contract"
+_EVIDENCE_VALIDATION_FRONTIER = "evidence_verification"
+_VALIDATION_FRONTIER_RANK = {
+    _EXTERNAL_FEEDBACK_VALIDATION_FRONTIER: 0,
+    _MODEL_OUTPUT_VALIDATION_FRONTIER: 1,
+    _EVIDENCE_VALIDATION_FRONTIER: 2,
+}
 
 _RUNNER_OWNED_DOSSIER_FIELDS: frozenset[str] = frozenset(
     {
@@ -87,6 +100,27 @@ _RUNNER_OWNED_DOSSIER_FIELDS: frozenset[str] = frozenset(
         "research_attempts",
     }
 )
+
+
+def _model_dossier_copy(candidate: Mapping[str, Any]) -> dict[str, Any]:
+    """Return an isolated model-owned projection for runner augmentation.
+
+    Evidence verification adds replay artifacts and receipts to nested experiments.
+    A shallow top-level copy would leak those runner-owned mutations back into the
+    authoring frontier and manufacture new model-contract errors on the next turn.
+    """
+
+    return json.loads(
+        json.dumps(
+            {
+                key: value
+                for key, value in candidate.items()
+                if key not in _RUNNER_OWNED_DOSSIER_FIELDS
+            },
+            ensure_ascii=False,
+        )
+    )
+
 
 # Stage-3 Codex may inspect repository state and explore candidate replays. This is
 # a coarse in-agent capability policy, not an evidence authorization contract:
@@ -164,12 +198,31 @@ def _has_origin_attachment_refs(atoms: Sequence[dict[str, Any]]) -> bool:
     )
 
 
+def _has_origin_materialization_inputs(
+    atoms: Sequence[dict[str, Any]], assignment: Mapping[str, Any]
+) -> bool:
+    if _has_origin_attachment_refs(atoms):
+        return True
+    receipts_raw = assignment.get("atom_receipts")
+    return any(
+        isinstance(artifact, Mapping) and _coerce_str(artifact.get("research_context_role"))
+        for receipt in (receipts_raw if isinstance(receipts_raw, list) else [])
+        if isinstance(receipt, Mapping)
+        for artifact in (
+            receipt.get("artifact_receipts")
+            if isinstance(receipt.get("artifact_receipts"), list)
+            else []
+        )
+    )
+
+
 def _prepare_origin_evidence_workspace(
     *,
     repo_input: str,
     repo_ref: str,
     preferred_workspace_dir: Path,
     evidence_atoms: Sequence[dict[str, Any]],
+    evidence_assignment: Mapping[str, Any],
     source_root: Path,
 ) -> tuple[Path, dict[str, Any]]:
     acquired = acquire_target(
@@ -181,6 +234,7 @@ def _prepare_origin_evidence_workspace(
         atoms=evidence_atoms,
         workspace_dir=acquired.workspace_dir,
         source_root=source_root,
+        evidence_assignment=evidence_assignment,
         relative_root=Path(".usertest_research") / "origin_evidence",
     )
     return acquired.workspace_dir, manifest
@@ -192,6 +246,7 @@ def _origin_attachment_read_receipts(
     workspace_dir: Path,
     manifest: dict[str, Any],
     evidence_attempts: Sequence[Mapping[str, Any]] = (),
+    required_files: Sequence[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     errors = verify_materialized_origin_attachments(
         workspace_dir=workspace_dir,
@@ -237,7 +292,8 @@ def _origin_attachment_read_receipts(
 
     receipts: list[dict[str, Any]] = []
     observed: set[str] = set()
-    for requirement in origin_attachment_requirements(manifest):
+    requirements = origin_attachment_requirements(manifest)
+    for requirement in requirements:
         rel_path = str(requirement["file"])
         expected_sha = str(requirement["sha256"])
         path = (workspace_dir / Path(rel_path)).resolve()
@@ -284,11 +340,58 @@ def _origin_attachment_read_receipts(
             )
             observed.add(rel_path)
             break
-    for requirement in origin_attachment_requirements(manifest):
+    required = (
+        {str(path) for path in required_files}
+        if required_files is not None
+        else {str(requirement["file"]) for requirement in requirements}
+    )
+    for requirement in requirements:
         rel_path = str(requirement["file"])
-        if rel_path not in observed:
+        if rel_path in required and rel_path not in observed:
             errors.append(f"origin_attachment_chunk_not_read_in_full:{rel_path}")
     return receipts, list(dict.fromkeys(errors))
+
+
+def _origin_attachment_read_evidence(
+    *,
+    run_dir: Path,
+    workspace_dir: Path | None,
+    manifest: dict[str, Any],
+    dossier: Mapping[str, Any],
+    verification: Mapping[str, Any],
+    evidence_attempts: Sequence[Mapping[str, Any]] = (),
+) -> tuple[list[dict[str, Any]], dict[str, Any], list[str]]:
+    """Attest mandatory and claim-bound reads while retaining optional coverage."""
+
+    initial_scope = origin_attachment_read_scope(
+        manifest,
+        dossier=dossier,
+        verification=verification,
+    )
+    if workspace_dir is None:
+        reads: list[dict[str, Any]] = []
+        errors = ["origin_attachment_workspace_unavailable"]
+    else:
+        reads, errors = _origin_attachment_read_receipts(
+            run_dir=run_dir,
+            workspace_dir=workspace_dir,
+            manifest=manifest,
+            evidence_attempts=evidence_attempts,
+            required_files=initial_scope["required_files"],
+        )
+    observed_files = [
+        str(read.get("file"))
+        for read in reads
+        if isinstance(read, Mapping) and _coerce_str(read.get("file")) is not None
+    ]
+    final_scope = origin_attachment_read_scope(
+        manifest,
+        dossier=dossier,
+        verification=verification,
+        observed_files=observed_files,
+    )
+    errors.extend(_string_list(final_scope.get("selection_errors")))
+    return reads, final_scope, list(dict.fromkeys(errors))
 
 
 def _fail_evidence_verification(
@@ -325,8 +428,8 @@ def _report_status_blocking_reason(
     report_status: str | None,
     research_status: str | None,
 ) -> str | None:
-    """Treat the extension as outcome authority while rejecting contradictory success."""
-    if report_status in {"partial", "failure"} and research_status == "evidence_sufficient":
+    """Treat the extension as outcome authority while rejecting an explicit failed run."""
+    if report_status == "failure" and research_status == "evidence_sufficient":
         return f"runner_report_status:{report_status}"
     return None
 
@@ -372,6 +475,72 @@ def _canonical_json_sha256(value: Any) -> str:
     ).hexdigest()
 
 
+def _authenticate_assignment_source_classifications(
+    assignment: Mapping[str, Any],
+    *,
+    atoms: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """Bind source/derived classification to the full runner-supplied atom."""
+
+    authenticated = dict(assignment)
+    authenticated.pop("origin_attachment_evidence", None)
+    atoms_by_id = {
+        atom_id: atom
+        for atom in atoms
+        for atom_id in [_coerce_str(atom.get("atom_id"))]
+        if atom_id is not None
+    }
+    receipts_raw = authenticated.get("atom_receipts")
+    receipts = receipts_raw if isinstance(receipts_raw, list) else []
+    authenticated_receipts: list[Any] = []
+    for receipt_raw in receipts:
+        if not isinstance(receipt_raw, Mapping):
+            authenticated_receipts.append(receipt_raw)
+            continue
+        receipt = dict(receipt_raw)
+        atom_id = _coerce_str(receipt.get("atom_id"))
+        atom = atoms_by_id.get(atom_id or "")
+        if atom is not None:
+            expected = source_observation_classification(atom)
+            observed = receipt.get("source_classification")
+            if observed is not None and observed != expected:
+                raise ValueError(
+                    f"research_source_classification_mismatch:{atom_id}"
+                )
+            receipt["source_classification"] = expected
+        authenticated_receipts.append(receipt)
+    authenticated["atom_receipts"] = authenticated_receipts
+    authenticated["assignment_sha256"] = evidence_assignment_sha256(authenticated)
+    return authenticated
+
+
+def _source_evidence_assignment_sha256(value: Any) -> str | None:
+    """Hash the stable input assignment without runner-composed workspace evidence."""
+
+    if not isinstance(value, Mapping):
+        return None
+    source_assignment = dict(value)
+    source_assignment.pop("origin_attachment_evidence", None)
+    return evidence_assignment_sha256(source_assignment)
+
+
+def _persisted_source_evidence_assignment_sha256(value: Any) -> str | None:
+    """Read the immutable source-assignment hash retained by materialization."""
+
+    if not isinstance(value, Mapping):
+        return None
+    origin_raw = value.get("origin_attachment_evidence")
+    origin = origin_raw if isinstance(origin_raw, Mapping) else {}
+    assigned_raw = origin.get("assigned_evidence")
+    assigned = assigned_raw if isinstance(assigned_raw, Mapping) else {}
+    materialized_source_hash = _coerce_str(assigned.get("assignment_sha256"))
+    if materialized_source_hash is not None:
+        return materialized_source_hash
+    # Legacy persisted dossiers predate assigned-evidence materialization and retain
+    # only their top-level assignment hash.
+    return _coerce_str(value.get("assignment_sha256"))
+
+
 def _model_owned_dossier_projection(dossier: Mapping[str, Any]) -> dict[str, Any]:
     """Project one dossier to the exact fields authored by the researcher.
 
@@ -379,23 +548,64 @@ def _model_owned_dossier_projection(dossier: Mapping[str, Any]) -> dict[str, Any
     runner later appends its own ``runner:*`` receipts. Remove only that reserved namespace
     when matching a persisted dossier back to the immutable model-output attempt.
     """
+    def runner_owned_ref(value: Any) -> bool:
+        if isinstance(value, str):
+            return value.startswith("runner:")
+        return bool(
+            isinstance(value, Mapping)
+            and isinstance(value.get("artifact_id"), str)
+            and str(value["artifact_id"]).startswith("runner:")
+        )
+
     projection: dict[str, Any] = {}
     for key, value in dossier.items():
         if key in _RUNNER_OWNED_DOSSIER_FIELDS:
             continue
         projected_value = value
         if key == "artifact_refs" and isinstance(value, list):
-            projected_value = [
-                item
-                for item in value
-                if not (
-                    isinstance(item, Mapping)
-                    and isinstance(item.get("artifact_id"), str)
-                    and str(item["artifact_id"]).startswith("runner:")
-                )
-            ]
+            projected_value = [item for item in value if not runner_owned_ref(item)]
+        elif key == "experiments" and isinstance(value, list):
+            projected_value = []
+            for item in value:
+                if not isinstance(item, Mapping):
+                    projected_value.append(item)
+                    continue
+                experiment = dict(item)
+                refs = experiment.get("artifact_refs")
+                if isinstance(refs, list):
+                    experiment["artifact_refs"] = [
+                        ref for ref in refs if not runner_owned_ref(ref)
+                    ]
+                projected_value.append(experiment)
         projection[key] = json.loads(json.dumps(projected_value, ensure_ascii=False))
     return projection
+
+
+def _retained_dossier_after_unverified_repair(
+    *,
+    dossier: Mapping[str, Any],
+    best: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Retain verified enrichment unless an unverified repair changed model claims."""
+
+    retained = json.loads(json.dumps(dossier, ensure_ascii=False))
+    retained_projection = _model_owned_dossier_projection(retained)
+    best_projection = _model_owned_dossier_projection(best)
+    if best_projection == retained_projection:
+        return retained
+
+    for key in list(retained):
+        if key not in _RUNNER_OWNED_DOSSIER_FIELDS and key not in best_projection:
+            retained.pop(key)
+    for key, value in best_projection.items():
+        retained[key] = json.loads(json.dumps(value, ensure_ascii=False))
+    verification = retained.get("evidence_verification")
+    if isinstance(verification, dict):
+        _fail_evidence_verification(
+            verification,
+            errors=["research_unverified_repair_changed_model_projection"],
+        )
+    return retained
 
 
 def _continuation_source_attempt(
@@ -421,6 +631,28 @@ def _continuation_source_attempt(
         ):
             return attempt
     return attempts[-1]
+
+
+def _continuation_initial_validation_frontier(
+    *,
+    source_attempt: Mapping[str, Any],
+    feedback_attempts: Sequence[Mapping[str, Any]],
+) -> str | None:
+    """Preserve the semantic frontier when feedback was persisted before resumption.
+
+    A live independent-feedback call creates ``feedback_attempts`` in this invocation. A
+    process restart or section-local supervisor can instead resume from an already persisted
+    ``evidence_verification_feedback`` attempt whose errors exactly match the supplied
+    frontier. In both cases the next candidate is advancing from external review into the
+    evidence verifier; treating the persisted form as an existing evidence-verification
+    frontier misclassifies newly surfaced deep findings as regression.
+    """
+
+    if feedback_attempts or source_attempt.get("attempt_kind") == (
+        "evidence_verification_feedback"
+    ):
+        return _EXTERNAL_FEEDBACK_VALIDATION_FRONTIER
+    return None
 
 
 def _write_evidence_assignment_sidecar(
@@ -603,6 +835,11 @@ def _blocked_research_placeholder(
         "root_cause_hypotheses": [],
         "root_cause_confidence": 0.0,
         "broader_class_assessment": "unknown",
+        "actionability_assessment": {
+            "disposition": "undetermined",
+            "rationale": "Research could not execute, so current actionability is unknown.",
+            "evidence_refs": [],
+        },
         "material_unknowns": [
             {
                 "unknown": unknown,
@@ -1075,6 +1312,24 @@ def _safe_model_output_attempt(attempt: dict[str, Any]) -> bool:
     }
 
 
+def _evidence_feedback_source_attempt(
+    *,
+    current_attempt: dict[str, Any],
+    repaired_source_attempt: dict[str, Any],
+    model_dossier: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind verifier feedback to the exact output-valid model frontier it inspected."""
+
+    expected_dossier_sha256 = _canonical_json_sha256(model_dossier)
+    for attempt in (repaired_source_attempt, current_attempt):
+        if (
+            attempt.get("attempted_dossier_sha256") == expected_dossier_sha256
+            and _string_list(attempt.get("validation_errors_after")) == []
+        ):
+            return attempt
+    raise ValueError("research_evidence_feedback_source_frontier_unavailable")
+
+
 def _attempt_correction_state(attempt: dict[str, Any]) -> str:
     return _canonical_json_sha256(
         {
@@ -1268,6 +1523,42 @@ def _research_retry_remediation_hints(
                 "causal condition, and complementary observable results. Otherwise remove the "
                 "control reference and report the diagnostic outside experiments."
             )
+        elif code == "research_dossier_hypothesis_support_not_linked_to_inspected_code":
+            target_fields = [
+                "root_cause_hypotheses[].mechanism_symbols",
+                "experiments[].proof_adapter.implementation_touchpoints",
+            ]
+            required_change = (
+                "For a hypothesis supported through a proof-adapter pair, at least one hypothesis "
+                "mechanism_symbols value must exactly equal the connected touchpoint's "
+                "causal_locator or one of its symbols entries. The touchpoint field is named "
+                "symbols, never inspected_symbols; it also requires the inspected repository "
+                "path and relationship, and its causal_locator must equal intervention.target. "
+                "Keep implementation_touchpoints under proof_adapter and do not invent "
+                "hypothesis-level evidence_code_links. The other valid route is an existing "
+                "supporting artifact whose path is itself an inspected repository file."
+            )
+        elif code.startswith("research_dossier_proof_adapter_predicate_"):
+            target_fields = ["experiments[].proof_adapter.positive_outcome.predicate"]
+            required_change = (
+                "Use a registered predicate object with its discriminator in the top-level kind "
+                'field, for example {"kind":"equals","expected":false}. Do not emit '
+                '{"equals":{...}} and do not reuse the experiment observable-assertion '
+                "shape {source,operator,expected}. Preserve the observed value and semantic basis."
+            )
+        elif code == "research_dossier_falsification_shared_mechanism_artifact_missing":
+            target_fields = [
+                "experiments[].proof_adapter.observations",
+                "root_cause_hypotheses[].falsification_attempts[]",
+            ]
+            required_change = (
+                "If this exact hypothesis/baseline/challenge pair already has a real selector-"
+                "backed proof adapter, complete observations={baseline:{source,...},challenge:"
+                "{source,...}} using only retained replay fields. Otherwise retain the attempt "
+                "only when both existing experiments already reference the same inspected "
+                "mechanism artifact. Remove the optional attempt when neither proof exists; do "
+                "not invent artifact references during dossier repair."
+            )
         elif code == "research_dossier_falsification_result_mismatch":
             target_fields = [
                 "root_cause_hypotheses[].falsification_attempts[].disproof_condition",
@@ -1293,6 +1584,49 @@ def _research_retry_remediation_hints(
             required_change = (
                 "Emit the named required model-owned field with the exact documented JSON type; "
                 "do not invent runner-owned fields."
+            )
+        elif code == "research_relation_assessment_missing":
+            target_fields = ["extensions.backlog_repro_research.case_relation_assessment"]
+            required_change = (
+                "Add the explicit case relation assessment required for this fresh research "
+                "output. Use retain, keep_separate, or undetermined with facets=[] when signed "
+                "occurrence evidence does not establish a split. Use split only for an exact "
+                "disjoint occurrence partition with distinct causal/action boundary citations; "
+                "do not invent evidence to satisfy the field."
+            )
+        elif code.startswith("research_actionability_assessment_"):
+            target_fields = [
+                "extensions.backlog_repro_research.actionability_assessment"
+            ]
+            required_change = (
+                "Assess current actionability separately from evidence sufficiency. Use "
+                "requires_change, already_addressed, non_actionable, or undetermined; provide a "
+                "nonempty rationale and cite only experiment_id or artifact_id values already "
+                "declared in this dossier. Preserve useful experiments and controls. A complete "
+                "negative should remain evidence_sufficient with already_addressed or "
+                "non_actionable instead of being downgraded merely to stop optioning."
+            )
+        elif code == "research_dossier_evidence_sufficient_with_blocking_reasons":
+            target_fields = [
+                "research_status",
+                "blocking_reasons",
+                "material_unknowns[]",
+                "evidence_boundaries",
+                "experiments[].verification_boundary",
+            ]
+            required_change = (
+                "Resolve the contradiction without erasing evidence. Inspect every declared "
+                "blocker relative to the implementation decision. If it is only an optional "
+                "diagnostic limit, residual observation, or live-verification obligation and the "
+                "retained mechanism, change surface, and executable outcome oracle are already "
+                "established, remove it from blocking_reasons and preserve it in "
+                "evidence_boundaries, a material=false unknown, or the relevant experiment's "
+                "verification_boundary. If it prevents a required proof element, preserve the "
+                "reason, set research_status=blocked, and materialize the affected decision and "
+                "needed evidence. If evidence is merely incomplete without an external block, use "
+                "insufficient_evidence plus the material unknown instead. Do not delete a genuine "
+                "blocker merely to keep evidence_sufficient, and do not run new research for this "
+                "structural correction."
             )
         elif code in {
             "research_dossier_problem_id_mismatch",
@@ -1320,6 +1654,24 @@ def _research_retry_remediation_hints(
                 "Use exactly one scalar outcome: supports, refutes, or inconclusive. Put any "
                 "explanation in result; reproduced/not_reproduced and structured objects are "
                 "not experiment outcomes."
+            )
+        elif code == "research_dossier_interrupted_inconclusive_not_replayable":
+            target_fields = [
+                "experiments[]",
+                "root_cause_hypotheses[].supporting_evidence",
+                "root_cause_hypotheses[].counterevidence",
+                "root_cause_hypotheses[].disposition_evidence",
+                "material_unknowns[]",
+                "blocking_reasons",
+            ]
+            required_change = (
+                "An inconclusive command ending with normalized timeout/kill exit 124 or 137 "
+                "was interrupted, so it is not an independently replayable causal experiment. "
+                "Remove that item from experiments and replace any hypothesis reference with an "
+                "already-declared artifact from the interrupted attempt when relevant. Preserve "
+                "the evidence gap in material_unknowns or blocking_reasons. Do not relabel it "
+                "supports/refutes merely to pass validation. If timeout itself is the assigned "
+                "symptom, establish it later with a self-contained faithful replay."
             )
         elif code in {
             "research_dossier_invalid_experiment_observable_assertion",
@@ -1358,13 +1710,103 @@ def _research_retry_remediation_hints(
                 "must not be chained with markers or other commands. Otherwise remove the "
                 "unsupported inspected-file/symbol claim and preserve the resulting unknown."
             )
+        elif code == "experiment_not_bound_to_atom":
+            target_fields = [
+                "experiments[].observable_assertion",
+                "experiments[].origin_evidence_bindings",
+            ]
+            required_change = (
+                "Bind the supporting experiment to an exact immutable source-atom symptom. "
+                "When a signed retained case aggregate represents repeated identical "
+                "occurrences, bind that aggregate once; do not manufacture redundant "
+                "occurrence bindings. "
+                "Prefer an observable_assertion that checks the same nonempty error code/type "
+                "in replay stdout or stderr, then declare that atom_id, role=symptom, exact "
+                "$.field_path, and exact source value in origin_evidence_bindings. Do not bind "
+                "a different command or an unrelated exit code merely because both failed; if "
+                "the replay cannot honestly observe the source symptom, change its outcome or "
+                "preserve the evidence gap."
+            )
+        elif code == "experiment_command_not_authorized":
+            target_fields = [
+                "artifact_refs",
+                "experiments[].artifact_refs",
+                "experiments[].command",
+                "inspected_files",
+            ]
+            required_change = (
+                "Preserve an already observed shell-free command. If its entrypoint is under "
+                ".usertest_research, declare that exact harness file as an artifact_ref and "
+                "reference it from the experiment so the runner can copy and replay the "
+                "attested harness. An optional repository_bindings declaration must be a list "
+                "of {path,relationship} objects; a malformed declaration blocks fallback to "
+                "the attested harness, so correct it or remove it when the harness artifact is "
+                "the authorization. If it is a tracked repository entrypoint, keep the exact "
+                "file in inspected_files. Do not replace a useful observed harness with a "
+                "different test command merely to change this authorization error."
+            )
+        elif code.startswith(
+            "research_dossier_invalid_experiment_repository_binding"
+        ):
+            target_fields = ["experiments[].repository_bindings"]
+            required_change = (
+                "repository_bindings is optional and, when present, must be a nonempty list of "
+                "objects shaped exactly {path,relationship}. Each path is one relative tracked "
+                "repository file already in inspected_files. Do not use {paths:[...]} or one "
+                "shared relationship object. Remove the optional field when an attested "
+                "research-harness artifact already authorizes the command."
+            )
+        elif code == "experiment_clean_replay_missing":
+            target_fields = [
+                "artifact_refs",
+                "experiments[].artifact_refs",
+                "experiments[].command",
+            ]
+            required_change = (
+                "This is normally downstream of command authorization. Preserve the observed "
+                "experiment and make its existing repository entrypoint or attested research "
+                "harness replayable; the runner will perform the clean replay. Do not delete "
+                "the experiment, downgrade the conclusion, or launch an unrelated replacement "
+                "test unless the retained command itself is not faithful."
+            )
+        elif code == "experiment_atom_binding_invalid":
+            target_fields = [
+                "experiments[].observable_assertion",
+                "experiments[].origin_evidence_bindings",
+            ]
+            required_change = (
+                "Use the exact immutable atom-binding keys: atom_id, role, field_path, and "
+                "value. field_path uses the restricted $.field[index] syntax, never a leading "
+                "/ JSON pointer, and the scalar belongs in value, never source_value. When the "
+                "validation_error includes candidate_field_paths, those are exact runner-derived "
+                "locations for the declared value; choose one only when its field meaning matches "
+                "the claim. role=symptom must make the assertion or structured predicate directly "
+                "observe that source value. context/corroborating preserve lineage but do not "
+                "prove the symptom. If no honest direct observation exists, retain "
+                "insufficient_evidence and the material unknown instead of manufacturing a "
+                "binding."
+            )
+        elif code == "inspected_symbol_unresolved" and error.startswith(
+            "inspected_symbol_unresolved:config:"
+        ):
+            target_fields = ["inspected_symbols", "inspected_files"]
+            required_change = (
+                "A config symbol uses the canonical RFC-6901 value pointer form "
+                "config:/segment/... (for example config:/agents/codex/config_overrides); it "
+                "does not contain a filename, # fragment, or dotted path. Keep the tracked "
+                "config file itself in inspected_files and retain the config symbol only when "
+                "the attested read contains that exact value path."
+            )
         elif code == "inspected_symbol_unresolved":
             target_fields = ["inspected_symbols", "inspected_files"]
             required_change = (
-                "After locating the symbol, perform a standalone attested whole-file or exact "
-                "bounded Get-Content read containing its complete definition. Do not use "
-                "Select-String output as proof. If the definition was not observed, remove the "
-                "symbol claim and report the mechanism/change-surface boundary honestly."
+                "After locating the symbol, run standalone attested Get-Content commands that "
+                "cover its definition header and the relevant body (whole-file for a small "
+                "file, or exact bounded -Skip/-First ranges). Select-String, rg, inline "
+                "Python/AST printers, and commands chained with markers are discovery only and "
+                "do not create the required read attestation. If the definition cannot be "
+                "observed, remove the symbol claim and report the mechanism/change-surface "
+                "boundary honestly."
             )
         elif code == "inspected_file_unresolved":
             target_fields = ["inspected_files", "artifact_refs"]
@@ -1373,6 +1815,30 @@ def _research_retry_remediation_hints(
                 "inspected_files. A .usertest_research overlay or generated run artifact must "
                 "remain an artifact_ref/experiment artifact, not masquerade as a repository "
                 "implementation file."
+            )
+        elif code in {
+            "temporary_harness_mechanism_call_missing",
+            "temporary_harness_mechanism_observable_dataflow_missing",
+        }:
+            target_fields = [
+                "experiments[].command",
+                "experiments[].observable_assertion",
+                "root_cause_hypotheses[].mechanism_symbols",
+            ]
+            required_change = (
+                "The retained harness must invoke the claimed production mechanism and carry "
+                "that call's return value, exception, or state transition into the exact "
+                "asserted observation. Printing a production result beside a separately or "
+                "manually synthesized failure value is not causal evidence. Prefer a faithful "
+                "production entrypoint or a narrow harness whose asserted value is computed by "
+                "the claimed mechanism. Do not replace an attested direct research harness with "
+                "a model-created pytest selector merely to change its proof shape; preserve the "
+                "harness and correct its causal assertion. If a listed symbol exists only in the "
+                "current fix path rather than the original failure-producing path, remove it "
+                "from the root-cause mechanism list and retain it as actionability/fix evidence. "
+                "If the current experiment establishes only an adjacent behavior, make it "
+                "inconclusive, narrow the hypothesis, and preserve the causal gap as a material "
+                "unknown instead of manufacturing a link."
             )
         elif code == "experiment_replay_workspace_mutated":
             target_fields = ["experiments[].replay_setup.disposable_state_paths"]
@@ -1407,8 +1873,11 @@ def _research_retry_remediation_hints(
                 "resolved distinct experiment IDs and shell-free commands, the required "
                 "supporting/refuting outcomes, identical addressed source atoms, shared "
                 "mechanism-source evidence, and a challenge result matching the predeclared "
-                "disproof condition. Remove the optional attempt when no such intervention was "
-                "actually run."
+                "disproof condition. Use the smallest honest shared failure-producing mechanism "
+                "subset: a guard introduced by the current fix is actionability evidence, not a "
+                "required historical root-cause symbol. Preserve and correct an already attested "
+                "direct harness before creating a different test. Remove the optional attempt "
+                "when no such intervention was actually run."
             )
         elif "control_relationship" in code or "control" in code:
             target_fields = ["experiments[].control_relationship"]
@@ -1422,6 +1891,26 @@ def _research_retry_remediation_hints(
             required_change = (
                 "Declare each artifact once with a unique artifact_id and reference only those "
                 "exact IDs from experiments and hypotheses."
+            )
+        elif code in {
+            "primary_hypothesis_mechanism_evidence_missing",
+            "primary_hypothesis_mechanism_coverage_incomplete",
+            "primary_hypothesis_causal_root_missing",
+        }:
+            target_fields = [
+                "root_cause_hypotheses[].mechanism_symbols",
+                "root_cause_hypotheses[].statement",
+                "root_cause_hypotheses[].supporting_evidence",
+                "experiments[]",
+            ]
+            required_change = (
+                "Make the first hypothesis the concrete historical failure-producing mechanism, "
+                "not a bundle containing the later fix. List only symbols whose outputs or state "
+                "transitions the supporting experiment carries into its asserted observation. A "
+                "gate introduced by the current fix belongs in actionability evidence or a fix "
+                "touchpoint when the historical failure path did not depend on it. Narrow an "
+                "overbroad symbol list and preserve the already-run causal harness before doing "
+                "new research."
             )
         elif "hypothesis" in code:
             target_fields = ["root_cause_hypotheses[]"]
@@ -1508,6 +1997,57 @@ def _verifier_feedback_requires_research_tools(errors: Sequence[str]) -> bool:
     """
 
     return bool(errors)
+
+
+def _verifier_diagnostic_feedback(
+    evidence_verification: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Expose runner-owned root diagnostics alongside downstream verifier errors.
+
+    Evidence verification deliberately retains adapter diagnostics separately from the
+    downstream readiness error list: an ancillary rejected claim is useful diagnostic
+    context without necessarily being an advancement blocker.  The same distinction must
+    survive correction.  Otherwise an author sees only secondary missing-mechanism errors
+    and is forced to guess why its adapter receipt was not minted.
+
+    This payload is feedback, not a new gate.  It is content-bound in the repair contract,
+    and every entry comes directly from the runner-owned verification receipt.
+    """
+
+    raw = evidence_verification.get("proof_adapter_diagnostics")
+    entries: list[dict[str, Any]] = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        diagnostics = _dedupe_validation_errors(
+            [value for value in item.get("diagnostics", []) if isinstance(value, str)]
+            if isinstance(item.get("diagnostics"), list)
+            else []
+        )
+        if not diagnostics:
+            continue
+        entries.append(
+            {
+                "experiment_id": item.get("experiment_id"),
+                "adapter_id": item.get("adapter_id"),
+                "claim_sha256": item.get("claim_sha256"),
+                "diagnostics": diagnostics,
+            }
+        )
+    if not entries:
+        return None
+    projection: dict[str, Any] = {
+        "schema_version": 1,
+        "kind": "proof_adapter_root_diagnostics",
+        "entries": entries,
+        "instruction": (
+            "These are direct runner diagnostics for authored adapter claims. Correct or remove "
+            "the affected claim when it is part of the retained proof. They are explanatory "
+            "feedback, not additional blockers; the ordinary verifier errors remain the gate."
+        ),
+    }
+    projection["diagnostics_sha256"] = _canonical_json_sha256(projection)
+    return projection
 
 
 def _narrow_repair_path(
@@ -1689,45 +2229,101 @@ def _correction_progress_assessment(
     total_correction_seconds: float,
     original_investigation_seconds: float | None,
     best_error_count: int,
+    before_validation_frontier: str = _MODEL_OUTPUT_VALIDATION_FRONTIER,
+    after_validation_frontier: str = _MODEL_OUTPUT_VALIDATION_FRONTIER,
+    best_validation_frontier: str = _MODEL_OUTPUT_VALIDATION_FRONTIER,
+    immediate_prior_feedback_errors: Sequence[str] | None = None,
+    immediate_prior_feedback_dossier_sha256: str | None = None,
+    previous_consecutive_nonprogress_count: int = 0,
+    substantive_coverage_regressions: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """Choose correction, acceptance, or restart from observed progress and cost."""
+    """Assess correction progress without conflating feedback and objective-best frontiers.
+
+    ``before_*`` describes the safe forward baseline and ``best_*`` describes the strongest
+    verified result.  A quarantined candidate may become neither, but it is still the feedback the
+    author was asked to correct next.  Compare the next candidate with that immediate feedback so
+    reworked findings are not discarded merely because the candidate remains worse than the
+    objective best.  Elapsed and cumulative correction time are telemetry only.  They never decide
+    whether repairable authored work is continued, paused, or restarted.
+    """
     before_ids = {_validation_error_identity(error) for error in before_errors}
     after_ids = {_validation_error_identity(error) for error in after_errors}
+    prior_feedback_ids = {
+        _validation_error_identity(error)
+        for error in (
+            immediate_prior_feedback_errors
+            if immediate_prior_feedback_errors is not None
+            else before_errors
+        )
+    }
     resolved = sorted(before_ids - after_ids)
     introduced = sorted(after_ids - before_ids)
-    objective_progress = len(after_ids) < best_error_count
+    prior_feedback_resolved = sorted(prior_feedback_ids - after_ids)
+    prior_feedback_introduced = sorted(after_ids - prior_feedback_ids)
+    after_frontier_rank = _VALIDATION_FRONTIER_RANK[after_validation_frontier]
+    best_frontier_rank = _VALIDATION_FRONTIER_RANK[best_validation_frontier]
+    objective_progress = after_frontier_rank > best_frontier_rank or (
+        after_frontier_rank == best_frontier_rank and len(after_ids) < best_error_count
+    )
+    error_count_progress = len(after_ids) < len(before_ids)
+    prior_feedback_error_count_progress = len(after_ids) < len(prior_feedback_ids)
+    prior_feedback_reworked = bool(prior_feedback_resolved)
+    genuine_feedback_progress = bool(
+        not fundamental_changes
+        and not substantive_coverage_regressions
+        and (objective_progress or prior_feedback_error_count_progress or prior_feedback_reworked)
+    )
+    consecutive_nonprogress_count = (
+        0 if genuine_feedback_progress else max(0, int(previous_consecutive_nonprogress_count)) + 1
+    )
     forward_frontier_advanced = (
-        before_dossier_sha256 != after_dossier_sha256 or before_ids != after_ids
+        before_dossier_sha256 != after_dossier_sha256
+        or before_ids != after_ids
+        or before_validation_frontier != after_validation_frontier
+    )
+    prior_feedback_dossier_sha256 = immediate_prior_feedback_dossier_sha256 or before_dossier_sha256
+    immediate_prior_feedback_state_changed = bool(
+        prior_feedback_dossier_sha256 != after_dossier_sha256 or prior_feedback_ids != after_ids
     )
     progress: dict[str, Any] = {
         "before_error_count": len(before_ids),
         "after_error_count": len(after_ids),
         "resolved_error_identities": resolved,
         "introduced_error_identities": introduced,
+        "immediate_prior_feedback_error_count": len(prior_feedback_ids),
+        "resolved_immediate_prior_feedback_error_identities": prior_feedback_resolved,
+        "introduced_since_immediate_prior_feedback_error_identities": (prior_feedback_introduced),
+        "immediate_prior_feedback_state_changed": immediate_prior_feedback_state_changed,
         "dossier_changed": before_dossier_sha256 != after_dossier_sha256,
         "repeated_state_count": repeated_state_count,
+        "consecutive_genuine_nonprogress_count": consecutive_nonprogress_count,
         "correction_seconds_since_best_progress": cumulative_correction_seconds,
+        "correction_seconds_since_feedback_progress": cumulative_correction_seconds,
         "total_correction_seconds": total_correction_seconds,
         "original_investigation_seconds": original_investigation_seconds,
-        # A safe changed candidate is worth retaining as the next correction frontier, but only
-        # objective progress resets the cost-since-best clock. This prevents 1-for-1 diagnostic
-        # churn from running forever while preserving useful parent-to-child corrections.
+        "before_validation_frontier": before_validation_frontier,
+        "after_validation_frontier": after_validation_frontier,
+        "best_validation_frontier_before": best_validation_frontier,
+        # A safe changed candidate is worth retaining as the next correction frontier. Objective
+        # progress or a lower surfaced-error count resets the cost clock; 1-for-1 diagnostic churn
+        # does not, so changing error names alone cannot run forever.
         "forward_frontier_advanced": forward_frontier_advanced,
         "objective_progress": objective_progress,
-        "cost_clock_reset": objective_progress,
+        # Fewer surfaced findings is real correction progress even when a structural error
+        # temporarily prevents the deeper verifier from running. Keep the deeper dossier as the
+        # objective fallback, but do not charge a reducing correction against the restart clock.
+        "error_count_progress": error_count_progress,
+        "immediate_prior_feedback_error_count_progress": (prior_feedback_error_count_progress),
+        "immediate_prior_feedback_reworked": prior_feedback_reworked,
+        "genuine_feedback_progress": genuine_feedback_progress,
+        "substantive_coverage_regressions": list(substantive_coverage_regressions),
+        "cost_clock_reset": bool(
+            not substantive_coverage_regressions
+            and (objective_progress or prior_feedback_error_count_progress)
+        ),
     }
     if fundamental_changes:
-        if (
-            original_investigation_seconds is not None
-            and original_investigation_seconds > 0.0
-            and cumulative_correction_seconds >= original_investigation_seconds
-        ):
-            progress.update(
-                decision="restart",
-                reason="retained_evidence_rework_reached_investigation_cost",
-                fundamental_change_paths=list(fundamental_changes),
-            )
-        elif repeated_state_count >= _REPEATED_CORRECTION_STATE_RESTART_COUNT:
+        if repeated_state_count >= _REPEATED_CORRECTION_STATE_RESTART_COUNT:
             progress.update(
                 decision="restart",
                 reason="retained_evidence_change_repeated_after_feedback",
@@ -1744,26 +2340,347 @@ def _correction_progress_assessment(
     elif any(_repair_error_requires_new_investigation(error) for error in after_errors):
         progress.update(decision="restart", reason="integrity_or_new_investigation_required")
     elif objective_progress:
-        # This remains progress even when the remaining error is new and resets the cost clock.
-        progress.update(decision="continue", reason="best_error_count_decreased")
+        # Reaching the evidence verifier is progress even when it reveals more findings than
+        # the shallow output validator. Within one frontier, fewer findings is still progress.
+        progress.update(
+            decision="continue",
+            reason=(
+                "validation_frontier_advanced"
+                if after_frontier_rank > best_frontier_rank
+                else "best_error_count_decreased"
+            ),
+        )
+    elif prior_feedback_error_count_progress:
+        progress.update(
+            decision="continue",
+            reason="error_count_decreased_before_deeper_revalidation",
+        )
     elif repeated_state_count >= _REPEATED_CORRECTION_STATE_RESTART_COUNT:
-        progress.update(decision="restart", reason="exact_state_repeated_after_feedback")
-    elif (
-        original_investigation_seconds is not None
-        and original_investigation_seconds > 0.0
-        and cumulative_correction_seconds >= original_investigation_seconds
-    ):
-        progress.update(decision="restart", reason="correction_cost_reached_investigation_cost")
-    elif resolved:
+        progress.update(decision="paused", reason="exact_state_repeated_after_feedback")
+    elif prior_feedback_resolved:
+        # Correcting the findings the author actually received is forward work even when a
+        # deeper or nondeterministic review surfaces a different set. Keep that changed result
+        # as the next same-author frontier; the objective-best comparison below still prevents
+        # a larger same-depth error set from being promoted as the strongest result.
         progress.update(decision="continue", reason="prior_errors_reworked_without_new_best")
-    elif len(after_ids) < len(before_ids):
-        progress.update(decision="continue", reason="local_error_count_decreased_without_new_best")
-    elif forward_frontier_advanced:
-        progress.update(decision="continue", reason="correction_state_changed")
+    elif consecutive_nonprogress_count >= _REPEATED_CORRECTION_STATE_RESTART_COUNT:
+        progress.update(
+            decision="paused",
+            reason="consecutive_nonadvancing_corrections_require_adjudication",
+        )
+    elif immediate_prior_feedback_state_changed:
+        progress.update(
+            decision="continue",
+            reason="correction_changed_without_feedback_progress",
+        )
     else:
         # One no-op is feedback, not proof of incapacity. Only the repeated state above stalls.
         progress.update(decision="continue", reason="first_materially_unchanged_correction")
     return progress
+
+
+def _source_ordinary_nonadvancing_correction_count(
+    source_attempt: Mapping[str, Any],
+    *,
+    current_errors: Sequence[str],
+) -> int:
+    """Restore only a hash-bound streak recorded for the exact resumed error frontier."""
+
+    if source_attempt.get("attempt_sha256") != research_attempt_sha256(source_attempt):
+        return 0
+    source_errors = _dedupe_validation_errors(
+        _string_list(source_attempt.get("validation_errors_after"))
+    )
+    if source_errors != _dedupe_validation_errors(current_errors):
+        return 0
+    progress = source_attempt.get("repair_progress")
+    if not isinstance(progress, Mapping):
+        return 0
+    ordinary = progress.get("ordinary_nonadvancing_correction")
+    candidates = [progress.get("consecutive_ordinary_nonadvancing_correction_count")]
+    if isinstance(ordinary, Mapping):
+        candidates.append(ordinary.get("consecutive_count"))
+    counts = {
+        int(value)
+        for value in candidates
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    }
+    return counts.pop() if len(counts) == 1 else 0
+
+
+def _source_advancement_regression_count(
+    source_attempt: Mapping[str, Any],
+    *,
+    current_errors: Sequence[str],
+) -> int:
+    """Restore a hash-bound unsupported-downgrade streak for one exact frontier."""
+
+    if source_attempt.get("attempt_sha256") != research_attempt_sha256(source_attempt):
+        return 0
+    source_errors = _dedupe_validation_errors(
+        _string_list(source_attempt.get("validation_errors_after"))
+    )
+    if source_errors != _dedupe_validation_errors(current_errors):
+        return 0
+    progress = source_attempt.get("repair_progress")
+    if not isinstance(progress, Mapping):
+        return 0
+    regression = progress.get("advancement_regression")
+    candidates = [progress.get("consecutive_advancement_regression_count")]
+    if isinstance(regression, Mapping):
+        candidates.append(regression.get("consecutive_count"))
+    counts = {
+        int(value)
+        for value in candidates
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+    }
+    return counts.pop() if len(counts) == 1 else 0
+
+
+def _retained_advancement_regression_count(
+    source_attempt: Mapping[str, Any],
+    *,
+    current_errors: Sequence[str],
+    attempt_history: Sequence[Mapping[str, Any]],
+) -> int:
+    """Count consecutive quarantined downgrades bound to a retained safe frontier.
+
+    Unsupported downgrades deliberately do not replace the safe forward dossier. Across
+    process-bounded continuations, that means the next call selects the same older source
+    attempt while the authored downgrade lives later in the immutable attempt ledger. Recover
+    the streak from valid sibling attempts instead of promoting the weaker dossier or rewriting
+    its history. Any different authored candidate ends this class-specific streak.
+    """
+
+    source_sha256 = _coerce_str(source_attempt.get("attempt_sha256"))
+    if (
+        source_sha256 is None
+        or source_sha256 != research_attempt_sha256(source_attempt)
+        or _dedupe_validation_errors(
+            _string_list(source_attempt.get("validation_errors_after"))
+        )
+        != _dedupe_validation_errors(current_errors)
+    ):
+        return 0
+    source_session_id = _coerce_str(source_attempt.get("agent_session_id"))
+    count = _source_advancement_regression_count(
+        source_attempt,
+        current_errors=current_errors,
+    )
+    seen_attempts: set[str] = {source_sha256}
+    for attempt in attempt_history:
+        attempt_sha256 = _coerce_str(attempt.get("attempt_sha256"))
+        if attempt_sha256 is None or attempt_sha256 in seen_attempts:
+            continue
+        seen_attempts.add(attempt_sha256)
+        if attempt_sha256 != research_attempt_sha256(attempt):
+            continue
+        if attempt.get("source_attempt_sha256") != source_sha256:
+            continue
+        if _dedupe_validation_errors(
+            _string_list(attempt.get("validation_errors_before"))
+        ) != _dedupe_validation_errors(current_errors):
+            continue
+        if source_session_id is not None and any(
+            _coerce_str(attempt.get(field)) != source_session_id
+            for field in (
+                "agent_session_id",
+                "observed_agent_session_id",
+                "resumed_from_session_id",
+            )
+        ):
+            continue
+        progress = attempt.get("repair_progress")
+        attempted_dossier = attempt.get("attempted_dossier")
+        if not isinstance(progress, Mapping) or not isinstance(attempted_dossier, Mapping):
+            continue
+        regression = progress.get("advancement_regression")
+        unsupported_downgrade = bool(
+            isinstance(regression, Mapping)
+            and progress.get("reason")
+            in {
+                "advancing_claim_downgrade_requires_same_author_resolution",
+                "advancing_claim_downgrade_requires_adjudication",
+            }
+            and attempted_dossier.get("research_status") != "evidence_sufficient"
+            and regression.get("candidate_research_status")
+            == attempted_dossier.get("research_status")
+        )
+        if unsupported_downgrade:
+            count += 1
+        else:
+            count = 0
+    return count
+
+
+def _substantive_research_coverage(dossier: Mapping[str, Any]) -> set[str]:
+    """Project durable causal/outcome coverage without scoring prose or benchmark vocabulary.
+
+    This is a correction-frontier safeguard, not another evidence verifier.  It records only
+    general proof roles whose disappearance can make a mechanically cleaner dossier substantively
+    weaker.  Stable hypothesis/atom identities preserve independent coverage, while adapter and
+    outcome facts retain experiment and hypothesis identity so a causal contrast cannot mask the
+    disappearance of a separate operational postcondition.
+    """
+
+    coverage: set[str] = set()
+    hypotheses_raw = dossier.get("root_cause_hypotheses")
+    hypotheses_by_experiment: dict[str, set[str]] = {}
+    for hypothesis in hypotheses_raw if isinstance(hypotheses_raw, list) else []:
+        if not isinstance(hypothesis, Mapping):
+            continue
+        hypothesis_id = _coerce_str(hypothesis.get("hypothesis_id"))
+        if hypothesis_id is None:
+            continue
+        if _string_list(hypothesis.get("supporting_evidence")) or _string_list(
+            hypothesis.get("disposition_evidence")
+        ):
+            coverage.add(f"root_cause_hypotheses[{hypothesis_id}].supported")
+        if _string_list(hypothesis.get("mechanism_symbols")):
+            coverage.add(f"root_cause_hypotheses[{hypothesis_id}].mechanism")
+        for experiment_id in {
+            *_string_list(hypothesis.get("supporting_evidence")),
+            *_string_list(hypothesis.get("disposition_evidence")),
+        }:
+            hypotheses_by_experiment.setdefault(experiment_id, set()).add(hypothesis_id)
+        falsification_attempts = hypothesis.get("falsification_attempts")
+        if any(
+            isinstance(attempt, Mapping) and attempt.get("outcome") in {"survived", "disproved"}
+            for attempt in (
+                falsification_attempts if isinstance(falsification_attempts, list) else []
+            )
+        ):
+            coverage.add(f"root_cause_hypotheses[{hypothesis_id}].falsification")
+
+    experiments_raw = dossier.get("experiments")
+    for experiment in experiments_raw if isinstance(experiments_raw, list) else []:
+        if not isinstance(experiment, Mapping):
+            continue
+        experiment_id = _coerce_str(experiment.get("experiment_id")) or "unbound"
+        if experiment.get("outcome") in {"supports", "refutes"}:
+            for atom_id in _string_list(experiment.get("addresses_atom_ids")):
+                coverage.add(f"origin_atom[{atom_id}].direct_experimental_coverage")
+        adapter = experiment.get("proof_adapter")
+        if isinstance(adapter, Mapping):
+            hypothesis_id = _coerce_str(adapter.get("hypothesis_id")) or "unbound"
+            if (
+                _coerce_str(adapter.get("adapter_id")) is not None
+                and _coerce_str(adapter.get("baseline_experiment_id")) is not None
+                and _coerce_str(adapter.get("challenge_experiment_id")) is not None
+            ):
+                coverage.add(f"causal_proof[{hypothesis_id}].controlled_adapter")
+            touchpoints = adapter.get("implementation_touchpoints")
+            if any(
+                isinstance(touchpoint, Mapping)
+                for touchpoint in (touchpoints if isinstance(touchpoints, list) else [])
+            ):
+                coverage.add(f"causal_proof[{hypothesis_id}].implementation_touchpoint")
+            positive_outcome = adapter.get("positive_outcome")
+            if (
+                isinstance(positive_outcome, Mapping)
+                and positive_outcome.get("contract_role") != "causal_contrast"
+                and isinstance(positive_outcome.get("predicate"), Mapping)
+                and isinstance(positive_outcome.get("semantic_basis"), Mapping)
+            ):
+                coverage.add(
+                    "positive_outcome.proof_adapter"
+                    f"[{experiment_id}][{hypothesis_id}].operational_contract"
+                )
+        experiment_contract = experiment.get("positive_outcome_contract")
+        if isinstance(experiment_contract, Mapping):
+            explicitly_bound_hypothesis = _coerce_str(
+                experiment_contract.get("binds_hypothesis_id")
+            )
+            bound_hypothesis_ids = (
+                {explicitly_bound_hypothesis}
+                if explicitly_bound_hypothesis is not None
+                else hypotheses_by_experiment.get(experiment_id, {"unbound"})
+            )
+            for hypothesis_id in sorted(bound_hypothesis_ids):
+                coverage.add(
+                    "positive_outcome.experiment_contract"
+                    f"[{experiment_id}][{hypothesis_id}].operational_contract"
+                )
+    return coverage
+
+
+def _epistemic_downgrade_basis(
+    before_dossier: Mapping[str, Any],
+    after_dossier: Mapping[str, Any],
+) -> list[str]:
+    """Return concrete evidence that an advancing conclusion became untenable.
+
+    A status change by itself is not research progress: otherwise an author could make
+    verifier findings disappear merely by changing ``research_status``.  Conversely, an
+    honest correction that records new evidence-backed counterevidence or an evidenced
+    unresolved causal alternative must remain the next same-author correction frontier.  A
+    newly worded unknown is not itself evidence: accepting it would let an author erase a
+    verified mechanism and make every verifier finding disappear by downgrading the status.
+    """
+
+    basis: list[str] = []
+
+    declared_evidence_refs = {
+        str(item.get(key))
+        for field, key in (("experiments", "experiment_id"), ("artifact_refs", "artifact_id"))
+        for item in (
+            after_dossier.get(field)
+            if isinstance(after_dossier.get(field), list)
+            else []
+        )
+        if isinstance(item, Mapping) and _coerce_str(item.get(key)) is not None
+    }
+
+    def hypotheses_by_id(dossier: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+        raw = dossier.get("root_cause_hypotheses")
+        return {
+            str(hypothesis["hypothesis_id"]): hypothesis
+            for hypothesis in (raw if isinstance(raw, list) else [])
+            if isinstance(hypothesis, Mapping)
+            and _coerce_str(hypothesis.get("hypothesis_id")) is not None
+        }
+
+    before_hypotheses = hypotheses_by_id(before_dossier)
+    after_hypotheses = hypotheses_by_id(after_dossier)
+    for hypothesis_id, after_hypothesis in after_hypotheses.items():
+        before_hypothesis = before_hypotheses.get(hypothesis_id, {})
+        before_counterevidence = set(_string_list(before_hypothesis.get("counterevidence")))
+        after_counterevidence = set(_string_list(after_hypothesis.get("counterevidence")))
+        if (after_counterevidence - before_counterevidence) & declared_evidence_refs:
+            basis.append("hypothesis_counterevidence_added")
+            break
+    for hypothesis_id, after_hypothesis in after_hypotheses.items():
+        if after_hypothesis.get("disposition") not in {"plausible", "unresolved"}:
+            continue
+        before_hypothesis = before_hypotheses.get(hypothesis_id)
+        if before_hypothesis is None or before_hypothesis.get("disposition") not in {
+            "plausible",
+            "unresolved",
+        }:
+            disposition_evidence = set(
+                _string_list(after_hypothesis.get("disposition_evidence"))
+            )
+            if disposition_evidence & declared_evidence_refs:
+                basis.append("causal_alternative_became_unresolved")
+                break
+
+    return list(dict.fromkeys(basis))
+
+
+def _unsupported_substantive_coverage_loss(
+    before_dossier: Mapping[str, Any],
+    after_dossier: Mapping[str, Any],
+) -> tuple[list[str], list[str]]:
+    """Return lost proof roles unless new retained evidence supports an epistemic revision."""
+
+    lost = sorted(
+        _substantive_research_coverage(before_dossier)
+        - _substantive_research_coverage(after_dossier)
+    )
+    if not lost:
+        return [], []
+    epistemic_basis = _epistemic_downgrade_basis(before_dossier, after_dossier)
+    return ([] if epistemic_basis else lost), epistemic_basis
 
 
 def _repair_contract(
@@ -1776,6 +2693,7 @@ def _repair_contract(
     previous_correction_feedback: dict[str, Any] | None = None,
     research_capabilities: bool = False,
     independent_feedback: Mapping[str, Any] | None = None,
+    verifier_diagnostics: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     projection = _research_retry_prior_attempt_projection(source_attempt)
     contract: dict[str, Any] = {
@@ -1823,15 +2741,93 @@ def _repair_contract(
         immutable_feedback = json.loads(json.dumps(dict(independent_feedback), ensure_ascii=False))
         contract["independent_feedback"] = immutable_feedback
         contract["independent_feedback_sha256"] = _canonical_json_sha256(immutable_feedback)
+    if isinstance(verifier_diagnostics, Mapping):
+        immutable_diagnostics = json.loads(
+            json.dumps(dict(verifier_diagnostics), ensure_ascii=False)
+        )
+        contract["verifier_diagnostics"] = immutable_diagnostics
+        contract["verifier_diagnostics_sha256"] = _canonical_json_sha256(
+            immutable_diagnostics
+        )
     contract["repair_contract_sha256"] = _canonical_json_sha256(contract)
     return contract
 
 
+def _authenticated_prior_continuation_feedback(
+    independent_feedback: Any,
+) -> Mapping[str, Any] | None:
+    """Return helper-delivered continuation feedback only when its bindings agree."""
+
+    if not isinstance(independent_feedback, Mapping):
+        return None
+    feedback = independent_feedback.get("prior_continuation_feedback")
+    reference = independent_feedback.get("prior_continuation_feedback_reference")
+    if not isinstance(feedback, Mapping) or not isinstance(reference, Mapping):
+        return None
+    if independent_feedback.get("prior_continuation_feedback_sha256") != (
+        _canonical_json_sha256(feedback)
+    ):
+        return None
+    if independent_feedback.get("prior_continuation_feedback_reference_sha256") != (
+        _canonical_json_sha256(reference)
+    ):
+        return None
+    if (
+        reference.get("source_attempt_sha256") != feedback.get("source_attempt_sha256")
+        or reference.get("source_attempted_dossier_sha256")
+        != feedback.get("candidate_dossier_sha256")
+        or _dedupe_validation_errors(
+            _string_list(reference.get("source_validation_errors"))
+        )
+        != _dedupe_validation_errors(_string_list(feedback.get("validation_errors")))
+    ):
+        return None
+    return feedback
+
+
+def _priority_repair_feedback(contract: Mapping[str, Any]) -> str:
+    """Foreground the last correction instruction without duplicating the full contract."""
+
+    previous = contract.get("previous_correction_feedback")
+    feedback = (
+        previous
+        if isinstance(previous, Mapping)
+        else _authenticated_prior_continuation_feedback(contract.get("independent_feedback"))
+    )
+    if not isinstance(feedback, Mapping):
+        return ""
+    independent = contract.get("independent_feedback")
+    supervisor_notes = (
+        _string_list(independent.get("supervisor_execution_notes"))
+        if isinstance(independent, Mapping)
+        else []
+    )
+    priority = {
+        "last_attempt_source_sha256": feedback.get("source_attempt_sha256"),
+        "last_attempt_instruction": _coerce_str(feedback.get("instruction")),
+        "last_attempt_validation_errors": _string_list(feedback.get("validation_errors")),
+        "latest_supervisor_note": supervisor_notes[-1] if supervisor_notes else None,
+        "unsupported_downgrade_requirement": (
+            "Do not replace an advancing evidence repair with insufficient_evidence unless newly "
+            "executed and retained counterevidence in this turn is cited by the revised dossier. "
+            "Without that new counterevidence, continue from the supplied safe-forward dossier "
+            "and repair its exact remaining mechanism and outcome links."
+        ),
+    }
+    return (
+        "## Priority correction feedback (apply before the full contract)\n"
+        + json.dumps(priority, ensure_ascii=False, indent=2)
+        + "\n\n"
+    )
+
+
 def _append_prompt_for_targeted_repair(contract: dict[str, Any]) -> str:
     payload = json.dumps(contract, ensure_ascii=False, indent=2)
+    priority_feedback = _priority_repair_feedback(contract)
     if contract.get("research_capabilities") is True:
         return (
             "# Backlog research evidence: same-session continuation\n\n"
+            f"{priority_feedback}"
             "The runner verifier found correctable gaps after your dossier was parsed. Continue "
             "the original investigation in this exact author session and workspace. Use research "
             "tools where the diagnostics require new evidence; actually execute and retain every "
@@ -1844,6 +2840,7 @@ def _append_prompt_for_targeted_repair(contract: dict[str, Any]) -> str:
         )
     return (
         "# Backlog research dossier: bounded correction\n\n"
+        f"{priority_feedback}"
         "This is a correction turn, not a new investigation. Do not inspect the repository, "
         "run commands, edit files, add evidence, or change an honest research status. Emit one "
         "complete troubleshoot_v1 report whose backlog_repro_research extension is the complete "
@@ -2138,11 +3135,34 @@ def _run_targeted_dossier_repairs(
     research_capabilities: bool = False,
     attempt_kind: str = "model_output_repair",
     independent_feedback: Mapping[str, Any] | None = None,
+    verifier_diagnostics: Mapping[str, Any] | None = None,
     original_investigation_seconds: float | None = None,
     source_baseline_is_unverified_draft: bool | None = None,
     evidence_attempt_history: list[dict[str, Any]] | None = None,
+    initial_validation_frontier: str | None = None,
+    max_repair_turns: int | None = None,
 ) -> dict[str, Any]:
-    """Continue the authoring Codex session until corrected or demonstrably worth restarting."""
+    """Continue the authoring Codex session until corrected or genuinely stalled.
+
+    Keep three concerns separate: the objective best is the strongest result retained for return,
+    the safe forward frontier is the dossier supplied as the next baseline, and the immediate
+    feedback frontier is the latest authored candidate the verifier actually assessed.  Even when
+    safety quarantines that candidate from the next baseline, its findings remain the comparison
+    point for whether the same author reworked the feedback.  Rework cost can escalate repeated
+    nonprogress, but never replaces evidence that consecutive turns actually failed to progress.
+    Unsupported loss of established causal/outcome coverage is quarantined; repeated equal-count
+    identity replacement is retained briefly but pauses when it remains objectively lateral.
+    """
+    if (
+        max_repair_turns is not None
+        and (
+            isinstance(max_repair_turns, bool)
+            or not isinstance(max_repair_turns, int)
+            or max_repair_turns < 1
+        )
+    ):
+        raise ValueError("max_repair_turns_must_be_positive")
+
     workspace = _research_attempt_workspace_path(source_attempt)
     baseline_raw = source_attempt.get("attempted_dossier")
     baseline = (
@@ -2160,6 +3180,24 @@ def _run_targeted_dossier_repairs(
     best_dossier = json.loads(json.dumps(baseline, ensure_ascii=False))
     best_errors = list(current_errors)
     best_source = source_attempt
+    default_validation_frontier = (
+        _EVIDENCE_VALIDATION_FRONTIER
+        if candidate_validator is not None
+        else _MODEL_OUTPUT_VALIDATION_FRONTIER
+    )
+    current_validation_frontier = initial_validation_frontier or default_validation_frontier
+    if current_validation_frontier not in _VALIDATION_FRONTIER_RANK:
+        raise ValueError(f"unknown_initial_validation_frontier:{current_validation_frontier}")
+    # The objective best answers "what is the strongest result seen so far?" while the
+    # forward frontier answers "what is the latest safe state this author should correct?".
+    # They intentionally diverge when a model-output finding temporarily prevents the deeper
+    # evidence verifier from rerunning.  Conflating them makes an equal-count follow-up jump
+    # back to an older, noisier dossier merely because it is not a new global best.
+    forward_dossier = json.loads(json.dumps(baseline, ensure_ascii=False))
+    forward_errors = list(current_errors)
+    forward_source = source_attempt
+    forward_validation_frontier = current_validation_frontier
+    best_validation_frontier = current_validation_frontier
     attempts: list[dict[str, Any]] = []
     repair_runs: list[str] = []
     session_id = _coerce_str(source_attempt.get("agent_session_id"))
@@ -2219,10 +3257,59 @@ def _run_targeted_dossier_repairs(
         }
     )
     invocation_failure_counts: dict[str, int] = {}
+    consecutive_invocation_failures = 0
     previous_correction_feedback: dict[str, Any] | None = None
+    immediate_prior_feedback_errors = list(current_errors)
+    immediate_prior_feedback_dossier = json.loads(json.dumps(baseline, ensure_ascii=False))
+    immediate_prior_feedback_dossier_sha256 = _canonical_json_sha256(baseline)
+    immediate_prior_feedback_validation_frontier = current_validation_frontier
+    consecutive_genuine_nonprogress_count = 0
+    consecutive_advancement_regressions = _retained_advancement_regression_count(
+        source_attempt,
+        current_errors=current_errors,
+        attempt_history=(evidence_attempt_history or ()),
+    )
+    consecutive_substantive_regressions = 0
+    consecutive_ordinary_nonadvancing_corrections = (
+        _source_ordinary_nonadvancing_correction_count(
+            source_attempt,
+            current_errors=current_errors,
+        )
+    )
     repair_index = 0
 
     while True:
+        if max_repair_turns is not None and repair_index >= max_repair_turns:
+            return {
+                "dossier": forward_dossier,
+                "validation_errors": forward_errors,
+                "source_attempt_sha256": forward_source.get("attempt_sha256"),
+                "best_dossier": best_dossier,
+                "best_validation_errors": best_errors,
+                "best_source_attempt_sha256": best_source.get("attempt_sha256"),
+                "attempts": attempts,
+                "repair_run_dirs": repair_runs,
+                "status": "repairable_paused:repair_turn_limit_reached",
+                "expected_session_id": session_id,
+                "observed_session_id": session_id,
+                "continuation_failure": None,
+                "authored_work_disposition": "retained",
+                "retained_frontier": {
+                    "latest_safe_dossier_sha256": _canonical_json_sha256(
+                        forward_dossier
+                    ),
+                    "objective_best_dossier_sha256": _canonical_json_sha256(
+                        best_dossier
+                    ),
+                    "completed_repair_turns": repair_index,
+                    "max_repair_turns": max_repair_turns,
+                    "consecutive_ordinary_nonadvancing_correction_count": (
+                        consecutive_ordinary_nonadvancing_corrections
+                    ),
+                    "next_action": "resume_same_author_after_supervision",
+                },
+                "continuation_feedback": previous_correction_feedback,
+            }
         authorized_paths = _targeted_repair_authorized_paths(
             current_errors,
             dossier=baseline,
@@ -2238,6 +3325,7 @@ def _run_targeted_dossier_repairs(
             previous_correction_feedback=previous_correction_feedback,
             research_capabilities=research_capabilities,
             independent_feedback=independent_feedback,
+            verifier_diagnostics=verifier_diagnostics,
         )
         attempt_number = first_attempt_number + repair_index
         request = RunRequest(
@@ -2258,7 +3346,10 @@ def _run_targeted_dossier_repairs(
                 f"{problem_id}:dossier_repair:{attempt_number}:{contract['repair_contract_sha256']}"
             ),
             model=model,
-            agent_append_system_prompt=_append_prompt_for_targeted_repair(contract),
+            # This is the next user turn in the retained author conversation. Codex resume
+            # restores the original system instructions, so a new model-instructions file alone
+            # does not deliver verifier feedback to that session.
+            agent_user_prompt=_append_prompt_for_targeted_repair(contract),
             keep_workspace=True,
             resume_workspace_dir=workspace,
             codex_resume_session_id=session_id,
@@ -2272,24 +3363,27 @@ def _run_targeted_dossier_repairs(
         try:
             result = run_once(config=cfg, request=request)
         except Exception as exc:  # noqa: BLE001
+            consecutive_invocation_failures += 1
             failure_seconds = max(0.0, time.monotonic() - invocation_started)
             correction_seconds_total += failure_seconds
             correction_seconds_since_best += failure_seconds
             failure = f"research_dossier_repair_runner_exception:{type(exc).__name__}:{exc}"
             invocation_failure_counts[failure] = invocation_failure_counts.get(failure, 0) + 1
             failure_repeated = invocation_failure_counts[failure]
-            economic_pause = bool(
-                original_seconds is not None and correction_seconds_since_best >= original_seconds
+            failure_pause = bool(
+                failure_repeated >= 2
+                or consecutive_invocation_failures
+                >= _CONSECUTIVE_ORDINARY_NONADVANCING_PAUSE_COUNT
             )
             failure_reason = (
-                "correction_cost_reached_investigation_cost"
-                if economic_pause
-                else "same_session_invocation_failed_repeatedly"
+                "same_session_invocation_failed_repeatedly"
                 if failure_repeated >= 2
+                else "consecutive_nonadvancing_invocations_require_adjudication"
+                if failure_pause
                 else "retry_same_session_after_first_invocation_failure"
             )
             failure_progress = {
-                "decision": ("restart" if economic_pause or failure_repeated >= 2 else "continue"),
+                "decision": ("paused" if failure_pause else "continue"),
                 "reason": failure_reason,
                 "before_error_count": len(current_errors),
                 "after_error_count": 1,
@@ -2297,6 +3391,7 @@ def _run_targeted_dossier_repairs(
                 "introduced_error_identities": [failure],
                 "dossier_changed": False,
                 "repeated_state_count": failure_repeated,
+                "consecutive_genuine_nonprogress_count": consecutive_invocation_failures,
                 "correction_seconds_since_best_progress": correction_seconds_since_best,
                 "total_correction_seconds": correction_seconds_total,
                 "original_investigation_seconds": original_seconds,
@@ -2305,8 +3400,8 @@ def _run_targeted_dossier_repairs(
                     "latest_safe_dossier_sha256": _canonical_json_sha256(baseline),
                     "objective_best_dossier_sha256": _canonical_json_sha256(best_dossier),
                     "next_action": (
-                        "fresh_restart_evaluation"
-                        if economic_pause or failure_repeated >= 2
+                        "same_author_feedback_or_supervisor_adjudication"
+                        if failure_pause
                         else "same_session_retry"
                     ),
                 },
@@ -2334,21 +3429,28 @@ def _run_targeted_dossier_repairs(
                 "validation_errors": [failure],
                 "instruction": "Retry the correction in this same session; do not restart.",
             }
-            if economic_pause or failure_repeated >= 2:
+            if failure_pause:
                 return {
-                    "dossier": best_dossier,
-                    "validation_errors": best_errors,
-                    "source_attempt_sha256": best_source.get("attempt_sha256"),
+                    "dossier": forward_dossier,
+                    "validation_errors": forward_errors,
+                    "source_attempt_sha256": forward_source.get("attempt_sha256"),
                     "best_dossier": best_dossier,
                     "best_validation_errors": best_errors,
                     "best_source_attempt_sha256": best_source.get("attempt_sha256"),
                     "attempts": attempts,
                     "repair_run_dirs": repair_runs,
-                    "status": "restart:" + failure_reason,
+                    "status": "repairable_paused:" + failure_reason,
+                    "expected_session_id": session_id,
+                    "observed_session_id": session_id,
+                    "continuation_failure": failure,
+                    "authored_work_disposition": "retained",
+                    "retained_frontier": failure_progress["retained_frontier"],
+                    "continuation_feedback": previous_correction_feedback,
                 }
             repair_index += 1
             continue
 
+        consecutive_invocation_failures = 0
         repair_runs.append(str(result.run_dir.resolve()))
         repair_seconds = _run_wall_seconds(result.run_dir) or 0.0
         correction_seconds_total += repair_seconds
@@ -2419,7 +3521,9 @@ def _run_targeted_dossier_repairs(
             evidence_assignment=evidence_assignment,
             allow_research_workspace_changes=research_capabilities,
         )
+        candidate_validation_frontier = _MODEL_OUTPUT_VALIDATION_FRONTIER
         if candidate and not candidate_errors and candidate_validator is not None:
+            candidate_validation_frontier = _EVIDENCE_VALIDATION_FRONTIER
             try:
                 candidate_errors.extend(
                     str(error) for error in candidate_validator(candidate, result)
@@ -2445,6 +3549,17 @@ def _run_targeted_dossier_repairs(
                 after_dossier=candidate,
             )
         )
+        substantive_coverage_regressions, substantive_revision_basis = (
+            _unsupported_substantive_coverage_loss(forward_dossier, candidate)
+        )
+        substantive_coverage_added_since_feedback = sorted(
+            _substantive_research_coverage(candidate)
+            - _substantive_research_coverage(immediate_prior_feedback_dossier)
+        )
+        if fundamental_changes:
+            # Immutable evidence mutation has its own stricter recovery contract; do not let this
+            # softer progression safeguard replace that scope decision.
+            substantive_coverage_regressions = []
         state_key = _canonical_json_sha256(
             {
                 "dossier_sha256": _canonical_json_sha256(candidate),
@@ -2468,32 +3583,320 @@ def _run_targeted_dossier_repairs(
             total_correction_seconds=correction_seconds_total,
             original_investigation_seconds=original_seconds,
             best_error_count=len(best_errors),
+            before_validation_frontier=current_validation_frontier,
+            after_validation_frontier=candidate_validation_frontier,
+            best_validation_frontier=best_validation_frontier,
+            immediate_prior_feedback_errors=immediate_prior_feedback_errors,
+            immediate_prior_feedback_dossier_sha256=(immediate_prior_feedback_dossier_sha256),
+            previous_consecutive_nonprogress_count=(consecutive_genuine_nonprogress_count),
+            substantive_coverage_regressions=substantive_coverage_regressions,
         )
+        consecutive_genuine_nonprogress_count = int(
+            progress["consecutive_genuine_nonprogress_count"]
+        )
+        candidate_frontier_rank = _VALIDATION_FRONTIER_RANK[candidate_validation_frontier]
+        best_frontier_rank = _VALIDATION_FRONTIER_RANK[best_validation_frontier]
+        forward_frontier_rank = _VALIDATION_FRONTIER_RANK[forward_validation_frontier]
+        immediate_prior_frontier_rank = _VALIDATION_FRONTIER_RANK[
+            immediate_prior_feedback_validation_frontier
+        ]
+        immediate_prior_error_ids = {
+            _validation_error_identity(error) for error in immediate_prior_feedback_errors
+        }
+        candidate_error_ids = {
+            _validation_error_identity(error) for error in candidate_errors
+        }
+        status_downgrade = bool(
+            candidate_validator is not None
+            and baseline.get("research_status") == "evidence_sufficient"
+            and candidate.get("research_status") != "evidence_sufficient"
+        )
+        epistemic_downgrade_basis = (
+            _epistemic_downgrade_basis(baseline, candidate) if status_downgrade else []
+        )
+        candidate_advancement_regression = bool(
+            status_downgrade and not epistemic_downgrade_basis
+        )
+        candidate_substantive_regression = bool(
+            substantive_coverage_regressions and not candidate_advancement_regression
+        )
+        candidate_validation_depth_advanced = bool(
+            candidate_frontier_rank > immediate_prior_frontier_rank
+        )
+        evidence_backed_revision = sorted(
+            {*substantive_revision_basis, *epistemic_downgrade_basis}
+        )
+        candidate_substantive_advancement = bool(
+            not candidate_substantive_regression
+            and (substantive_coverage_added_since_feedback or evidence_backed_revision)
+        )
+        candidate_lateral_correction = bool(
+            not candidate_advancement_regression
+            and not candidate_substantive_regression
+            and not substantive_revision_basis
+            and not substantive_coverage_added_since_feedback
+            and not progress.get("objective_progress")
+            and not candidate_validation_depth_advanced
+            and candidate_frontier_rank == immediate_prior_frontier_rank
+            and len(candidate_error_ids) == len(immediate_prior_error_ids)
+            and candidate_error_ids != immediate_prior_error_ids
+        )
+        candidate_integrity_or_session_failure = bool(
+            result.agent_session_id != session_id
+            or any(_repair_error_requires_new_investigation(error) for error in candidate_errors)
+        )
+        candidate_genuine_advancement = bool(
+            not fundamental_changes
+            and not candidate_advancement_regression
+            and not candidate_substantive_regression
+            and not candidate_integrity_or_session_failure
+            and (
+                progress.get("decision") == "accepted"
+                or progress.get("immediate_prior_feedback_error_count_progress")
+                or candidate_validation_depth_advanced
+                or progress.get("objective_progress")
+                or substantive_coverage_added_since_feedback
+                or evidence_backed_revision
+            )
+        )
+        candidate_ordinary_nonadvancing = bool(
+            not candidate_genuine_advancement
+            and not fundamental_changes
+            and not candidate_advancement_regression
+            and not candidate_substantive_regression
+            and not candidate_integrity_or_session_failure
+        )
+        if candidate_genuine_advancement:
+            consecutive_ordinary_nonadvancing_corrections = 0
+        elif candidate_ordinary_nonadvancing:
+            consecutive_ordinary_nonadvancing_corrections += 1
+        progress["consecutive_ordinary_nonadvancing_correction_count"] = (
+            consecutive_ordinary_nonadvancing_corrections
+        )
+        if substantive_revision_basis:
+            progress["substantive_revision_basis"] = substantive_revision_basis
+        if status_downgrade:
+            progress["status_downgrade"] = {
+                "before_research_status": baseline.get("research_status"),
+                "candidate_research_status": candidate.get("research_status"),
+                "epistemic_basis": epistemic_downgrade_basis,
+                "supported": bool(epistemic_downgrade_basis),
+            }
+        if candidate_advancement_regression:
+            consecutive_advancement_regressions += 1
+        else:
+            consecutive_advancement_regressions = 0
+        progress["consecutive_advancement_regression_count"] = (
+            consecutive_advancement_regressions
+        )
+        if candidate_substantive_regression:
+            consecutive_substantive_regressions += 1
+        else:
+            consecutive_substantive_regressions = 0
+        progress["substantive_coverage_added_since_immediate_feedback"] = list(
+            substantive_coverage_added_since_feedback
+        )
+        candidate_not_promoted_to_best = bool(
+            not fundamental_changes
+            and (
+                candidate_advancement_regression
+                or candidate_substantive_regression
+                or candidate_frontier_rank < best_frontier_rank
+                or (
+                    candidate_frontier_rank == best_frontier_rank
+                    and len(candidate_errors) > len(best_errors)
+                )
+            )
+        )
+        candidate_regressed_from_forward = bool(
+            candidate_advancement_regression
+            or candidate_substantive_regression
+            or (
+                candidate_frontier_rank < forward_frontier_rank
+                and not progress.get("error_count_progress")
+            )
+            or (
+                candidate_frontier_rank == forward_frontier_rank
+                and len(candidate_errors) > len(forward_errors)
+                and not progress.get("resolved_error_identities")
+            )
+        )
+        if candidate_advancement_regression:
+            # A weaker conclusion can be honest, and it remains fully retained in the attempt
+            # ledger.  It is not, however, a successful repair of an advancing proof merely
+            # because the weaker contract stops materializing mechanism and outcome checks.
+            # Return the established advancing frontier to the same author for bounded correction.
+            # A third consecutive unsupported downgrade pauses for adjudication instead of
+            # discarding the work or launching a fresh investigation. Genuine new counterevidence
+            # can then be assessed explicitly rather than being confused with a linking escape.
+            progress["objective_progress"] = False
+            progress["error_count_progress"] = False
+            progress["cost_clock_reset"] = False
+            progress["advancement_regression"] = {
+                "objective_best_research_status": best_dossier.get("research_status"),
+                "forward_frontier_research_status": forward_dossier.get("research_status"),
+                "candidate_research_status": candidate.get("research_status"),
+                "consecutive_count": consecutive_advancement_regressions,
+            }
+            progress["decision"] = (
+                "paused"
+                if consecutive_advancement_regressions
+                >= _CONSECUTIVE_ADVANCEMENT_REGRESSION_PAUSE_COUNT
+                else "continue"
+            )
+            progress["reason"] = (
+                "advancing_claim_downgrade_requires_adjudication"
+                if consecutive_advancement_regressions
+                >= _CONSECUTIVE_ADVANCEMENT_REGRESSION_PAUSE_COUNT
+                else "advancing_claim_downgrade_requires_same_author_resolution"
+            )
+        elif candidate_substantive_regression:
+            # Mechanical cleanup is not substantive progress when it removes already established
+            # causal or outcome coverage. Preserve both authored attempts, return the strongest
+            # frontier as the next baseline, and let the same author restore the coverage or add
+            # actual counterevidence. Repeated unsupported loss pauses for review rather than
+            # discarding the work or launching another nondeterministic investigation.
+            progress["objective_progress"] = False
+            progress["cost_clock_reset"] = False
+            progress["substantive_research_regression"] = {
+                "lost_coverage": list(substantive_coverage_regressions),
+                "consecutive_count": consecutive_substantive_regressions,
+                "mechanical_error_count_decreased": bool(
+                    progress.get("immediate_prior_feedback_error_count_progress")
+                ),
+            }
+            progress["decision"] = (
+                "paused"
+                if consecutive_substantive_regressions
+                >= _CONSECUTIVE_SUBSTANTIVE_REGRESSION_PAUSE_COUNT
+                else "continue"
+            )
+            progress["reason"] = (
+                "substantive_research_regression_requires_adjudication"
+                if progress["decision"] == "paused"
+                else "substantive_research_regression_requires_same_author_resolution"
+            )
+        elif candidate_validation_depth_advanced or candidate_substantive_advancement:
+            # These are real research advances even when the objective-best frontier had already
+            # reached the same depth or the immediate error count happens to remain unchanged.
+            progress_was_already_genuine = bool(progress.get("genuine_feedback_progress"))
+            progress["genuine_feedback_progress"] = True
+            progress["cost_clock_reset"] = True
+            progress["consecutive_genuine_nonprogress_count"] = 0
+            consecutive_genuine_nonprogress_count = 0
+            progress["feedback_advancement"] = {
+                "validation_frontier_advanced": candidate_validation_depth_advanced,
+                "substantive_coverage_added": list(substantive_coverage_added_since_feedback),
+                "epistemic_revision_basis": list(evidence_backed_revision),
+            }
+            if progress["decision"] != "accepted" and not progress_was_already_genuine:
+                progress["decision"] = "continue"
+                progress["reason"] = (
+                    "validation_frontier_advanced_since_immediate_feedback"
+                    if candidate_validation_depth_advanced
+                    else "evidence_backed_revision_since_immediate_feedback"
+                    if evidence_backed_revision
+                    else "substantive_coverage_advanced_since_immediate_feedback"
+                )
+        elif candidate_ordinary_nonadvancing:
+            # Keep changed same-author work, including useful diagnostic refinement, but use one
+            # counter for every ordinary nonadvancing form. Otherwise alternating equal-count
+            # identity churn with a changed dossier carrying the same findings resets two partial
+            # counters forever. Only actual research progress resets this streak.
+            progress["genuine_feedback_progress"] = False
+            progress["cost_clock_reset"] = False
+            progress["ordinary_nonadvancing_correction"] = {
+                "consecutive_count": consecutive_ordinary_nonadvancing_corrections,
+                "dossier_changed_since_immediate_feedback": bool(
+                    progress.get("immediate_prior_feedback_state_changed")
+                ),
+                "error_identities_changed": candidate_error_ids != immediate_prior_error_ids,
+                "immediate_feedback_error_count": len(immediate_prior_error_ids),
+                "candidate_error_count": len(candidate_error_ids),
+            }
+            if candidate_lateral_correction:
+                progress["lateral_correction_churn"] = {
+                    "consecutive_count": consecutive_ordinary_nonadvancing_corrections,
+                    "equal_error_count": len(candidate_error_ids),
+                    "reworked_error_identities": sorted(
+                        immediate_prior_error_ids - candidate_error_ids
+                    ),
+                    "introduced_error_identities": sorted(
+                        candidate_error_ids - immediate_prior_error_ids
+                    ),
+                }
+            progress["decision"] = (
+                "paused"
+                if consecutive_ordinary_nonadvancing_corrections
+                >= _CONSECUTIVE_ORDINARY_NONADVANCING_PAUSE_COUNT
+                else "continue"
+            )
+            progress["reason"] = (
+                "lateral_correction_churn_requires_adjudication"
+                if progress["decision"] == "paused" and candidate_lateral_correction
+                else "consecutive_nonadvancing_corrections_require_adjudication"
+                if progress["decision"] == "paused"
+                else "lateral_correction_retained_for_same_author"
+                if candidate_lateral_correction
+                else "nonadvancing_correction_retained_for_same_author"
+            )
+        if candidate_not_promoted_to_best:
+            # Keep every authored candidate in the attempt history. A safe candidate remains the
+            # next baseline even when a shallower validator frontier still needs repair. A true
+            # regression is different: return to the immediately prior safe forward frontier.
+            progress["candidate_not_promoted_to_objective_best"] = True
+            # Retain the old field as a compatibility alias for persisted attempt readers.  New
+            # artifacts state the actual comparison explicitly: regressions are measured against
+            # the current forward correction frontier, not merely against the objective best.
+            progress["candidate_regressed_from_forward_frontier"] = (
+                candidate_regressed_from_forward
+            )
+            progress["candidate_regressed_from_objective_best"] = (
+                candidate_regressed_from_forward
+            )
+            progress["candidate_disposition"] = (
+                "retained_as_nonbaseline_attempt"
+                if candidate_regressed_from_forward
+                else "retained_as_progressing_correction_baseline"
+            )
+            progress["next_baseline"] = (
+                "forward_frontier"
+                if candidate_regressed_from_forward
+                else "latest_safe_candidate"
+            )
         if result.agent_session_id != session_id:
             progress["decision"] = "restart"
             progress["reason"] = "same_session_continuity_failed"
             progress["observed_session_id"] = result.agent_session_id
         decision = str(progress["decision"])
-        if decision == "restart":
-            latest_safe = not fundamental_changes and result.agent_session_id == session_id
+        if decision in {"restart", "paused"}:
+            latest_safe = bool(
+                not fundamental_changes
+                and result.agent_session_id == session_id
+                and not candidate_regressed_from_forward
+            )
             progress["authored_work_disposition"] = "retained"
             progress["retained_frontier"] = {
                 "latest_safe_dossier_sha256": _canonical_json_sha256(
-                    candidate if latest_safe else baseline
+                    candidate if latest_safe else forward_dossier
                 ),
                 "objective_best_dossier_sha256": _canonical_json_sha256(best_dossier),
                 "candidate_disposition": (
                     "retained_as_latest_safe"
                     if latest_safe
-                    else "quarantined_while_prior_safe_frontier_is_retained"
+                    else "quarantined_while_forward_frontier_is_retained"
                 ),
                 "next_action": "fresh_restart_or_pause_evaluation",
             }
+            if decision == "paused":
+                progress["retained_frontier"]["next_action"] = (
+                    "same_author_feedback_or_supervisor_adjudication"
+                )
         outcome = (
             "repair_contract_valid"
             if decision == "accepted"
             else "repair_contract_invalid"
-            if decision == "continue" and not fundamental_changes
+            if decision in {"continue", "paused"} and not fundamental_changes
             else "repair_scope_rejected"
         )
         repair_attempt = _research_attempt_record(
@@ -2517,30 +3920,148 @@ def _run_targeted_dossier_repairs(
             repair_progress=progress,
         )
         attempts.append(repair_attempt)
+        immediate_prior_feedback_errors = list(candidate_errors)
+        immediate_prior_feedback_dossier = json.loads(json.dumps(candidate, ensure_ascii=False))
+        immediate_prior_feedback_dossier_sha256 = _canonical_json_sha256(candidate)
+        immediate_prior_feedback_validation_frontier = candidate_validation_frontier
         if evidence_attempt_history is not None:
             evidence_attempt_history.append(dict(repair_attempt))
+        if fundamental_changes:
+            correction_instruction = (
+                "Restore every retained-evidence path from baseline before correcting the "
+                "model-owned structure."
+            )
+        elif candidate_advancement_regression:
+            correction_instruction = (
+                "The last candidate is retained as a nonadvancing research conclusion, but "
+                "downgrading research_status cannot satisfy an advancing evidence-repair request "
+                "merely by suppressing mechanism and outcome checks. Continue from the prior safe "
+                "forward dossier supplied by this prompt and repair its exact remaining links. If "
+                "newly observed counterevidence genuinely invalidates sufficiency, cite that "
+                "evidence explicitly so the conclusion can be adjudicated; do not represent "
+                "verifier or schema acceptance as a material causal unknown."
+            )
+        elif candidate_substantive_regression:
+            correction_instruction = (
+                "The last candidate is retained but quarantined because it removed these "
+                "established causal or outcome proof roles: "
+                + ", ".join(substantive_coverage_regressions)
+                + ". Continue in this same author session from the prior safe forward dossier "
+                "supplied by this prompt. Restore equivalent substantive coverage while repairing "
+                "the remaining verifier feedback, or add retained counterevidence that explicitly "
+                "supports revising the conclusion. A lower mechanical error count alone does not "
+                "justify deleting established proof."
+            )
+        elif candidate_lateral_correction and not candidate_regressed_from_forward:
+            correction_instruction = (
+                "This equal-count correction is retained and its changed diagnostics are useful "
+                "feedback, but it did not yet reduce the current findings, reach a deeper "
+                "validation frontier, improve the objective best, or restore/add substantive "
+                "causal coverage. Continue in this same author session from the supplied latest "
+                "candidate. Resolve at least one current finding or make evidence-backed "
+                "substantive progress; do not merely exchange one error identity for another."
+            )
+        elif candidate_regressed_from_forward:
+            correction_instruction = (
+                "The last candidate was retained but not promoted because it regressed from the "
+                "current forward validation frontier or error count. Continue in this same session "
+                "from the prior safe forward dossier supplied by this prompt and repair its exact "
+                "remaining errors. The regressed candidate remains in the attempt history, but is "
+                "not the correction baseline."
+            )
+        elif candidate_ordinary_nonadvancing:
+            correction_instruction = (
+                "This correction is retained, but it did not reduce the current findings, reach "
+                "a deeper validation frontier, improve the objective best, restore or add "
+                "substantive causal coverage, or provide an evidence-backed revision. Continue "
+                "in this same author session from the supplied latest safe frontier and make one "
+                "of those concrete forms of progress. Rewording the dossier while retaining the "
+                "same findings does not reset the correction streak."
+            )
+        elif candidate_not_promoted_to_best:
+            correction_instruction = (
+                "The last candidate is retained as the latest safe forward correction frontier "
+                "even though it did not replace the objective best. Continue from that latest "
+                "candidate and repair its exact errors. The deeper objective-best dossier remains "
+                "an evaluation reference, not the next author baseline."
+            )
+        else:
+            correction_instruction = "Use this assessment as feedback for the next correction."
         previous_correction_feedback = {
             "source_attempt_sha256": repair_attempt["attempt_sha256"],
             "candidate_dossier_sha256": repair_attempt["attempted_dossier_sha256"],
-            "assessment_reason": progress["reason"],
-            "validation_errors": list(candidate_errors),
-            "fundamental_change_paths": list(fundamental_changes),
-            "instruction": (
-                "Restore every retained-evidence path from baseline before correcting the "
-                "model-owned structure."
-                if fundamental_changes
-                else "Use this assessment as feedback for the next correction."
+            "assessment_reason": (
+                "candidate_downgraded_advancing_claim"
+                if candidate_advancement_regression
+                else "candidate_removed_established_substantive_coverage"
+                if candidate_substantive_regression
+                else "candidate_reworked_equal_count_feedback_without_advancement"
+                if candidate_lateral_correction and not candidate_regressed_from_forward
+                else "candidate_regressed_from_forward_frontier"
+                if candidate_regressed_from_forward
+                else "candidate_changed_without_substantive_advancement"
+                if candidate_ordinary_nonadvancing
+                else "candidate_retained_as_forward_frontier"
+                if candidate_not_promoted_to_best
+                else progress["reason"]
             ),
+            "validation_errors": list(candidate_errors),
+            "objective_best_validation_errors": (
+                list(best_errors) if candidate_not_promoted_to_best else None
+            ),
+            "forward_frontier_validation_errors": (
+                list(forward_errors) if candidate_regressed_from_forward else None
+            ),
+            "fundamental_change_paths": list(fundamental_changes),
+            "substantive_coverage_regressions": list(substantive_coverage_regressions),
+            "lateral_correction_churn": progress.get("lateral_correction_churn"),
+            "ordinary_nonadvancing_correction": progress.get(
+                "ordinary_nonadvancing_correction"
+            ),
+            "instruction": correction_instruction,
         }
-        if decision == "restart":
-            latest_is_safe = not fundamental_changes and result.agent_session_id == session_id
+        if decision == "paused":
+            paused_candidate_is_latest_safe = bool(
+                not fundamental_changes
+                and result.agent_session_id == session_id
+                and not candidate_regressed_from_forward
+            )
             return {
-                "dossier": candidate if latest_is_safe else baseline,
-                "validation_errors": candidate_errors if latest_is_safe else current_errors,
+                "dossier": candidate if paused_candidate_is_latest_safe else forward_dossier,
+                "validation_errors": (
+                    candidate_errors if paused_candidate_is_latest_safe else forward_errors
+                ),
+                "source_attempt_sha256": (
+                    repair_attempt.get("attempt_sha256")
+                    if paused_candidate_is_latest_safe
+                    else forward_source.get("attempt_sha256")
+                ),
+                "best_dossier": best_dossier,
+                "best_validation_errors": best_errors,
+                "best_source_attempt_sha256": best_source.get("attempt_sha256"),
+                "attempts": attempts,
+                "repair_run_dirs": repair_runs,
+                "status": "repairable_paused:" + str(progress["reason"]),
+                "expected_session_id": session_id,
+                "observed_session_id": result.agent_session_id,
+                "continuation_failure": None,
+                "latest_nonadvancing_dossier": candidate,
+                "retained_frontier": progress.get("retained_frontier"),
+                "continuation_feedback": previous_correction_feedback,
+            }
+        if decision == "restart":
+            latest_is_safe = bool(
+                not fundamental_changes
+                and result.agent_session_id == session_id
+                and not candidate_regressed_from_forward
+            )
+            return {
+                "dossier": candidate if latest_is_safe else forward_dossier,
+                "validation_errors": candidate_errors if latest_is_safe else forward_errors,
                 "source_attempt_sha256": (
                     repair_attempt.get("attempt_sha256")
                     if latest_is_safe
-                    else accepted_source.get("attempt_sha256")
+                    else forward_source.get("attempt_sha256")
                 ),
                 "best_dossier": best_dossier,
                 "best_validation_errors": best_errors,
@@ -2562,15 +4083,34 @@ def _run_targeted_dossier_repairs(
             # edit; only persistence or cost can justify restart.
             repair_index += 1
             continue
-        baseline = candidate
-        current_errors = candidate_errors
-        accepted_source = repair_attempt
-        if len(current_errors) <= len(best_errors):
+        if candidate_regressed_from_forward:
+            baseline = json.loads(json.dumps(forward_dossier, ensure_ascii=False))
+            current_errors = list(forward_errors)
+            accepted_source = forward_source
+            current_validation_frontier = forward_validation_frontier
+        else:
+            forward_dossier = json.loads(json.dumps(candidate, ensure_ascii=False))
+            forward_errors = list(candidate_errors)
+            forward_source = repair_attempt
+            forward_validation_frontier = candidate_validation_frontier
+            baseline = json.loads(json.dumps(forward_dossier, ensure_ascii=False))
+            current_errors = list(forward_errors)
+            accepted_source = forward_source
+            current_validation_frontier = forward_validation_frontier
+        current_frontier_rank = _VALIDATION_FRONTIER_RANK[current_validation_frontier]
+        best_frontier_rank = _VALIDATION_FRONTIER_RANK[best_validation_frontier]
+        if current_frontier_rank > best_frontier_rank or (
+            current_frontier_rank == best_frontier_rank and len(current_errors) < len(best_errors)
+        ):
             best_dossier = json.loads(json.dumps(baseline, ensure_ascii=False))
             best_errors = list(current_errors)
             best_source = repair_attempt
-            if progress.get("cost_clock_reset") is True:
-                correction_seconds_since_best = 0.0
+            best_validation_frontier = current_validation_frontier
+        if progress.get("cost_clock_reset") is True:
+            # A smaller immediate-feedback set is useful progress even when the candidate remains
+            # quarantined behind a stronger objective best.  The attempt record above preserves
+            # the pre-reset accumulated cost; this reset applies to the next correction turn.
+            correction_seconds_since_best = 0.0
         if decision == "accepted":
             return {
                 "dossier": baseline,
@@ -2602,8 +4142,10 @@ def continue_research_dossier_from_independent_feedback(
     replay_executor: ReplayExecutor | None,
     artifacts_dir: Path,
     independent_feedback: Mapping[str, Any] | None = None,
-    continuation_attempt_kind: str = "independent_qualification_research_continuation",
+    retained_evidence_attempts: Sequence[Mapping[str, Any]] = (),
+    continuation_attempt_kind: str = "evidence_verification_research_continuation",
     original_investigation_seconds: float | None = None,
+    max_repair_turns: int | None = None,
 ) -> dict[str, Any]:
     """Resume one retained researcher with external semantic feedback and reverify it.
 
@@ -2626,7 +4168,9 @@ def continue_research_dossier_from_independent_feedback(
         if isinstance(attempts_raw, list)
         else []
     )
-    errors = [str(error) for error in validation_errors if str(error).strip()]
+    errors = _dedupe_validation_errors(
+        str(error) for error in validation_errors if str(error).strip()
+    )
     missing: list[str] = []
     if case_id is None:
         missing.append("case_id")
@@ -2688,15 +4232,114 @@ def continue_research_dossier_from_independent_feedback(
             "invocation_failed",
         }
     )
-    evidence_attempt_history = [dict(attempt) for attempt in attempts]
+    attempt_history = [dict(attempt) for attempt in attempts]
+    feedback_attempts: list[dict[str, Any]] = []
+    source_validation_errors = _dedupe_validation_errors(
+        _string_list(source_attempt.get("validation_errors_after"))
+    )
+    if isinstance(independent_feedback, Mapping) and source_validation_errors != errors:
+        # Independent review introduces a new error frontier after the retained author
+        # attempt. Preserve unresolved source errors and add the independent findings
+        # before asking the same author to continue. Otherwise feedback arriving while a
+        # correction is already in progress either loses known work or claims an
+        # errors-before frontier that its hashed source never contained.
+        source_run_dir = _coerce_str(source_attempt.get("run_dir"))
+        source_report_path = _coerce_str(source_attempt.get("report_path"))
+        source_attempt_sha256 = _coerce_str(source_attempt.get("attempt_sha256"))
+        source_session_id = _coerce_str(source_attempt.get("agent_session_id"))
+        source_attempted_dossier = source_attempt.get("attempted_dossier")
+        transition_missing = [
+            field
+            for field, value in (
+                ("source_run_dir", source_run_dir),
+                ("source_report_path", source_report_path),
+                ("source_attempt_sha256", source_attempt_sha256),
+                ("source_agent_session_id", source_session_id),
+                (
+                    "source_attempted_dossier",
+                    source_attempted_dossier
+                    if isinstance(source_attempted_dossier, Mapping)
+                    else None,
+                ),
+            )
+            if value is None
+        ]
+        if transition_missing:
+            return {
+                "status": "repairable_paused:research_feedback_transition_context_missing",
+                "dossier": dict(dossier),
+                "validation_errors": [
+                    "research_feedback_transition_context_missing:" + ",".join(transition_missing)
+                ],
+                "attempts": [],
+                "authored_work_disposition": "retained",
+            }
+        assert source_run_dir is not None
+        assert source_report_path is not None
+        assert source_attempt_sha256 is not None
+        assert source_session_id is not None
+        assert isinstance(source_attempted_dossier, Mapping)
+        carried_nonadvancing_count = _source_ordinary_nonadvancing_correction_count(
+            source_attempt,
+            current_errors=source_validation_errors,
+        )
+        carried_advancement_regression_count = _retained_advancement_regression_count(
+            source_attempt,
+            current_errors=source_validation_errors,
+            attempt_history=attempt_history,
+        )
+        carried_progress: dict[str, Any] = {}
+        if carried_nonadvancing_count > 0:
+            carried_progress.update(
+                consecutive_ordinary_nonadvancing_correction_count=(
+                    carried_nonadvancing_count
+                ),
+                ordinary_nonadvancing_streak_carried_from_source_attempt_sha256=(
+                    source_attempt_sha256
+                ),
+            )
+        if carried_advancement_regression_count > 0:
+            carried_progress.update(
+                consecutive_advancement_regression_count=(
+                    carried_advancement_regression_count
+                ),
+                advancement_regression_streak_carried_from_source_attempt_sha256=(
+                    source_attempt_sha256
+                ),
+            )
+        feedback_errors = _dedupe_validation_errors([*source_validation_errors, *errors])
+        feedback_transition = _research_attempt_record(
+            attempt_number=len(attempt_history) + 1,
+            outcome="evidence_verification_invalid",
+            run_dir=Path(source_run_dir),
+            report_path=Path(source_report_path),
+            validation_errors=feedback_errors,
+            validation_errors_before=source_validation_errors,
+            attempted_dossier=json.loads(json.dumps(source_attempted_dossier, ensure_ascii=False)),
+            attempt_kind="evidence_verification_feedback",
+            source_attempt_sha256=source_attempt_sha256,
+            agent_session_id=source_session_id,
+            observed_agent_session_id=source_session_id,
+            attempt_wall_seconds=0.0,
+            repair_progress=carried_progress or None,
+        )
+        attempt_history.append(feedback_transition)
+        feedback_attempts.append(feedback_transition)
+        source_attempt = feedback_transition
+        errors = feedback_errors
+    # A process restart may leave the latest safe authoring frontier and its original
+    # command-bearing research run in separate retained artifacts.  Carry those older
+    # event sources into re-verification without rewriting the model-attempt lineage;
+    # `_compatible_research_evidence_attempts` independently rehashes and authenticates
+    # every supplied attempt before any event is trusted.
+    evidence_attempt_history = [
+        *[dict(attempt) for attempt in retained_evidence_attempts if isinstance(attempt, Mapping)],
+        *[dict(attempt) for attempt in attempt_history],
+    ]
 
     def validate_candidate(candidate: dict[str, Any], correction_result: Any) -> Sequence[str]:
         verification_run_dir = Path(correction_result.run_dir).resolve()
-        prepared = {
-            key: value
-            for key, value in candidate.items()
-            if key not in _RUNNER_OWNED_DOSSIER_FIELDS
-        }
+        prepared = _model_dossier_copy(candidate)
         prepared["research_schema_version"] = RESEARCH_PROOF_SCHEMA_VERSION
         prepared["evidence_assignment"] = evidence_assignment
         prepared["repo_revision"] = _canonical_repo_revision(verification_run_dir) or repo_revision
@@ -2773,18 +4416,19 @@ def continue_research_dossier_from_independent_feedback(
                 source_attempt=source_attempt,
                 continuation_run_dir=verification_run_dir,
             )
-            attachment_reads, attachment_errors = (
-                _origin_attachment_read_receipts(
+            attachment_reads, attachment_scope, attachment_errors = (
+                _origin_attachment_read_evidence(
                     run_dir=verification_run_dir,
                     workspace_dir=workspace,
                     manifest=origin_attachment,
+                    dossier=prepared,
+                    verification=receipt,
                     evidence_attempts=evidence_attempts,
                 )
-                if workspace is not None
-                else ([], ["origin_attachment_workspace_unavailable"])
             )
             receipt["origin_attachment_evidence"] = origin_attachment
             receipt["origin_attachment_read_attestations"] = attachment_reads
+            receipt["origin_attachment_read_coverage"] = attachment_scope
             if attachment_errors:
                 _fail_evidence_verification(receipt, errors=attachment_errors)
         verified_candidates[_canonical_json_sha256(candidate)] = (
@@ -2810,7 +4454,7 @@ def continue_research_dossier_from_independent_feedback(
         evidence_assignment=evidence_assignment,
         source_attempt=source_attempt,
         validation_errors=errors,
-        first_attempt_number=len(attempts) + 1,
+        first_attempt_number=len(attempt_history) + 1,
         candidate_validator=validate_candidate,
         research_capabilities=True,
         attempt_kind=continuation_attempt_kind,
@@ -2818,6 +4462,11 @@ def continue_research_dossier_from_independent_feedback(
         original_investigation_seconds=effective_original_seconds,
         source_baseline_is_unverified_draft=source_baseline_is_unverified_draft,
         evidence_attempt_history=evidence_attempt_history,
+        initial_validation_frontier=_continuation_initial_validation_frontier(
+            source_attempt=source_attempt,
+            feedback_attempts=feedback_attempts,
+        ),
+        max_repair_turns=max_repair_turns,
     )
     repaired_raw = repair.get("dossier")
     repaired = dict(repaired_raw) if isinstance(repaired_raw, dict) else dict(dossier)
@@ -2829,12 +4478,12 @@ def continue_research_dossier_from_independent_feedback(
         prepared["run_dir"] = str(verification_run_dir)
         workspace_dir = receipt.get("planning_workspace_dir")
         prepared["repo_workspace"] = workspace_dir if isinstance(workspace_dir, str) else None
-        _set_research_attempts(prepared, [*attempts, *new_attempts])
+        _set_research_attempts(prepared, [*attempt_history, *new_attempts])
         return {
             "status": "corrected",
             "dossier": prepared,
             "validation_errors": [],
-            "attempts": new_attempts,
+            "attempts": [*feedback_attempts, *new_attempts],
             "repair_run_dirs": list(repair.get("repair_run_dirs") or []),
             "expected_session_id": repair.get("expected_session_id"),
             "observed_session_id": repair.get("observed_session_id"),
@@ -2858,22 +4507,28 @@ def continue_research_dossier_from_independent_feedback(
             retained_workspace if isinstance(retained_workspace, str) else None
         )
     else:
-        retained = json.loads(json.dumps(dossier, ensure_ascii=False))
-        for key, value in best.items():
-            if key not in _RUNNER_OWNED_DOSSIER_FIELDS:
-                retained[key] = json.loads(json.dumps(value, ensure_ascii=False))
-    _set_research_attempts(retained, [*attempts, *new_attempts])
+        retained = _retained_dossier_after_unverified_repair(
+            dossier=dossier,
+            best=best,
+        )
+    _set_research_attempts(retained, [*attempt_history, *new_attempts])
     return {
         "status": str(repair.get("status") or "repairable_paused:research_correction_failed"),
         "dossier": retained,
         "validation_errors": best_errors,
+        "source_attempt_sha256": repair.get("source_attempt_sha256"),
         "best_source_attempt_sha256": repair.get("best_source_attempt_sha256"),
-        "attempts": new_attempts,
+        "attempts": [*feedback_attempts, *new_attempts],
         "repair_run_dirs": list(repair.get("repair_run_dirs") or []),
         "expected_session_id": repair.get("expected_session_id"),
         "observed_session_id": repair.get("observed_session_id"),
         "external_wait": repair.get("external_wait"),
         "continuation_failure": repair.get("continuation_failure"),
+        "latest_nonadvancing_dossier": repair.get("latest_nonadvancing_dossier"),
+        "retained_frontier": repair.get("retained_frontier"),
+        "continuation_feedback": repair.get("continuation_feedback"),
+        "forward_dossier": repair.get("dossier"),
+        "forward_validation_errors": repair.get("validation_errors"),
         "authored_work_disposition": "retained",
     }
 
@@ -3479,19 +5134,117 @@ def _append_prompt_for_problem(
     assignment_raw = prompt_payload.get("evidence_assignment")
     assignment = dict(assignment_raw) if isinstance(assignment_raw, dict) else {}
     origin_raw = assignment.get("origin_attachment_evidence")
-    origin = origin_raw if isinstance(origin_raw, dict) else {}
-    if origin:
+    if not isinstance(origin_raw, Mapping):
+        top_level_origin = prompt_payload.get("origin_attachment_evidence")
+        origin_raw = top_level_origin if isinstance(top_level_origin, Mapping) else {}
+    origin = dict(origin_raw) if isinstance(origin_raw, Mapping) else {}
+    assigned_raw = origin.get("assigned_evidence")
+    assigned = dict(assigned_raw) if isinstance(assigned_raw, Mapping) else {}
+    if assigned:
+        atom_entries_raw = assigned.get("atoms")
+        atom_entries = [
+            dict(item) for item in atom_entries_raw or [] if isinstance(item, Mapping)
+        ]
+        entries_by_id = {
+            str(item.get("atom_id")): item
+            for item in atom_entries
+            if _coerce_str(item.get("atom_id")) is not None
+        }
+
+        def compact_atom_collection(value: Any) -> list[dict[str, Any]]:
+            collection = value if isinstance(value, list) else []
+            compact: list[dict[str, Any]] = []
+            missing: list[str] = []
+            for atom_raw in collection:
+                if not isinstance(atom_raw, Mapping):
+                    continue
+                atom_id = _coerce_str(atom_raw.get("atom_id"))
+                entry = entries_by_id.get(atom_id or "")
+                if entry is not None:
+                    compact.append(dict(entry))
+                else:
+                    missing.append(atom_id or "<missing-atom-id>")
+            if missing:
+                raise ValueError(
+                    "assigned_evidence_index_missing_prompt_atoms:" + ",".join(missing)
+                )
+            return compact
+
+        prompt_payload["evidence_atoms"] = compact_atom_collection(
+            prompt_payload.get("evidence_atoms")
+        )
+        if "derived_evidence_atoms" in prompt_payload:
+            prompt_payload["derived_evidence_atoms"] = compact_atom_collection(
+                prompt_payload.get("derived_evidence_atoms")
+            )
+
         artifacts_raw = origin.get("artifacts")
         artifacts = artifacts_raw if isinstance(artifacts_raw, list) else []
+        atom_refs_raw = origin.get("atom_refs")
+        atom_refs = atom_refs_raw if isinstance(atom_refs_raw, list) else []
+        attachment_counts: dict[str, int] = {}
+        for ref in atom_refs:
+            if not isinstance(ref, Mapping):
+                continue
+            atom_id = _coerce_str(ref.get("atom_id"))
+            if atom_id is not None:
+                attachment_counts[atom_id] = attachment_counts.get(atom_id, 0) + 1
+        compact_assigned = {
+            key: assigned.get(key)
+            for key in (
+                "schema_version",
+                "format",
+                "case_id",
+                "problem_id",
+                "assignment_status",
+                "assignment_errors",
+                "assignment_sha256",
+                "assignment_file",
+                "assignment_file_sha256",
+                "assignment_file_size_bytes",
+                "expected_atom_ids",
+                "expected_atom_count",
+                "case_evidence_atom_ids",
+                "case_evidence_atom_count",
+                "occurrence_evidence_atom_ids",
+                "occurrence_evidence_atom_count",
+                "materialized_atom_count",
+                "materialized_receipt_count",
+                "materialization_sha256",
+                "index_file",
+                "index_file_sha256",
+                "index_file_size_bytes",
+            )
+        }
         compact_origin = {
             "schema_version": origin.get("schema_version"),
             "format": origin.get("format"),
             "manifest_file": origin.get("manifest_file"),
             "manifest_file_sha256": origin.get("manifest_file_sha256"),
             "materialization_sha256": origin.get("materialization_sha256"),
-            "atom_refs": origin.get("atom_refs", []),
+            "attachment_atom_ref_count": len(atom_refs),
+            "attachment_count_by_atom_id": attachment_counts,
             "errors": origin.get("errors", []),
-            "artifacts": [
+            "assigned_evidence": compact_assigned,
+            "run_context": (
+                {
+                    key: origin.get("run_context", {}).get(key)
+                    for key in (
+                        "schema_version",
+                        "format",
+                        "source_run_count",
+                        "source_artifact_count",
+                        "materialization_sha256",
+                        "index_file",
+                        "index_file_sha256",
+                        "index_file_size_bytes",
+                        "index_compacted",
+                    )
+                }
+                if isinstance(origin.get("run_context"), Mapping)
+                else None
+            ),
+            "artifact_manifests": [
                 {
                     "artifact_sha256": artifact.get("artifact_sha256"),
                     "size_bytes": artifact.get("size_bytes"),
@@ -3500,11 +5253,38 @@ def _append_prompt_for_problem(
                     "chunk_count": artifact.get("chunk_count"),
                 }
                 for artifact in artifacts
-                if isinstance(artifact, dict)
+                if isinstance(artifact, Mapping)
             ],
         }
-        assignment["origin_attachment_evidence"] = compact_origin
-        prompt_payload["evidence_assignment"] = assignment
+        compact_assignment = {
+            key: assignment.get(key)
+            for key in (
+                "status",
+                "errors",
+                "case_id",
+                "problem_id",
+                "expected_atom_ids",
+                "assignment_sha256",
+                "case_evidence_atom_ids",
+                "occurrence_evidence_atom_ids",
+            )
+        }
+        compact_assignment.update(
+            {
+                "expected_atom_count": len(_string_list(assignment.get("expected_atom_ids"))),
+                "atom_receipt_count": len(
+                    assignment.get("atom_receipts")
+                    if isinstance(assignment.get("atom_receipts"), list)
+                    else []
+                ),
+                "materialized_source_assignment_sha256": assigned.get(
+                    "assignment_sha256"
+                ),
+                "origin_attachment_evidence": compact_origin,
+            }
+        )
+        prompt_payload["evidence_assignment"] = compact_assignment
+        prompt_payload["origin_attachment_evidence"] = compact_origin
 
     payload = json.dumps(prompt_payload, ensure_ascii=False, indent=2)
 
@@ -3521,19 +5301,48 @@ def _append_prompt_for_problem(
     parts.append("## Assigned problem payload (JSON)")
     parts.append(payload)
     parts.append("")
-    origin_raw = assignment.get("origin_attachment_evidence")
-    origin = origin_raw if isinstance(origin_raw, dict) else {}
-    if origin.get("atom_refs"):
+    if assigned:
+        parts.append("## Required assigned-evidence reads")
+        parts.append(
+            "Read the complete assigned_evidence.index_file before assessing the case. "
+            "It contains one bounded symptom/lineage entry for every assigned atom and "
+            "hash-addressed paths to each complete atom and runner receipt."
+        )
+        parts.append(
+            "Account for every expected atom in the dossier. Open the referenced complete "
+            "atom or receipt whenever the compact entry is insufficient to support, reject, "
+            "or disposition it; no atom body has been discarded or silently capped. The "
+            "runner retains and revalidates the full-index read."
+        )
+        parts.append(
+            "The materialized assignment is the complete runner assignment before the "
+            "separately hash-bound origin-attachment manifest was composed. The prompt's "
+            "evidence_assignment.assignment_sha256 binds that composed assignment."
+        )
+        parts.append("")
+    if origin.get("atom_refs") or isinstance(origin.get("run_context"), Mapping):
         parts.append("## Required origin-attachment reads")
         parts.append(
             "The host artifact_ref paths are provenance only and may be invisible here. "
             "Use the hash-verified workspace paths in evidence_assignment."
         )
         parts.append(
-            "Before making a mechanism claim, read each artifact manifest_file and every "
-            "complete bounded chunk file declared by that manifest. The runner retains and "
-            "revalidates those read events; the large chunk list is intentionally not inlined."
+            "Use each hash-bound artifact manifest_file to locate evidence that is material to "
+            "a claim or decision. Read each bounded chunk you actually rely on in full and "
+            "declare that exact workspace chunk path in the dossier's artifact_refs; an "
+            "experiment relying on it must reference the same artifact_id. Do not claim to have "
+            "reviewed chunks you did not read. The runner verifies every retained file's hash, "
+            "requires full reads of claim-bound chunks, and records unread optional material as "
+            "an explicit coverage boundary rather than a research failure. The full chunk list "
+            "is intentionally not inlined."
         )
+        if isinstance(origin.get("run_context"), Mapping):
+            parts.append(
+                "Also read the complete run_context index_file declared in the manifest. "
+                "It is a bounded, secret-filtered, "
+                "hash-bound projection of retained source-run control-plane evidence. Do not "
+                "read the absolute host provenance paths in atom snapshots or receipts."
+            )
         parts.append("")
     parts.append(
         "Reminder: stage-3 success is reproduction/bounding with evidence, NOT implementation."
@@ -3600,11 +5409,13 @@ def run_repro_research_stage(
     Case-local runner, report, extension, and dossier failures are returned as explicit
     blocked research proofs so unrelated cases continue. A repair-authorizable model-output
     failure receives exact validator feedback in the original Codex author session. Correction
-    continues while it is improving the best known dossier or remains cheaper than repeating the
-    original investigation; replacing two errors with one different error is still progress.
-    A fresh, complete case-local investigation is reserved for demonstrated correction
-    nonprogress, session/workspace integrity failures, or correction cost approaching the original
-    investigation. Evidence-assignment and verification failures never use either path. Global
+    continues while it is improving the best known dossier or reworking the immediate feedback;
+    replacing two errors with one different error is still progress. Cost is a secondary signal
+    after repeated genuine nonprogress, not an independent reason to discard authored work.
+    A fresh, complete case-local investigation is reserved for demonstrated repeated correction
+    nonprogress, session/workspace integrity failures, uncorrectable failure, or rework effectively
+    equivalent to a fresh investigation. Evidence-assignment and verification failures never use
+    either path. Global
     configuration failures (for example a missing repo reference or stage guidance) still raise
     because no case can be researched correctly under that configuration. A runner-attested
     ChatGPT subscription usage limit is provider-global: it retains the triggering frontier and
@@ -3684,9 +5495,21 @@ def run_repro_research_stage(
             current_assignment = (
                 current_assignment_raw if isinstance(current_assignment_raw, dict) else {}
             )
-            if persisted_assignment.get("assignment_sha256") != current_assignment.get(
-                "assignment_sha256"
-            ):
+            current_atoms = [
+                atom
+                for field in ("evidence_atoms", "derived_evidence_atoms")
+                for atom in (
+                    problem.get(field) if isinstance(problem.get(field), list) else []
+                )
+                if isinstance(atom, Mapping)
+            ]
+            current_assignment = _authenticate_assignment_source_classifications(
+                current_assignment,
+                atoms=current_atoms,
+            )
+            if _persisted_source_evidence_assignment_sha256(
+                persisted_assignment
+            ) != _source_evidence_assignment_sha256(current_assignment):
                 raise ValueError(
                     "research_external_wait_resume_evidence_assignment_changed:" + problem_id
                 )
@@ -3798,6 +5621,20 @@ def run_repro_research_stage(
         )
         evidence_atoms_raw = problem.get("evidence_atoms")
         evidence_atoms = evidence_atoms_raw if isinstance(evidence_atoms_raw, list) else []
+        derived_evidence_atoms_raw = problem.get("derived_evidence_atoms")
+        derived_evidence_atoms = (
+            derived_evidence_atoms_raw
+            if isinstance(derived_evidence_atoms_raw, list)
+            else []
+        )
+        evidence_assignment = _authenticate_assignment_source_classifications(
+            evidence_assignment,
+            atoms=[
+                atom
+                for atom in [*evidence_atoms, *derived_evidence_atoms]
+                if isinstance(atom, Mapping)
+            ],
+        )
         evidence_atom_ids = [
             atom_id
             for atom in evidence_atoms
@@ -3865,9 +5702,9 @@ def run_repro_research_stage(
             persisted_assignment = (
                 persisted_assignment_raw if isinstance(persisted_assignment_raw, dict) else {}
             )
-            if persisted_assignment.get("assignment_sha256") != evidence_assignment.get(
-                "assignment_sha256"
-            ):
+            if _persisted_source_evidence_assignment_sha256(
+                persisted_assignment
+            ) != _source_evidence_assignment_sha256(evidence_assignment):
                 raise ValueError(f"research_external_wait_resume_evidence_assignment_changed:{pid}")
         persisted_blockers = (
             _string_list(persisted_dossier.get("blocking_reasons"))
@@ -4037,17 +5874,30 @@ def run_repro_research_stage(
         prepared_workspace: Path | None = None
         origin_attachment_evidence: dict[str, Any] = {}
         problem_for_agent = dict(problem)
-        if _has_origin_attachment_refs(evidence_atoms):
+        materialization_atoms: list[dict[str, Any]] = []
+        materialized_atom_ids: set[str] = set()
+        for atom in [*evidence_atoms, *derived_evidence_atoms]:
+            if not isinstance(atom, dict):
+                continue
+            atom_id = _coerce_str(atom.get("atom_id"))
+            if atom_id is None or atom_id in materialized_atom_ids:
+                continue
+            materialized_atom_ids.add(atom_id)
+            materialization_atoms.append(atom)
+        if materialization_atoms:
             assert repo_input is not None
             assert resolved_repo_ref is not None
             preferred_workspace = (
-                stage_artifacts_dir / "research_workspaces" / f"{idx:03d}_{seed}_{uuid4().hex[:12]}"
+                cfg.runs_dir
+                / "_research_workspaces"
+                / f"{idx:03d}_{seed}_{uuid4().hex[:12]}"
             )
             prepared_workspace, origin_attachment_evidence = _prepare_origin_evidence_workspace(
                 repo_input=str(repo_input),
                 repo_ref=resolved_repo_ref,
                 preferred_workspace_dir=preferred_workspace,
-                evidence_atoms=[atom for atom in evidence_atoms if isinstance(atom, dict)],
+                evidence_atoms=materialization_atoms,
+                evidence_assignment=evidence_assignment,
                 source_root=repo_root,
             )
             evidence_assignment["origin_attachment_evidence"] = origin_attachment_evidence
@@ -4798,11 +6648,12 @@ def run_repro_research_stage(
             ]
             continue
 
-        dossier: dict[str, Any] = {
-            key: value
-            for key, value in ext_block_raw.items()
-            if key not in _RUNNER_OWNED_DOSSIER_FIELDS
-        }
+        # Preserve the exact model-authored tree before runner augmentation. Evidence
+        # verification intentionally appends replay receipts to nested experiment lists;
+        # those receipts belong in the persisted proof, never in the author's repair
+        # baseline on the next turn.
+        model_dossier = _model_dossier_copy(ext_block_raw)
+        dossier: dict[str, Any] = _model_dossier_copy(model_dossier)
         dossier["research_schema_version"] = RESEARCH_PROOF_SCHEMA_VERSION
         dossier["evidence_assignment"] = evidence_assignment
         repo_revision = _canonical_repo_revision(run_dir)
@@ -4863,13 +6714,18 @@ def run_repro_research_stage(
             replay_executor=replay_executor,
         )
         if origin_attachment_evidence and prepared_workspace is not None:
-            attachment_reads, attachment_errors = _origin_attachment_read_receipts(
+            attachment_reads, attachment_scope, attachment_errors = (
+                _origin_attachment_read_evidence(
                 run_dir=run_dir,
                 workspace_dir=prepared_workspace,
                 manifest=origin_attachment_evidence,
+                dossier=dossier,
+                verification=evidence_verification,
+                )
             )
             evidence_verification["origin_attachment_evidence"] = origin_attachment_evidence
             evidence_verification["origin_attachment_read_attestations"] = attachment_reads
+            evidence_verification["origin_attachment_read_coverage"] = attachment_scope
             if attachment_errors:
                 _fail_evidence_verification(
                     evidence_verification,
@@ -4926,11 +6782,7 @@ def run_repro_research_stage(
                 verification_run_dir = (
                     correction_result.run_dir if _research_capabilities else _original_run_dir
                 )
-                prepared = {
-                    key: value
-                    for key, value in candidate.items()
-                    if key not in _RUNNER_OWNED_DOSSIER_FIELDS
-                }
+                prepared = _model_dossier_copy(candidate)
                 prepared["research_schema_version"] = RESEARCH_PROOF_SCHEMA_VERSION
                 prepared["evidence_assignment"] = _evidence_assignment
                 candidate_revision = _canonical_repo_revision(verification_run_dir)
@@ -5025,18 +6877,19 @@ def run_repro_research_stage(
                         workspace_raw = _coerce_str(workspace_ref.get("workspace_dir"))
                         if workspace_raw is not None:
                             candidate_workspace = Path(workspace_raw).resolve()
-                    attachment_reads, attachment_errors = (
-                        _origin_attachment_read_receipts(
+                    attachment_reads, attachment_scope, attachment_errors = (
+                        _origin_attachment_read_evidence(
                             run_dir=verification_run_dir,
                             workspace_dir=candidate_workspace,
                             manifest=_origin_attachment_evidence,
+                            dossier=prepared,
+                            verification=candidate_receipt,
                             evidence_attempts=evidence_attempts,
                         )
-                        if candidate_workspace is not None
-                        else ([], ["origin_attachment_workspace_unavailable"])
                     )
                     candidate_receipt["origin_attachment_evidence"] = _origin_attachment_evidence
                     candidate_receipt["origin_attachment_read_attestations"] = attachment_reads
+                    candidate_receipt["origin_attachment_read_coverage"] = attachment_scope
                     if attachment_errors:
                         _fail_evidence_verification(
                             candidate_receipt,
@@ -5060,19 +6913,20 @@ def run_repro_research_stage(
                     or ["research_evidence_verification_failed_without_diagnostic"]
                 )
 
+            verifier_source_attempt = _evidence_feedback_source_attempt(
+                current_attempt=current_attempt,
+                repaired_source_attempt=retry_source_attempt,
+                model_dossier=model_dossier,
+            )
             verifier_source = _research_attempt_record(
                 attempt_number=len(research_attempt_history) + 1,
                 outcome="evidence_verification_invalid",
                 run_dir=run_dir,
                 report_path=report_path,
                 validation_errors=verification_errors,
-                attempted_dossier={
-                    key: value
-                    for key, value in dossier.items()
-                    if key not in _RUNNER_OWNED_DOSSIER_FIELDS
-                },
+                attempted_dossier=model_dossier,
                 attempt_kind="evidence_verification_feedback",
-                source_attempt_sha256=current_attempt.get("attempt_sha256"),
+                source_attempt_sha256=verifier_source_attempt.get("attempt_sha256"),
                 agent_session_id=result.agent_session_id,
                 observed_agent_session_id=result.agent_session_id,
                 attempt_wall_seconds=_run_wall_seconds(run_dir),
@@ -5092,6 +6946,9 @@ def run_repro_research_stage(
                 first_attempt_number=len(research_attempt_history) + 1,
                 candidate_validator=validate_verifier_candidate,
                 research_capabilities=research_capabilities,
+                verifier_diagnostics=_verifier_diagnostic_feedback(
+                    evidence_verification
+                ),
                 attempt_kind=(
                     "evidence_verification_research_continuation"
                     if research_capabilities
@@ -5141,14 +6998,26 @@ def run_repro_research_stage(
             repaired_raw = verifier_repair.get("dossier")
             repaired = dict(repaired_raw) if isinstance(repaired_raw, dict) else {}
             accepted = verified_candidates.get(_canonical_json_sha256(repaired))
-            if verifier_repair.get("status") == "corrected" and accepted is not None:
+            repair_corrected = verifier_repair.get("status") == "corrected"
+            final_candidate = accepted if repair_corrected else None
+            if not repair_corrected:
+                # The adaptive repair loop can safely pause or request a fresh restart after a
+                # later candidate regresses.  Its ``best_dossier`` is the content-addressed
+                # objective frontier retained for exactly that outcome.  Persist the matching
+                # verifier-prepared tree and its failed receipt instead of falling through to the
+                # older pre-correction dossier.  A failed receipt still blocks readiness below;
+                # this preserves authored progress without turning it into acceptance.
+                best_raw = verifier_repair.get("best_dossier")
+                best = dict(best_raw) if isinstance(best_raw, dict) else repaired
+                final_candidate = verified_candidates.get(_canonical_json_sha256(best))
+            if final_candidate is not None:
                 (
                     dossier,
                     evidence_verification,
                     accepted_run_dir,
                     effective_result,
                     effective_report_obj,
-                ) = accepted
+                ) = final_candidate
                 dossier["evidence_verification"] = evidence_verification
                 dossier["run_dir"] = str(accepted_run_dir)
                 workspace_dir = evidence_verification.get("planning_workspace_dir")
@@ -5325,6 +7194,39 @@ def run_repro_research_stage(
                 1
                 for dossier in dossiers
                 if dossier.get("research_status") == "insufficient_evidence"
+            ),
+            "requires_change_count": sum(
+                1
+                for dossier in dossiers
+                if isinstance(dossier.get("actionability_assessment"), Mapping)
+                and dossier["actionability_assessment"].get("disposition") == "requires_change"
+            ),
+            "already_addressed_count": sum(
+                1
+                for dossier in dossiers
+                if isinstance(dossier.get("actionability_assessment"), Mapping)
+                and dossier["actionability_assessment"].get("disposition")
+                == "already_addressed"
+            ),
+            "non_actionable_count": sum(
+                1
+                for dossier in dossiers
+                if isinstance(dossier.get("actionability_assessment"), Mapping)
+                and dossier["actionability_assessment"].get("disposition") == "non_actionable"
+            ),
+            "actionability_undetermined_count": sum(
+                1
+                for dossier in dossiers
+                if not isinstance(dossier.get("actionability_assessment"), Mapping)
+                or dossier["actionability_assessment"].get("disposition") == "undetermined"
+            ),
+            "successful_negative_research_count": sum(
+                1
+                for dossier in dossiers
+                if dossier.get("research_status") == "evidence_sufficient"
+                and isinstance(dossier.get("actionability_assessment"), Mapping)
+                and dossier["actionability_assessment"].get("disposition")
+                in {"already_addressed", "non_actionable"}
             ),
             "output_contract_retry_count": sum(
                 max(

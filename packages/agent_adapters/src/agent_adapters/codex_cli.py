@@ -7,7 +7,7 @@ import subprocess
 import threading
 import time
 import tomllib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from uuid import UUID
@@ -18,6 +18,9 @@ from agent_adapters.events import utc_now_iso
 _CODEX_REFRESH_TOKEN_REUSED_MARKER = "[usertest] detected codex auth error: refresh_token_reused"
 _CODEX_REFRESH_TOKEN_REUSED_SUBSTRING = "refresh_token_reused"
 _CHATGPT_LOGIN_STATUS = "Logged in using ChatGPT"
+_PLAIN_CODEX_BINARY_NAMES: frozenset[str] = frozenset({"codex", "codex.exe"})
+_WINDOWS_DESKTOP_CODEX_RELATIVE_BIN = Path("OpenAI") / "Codex" / "bin"
+_WINDOWS_DESKTOP_CODEX_PROBE_TIMEOUT_SECONDS = 10.0
 CODEX_CHATGPT_SUBSCRIPTION_BASE_URL = "https://chatgpt.com/backend-api/"
 CODEX_OPENAI_SUBSCRIPTION_BASE_URL = "https://chatgpt.com/backend-api/codex"
 CODEX_SUBSCRIPTION_AUTH_ENV_VARS: tuple[str, ...] = (
@@ -209,6 +212,7 @@ class CodexExecResult:
     last_message_path: Path
     stderr_path: Path
     thread_id: str | None = None
+    terminal_turn_salvaged: bool = False
 
 
 def _canonical_codex_thread_id(value: str) -> str:
@@ -456,7 +460,82 @@ def validate_codex_reasoning_effort_config_overrides(
     )
 
 
-def _resolve_executable(binary: str) -> str:
+def _windows_desktop_codex_candidates(*, local_app_data: str | None) -> list[Path]:
+    """Return Desktop-managed Codex executables from newest to oldest.
+
+    Codex Desktop extracts its host CLI below ``%LOCALAPPDATA%/OpenAI/Codex/bin``
+    into content-addressed directories. The directory name is intentionally opaque, so
+    discovery must not pin a particular installation hash or Windows user profile.
+    """
+
+    if not isinstance(local_app_data, str) or not local_app_data.strip():
+        return []
+
+    bin_dir = Path(local_app_data).expanduser() / _WINDOWS_DESKTOP_CODEX_RELATIVE_BIN
+    try:
+        children = list(bin_dir.iterdir())
+    except OSError:
+        return []
+
+    candidates: list[tuple[int, str, Path]] = []
+    direct_candidate = bin_dir / "codex.exe"
+    possible_candidates = [direct_candidate]
+    for child in children:
+        try:
+            if child.is_dir():
+                possible_candidates.append(child / "codex.exe")
+        except OSError:
+            continue
+    for candidate in possible_candidates:
+        try:
+            if not candidate.is_file():
+                continue
+            modified_ns = candidate.stat().st_mtime_ns
+        except OSError:
+            continue
+        candidates.append((modified_ns, str(candidate).casefold(), candidate))
+
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [candidate for _modified_ns, _path_key, candidate in candidates]
+
+
+def _codex_executable_is_usable(candidate: Path) -> bool:
+    """Check that a discovered Desktop CLI can execute its non-network version probe."""
+
+    try:
+        completed = subprocess.run(
+            [str(candidate), "--version"],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+            timeout=_WINDOWS_DESKTOP_CODEX_PROBE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def _resolve_windows_desktop_codex_executable(*, local_app_data: str | None) -> str | None:
+    for candidate in _windows_desktop_codex_candidates(local_app_data=local_app_data):
+        if _codex_executable_is_usable(candidate):
+            return str(candidate)
+    return None
+
+
+def resolve_codex_executable(
+    binary: str,
+    *,
+    env: Mapping[str, str] | None = None,
+) -> str:
+    """Resolve the configured Codex executable for a local host invocation.
+
+    Explicit paths remain authoritative. On Windows, only the plain ``codex``/``codex.exe``
+    configuration receives Desktop-aware resolution: a usable CLI managed by the signed-in
+    Desktop installation is preferred over an older npm shim on ``PATH``. If Desktop is absent
+    or its retained candidates cannot execute, ordinary ``PATH`` resolution remains the fallback.
+    """
+
     p = Path(binary)
     if p.is_absolute():
         return str(p)
@@ -465,8 +544,22 @@ def _resolve_executable(binary: str) -> str:
     if any(sep in binary for sep in ("/", "\\")) or (os.name == "nt" and ":" in binary):
         return binary
 
-    resolved = shutil.which(binary)
+    effective_env: Mapping[str, str] = os.environ if env is None else env
+    if os.name == "nt" and binary.strip().casefold() in _PLAIN_CODEX_BINARY_NAMES:
+        desktop_binary = _resolve_windows_desktop_codex_executable(
+            local_app_data=effective_env.get("LOCALAPPDATA")
+        )
+        if desktop_binary is not None:
+            return desktop_binary
+
+    resolved = shutil.which(binary, path=effective_env.get("PATH"))
     return resolved if resolved is not None else binary
+
+
+def _resolve_executable(binary: str) -> str:
+    """Backward-compatible private alias for the public Codex resolver."""
+
+    return resolve_codex_executable(binary)
 
 
 def _codex_program_argv(binary: str) -> tuple[list[str], str]:
@@ -737,14 +830,20 @@ def run_codex_exec(
     )
     if canonical_resume_session_id is not None and subcommand != "exec":
         raise ValueError("codex_resume_requires_exec_subcommand")
+    # The `exec resume` subparser does not accept --cd/--sandbox, but both are top-level Codex
+    # options. Reassert the runner-owned workspace and sandbox before `exec`; otherwise a resumed
+    # invocation falls back to Codex's read-only permission profile instead of preserving the
+    # effective policy used by the original turn.
+    if canonical_resume_session_id is not None:
+        argv.extend(["--cd", str(workspace_dir), "--sandbox", sandbox])
     argv.append(subcommand)
     if canonical_resume_session_id is not None:
         argv.append("resume")
     if ignore_user_config:
         argv.append("--ignore-user-config")
     argv.append("--json")
-    # `codex exec resume` restores the original session's cwd and sandbox. Its CLI deliberately
-    # does not accept --cd/--sandbox, so never fake continuation by starting a fresh exec.
+    # Fresh `exec` accepts these options directly. Resume receives the same values as top-level
+    # options above while retaining the exact session id below.
     if canonical_resume_session_id is None:
         argv.extend(["--cd", str(workspace_dir), "--sandbox", sandbox])
     if ignore_rules:
@@ -755,7 +854,8 @@ def run_codex_exec(
         argv.extend(["--model", model])
     for override in config_overrides:
         argv.extend(["-c", override])
-    argv.extend(["--output-last-message", agent_last_message_path or str(last_message_path)])
+    effective_last_message_path = Path(agent_last_message_path or str(last_message_path))
+    argv.extend(["--output-last-message", str(effective_last_message_path)])
     if canonical_resume_session_id is not None:
         argv.append(canonical_resume_session_id)
     argv.append("-")
@@ -831,6 +931,7 @@ def run_codex_exec(
                     pass
 
         saw_apply_patch_approval_request = threading.Event()
+        saw_terminal_turn_completed = threading.Event()
 
         def _stream_stdout() -> None:
             if proc.stdout is None:
@@ -851,15 +952,22 @@ def run_codex_exec(
                 if payload.get("type") == "apply_patch_approval_request":
                     saw_apply_patch_approval_request.set()
                     continue
+                if payload.get("type") == "turn.completed":
+                    saw_terminal_turn_completed.set()
+                    continue
                 msg = payload.get("msg")
                 if isinstance(msg, dict) and msg.get("type") == "apply_patch_approval_request":
                     saw_apply_patch_approval_request.set()
+                if isinstance(msg, dict) and msg.get("type") == "turn.completed":
+                    saw_terminal_turn_completed.set()
 
         reader = threading.Thread(target=_stream_stdout, daemon=True)
         reader.start()
 
         start = time.monotonic()
         last_auth_scan = start - 1.0
+        terminal_completion_observed_at: float | None = None
+        terminal_turn_salvaged = False
         while True:
             if not saw_refresh_token_reused and (time.monotonic() - last_auth_scan) > 0.2:
                 last_auth_scan = time.monotonic()
@@ -892,6 +1000,20 @@ def run_codex_exec(
                 stderr_f.flush()
                 _kill_process_tree(proc)
                 break
+
+            if saw_terminal_turn_completed.is_set() and effective_last_message_path.is_file():
+                if terminal_completion_observed_at is None:
+                    terminal_completion_observed_at = time.monotonic()
+                elif time.monotonic() - terminal_completion_observed_at >= 2.0:
+                    stderr_f.write(
+                        "Codex emitted turn.completed and persisted output-last-message, but "
+                        "the CLI process remained alive after protocol completion. Cleaned up "
+                        "the orphaned process tree and retained the completed turn.\n"
+                    )
+                    stderr_f.flush()
+                    terminal_turn_salvaged = True
+                    _kill_process_tree(proc)
+                    break
 
             if (
                 effective_timeout_seconds is not None
@@ -947,9 +1069,16 @@ def run_codex_exec(
         raise RuntimeError("codex_resume_session_id_changed")
     return CodexExecResult(
         argv=full_argv,
-        exit_code=proc.returncode if proc.returncode is not None else 1,
+        exit_code=(
+            0
+            if terminal_turn_salvaged
+            else proc.returncode
+            if proc.returncode is not None
+            else 1
+        ),
         raw_events_path=raw_events_path,
         last_message_path=last_message_path,
         stderr_path=stderr_path,
         thread_id=observed_thread_id or canonical_resume_session_id,
+        terminal_turn_salvaged=terminal_turn_salvaged,
     )

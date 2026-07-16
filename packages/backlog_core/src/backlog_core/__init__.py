@@ -72,14 +72,17 @@ from backlog_core.stage_contracts import (
     build_stage_document,
     evidence_assignment_sha256,
     evidence_verification_sha256,
+    is_interrupted_inconclusive_experiment,
     parse_change_plan_list,
     parse_priority_decision_list,
     parse_problem_record_list,
     parse_research_dossier_list,
     parse_selection_decisions,
     parse_solution_option_sets,
+    research_actionability_assessment,
     research_claims_sha256,
     research_dossier_output_contract_errors,
+    research_evidence_verification_contract_errors,
     research_prompt_projection,
 )
 from backlog_core.ticket_readiness import (
@@ -98,6 +101,7 @@ from backlog_core.ticket_readiness import (
     research_limitation_references,
     verified_mechanism_evidence,
     verified_outcome_oracles,
+    verified_staged_replay_command_asset_paths,
 )
 
 __all__ = [
@@ -136,6 +140,7 @@ __all__ = [
     "build_stage_document",
     "evidence_assignment_sha256",
     "evidence_verification_sha256",
+    "is_interrupted_inconclusive_experiment",
     "falsification_review_receipt_errors",
     "canonicalize_problem_cases",
     "compute_backlog_coverage",
@@ -165,11 +170,14 @@ __all__ = [
     "parse_solution_option_sets",
     "parse_ticket_list",
     "rank_stage_related_items",
+    "research_actionability_assessment",
     "research_evidence_references",
     "verified_mechanism_evidence",
     "verified_outcome_oracles",
+    "verified_staged_replay_command_asset_paths",
     "research_claims_sha256",
     "research_dossier_output_contract_errors",
+    "research_evidence_verification_contract_errors",
     "research_prompt_projection",
     "research_limitation_references",
     "propagate_case_lineage",

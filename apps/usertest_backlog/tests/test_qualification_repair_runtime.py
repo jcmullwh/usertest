@@ -477,6 +477,261 @@ def test_stage3_continuation_receives_complete_bound_independent_feedback(
     assert feedback["causal_target"] == route["causal_target"]
 
 
+def test_verifier_clean_stage3_advances_without_reopening_the_author(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    route = _route_for_stage(
+        "repro_research",
+        output_kind="research",
+        target_identity="research:problem:one",
+        downstream=[
+            "repro_research",
+            "solution_optioning",
+            "solution_selection",
+            "implementation_planning",
+            "ticket_assembly",
+        ],
+    )
+    completed_dossier = {
+        "problem_id": "problem:one",
+        "case_id": "case:one",
+        "repo_workspace": str(tmp_path),
+        "research_status": "evidence_sufficient",
+        "retained_artifact": "runs/research/attempt-19.json",
+        # Future solution behavior is a downstream proof obligation, not a reason to
+        # reopen a verifier-clean causal research dossier.
+        "future_solution_outcome_proof": False,
+    }
+    checked: list[tuple[str, dict[str, Any]]] = []
+    downstream_calls: list[str] = []
+
+    monkeypatch.setattr(
+        runtime,
+        "assess_research_readiness",
+        lambda dossier: (checked.append(("readiness", dossier)) or (True, [])),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "verify_persisted_research_evidence",
+        lambda dossier: (checked.append(("evidence", dossier)) or (True, [])),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "continue_research_dossier_from_independent_feedback",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("a complete Stage 3 dossier must not be reopened")
+        ),
+    )
+
+    def stage4(**_kwargs: Any) -> dict[str, Any]:
+        downstream_calls.append("stage4")
+        return _doc(
+            "solution_optioning",
+            [{"problem_id": "problem:one", "option_id": "option:one"}],
+        )
+
+    def stage5(**_kwargs: Any) -> dict[str, Any]:
+        downstream_calls.append("stage5")
+        return _doc(
+            "solution_selection",
+            [{"problem_id": "problem:one", "selected_option_id": "option:one"}],
+        )
+
+    def stage6(**_kwargs: Any) -> dict[str, Any]:
+        downstream_calls.append("stage6")
+        return _doc(
+            "implementation_planning",
+            [{"problem_id": "problem:one", "plan_revision_id": "plan:one"}],
+        )
+
+    monkeypatch.setattr(runtime, "_run_solution_optioning_stage", stage4)
+    monkeypatch.setattr(runtime, "_run_solution_selection_stage", stage5)
+    monkeypatch.setattr(runtime, "_run_implementation_planning_stage", stage6)
+    monkeypatch.setattr(runtime, "assemble_backlog_tickets", lambda **_kwargs: [])
+
+    result = runtime.run_stage456_qualification_repairs(
+        routes=[route],
+        source_pending_run_sha256="d" * 64,
+        source_adjudication_sha256="e" * 64,
+        repo_root=tmp_path,
+        atoms=[{"atom_id": "atom:origin"}],
+        stage1=_doc(
+            "problem_mining",
+            [{"problem_id": "problem:one", "case_id": "case:one"}],
+        ),
+        stage2=_doc(
+            "problem_prioritization",
+            [{"problem_id": "problem:one", "selected_for_research": True}],
+        ),
+        stage3=_doc("repro_research", [completed_dossier]),
+        stage4=_doc("solution_optioning", []),
+        stage5=_doc("solution_selection", []),
+        stage6=_doc("implementation_planning", []),
+        pipeline_manifest=type(
+            "Manifest",
+            (),
+            {"load_stage_guidance": lambda _self, stage: f"guidance:{stage}"},
+        )(),
+        repair_artifacts_dir=tmp_path / "stage3-complete",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        breadth_profile="standard",
+        # A completed dossier does not require authoring context merely to advance.
+        repo_input=None,
+        case_registry={"cases": {}},
+    )
+
+    assert [name for name, _dossier in checked] == ["readiness", "evidence"]
+    assert all(dossier is checked[0][1] for _name, dossier in checked)
+    assert result.consumption["accepted_repair_count"] == 1
+    assert downstream_calls == ["stage4", "stage5", "stage6"]
+    retained = result.stage_documents["repro_research"]["items"][0]
+    assert retained["retained_artifact"] == "runs/research/attempt-19.json"
+    assert retained["future_solution_outcome_proof"] is False
+    replacement_meta = result.stage_documents["repro_research"]["input_meta"][
+        "qualification_repair_history"
+    ][0]["replacement_author_input_meta"]
+    assert replacement_meta["qualification_research_completion_advance"] == {
+        "status": "already_complete",
+        "problem_id": "problem:one",
+        "readiness_verified": True,
+        "persisted_evidence_verified": True,
+        "source": "current_correction_frontier",
+    }
+
+
+def test_incomplete_stage3_correction_uses_each_current_same_author_frontier(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    route = _route_for_stage(
+        "repro_research",
+        output_kind="research",
+        target_identity="research:problem:one",
+        downstream=[
+            "repro_research",
+            "solution_optioning",
+            "solution_selection",
+            "implementation_planning",
+            "ticket_assembly",
+        ],
+    )
+    seen_revisions: list[int] = []
+
+    monkeypatch.setattr(
+        runtime,
+        "assess_research_readiness",
+        lambda _dossier: (False, ["research_incomplete"]),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "verify_persisted_research_evidence",
+        lambda _dossier: (_ for _ in ()).throw(
+            AssertionError("incomplete evidence must not be authenticated as complete")
+        ),
+    )
+
+    def continue_research(**kwargs: Any) -> dict[str, Any]:
+        revision = int(kwargs["dossier"]["revision"])
+        seen_revisions.append(revision)
+        next_dossier = {
+            **kwargs["dossier"],
+            "revision": revision + 1,
+            "retained_attempts": [*range(revision + 2)],
+        }
+        return {
+            "status": "corrected" if revision == 1 else "repairable_paused",
+            "dossier": next_dossier,
+            "validation_errors": [] if revision == 1 else ["schema:still_invalid"],
+            "agent_session_id": route["agent_session_id"],
+            "workspace_dir": route["workspace_dir"],
+        }
+
+    monkeypatch.setattr(
+        runtime,
+        "continue_research_dossier_from_independent_feedback",
+        continue_research,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_run_solution_optioning_stage",
+        lambda **_kwargs: _doc(
+            "solution_optioning",
+            [{"problem_id": "problem:one", "option_id": "option:one"}],
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_run_solution_selection_stage",
+        lambda **_kwargs: _doc(
+            "solution_selection",
+            [{"problem_id": "problem:one", "selected_option_id": "option:one"}],
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "_run_implementation_planning_stage",
+        lambda **_kwargs: _doc(
+            "implementation_planning",
+            [{"problem_id": "problem:one", "plan_revision_id": "plan:one"}],
+        ),
+    )
+    monkeypatch.setattr(runtime, "assemble_backlog_tickets", lambda **_kwargs: [])
+
+    result = runtime.run_stage456_qualification_repairs(
+        routes=[route],
+        source_pending_run_sha256="d" * 64,
+        source_adjudication_sha256="e" * 64,
+        repo_root=tmp_path,
+        atoms=[{"atom_id": "atom:origin"}],
+        stage1=_doc(
+            "problem_mining",
+            [{"problem_id": "problem:one", "case_id": "case:one"}],
+        ),
+        stage2=_doc(
+            "problem_prioritization",
+            [{"problem_id": "problem:one", "selected_for_research": True}],
+        ),
+        stage3=_doc(
+            "repro_research",
+            [
+                {
+                    "problem_id": "problem:one",
+                    "case_id": "case:one",
+                    "repo_workspace": str(tmp_path),
+                    "revision": 0,
+                    "retained_attempts": [0],
+                }
+            ],
+        ),
+        stage4=_doc("solution_optioning", []),
+        stage5=_doc("solution_selection", []),
+        stage6=_doc("implementation_planning", []),
+        pipeline_manifest=type(
+            "Manifest",
+            (),
+            {"load_stage_guidance": lambda _self, stage: f"guidance:{stage}"},
+        )(),
+        repair_artifacts_dir=tmp_path / "stage3-current-frontier",
+        agent="codex",
+        model=None,
+        cfg=object(),
+        breadth_profile="standard",
+        repo_input=str(tmp_path),
+        research_ref="dev",
+        replay_executor=object(),
+        case_registry={"cases": {}},
+    )
+
+    assert seen_revisions == [0, 1]
+    assert result.consumption["accepted_repair_count"] == 1
+    retained = result.stage_documents["repro_research"]["items"][0]
+    assert retained["revision"] == 2
+    assert retained["retained_attempts"] == [0, 1, 2]
+
+
 def test_runtime_stage1_miss_resumes_reviewer_then_runs_stage2_through_stage6(
     monkeypatch: Any,
     tmp_path: Path,

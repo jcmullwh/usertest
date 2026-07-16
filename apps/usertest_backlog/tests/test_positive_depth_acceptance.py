@@ -22,6 +22,7 @@ from backlog_core.case_lineage import (
     attach_supporting_atoms_to_problem_cases,
     eligible_problem_mining_atoms,
     normalize_atom_lineage,
+    source_evidence_atom_projection,
 )
 from backlog_core.stage_contracts import (
     assess_research_readiness,
@@ -78,9 +79,7 @@ def _attach_exact_origin_boundary(
 ) -> None:
     experiment_id = str(oracle["research_experiment_id"])
     replay = next(
-        value
-        for value in verification["experiments"]
-        if value["experiment_id"] == experiment_id
+        value for value in verification["experiments"] if value["experiment_id"] == experiment_id
     )
     atom_receipt = next(
         value
@@ -126,9 +125,7 @@ def _attach_exact_origin_boundary(
         "positive_outcome_contract_ids": [contract_id],
         "runner_attested": True,
     }
-    replay_observation["replay_observation_sha256"] = _canonical_sha256(
-        replay_observation
-    )
+    replay_observation["replay_observation_sha256"] = _canonical_sha256(replay_observation)
     replay["command_authorization"] = authorization
     replay["replay_inputs"] = replay_inputs
     oracle["execution"] = {
@@ -139,9 +136,7 @@ def _attach_exact_origin_boundary(
         "replay_inputs": replay_inputs,
         "replay_observation": replay_observation,
     }
-    oracle["outcome_oracle_id"] = _content_id(
-        "outcome_oracle", oracle, "outcome_oracle_id"
-    )
+    oracle["outcome_oracle_id"] = _content_id("outcome_oracle", oracle, "outcome_oracle_id")
     source_identity = {
         "schema_version": 1,
         "origin_atom_id": atom_id,
@@ -163,9 +158,7 @@ def _attach_exact_origin_boundary(
             f"origin_command_identity:{source_identity['source_identity_sha256']}"
         ],
         "replay_inputs_sha256": replay_inputs["replay_inputs_sha256"],
-        "replay_observation_sha256": replay_observation[
-            "replay_observation_sha256"
-        ],
+        "replay_observation_sha256": replay_observation["replay_observation_sha256"],
         "positive_outcome_contract_ids": [contract_id],
         "selected_mechanism_evidence_ids": sorted(mechanism_evidence_ids),
         "outcome_oracle_id": oracle["outcome_oracle_id"],
@@ -541,6 +534,12 @@ def _verified_research_proof(
         ],
         "root_cause_confidence": 0.93,
         "broader_class_assessment": "isolated_instance",
+        "case_relation_assessment": {
+            "disposition": "retain",
+            "rationale": "The signed occurrence and verified mechanism remain one work unit.",
+            "facets": [],
+            "material_unknowns": [],
+        },
         "material_unknowns": [],
         "blocking_reasons": [],
         "evidence_boundaries": [
@@ -1077,6 +1076,19 @@ def _option(research: dict[str, Any]) -> dict[str, Any]:
                 "before": "The retained fixture prints classification=policy_block.",
                 "after": "The same fixture no longer prints that classification.",
             },
+            "outcome_strategy": {
+                "intended_operation": (
+                    "The retained incomplete-run operation reports its lifecycle classification "
+                    "without mislabeling it as a policy block."
+                ),
+                "success_properties": [
+                    "The original replay produces the lifecycle-derived classification."
+                ],
+                "safety_constraints": [
+                    "True policy-block inputs retain their existing classification."
+                ],
+                "original_scenario_experiment_ids": ["exp-support"],
+            },
         },
         "scope_evidence": {
             "scope_level": "single_path",
@@ -1145,6 +1157,17 @@ def _selection(research: dict[str, Any], option: dict[str, Any]) -> dict[str, An
                     "evidence_refs": [evidence_id],
                 }
             ],
+            "outcome_strategy_review": {
+                "verdict": "sufficient",
+                "semantic_relation_assessment": (
+                    "The option strategy proves the useful lifecycle classification on the "
+                    "retained replay while preserving genuine policy blocks."
+                ),
+                "proves_intended_operation": True,
+                "problem_coverage": "full",
+                "residual_untested_paths": [],
+                "evidence_refs": [evidence_id],
+            },
         },
         problem_id=research["problem_id"],
         selected_option=option,
@@ -1173,6 +1196,7 @@ def _selection(research: dict[str, Any], option: dict[str, Any]) -> dict[str, An
 def _plan(
     research: dict[str, Any],
     option: dict[str, Any],
+    selection: dict[str, Any],
     *,
     create_integration_fixture: bool = False,
 ) -> dict[str, Any]:
@@ -1246,6 +1270,7 @@ def _plan(
             "mitigation_effect": None,
             "recurrence": {
                 "description": "Check later canonical-case cycles for recurrence.",
+                "verification_owner": "centralized_case_refresh",
                 "commands": [],
                 "predicates": [],
             },
@@ -1295,7 +1320,7 @@ def _plan(
         "suggested_owner": "runner_core",
         "related_change_plan_ids": [],
     }
-    plan = bind_plan_outcome_oracle(plan, research=research)
+    plan = bind_plan_outcome_oracle(plan, research=research, selection=selection)
     return assign_plan_revision_id(plan)
 
 
@@ -1506,6 +1531,17 @@ def _run_production_research_acceptance(
         ],
         "root_cause_confidence": 0.9,
         "broader_class_assessment": "unknown",
+        "case_relation_assessment": {
+            "disposition": "retain",
+            "rationale": "The signed occurrence and verified mechanism form one work unit.",
+            "facets": [],
+            "material_unknowns": [],
+        },
+        "actionability_assessment": {
+            "disposition": "requires_change",
+            "rationale": "The original replay proves the failure remains at the pinned revision.",
+            "evidence_refs": ["experiment:original"],
+        },
         "material_unknowns": list(material_unknowns or []),
         "blocking_reasons": [],
         "evidence_boundaries": [],
@@ -1522,6 +1558,7 @@ def _run_production_research_acceptance(
         "evidence_role": "observation",
         "origin_stage": "runtime",
     }
+    atom_snapshot = source_evidence_atom_projection(atom)
     assignment: dict[str, object] = {
         "status": "complete",
         "errors": [],
@@ -1531,8 +1568,8 @@ def _run_production_research_acceptance(
         "atom_receipts": [
             {
                 "atom_id": "atom:origin",
-                "atom_sha256": _canonical_sha256(atom),
-                "atom_snapshot": atom,
+                "atom_sha256": _canonical_sha256(atom_snapshot),
+                "atom_snapshot": atom_snapshot,
                 "artifact_receipts": [
                     {
                         "path": str(origin),
@@ -1547,7 +1584,7 @@ def _run_production_research_acceptance(
     selected_problem = {
         "case_id": claims["case_id"],
         "problem_id": claims["problem_id"],
-        "evidence_atoms": [{"atom_id": "atom:origin"}],
+        "evidence_atoms": [atom],
         "evidence_assignment": assignment,
     }
 
@@ -1558,8 +1595,10 @@ def _run_production_research_acceptance(
     def fake_run_once(*, config: RunnerConfig, request: object) -> RunResult:
         del config
         assert request.keep_workspace is True
+        research_workspace = request.resume_workspace_dir
+        assert isinstance(research_workspace, Path)
         run_dir = tmp_path / "research-agent-run"
-        run_dir.mkdir()
+        run_dir.mkdir(exist_ok=True)
         write_json(
             run_dir / "report.json",
             {
@@ -1583,8 +1622,37 @@ def _run_production_research_acceptance(
                 "agent": request.agent,
             },
         )
-        write_json(run_dir / "workspace_ref.json", {"workspace_dir": str(workspace)})
+        write_json(
+            run_dir / "workspace_ref.json",
+            {"workspace_dir": str(research_workspace)},
+        )
         events = [
+            {
+                "type": "read_file",
+                "data": {
+                    "path": ".usertest_research/origin_evidence/assigned/index.json",
+                    "read_source": "tool",
+                    "source_exit_code": 0,
+                    **observed_read_attestation(
+                        path=(
+                            research_workspace
+                            / ".usertest_research"
+                            / "origin_evidence"
+                            / "assigned"
+                            / "index.json"
+                        ),
+                        observed_text=(
+                            research_workspace
+                            / ".usertest_research"
+                            / "origin_evidence"
+                            / "assigned"
+                            / "index.json"
+                        ).read_text(encoding="utf-8"),
+                        source_exit_code=0,
+                        allow_partial=False,
+                    ),
+                },
+            },
             {"type": "run_command", "data": {"command": original_command, "exit_code": 1}},
             {
                 "type": "run_command",
@@ -1604,12 +1672,14 @@ def _run_production_research_acceptance(
                 "type": "read_file",
                 "data": {
                     "path": "src/core.py",
-                    "bytes": (workspace / "src" / "core.py").stat().st_size,
+                    "bytes": (research_workspace / "src" / "core.py").stat().st_size,
                     "read_source": "tool",
                     "source_exit_code": 0,
                     **observed_read_attestation(
-                        path=workspace / "src" / "core.py",
-                        observed_text=(workspace / "src" / "core.py").read_text(encoding="utf-8"),
+                        path=research_workspace / "src" / "core.py",
+                        observed_text=(research_workspace / "src" / "core.py").read_text(
+                            encoding="utf-8"
+                        ),
                         source_exit_code=0,
                         allow_partial=True,
                     ),
@@ -1734,7 +1804,7 @@ def test_production_research_material_unknown_blocks_specific_progression_gate(
     assert reasons == ["material_unknown_blocks_implementation_decision"]
 
 
-def test_production_research_without_positive_contract_stays_research_required(
+def test_production_research_without_positive_contract_can_advance_to_optioning(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1751,9 +1821,8 @@ def test_production_research_without_positive_contract_stays_research_required(
         persisted["evidence_verification"]["outcome_oracles"][0]["positive_outcome_contracts"] == []
     )
     ready, reasons = assess_research_readiness(persisted)
-    assert ready is False
-    assert "research_proof_invalid" not in reasons
-    assert reasons == ["research_positive_outcome_contract_missing"]
+    assert ready is True, reasons
+    assert reasons == []
 
 
 def test_synthetic_wrong_output_contract_reaches_a_root_cause_plan() -> None:
@@ -1766,7 +1835,7 @@ def test_synthetic_wrong_output_contract_reaches_a_root_cause_plan() -> None:
     assert option_ready is True, option_reasons
 
     selection = _selection(research, option)
-    plan = _plan(research, option)
+    plan = _plan(research, option, selection)
     problem = _source_problem_record(
         research,
         title="Incomplete runs are assigned the wrong cause",
@@ -1803,16 +1872,15 @@ def test_synthetic_wrong_output_contract_reaches_a_root_cause_plan() -> None:
             "expected": "classification=policy_block",
         },
         {
-            "source": "exit_code",
-            "operator": "equals",
-            "expected": 0,
-        },
-        {
             "source": "stdout",
             "operator": "contains",
-            "expected": "expected_behavior_confirmed",
+            "expected": "classification=incomplete",
         },
     ]
+    assert (
+        plan["outcome_verification_roles"]["original_scenario"]["oracle"]["kind"]
+        == "stage5_planned_outcome"
+    )
 
 
 def test_action_create_through_an_inspected_boundary_reaches_ready_plan() -> None:
@@ -1880,11 +1948,23 @@ def test_action_create_through_an_inspected_boundary_reaches_ready_plan() -> Non
             "unsupported_assumptions": [],
             "residual_recurrence_paths": [],
             "compatibility_risks": ["Existing declared adapters must keep their resolution path."],
-            "testability": {
-                "before": "The retained request emits adapter_missing:native_probe.",
-                "after": "The same request no longer emits the missing-adapter value.",
+                "testability": {
+                    "before": "The retained request emits adapter_missing:native_probe.",
+                    "after": "The same request no longer emits the missing-adapter value.",
+                },
+                "outcome_strategy": {
+                    "intended_operation": (
+                        "The declared native_probe request resolves through its adapter target."
+                    ),
+                    "success_properties": [
+                        "The retained request completes through the declared adapter path."
+                    ],
+                    "safety_constraints": [
+                        "Existing declared adapters retain their resolution behavior."
+                    ],
+                    "original_scenario_experiment_ids": ["exp-support"],
+                },
             },
-        },
         "scope_evidence": {
             "scope_level": "single_path",
             "independent_consumers_or_failure_paths": [
@@ -1974,6 +2054,7 @@ def test_action_create_through_an_inspected_boundary_reaches_ready_plan() -> Non
                 "mitigation_effect": None,
                 "recurrence": {
                     "description": "Check later canonical-case cycles for recurrence.",
+                    "verification_owner": "centralized_case_refresh",
                     "commands": [],
                     "predicates": [],
                 },
@@ -2028,7 +2109,9 @@ def test_action_create_through_an_inspected_boundary_reaches_ready_plan() -> Non
             "related_change_plan_ids": [],
         }
     )
-    plan = assign_plan_revision_id(bind_plan_outcome_oracle(plan, research=research))
+    plan = assign_plan_revision_id(
+        bind_plan_outcome_oracle(plan, research=research, selection=selection)
+    )
     problem = _source_problem_record(
         research,
         title="Declared adapter implementation is absent",

@@ -11,6 +11,7 @@ import hashlib
 import json
 import re
 from collections.abc import Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 
 from run_artifacts import (
@@ -49,6 +50,10 @@ _CLASS_SCOPE_RE = re.compile(
     r"\s+(?:abstraction|contract|mechanism|source)|system[- ]wide|all\s+(?:callers|consumers))\b",
     re.IGNORECASE,
 )
+_STRUCTURED_NUMERIC_STATE_RE = re.compile(
+    r'(?:"[A-Za-z_][A-Za-z0-9_.-]*"|[A-Za-z_][A-Za-z0-9_.-]*)'
+    r"\s*[:=]\s*-?\d+(?:\.\d+)?(?:\s*[,}\]]|\s*$)"
+)
 _RUNTIME_MARKERS = (
     "at runtime",
     "runtime failure",
@@ -86,6 +91,7 @@ _FALSIFICATION_EVIDENCE_EFFECTS = frozenset(
 )
 _MATERIAL_RISK_DISPOSITIONS = frozenset({"accepted", "mitigated", "blocks_selection"})
 _OUTCOME_ROLES = frozenset({"original_scenario", "live", "mitigation_effect", "recurrence"})
+_CENTRALIZED_RECURRENCE_OWNER = "centralized_case_refresh"
 _PLAN_REVISION_FIELDS = (
     "change_plan_id",
     "case_id",
@@ -549,6 +555,653 @@ def _research_positive_contract_index(
     return indexed
 
 
+def _verified_fail_first_experiment_ids(
+    research: Mapping[str, Any] | None,
+) -> set[str]:
+    """Return clean, runner-replayed commands that fail before the proposed change.
+
+    A supporting experiment that exits zero while asserting the old symptom is useful
+    mechanism evidence, but it is not an exact post-change replay: changing that assertion
+    changes the oracle.  A fail-first command is different.  Its unchanged invocation
+    already returns nonzero at the researched revision and can return zero after the
+    implementation.  Stage 4 may therefore select it as the exact before/after command.
+
+    Older verified receipts did not retain every isolation field.  Missing legacy fields
+    remain readable, while an explicitly dirty, mutated, unauthorized, or revision-mismatched
+    replay is never eligible.
+    """
+
+    eligible: set[str] = set()
+    conflicts: set[str] = set()
+    seen_commands: dict[str, str] = {}
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        repo_revision = _string(member.get("repo_revision")) or _string(
+            verification.get("repo_revision")
+        )
+        declared = {
+            _string(item.get("experiment_id")): item
+            for item in (
+                member.get("experiments", [])
+                if isinstance(member.get("experiments"), list)
+                else []
+            )
+            if isinstance(item, Mapping) and _string(item.get("experiment_id")) is not None
+        }
+        raw_receipts = verification.get("experiments")
+        for receipt in raw_receipts if isinstance(raw_receipts, list) else []:
+            if not isinstance(receipt, Mapping):
+                continue
+            experiment_id = _string(receipt.get("experiment_id"))
+            source = declared.get(experiment_id)
+            command = _string(receipt.get("command"))
+            exit_code = receipt.get("exit_code")
+            authorization = receipt.get("command_authorization")
+            workspace_head = _string(receipt.get("workspace_head"))
+            if (
+                experiment_id is None
+                or not isinstance(source, Mapping)
+                or command is None
+                or source.get("outcome") != "supports"
+                or receipt.get("outcome") != "supports"
+                or receipt.get("assertion_passed") is not True
+                or isinstance(exit_code, bool)
+                or not isinstance(exit_code, int)
+                or exit_code == 0
+                or source.get("scenario_kind")
+                not in {
+                    "original_replay",
+                    "faithful_replay",
+                    "live_runtime",
+                    "fail_first_contract",
+                }
+                or " ".join(str(source.get("command") or "").split())
+                != " ".join(command.split())
+                or receipt.get("post_replay_mutations") not in (None, False)
+                or receipt.get("undeclared_post_replay_mutations") not in (None, [])
+                or (
+                    repo_revision is not None
+                    and workspace_head is not None
+                    and workspace_head != repo_revision
+                )
+                or (
+                    isinstance(authorization, Mapping)
+                    and authorization.get("runner_attested") is not True
+                )
+            ):
+                continue
+            normalized = " ".join(command.split())
+            previous = seen_commands.get(experiment_id)
+            if previous is not None and previous != normalized:
+                conflicts.add(experiment_id)
+                continue
+            seen_commands[experiment_id] = normalized
+            eligible.add(experiment_id)
+    return eligible - conflicts
+
+
+def _verified_fail_first_outcome_oracles(
+    research: Mapping[str, Any] | None,
+) -> dict[str, Mapping[str, Any]]:
+    """Return retained executable assets for verified fail-first experiments.
+
+    New receipts may carry a dedicated fail-first oracle.  Older verified dossiers already
+    retained the exact experiment receipt and one immutable overlay asset for another replay
+    from the same research workspace.  In that case derive a new content-addressed oracle
+    from those two runner-owned sources.  The source experiment-receipt hash and source asset
+    oracle ID remain explicit; the accepted Stage-3 dossier is never rewritten.
+    """
+
+    eligible = _verified_fail_first_experiment_ids(research)
+    oracles: dict[str, Mapping[str, Any]] = {}
+    conflicts: set[str] = set()
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        raw_oracles = verification.get("outcome_oracles")
+        for oracle in raw_oracles if isinstance(raw_oracles, list) else []:
+            if not isinstance(oracle, Mapping):
+                continue
+            experiment_id = _string(oracle.get("research_experiment_id"))
+            oracle_id = _string(oracle.get("outcome_oracle_id"))
+            projection = {
+                key: value for key, value in oracle.items() if key != "outcome_oracle_id"
+            }
+            execution = oracle.get("execution")
+            argv = execution.get("argv") if isinstance(execution, Mapping) else None
+            asset = oracle.get("asset")
+            needs_asset = bool(
+                isinstance(argv, list)
+                and any(
+                    isinstance(token, str)
+                    and token.replace("\\", "/").startswith(".usertest_research/")
+                    for token in argv
+                )
+            )
+            if (
+                experiment_id not in eligible
+                or oracle_id != f"outcome_oracle:{_canonical_sha256(projection)}"
+                or oracle.get("kind") != "staged_replay"
+                or oracle.get("proof_scope") != "behavioral"
+                or not isinstance(oracle.get("baseline"), Mapping)
+                or isinstance(oracle["baseline"].get("exit_code"), bool)
+                or not isinstance(oracle["baseline"].get("exit_code"), int)
+                or oracle["baseline"].get("exit_code") == 0
+                or not isinstance(execution, Mapping)
+                or not isinstance(argv, list)
+                or not argv
+                or (needs_asset and not isinstance(asset, Mapping))
+            ):
+                continue
+            previous = oracles.get(experiment_id)
+            if previous is not None and dict(previous) != dict(oracle):
+                conflicts.add(str(experiment_id))
+            else:
+                oracles[str(experiment_id)] = oracle
+    for experiment_id in conflicts:
+        oracles.pop(experiment_id, None)
+
+    missing = eligible - set(oracles)
+    if not missing:
+        return oracles
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        declared = {
+            _string(item.get("experiment_id")): item
+            for item in (
+                member.get("experiments", [])
+                if isinstance(member.get("experiments"), list)
+                else []
+            )
+            if isinstance(item, Mapping) and _string(item.get("experiment_id")) is not None
+        }
+        receipts = {
+            _string(item.get("experiment_id")): item
+            for item in (
+                verification.get("experiments", [])
+                if isinstance(verification.get("experiments"), list)
+                else []
+            )
+            if isinstance(item, Mapping) and _string(item.get("experiment_id")) is not None
+        }
+        retained_assets: dict[str, tuple[str, Mapping[str, Any]]] = {}
+        raw_oracles = verification.get("outcome_oracles")
+        for source_oracle in raw_oracles if isinstance(raw_oracles, list) else []:
+            if not isinstance(source_oracle, Mapping):
+                continue
+            source_id = _string(source_oracle.get("outcome_oracle_id"))
+            source_projection = {
+                key: value
+                for key, value in source_oracle.items()
+                if key != "outcome_oracle_id"
+            }
+            asset = source_oracle.get("asset")
+            manifest = asset.get("manifest") if isinstance(asset, Mapping) else None
+            asset_id = _string(asset.get("asset_id")) if isinstance(asset, Mapping) else None
+            if (
+                source_id != f"outcome_oracle:{_canonical_sha256(source_projection)}"
+                or asset_id is None
+                or not isinstance(manifest, Mapping)
+                or not manifest
+                or asset.get("manifest_sha256") != _canonical_sha256(manifest)
+                or asset_id
+                != "outcome_asset:"
+                + _canonical_sha256({"schema_version": 1, "manifest": manifest})
+            ):
+                continue
+            retained_assets[asset_id] = (str(source_id), asset)
+        if not retained_assets:
+            continue
+        provenance = verification.get("verified_mechanism_provenance")
+        primary_hypothesis_id = (
+            _string(provenance.get("primary_hypothesis_id"))
+            if isinstance(provenance, Mapping)
+            else None
+        )
+        selected_evidence_ids = {
+            value
+            for value in (
+                provenance.get("mechanism_evidence_ids", [])
+                if isinstance(provenance, Mapping)
+                else []
+            )
+            if isinstance(value, str) and value
+        }
+        mechanism_evidence = [
+            item
+            for item in (
+                verification.get("mechanism_evidence", [])
+                if isinstance(verification.get("mechanism_evidence"), list)
+                else []
+            )
+            if isinstance(item, Mapping)
+        ]
+        for experiment_id in sorted(missing):
+            source = declared.get(experiment_id)
+            receipt = receipts.get(experiment_id)
+            argv = receipt.get("executed_argv") if isinstance(receipt, Mapping) else None
+            authorization = (
+                receipt.get("command_authorization")
+                if isinstance(receipt, Mapping)
+                else None
+            )
+            required_asset_paths = {
+                token.replace("\\", "/").split("::", 1)[0]
+                for token in (argv if isinstance(argv, list) else [])
+                if isinstance(token, str)
+                and token.replace("\\", "/").startswith(".usertest_research/")
+            }
+            matching_assets = [
+                (source_oracle_id, asset)
+                for source_oracle_id, asset in retained_assets.values()
+                if required_asset_paths.issubset(
+                    {
+                        str(path).replace("\\", "/")
+                        for path in asset.get("manifest", {})
+                    }
+                )
+            ]
+            addressed_atoms = {
+                value
+                for value in (
+                    source.get("addresses_atom_ids", [])
+                    if isinstance(source, Mapping)
+                    else []
+                )
+                if isinstance(value, str) and value
+            }
+            bound_evidence = [
+                item
+                for item in mechanism_evidence
+                if _string(item.get("mechanism_evidence_id")) in selected_evidence_ids
+                and item.get("hypothesis_id") == primary_hypothesis_id
+                and addressed_atoms.intersection(
+                    {
+                        value
+                        for value in item.get("origin_atom_ids", [])
+                        if isinstance(value, str) and value
+                    }
+                )
+            ]
+            if (
+                not isinstance(source, Mapping)
+                or not isinstance(receipt, Mapping)
+                or not isinstance(argv, list)
+                or not argv
+                or not isinstance(authorization, Mapping)
+                or not required_asset_paths
+                or not matching_assets
+                or not bound_evidence
+                or primary_hypothesis_id is None
+            ):
+                continue
+            source_oracle_id, asset = sorted(
+                matching_assets,
+                key=lambda value: (str(value[1].get("asset_id")), value[0]),
+            )[0]
+            mechanism_ids = sorted(
+                str(item["mechanism_evidence_id"])
+                for item in bound_evidence
+                if _string(item.get("mechanism_evidence_id")) is not None
+            )
+            oracle: dict[str, Any] = {
+                "schema_version": 1,
+                "case_id": member.get("case_id"),
+                "repo_revision": member.get("repo_revision")
+                or verification.get("repo_revision"),
+                "primary_hypothesis_id": primary_hypothesis_id,
+                "primary_verified_mechanism_sha256": verification.get(
+                    "verified_mechanism_sha256"
+                ),
+                "primary_verified_mechanism_provenance_sha256": verification.get(
+                    "verified_mechanism_provenance_sha256"
+                ),
+                "research_experiment_id": experiment_id,
+                "scenario_kind": source.get("scenario_kind"),
+                "origin_atom_ids": sorted(addressed_atoms),
+                "mechanism_evidence_ids": mechanism_ids,
+                "baseline": {
+                    "exit_code": receipt.get("exit_code"),
+                    "observable_assertion": source.get("observable_assertion"),
+                    "stdout_sha256": receipt.get("stdout_sha256"),
+                    "stderr_sha256": receipt.get("stderr_sha256"),
+                },
+                "kind": "staged_replay",
+                "proof_scope": "behavioral",
+                "execution": {
+                    "argv": list(argv),
+                    "command_authorization": dict(authorization),
+                    "platform_requirement": source.get("platform_requirement", "any"),
+                    "shell": False,
+                },
+                "asset": deepcopy(dict(asset)),
+                "derived_replay_source": {
+                    "kind": "verified_fail_first_from_retained_stage3_overlay",
+                    "experiment_receipt_sha256": _canonical_sha256(receipt),
+                    "retained_asset_source_outcome_oracle_id": source_oracle_id,
+                },
+            }
+            oracle["outcome_oracle_id"] = "outcome_oracle:" + _canonical_sha256(oracle)
+            oracles[experiment_id] = oracle
+            missing.discard(experiment_id)
+        if not missing:
+            break
+    return oracles
+
+
+def _retained_outcome_asset_paths(
+    research: Mapping[str, Any] | None,
+) -> set[str]:
+    """Return immutable Stage-3 replay paths that Stage 6 must never rewrite."""
+
+    paths: set[str] = set()
+    for member in _research_dossier_members(research):
+        verification = member.get("evidence_verification")
+        if not isinstance(verification, Mapping) or verification.get("status") != "verified":
+            continue
+        raw_oracles = verification.get("outcome_oracles")
+        for oracle in raw_oracles if isinstance(raw_oracles, list) else []:
+            if not isinstance(oracle, Mapping):
+                continue
+            oracle_id = _string(oracle.get("outcome_oracle_id"))
+            oracle_projection = {
+                key: value for key, value in oracle.items() if key != "outcome_oracle_id"
+            }
+            if oracle_id != f"outcome_oracle:{_canonical_sha256(oracle_projection)}":
+                continue
+            asset = oracle.get("asset")
+            manifest = asset.get("manifest") if isinstance(asset, Mapping) else None
+            if (
+                not isinstance(manifest, Mapping)
+                or not manifest
+                or asset.get("manifest_sha256") != _canonical_sha256(manifest)
+                or asset.get("asset_id")
+                != "outcome_asset:"
+                + _canonical_sha256({"schema_version": 1, "manifest": manifest})
+            ):
+                continue
+            paths.update(
+                path.replace("\\", "/").removeprefix("./").casefold()
+                for path in manifest
+                if isinstance(path, str) and path
+            )
+    return paths
+
+
+def _option_outcome_strategy(
+    option: Mapping[str, Any] | None,
+    *,
+    research: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Return a valid prospective Stage-4 outcome strategy.
+
+    Stage 3 owns proof of the existing failure mechanism.  An executed Stage-3 outcome
+    contract is useful baseline evidence when one falls naturally out of that research,
+    but it cannot replace Stage 4's prospective statement of what this particular option
+    must accomplish.  This validator intentionally checks provenance and completeness,
+    not whether the proposed solution has already succeeded.
+    """
+
+    coverage = option.get("causal_coverage") if isinstance(option, Mapping) else None
+    raw = coverage.get("outcome_strategy") if isinstance(coverage, Mapping) else None
+    if not isinstance(raw, Mapping):
+        return None
+    intended_operation = _string(raw.get("intended_operation"))
+    success_properties = _string_list(raw.get("success_properties"), nonempty=True)
+    safety_constraints = _string_list(raw.get("safety_constraints"))
+    replay_mode = _string(raw.get("post_change_replay_mode"))
+    experiment_ids = _string_list(
+        raw.get("original_scenario_experiment_ids"),
+        nonempty=True,
+    )
+    if (
+        intended_operation is None
+        or success_properties is None
+        or safety_constraints is None
+        or experiment_ids is None
+        or len(experiment_ids) != len(set(experiment_ids))
+    ):
+        return None
+    experiments = {
+        _string(item.get("experiment_id")): item
+        for member in _research_dossier_members(research)
+        for item in (
+            member.get("experiments", [])
+            if isinstance(member.get("experiments"), list)
+            else []
+        )
+        if isinstance(item, Mapping) and _string(item.get("experiment_id")) is not None
+    }
+    selected_atoms: set[str] = set()
+    for experiment_id in experiment_ids:
+        experiment = experiments.get(experiment_id)
+        if (
+            not isinstance(experiment, Mapping)
+            or experiment.get("outcome") != "supports"
+            or experiment.get("scenario_kind")
+            not in {
+                "original_replay",
+                "faithful_replay",
+                "live_runtime",
+                "fail_first_contract",
+            }
+        ):
+            return None
+        selected_atoms.update(
+            value
+            for value in experiment.get("addresses_atom_ids", [])
+            if isinstance(value, str) and value
+        )
+    fail_first_ids = _verified_fail_first_experiment_ids(research)
+    relevant_fail_first_ids = {
+        experiment_id
+        for experiment_id in fail_first_ids
+        if not selected_atoms
+        or selected_atoms.intersection(
+            {
+                value
+                for value in experiments.get(experiment_id, {}).get(
+                    "addresses_atom_ids", []
+                )
+                if isinstance(value, str) and value
+            }
+        )
+    }
+    if replay_mode is None:
+        # Backward compatibility for already-persisted strategies that selected only
+        # genuine fail-first commands before the mode field existed.
+        if any(experiment_id not in fail_first_ids for experiment_id in experiment_ids):
+            return None
+        normalized_mode = "verified_fail_first"
+    elif replay_mode == "verified_fail_first":
+        if any(experiment_id not in fail_first_ids for experiment_id in experiment_ids):
+            return None
+        normalized_mode = replay_mode
+    elif replay_mode == "stage6_planned_unverified":
+        # Do not discard an exact fail-first oracle in favor of a mutable future test.
+        # The fallback exists for cases where research could establish the mechanism but
+        # the solution-specific success command cannot exist before implementation.
+        if relevant_fail_first_ids or any(
+            experiments[experiment_id].get("scenario_kind") == "fail_first_contract"
+            for experiment_id in experiment_ids
+        ):
+            return None
+        normalized_mode = replay_mode
+    else:
+        return None
+    normalized = {
+        "intended_operation": intended_operation,
+        "success_properties": success_properties,
+        "safety_constraints": safety_constraints,
+        "original_scenario_experiment_ids": experiment_ids,
+    }
+    if replay_mode is not None:
+        normalized["post_change_replay_mode"] = normalized_mode
+    return normalized
+
+
+def _validated_stage5_outcome_contract(
+    raw: Any,
+) -> dict[str, Any] | None:
+    if not isinstance(raw, Mapping):
+        return None
+    contract = dict(raw)
+    contract_id = _string(contract.get("outcome_contract_id"))
+    projection = {
+        key: value for key, value in contract.items() if key != "outcome_contract_id"
+    }
+    if contract_id != f"stage5_outcome_contract:{_canonical_sha256(projection)}":
+        return None
+    if (
+        contract.get("kind") != "selected_option_outcome_strategy"
+        or contract.get("outcome_contract_status") != "approved_for_planning"
+        or contract.get("post_change_evidence_status") != "unverified"
+        or not isinstance(contract.get("strategy"), Mapping)
+        or not isinstance(contract.get("review"), Mapping)
+    ):
+        return None
+    return contract
+
+
+def _selected_stage5_outcome_contract(
+    selection: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    review = selection.get("falsification_review") if isinstance(selection, Mapping) else None
+    raw = review.get("selected_outcome_contract") if isinstance(review, Mapping) else None
+    return _validated_stage5_outcome_contract(raw)
+
+
+def _normalized_retained_asset_path(raw: Any) -> str | None:
+    value = _string(raw)
+    if value is None:
+        return None
+    normalized = value.replace("\\", "/").removeprefix("./")
+    parts = normalized.split("/")
+    if (
+        not normalized
+        or normalized.startswith("/")
+        or re.match(r"^[A-Za-z]:", normalized)
+        or any(part in {"", ".", ".."} for part in parts)
+    ):
+        return None
+    return normalized.casefold()
+
+
+def _validated_fail_first_staged_replay(
+    raw: Any,
+    *,
+    research: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Validate a Stage-6 oracle against its exact runner-owned Stage-3 replay.
+
+    The Stage-6 binding is allowed to add only the content-addressed Stage-5 outcome
+    contract to the verified Stage-3 oracle.  This keeps retained overlay paths usable
+    without turning a model-authored manifest or a merely similar command into evidence.
+    """
+
+    if (
+        not isinstance(raw, Mapping)
+        or raw.get("kind") != "staged_replay"
+        or raw.get("proof_scope") != "behavioral"
+    ):
+        return None
+    oracle_id = _string(raw.get("outcome_oracle_id"))
+    oracle_projection = {
+        key: value for key, value in raw.items() if key != "outcome_oracle_id"
+    }
+    if oracle_id != f"outcome_oracle:{_canonical_sha256(oracle_projection)}":
+        return None
+    experiment_id = _string(raw.get("research_experiment_id"))
+    expected = _verified_fail_first_outcome_oracles(research).get(experiment_id or "")
+    if not isinstance(expected, Mapping) or "selected_outcome_contract" in expected:
+        return None
+    expected_projection = {
+        key: value for key, value in expected.items() if key != "outcome_oracle_id"
+    }
+    retained_projection = {
+        key: value
+        for key, value in raw.items()
+        if key not in {"outcome_oracle_id", "selected_outcome_contract"}
+    }
+    if retained_projection != expected_projection:
+        return None
+    contract = _validated_stage5_outcome_contract(raw.get("selected_outcome_contract"))
+    if contract is None:
+        return None
+
+    execution = raw.get("execution")
+    argv = execution.get("argv") if isinstance(execution, Mapping) else None
+    asset = raw.get("asset")
+    manifest = asset.get("manifest") if isinstance(asset, Mapping) else None
+    if (
+        not isinstance(execution, Mapping)
+        or execution.get("shell") is not False
+        or not isinstance(argv, list)
+        or not argv
+        or any(not isinstance(token, str) or not token for token in argv)
+        or not isinstance(asset, Mapping)
+        or not isinstance(manifest, Mapping)
+        or not manifest
+        or asset.get("manifest_sha256") != _canonical_sha256(manifest)
+        or asset.get("asset_id")
+        != "outcome_asset:"
+        + _canonical_sha256({"schema_version": 1, "manifest": manifest})
+    ):
+        return None
+    normalized_manifest_paths: set[str] = set()
+    for path in manifest:
+        normalized = _normalized_retained_asset_path(path)
+        if normalized is None or normalized in normalized_manifest_paths:
+            return None
+        normalized_manifest_paths.add(normalized)
+    return {
+        "asset_paths": normalized_manifest_paths,
+        "command": _verified_research_experiment_commands(research).get(
+            experiment_id or ""
+        ),
+        "contract": contract,
+        "experiment_id": experiment_id,
+        "oracle": raw,
+    }
+
+
+def verified_staged_replay_command_asset_paths(
+    plan: Mapping[str, Any] | None,
+    *,
+    research: Mapping[str, Any] | None,
+) -> dict[str, set[str]]:
+    """Map an exact verified replay command to paths supplied by its retained asset."""
+
+    roles = plan.get("outcome_verification_roles") if isinstance(plan, Mapping) else None
+    original = roles.get("original_scenario") if isinstance(roles, Mapping) else None
+    oracle = original.get("oracle") if isinstance(original, Mapping) else None
+    binding = _validated_fail_first_staged_replay(oracle, research=research)
+    if binding is None:
+        return {}
+    command = _string(binding.get("command"))
+    raw_oracle = binding.get("oracle")
+    execution = raw_oracle.get("execution") if isinstance(raw_oracle, Mapping) else None
+    argv = execution.get("argv") if isinstance(execution, Mapping) else None
+    if command is None or not isinstance(argv, list):
+        return {}
+    manifest_paths = binding["asset_paths"]
+    referenced_paths = {
+        normalized
+        for token in argv
+        if isinstance(token, str)
+        for normalized in [
+            _normalized_retained_asset_path(token.split("::", 1)[0].strip("'\"(),;:"))
+        ]
+        if normalized in manifest_paths
+    }
+    return {command: referenced_paths} if referenced_paths else {}
+
+
 def _baseline_inverse_assertion(oracle: Mapping[str, Any]) -> dict[str, Any] | None:
     baseline = oracle.get("baseline")
     baseline = baseline if isinstance(baseline, Mapping) else {}
@@ -786,6 +1439,168 @@ def _bind_single_outcome_scenario(
     return predicates, bound_after, selected_proofs
 
 
+def _bind_stage5_planned_outcome(
+    plan: Mapping[str, Any],
+    *,
+    research: Mapping[str, Any],
+    selection: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Bind Stage-6 executable checks to the outcome semantics approved in Stage 5."""
+
+    contract = _selected_stage5_outcome_contract(selection)
+    if contract is None:
+        raise ValueError("stage5_selected_outcome_contract_missing")
+    strategy = contract.get("strategy")
+    replay_mode = (
+        _string(strategy.get("post_change_replay_mode"))
+        if isinstance(strategy, Mapping)
+        else None
+    )
+    experiment_ids = (
+        _string_list(strategy.get("original_scenario_experiment_ids"), nonempty=True)
+        if isinstance(strategy, Mapping)
+        else None
+    )
+    if experiment_ids is None:
+        raise ValueError("stage5_outcome_original_scenarios_missing")
+    experiments = {
+        _string(item.get("experiment_id")): item
+        for member in _research_dossier_members(research)
+        for item in (
+            member.get("experiments", [])
+            if isinstance(member.get("experiments"), list)
+            else []
+        )
+        if isinstance(item, Mapping) and _string(item.get("experiment_id")) is not None
+    }
+    if any(experiment_id not in experiments for experiment_id in experiment_ids):
+        raise ValueError("stage5_outcome_original_scenario_unbound")
+
+    bound = dict(plan)
+    reproduction_raw = bound.get("before_after_reproduction")
+    reproduction = dict(reproduction_raw) if isinstance(reproduction_raw, Mapping) else {}
+    after_raw = reproduction.get("after_change")
+    after = dict(after_raw) if isinstance(after_raw, Mapping) else {}
+    command = _string(after.get("command"))
+    expected_exit = after.get("expected_exit_code")
+    if (
+        command is None
+        or isinstance(expected_exit, bool)
+        or not isinstance(expected_exit, int)
+    ):
+        raise ValueError("stage5_outcome_after_command_or_exit_missing")
+    predicates: list[dict[str, Any]] = [
+        {"type": "command_exit_code", "command_index": 0, "equals": expected_exit}
+    ]
+    for assertion in (
+        after.get("observable_assertions")
+        if isinstance(after.get("observable_assertions"), list)
+        else []
+    ):
+        if isinstance(assertion, Mapping):
+            predicate = _observable_assertion_predicate(assertion)
+            if predicate is not None and predicate not in predicates:
+                predicates.append(predicate)
+    for expectation in (
+        after.get("artifact_expectations")
+        if isinstance(after.get("artifact_expectations"), list)
+        else []
+    ):
+        if isinstance(expectation, Mapping):
+            predicate = _artifact_expectation_predicate(expectation)
+            if predicate is not None and predicate not in predicates:
+                predicates.append(predicate)
+    for expectation in (
+        after.get("state_expectations")
+        if isinstance(after.get("state_expectations"), list)
+        else []
+    ):
+        if (
+            isinstance(expectation, Mapping)
+            and _string(expectation.get("target_id")) is not None
+            and isinstance(expectation.get("exists"), bool)
+            and "equals" in expectation
+        ):
+            predicate = {
+                "type": "oracle_state_equals",
+                "target_id": expectation.get("target_id"),
+                "exists": expectation.get("exists"),
+                "equals": expectation.get("equals"),
+            }
+            if predicate not in predicates:
+                predicates.append(predicate)
+    if not any(_positive_outcome_predicate(predicate) for predicate in predicates):
+        raise ValueError("stage5_outcome_positive_predicate_missing")
+
+    selected_experiment_id = _string(reproduction.get("research_experiment_id"))
+    if selected_experiment_id not in experiment_ids:
+        selected_experiment_id = experiment_ids[0]
+    if replay_mode == "verified_fail_first":
+        fail_first_oracle = _verified_fail_first_outcome_oracles(research).get(
+            selected_experiment_id or ""
+        )
+        verified_command = _verified_research_experiment_commands(research).get(
+            selected_experiment_id or ""
+        )
+        if not isinstance(fail_first_oracle, Mapping):
+            raise ValueError("stage5_outcome_fail_first_oracle_unavailable")
+        if verified_command != " ".join(command.split()):
+            raise ValueError("stage5_outcome_fail_first_command_changed")
+        oracle = {
+            key: deepcopy(value)
+            for key, value in fail_first_oracle.items()
+            if key != "outcome_oracle_id"
+        }
+        oracle["selected_outcome_contract"] = contract
+        original_commands: list[str] = []
+        original_description = (
+            "Post-change execution of the unchanged runner-verified fail-first replay "
+            "under Stage-5-approved success semantics."
+        )
+    else:
+        oracle = {
+            "schema_version": 1,
+            "kind": "stage5_planned_outcome",
+            "proof_scope": "planned_post_change_verification",
+            "case_id": bound.get("case_id"),
+            "repo_revision": research.get("repo_revision"),
+            "research_experiment_id": selected_experiment_id,
+            "research_experiment_ids": experiment_ids,
+            "selected_outcome_contract": contract,
+        }
+        original_commands = [command]
+        original_description = (
+            "Post-change replay designed from the Stage-3 baseline under "
+            "Stage-5-approved success semantics."
+        )
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _canonical_sha256(oracle)
+    roles_raw = bound.get("outcome_verification_roles")
+    roles = dict(roles_raw) if isinstance(roles_raw, Mapping) else {}
+    original_raw = roles.get("original_scenario")
+    original = dict(original_raw) if isinstance(original_raw, Mapping) else {}
+    original.update(
+        {
+            "description": _string(original.get("description"))
+            or original_description,
+            "research_experiment_id": selected_experiment_id,
+            "research_experiment_ids": experiment_ids,
+            "commands": original_commands,
+            "predicates": predicates,
+            "oracle": oracle,
+            "required_proof_scope": oracle["proof_scope"],
+        }
+    )
+    roles["original_scenario"] = original
+    bound["outcome_verification_roles"] = roles
+    reproduction["research_experiment_id"] = selected_experiment_id
+    reproduction["research_experiment_ids"] = experiment_ids
+    reproduction["outcome_oracle_id"] = oracle["outcome_oracle_id"]
+    reproduction["outcome_oracle_ids"] = [oracle["outcome_oracle_id"]]
+    reproduction["required_proof_scope"] = oracle["proof_scope"]
+    bound["before_after_reproduction"] = reproduction
+    return bound
+
+
 def bind_plan_outcome_oracle(
     plan: Mapping[str, Any],
     *,
@@ -793,6 +1608,20 @@ def bind_plan_outcome_oracle(
     selection: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind only stage-5-selected semantics to every retained original scenario."""
+
+    # The Stage-5-reviewed option strategy is the authoritative prospective success
+    # contract even when Stage 3 retained an executed baseline contract.  The older
+    # positive-contract-only path remains readable for already-persisted selections.
+    if isinstance(selection, Mapping) and _selected_stage5_outcome_contract(selection) is not None:
+        return _bind_stage5_planned_outcome(
+            plan,
+            research=research,
+            selection=selection,
+        )
+    if not _research_positive_contract_index(research):
+        if not isinstance(selection, Mapping):
+            raise ValueError("stage5_selection_missing")
+        raise ValueError("stage5_selected_outcome_contract_missing")
 
     bound = dict(plan)
     reproduction_raw = bound.get("before_after_reproduction")
@@ -960,6 +1789,22 @@ def _positive_outcome_predicate(predicate: Mapping[str, Any]) -> bool:
     return False
 
 
+def _positive_measured_state_assertion(assertion: Mapping[str, Any]) -> bool:
+    """Require a concrete measured state in addition to a successful test exit.
+
+    An exact fail-first test may intentionally retain the original symptom text as
+    diagnostic context after its internal contract starts passing.  A structured numeric
+    observation provides an independent material postcondition without treating a generic
+    success message or exit zero as proof of the corrected state.
+    """
+
+    predicate = _observable_assertion_predicate(assertion)
+    if predicate is None or not _positive_outcome_predicate(predicate):
+        return False
+    value = _string(predicate.get("value"))
+    return bool(value is not None and _STRUCTURED_NUMERIC_STATE_RE.search(value))
+
+
 def _verified_research_experiment_commands(
     research: Mapping[str, Any] | None,
 ) -> dict[str, str]:
@@ -1009,6 +1854,40 @@ def _outcome_role_contract_errors(
         reasons.append("change_plan_outcome_role_fields_invalid")
     normalized_tests = {" ".join(command.split()) for command in verification_commands}
     verified_research_commands = _verified_research_experiment_commands(research)
+    original_raw = raw.get("original_scenario")
+    original_oracle_raw = (
+        original_raw.get("oracle") if isinstance(original_raw, Mapping) else None
+    )
+    staged_replay_binding = _validated_fail_first_staged_replay(
+        original_oracle_raw,
+        research=research,
+    )
+    planned_or_staged_oracle = bool(
+        isinstance(original_oracle_raw, Mapping)
+        and (
+            original_oracle_raw.get("kind") == "stage5_planned_outcome"
+            or staged_replay_binding is not None
+        )
+    )
+    planned_repo_revision = (
+        _string(original_oracle_raw.get("repo_revision"))
+        if planned_or_staged_oracle and isinstance(original_oracle_raw, Mapping)
+        else None
+    )
+    selected_outcome_contract_raw = (
+        original_oracle_raw.get("selected_outcome_contract")
+        if planned_or_staged_oracle and isinstance(original_oracle_raw, Mapping)
+        else None
+    )
+    planned_outcome_contract_id = (
+        _string(selected_outcome_contract_raw.get("outcome_contract_id"))
+        if isinstance(selected_outcome_contract_raw, Mapping)
+        and selected_outcome_contract_raw.get("outcome_contract_status")
+        == "approved_for_planning"
+        and selected_outcome_contract_raw.get("post_change_evidence_status")
+        == "unverified"
+        else None
+    )
     normalized_roles: dict[str, Mapping[str, Any] | None] = {}
     for role in sorted(_OUTCOME_ROLES):
         value = raw.get(role)
@@ -1024,20 +1903,33 @@ def _outcome_role_contract_errors(
             reasons.append(f"change_plan_outcome_role_description_missing:{role}")
         oracle = value.get("oracle") if role == "original_scenario" else None
         oracle_kind = oracle.get("kind") if isinstance(oracle, Mapping) else None
+        planned_outcome_oracle = oracle_kind == "stage5_planned_outcome"
         oracle_mode = oracle_kind in {
             "staged_replay",
             "causal_proof_replay",
             "config_state",
             "multi_scenario",
         }
+        verification_owner = value.get("verification_owner")
+        centralized_recurrence = (
+            role == "recurrence"
+            and verification_owner == _CENTRALIZED_RECURRENCE_OWNER
+        )
+        if verification_owner is not None and not centralized_recurrence:
+            reasons.append(
+                f"change_plan_outcome_role_verification_owner_invalid:{role}"
+            )
         commands = _string_list(
-            value.get("commands"), nonempty=role != "recurrence" and not oracle_mode
+            value.get("commands"),
+            nonempty=not oracle_mode and not centralized_recurrence,
         )
         if commands is None:
             reasons.append(f"change_plan_outcome_role_commands_invalid:{role}")
             commands = []
         if oracle_mode and commands:
             reasons.append("change_plan_outcome_oracle_commands_forbidden")
+        if centralized_recurrence and commands:
+            reasons.append("change_plan_centralized_recurrence_commands_invalid")
         virtual_command_count = (
             1
             if oracle_kind in {"staged_replay", "causal_proof_replay"}
@@ -1085,6 +1977,7 @@ def _outcome_role_contract_errors(
                     reasons.append(f"change_plan_outcome_role_command_bindings_invalid:{role}")
                 else:
                     bound_indices: set[int] = set()
+                    planned_binding_indices: set[int] = set()
                     for binding_index, command_binding in enumerate(command_bindings):
                         if not isinstance(command_binding, Mapping):
                             reasons.append(
@@ -1096,13 +1989,52 @@ def _outcome_role_contract_errors(
                         experiment_id = _string(
                             command_binding.get("research_experiment_id")
                         )
-                        if (
+                        index_invalid = bool(
                             isinstance(command_index, bool)
                             or not isinstance(command_index, int)
                             or command_index < 0
                             or command_index >= len(commands)
                             or command_index in bound_indices
-                            or experiment_id is None
+                        )
+                        if index_invalid:
+                            reasons.append(
+                                f"change_plan_outcome_role_command_binding_unverified:"
+                                f"{role}:{binding_index}"
+                            )
+                            continue
+                        assert isinstance(command_index, int)
+                        if (
+                            command_binding.get("binding_kind")
+                            == "stage6_planned_post_change"
+                        ):
+                            if (
+                                role not in {"live", "mitigation_effect"}
+                                or set(command_binding)
+                                != {
+                                    "command_index",
+                                    "binding_kind",
+                                    "selected_outcome_contract_id",
+                                    "repo_revision",
+                                }
+                                or _string(
+                                    command_binding.get(
+                                        "selected_outcome_contract_id"
+                                    )
+                                )
+                                != planned_outcome_contract_id
+                                or _string(command_binding.get("repo_revision"))
+                                != planned_repo_revision
+                            ):
+                                reasons.append(
+                                    "change_plan_outcome_role_planned_command_binding_invalid:"
+                                    f"{role}:{binding_index}"
+                                )
+                                continue
+                            bound_indices.add(command_index)
+                            planned_binding_indices.add(command_index)
+                            continue
+                        if (
+                            experiment_id is None
                             or verified_research_commands.get(experiment_id)
                             != " ".join(commands[command_index].split())
                         ):
@@ -1116,12 +2048,30 @@ def _outcome_role_contract_errors(
                         reasons.append(
                             f"change_plan_outcome_role_command_binding_coverage_invalid:{role}"
                         )
+                    if planned_binding_indices:
+                        if value.get("execution_status") != "planned_unverified":
+                            reasons.append(
+                                "change_plan_outcome_role_planned_execution_status_invalid:"
+                                f"{role}"
+                            )
+                    elif value.get("execution_status") is not None:
+                        reasons.append(
+                            f"change_plan_outcome_role_execution_status_unexpected:{role}"
+                        )
             elif command_bindings not in (None, []):
                 reasons.append(f"change_plan_outcome_role_command_bindings_without_commands:{role}")
+            elif value.get("execution_status") is not None:
+                reasons.append(
+                    f"change_plan_outcome_role_execution_status_unexpected:{role}"
+                )
         predicates = value.get("predicates")
-        if not isinstance(predicates, list) or (not predicates and role != "recurrence"):
+        if not isinstance(predicates, list) or (
+            not predicates and not centralized_recurrence
+        ):
             reasons.append(f"change_plan_outcome_role_predicates_invalid:{role}")
             predicates = []
+        if centralized_recurrence and predicates:
+            reasons.append("change_plan_centralized_recurrence_predicates_invalid")
         exit_coverage: set[int] = set()
         for index, predicate in enumerate(predicates):
             if not isinstance(predicate, Mapping):
@@ -1171,7 +2121,7 @@ def _outcome_role_contract_errors(
             elif predicate_type == "oracle_state_equals":
                 target_id = _string(predicate.get("target_id"))
                 if (
-                    oracle_kind != "config_state"
+                    oracle_kind not in {"config_state", "stage5_planned_outcome"}
                     or target_id is None
                     or not isinstance(predicate.get("exists"), bool)
                     or "equals" not in predicate
@@ -1266,6 +2216,26 @@ def _outcome_role_contract_errors(
                 reasons.append("change_plan_outcome_config_scope_invalid")
             if oracle_kind == "multi_scenario" and oracle.get("proof_scope") != "multi_scenario":
                 reasons.append("change_plan_outcome_multi_scenario_scope_invalid")
+        elif planned_outcome_oracle:
+            oracle_id = _string(oracle.get("outcome_oracle_id"))
+            projection = {key: item for key, item in oracle.items() if key != "outcome_oracle_id"}
+            if oracle_id != f"outcome_oracle:{_canonical_sha256(projection)}":
+                reasons.append("change_plan_outcome_oracle_hash_invalid")
+            if oracle.get("proof_scope") != "planned_post_change_verification":
+                reasons.append("change_plan_outcome_planned_scope_invalid")
+            selected_contract = oracle.get("selected_outcome_contract")
+            if not isinstance(selected_contract, Mapping) or _string(
+                selected_contract.get("outcome_contract_id")
+            ) != "stage5_outcome_contract:" + _canonical_sha256(
+                {
+                    key: item
+                    for key, item in selected_contract.items()
+                    if key != "outcome_contract_id"
+                }
+            ):
+                reasons.append("change_plan_stage5_outcome_contract_invalid")
+            if value.get("required_proof_scope") != oracle.get("proof_scope"):
+                reasons.append("change_plan_outcome_oracle_scope_mismatch")
 
     original = normalized_roles.get("original_scenario")
     if original is None and not has_proof_limitation:
@@ -1277,7 +2247,7 @@ def _outcome_role_contract_errors(
         oracle_kind = original_oracle.get("kind") if isinstance(original_oracle, Mapping) else None
         role_commands = _string_list(original.get("commands"), nonempty=oracle_kind is None) or []
         after_command = _string(after.get("command"))
-        if oracle_kind is None:
+        if oracle_kind is None or oracle_kind == "stage5_planned_outcome":
             if len(role_commands) != 1 or (
                 after_command is not None
                 and " ".join(role_commands[0].split()) != " ".join(after_command.split())
@@ -1459,7 +2429,16 @@ def _outcome_role_contract_errors(
                 for scenario in original_oracle.get("scenarios", [])
             )
         )
-        if not multi_scenario_positive and not any(
+        planned_outcome_positive = bool(
+            isinstance(original_oracle, Mapping)
+            and original_oracle.get("kind") == "stage5_planned_outcome"
+            and isinstance(original_oracle.get("selected_outcome_contract"), Mapping)
+            and any(
+                isinstance(predicate, Mapping) and _positive_outcome_predicate(predicate)
+                for predicate in original_predicates
+            )
+        )
+        if not planned_outcome_positive and not multi_scenario_positive and not any(
             isinstance(predicate, Mapping)
             and dict(predicate) in grounded_predicates
             and (
@@ -2217,22 +3196,99 @@ def bind_falsification_review(
     )
     contract_reviews: list[dict[str, Any]] = []
     reviewed_ids: set[str] = set()
+    outcome_strategy = _option_outcome_strategy(selected_option, research=research)
+    if outcome_strategy is None:
+        raise ValueError("falsification_outcome_strategy_missing")
+    strategy_review_raw = review.get("outcome_strategy_review")
+    if not isinstance(strategy_review_raw, Mapping):
+        raise ValueError("falsification_outcome_strategy_review_missing")
+    strategy_verdict = _string(strategy_review_raw.get("verdict"))
+    relation = _string(strategy_review_raw.get("semantic_relation_assessment"))
+    problem_coverage = _string(strategy_review_raw.get("problem_coverage"))
+    proves_intended = strategy_review_raw.get("proves_intended_operation")
+    strategy_residual = _string_list(strategy_review_raw.get("residual_untested_paths"))
+    strategy_refs = _string_list(strategy_review_raw.get("evidence_refs"), nonempty=True)
+    if strategy_verdict not in {
+        "sufficient",
+        "surface_only",
+        "insufficient_evidence",
+        "contradicted",
+    }:
+        raise ValueError("falsification_outcome_strategy_verdict_invalid")
+    if relation is None:
+        raise ValueError("falsification_outcome_strategy_relation_missing")
+    if problem_coverage not in {"full", "partial", "unknown"}:
+        raise ValueError("falsification_outcome_strategy_coverage_invalid")
+    if not isinstance(proves_intended, bool):
+        raise ValueError("falsification_outcome_strategy_operation_invalid")
+    if (
+        strategy_residual is None
+        or strategy_refs is None
+        or any(ref not in evidence_pool for ref in strategy_refs)
+    ):
+        raise ValueError("falsification_outcome_strategy_evidence_invalid")
+    outcome_strategy_review = {
+        **dict(strategy_review_raw),
+        "verdict": strategy_verdict,
+        "semantic_relation_assessment": relation,
+        "problem_coverage": problem_coverage,
+        "proves_intended_operation": proves_intended,
+        "residual_untested_paths": strategy_residual,
+        "evidence_refs": strategy_refs,
+    }
+    disposition_by_risk = {
+        risk: raw_disposition
+        for raw_disposition in (
+            review.get("material_risk_dispositions")
+            if isinstance(review.get("material_risk_dispositions"), list)
+            else []
+        )
+        if isinstance(raw_disposition, Mapping)
+        for risk in [_string(raw_disposition.get("risk"))]
+        if risk is not None
+    }
+    undisposed_strategy_residuals = [
+        risk
+        for risk in strategy_residual or []
+        if _string(disposition_by_risk.get(risk, {}).get("disposition"))
+        not in {"accepted", "mitigated"}
+    ]
+    strategy_semantics_valid = bool(
+        strategy_verdict == "sufficient"
+        and problem_coverage in {"full", "partial"}
+        and proves_intended is True
+        and (problem_coverage == "full" or bool(strategy_residual))
+        and not undisposed_strategy_residuals
+    )
+    if overall_verdict == "accept" and not strategy_semantics_valid:
+        if undisposed_strategy_residuals:
+            raise ValueError(
+                "falsification_accepts_undisposed_outcome_strategy_residual:"
+                + json.dumps(
+                    undisposed_strategy_residuals,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
+        raise ValueError("falsification_accepts_insufficient_outcome_semantics")
+
+    # Executed Stage-3 contracts remain authenticated baseline evidence.  They are
+    # optional in a current Stage-5 review and never replace or veto the prospective
+    # option-strategy review above.  When the legacy review fields are emitted, validate
+    # them fully so old consumers can continue to display them.
     if not positive_contracts:
-        if overall_verdict == "accept":
-            raise ValueError("falsification_positive_outcome_contract_missing")
-        if selected_contract_ids is not None or reviews_raw not in (None, []):
+        if selected_contract_ids not in (None, []) or reviews_raw not in (None, []):
             raise ValueError("falsification_outcome_contract_review_without_contract")
         selected_contract_id = None
         selected_contract_ids = []
+    elif reviews_raw in (None, []):
+        if selected_contract_ids not in (None, []):
+            raise ValueError("falsification_selected_outcome_contract_unreviewed")
+        selected_contract_id = None
+        selected_contract_ids = []
     else:
-        if not isinstance(reviews_raw, list) or not reviews_raw:
-            raise ValueError("falsification_outcome_contract_reviews_missing")
-        if (
-            selected_contract_ids is None
-            or len(selected_contract_ids) != len(set(selected_contract_ids))
-            or any(value not in positive_contracts for value in selected_contract_ids)
-        ):
-            raise ValueError("falsification_selected_outcome_contract_unbound")
+        if not isinstance(reviews_raw, list):
+            raise ValueError("falsification_outcome_contract_reviews_invalid")
         for index, contract_review in enumerate(reviews_raw):
             if not isinstance(contract_review, Mapping):
                 raise ValueError(f"falsification_outcome_contract_review_invalid:{index}")
@@ -2280,104 +3336,75 @@ def bind_falsification_review(
             )
         if reviewed_ids != set(positive_contracts):
             raise ValueError("falsification_outcome_contract_review_coverage_mismatch")
-        oracle_ids = {
-            _string(oracle.get("outcome_oracle_id"))
-            for _contract, oracle in positive_contracts.values()
-        }
-        selected_oracle_ids = [
-            _string(positive_contracts[value][1].get("outcome_oracle_id"))
-            for value in selected_contract_ids
-        ]
-        if (
-            None in oracle_ids
-            or None in selected_oracle_ids
-            or set(selected_oracle_ids) != oracle_ids
-            or len(selected_oracle_ids) != len(oracle_ids)
+        if selected_contract_ids is None:
+            selected_contract_ids = []
+        elif (
+            len(selected_contract_ids) != len(set(selected_contract_ids))
+            or any(value not in reviewed_ids for value in selected_contract_ids)
         ):
-            raise ValueError("falsification_selected_outcome_contract_oracle_coverage_mismatch")
-        selected_reviews = [
-            value
-            for value in contract_reviews
-            if value["positive_outcome_contract_id"] in selected_contract_ids
-        ]
-        disposition_by_risk = {
-            risk: raw_disposition
-            for raw_disposition in (
-                review.get("material_risk_dispositions")
-                if isinstance(review.get("material_risk_dispositions"), list)
-                else []
-            )
-            if isinstance(raw_disposition, Mapping)
-            for risk in [_string(raw_disposition.get("risk"))]
-            if risk is not None
-        }
-        selected_residual_paths = {
-            risk
-            for selected_review in selected_reviews
-            for risk in selected_review["residual_untested_paths"]
-        }
-        selected_semantics_valid = all(
-            selected_review["verdict"] == "sufficient"
-            and selected_review["problem_coverage"] in {"full", "partial"}
-            and selected_review["proves_intended_operation"] is True
-            and (
-                selected_review["problem_coverage"] == "full"
-                or bool(selected_review["residual_untested_paths"])
-            )
-            and all(
-                _string(disposition_by_risk.get(risk, {}).get("disposition"))
-                in {"accepted", "mitigated"}
-                for risk in selected_review["residual_untested_paths"]
-            )
-            for selected_review in selected_reviews
-        )
-        if overall_verdict == "accept" and not selected_semantics_valid:
-            raise ValueError("falsification_accepts_insufficient_outcome_semantics")
-        option_coverage = selected_option.get("causal_coverage")
-        option_coverage = option_coverage if isinstance(option_coverage, Mapping) else {}
-        selected_outcome_evidence = {
-            evidence_ref
-            for selected_review in selected_reviews
-            for evidence_ref in selected_review["evidence_refs"]
-        }
-        evidenced_mitigations = {
-            risk
-            for risk, disposition in disposition_by_risk.items()
-            if _string(disposition.get("disposition")) == "mitigated"
-            and bool(
-                selected_outcome_evidence.intersection(
-                    _string_list(disposition.get("evidence_refs"), nonempty=True)
-                    or []
+            raise ValueError("falsification_selected_outcome_contract_unbound")
+        if selected_contract_ids:
+            oracle_ids = {
+                _string(oracle.get("outcome_oracle_id"))
+                for _contract, oracle in positive_contracts.values()
+            }
+            selected_oracle_ids = [
+                _string(positive_contracts[value][1].get("outcome_oracle_id"))
+                for value in selected_contract_ids
+            ]
+            if (
+                None in oracle_ids
+                or None in selected_oracle_ids
+                or set(selected_oracle_ids) != oracle_ids
+                or len(selected_oracle_ids) != len(oracle_ids)
+            ):
+                raise ValueError(
+                    "falsification_selected_outcome_contract_oracle_coverage_mismatch"
                 )
-            )
-        }
-        # An explicitly untested path remains a bounded outcome even when a
-        # mitigation reduces its impact. Other option/review risks stop being
-        # residual only when their mitigation is tied to evidence used by the
-        # selected sufficient outcome contract (for example a compatibility
-        # regression oracle).
-        bounded_risks = set(selected_residual_paths)
-        for field in ("unsupported_assumptions", "residual_recurrence_paths"):
-            bounded_risks.update(_string_list(option_coverage.get(field)) or [])
-        bounded_risks.update(
-            risk
-            for risk in (_string_list(option_coverage.get("compatibility_risks")) or [])
-            if risk not in evidenced_mitigations
+        selected_contract_id = (
+            selected_contract_ids[0] if len(selected_contract_ids) == 1 else None
         )
-        for field in ("unsupported_assumptions", "residual_risks"):
-            bounded_risks.update(_string_list(review.get(field)) or [])
-        if overall_verdict == "accept":
-            outcome_claim_status = "mitigated" if bounded_risks else "resolved"
-            outcome_confidence = "bounded" if bounded_risks else "full"
-        selected_contract_id = selected_contract_ids[0] if len(selected_contract_ids) == 1 else None
+
+    option_coverage = selected_option.get("causal_coverage")
+    option_coverage = option_coverage if isinstance(option_coverage, Mapping) else {}
+    unsupported_assumptions = set(
+        _string_list(option_coverage.get("unsupported_assumptions")) or []
+    )
+    unsupported_assumptions.update(_string_list(review.get("unsupported_assumptions")) or [])
+    confidence_bounding_risks = set(strategy_residual)
+    for field in (
+        "unsupported_assumptions",
+        "residual_recurrence_paths",
+        "compatibility_risks",
+    ):
+        confidence_bounding_risks.update(_string_list(option_coverage.get(field)) or [])
+    for field in ("unsupported_assumptions", "residual_risks"):
+        confidence_bounding_risks.update(_string_list(review.get(field)) or [])
+    outcome_limiting_risks = set(strategy_residual)
+    outcome_limiting_risks.update(
+        risk
+        for risk in unsupported_assumptions
+        if _string(disposition_by_risk.get(risk, {}).get("disposition")) == "mitigated"
+    )
+    if overall_verdict == "accept":
+        outcome_claim_status = "mitigated" if outcome_limiting_risks else "resolved"
+        outcome_confidence = "bounded" if confidence_bounding_risks else "full"
 
     bound = dict(review)
     bound.pop("adversarial_evidence_receipt", None)
+    # This is a design-time upper bound for a future outcome claim, not evidence that
+    # the implementation already achieved it.  Keep the established fields for plan
+    # compatibility and make the pre-implementation evidence state explicit.
     bound["outcome_claim_status"] = outcome_claim_status
     bound["outcome_confidence"] = outcome_confidence
+    bound["outcome_contract_status"] = (
+        "approved_for_planning" if overall_verdict == "accept" else "not_approved"
+    )
+    bound["post_change_evidence_status"] = "unverified"
     bound["selected_positive_outcome_contract_id"] = selected_contract_id
     bound["selected_positive_outcome_contract_ids"] = selected_contract_ids
     bound["outcome_contract_reviews"] = contract_reviews
+    bound["outcome_strategy_review"] = outcome_strategy_review
     evidence_refs_raw = review.get("evidence_refs")
     if not isinstance(evidence_refs_raw, list) or not evidence_refs_raw:
         raise ValueError("falsification_verified_evidence_refs_missing")
@@ -2414,6 +3441,10 @@ def bind_falsification_review(
         for ref in contract_review["evidence_refs"]
     ):
         raise ValueError("falsification_outcome_contract_evidence_not_cited")
+    if outcome_strategy_review is not None and any(
+        ref not in cited_evidence_ids for ref in outcome_strategy_review["evidence_refs"]
+    ):
+        raise ValueError("falsification_outcome_strategy_evidence_not_cited")
 
     dispositions_raw = review.get("material_risk_dispositions")
     if not isinstance(dispositions_raw, list):
@@ -2423,10 +3454,35 @@ def bind_falsification_review(
         if not isinstance(disposition, Mapping):
             raise ValueError(f"falsification_risk_disposition_invalid:{index}")
         refs = _string_list(disposition.get("evidence_refs"), nonempty=True)
-        if refs is None or any(ref not in cited_evidence_ids for ref in refs):
+        if refs is None:
+            raise ValueError(f"falsification_risk_evidence_refs_missing:{index}")
+        if any(ref not in cited_evidence_ids for ref in refs):
             raise ValueError(f"falsification_risk_evidence_ref_unbound:{index}")
         bound_dispositions.append({**dict(disposition), "evidence_refs": refs})
     bound["material_risk_dispositions"] = bound_dispositions
+
+    selected_outcome_contract: dict[str, Any] = {
+        "schema_version": 1,
+        "producer": "backlog_core.bind_falsification_review",
+        "kind": "selected_option_outcome_strategy",
+        "problem_id": problem_id,
+        "selected_option_id": selected_option_id,
+        "selected_option_sha256": _canonical_sha256(selected_option),
+        "research_receipt_sha256": research_receipt_sha256,
+        "strategy": outcome_strategy,
+        "review": outcome_strategy_review,
+        "outcome_contract_status": bound["outcome_contract_status"],
+        "post_change_evidence_status": "unverified",
+        "maximum_post_change_outcome_claim": outcome_claim_status,
+        "outcome_claim_status": outcome_claim_status,
+        "outcome_confidence": outcome_confidence,
+        "research_baseline_positive_outcome_contract_ids": sorted(positive_contracts),
+        "research_baseline_reviews_sha256": _canonical_sha256(contract_reviews),
+    }
+    selected_outcome_contract["outcome_contract_id"] = (
+        "stage5_outcome_contract:" + _canonical_sha256(selected_outcome_contract)
+    )
+    bound["selected_outcome_contract"] = selected_outcome_contract
 
     evidence_projection = [
         {
@@ -2451,6 +3507,9 @@ def bind_falsification_review(
         "selected_positive_outcome_contract_id": selected_contract_id,
         "selected_positive_outcome_contract_ids": selected_contract_ids,
         "outcome_contract_reviews_sha256": _canonical_sha256(contract_reviews),
+        "selected_outcome_contract_id": selected_outcome_contract.get("outcome_contract_id"),
+        "outcome_contract_status": bound["outcome_contract_status"],
+        "post_change_evidence_status": "unverified",
         "outcome_claim_status": outcome_claim_status,
         "outcome_confidence": outcome_confidence,
     }
@@ -3757,6 +4816,8 @@ def assess_solution_option_readiness(
             for field in ("before", "after"):
                 if _string(testability.get(field)) is None:
                     reasons.append(f"solution_option_testability_{field}_missing")
+        if research is not None and _option_outcome_strategy(option, research=research) is None:
+            reasons.append("solution_option_outcome_strategy_missing_or_unbound")
         reasons.extend(_research_binding_reasons(coverage, research=research))
 
     verified_paths = _verified_failure_paths(research)
@@ -4005,15 +5066,24 @@ def assess_selection_readiness(
                     material_risks.update(_string_list(coverage.get(field)) or [])
         for field in ("unsupported_assumptions", "residual_risks"):
             material_risks.update(_string_list(falsification.get(field)) or [])
-        for contract_review in (
-            falsification.get("outcome_contract_reviews")
-            if isinstance(falsification.get("outcome_contract_reviews"), list)
-            else []
-        ):
-            if isinstance(contract_review, Mapping):
-                material_risks.update(
-                    _string_list(contract_review.get("residual_untested_paths")) or []
-                )
+        outcome_strategy_review = falsification.get("outcome_strategy_review")
+        if isinstance(outcome_strategy_review, Mapping):
+            material_risks.update(
+                _string_list(outcome_strategy_review.get("residual_untested_paths")) or []
+            )
+        else:
+            # Compatibility for persisted pre-strategy selections.  Current Stage-3
+            # positive contracts are supplemental baseline evidence; a baseline's
+            # limited proof scope does not reduce the reviewed option strategy's scope.
+            for contract_review in (
+                falsification.get("outcome_contract_reviews")
+                if isinstance(falsification.get("outcome_contract_reviews"), list)
+                else []
+            ):
+                if isinstance(contract_review, Mapping):
+                    material_risks.update(
+                        _string_list(contract_review.get("residual_untested_paths")) or []
+                    )
         dispositions = falsification.get("material_risk_dispositions")
         if not isinstance(dispositions, list):
             reasons.append("selection_falsification_risk_dispositions_invalid")
@@ -4102,7 +5172,8 @@ def assess_change_plan_readiness(
         reasons.append("change_plan_revision_id_content_mismatch")
     if plan.get("plan_revision_source") != "server_content_addressed_v1":
         reasons.append("change_plan_revision_source_invalid")
-    if verified_outcome_oracles(research):
+    stage5_outcome_contract = _selected_stage5_outcome_contract(selection)
+    if verified_outcome_oracles(research) or stage5_outcome_contract is not None:
         try:
             rebound_plan = bind_plan_outcome_oracle(
                 plan,
@@ -4172,7 +5243,7 @@ def assess_change_plan_readiness(
         )
         if isinstance(contract, Mapping)
     }
-    if isinstance(falsification, Mapping):
+    if isinstance(falsification, Mapping) and stage5_outcome_contract is None:
         planned_selected_ids = (
             _string_list(
                 planned_original.get("selected_positive_outcome_contract_ids"),
@@ -4187,6 +5258,11 @@ def assess_change_plan_readiness(
             reasons.append("change_plan_selected_positive_outcome_contract_binding_changed")
         elif any(value not in planned_contract_ids for value in selected_positive_contract_ids):
             reasons.append("change_plan_outcome_contract_not_falsification_selected")
+    elif stage5_outcome_contract is not None:
+        if not isinstance(planned_oracle, Mapping) or planned_oracle.get(
+            "selected_outcome_contract"
+        ) != stage5_outcome_contract:
+            reasons.append("change_plan_stage5_outcome_contract_binding_changed")
     for field in (
         "implementation_steps",
         "verification_steps",
@@ -4200,6 +5276,7 @@ def assess_change_plan_readiness(
         reasons.append("change_plan_contains_discovery_first_step")
 
     targets = plan.get("change_targets")
+    retained_asset_paths = _retained_outcome_asset_paths(research)
     if not isinstance(targets, list) or not targets:
         reasons.append("change_plan_targets_missing")
     else:
@@ -4220,6 +5297,15 @@ def assess_change_plan_readiness(
                 reasons.append(f"change_plan_target_destination_missing:{index}")
             elif action not in {"rename", "move"} and destination is not None:
                 reasons.append(f"change_plan_target_destination_unexpected:{index}")
+            candidate_paths = [
+                value.replace("\\", "/").removeprefix("./").casefold()
+                for value in (_string(target.get("path")), destination)
+                if value is not None
+            ]
+            if any(value in retained_asset_paths for value in candidate_paths):
+                reasons.append(
+                    f"change_plan_target_rewrites_retained_outcome_asset:{index}"
+                )
 
     reproduction = plan.get("before_after_reproduction")
     if not isinstance(reproduction, Mapping):
@@ -4319,6 +5405,18 @@ def assess_change_plan_readiness(
                 and bound_oracle.get("kind") == "multi_scenario"
                 and bound_oracle.get("proof_scope") == "multi_scenario"
             )
+            fail_first_oracle = (
+                research_experiment is not None
+                and research_experiment.get("scenario_kind") == "fail_first_contract"
+                and (
+                    validated := _validated_fail_first_staged_replay(
+                        bound_oracle,
+                        research=research,
+                    )
+                )
+                is not None
+                and validated.get("experiment_id") == research_experiment_id
+            )
             if research_experiment_id is None or research_experiment is None:
                 reasons.append("change_plan_research_experiment_unbound")
             elif causal_oracle:
@@ -4344,6 +5442,9 @@ def assess_change_plan_readiness(
             elif research_experiment.get("scenario_kind") == "static_trace":
                 if not config_oracle or research_experiment.get("outcome") != "supports":
                     reasons.append("change_plan_static_trace_cannot_prove_behavioral_outcome")
+            elif research_experiment.get("scenario_kind") == "fail_first_contract":
+                if not fail_first_oracle or research_experiment.get("outcome") != "supports":
+                    reasons.append("change_plan_research_experiment_not_original_support")
             elif (
                 research_experiment.get("scenario_kind")
                 not in {"original_replay", "faithful_replay", "live_runtime"}
@@ -4438,13 +5539,27 @@ def assess_change_plan_readiness(
                     and isinstance(research_experiment.get("observable_assertion"), Mapping)
                     else {}
                 )
-                if not config_oracle and not any(
+                direct_symptom_reversal = any(
                     isinstance(assertion, Mapping)
                     and _oracle_inverts_baseline(
                         baseline_assertion,
                         assertion,
                     )
                     for assertion in after_assertions
+                )
+                fail_first_measured_reversal = bool(
+                    fail_first_oracle
+                    and after.get("expected_exit_code") == 0
+                    and any(
+                        isinstance(assertion, Mapping)
+                        and _positive_measured_state_assertion(assertion)
+                        for assertion in after_assertions
+                    )
+                )
+                if (
+                    not config_oracle
+                    and not direct_symptom_reversal
+                    and not fail_first_measured_reversal
                 ):
                     reasons.append("change_plan_after_oracle_does_not_reverse_original_symptom")
                 if (
@@ -4825,4 +5940,5 @@ __all__ = [
     "research_limitation_references",
     "verified_mechanism_evidence",
     "verified_outcome_oracles",
+    "verified_staged_replay_command_asset_paths",
 ]

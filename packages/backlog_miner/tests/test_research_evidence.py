@@ -4,6 +4,7 @@ import json
 import os
 import stat
 import subprocess
+import sys
 from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
@@ -123,6 +124,80 @@ def test_command_observation_normalizes_equivalent_relative_path_spelling() -> N
     assert mod._normalize_command(declared) != mod._normalize_command(
         r"python .\.usertest_research\different_probe.py gemini-run-once-block"
     )
+
+
+def test_command_observation_normalizes_doubled_windows_path_separators() -> None:
+    declared = (
+        r"python .usertest_research\probe.py "
+        r"--out .usertest_research\result.json"
+    )
+    observed = (
+        r"python .usertest_research\\probe.py "
+        r"--out .usertest_research\\result.json"
+    )
+
+    assert mod._normalize_command(declared) == mod._normalize_command(observed)
+
+
+def test_repository_python_import_environment_uses_only_pinned_src_projects(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    for relative in (
+        "packages/alpha",
+        "apps/tool",
+        ".usertest_research/untrusted",
+        "packages/no_src",
+    ):
+        project = workspace / relative
+        project.mkdir(parents=True)
+        (project / "pyproject.toml").write_text("[project]\nname='fixture'\n", encoding="utf-8")
+    (workspace / "packages" / "alpha" / "src").mkdir()
+    (workspace / "apps" / "tool" / "src").mkdir()
+    (workspace / ".usertest_research" / "untrusted" / "src").mkdir()
+
+    pythonpath, receipt = mod._repository_python_import_environment(
+        workspace,
+        execution_root="/workspace",
+        path_separator=":",
+    )
+
+    assert pythonpath == "/workspace/apps/tool/src:/workspace/packages/alpha/src"
+    assert receipt["runner_applied"] is True
+    assert receipt["source_roots"] == ["apps/tool/src", "packages/alpha/src"]
+    assert receipt["repository_python_import_sha256"] == mod._canonical_json_sha256(
+        {key: value for key, value in receipt.items() if key != "repository_python_import_sha256"}
+    )
+
+
+def test_trusted_host_replay_imports_package_from_pinned_workspace(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    package = workspace / "packages" / "fixture_dep"
+    module = package / "src" / "fixture_dep"
+    module.mkdir(parents=True)
+    (package / "pyproject.toml").write_text("[project]\nname='fixture-dep'\n", encoding="utf-8")
+    (module / "__init__.py").write_text("VALUE = 'pinned'\n", encoding="utf-8")
+    harness = workspace / ".usertest_research" / "probe.py"
+    harness.parent.mkdir()
+    harness.write_text(
+        "from fixture_dep import VALUE\nprint(VALUE)\n",
+        encoding="utf-8",
+    )
+
+    completed = mod.TrustedHostReplayExecutor(approved_source_roots=[tmp_path]).execute(
+        [sys.executable, str(harness)],
+        cwd=workspace,
+        source_workspace=workspace,
+        timeout_seconds=None,
+    )
+
+    assert completed.returncode == 0
+    assert completed.stdout.strip() == "pinned"
+    import_receipt = completed.execution_metadata["repository_python_import"]
+    assert import_receipt["runner_applied"] is True
+    assert import_receipt["source_roots"] == ["packages/fixture_dep/src"]
 
 
 def test_evidence_event_stream_retains_fresh_events_before_empty_current_correction(
@@ -957,7 +1032,6 @@ def test_post_merge_replays_hash_attested_research_harness_in_clean_commit(
         )
         == []
     )
-
     (source / "src" / "core.py").write_text(
         "def run():\n    return 'fixed'\n",
         encoding="utf-8",
@@ -1026,6 +1100,383 @@ def test_post_merge_replays_hash_attested_research_harness_in_clean_commit(
         )
     assert not (source / ".usertest_research").exists()
     assert _git(["status", "--porcelain"], cwd=source) == ""
+
+
+def test_independent_fail_first_harness_binds_selected_mechanism_without_selecting_it(
+    tmp_path: Path,
+) -> None:
+    research = tmp_path / "research"
+    (research / "src").mkdir(parents=True)
+    (research / "src" / "core.py").write_text(
+        "def evaluate():\n    return [1, 2, 3, 4]\n",
+        encoding="utf-8",
+    )
+    harness_path = ".usertest_research/test_outcome.py"
+    harness = research / harness_path
+    harness.parent.mkdir()
+    harness.write_text(
+        "from src.core import evaluate\n\n"
+        "def test_outcome():\n"
+        "    result = evaluate()\n"
+        "    bounded = len(result) <= 3\n"
+        "    outcome = bounded\n"
+        "    assert outcome is True\n",
+        encoding="utf-8",
+    )
+    stdout_path = tmp_path / "stdout.txt"
+    stderr_path = tmp_path / "stderr.txt"
+    node_id = f"{harness_path}::test_outcome"
+    stdout_path.write_text(
+        f"collected 1 item\nFAILED {node_id} - assert False\n"
+        f"{harness_path}:7: AssertionError\n1 failed in 0.01s\n",
+        encoding="utf-8",
+    )
+    stderr_path.write_text("", encoding="utf-8")
+    argv = ["python", "-m", "pytest", node_id]
+    authorization = mod._command_authorization_receipt(
+        {
+            "authorization_kind": "standard_test_or_research_harness",
+            "executed_argv_sha256": mod._canonical_json_sha256(argv),
+            "shell": False,
+            "workspace_confined": True,
+            "artifact_id": "artifact:outcome-harness",
+            "entrypoint_path": harness_path,
+            "entrypoint_sha256": sha256(harness.read_bytes()).hexdigest(),
+        }
+    )
+    setup = mod._replay_setup_receipt(
+        environment_overrides={},
+        disposable_state_paths=[],
+    )
+    revision = "a" * 40
+    observable_assertion = {
+        "source": "exit_code",
+        "operator": "equals",
+        "expected": 1,
+    }
+    experiment = {
+        "experiment_id": "exp-outcome",
+        "scenario_kind": "faithful_replay",
+        "addresses_atom_ids": ["atom:retention"],
+        "command": f"python -m pytest {node_id}",
+        "result": "The production-derived boundedness property is false.",
+        "outcome": "supports",
+        "exit_code": 1,
+        "observable_assertion": observable_assertion,
+        "artifact_refs": ["artifact:outcome-harness"],
+        "positive_outcome_contract": {
+            "contract_kind": "retained_harness_semantic_assertion",
+            "binds_hypothesis_id": "h-retention",
+            "expected_value": True,
+            "semantic_relation": "required_operational_property",
+            "semantic_rationale": (
+                "The source describes bounded retention as the required operational property."
+            ),
+            "semantic_basis": {
+                "kind": "authenticated_semantic_citation",
+                "atom_id": "atom:retention",
+                "field_path": "$.text",
+            },
+        },
+    }
+    replay = {
+        "experiment_id": "exp-outcome",
+        "scenario_kind": "faithful_replay",
+        "addresses_atom_ids": ["atom:retention"],
+        "command": experiment["command"],
+        "executed_argv": argv,
+        "command_authorization": authorization,
+        "declared_result": experiment["result"],
+        "outcome": "supports",
+        "exit_code": 1,
+        "workspace_dir": str(research),
+        "workspace_head": revision,
+        "undeclared_post_replay_mutations": [],
+        "replay_setup_receipt": setup,
+        "stdout_path": str(stdout_path),
+        "stderr_path": str(stderr_path),
+        "stdout_sha256": sha256(stdout_path.read_bytes()).hexdigest(),
+        "stderr_sha256": sha256(stderr_path.read_bytes()).hexdigest(),
+        "observable_assertion": observable_assertion,
+        "assertion_passed": True,
+        "artifact_refs": ["artifact:outcome-harness"],
+    }
+    mechanism = {
+        "mechanism_evidence_id": "mechanism_evidence:selected-before-outcome",
+        "hypothesis_id": "h-retention",
+        "evidence_type": "controlled_scenario",
+        "experiment_ids": ["exp-causal-baseline"],
+        "origin_atom_ids": ["atom:retention"],
+        "mechanism_symbols": ["src.core.evaluate"],
+        "code_paths": [{"symbol": "src.core.evaluate", "path": "src/core.py"}],
+        "causal_root_bindings": [{"kind": "origin_symptom_observation"}],
+        "adversarial_effect": "supports_selection",
+    }
+    selected = _selected_mechanism_binding(
+        hypothesis_id="h-retention",
+        mechanism_evidence=[mechanism],
+        causal_root_evidence_ids=["mechanism_evidence:selected-before-outcome"],
+    )
+    atom = {
+        "atom_id": "atom:retention",
+        "text": "Managed maintenance-image retention must remain bounded after a burst.",
+        "evidence_role": "observation",
+        "origin_stage": "runtime",
+    }
+    assignment = {
+        "atom_receipts": [
+            {
+                "atom_id": "atom:retention",
+                "atom_sha256": mod._canonical_json_sha256(atom),
+                "atom_snapshot": atom,
+            }
+        ]
+    }
+    overlay = {
+        key: value
+        for key, value in mod._workspace_manifest(research).items()
+        if key.startswith(".usertest_research/")
+    }
+    run_dir = tmp_path / "runs" / "usertest" / "research-run"
+    run_dir.mkdir(parents=True)
+    errors: list[str] = []
+    oracles = mod._outcome_oracle_receipts(
+        {
+            "case_id": "case:retention",
+            "repo_revision": revision,
+            "experiments": [experiment],
+            "root_cause_hypotheses": [
+                {
+                    "hypothesis_id": "h-retention",
+                    "mechanism_symbols": ["src.core.evaluate"],
+                }
+            ],
+        },
+        clean_replays={"exp-outcome": replay},
+        mechanism_evidence=[mechanism],
+        **selected,
+        control_verifications=[],
+        falsification_interventions=[],
+        inspected_file_receipts=[],
+        inspected_symbol_receipts=[],
+        evidence_assignment=assignment,
+        atom_bindings=[],
+        planning_workspace=research,
+        research_workspace=research,
+        overlay_manifest=overlay,
+        run_dir=run_dir,
+        repo_revision=revision,
+        errors=errors,
+    )
+
+    assert errors == []
+    assert len(oracles) == 1
+    oracle = oracles[0]
+    binding = oracle["outcome_mechanism_binding"]
+    assert binding["research_experiment_id"] == "exp-outcome"
+    assert binding["selected_mechanism_evidence_ids"] == [
+        "mechanism_evidence:selected-before-outcome"
+    ]
+    assert "exp-outcome" not in mechanism["experiment_ids"]
+    assert binding["assertion_receipts"][0]["line"] == 7
+    assert binding["dataflow_receipt"]["assignment_chain"][-1]["local"] == "outcome"
+    contract = oracle["positive_outcome_contracts"][0]
+    assert contract["kind"] == "retained_research_harness_assertion"
+    assert contract["semantic_review_required"] is True
+    assert contract["semantic_basis"]["provenance"]["basis_kind"] == (
+        "authenticated_semantic_citation"
+    )
+    assert (
+        stage_contracts._validate_outcome_oracles(
+            {
+                "case_id": "case:retention",
+                "repo_revision": revision,
+                "evidence_assignment": assignment,
+            },
+            {
+                "outcome_oracles": [oracle],
+                "experiments": [replay],
+                "mechanism_evidence": [mechanism],
+                **selected,
+                "inspected_files": [],
+                "inspected_symbols": [],
+                "falsification_interventions": [],
+                "proof_adapter_receipts": [],
+                "atom_bindings": [],
+            },
+            pid="problem:retention",
+        )
+        == []
+    )
+    tampered = json.loads(json.dumps(oracle))
+    tampered_binding = tampered["outcome_mechanism_binding"]
+    tampered_binding["hypothesis_id"] = "h-unrelated"
+    tampered_binding["outcome_mechanism_binding_id"] = (
+        "outcome_mechanism_binding:"
+        + mod._canonical_json_sha256(
+            {
+                key: value
+                for key, value in tampered_binding.items()
+                if key != "outcome_mechanism_binding_id"
+            }
+        )
+    )
+    tampered_contract = tampered["positive_outcome_contracts"][0]
+    tampered_contract["outcome_mechanism_binding_id"] = tampered_binding[
+        "outcome_mechanism_binding_id"
+    ]
+    tampered_contract["positive_outcome_contract_id"] = (
+        "positive_outcome_contract:"
+        + mod._canonical_json_sha256(
+            {
+                key: value
+                for key, value in tampered_contract.items()
+                if key != "positive_outcome_contract_id"
+            }
+        )
+    )
+    tampered["outcome_oracle_id"] = "outcome_oracle:" + mod._canonical_json_sha256(
+        {key: value for key, value in tampered.items() if key != "outcome_oracle_id"}
+    )
+    tamper_errors = stage_contracts._validate_outcome_oracles(
+        {
+            "case_id": "case:retention",
+            "repo_revision": revision,
+            "evidence_assignment": assignment,
+        },
+        {
+            "outcome_oracles": [tampered],
+            "experiments": [replay],
+            "mechanism_evidence": [mechanism],
+            **selected,
+            "inspected_files": [],
+            "inspected_symbols": [],
+            "falsification_interventions": [],
+            "proof_adapter_receipts": [],
+            "atom_bindings": [],
+        },
+        pid="problem:retention",
+    )
+    assert "research_outcome_oracle_invalid: problem:retention: 0" in tamper_errors
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            "from src.core import evaluate\n\n"
+            "def test_outcome():\n"
+            "    result = evaluate()\n"
+            "    result = []\n"
+            "    outcome = len(result) <= 3\n"
+            "    assert outcome is True\n"
+        ),
+        (
+            "from src.core import evaluate\n\n"
+            "def test_outcome():\n"
+            "    result = evaluate()\n"
+            "    outcome = (len(result) <= 3) or True\n"
+            "    assert outcome is True\n"
+        ),
+        (
+            "from src.core import evaluate\n\n"
+            "def test_outcome():\n"
+            "    result = evaluate()\n"
+            "    outcome = (len(result) * 0) == 1\n"
+            "    assert outcome is True\n"
+        ),
+        (
+            "import src.core as core\n\n"
+            "def test_outcome(monkeypatch):\n"
+            "    monkeypatch.setattr(core, 'evaluate', lambda: [])\n"
+            "    result = core.evaluate()\n"
+            "    outcome = len(result) <= 3\n"
+            "    assert outcome is True\n"
+        ),
+        (
+            "from src.core import evaluate\n\n"
+            "def test_outcome():\n"
+            "    result = evaluate()\n"
+            "    outcome = result == result\n"
+            "    assert outcome is True\n"
+        ),
+        (
+            "from src.core import evaluate\n\n"
+            "def test_outcome():\n"
+            "    result = evaluate()\n"
+            "    if result:\n"
+            "        outcome = False\n"
+            "    assert outcome is True\n"
+        ),
+        (
+            "from src.core import evaluate\n\n"
+            "def test_outcome():\n"
+            "    result = evaluate()\n"
+            "    return\n"
+            "    assert (len(result) <= 3) is True\n"
+        ),
+        (
+            "import pytest\n"
+            "from src.core import evaluate\n\n"
+            "def test_outcome():\n"
+            "    result = evaluate()\n"
+            "    pytest.skip('not today')\n"
+            "    assert (len(result) <= 3) is True\n"
+        ),
+        (
+            "import pytest\n"
+            "from src.core import evaluate\n\n"
+            "@pytest.mark.xfail\n"
+            "def test_outcome():\n"
+            "    result = evaluate()\n"
+            "    assert (len(result) <= 3) is True\n"
+        ),
+    ],
+)
+def test_outcome_binding_rejects_non_immutable_or_constant_dominated_flow(
+    tmp_path: Path,
+    body: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    (workspace / "src").mkdir(parents=True)
+    (workspace / "src" / "core.py").write_text(
+        "def evaluate():\n    return [1, 2, 3, 4]\n",
+        encoding="utf-8",
+    )
+    harness_path = ".usertest_research/test_outcome.py"
+    harness = workspace / harness_path
+    harness.parent.mkdir()
+    harness.write_text(body, encoding="utf-8")
+    stderr = tmp_path / "stderr.txt"
+    assertion_line = len(body.splitlines())
+    stderr.write_text(
+        "",
+        encoding="utf-8",
+    )
+    stdout = tmp_path / "stdout.txt"
+    node_id = f"{harness_path}::test_outcome"
+    stdout.write_text(
+        f"FAILED {node_id} - assert False\n"
+        f"{harness_path}:{assertion_line}: AssertionError\n1 failed in 0.01s\n",
+        encoding="utf-8",
+    )
+    replay = {
+        "executed_argv": ["python", "-m", "pytest", node_id],
+        "workspace_dir": str(workspace),
+        "stdout_path": str(stdout),
+        "stderr_path": str(stderr),
+    }
+
+    assert (
+        mod._restricted_outcome_assertion_dataflow(
+            experiment={},
+            replay=replay,
+            expected_value=True,
+            mechanism_symbols=["src.core.evaluate"],
+            symbol_paths={"src.core.evaluate": "src/core.py"},
+        )
+        is None
+    )
 
 
 def test_config_oracle_closes_config_state_without_claiming_behavior(
@@ -1545,6 +1996,70 @@ def test_persisted_origin_attachment_receipt_revalidates_chunks_and_reads(
         "origin_attachment_read_attestations": attestations,
     }
 
+    selective_dossier = {"artifact_refs": []}
+    mandatory_requirements = [
+        requirement
+        for requirement in requirements
+        if requirement.get("content_role")
+        in {"assigned_evidence_index", "source_run_context_index"}
+    ]
+    selective_events: list[dict[str, object]] = []
+    selective_attestations: list[dict[str, object]] = []
+    for requirement in mandatory_requirements:
+        requirement_index = requirements.index(requirement)
+        event = events[requirement_index]
+        selective_events.append(event)
+        attestation = dict(attestations[requirement_index])
+        attestation["read_event_index"] = len(selective_events) - 1
+        selective_attestations.append(attestation)
+    selective_receipt = {
+        "origin_attachment_evidence": manifest,
+        "origin_attachment_read_attestations": selective_attestations,
+        "atom_bindings": [],
+    }
+    selective_receipt["origin_attachment_read_coverage"] = (
+        mod.origin_attachment_read_scope(
+            manifest,
+            dossier=selective_dossier,
+            verification=selective_receipt,
+            observed_files=[
+                str(requirement["file"]) for requirement in mandatory_requirements
+            ],
+        )
+    )
+    assert (
+        mod._persisted_origin_attachment_errors(
+            assignment=assignment,
+            receipt=selective_receipt,
+            research_workspace=workspace,
+            persisted_events=selective_events,
+            dossier=selective_dossier,
+        )
+        == []
+    )
+    selective_receipt["origin_attachment_read_coverage"][
+        "unread_optional_file_count"
+    ] += 1
+    assert "research_origin_attachment_read_coverage_changed" in (
+        mod._persisted_origin_attachment_errors(
+            assignment=assignment,
+            receipt=selective_receipt,
+            research_workspace=workspace,
+            persisted_events=selective_events,
+            dossier=selective_dossier,
+        )
+    )
+    selective_receipt["origin_attachment_read_coverage"] = (
+        mod.origin_attachment_read_scope(
+            manifest,
+            dossier=selective_dossier,
+            verification=selective_receipt,
+            observed_files=[
+                str(requirement["file"]) for requirement in mandatory_requirements
+            ],
+        )
+    )
+
     assert (
         mod._persisted_origin_attachment_errors(
             assignment=assignment,
@@ -1568,6 +2083,14 @@ def test_persisted_origin_attachment_receipt_revalidates_chunks_and_reads(
         persisted_events=events,
     )
     assert any("origin_attachment_chunk_changed" in error for error in errors)
+    selective_errors = mod._persisted_origin_attachment_errors(
+        assignment=assignment,
+        receipt=selective_receipt,
+        research_workspace=workspace,
+        persisted_events=selective_events,
+        dossier=selective_dossier,
+    )
+    assert any("origin_attachment_chunk_changed" in error for error in selective_errors)
 
 
 def test_runner_materialized_origin_evidence_is_not_misclassified_as_agent_write(
@@ -1733,6 +2256,162 @@ def _control_dossier(control_target: str) -> tuple[dict[str, object], dict[str, 
     return dossier, replays
 
 
+def _attested_research_pytest_control(
+    workspace: Path,
+    *,
+    helper_source: str | None = None,
+    baseline_call: str = "_probe(fatal=True)",
+    challenge_call: str = "_probe(fatal=False)",
+) -> tuple[dict[str, object], dict[str, dict[str, object]]]:
+    production = workspace / "src" / "core.py"
+    production.parent.mkdir(parents=True)
+    production.write_text(
+        "def classify(*, fatal, extra=False):\n"
+        "    return 'fatal' if fatal else 'notice'\n",
+        encoding="utf-8",
+    )
+    _baseline_repo_commit_existing(workspace, "add classifier")
+    harness = workspace / ".usertest_research" / "test_probe.py"
+    harness.parent.mkdir()
+    helper = helper_source or (
+        "def _probe(*, fatal):\n"
+        "    return classify(fatal=fatal)\n"
+    )
+    harness.write_text(
+        "from src.core import classify\n\n"
+        f"{helper}\n"
+        "def test_baseline():\n"
+        f"    result = {baseline_call}\n"
+        "    print(result)\n"
+        "    assert result in {'fatal', 'notice', 'fixed'}\n\n"
+        "def test_challenge():\n"
+        f"    result = {challenge_call}\n"
+        "    print(result)\n"
+        "    assert result in {'fatal', 'notice', 'fixed'}\n",
+        encoding="utf-8",
+    )
+    baseline_command = (
+        "pytest -p no:cacheprovider "
+        ".usertest_research/test_probe.py::test_baseline -q -s "
+        "--junitxml .usertest_research/baseline.xml"
+    )
+    challenge_command = (
+        "pytest -p no:cacheprovider "
+        ".usertest_research/test_probe.py::test_challenge -q -s "
+        "--junitxml .usertest_research/challenge.xml"
+    )
+    experiments: list[dict[str, object]] = [
+        {
+            "experiment_id": "support",
+            "scenario_kind": "production_function_pytest_replay",
+            "command": baseline_command,
+            "outcome": "supports",
+            "exit_code": 0,
+            "addresses_atom_ids": ["atom:support"],
+            "artifact_refs": ["artifact:test-probe"],
+            "observable_assertion": {
+                "source": "stdout",
+                "operator": "contains",
+                "expected": "fatal",
+            },
+            "repository_bindings": [
+                {
+                    "path": "src/core.py",
+                    "relationship": "The retained harness directly calls this classifier.",
+                }
+            ],
+        },
+        {
+            "experiment_id": "control",
+            "scenario_kind": "control",
+            "command": challenge_command,
+            "outcome": "supports",
+            "exit_code": 0,
+            "addresses_atom_ids": ["atom:support"],
+            "artifact_refs": ["artifact:test-probe"],
+            "observable_assertion": {
+                "source": "stdout",
+                "operator": "not_contains",
+                "expected": "fatal",
+            },
+            "repository_bindings": [
+                {
+                    "path": "src/core.py",
+                    "relationship": "The retained harness directly calls this classifier.",
+                }
+            ],
+            "control_relationship": {
+                "supports_experiment_id": "support",
+                "controlled_variable": "fatal classifier input",
+                "expected_difference": "fatal changes to notice",
+                "mechanism_symbols": ["core.classify"],
+            },
+        },
+    ]
+    dossier: dict[str, object] = {
+        "inspected_files": ["src/core.py"],
+        "artifact_refs": [
+            {
+                "artifact_id": "artifact:test-probe",
+                "kind": "research_harness",
+                "path": ".usertest_research/test_probe.py",
+            }
+        ],
+        "experiments": experiments,
+        "root_cause_hypotheses": [
+            {
+                "hypothesis_id": "h1",
+                "statement": "The fatal input controls the classifier result.",
+                "supporting_evidence": ["support", "control"],
+                "counterevidence": [],
+                "mechanism_symbols": ["core.classify"],
+                "falsification_attempts": [
+                    {
+                        "attempt_id": "attempt:toggle-fatal",
+                        "hypothesis_id": "h1",
+                        "claim": "The fatal input controls the classifier result.",
+                        "baseline_experiment_id": "support",
+                        "challenge_experiment_id": "control",
+                        "disproof_condition": {
+                            "source": "stdout",
+                            "operator": "contains",
+                            "expected": "fatal",
+                        },
+                        "outcome": "survived",
+                    }
+                ],
+            }
+        ],
+    }
+    replays: dict[str, dict[str, object]] = {}
+    for experiment in experiments:
+        command = str(experiment["command"])
+        authorized = mod._authorized_replay_invocation(
+            command=command,
+            experiment=experiment,
+            dossier=dossier,
+            assignment={},
+            workspace=workspace,
+        )
+        assert authorized is not None
+        argv, authorization = authorized
+        replays[str(experiment["experiment_id"])] = {
+            "executed_argv": argv,
+            "command_authorization": authorization,
+            "workspace_dir": str(workspace),
+            "command": command,
+            "declared_result": experiment.get("result"),
+            "exit_code": 0,
+            "outcome": experiment.get("outcome"),
+            "scenario_kind": experiment.get("scenario_kind"),
+            "observable_assertion": experiment.get("observable_assertion"),
+            "assertion_passed": True,
+            "stdout_sha256": "1" * 64,
+            "stderr_sha256": "2" * 64,
+        }
+    return dossier, replays
+
+
 def test_complete_manifest_detects_staged_hidden_and_untracked_production_edits(
     tmp_path: Path,
 ) -> None:
@@ -1766,6 +2445,36 @@ def test_complete_manifest_detects_staged_hidden_and_untracked_production_edits(
     assert "git_index_changed" in errors
     assert receipt["git_index_changed"] is True
     assert receipt["research_overlay_paths"] == [".usertest_research/notes.txt"]
+
+
+def test_workspace_overlay_records_but_does_not_block_generated_virtualenv(
+    tmp_path: Path,
+) -> None:
+    baseline = tmp_path / "baseline"
+    _baseline_repo(baseline)
+    research = tmp_path / "research"
+    _git(["clone", str(baseline), str(research)], cwd=tmp_path)
+    environment_root = research / "packages" / "runner_core" / ".venv"
+    (environment_root / "Scripts").mkdir(parents=True)
+    (environment_root / "pyvenv.cfg").write_text("home = python\n", encoding="utf-8")
+    (environment_root / "Scripts" / "python.exe").write_bytes(b"tool environment")
+    (environment_root.parent / ".pdm-python").write_text(".venv\n", encoding="utf-8")
+    (research / "tests" / "unexpected.py").write_text("changed\n", encoding="utf-8")
+
+    errors, receipt = mod._workspace_overlay_errors(
+        research_workspace=research,
+        baseline_workspace=baseline,
+    )
+
+    assert "untracked_workspace_file:tests/unexpected.py" in errors
+    assert not any("packages/runner_core/.venv" in error for error in errors)
+    assert "untracked_workspace_file:packages/runner_core/.pdm-python" not in errors
+    assert receipt["ignored_tool_environment_roots"] == ["packages/runner_core/.venv"]
+    assert receipt["ignored_tool_environment_paths"] == [
+        "packages/runner_core/.pdm-python",
+        "packages/runner_core/.venv/Scripts/python.exe",
+        "packages/runner_core/.venv/pyvenv.cfg",
+    ]
 
 
 def test_suspicious_diff_classification_is_monotonic() -> None:
@@ -1802,9 +2511,43 @@ def test_canonical_manifest_detects_mode_symlink_and_index_state(tmp_path: Path)
     )
 
     assert "git_index_changed" in errors
-    assert "untracked_workspace_file:.usertest_research/source-link.py" in errors
+    assert "untracked_workspace_file:.usertest_research/source-link.py" not in errors
+    assert receipt["excluded_non_regular_research_paths"] == [".usertest_research/source-link.py"]
+    assert ".usertest_research/source-link.py" not in receipt["research_overlay_manifest"]
     assert receipt["git_index_changed"] is True
     assert receipt["baseline_git_index_sha256"] != receipt["research_git_index_sha256"]
+
+
+def test_unreadable_research_scratch_is_excluded_without_hiding_product_edits(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    baseline = tmp_path / "baseline"
+    _baseline_repo(baseline)
+    research = tmp_path / "research"
+    _git(["clone", str(baseline), str(research)], cwd=tmp_path)
+    scratch = research / ".usertest_research" / "pytest-current"
+    scratch.parent.mkdir()
+    scratch.write_text("host-unreadable reparse surrogate\n", encoding="utf-8")
+    (research / "tests" / "unexpected.py").write_text("changed\n", encoding="utf-8")
+    real_sha256_path = mod._sha256_path
+
+    def fake_sha256_path(path: Path) -> str:
+        if path == scratch:
+            raise OSError(22, "invalid host filename")
+        return real_sha256_path(path)
+
+    monkeypatch.setattr(mod, "_sha256_path", fake_sha256_path)
+
+    errors, receipt = mod._workspace_overlay_errors(
+        research_workspace=research,
+        baseline_workspace=baseline,
+    )
+
+    assert "untracked_workspace_file:tests/unexpected.py" in errors
+    assert "untracked_workspace_file:.usertest_research/pytest-current" not in errors
+    assert receipt["excluded_non_regular_research_paths"] == [".usertest_research/pytest-current"]
+    assert ".usertest_research/pytest-current" not in receipt["research_overlay_manifest"]
 
 
 def test_canonical_manifest_detects_filesystem_mode_change(tmp_path: Path) -> None:
@@ -1916,6 +2659,56 @@ def test_clean_replay_rejects_agent_claim_that_baseline_does_not_reproduce(
     assert receipts["claimed-failure"]["exit_code"] == 0
     assert any(error.startswith("experiment_replay_exit_mismatch") for error in errors)
     assert "experiment_observable_assertion_failed:claimed-failure" in errors
+
+
+@pytest.mark.parametrize("exit_code", [124, 137])
+def test_clean_replay_never_executes_interrupted_inconclusive_attempt(
+    tmp_path: Path,
+    exit_code: int,
+) -> None:
+    class NeverExecute:
+        def isolation_receipt(self, *, source_workspace: Path) -> dict[str, object]:
+            return {
+                "trust_decision": "approved",
+                "trust_reason": "unit_test",
+                "platform": "windows",
+                "source_workspace": str(source_workspace),
+            }
+
+        def execute(self, *args: object, **kwargs: object) -> None:
+            raise AssertionError("interrupted inconclusive attempt must not execute")
+
+    dossier = {
+        "problem_id": "problem:interrupted",
+        "artifact_refs": [],
+        "experiments": [
+            {
+                "experiment_id": "interrupted-control",
+                "command": "python .usertest_research/probe.py",
+                "outcome": "inconclusive",
+                "exit_code": exit_code,
+            }
+        ],
+    }
+    errors: list[str] = []
+
+    receipts = mod._clean_replay_receipts(
+        dossier,
+        baseline_workspace=tmp_path / "baseline",
+        research_workspace=tmp_path / "research",
+        overlay_manifest={},
+        replay_root=tmp_path / "replays",
+        repo_revision="a" * 40,
+        timeout_seconds=None,
+        errors=errors,
+        replay_executor=NeverExecute(),  # type: ignore[arg-type]
+    )
+
+    assert receipts == {}
+    assert errors == [
+        "research_dossier_interrupted_inconclusive_not_replayable:"
+        f"problem:interrupted:experiment=interrupted-control:exit_code={exit_code}"
+    ]
 
 
 def test_clean_replay_copies_hash_attested_overlay_harness(tmp_path: Path) -> None:
@@ -2140,6 +2933,1053 @@ def test_partial_read_cannot_attest_unobserved_symbol(tmp_path: Path) -> None:
     assert "inspected_symbol_unresolved:core.unseen" in errors
 
 
+def test_multiple_partial_reads_retain_earlier_attested_symbol(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    _baseline_repo(workspace)
+    source = workspace / "src" / "core.py"
+    source.write_text(
+        "def earlier():\n    return True\n\ndef later():\n    return False\n",
+        encoding="utf-8",
+    )
+    _git(["add", "src/core.py"], cwd=workspace)
+    _git(["commit", "-m", "two observed ranges"], cwd=workspace)
+
+    events: list[dict[str, object]] = []
+    for observed in (
+        "def earlier():\n    return True\n",
+        "def later():\n    return False\n",
+    ):
+        attestation = observed_read_attestation(
+            path=source,
+            observed_text=observed,
+            source_exit_code=0,
+            allow_partial=True,
+        )
+        events.append(
+            {
+                "type": "read_file",
+                "data": {
+                    "path": "src/core.py",
+                    "bytes": source.stat().st_size,
+                    "read_source": "tool",
+                    "source_exit_code": 0,
+                    **attestation,
+                },
+            }
+        )
+    errors: list[str] = []
+
+    _files, symbols = mod._inspection_receipts(
+        {
+            "inspected_files": ["src/core.py"],
+            "inspected_symbols": ["core.earlier"],
+        },
+        workspace=workspace,
+        events=events,
+        errors=errors,
+    )
+
+    assert errors == []
+    assert symbols == [{"symbol": "core.earlier", "path": "src/core.py"}]
+
+
+def _exact_range_read_event(
+    *,
+    source: Path,
+    relative_path: str,
+    skip_lines: int,
+    first_lines: int,
+) -> dict[str, object]:
+    normalized = source.read_text(encoding="utf-8").replace("\r\n", "\n").replace("\r", "\n")
+    observed = "".join(
+        normalized.splitlines(keepends=True)[skip_lines : skip_lines + first_lines]
+    )
+    attestation = observed_read_attestation(
+        path=source,
+        observed_text=observed,
+        source_exit_code=0,
+        allow_partial=True,
+    )
+    return {
+        "type": "read_file",
+        "data": {
+            "path": relative_path,
+            "bytes": source.stat().st_size,
+            "read_source": "shell_command",
+            "attestation_kind": "exact_line_range",
+            "source_exit_code": 0,
+            "requested_skip_lines": skip_lines,
+            "requested_first_lines": first_lines,
+            **attestation,
+        },
+    }
+
+
+def test_exact_range_read_revalidation_rejects_unmintable_partial_shell_shapes(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.py"
+    source.write_text(
+        "def earlier():\n    return True\n\ndef later():\n    return False\n",
+        encoding="utf-8",
+    )
+    event = _exact_range_read_event(
+        source=source,
+        relative_path="source.py",
+        skip_lines=0,
+        first_lines=2,
+    )
+    data = event["data"]
+    assert isinstance(data, dict)
+
+    assert mod._revalidated_read_event_attestation(path=source, data=data) is not None
+
+    generic_shell = {key: value for key, value in data.items() if key != "attestation_kind"}
+    assert mod._revalidated_read_event_attestation(path=source, data=generic_shell) is None
+
+    wrong_range = {**data, "requested_skip_lines": 3}
+    assert mod._revalidated_read_event_attestation(path=source, data=wrong_range) is None
+
+    invalid_count = {**data, "requested_first_lines": 2_001}
+    assert mod._revalidated_read_event_attestation(path=source, data=invalid_count) is None
+
+
+class _LocalDockerReceiptExecutor:
+    """Local test double that emits the same durable metadata contract as Docker."""
+
+    def __init__(self, image_ref: str) -> None:
+        self.image_ref = image_ref
+
+    def isolation_receipt(self, *, source_workspace: Path) -> dict[str, object]:
+        pythonpath, _receipt = mod._repository_python_import_environment(
+            source_workspace,
+            execution_root="/workspace",
+            path_separator=":",
+        )
+        return {
+            "executor": "docker",
+            "platform": "linux",
+            "os_sandbox": True,
+            "network": "none",
+            "filesystem_isolation": "dedicated_clone_bind_mount",
+            "trust_decision": "explicit_image",
+            "trust_reason": self.image_ref,
+            "source_workspace": str(source_workspace.resolve()),
+            "sanitized_environment_keys": [
+                "CI",
+                *(["PYTHONPATH"] if pythonpath is not None else []),
+            ],
+        }
+
+    def execute(
+        self,
+        argv: list[str],
+        *,
+        cwd: Path,
+        source_workspace: Path,
+        timeout_seconds: float | None,
+        environment_overrides: dict[str, str | None] | None = None,
+    ) -> mod.ReplayExecutionResult:
+        del source_workspace
+        environment = os.environ.copy()
+        environment.update({"CI": "1", "PYTHONDONTWRITEBYTECODE": "1"})
+        for key, value in (environment_overrides or {}).items():
+            if value is None:
+                environment.pop(key, None)
+            else:
+                environment[key] = value
+        executed = list(argv)
+        if Path(executed[0]).name.casefold() in {"python", "python3", "python.exe"}:
+            executed[0] = sys.executable
+        completed = subprocess.run(
+            executed,
+            cwd=cwd,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            check=False,
+            timeout=timeout_seconds,
+            env=environment,
+        )
+        container_name = "test-" + sha256(str(cwd).encode()).hexdigest()[:12]
+        metadata_dir = cwd.parent / f".{cwd.name}.docker_replay"
+        metadata_dir.mkdir(parents=True, exist_ok=True)
+        metadata_path = metadata_dir / "sandbox.json"
+        metadata_path.write_text(
+            json.dumps(
+                {
+                    "backend": "docker",
+                    "network_mode": "none",
+                    "container_name": container_name,
+                    "image_tag": self.image_ref,
+                }
+            ),
+            encoding="utf-8",
+        )
+        pythonpath, import_receipt = mod._repository_python_import_environment(
+            cwd,
+            execution_root="/workspace",
+            path_separator=":",
+        )
+        applied_environment = {
+            "CI": "1",
+            **({"PYTHONPATH": pythonpath} if pythonpath is not None else {}),
+        }
+        return mod.ReplayExecutionResult(
+            returncode=completed.returncode,
+            stdout=completed.stdout or "",
+            stderr=completed.stderr or "",
+            execution_metadata={
+                "executor": "docker",
+                "sandbox_metadata_path": str(metadata_path),
+                "sandbox_metadata_sha256": sha256(metadata_path.read_bytes()).hexdigest(),
+                "backend": "docker",
+                "image_tag": self.image_ref,
+                "image_hash": None,
+                "image_id": "sha256:" + sha256(self.image_ref.encode()).hexdigest(),
+                "network": "none",
+                "container_name": container_name,
+                "cleanup_attempted": True,
+                "cleanup_confirmed": True,
+                "environment_attestation": mod.environment_attestation(applied_environment),
+                "repository_python_import": import_receipt,
+            },
+        )
+
+
+def _persisted_router_overlay_dossier(tmp_path: Path) -> dict[str, object]:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "pyproject.toml").write_text(
+        '[project]\nname = "persisted-symmetry"\nversion = "0.0.0"\n',
+        encoding="utf-8",
+    )
+    source = workspace / "src" / "core.py"
+    source.parent.mkdir()
+    source.write_text(
+        "def earlier():\n"
+        "    return True\n\n"
+        "padding_1 = 1\n"
+        "padding_2 = 2\n"
+        "padding_3 = 3\n\n"
+        "def later():\n"
+        "    return False\n",
+        encoding="utf-8",
+    )
+    revision = _baseline_repo_commit_existing(workspace, "persisted verifier symmetry")
+    harness = workspace / ".usertest_research" / "probe.py"
+    harness.parent.mkdir()
+    harness.write_text('print("{\\"signal\\":\\"probe-ok\\"}")\n', encoding="utf-8")
+
+    atom_id = "atom:persisted-symmetry"
+    assignment = _runner_bound_atom_assignment(
+        atom_id=atom_id,
+        atom_snapshot={
+            "atom_id": atom_id,
+            "signal": "probe-ok",
+            "text": "The observed signal is probe-ok.",
+            "evidence_role": "observation",
+            "origin_stage": "runtime",
+        },
+    )
+    assignment.update(
+        case_id="case:persisted-symmetry",
+        problem_id="problem:persisted-symmetry",
+    )
+    assignment["assignment_sha256"] = mod.evidence_assignment_sha256(assignment)
+    experiments: list[dict[str, object]] = []
+    for experiment_id, platform_requirement in (
+        ("experiment:router-default", None),
+        ("experiment:router-linux", "linux"),
+    ):
+        experiment: dict[str, object] = {
+            "experiment_id": experiment_id,
+            "scenario_kind": "diagnostic_probe",
+            "addresses_atom_ids": [atom_id],
+            "origin_evidence_bindings": [
+                {
+                    "atom_id": atom_id,
+                    "role": "symptom",
+                    "field_path": "$.signal",
+                    "value": "probe-ok",
+                }
+            ],
+            "command": "python .usertest_research/probe.py",
+            "result": "The retained research harness emitted the assigned probe signal.",
+            "outcome": "supports",
+            "exit_code": 0,
+            "observable_assertion": {
+                "source": "stdout",
+                "operator": "contains",
+                "expected": '"signal":"probe-ok"',
+            },
+            "artifact_refs": ["artifact:probe-harness"],
+        }
+        if platform_requirement is not None:
+            experiment["platform_requirement"] = platform_requirement
+        experiments.append(experiment)
+    dossier: dict[str, object] = {
+        "research_schema_version": 3,
+        "case_id": "case:persisted-symmetry",
+        "problem_id": "problem:persisted-symmetry",
+        "repo_revision": revision,
+        "research_method": "persisted verifier symmetry regression",
+        "reproduction_status": "partial",
+        "research_status": "insufficient_evidence",
+        "writes_used": True,
+        "writes_purpose": ["retained research harness"],
+        "implementation_performed": False,
+        "artifact_refs": [
+            {
+                "artifact_id": "artifact:probe-harness",
+                "kind": "research_harness",
+                "path": ".usertest_research/probe.py",
+                "description": "Retained research-only probe",
+            }
+        ],
+        "experiments": experiments,
+        "inspected_files": ["src/core.py"],
+        "inspected_symbols": ["core.earlier"],
+        "root_cause_hypotheses": [
+            {
+                "hypothesis_id": "hypothesis:incomplete-mechanism",
+                "statement": "The available probe does not yet establish the production mechanism.",
+                "supporting_evidence": ["experiment:router-default"],
+                "counterevidence": [],
+                "mechanism_symbols": ["core.earlier"],
+                "disposition": "primary",
+                "disposition_evidence": ["experiment:router-default"],
+                "falsification_attempts": [],
+            }
+        ],
+        "root_cause_confidence": 0.2,
+        "broader_class_assessment": "unknown",
+        "material_unknowns": ["The production causal path remains unverified."],
+        "blocking_reasons": ["mechanism evidence is incomplete"],
+        "evidence_boundaries": [],
+        "case_relation_assessment": {
+            "disposition": "retain",
+            "rationale": "The regression fixture retains one signed occurrence.",
+            "facets": [],
+            "material_unknowns": ["The mechanism remains incomplete."],
+        },
+        "evidence_assignment": assignment,
+    }
+    run_dir = tmp_path / "research-run"
+    run_dir.mkdir()
+    (run_dir / "report.json").write_text('{"status":"complete"}\n', encoding="utf-8")
+    (run_dir / "workspace_ref.json").write_text(
+        json.dumps({"workspace_dir": str(workspace)}),
+        encoding="utf-8",
+    )
+    (run_dir / "target_ref.json").write_text(
+        json.dumps({"ref": revision, "commit_sha": revision, "agent": "claude"}),
+        encoding="utf-8",
+    )
+    events: list[dict[str, object]] = [
+        {
+            "type": "run_command",
+            "data": {"command": "python .usertest_research/probe.py", "exit_code": 0},
+        },
+        {
+            "type": "run_command",
+            "data": {"command": "python .usertest_research/probe.py", "exit_code": 0},
+        },
+        _exact_range_read_event(
+            source=source,
+            relative_path="src/core.py",
+            skip_lines=0,
+            first_lines=2,
+        ),
+        _exact_range_read_event(
+            source=source,
+            relative_path="src/core.py",
+            skip_lines=7,
+            first_lines=2,
+        ),
+    ]
+    _write_normalized_events(run_dir / "normalized_events.jsonl", events)
+    artifact_refs = dossier["artifact_refs"]
+    assert isinstance(artifact_refs, list)
+    artifact_refs.append(
+        {
+            "artifact_id": "runner:target_ref",
+            "kind": "runner_provenance",
+            "path": str(run_dir / "target_ref.json"),
+        }
+    )
+    default_executor = _LocalDockerReceiptExecutor("test/default:immutable")
+    linux_executor = _LocalDockerReceiptExecutor("test/linux:immutable")
+    receipt = mod.verify_research_evidence(
+        dossier,
+        run_dir=run_dir,
+        repo_revision=revision,
+        case_id="case:persisted-symmetry",
+        problem_id="problem:persisted-symmetry",
+        expected_case_id="case:persisted-symmetry",
+        expected_problem_id="problem:persisted-symmetry",
+        evidence_assignment=assignment,
+        evidence_atom_ids=[atom_id],
+        revision_view_destination=tmp_path / "revision-view",
+        replay_timeout_seconds=None,
+        requested_repo_ref=revision,
+        resolved_repo_ref=revision,
+        replay_executor=mod.PlatformRoutingReplayExecutor(
+            default_executor=default_executor,
+            platform_executors={"linux": linux_executor},
+        ),
+    )
+    dossier["evidence_verification"] = receipt
+    assert receipt["status"] == "verified", receipt["errors"]
+    return dossier
+
+
+def test_persisted_verifier_roundtrips_router_overlay_ranges_and_incomplete_mechanism(
+    tmp_path: Path,
+) -> None:
+    dossier = _persisted_router_overlay_dossier(tmp_path)
+    receipt = dossier["evidence_verification"]
+    assert isinstance(receipt, dict)
+
+    valid, errors = mod.verify_persisted_research_evidence(dossier)
+
+    assert valid is True
+    assert errors == []
+    assert receipt["experiments"][0]["execution_isolation"]["trust_reason"] == (
+        "test/default:immutable"
+    )
+    assert receipt["experiments"][1]["execution_isolation"]["trust_reason"] == (
+        "test/linux:immutable"
+    )
+    assert any(
+        item["component"] == "blocked_or_insufficient_mechanism_projection"
+        for item in receipt["quarantined_diagnostics"]
+    )
+
+    route_tampered = deepcopy(dossier)
+    route_receipt = route_tampered["evidence_verification"]
+    assert isinstance(route_receipt, dict)
+    route_receipt["experiments"][0]["execution_isolation"] = deepcopy(
+        route_receipt["replay_isolation"]["routes"]["linux"]
+    )
+    route_receipt["receipt_sha256"] = stage_contracts.evidence_verification_sha256(route_receipt)
+    route_valid, route_errors = mod.verify_persisted_research_evidence(route_tampered)
+    assert route_valid is False
+    assert (
+        "research_replay_isolation_changed:experiment:router-default:route_mismatch"
+        in route_errors
+    )
+
+    quarantine_tampered = deepcopy(dossier)
+    quarantine_receipt = quarantine_tampered["evidence_verification"]
+    assert isinstance(quarantine_receipt, dict)
+    quarantine_receipt["quarantined_diagnostics"] = []
+    quarantine_receipt["receipt_sha256"] = stage_contracts.evidence_verification_sha256(
+        quarantine_receipt
+    )
+    quarantine_valid, quarantine_errors = mod.verify_persisted_research_evidence(
+        quarantine_tampered
+    )
+    assert quarantine_valid is False
+    assert "research_quarantined_diagnostics_changed" in quarantine_errors
+
+
+def test_persisted_verifier_accepts_legacy_absent_additive_empty_overlay_fields(
+    tmp_path: Path,
+) -> None:
+    dossier = _persisted_router_overlay_dossier(tmp_path)
+    receipt = dossier["evidence_verification"]
+    assert isinstance(receipt, dict)
+    overlay = receipt["workspace_overlay"]
+    assert isinstance(overlay, dict)
+    for field in (
+        "excluded_non_regular_research_paths",
+        "ignored_tool_environment_roots",
+        "ignored_tool_environment_paths",
+    ):
+        assert overlay.pop(field) == []
+    receipt["receipt_sha256"] = stage_contracts.evidence_verification_sha256(receipt)
+
+    valid, errors = mod.verify_persisted_research_evidence(dossier)
+
+    assert valid is True
+    assert errors == []
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "excluded_non_regular_research_paths",
+        "ignored_tool_environment_roots",
+        "ignored_tool_environment_paths",
+    ],
+)
+def test_persisted_overlay_legacy_omission_rejects_nonempty_current_value(field: str) -> None:
+    recomputed = {
+        "stable_field": "unchanged",
+        "excluded_non_regular_research_paths": [],
+        "ignored_tool_environment_roots": [],
+        "ignored_tool_environment_paths": [],
+    }
+    recomputed[field] = ["current/nonempty"]
+    persisted = {key: value for key, value in recomputed.items() if key != field}
+
+    assert mod._persisted_workspace_overlay_matches(persisted, recomputed) is False
+
+
+def _retained_overlay_asset_fixture(
+    tmp_path: Path,
+) -> tuple[dict[str, object], dict[str, object], Path, Path, Path]:
+    planning = tmp_path / "planning"
+    source = planning / "packages" / "runtime" / "src" / "runtime" / "backend.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def mechanism():\n    return 49\n", encoding="utf-8")
+    revision = _baseline_repo_commit_existing(planning, "add retained-overlay mechanism")
+    research = tmp_path / "research"
+    _git(["clone", str(planning), str(research)], cwd=tmp_path)
+    harness = research / ".usertest_research" / "test_probe.py"
+    harness.parent.mkdir()
+    harness.write_text(
+        "from runtime.backend import mechanism\n\n"
+        "def test_probe():\n"
+        "    assert mechanism() == 5\n",
+        encoding="utf-8",
+    )
+    overlay_errors, overlay = mod._workspace_overlay_errors(
+        research_workspace=research,
+        baseline_workspace=planning,
+    )
+    assert overlay_errors == []
+    run_dir = tmp_path / "runs" / "stage3" / "accepted-run"
+    run_dir.mkdir(parents=True)
+    asset_errors: list[str] = []
+    asset = mod._persist_outcome_overlay_asset(
+        run_dir=run_dir,
+        research_workspace=research,
+        overlay_manifest=overlay["research_overlay_manifest"],
+        errors=asset_errors,
+    )
+    assert asset_errors == []
+    assert isinstance(asset, dict)
+    dossier: dict[str, object] = {
+        "case_id": "case:retained-overlay",
+        "problem_id": "problem:retained-overlay",
+        "repo_revision": revision,
+        "inspected_files": ["packages/runtime/src/runtime/backend.py"],
+        "artifact_refs": [
+            {
+                "artifact_id": "artifact:test-probe",
+                "kind": "research_harness",
+                "path": ".usertest_research/test_probe.py",
+            }
+        ],
+    }
+    receipt: dict[str, object] = {
+        "run_dir": str(run_dir),
+        "workspace_dir": str(research),
+        "workspace_overlay": overlay,
+        "verified_mechanism_sha256": "a" * 64,
+        "verified_mechanism_provenance_sha256": "b" * 64,
+        "outcome_oracles": [
+            {
+                "case_id": dossier["case_id"],
+                "repo_revision": revision,
+                "primary_verified_mechanism_sha256": "a" * 64,
+                "primary_verified_mechanism_provenance_sha256": "b" * 64,
+                "asset": asset,
+            }
+        ],
+    }
+    return dossier, receipt, planning, research, harness
+
+
+def test_persisted_verifier_recovers_exact_overlay_and_authorization_from_same_run_asset(
+    tmp_path: Path,
+) -> None:
+    dossier, receipt, planning, research, harness = _retained_overlay_asset_fixture(tmp_path)
+    experiment = {
+        "scenario_kind": "faithful_replay",
+        "repository_bindings": [
+            {
+                "path": "packages/runtime/src/runtime/backend.py",
+                "relationship": "The retained harness imports this inspected production module.",
+            }
+        ],
+    }
+    command = "python -B -m pytest -q .usertest_research/test_probe.py::test_probe"
+    original = mod._authorized_replay_invocation(
+        command=command,
+        experiment=experiment,
+        dossier=dossier,
+        assignment={},
+        workspace=research,
+    )
+    assert original is not None
+    original_sha256 = mod._sha256_path(harness)
+    original_size = harness.stat().st_size
+    harness.write_text("def test_probe():\n    assert False\n", encoding="utf-8")
+
+    bundle, manifest, errors = mod._authenticated_retained_overlay_workspace(
+        dossier=dossier,
+        receipt=receipt,
+        run_dir=Path(str(receipt["run_dir"])),
+        planning_workspace=planning,
+    )
+
+    assert errors == []
+    assert bundle is not None
+    assert mod._sha256_path(bundle / ".usertest_research" / "test_probe.py") == original_sha256
+    artifact = {
+        "artifact_id": "artifact:test-probe",
+        "path": str(harness),
+        "sha256": original_sha256,
+        "size_bytes": original_size,
+    }
+    assert mod._persisted_artifact_path(
+        artifact,
+        original_research_workspace=research,
+        retained_overlay_workspace=bundle,
+        retained_overlay_manifest=manifest,
+        planning_workspace=planning,
+    ) == bundle / ".usertest_research" / "test_probe.py"
+    reconstructed = mod._persisted_retained_authorized_invocation(
+        command=command,
+        experiment=experiment,
+        dossier=dossier,
+        assignment={},
+        retained_workspace=bundle,
+        retained_manifest=manifest,
+        planning_workspace=planning,
+        persisted_authorization=original[1],
+    )
+    assert reconstructed == original
+
+    legacy = mod._command_authorization_receipt(
+        {
+            "authorization_kind": "declared_repository_bindings",
+            "executed_argv_sha256": mod._canonical_json_sha256(original[0]),
+            "shell": False,
+            "workspace_confined": True,
+            "repository_bindings": original[1]["repository_bindings"],
+        }
+    )
+    assert mod._persisted_retained_authorized_invocation(
+        command=command,
+        experiment=experiment,
+        dossier=dossier,
+        assignment={},
+        retained_workspace=bundle,
+        retained_manifest=manifest,
+        planning_workspace=planning,
+        persisted_authorization=legacy,
+    ) == (original[0], legacy)
+
+
+def test_persisted_retained_overlay_rejects_content_tamper(tmp_path: Path) -> None:
+    dossier, receipt, planning, _research, _harness = _retained_overlay_asset_fixture(tmp_path)
+    asset = receipt["outcome_oracles"][0]["asset"]
+    bundle = tmp_path / "runs" / str(asset["runs_relative_path"])
+    retained_harness = bundle / ".usertest_research" / "test_probe.py"
+    retained_harness.write_text(retained_harness.read_text() + "# tamper\n", encoding="utf-8")
+
+    resolved, manifest, errors = mod._authenticated_retained_overlay_workspace(
+        dossier=dossier,
+        receipt=receipt,
+        run_dir=Path(str(receipt["run_dir"])),
+        planning_workspace=planning,
+    )
+
+    assert resolved is None
+    assert manifest == {}
+    assert "research_retained_overlay_asset_content_changed" in errors
+
+
+@pytest.mark.parametrize("tamper", ["manifest", "declared_path", "asset_id", "oracle_binding"])
+def test_persisted_retained_overlay_rejects_untrusted_asset_bindings(
+    tmp_path: Path,
+    tamper: str,
+) -> None:
+    dossier, original_receipt, planning, _research, _harness = (
+        _retained_overlay_asset_fixture(tmp_path)
+    )
+    receipt = deepcopy(original_receipt)
+    oracle = receipt["outcome_oracles"][0]
+    asset = oracle["asset"]
+    if tamper == "manifest":
+        asset["manifest"][".usertest_research/test_probe.py"]["sha256"] = "0" * 64
+    elif tamper == "declared_path":
+        asset["runs_relative_path"] = "stage3/accepted-run/../forged/bundle"
+    elif tamper == "asset_id":
+        asset["asset_id"] = "outcome_asset:" + "0" * 64
+    else:
+        oracle["repo_revision"] = "0" * 40
+
+    resolved, manifest, errors = mod._authenticated_retained_overlay_workspace(
+        dossier=dossier,
+        receipt=receipt,
+        run_dir=Path(str(receipt["run_dir"])),
+        planning_workspace=planning,
+    )
+
+    assert resolved is None
+    assert manifest == {}
+    assert errors
+
+
+@pytest.mark.parametrize("drift", ["tracked_content", "planning_head"])
+def test_persisted_retained_overlay_does_not_forgive_pinned_planning_drift(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    dossier, receipt, planning, _research, _harness = _retained_overlay_asset_fixture(tmp_path)
+    source = planning / "packages" / "runtime" / "src" / "runtime" / "backend.py"
+    source.write_text("def mechanism():\n    return 5\n", encoding="utf-8")
+    if drift == "planning_head":
+        _git(["add", "-A"], cwd=planning)
+        _git(["commit", "-m", "drift"], cwd=planning)
+
+    resolved, manifest, errors = mod._authenticated_retained_overlay_workspace(
+        dossier=dossier,
+        receipt=receipt,
+        run_dir=Path(str(receipt["run_dir"])),
+        planning_workspace=planning,
+    )
+
+    assert resolved is None
+    assert manifest == {}
+    assert any(error.startswith("research_retained_overlay_baseline_") for error in errors)
+
+
+def test_persisted_verifier_still_rejects_runner_artifact_drift(tmp_path: Path) -> None:
+    dossier = _persisted_router_overlay_dossier(tmp_path)
+    receipt = dossier["evidence_verification"]
+    receipt["normalized_events_sha256"] = "0" * 64
+    receipt["receipt_sha256"] = stage_contracts.evidence_verification_sha256(receipt)
+
+    valid, errors = mod.verify_persisted_research_evidence(dossier)
+
+    assert valid is False
+    assert "research_runner_artifact_changed:normalized_events.jsonl" in errors
+
+
+def _verified_retained_harness_dossier(tmp_path: Path) -> tuple[dict[str, object], Path, Path]:
+    workspace = tmp_path / "workspace"
+    source = workspace / "packages" / "runtime" / "src" / "runtime" / "backend.py"
+    source.parent.mkdir(parents=True)
+    source.write_text(
+        "import os\n\ndef mode():\n    return os.getenv('BACKLOG_DEPTH_VERIFY_MODE')\n",
+        encoding="utf-8",
+    )
+    (workspace / "packages" / "runtime" / "pyproject.toml").write_text(
+        "[project]\nname = 'runtime'\nversion = '0.0.0'\n",
+        encoding="utf-8",
+    )
+    revision = _baseline_repo_commit_existing(workspace, "add environment consumer")
+    harness = workspace / ".usertest_research" / "environment_probe.py"
+    harness.parent.mkdir()
+    harness.write_text(
+        "import json\n"
+        "from runtime.backend import mode\n"
+        "print(json.dumps({'mode': mode()}, separators=(',', ':')))\n",
+        encoding="utf-8",
+    )
+    command = "python .usertest_research/environment_probe.py"
+    atom_id = "atom:retained-harness"
+    atom = {
+        "atom_id": atom_id,
+        "observed_output": '{"mode":null}',
+        "expected_mode": "ready",
+        "text": "The mode was null even though the required mode is ready.",
+        "evidence_role": "observation",
+        "origin_stage": "runtime",
+    }
+    assignment = _runner_bound_atom_assignment(atom_id=atom_id, atom_snapshot=atom)
+    assignment.update(
+        case_id="case:retained-harness",
+        problem_id="problem:retained-harness",
+    )
+    assignment["atom_receipts"][0]["origin_evidence_mode"] = "signed_snapshot"
+    assignment["assignment_sha256"] = mod.evidence_assignment_sha256(assignment)
+    claim = {
+        "adapter_id": "environment.v1",
+        "hypothesis_id": "hypothesis:retained-environment",
+        "baseline_experiment_id": "experiment:mode-absent",
+        "challenge_experiment_id": "experiment:mode-ready",
+        "intervention": {
+            "kind": "child_environment_variable",
+            "target": "env:BACKLOG_DEPTH_VERIFY_MODE",
+            "predicted_polarity": "absent_to_ready",
+            "before": None,
+            "after": "ready",
+        },
+        "observations": {
+            "baseline": {"source": "stdout_json", "json_pointer": "/mode"},
+            "challenge": {"source": "stdout_json", "json_pointer": "/mode"},
+        },
+        "positive_outcome": {
+            "predicate": {"kind": "equals", "expected": "ready"},
+            "semantic_basis": {
+                "kind": "origin_exact_value",
+                "atom_id": atom_id,
+                "field_path": "$.expected_mode",
+            },
+        },
+        "implementation_touchpoints": [
+            {
+                "causal_locator": "env:BACKLOG_DEPTH_VERIFY_MODE",
+                "path": "packages/runtime/src/runtime/backend.py",
+                "symbols": ["runtime.backend.mode"],
+                "relationship": "This inspected production function consumes the controlled mode.",
+            }
+        ],
+    }
+    experiments = [
+        {
+            "experiment_id": "experiment:mode-absent",
+            "scenario_kind": "environment_mode_absent",
+            "addresses_atom_ids": [atom_id],
+            "command": command,
+            "result": "The clean child reports a null mode.",
+            "outcome": "supports",
+            "exit_code": 0,
+            "replay_setup": {"environment": {"BACKLOG_DEPTH_VERIFY_MODE": None}},
+            "observable_assertion": {
+                "source": "stdout",
+                "operator": "contains",
+                "expected": '{"mode":null}',
+            },
+            "origin_evidence_bindings": [
+                {
+                    "atom_id": atom_id,
+                    "role": "symptom",
+                    "field_path": "$.observed_output",
+                    "value": '{"mode":null}',
+                    "value_sha256": mod._canonical_json_sha256('{"mode":null}'),
+                }
+            ],
+            "artifact_refs": ["artifact:environment-probe"],
+        },
+        {
+            "experiment_id": "experiment:mode-ready",
+            "scenario_kind": "environment_mode_ready",
+            "addresses_atom_ids": [atom_id],
+            "command": command,
+            "result": "The controlled child reports ready.",
+            "outcome": "supports",
+            "exit_code": 0,
+            "replay_setup": {"environment": {"BACKLOG_DEPTH_VERIFY_MODE": "ready"}},
+            "observable_assertion": {
+                "source": "stdout",
+                "operator": "contains",
+                "expected": '{"mode":"ready"}',
+            },
+            "origin_evidence_bindings": [
+                {
+                    "atom_id": atom_id,
+                    "role": "symptom",
+                    "field_path": "$.expected_mode",
+                    "value": "ready",
+                    "value_sha256": mod._canonical_json_sha256("ready"),
+                }
+            ],
+            "artifact_refs": ["artifact:environment-probe"],
+            "proof_adapter": claim,
+        },
+    ]
+    statement = "The child environment value controls the emitted mode."
+    dossier: dict[str, object] = {
+        "research_schema_version": 3,
+        "case_id": "case:retained-harness",
+        "problem_id": "problem:retained-harness",
+        "repo_revision": revision,
+        "research_method": "runner_retained_environment_harness",
+        "reproduction_status": "reproduced",
+        "research_status": "evidence_sufficient",
+        "writes_used": True,
+        "writes_purpose": ["retained research harness"],
+        "implementation_performed": False,
+        "diff_classification": "allowed_research_edits",
+        "artifact_refs": [
+            {
+                "artifact_id": "artifact:environment-probe",
+                "kind": "research_harness",
+                "path": ".usertest_research/environment_probe.py",
+            }
+        ],
+        "experiments": experiments,
+        "inspected_files": ["packages/runtime/src/runtime/backend.py"],
+        "inspected_symbols": ["runtime.backend.mode"],
+        "root_cause_hypotheses": [
+            {
+                "hypothesis_id": "hypothesis:retained-environment",
+                "statement": statement,
+                "supporting_evidence": [
+                    "experiment:mode-absent",
+                    "experiment:mode-ready",
+                ],
+                "counterevidence": [],
+                "mechanism_symbols": ["env:BACKLOG_DEPTH_VERIFY_MODE"],
+                "disposition": "primary",
+                "disposition_evidence": ["experiment:mode-ready"],
+                "falsification_attempts": [
+                    {
+                        "attempt_id": "attempt:environment-does-not-control-output",
+                        "hypothesis_id": "hypothesis:retained-environment",
+                        "claim": statement,
+                        "baseline_experiment_id": "experiment:mode-absent",
+                        "challenge_experiment_id": "experiment:mode-ready",
+                        "disproof_condition": {
+                            "source": "stdout",
+                            "operator": "not_contains",
+                            "expected": '{"mode":"ready"}',
+                        },
+                        "outcome": "survived",
+                    }
+                ],
+            }
+        ],
+        "root_cause_confidence": 0.75,
+        "broader_class_assessment": "unknown",
+        "case_relation_assessment": {
+            "disposition": "retain",
+            "rationale": "The source occurrence and verified environment mechanism are one unit.",
+            "facets": [],
+            "material_unknowns": [],
+        },
+        "material_unknowns": [],
+        "blocking_reasons": [],
+        "evidence_boundaries": [],
+        "evidence_assignment": assignment,
+    }
+    run_dir = tmp_path / "runs" / "stage3" / "accepted-run"
+    run_dir.mkdir(parents=True)
+    (run_dir / "report.json").write_text(
+        json.dumps({"schema_version": 1, "kind": "troubleshoot_v1", "status": "success"}),
+        encoding="utf-8",
+    )
+    (run_dir / "workspace_ref.json").write_text(
+        json.dumps({"workspace_dir": str(workspace)}),
+        encoding="utf-8",
+    )
+    (run_dir / "target_ref.json").write_text(
+        json.dumps({"ref": revision, "commit_sha": revision, "agent": "claude"}),
+        encoding="utf-8",
+    )
+    dossier["artifact_refs"].append(
+        {
+            "artifact_id": "runner:target_ref",
+            "kind": "runner_provenance",
+            "path": str(run_dir / "target_ref.json"),
+        }
+    )
+    source_text = source.read_text(encoding="utf-8")
+    harness_text = harness.read_text(encoding="utf-8")
+    events = [
+        {"type": "run_command", "data": {"command": command, "exit_code": 0}},
+        {"type": "run_command", "data": {"command": command, "exit_code": 0}},
+        {
+            "type": "read_file",
+            "data": {
+                "path": "packages/runtime/src/runtime/backend.py",
+                "bytes": source.stat().st_size,
+                "read_source": "tool",
+                "source_exit_code": 0,
+                **observed_read_attestation(
+                    path=source,
+                    observed_text=source_text,
+                    source_exit_code=0,
+                    allow_partial=False,
+                ),
+            },
+        },
+        {
+            "type": "read_file",
+            "data": {
+                "path": ".usertest_research/environment_probe.py",
+                "bytes": harness.stat().st_size,
+                "read_source": "tool",
+                "source_exit_code": 0,
+                **observed_read_attestation(
+                    path=harness,
+                    observed_text=harness_text,
+                    source_exit_code=0,
+                    allow_partial=False,
+                ),
+            },
+        },
+    ]
+    _write_normalized_events(run_dir / "normalized_events.jsonl", events)
+    receipt = mod.verify_research_evidence(
+        dossier,
+        run_dir=run_dir,
+        repo_revision=revision,
+        case_id=str(dossier["case_id"]),
+        problem_id=str(dossier["problem_id"]),
+        expected_case_id=str(dossier["case_id"]),
+        expected_problem_id=str(dossier["problem_id"]),
+        evidence_assignment=assignment,
+        evidence_atom_ids=[atom_id],
+        revision_view_destination=tmp_path / "revision-view",
+        replay_timeout_seconds=None,
+        requested_repo_ref=revision,
+        resolved_repo_ref=revision,
+        replay_executor=mod.TrustedHostReplayExecutor(
+            approved_source_roots=[tmp_path],
+            source_identity=workspace,
+        ),
+    )
+    dossier["evidence_verification"] = receipt
+    assert receipt["status"] == "verified", receipt["errors"]
+    assert len(receipt["outcome_oracles"]) == 1
+    assert "asset" in receipt["outcome_oracles"][0]
+    return dossier, workspace, harness
+
+
+def test_full_persisted_verifier_recovers_drifted_overlay_and_rejects_asset_tamper(
+    tmp_path: Path,
+) -> None:
+    dossier, _workspace, harness = _verified_retained_harness_dossier(tmp_path)
+    original = harness.read_bytes()
+    harness.write_text("print('later correction turn')\n", encoding="utf-8")
+
+    recovered, recovery_errors = mod.verify_persisted_research_evidence(dossier)
+
+    assert recovered is True, recovery_errors
+    assert recovery_errors == []
+    receipt = dossier["evidence_verification"]
+    asset = receipt["outcome_oracles"][0]["asset"]
+    runs_root = mod._runs_root_for(Path(str(receipt["run_dir"])))
+    assert runs_root is not None
+    retained_harness = (
+        runs_root
+        / str(asset["runs_relative_path"])
+        / ".usertest_research"
+        / "environment_probe.py"
+    )
+    assert retained_harness.read_bytes() == original
+    retained_harness.write_bytes(original + b"# tamper\n")
+
+    tampered, tamper_errors = mod.verify_persisted_research_evidence(dossier)
+
+    assert tampered is False
+    assert "research_retained_overlay_asset_content_changed" in tamper_errors
+
+
+def test_partial_python_read_attests_local_assignment_definition() -> None:
+    observed = (
+        "        codex_personality_warning_detected = bool(warning_lines)\n"
+        "        if codex_personality_warning_detected:\n"
+        "            handle_warning()\n"
+    )
+
+    assert mod._symbol_definition_exists(
+        path="packages/runner_core/src/runner_core/runner.py",
+        content=observed,
+        symbol="runner_core.runner.codex_personality_warning_detected",
+    )
+
+
 def test_unrelated_assertion_failure_has_no_mechanism_causal_link(tmp_path: Path) -> None:
     output = "tests/test_repro.py:4: in test_repro\n    assert False\nE   assert False\n"
 
@@ -2259,6 +4099,56 @@ def test_one_replay_cannot_cover_unrelated_commandless_atoms_by_exit_code(
     assert "supporting_experiments_do_not_cover_origin_atoms" in errors
 
 
+def test_signed_case_aggregate_covers_redundant_occurrence_shape() -> None:
+    dossier = {
+        "research_status": "evidence_sufficient",
+        "case_relation_assessment": {
+            "disposition": "retain",
+            "rationale": "One signed aggregate authenticates the repeated evidence shape.",
+            "facets": [],
+            "material_unknowns": [],
+        },
+        "experiments": [
+            {
+                "experiment_id": "aggregate-replay",
+                "scenario_kind": "faithful_replay",
+                "addresses_atom_ids": ["atom:aggregate", "atom:one", "atom:two"],
+                "command": "python replay.py",
+                "outcome": "supports",
+                "observable_assertion": {
+                    "source": "stdout",
+                    "operator": "contains",
+                    "expected": "codex_model_messages_missing",
+                },
+            }
+        ],
+    }
+    assignment = {
+        "status": "complete",
+        "expected_atom_ids": ["atom:aggregate", "atom:one", "atom:two"],
+        "case_evidence_atom_ids": ["atom:aggregate"],
+        "occurrence_evidence_atom_ids": ["atom:one", "atom:two"],
+        "atom_receipts": [
+            {
+                "atom_id": "atom:aggregate",
+                "atom_snapshot": {
+                    "atom_id": "atom:aggregate",
+                    "error_code": "codex_model_messages_missing",
+                },
+            },
+            {"atom_id": "atom:one", "atom_snapshot": {"atom_id": "atom:one"}},
+            {"atom_id": "atom:two", "atom_snapshot": {"atom_id": "atom:two"}},
+        ],
+    }
+    dossier["evidence_assignment"] = assignment
+    errors: list[str] = []
+
+    bindings = mod._experiment_atom_bindings(dossier, assignment, errors=errors)
+
+    assert [binding["atom_id"] for binding in bindings] == ["atom:aggregate"]
+    assert errors == []
+
+
 def test_persisted_receipt_json_projection_is_stable() -> None:
     assert mod._canonical_json_sha256({"b": 2, "a": 1}) == mod._canonical_json_sha256(
         json.loads('{"a": 1, "b": 2}')
@@ -2356,6 +4246,23 @@ def test_replay_command_parser_rejects_shell_and_control_injection() -> None:
         ".usertest_research/route_contract_probe.py",
     ]
     assert mod._parse_replay_argv(
+        r"python .usertest_research\route_contract_probe.py "
+        r"--out .usertest_research\observations\result.json"
+    ) == [
+        "python",
+        ".usertest_research/route_contract_probe.py",
+        "--out",
+        ".usertest_research/observations/result.json",
+    ]
+    assert mod._parse_replay_argv(
+        r"python .usertest_research\route_contract_probe.py "
+        r"--out=.usertest_research\observations\result.json"
+    ) == [
+        "python",
+        ".usertest_research/route_contract_probe.py",
+        "--out=.usertest_research/observations/result.json",
+    ]
+    assert mod._parse_replay_argv(
         r'pdm run python ".usertest_research\route contract probe.py"'
     ) == [
         "pdm",
@@ -2376,6 +4283,26 @@ def test_replay_command_parser_rejects_shell_and_control_injection() -> None:
         "-m",
         "pytest",
         "packages/runner_core/tests/test_codex_execpolicy.py",
+    ]
+    assert mod._parse_replay_argv(
+        r"python -m pytest tests\test_probe.py "
+        r"--basetemp=.usertest_research\pytest_tmp "
+        r"--junitxml=.usertest_research\pytest.xml"
+    ) == [
+        "python",
+        "-m",
+        "pytest",
+        "tests/test_probe.py",
+        "--basetemp=.usertest_research/pytest_tmp",
+        "--junitxml=.usertest_research/pytest.xml",
+    ]
+    assert mod._parse_replay_argv(
+        r"pytest tests\test_probe.py --basetemp .usertest_research\pytest_tmp"
+    ) == [
+        "pytest",
+        "tests/test_probe.py",
+        "--basetemp",
+        ".usertest_research/pytest_tmp",
     ]
     assert mod._parse_replay_argv(
         r"pytest packages\runner_core\tests\test_x.py::test_path[param\value]"
@@ -2421,6 +4348,34 @@ def test_replay_command_parser_rejects_shell_and_control_injection() -> None:
     ):
         argv = mod._parse_replay_argv(command)
         assert argv is None or not mod._replay_argv_is_workspace_confined(argv)
+
+
+def test_workspace_manifest_records_unreadable_regular_file_without_crashing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    readable = tmp_path / "readable.txt"
+    unreadable = tmp_path / "unreadable.txt"
+    readable.write_text("readable\n", encoding="utf-8")
+    unreadable.write_text("unreadable\n", encoding="utf-8")
+    real_sha256_path = mod._sha256_path
+
+    def fake_sha256_path(path: Path) -> str:
+        if path == unreadable:
+            raise OSError(22, "invalid host filename")
+        return real_sha256_path(path)
+
+    monkeypatch.setattr(mod, "_sha256_path", fake_sha256_path)
+
+    manifest = mod._workspace_manifest(tmp_path)
+
+    assert manifest["readable.txt"]["kind"] == "file"
+    assert manifest["unreadable.txt"] == {
+        "kind": "unreadable_file",
+        "mode": unreadable.stat().st_mode & 0o777,
+        "size_bytes": unreadable.stat().st_size,
+        "error": "OSError",
+    }
 
 
 def test_practical_config_cli_replay_proves_wrong_value_to_correct_value(
@@ -2631,6 +4586,56 @@ def test_repository_native_runner_authorization_uses_declared_tracked_bindings(
     assert receipt["authorization_kind"] == "declared_repository_bindings"
     assert receipt["repository_bindings"][0]["path"] == manifest_name
     assert receipt["repository_bindings"][0]["git_blob_sha"]
+    assert mod._command_authorization_attested(receipt, argv=argv)
+
+
+def test_declared_bindings_preserve_attested_research_harness_entrypoint(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "repo"
+    source = workspace / "packages" / "runtime" / "src" / "runtime" / "backend.py"
+    source.parent.mkdir(parents=True)
+    source.write_text("def mechanism():\n    return 1\n", encoding="utf-8")
+    _baseline_repo_commit_existing(workspace, "add production mechanism")
+    harness = workspace / ".usertest_research" / "test_probe.py"
+    harness.parent.mkdir()
+    harness.write_text("def test_probe():\n    assert True\n", encoding="utf-8")
+    experiment = {
+        "scenario_kind": "control",
+        "repository_bindings": [
+            {
+                "path": "packages/runtime/src/runtime/backend.py",
+                "relationship": "The harness imports the inspected production module.",
+            }
+        ],
+    }
+    dossier = {
+        "inspected_files": ["packages/runtime/src/runtime/backend.py"],
+        "artifact_refs": [
+            {
+                "artifact_id": "artifact:test-probe",
+                "path": ".usertest_research/test_probe.py",
+            }
+        ],
+    }
+
+    authorized = mod._authorized_replay_invocation(
+        command=(
+            "python -B -m pytest -q "
+            ".usertest_research/test_probe.py::test_probe"
+        ),
+        experiment=experiment,
+        dossier=dossier,
+        assignment={},
+        workspace=workspace,
+    )
+
+    assert authorized is not None
+    argv, receipt = authorized
+    assert receipt["authorization_kind"] == "declared_repository_bindings"
+    assert receipt["entrypoint_path"] == ".usertest_research/test_probe.py"
+    assert receipt["entrypoint_sha256"] == mod._sha256_path(harness)
+    assert receipt["artifact_id"] == "artifact:test-probe"
     assert mod._command_authorization_attested(receipt, argv=argv)
 
 
@@ -3083,6 +5088,20 @@ def test_powershell_environment_adapter_runs_through_production_replay_and_oracl
         "kind": "equals",
         "expected": "ready",
     }
+    contrast_proof = deepcopy(proofs[0])
+    contrast_proof["positive_outcome"]["contract_role"] = "causal_contrast"
+    contrast_proof["proof_receipt_id"] = mod.proof_receipt_id_for(contrast_proof)
+    contrast_evidence = deepcopy(mechanism[0])
+    contrast_evidence["proof_receipt_id"] = contrast_proof["proof_receipt_id"]
+    contrast_evidence["mechanism_evidence_id"] = "mechanism_evidence:contrast"
+    assert (
+        mod._causal_proof_positive_contract(
+            experiment_id="experiment:without-mode",
+            evidence=[contrast_evidence],
+            proof_receipt=contrast_proof,
+        )
+        is None
+    )
     boundary_errors: list[str] = []
     boundaries, boundary_errors = mod._verification_boundary_receipts(
         experiments=experiment_index,
@@ -3614,6 +5633,12 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
         ],
         "root_cause_confidence": 0.51,
         "broader_class_assessment": "unknown",
+        "case_relation_assessment": {
+            "disposition": "retain",
+            "rationale": "The signed occurrence and verified environment mechanism are one unit.",
+            "facets": [],
+            "material_unknowns": [],
+        },
         "material_unknowns": [],
         "blocking_reasons": [],
         "evidence_boundaries": [],
@@ -3826,6 +5851,63 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
     ready, readiness_reasons = stage_contracts.assess_research_readiness(dossier)
     assert ready is True, "\n".join(readiness_reasons)
 
+    injected_outcome_error = (
+        "outcome_mechanism_binding_invalid:experiment:mode-ready:"
+        "production_assertion_dataflow_unresolved"
+    )
+    original_outcome_oracle_receipts = mod._outcome_oracle_receipts
+
+    def outcome_candidate_with_invalid_future_binding(*args, errors, **kwargs):
+        projected = original_outcome_oracle_receipts(*args, errors=errors, **kwargs)
+        errors.append(injected_outcome_error)
+        return projected
+
+    with monkeypatch.context() as outcome_patch:
+        outcome_patch.setattr(
+            mod,
+            "_outcome_oracle_receipts",
+            outcome_candidate_with_invalid_future_binding,
+        )
+        optional_outcome_dossier = deepcopy(unverified_dossier)
+        optional_outcome_receipt = mod.verify_research_evidence(
+            optional_outcome_dossier,
+            run_dir=run_dir,
+            repo_revision=revision,
+            case_id=str(optional_outcome_dossier["case_id"]),
+            problem_id=str(optional_outcome_dossier["problem_id"]),
+            expected_case_id=str(optional_outcome_dossier["case_id"]),
+            expected_problem_id=str(optional_outcome_dossier["problem_id"]),
+            evidence_assignment=assignment,
+            evidence_atom_ids=[atom_id],
+            revision_view_destination=tmp_path / "revision-view-optional-outcome",
+            replay_timeout_seconds=None,
+            requested_repo_ref=revision,
+            resolved_repo_ref=revision,
+            replay_executor=mod.TrustedHostReplayExecutor(
+                approved_source_roots=[tmp_path],
+                source_identity=workspace,
+            ),
+        )
+
+        assert optional_outcome_receipt["status"] == "verified", optional_outcome_receipt[
+            "errors"
+        ]
+        assert optional_outcome_receipt["errors"] == []
+        assert optional_outcome_receipt["verified_mechanism"] is not None
+        assert optional_outcome_receipt["outcome_oracles"] == []
+        diagnostics_by_component = {
+            str(item["component"]): item["diagnostics"]
+            for item in optional_outcome_receipt["quarantined_diagnostics"]
+        }
+        assert injected_outcome_error in diagnostics_by_component["optional_post_change_outcome"]
+
+        optional_outcome_dossier["evidence_verification"] = optional_outcome_receipt
+        optional_persisted_valid, optional_persisted_errors = (
+            mod.verify_persisted_research_evidence(optional_outcome_dossier)
+        )
+        assert optional_persisted_errors == []
+        assert optional_persisted_valid is True
+
     for mode in ("missing", "unconnected"):
         rejected_dossier = deepcopy(unverified_dossier)
         rejected_claim = rejected_dossier["experiments"][1]["proof_adapter"]
@@ -3875,6 +5957,529 @@ def test_top_level_verifier_dispatches_powershell_adapter_and_persists_proof(
         ), rejected_reasons
 
 
+def test_adapter_consumer_requires_authenticated_harness_dependency_and_keeps_identity(
+    tmp_path: Path,
+) -> None:
+    experiment_ids = ("experiment:fresh", "experiment:aged")
+    proof = {
+        "observations": {
+            "baseline": {"experiment_id": experiment_ids[0]},
+            "challenge": {"experiment_id": experiment_ids[1]},
+        },
+        "intervention": {
+            "target": "runner_core.execution_backend.cleanup_local_maintenance_images"
+        },
+    }
+    workspace = tmp_path / "workspace"
+    harness_root = workspace / ".usertest_research"
+    harness_root.mkdir(parents=True)
+    entrypoint = ".usertest_research/test_cleanup.py"
+    (workspace / entrypoint).write_text(
+        """from pathlib import Path
+import importlib.util
+
+def _harness():
+    path = Path(__file__).with_name("cleanup_probe.py")
+    spec = importlib.util.spec_from_file_location("cleanup_probe", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+def test_fresh():
+    return _harness().run()
+
+def test_aged():
+    return _harness().run()
+""",
+        encoding="utf-8",
+    )
+    (harness_root / "cleanup_probe.py").write_text(
+        """import runner_core.execution_backend as backend
+
+def run():
+    return backend.cleanup_local_maintenance_images
+""",
+        encoding="utf-8",
+    )
+    entrypoint_sha256 = mod._sha256_path(workspace / entrypoint)
+    binding_projection = {
+        "path": "packages/runner_core/src/runner_core/execution_backend.py",
+        "relationship": "The harness exercises this inspected production module.",
+        "file_sha256": "9" * 64,
+        "git_blob_sha": "8" * 40,
+        "runner_attested": True,
+    }
+    repository_binding = {
+        **binding_projection,
+        "repository_binding_sha256": mod._canonical_json_sha256(binding_projection),
+    }
+    replays: dict[str, dict[str, object]] = {}
+    for experiment_id, selector in zip(experiment_ids, ("test_fresh", "test_aged"), strict=True):
+        argv = [
+            "python",
+            "-B",
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            "-s",
+            f"{entrypoint}::{selector}",
+        ]
+        replays[experiment_id] = {
+            "executed_argv": argv,
+            "command_authorization": mod._command_authorization_receipt(
+                {
+                    "authorization_kind": "declared_repository_bindings",
+                    "executed_argv_sha256": mod._canonical_json_sha256(argv),
+                    "shell": False,
+                    "workspace_confined": True,
+                    "repository_bindings": [repository_binding],
+                    "artifact_id": "artifact:cleanup-harness",
+                    "entrypoint_kind": "repository_argv_entrypoint",
+                    "entrypoint_path": entrypoint,
+                    "entrypoint_argv_index": 8,
+                    "runtime_executable": "python",
+                    "entrypoint_sha256": entrypoint_sha256,
+                    "entrypoint_git_blob_sha": None,
+                    "project_runner": None,
+                }
+            ),
+            "workspace_dir": str(workspace),
+        }
+    touchpoint = {
+        "touchpoint_id": "implementation_touchpoint:" + "b" * 64,
+        "causal_locator": "runner_core.execution_backend.cleanup_local_maintenance_images",
+        "path": "packages/runner_core/src/runner_core/execution_backend.py",
+        "symbols": ["runner_core.execution_backend.cleanup_local_maintenance_images"],
+        "relationship": "Implements maintenance image retention.",
+        "runner_attested": True,
+        "inspected_content_sha256": "c" * 64,
+        "evidence_sha256": "b" * 64,
+    }
+    unconnected_touchpoint = {
+        "touchpoint_id": "implementation_touchpoint:" + "d" * 64,
+        "causal_locator": "runner_core.execution_backend.cleanup_local_maintenance_images",
+        "path": "configs/maintenance_docker.yaml",
+        "symbols": [],
+        "relationship": "Defines the configured retention count.",
+        "runner_attested": True,
+        "inspected_content_sha256": "e" * 64,
+        "evidence_sha256": "d" * 64,
+    }
+
+    receipt = mod._adapter_executed_consumer_receipt(
+        proof,
+        clean_replays=replays,
+        implementation_touchpoints=[touchpoint, unconnected_touchpoint],
+    )
+
+    assert receipt is not None
+    identity = receipt["consumer_identity"]
+    assert identity["kind"] == "runner_observed_research_harness_consumer"
+    assert identity["entrypoint"] == entrypoint
+    assert identity["command_authorization_identity"]["identity_kind"] == (
+        "repository_bindings"
+    )
+    assert identity["attestation_basis"] == (
+        "executed_research_harness_with_authenticated_production_dependency"
+    )
+    assert identity["change_surfaces"] == [
+        {
+            "path": touchpoint["path"],
+            "symbols": touchpoint["symbols"],
+            "inspected_content_sha256": touchpoint["inspected_content_sha256"],
+        }
+    ]
+    assert len(identity["authenticated_dependency_edges"]) == 1
+    edge = identity["authenticated_dependency_edges"][0]
+    assert edge["touchpoint_id"] == touchpoint["touchpoint_id"]
+    assert edge["touchpoint_symbol"] == (
+        "runner_core.execution_backend.cleanup_local_maintenance_images"
+    )
+    assert edge["source_path"] == ".usertest_research/cleanup_probe.py"
+    assert [hop["edge_kind"] for hop in edge["local_dependency_chain"]] == [
+        "python_local_module_reference"
+    ]
+    assert receipt["implementation_touchpoint_ids"] == [touchpoint["touchpoint_id"]]
+    assert receipt["causal_target"] == (
+        "runner_core.execution_backend.cleanup_local_maintenance_images"
+    )
+    assert receipt == stage_contracts._expected_adapter_executed_consumer(
+        proof,
+        experiments=replays,
+        implementation_touchpoints=[touchpoint, unconnected_touchpoint],
+        authenticated_dependency_edges=identity["authenticated_dependency_edges"],
+    )
+    disguised_replays = deepcopy(replays)
+    for replay in disguised_replays.values():
+        authorization = dict(replay["command_authorization"])
+        authorization.pop("authorization_sha256")
+        for field in (
+            "artifact_id",
+            "entrypoint_kind",
+            "entrypoint_path",
+            "entrypoint_argv_index",
+            "runtime_executable",
+            "entrypoint_sha256",
+            "entrypoint_git_blob_sha",
+            "project_runner",
+        ):
+            authorization.pop(field, None)
+        replay["command_authorization"] = mod._command_authorization_receipt(authorization)
+    assert (
+        mod._adapter_executed_consumer_receipt(
+            proof,
+            clean_replays=disguised_replays,
+            implementation_touchpoints=[touchpoint, unconnected_touchpoint],
+        )
+        is None
+    )
+
+
+def _authenticated_adapter_harness_replays(
+    tmp_path: Path,
+    *,
+    source: str,
+) -> tuple[dict[str, dict[str, object]], str]:
+    workspace = tmp_path / "workspace"
+    harness_root = workspace / ".usertest_research"
+    harness_root.mkdir(parents=True)
+    entrypoint = ".usertest_research/test_cleanup.py"
+    (workspace / entrypoint).write_text(source, encoding="utf-8")
+    entrypoint_sha256 = mod._sha256_path(workspace / entrypoint)
+    binding_projection = {
+        "path": "packages/runner_core/src/runner_core/execution_backend.py",
+        "relationship": "The harness exercises this inspected production module.",
+        "file_sha256": "9" * 64,
+        "git_blob_sha": "8" * 40,
+        "runner_attested": True,
+    }
+    repository_binding = {
+        **binding_projection,
+        "repository_binding_sha256": mod._canonical_json_sha256(binding_projection),
+    }
+    replays: dict[str, dict[str, object]] = {}
+    for experiment_id, selector in (
+        ("experiment:baseline", "test_baseline"),
+        ("experiment:challenge", "test_challenge"),
+    ):
+        argv = [
+            "python",
+            "-B",
+            "-m",
+            "pytest",
+            "-p",
+            "no:cacheprovider",
+            "-q",
+            "-s",
+            f"{entrypoint}::{selector}",
+        ]
+        replays[experiment_id] = {
+            "executed_argv": argv,
+            "command_authorization": mod._command_authorization_receipt(
+                {
+                    "authorization_kind": "declared_repository_bindings",
+                    "executed_argv_sha256": mod._canonical_json_sha256(argv),
+                    "shell": False,
+                    "workspace_confined": True,
+                    "repository_bindings": [repository_binding],
+                    "artifact_id": "artifact:cleanup-harness",
+                    "entrypoint_kind": "repository_argv_entrypoint",
+                    "entrypoint_path": entrypoint,
+                    "entrypoint_argv_index": 8,
+                    "runtime_executable": "python",
+                    "entrypoint_sha256": entrypoint_sha256,
+                    "entrypoint_git_blob_sha": None,
+                    "project_runner": None,
+                }
+            ),
+            "workspace_dir": str(workspace),
+        }
+    return replays, entrypoint
+
+
+def test_adapter_harness_dependency_identity_ignores_controlled_call_arguments(
+    tmp_path: Path,
+) -> None:
+    replays, entrypoint = _authenticated_adapter_harness_replays(
+        tmp_path,
+        source="""from pathlib import Path
+import runner_core.execution_backend as backend
+
+def test_baseline():
+    return backend.cleanup_local_maintenance_images(
+        repo_root=Path("baseline"), dry_run=True, active_image_refs=()
+    )
+
+def test_challenge():
+    return backend.cleanup_local_maintenance_images(
+        repo_root=Path("challenge"), dry_run=False, active_image_refs=("active",)
+    )
+""",
+    )
+    touchpoint = {
+        "touchpoint_id": "implementation_touchpoint:" + "b" * 64,
+        "causal_locator": "runner_core.execution_backend.cleanup_local_maintenance_images",
+        "path": "packages/runner_core/src/runner_core/execution_backend.py",
+        "symbols": ["runner_core.execution_backend.cleanup_local_maintenance_images"],
+        "relationship": "Implements maintenance image retention.",
+        "runner_attested": True,
+        "inspected_content_sha256": "c" * 64,
+        "evidence_sha256": "b" * 64,
+    }
+    proof = {
+        "observations": {
+            "baseline": {"experiment_id": "experiment:baseline"},
+            "challenge": {"experiment_id": "experiment:challenge"},
+        },
+        "intervention": {"target": touchpoint["causal_locator"]},
+    }
+
+    baseline_edges = mod._research_harness_dependency_edges(
+        replays["experiment:baseline"],
+        implementation_touchpoints=[touchpoint],
+    )
+    challenge_edges = mod._research_harness_dependency_edges(
+        replays["experiment:challenge"],
+        implementation_touchpoints=[touchpoint],
+    )
+    receipt = mod._adapter_executed_consumer_receipt(
+        proof,
+        clean_replays=replays,
+        implementation_touchpoints=[touchpoint],
+    )
+
+    assert baseline_edges == challenge_edges
+    assert receipt is not None
+    assert receipt["consumer_identity"]["entrypoint"] == entrypoint
+    assert receipt["consumer_identity"]["authenticated_dependency_edges"] == baseline_edges
+    assert len(receipt["invocations"]) == 2
+
+
+def test_adapter_harness_dependency_identity_rejects_different_production_calls(
+    tmp_path: Path,
+) -> None:
+    replays, _entrypoint = _authenticated_adapter_harness_replays(
+        tmp_path,
+        source="""from pathlib import Path
+import runner_core.execution_backend as backend
+
+def test_baseline():
+    return backend.cleanup_local_maintenance_images(repo_root=Path("repo"), dry_run=True)
+
+def test_challenge():
+    return backend.list_local_maintenance_images(repo_root=Path("repo"))
+""",
+    )
+    touchpoint = {
+        "touchpoint_id": "implementation_touchpoint:" + "b" * 64,
+        "causal_locator": "runner_core.execution_backend.cleanup_local_maintenance_images",
+        "path": "packages/runner_core/src/runner_core/execution_backend.py",
+        "symbols": [
+            "runner_core.execution_backend.cleanup_local_maintenance_images",
+            "runner_core.execution_backend.list_local_maintenance_images",
+        ],
+        "relationship": "Contains the maintenance image inventory and cleanup mechanisms.",
+        "runner_attested": True,
+        "inspected_content_sha256": "c" * 64,
+        "evidence_sha256": "b" * 64,
+    }
+    proof = {
+        "observations": {
+            "baseline": {"experiment_id": "experiment:baseline"},
+            "challenge": {"experiment_id": "experiment:challenge"},
+        },
+        "intervention": {"target": touchpoint["causal_locator"]},
+    }
+
+    baseline_edges = mod._research_harness_dependency_edges(
+        replays["experiment:baseline"],
+        implementation_touchpoints=[touchpoint],
+    )
+    challenge_edges = mod._research_harness_dependency_edges(
+        replays["experiment:challenge"],
+        implementation_touchpoints=[touchpoint],
+    )
+
+    assert baseline_edges != challenge_edges
+    assert (
+        mod._adapter_executed_consumer_receipt(
+            proof,
+            clean_replays=replays,
+            implementation_touchpoints=[touchpoint],
+        )
+        is None
+    )
+
+
+def test_adapter_consumer_rejects_harness_with_only_relationship_prose(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    harness = workspace / ".usertest_research" / "probe.py"
+    harness.parent.mkdir(parents=True)
+    harness.write_text(
+        'CLAIMED = "runner_core.execution_backend.cleanup_local_maintenance_images"\n'
+        'print("unrelated")\n',
+        encoding="utf-8",
+    )
+    experiment_ids = ("experiment:before", "experiment:after")
+    proof = {
+        "observations": {
+            "baseline": {"experiment_id": experiment_ids[0]},
+            "challenge": {"experiment_id": experiment_ids[1]},
+        },
+        "intervention": {
+            "target": "runner_core.execution_backend.cleanup_local_maintenance_images"
+        },
+    }
+    replays: dict[str, dict[str, object]] = {}
+    for experiment_id in experiment_ids:
+        argv = ["python", ".usertest_research/probe.py"]
+        replays[experiment_id] = {
+            "executed_argv": argv,
+            "workspace_dir": str(workspace),
+            "command_authorization": mod._command_authorization_receipt(
+                {
+                    "authorization_kind": "attested_research_harness",
+                    "executed_argv_sha256": mod._canonical_json_sha256(argv),
+                    "shell": False,
+                    "workspace_confined": True,
+                    "artifact_id": "artifact:probe",
+                    "entrypoint_kind": "python_script",
+                    "entrypoint_path": ".usertest_research/probe.py",
+                    "entrypoint_sha256": mod._sha256_path(harness),
+                    "entrypoint_git_blob_sha": None,
+                    "project_runner": None,
+                }
+            ),
+        }
+    touchpoint = {
+        "touchpoint_id": "implementation_touchpoint:" + "b" * 64,
+        "causal_locator": "runner_core.execution_backend.cleanup_local_maintenance_images",
+        "path": "packages/runner_core/src/runner_core/execution_backend.py",
+        "symbols": ["runner_core.execution_backend.cleanup_local_maintenance_images"],
+        "relationship": "Prose claims the harness exercises this production symbol.",
+        "runner_attested": True,
+        "inspected_content_sha256": "c" * 64,
+        "evidence_sha256": "b" * 64,
+    }
+
+    assert (
+        mod._adapter_executed_consumer_receipt(
+            proof,
+            clean_replays=replays,
+            implementation_touchpoints=[touchpoint],
+        )
+        is None
+    )
+
+
+def test_non_python_research_harness_is_unverified_not_repository_consumer(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    harness = workspace / ".usertest_research" / "probe.js"
+    harness.parent.mkdir(parents=True)
+    harness.write_text(
+        'import { mechanism } from "../packages/runtime/backend.js";\n'
+        "console.log(mechanism());\n",
+        encoding="utf-8",
+    )
+    experiment_ids = ("experiment:before", "experiment:after")
+    argv = ["node", ".usertest_research/probe.js"]
+    binding_projection = {
+        "path": "packages/runtime/backend.js",
+        "relationship": "The harness claims this production dependency.",
+        "file_sha256": "9" * 64,
+        "git_blob_sha": "8" * 40,
+        "runner_attested": True,
+    }
+    repository_binding = {
+        **binding_projection,
+        "repository_binding_sha256": mod._canonical_json_sha256(binding_projection),
+    }
+    replays = {
+        experiment_id: {
+            "executed_argv": argv,
+            "workspace_dir": str(workspace),
+            "command_authorization": mod._command_authorization_receipt(
+                {
+                    "authorization_kind": "declared_repository_bindings",
+                    "executed_argv_sha256": mod._canonical_json_sha256(argv),
+                    "shell": False,
+                    "workspace_confined": True,
+                    "repository_bindings": [repository_binding],
+                    "artifact_id": "artifact:js-probe",
+                    "entrypoint_kind": "node_script",
+                    "entrypoint_path": ".usertest_research/probe.js",
+                    "entrypoint_sha256": mod._sha256_path(harness),
+                    "entrypoint_git_blob_sha": None,
+                    "project_runner": None,
+                }
+            ),
+        }
+        for experiment_id in experiment_ids
+    }
+    proof = {
+        "proof_receipt_id": "proof:js-harness",
+        "hypothesis_id": "hypothesis:runtime",
+        "observations": {
+            "baseline": {"experiment_id": experiment_ids[0]},
+            "challenge": {"experiment_id": experiment_ids[1]},
+        },
+        "intervention": {"target": "runtime.backend.mechanism"},
+    }
+    touchpoint = {
+        "touchpoint_id": "implementation_touchpoint:" + "b" * 64,
+        "causal_locator": "runtime.backend.mechanism",
+        "path": "packages/runtime/backend.js",
+        "symbols": ["runtime.backend.mechanism"],
+        "relationship": "The production function supplies the observed value.",
+        "runner_attested": True,
+        "inspected_content_sha256": "c" * 64,
+        "evidence_sha256": "b" * 64,
+    }
+
+    assert (
+        mod._adapter_executed_consumer_receipt(
+            proof,
+            clean_replays=replays,
+            implementation_touchpoints=[touchpoint],
+        )
+        is None
+    )
+    errors: list[str] = []
+    receipts = mod._typed_mechanism_evidence_receipts(
+        {
+            "experiments": [],
+            "root_cause_hypotheses": [
+                {
+                    "hypothesis_id": "hypothesis:runtime",
+                    "mechanism_symbols": ["runtime.backend.mechanism"],
+                    "supporting_evidence": [experiment_ids[0]],
+                }
+            ],
+        },
+        clean_replays=replays,
+        symbol_receipts=[],
+        causal_links=[],
+        strong_controls=[],
+        falsification_interventions=[],
+        deterministic_closures=[],
+        atom_bindings=[],
+        errors=errors,
+        proof_adapter_receipts=[proof],
+    )
+
+    assert receipts == []
+    assert (
+        "proof_adapter_harness_dependency_unverified:"
+        "hypothesis:runtime:proof:js-harness"
+    ) in errors
+
+
 @pytest.mark.parametrize(
     "argv",
     [
@@ -3887,6 +6492,283 @@ def test_exact_pytest_selector_fails_closed_for_ambiguous_or_parameterized_selec
     argv: list[str],
 ) -> None:
     assert mod._exact_pytest_selector(argv) is None
+
+
+def test_exact_pytest_selector_accepts_attested_research_live_argv_shape() -> None:
+    argv = [
+        "pytest",
+        "-p",
+        "no:cacheprovider",
+        ".usertest_research/test_probe.py::test_baseline",
+        "-q",
+        "-s",
+        "--junitxml",
+        ".usertest_research/baseline.xml",
+    ]
+
+    assert mod._exact_pytest_selector(argv) is None
+    assert mod._exact_pytest_selector(argv, allow_research_harness=True) == (
+        ".usertest_research/test_probe.py",
+        ["test_baseline"],
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [
+            "python",
+            "-B",
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_core.py::test_guarded_control",
+        ],
+        [
+            "pdm",
+            "run",
+            "python",
+            "-I",
+            "-B",
+            "-m",
+            "pytest",
+            "tests/test_core.py::test_guarded_control",
+        ],
+    ],
+)
+def test_exact_pytest_selector_accepts_safe_python_interpreter_flags(
+    argv: list[str],
+) -> None:
+    assert mod._exact_pytest_selector(argv) == (
+        "tests/test_core.py",
+        ["test_guarded_control"],
+    )
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        [
+            "python",
+            "-c",
+            "pass",
+            "-m",
+            "pytest",
+            "tests/test_core.py::test_guarded_control",
+        ],
+        [
+            "python",
+            "-X",
+            "utf8",
+            "-m",
+            "pytest",
+            "tests/test_core.py::test_guarded_control",
+        ],
+        [
+            "python",
+            "-B",
+            "-m",
+            "pytest",
+            "-k",
+            "guarded",
+            "tests/test_core.py::test_guarded_control",
+        ],
+        [
+            "python",
+            "-B",
+            "-m",
+            "pytest",
+            "../tests/test_core.py::test_guarded_control",
+        ],
+    ],
+)
+def test_exact_pytest_selector_rejects_unsafe_or_ambiguous_flagged_invocations(
+    argv: list[str],
+) -> None:
+    assert mod._exact_pytest_selector(argv) is None
+
+
+def test_attested_research_pytest_shared_helper_delta_is_verified(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    dossier, replays = _attested_research_pytest_control(workspace)
+    planning_workspace = tmp_path / "planning"
+    _git(["clone", str(workspace), str(planning_workspace)], cwd=tmp_path)
+    assert not (planning_workspace / ".usertest_research").exists()
+    errors: list[str] = []
+
+    receipts = mod._falsification_intervention_receipts(
+        dossier,
+        clean_replays=replays,
+        planning_workspace=planning_workspace,
+        symbol_receipts=[{"symbol": "core.classify", "path": "src/core.py"}],
+        errors=errors,
+    )
+
+    assert errors == []
+    assert len(receipts) == 1
+    delta = receipts[0]["controlled_input_difference"]
+    assert delta["verification_method"] == "python_ast_shared_helper_parameter_delta_v1"
+    assert delta["difference"]["helper_function"] == "_probe"
+    assert delta["difference"]["helper_parameter"] == "fatal"
+    assert delta["difference"]["mechanism_slots"] == ["keyword:fatal"]
+    assert receipts[0]["shared_verified_mechanism_symbols"] == ["core.classify"]
+
+    attempt_errors: list[str] = []
+    attempts = mod._falsification_attempt_receipts(
+        dossier,
+        clean_replays=replays,
+        mechanism_evidence=[
+            {
+                "hypothesis_id": "h1",
+                "mechanism_evidence_id": "mechanism_evidence:baseline",
+                "experiment_ids": ["support"],
+                "mechanism_symbols": ["core.classify"],
+            }
+        ],
+        falsification_interventions=receipts,
+        deterministic_closures=[],
+        errors=attempt_errors,
+    )
+    assert attempt_errors == []
+    assert attempts["h1"][0]["outcome"] == "survived"
+    assert attempts["h1"][0]["mechanism_evidence_ids"] == [
+        "mechanism_evidence:baseline"
+    ]
+    assert attempts["h1"][0]["intervention_receipt_id"] == receipts[0][
+        "intervention_receipt_id"
+    ]
+
+
+@pytest.mark.parametrize("authorization_change", ["missing", "wrong_sha"])
+def test_research_pytest_shared_helper_requires_attested_entrypoint(
+    tmp_path: Path,
+    authorization_change: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    dossier, replays = _attested_research_pytest_control(workspace)
+    replay = replays["support"]
+    if authorization_change == "missing":
+        replay.pop("command_authorization")
+    else:
+        authorization = dict(replay["command_authorization"])
+        authorization.pop("authorization_sha256")
+        authorization["entrypoint_sha256"] = "0" * 64
+        replay["command_authorization"] = mod._command_authorization_receipt(authorization)
+    experiment = next(
+        item
+        for item in dossier["experiments"]
+        if isinstance(item, dict) and item.get("experiment_id") == "support"
+    )
+    errors: list[str] = []
+
+    selection = mod._pytest_test_selection_receipt(
+        hypothesis_id="h1",
+        experiment_id="support",
+        experiment=experiment,
+        replay=replay,
+        mechanism_symbols=["core.classify"],
+        symbol_paths={"core.classify": "src/core.py"},
+        planning_workspace=workspace,
+        errors=errors,
+    )
+
+    assert selection is None
+    assert errors == [
+        "causal_control_research_harness_unattested:"
+        "h1:support:.usertest_research/test_probe.py"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("helper_source", "baseline_call", "challenge_call"),
+    [
+        (
+            "def _probe(*, fatal):\n"
+            "    classify(fatal=fatal)\n"
+            "    return 'fixed'\n",
+            "_probe(fatal=True)",
+            "_probe(fatal=False)",
+        ),
+        (
+            "def _probe(*, fatal, stable=True):\n"
+            "    return classify(fatal=stable)\n",
+            "_probe(fatal=True, stable=True)",
+            "_probe(fatal=False, stable=True)",
+        ),
+        (
+            "def _probe(*, fatal, extra):\n"
+            "    return classify(fatal=fatal, extra=extra)\n",
+            "_probe(fatal=True, extra=False)",
+            "_probe(fatal=False, extra=True)",
+        ),
+    ],
+    ids=["hardcoded-return", "changed-unused-parameter", "two-changed-parameters"],
+)
+def test_research_pytest_shared_helper_rejects_noncausal_or_ambiguous_delta(
+    tmp_path: Path,
+    helper_source: str,
+    baseline_call: str,
+    challenge_call: str,
+) -> None:
+    workspace = tmp_path / "workspace"
+    dossier, replays = _attested_research_pytest_control(
+        workspace,
+        helper_source=helper_source,
+        baseline_call=baseline_call,
+        challenge_call=challenge_call,
+    )
+    errors: list[str] = []
+
+    receipts = mod._falsification_intervention_receipts(
+        dossier,
+        clean_replays=replays,
+        planning_workspace=workspace,
+        symbol_receipts=[{"symbol": "core.classify", "path": "src/core.py"}],
+        errors=errors,
+    )
+
+    assert receipts == []
+    assert any(
+        error.startswith("falsification_intervention_unverified:h1:attempt:toggle-fatal")
+        for error in errors
+    )
+
+
+def test_research_pytest_shared_helper_rejects_locally_shadowed_helper(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    dossier, replays = _attested_research_pytest_control(workspace)
+    harness = workspace / ".usertest_research" / "test_probe.py"
+    content = harness.read_text(encoding="utf-8")
+    content = content.replace(
+        "def test_baseline():\n",
+        "def test_baseline():\n    _probe = lambda **_kwargs: 'fatal'\n",
+    ).replace(
+        "def test_challenge():\n",
+        "def test_challenge():\n    _probe = lambda **_kwargs: 'notice'\n",
+    )
+    harness.write_text(content, encoding="utf-8")
+    for replay in replays.values():
+        authorization = dict(replay["command_authorization"])
+        authorization.pop("authorization_sha256")
+        authorization["entrypoint_sha256"] = mod._sha256_path(harness)
+        replay["command_authorization"] = mod._command_authorization_receipt(authorization)
+    errors: list[str] = []
+
+    receipts = mod._falsification_intervention_receipts(
+        dossier,
+        clean_replays=replays,
+        planning_workspace=workspace,
+        symbol_receipts=[{"symbol": "core.classify", "path": "src/core.py"}],
+        errors=errors,
+    )
+
+    assert receipts == []
+    assert any(
+        error.startswith("falsification_intervention_unverified:h1:attempt:toggle-fatal")
+        for error in errors
+    )
 
 
 @pytest.mark.parametrize(
@@ -4253,6 +7135,197 @@ def test_harness_call_discard_with_hard_coded_symptom_is_not_mechanism_evidence(
     assert link["verification_method"] == "runner_harness_observable_dataflow_v1"
 
 
+def test_harness_mechanism_flow_follows_local_return_and_exact_json_field(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "replay"
+    harness = workspace / ".usertest_research" / "probe.py"
+    harness.parent.mkdir(parents=True)
+    replay = {
+        "executed_argv": ["python", ".usertest_research/probe.py"],
+        "workspace_dir": str(workspace),
+    }
+    assertion = {
+        "source": "stdout",
+        "operator": "contains",
+        "expected": '"validator_issue_present": true',
+    }
+    harness.write_text(
+        "import json\n"
+        "from core import run\n\n"
+        "def investigate():\n"
+        "    issue = run()\n"
+        "    observation = {'validator_issue_present': issue is not None}\n"
+        "    return observation\n\n"
+        "def main():\n"
+        "    observation = investigate()\n"
+        "    print(json.dumps(observation))\n\n"
+        "main()\n",
+        encoding="utf-8",
+    )
+
+    _, touched, link = mod._harness_mechanism_touches(
+        replay=replay,
+        mechanism_symbols=["core.run"],
+        symbol_paths={"core.run": "src/core.py"},
+        observable_assertion=assertion,
+    )
+
+    assert touched == ["core.run"]
+    assert link is not None
+    assert link["symbol_sinks"] == [{"symbol": "core.run", "sink": "stdout"}]
+
+    harness.write_text(
+        "import json\n"
+        "from core import run\n\n"
+        "def investigate():\n"
+        "    issue = run()\n"
+        "    observation = {\n"
+        "        'unrelated_diagnostic': issue,\n"
+        "        'validator_issue_present': True,\n"
+        "    }\n"
+        "    return observation\n\n"
+        "def main():\n"
+        "    observation = investigate()\n"
+        "    print(json.dumps(observation))\n\n"
+        "main()\n",
+        encoding="utf-8",
+    )
+
+    _, touched, link = mod._harness_mechanism_touches(
+        replay=replay,
+        mechanism_symbols=["core.run"],
+        symbol_paths={"core.run": "src/core.py"},
+        observable_assertion=assertion,
+    )
+
+    assert touched == []
+    assert link is None
+
+
+def test_harness_mechanism_touch_resolves_function_local_imports(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "replay"
+    harness = workspace / ".usertest_research" / "probe.py"
+    harness.parent.mkdir(parents=True)
+    replay = {
+        "executed_argv": ["python", ".usertest_research/probe.py"],
+        "workspace_dir": str(workspace),
+    }
+    assertion = {
+        "source": "stdout",
+        "operator": "contains",
+        "expected": "available",
+    }
+    harness.write_text(
+        "def main():\n"
+        "    import json\n"
+        "    from pathlib import Path\n"
+        "    from core import run\n"
+        "    state = run()\n"
+        "    Path('observation.txt').write_text(str(state))\n"
+        "    print(state)\n\n"
+        "main()\n",
+        encoding="utf-8",
+    )
+
+    _, touched, link = mod._harness_mechanism_touches(
+        replay=replay,
+        mechanism_symbols=["core.run"],
+        symbol_paths={"core.run": "src/core.py"},
+        observable_assertion=assertion,
+    )
+
+    assert touched == ["core.run"]
+    assert link is not None
+    assert link["symbol_sinks"] == [{"symbol": "core.run", "sink": "stdout"}]
+
+
+def test_harness_mechanism_touch_rejects_shadowed_module_import(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "replay"
+    harness = workspace / ".usertest_research" / "probe.py"
+    harness.parent.mkdir(parents=True)
+    harness.write_text(
+        "from core import run\n\n"
+        "def main(run):\n"
+        "    print(run())\n\n"
+        "main(lambda: 'available')\n",
+        encoding="utf-8",
+    )
+
+    _, touched, link = mod._harness_mechanism_touches(
+        replay={
+            "executed_argv": ["python", ".usertest_research/probe.py"],
+            "workspace_dir": str(workspace),
+        },
+        mechanism_symbols=["core.run"],
+        symbol_paths={"core.run": "src/core.py"},
+        observable_assertion={
+            "source": "stdout",
+            "operator": "contains",
+            "expected": "available",
+        },
+    )
+
+    assert touched == []
+    assert link is None
+
+
+@pytest.mark.parametrize("research_status", ["blocked", "insufficient_evidence"])
+def test_incomplete_research_quarantines_missing_mechanism_without_claiming_it_verified(
+    research_status: str,
+) -> None:
+    mechanism_errors = [
+        "temporary_harness_mechanism_call_missing:hypothesis:one:experiment:one",
+        "primary_hypothesis_mechanism_evidence_missing:hypothesis:one",
+    ]
+
+    fatal, diagnostics = mod._partition_mechanism_validation_errors(
+        {"research_status": research_status},
+        mechanism_errors,
+    )
+
+    assert fatal == []
+    assert diagnostics == mechanism_errors
+
+    fatal, diagnostics = mod._partition_mechanism_validation_errors(
+        {"research_status": "evidence_sufficient"},
+        mechanism_errors,
+    )
+    assert fatal == mechanism_errors
+    assert diagnostics == []
+
+
+def test_sufficient_research_keeps_primary_mechanism_errors_fatal_and_quarantines_secondary(
+) -> None:
+    dossier = {
+        "research_status": "evidence_sufficient",
+        "root_cause_hypotheses": [
+            {"hypothesis_id": "hypothesis:primary"},
+            {"hypothesis_id": "hypothesis:alternative"},
+        ],
+    }
+    primary_error = (
+        "primary_hypothesis_mechanism_coverage_incomplete:hypothesis:primary"
+    )
+    secondary_error = (
+        "observed_output_mechanism_link_missing:"
+        "hypothesis:alternative:experiment:alternative"
+    )
+    unattributed_error = "mechanism_receipt_integrity_invalid"
+
+    fatal, diagnostics = mod._partition_mechanism_validation_errors(
+        dossier,
+        [secondary_error, primary_error, unattributed_error],
+    )
+
+    assert fatal == [primary_error, unattributed_error]
+    assert diagnostics == [secondary_error]
+
+
 def test_harness_mechanism_touch_follows_only_immediate_result_method_chain(
     tmp_path: Path,
 ) -> None:
@@ -4423,6 +7496,82 @@ def test_atom_binding_uses_structured_snapshot_output_without_ancillary_artifact
     assert "origin_artifact_path" not in bindings[0]
 
 
+def test_implicit_atom_binding_accepts_json_fragment_wrapping_exact_scalar() -> None:
+    atom_id = "atom:error-code"
+    error_code = "codex_model_messages_missing"
+    assignment = {
+        "status": "complete",
+        "expected_atom_ids": [atom_id],
+        "atom_receipts": [
+            {
+                "atom_id": atom_id,
+                "atom_sha256": mod._canonical_json_sha256({"code": error_code}),
+                "atom_snapshot": {"code": error_code},
+                "artifact_receipts": [],
+            }
+        ],
+    }
+    dossier = {
+        "experiments": [
+            {
+                "experiment_id": "wrapped-error-code",
+                "scenario_kind": "faithful_replay",
+                "addresses_atom_ids": [atom_id],
+                "command": "python .usertest_research/probe.py",
+                "outcome": "supports",
+                "observable_assertion": {
+                    "source": "stdout",
+                    "operator": "contains",
+                    "expected": f'"error_code": "{error_code}"',
+                },
+            }
+        ]
+    }
+    errors: list[str] = []
+
+    bindings = mod._experiment_atom_bindings(dossier, assignment, errors=errors)
+
+    assert errors == []
+    assert bindings[0]["origin_atom_field_path"] == "$.code"
+
+
+def test_implicit_atom_binding_rejects_unquoted_prose_containing_short_scalar() -> None:
+    atom_id = "atom:error-code"
+    assignment = {
+        "status": "complete",
+        "expected_atom_ids": [atom_id],
+        "atom_receipts": [
+            {
+                "atom_id": atom_id,
+                "atom_snapshot": {"code": "error"},
+                "artifact_receipts": [],
+            }
+        ],
+    }
+    dossier = {
+        "experiments": [
+            {
+                "experiment_id": "negated-error-prose",
+                "scenario_kind": "faithful_replay",
+                "addresses_atom_ids": [atom_id],
+                "command": "python .usertest_research/probe.py",
+                "outcome": "supports",
+                "observable_assertion": {
+                    "source": "stdout",
+                    "operator": "contains",
+                    "expected": "no error occurred",
+                },
+            }
+        ]
+    }
+    errors: list[str] = []
+
+    bindings = mod._experiment_atom_bindings(dossier, assignment, errors=errors)
+
+    assert bindings == []
+    assert f"experiment_not_bound_to_atom:negated-error-prose:{atom_id}" in errors
+
+
 def test_explicit_field_bindings_accept_short_symptom_and_context_atoms() -> None:
     assignment = {
         "status": "complete",
@@ -4492,6 +7641,327 @@ def test_explicit_field_bindings_accept_short_symptom_and_context_atoms() -> Non
     assert bindings[0]["origin_atom_field_path"] == "$.output_excerpt"
     assert bindings[0]["origin_atom_value_sha256"] == mod._canonical_json_sha256("bad")
     assert bindings[1]["origin_atom_sha256"] == "2" * 64
+
+
+def test_source_value_typo_cannot_bind_null_and_reports_exact_candidate_paths() -> None:
+    atom_id = "atom:error-code"
+    error_code = "codex_model_messages_missing"
+    snapshot = {
+        "nullable": None,
+        "nested": {"code": error_code},
+        "prose": f"Observed {error_code} while starting the agent",
+    }
+    errors: list[str] = []
+
+    bindings, direct = mod._explicit_atom_binding_receipts(
+        experiment={
+            "origin_evidence_bindings": [
+                {
+                    "atom_id": atom_id,
+                    "role": "context",
+                    "field_path": "$.nullable",
+                    "source_value": error_code,
+                }
+            ]
+        },
+        experiment_id="experiment:baseline",
+        atom_id=atom_id,
+        atom_receipt={
+            "atom_id": atom_id,
+            "atom_sha256": mod._canonical_json_sha256(snapshot),
+            "atom_snapshot": snapshot,
+        },
+        assertion={},
+        command="runner verify",
+        errors=errors,
+    )
+
+    assert bindings == []
+    assert direct is False
+    assert len(errors) == 1
+    assert ":value_key:details=" in errors[0]
+    details = json.loads(errors[0].split(":details=", 1)[1])
+    assert details == {
+        "candidate_field_path_count": 1,
+        "candidate_field_paths": ["$.nested.code"],
+        "declared_value_key": "source_value",
+        "truncated": False,
+    }
+
+
+def test_missing_value_key_does_not_suggest_unrelated_null_atom_paths() -> None:
+    atom_id = "atom:error-code"
+    snapshot = {
+        "nullable": None,
+        "nested": {"code": "codex_model_messages_missing"},
+    }
+    errors: list[str] = []
+
+    bindings, direct = mod._explicit_atom_binding_receipts(
+        experiment={
+            "origin_evidence_bindings": [
+                {
+                    "atom_id": atom_id,
+                    "role": "context",
+                    "field_path": "$.nested.code",
+                }
+            ]
+        },
+        experiment_id="experiment:baseline",
+        atom_id=atom_id,
+        atom_receipt={
+            "atom_id": atom_id,
+            "atom_sha256": mod._canonical_json_sha256(snapshot),
+            "atom_snapshot": snapshot,
+        },
+        assertion={},
+        command="runner verify",
+        errors=errors,
+    )
+
+    assert bindings == []
+    assert direct is False
+    assert len(errors) == 1
+    details = json.loads(errors[0].split(":details=", 1)[1])
+    assert details == {
+        "candidate_search_performed": False,
+        "declared_value_key": "missing",
+        "required_value_key": "value",
+    }
+
+
+def test_explicit_null_value_remains_a_valid_context_binding() -> None:
+    atom_id = "atom:nullable"
+    snapshot = {"nullable": None}
+    errors: list[str] = []
+
+    bindings, direct = mod._explicit_atom_binding_receipts(
+        experiment={
+            "origin_evidence_bindings": [
+                {
+                    "atom_id": atom_id,
+                    "role": "context",
+                    "field_path": "$.nullable",
+                    "value": None,
+                }
+            ]
+        },
+        experiment_id="experiment:baseline",
+        atom_id=atom_id,
+        atom_receipt={
+            "atom_id": atom_id,
+            "atom_sha256": mod._canonical_json_sha256(snapshot),
+            "atom_snapshot": snapshot,
+        },
+        assertion={},
+        command="runner verify",
+        errors=errors,
+    )
+
+    assert errors == []
+    assert direct is False
+    assert len(bindings) == 1
+    assert bindings[0]["origin_atom_value_sha256"] == mod._canonical_json_sha256(None)
+
+
+def test_wrong_atom_path_reports_the_exact_nested_path_for_the_declared_value() -> None:
+    atom_id = "atom:error-code"
+    snapshot = {"error": {"code": "codex_model_messages_missing"}}
+    errors: list[str] = []
+
+    bindings, direct = mod._explicit_atom_binding_receipts(
+        experiment={
+            "origin_evidence_bindings": [
+                {
+                    "atom_id": atom_id,
+                    "role": "context",
+                    "field_path": "$.code",
+                    "value": "codex_model_messages_missing",
+                }
+            ]
+        },
+        experiment_id="experiment:baseline",
+        atom_id=atom_id,
+        atom_receipt={
+            "atom_id": atom_id,
+            "atom_sha256": mod._canonical_json_sha256(snapshot),
+            "atom_snapshot": snapshot,
+        },
+        assertion={},
+        command="runner verify",
+        errors=errors,
+    )
+
+    assert bindings == []
+    assert direct is False
+    details = json.loads(errors[0].split(":details=", 1)[1])
+    assert details["candidate_field_paths"] == ["$.error.code"]
+    assert details["candidate_field_path_count"] == 1
+
+
+def test_atom_path_candidates_use_json_type_identity_and_shared_path_grammar() -> None:
+    snapshot = {
+        "integer": 1,
+        "boolean": True,
+        "float": 1.0,
+        "bad-key": True,
+    }
+
+    assert mod._atom_field_paths_matching_value(snapshot, True) == (["$.boolean"], 1)
+    assert mod._atom_field_paths_matching_value(snapshot, 1) == (["$.integer"], 1)
+    assert mod._atom_field_paths_matching_value(snapshot, 1.0) == (["$.float"], 1)
+
+
+def test_explicit_symptom_binding_accepts_output_fragment_wrapping_atom_scalar() -> None:
+    atom_id = "atom:error-code"
+    error_code = "codex_model_messages_missing"
+    snapshot = {"error": {"code": error_code}}
+    assignment = {
+        "status": "complete",
+        "expected_atom_ids": [atom_id],
+        "atom_receipts": [
+            {
+                "atom_id": atom_id,
+                "atom_sha256": mod._canonical_json_sha256(snapshot),
+                "atom_snapshot": snapshot,
+                "artifact_receipts": [],
+            }
+        ],
+    }
+    dossier = {
+        "experiments": [
+            {
+                "experiment_id": "wrapped-error-code",
+                "scenario_kind": "faithful_replay",
+                "addresses_atom_ids": [atom_id],
+                "command": "python .usertest_research/probe.py",
+                "outcome": "supports",
+                "observable_assertion": {
+                    "source": "stdout",
+                    "operator": "contains",
+                    "expected": f'"simulated_error_code": "{error_code}"',
+                },
+                "origin_evidence_bindings": [
+                    {
+                        "atom_id": atom_id,
+                        "role": "symptom",
+                        "field_path": "$.error.code",
+                        "value": error_code,
+                    }
+                ],
+            }
+        ]
+    }
+    errors: list[str] = []
+
+    bindings = mod._experiment_atom_bindings(dossier, assignment, errors=errors)
+
+    assert errors == []
+    assert bindings[0]["binding_role"] == "symptom"
+    assert bindings[0]["origin_atom_value_sha256"] == mod._canonical_json_sha256(error_code)
+
+
+def test_explicit_symptom_binding_rejects_unquoted_prose_containing_atom_scalar() -> None:
+    atom_id = "atom:error-code"
+    snapshot = {"error": {"code": "error"}}
+    assignment = {
+        "status": "complete",
+        "expected_atom_ids": [atom_id],
+        "atom_receipts": [
+            {
+                "atom_id": atom_id,
+                "atom_sha256": mod._canonical_json_sha256(snapshot),
+                "atom_snapshot": snapshot,
+                "artifact_receipts": [],
+            }
+        ],
+    }
+    dossier = {
+        "experiments": [
+            {
+                "experiment_id": "negated-error-prose",
+                "scenario_kind": "faithful_replay",
+                "addresses_atom_ids": [atom_id],
+                "command": "python .usertest_research/probe.py",
+                "outcome": "supports",
+                "observable_assertion": {
+                    "source": "stdout",
+                    "operator": "contains",
+                    "expected": "no error occurred",
+                },
+                "origin_evidence_bindings": [
+                    {
+                        "atom_id": atom_id,
+                        "role": "symptom",
+                        "field_path": "$.error.code",
+                        "value": "error",
+                    }
+                ],
+            }
+        ]
+    }
+    errors: list[str] = []
+
+    bindings = mod._experiment_atom_bindings(dossier, assignment, errors=errors)
+
+    assert bindings == []
+    assert errors == [
+        "experiment_atom_binding_invalid:negated-error-prose:atom:error-code:0:"
+        "not_bound_to_observation",
+        "supporting_experiments_do_not_cover_origin_atoms",
+        "supporting_experiments_have_no_direct_symptom_binding",
+    ]
+
+
+def test_explicit_symptom_binding_accepts_complete_key_value_token() -> None:
+    atom_id = "atom:error-code"
+    error_code = "codex_model_messages_missing"
+    snapshot = {"error": {"code": error_code}}
+    assignment = {
+        "status": "complete",
+        "expected_atom_ids": [atom_id],
+        "atom_receipts": [
+            {
+                "atom_id": atom_id,
+                "atom_sha256": mod._canonical_json_sha256(snapshot),
+                "atom_snapshot": snapshot,
+                "artifact_receipts": [],
+            }
+        ],
+    }
+    dossier = {
+        "experiments": [
+            {
+                "experiment_id": "structured-error-line",
+                "scenario_kind": "faithful_replay",
+                "addresses_atom_ids": [atom_id],
+                "command": "python .usertest_research/probe.py",
+                "outcome": "supports",
+                "observable_assertion": {
+                    "source": "stdout",
+                    "operator": "contains",
+                    "expected": (
+                        "code=codex_model_messages_missing "
+                        "classification=invalid_agent_config"
+                    ),
+                },
+                "origin_evidence_bindings": [
+                    {
+                        "atom_id": atom_id,
+                        "role": "symptom",
+                        "field_path": "$.error.code",
+                        "value": error_code,
+                    }
+                ],
+            }
+        ]
+    }
+    errors: list[str] = []
+
+    bindings = mod._experiment_atom_bindings(dossier, assignment, errors=errors)
+
+    assert errors == []
+    assert [binding["atom_id"] for binding in bindings] == [atom_id]
 
 
 def test_explicit_field_binding_rejects_changed_value_or_unrelated_symptom() -> None:
@@ -5653,18 +9123,24 @@ def test_control_rejects_mismatched_or_unverified_mechanism_subset(
 def test_retained_harness_scalar_intervention_survives_with_runner_bound_flow(
     tmp_path: Path,
 ) -> None:
-    workspace = tmp_path / "workspace"
-    (workspace / "src").mkdir(parents=True)
-    (workspace / "src" / "core.py").write_text(
-        "def run(mode):\n    return 'bad'\n",
-        encoding="utf-8",
-    )
-    (workspace / ".usertest_research").mkdir()
+    baseline_workspace = tmp_path / "baseline-workspace"
+    challenge_workspace = tmp_path / "challenge-workspace"
     harness = ".usertest_research/probe.py"
-    (workspace / harness).write_text(
-        "import sys\nfrom src.core import run\nvalue = run(sys.argv[1])\nprint(value)\n",
-        encoding="utf-8",
-    )
+    for workspace in (baseline_workspace, challenge_workspace):
+        (workspace / "src").mkdir(parents=True)
+        (workspace / "pyproject.toml").write_text(
+            "[project]\nname = 'retained-harness-fixture'\nversion = '0.0.0'\n",
+            encoding="utf-8",
+        )
+        (workspace / "src" / "core.py").write_text(
+            "def run(mode):\n    return 'bad'\n",
+            encoding="utf-8",
+        )
+        (workspace / ".usertest_research").mkdir()
+        (workspace / harness).write_text(
+            "import sys\nfrom src.core import run\nvalue = run(sys.argv[1])\nprint(value)\n",
+            encoding="utf-8",
+        )
 
     def experiment(experiment_id: str, value: str, *, scenario_kind: str) -> dict[str, object]:
         result: dict[str, object] = {
@@ -5718,10 +9194,43 @@ def test_retained_harness_scalar_intervention_survives_with_runner_bound_flow(
             }
         ],
     }
+
+    def replay_context(workspace: Path) -> dict[str, object]:
+        pythonpath, repository_import = mod._repository_python_import_environment(workspace)
+        assert pythonpath is not None
+        environment = {"CI": "1", "PYTHONPATH": pythonpath}
+        return {
+            "replay_setup_receipt": mod._replay_setup_receipt(
+                environment_overrides={},
+                disposable_state_paths=[],
+            ),
+            "execution_isolation": {
+                "executor": "trusted_host",
+                "platform": "windows",
+                "os_sandbox": False,
+                "network": "not_enforced",
+                "filesystem_isolation": "dedicated_clone_only_not_os_sandbox",
+                "trust_decision": "approved_local_source_root",
+                "sanitized_environment_keys": sorted(environment),
+            },
+            "execution_metadata": {
+                "executor": "trusted_host",
+                "environment_attestation": mod.environment_attestation(environment),
+                "repository_python_import": repository_import,
+            },
+        }
+
     replays = {
         experiment_id: {
             "executed_argv": mod._parse_replay_argv(str(experiment["command"])),
-            "workspace_dir": str(workspace),
+            "workspace_dir": str(
+                baseline_workspace if experiment_id == "baseline" else challenge_workspace
+            ),
+            "workspace_head": "a" * 40,
+            "overlay_manifest_sha256": "b" * 64,
+            **replay_context(
+                baseline_workspace if experiment_id == "baseline" else challenge_workspace
+            ),
             "assertion_passed": True,
             "exit_code": 0,
             "stdout_sha256": hash_character * 64,
@@ -5737,7 +9246,7 @@ def test_retained_harness_scalar_intervention_survives_with_runner_bound_flow(
     receipts = mod._falsification_intervention_receipts(
         dossier,
         clean_replays=replays,
-        planning_workspace=workspace,
+        planning_workspace=baseline_workspace,
         symbol_receipts=[{"symbol": "core.run", "path": "src/core.py"}],
         errors=errors,
     )
@@ -5750,6 +9259,123 @@ def test_retained_harness_scalar_intervention_survives_with_runner_bound_flow(
     assert difference["verification_method"] == "retained_harness_scalar_argv_delta_v1"
     assert difference["difference"]["runtime_argv_index"] == 1
     assert difference["difference"]["mechanism_argument_bindings"][0]["symbol"] == "core.run"
+    assert difference["difference"]["workspace_head"] == "a" * 40
+    baseline_environment = replays["baseline"]["execution_metadata"]["environment_attestation"]
+    challenge_environment = replays["challenge"]["execution_metadata"]["environment_attestation"]
+    assert (
+        baseline_environment["environment_attestation_sha256"]
+        != challenge_environment["environment_attestation_sha256"]
+    )
+    assert mod._retained_harness_replay_context(
+        replays["baseline"]
+    ) == mod._retained_harness_replay_context(replays["challenge"])
+
+    (challenge_workspace / harness).write_text(
+        "import sys\nfrom src.core import run\nprint('forged', run(sys.argv[1]))\n",
+        encoding="utf-8",
+    )
+    assert (
+        mod._retained_harness_scalar_argv_difference(
+            baseline_replay=replays["baseline"],
+            challenge_replay=replays["challenge"],
+            mechanism_symbols=["core.run"],
+            symbol_paths={"core.run": "src/core.py"},
+        )
+        is None
+    )
+
+
+@pytest.mark.parametrize("mismatch", ["setup_environment", "effective_environment", "platform"])
+def test_retained_harness_scalar_intervention_rejects_material_replay_context_mismatch(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    baseline_workspace = tmp_path / "baseline-workspace"
+    challenge_workspace = tmp_path / "challenge-workspace"
+    harness = ".usertest_research/probe.py"
+    for workspace in (baseline_workspace, challenge_workspace):
+        (workspace / "src").mkdir(parents=True)
+        (workspace / "pyproject.toml").write_text(
+            "[project]\nname = 'retained-harness-fixture'\nversion = '0.0.0'\n",
+            encoding="utf-8",
+        )
+        (workspace / "src" / "core.py").write_text(
+            "def run(mode):\n    return 'bad'\n",
+            encoding="utf-8",
+        )
+        (workspace / ".usertest_research").mkdir()
+        (workspace / harness).write_text(
+            "import sys\nfrom src.core import run\nvalue = run(sys.argv[1])\nprint(value)\n",
+            encoding="utf-8",
+        )
+
+    def replay(workspace: Path, value: str) -> dict[str, object]:
+        pythonpath, repository_import = mod._repository_python_import_environment(workspace)
+        assert pythonpath is not None
+        environment = {"CI": "1", "PYTHONPATH": pythonpath}
+        return {
+            "executed_argv": ["python", harness, value],
+            "workspace_dir": str(workspace),
+            "workspace_head": "a" * 40,
+            "overlay_manifest_sha256": "b" * 64,
+            "replay_setup_receipt": mod._replay_setup_receipt(
+                environment_overrides={},
+                disposable_state_paths=[],
+            ),
+            "execution_isolation": {
+                "executor": "trusted_host",
+                "platform": "windows",
+                "os_sandbox": False,
+                "network": "not_enforced",
+                "filesystem_isolation": "dedicated_clone_only_not_os_sandbox",
+                "trust_decision": "approved_local_source_root",
+                "sanitized_environment_keys": sorted(environment),
+            },
+            "execution_metadata": {
+                "executor": "trusted_host",
+                "environment_attestation": mod.environment_attestation(environment),
+                "repository_python_import": repository_import,
+            },
+        }
+
+    baseline = replay(baseline_workspace, "legacy")
+    challenge = replay(challenge_workspace, "alternative")
+    if mismatch == "setup_environment":
+        challenge["replay_setup_receipt"] = mod._replay_setup_receipt(
+            environment_overrides={"FEATURE_MODE": "alternative"},
+            disposable_state_paths=[],
+        )
+        metadata = challenge["execution_metadata"]
+        assert isinstance(metadata, dict)
+        effective_environment = {
+            "CI": "1",
+            "PYTHONPATH": str(challenge_workspace / "src"),
+            "FEATURE_MODE": "alternative",
+        }
+        metadata["environment_attestation"] = mod.environment_attestation(effective_environment)
+    elif mismatch == "effective_environment":
+        metadata = challenge["execution_metadata"]
+        assert isinstance(metadata, dict)
+        metadata["environment_attestation"] = mod.environment_attestation(
+            {
+                "CI": "0",
+                "PYTHONPATH": str(challenge_workspace / "src"),
+            }
+        )
+    else:
+        isolation = challenge["execution_isolation"]
+        assert isinstance(isolation, dict)
+        isolation["platform"] = "linux"
+
+    assert (
+        mod._retained_harness_scalar_argv_difference(
+            baseline_replay=baseline,
+            challenge_replay=challenge,
+            mechanism_symbols=["core.run"],
+            symbol_paths={"core.run": "src/core.py"},
+        )
+        is None
+    )
 
 
 @pytest.mark.parametrize(

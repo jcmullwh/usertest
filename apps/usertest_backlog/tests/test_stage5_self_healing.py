@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -13,6 +14,7 @@ _SELECTOR_SESSION = "11111111-1111-4111-8111-111111111111"
 _FALSIFIER_1_SESSION = "22222222-2222-4222-8222-222222222222"
 _FALSIFIER_2_SESSION = "33333333-3333-4333-8333-333333333333"
 _FALSIFIER_3_SESSION = "77777777-7777-4777-8777-777777777777"
+_FALSIFIER_4_SESSION = "88888888-8888-4888-8888-888888888888"
 _OPTIONER_SESSION = "44444444-4444-4444-8444-444444444444"
 _LABELER_SESSION = "55555555-5555-4555-8555-555555555555"
 _UNKNOWN_SESSION = "66666666-6666-4666-8666-666666666666"
@@ -199,8 +201,11 @@ def _run_case(
     *,
     options: list[dict[str, Any]] | None = None,
     stage4_doc: dict[str, Any] | None = None,
+    selection_validator: Any | None = None,
 ) -> tuple[dict[str, Any], _ScriptedTransport]:
     _patch_simple_contracts(monkeypatch)
+    if selection_validator is not None:
+        monkeypatch.setattr(healing, "selection_quality_errors", selection_validator)
     transport = _ScriptedTransport(tmp_path, script)
     monkeypatch.setattr(healing, "run_stage_prompt_json", transport)
     result = healing.run_stage5_live_case(
@@ -231,6 +236,47 @@ def _run_case(
     )
     assert transport.script == []
     return result, transport
+
+
+def test_complete_selection_gate_runs_after_labeler_metadata_exists(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observations: list[tuple[bool, bool]] = []
+
+    def selection_validator(
+        decision: dict[str, Any], *, require_complete: bool = False, **_kwargs: Any
+    ):
+        has_surface = isinstance(decision.get("change_surface"), dict)
+        if "falsification_review" in decision:
+            observations.append((require_complete, has_surface))
+        return [] if not require_complete or has_surface else ["selection_change_surface_missing"]
+
+    result, _ = _run_case(
+        tmp_path,
+        monkeypatch,
+        [
+            {
+                "stage": "solution_selection",
+                "response": _selection("option:a"),
+                "session": _SELECTOR_SESSION,
+            },
+            {
+                "stage": "solution_falsification",
+                "response": _review("accept"),
+                "session": _FALSIFIER_1_SESSION,
+            },
+            {
+                "stage": "selected_solution_labeler",
+                "response": _label(),
+                "session": _LABELER_SESSION,
+            },
+        ],
+        selection_validator=selection_validator,
+    )
+
+    assert result["status"] == "selected"
+    assert observations == [(False, False), (True, True)]
 
 
 def test_falsifier_format_error_repairs_in_same_falsifier_session(
@@ -588,10 +634,14 @@ def test_exact_selector_cycle_stalls_without_fixed_cycle_limit(
     assert result["decision"] is None
 
 
-def test_cross_role_economics_pause_nonprogress_and_preserve_frontiers(
+def test_costly_cross_role_progress_continues_after_two_nonprogress_cycles(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    findings = [
+        {"finding": "Root-cause gap remains", "affects": "root_cause"},
+        {"finding": "Outcome gap remains", "affects": "verification"},
+    ]
     result, _ = _run_case(
         tmp_path,
         monkeypatch,
@@ -600,37 +650,77 @@ def test_cross_role_economics_pause_nonprogress_and_preserve_frontiers(
                 "stage": "solution_selection",
                 "response": _selection("option:a"),
                 "session": _SELECTOR_SESSION,
-                "elapsed": 1.0,
-            },
-            {
-                "stage": "solution_falsification",
-                "response": _review("reject"),
-                "session": _FALSIFIER_1_SESSION,
-                "elapsed": 1.0,
-            },
-            {
-                "stage": "solution_selection",
-                "response": _selection("option:a", rationale="Same option with different wording."),
-                "session": _SELECTOR_SESSION,
-                "resume": _SELECTOR_SESSION,
                 "elapsed": 2.0,
             },
             {
                 "stage": "solution_falsification",
-                "response": _review("reject"),
+                "response": _review("reject", critical_findings=findings),
+                "session": _FALSIFIER_1_SESSION,
+                "elapsed": 2.0,
+            },
+            {
+                "stage": "solution_selection",
+                "response": _selection(
+                    "option:a", rationale="First same-option response to bound findings."
+                ),
+                "session": _SELECTOR_SESSION,
+                "resume": _SELECTOR_SESSION,
+                "elapsed": 200.0,
+            },
+            {
+                "stage": "solution_falsification",
+                "response": _review("reject", critical_findings=findings),
                 "session": _FALSIFIER_2_SESSION,
-                "elapsed": 0.0,
+                "elapsed": 200.0,
+            },
+            {
+                "stage": "solution_selection",
+                "response": _selection(
+                    "option:a", rationale="Second same-option response to bound findings."
+                ),
+                "session": _SELECTOR_SESSION,
+                "resume": _SELECTOR_SESSION,
+                "elapsed": 200.0,
+            },
+            {
+                "stage": "solution_falsification",
+                "response": _review("reject", critical_findings=findings),
+                "session": _FALSIFIER_3_SESSION,
+                "elapsed": 200.0,
+            },
+            {
+                "stage": "solution_selection",
+                "response": _selection(
+                    "option:b", rationale="Switch mechanisms after two nonadvancing cycles."
+                ),
+                "session": _SELECTOR_SESSION,
+                "resume": _SELECTOR_SESSION,
+                "elapsed": 200.0,
+            },
+            {
+                "stage": "solution_falsification",
+                "response": _review("accept"),
+                "session": _FALSIFIER_4_SESSION,
+                "elapsed": 200.0,
+            },
+            {
+                "stage": "selected_solution_labeler",
+                "response": _label(),
+                "session": _LABELER_SESSION,
             },
         ],
     )
 
-    assert result["status"] == "repairable_paused:rework_cost_reached_original"
-    assert result["outcome"]["rework_cost_since_progress"] == 2.0
-    assert len(result["role_runs"]) == 4
+    assert result["status"] == "selected"
+    assert result["decision"]["selected_option_id"] == "option:b"
+    assert result["outcome"]["consecutive_material_nonprogress"] == 0
+    assert result["outcome"]["rework_cost_since_progress"] == 0.0
+    assert result["outcome"]["total_rework_cost"] == 1200.0
+    assert len(result["role_runs"]) == 9
     assert result["feedback"]
 
 
-def test_option_revision_wording_churn_hits_cross_role_economics(
+def test_option_revision_pauses_only_on_third_nonprogress_cycle_and_retains_best(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -642,13 +732,14 @@ def test_option_revision_wording_churn_hits_cross_role_economics(
             "options": unchanged_options,
         }
     )
+    initial_revision = _revision_request()
     result, _ = _run_case(
         tmp_path,
         monkeypatch,
         [
             {
                 "stage": "solution_selection",
-                "response": _revision_request(),
+                "response": initial_revision,
                 "session": _SELECTOR_SESSION,
                 "elapsed": 1.0,
             },
@@ -657,7 +748,7 @@ def test_option_revision_wording_churn_hits_cross_role_economics(
                 "response": optioner_response,
                 "session": _OPTIONER_SESSION,
                 "resume": _OPTIONER_SESSION,
-                "elapsed": 0.5,
+                "elapsed": 100.0,
             },
             {
                 "stage": "solution_selection",
@@ -666,16 +757,61 @@ def test_option_revision_wording_churn_hits_cross_role_economics(
                 ),
                 "session": _SELECTOR_SESSION,
                 "resume": _SELECTOR_SESSION,
-                "elapsed": 0.5,
+                "elapsed": 100.0,
+            },
+            {
+                "stage": "solution_optioning",
+                "response": optioner_response,
+                "session": _OPTIONER_SESSION,
+                "resume": _OPTIONER_SESSION,
+                "elapsed": 100.0,
+            },
+            {
+                "stage": "solution_selection",
+                "response": _revision_request(
+                    rationale="Second distinct wording; the option mechanism is still unchanged."
+                ),
+                "session": _SELECTOR_SESSION,
+                "resume": _SELECTOR_SESSION,
+                "elapsed": 100.0,
+            },
+            {
+                "stage": "solution_optioning",
+                "response": optioner_response,
+                "session": _OPTIONER_SESSION,
+                "resume": _OPTIONER_SESSION,
+                "elapsed": 100.0,
+            },
+            {
+                "stage": "solution_selection",
+                "response": _revision_request(
+                    rationale="Third distinct wording; the option mechanism is still unchanged."
+                ),
+                "session": _SELECTOR_SESSION,
+                "resume": _SELECTOR_SESSION,
+                "elapsed": 100.0,
             },
         ],
         options=unchanged_options,
         stage4_doc=_stage4_doc(tmp_path),
     )
 
-    assert result["status"] == "repairable_paused:rework_cost_reached_original"
-    assert result["outcome"]["reasons"] == ["option_revision_rework_cost_reached_original"]
-    assert result["outcome"]["rework_cost_since_progress"] == 1.0
+    assert result["status"] == (
+        "repairable_paused:consecutive_nonadvancing_corrections_require_adjudication"
+    )
+    assert result["outcome"]["reasons"] == [
+        "consecutive_nonadvancing_corrections_require_adjudication"
+    ]
+    assert result["outcome"]["consecutive_material_nonprogress"] == 3
+    assert result["outcome"]["rework_cost_since_progress"] == 600.0
+    assert result["outcome"]["total_rework_cost"] == 600.0
+    assert len(result["role_runs"]) == 7
+    assert result["retained_frontier"] == {
+        "selector_response_sha256": sha256(initial_revision.encode("utf-8")).hexdigest(),
+        "selected_option_id": None,
+        "options_sha256": healing._canonical_sha256(unchanged_options),
+        "falsifier_defect_count": None,
+    }
 
 
 def test_fewer_substantive_falsifier_defects_reset_rework_economics(
@@ -772,7 +908,7 @@ def test_dispositioned_risk_omission_is_not_substantive_progress() -> None:
     ) == healing._falsifier_substantive_defect_count(omitted_disclosed_risk)
 
 
-def test_nonpositive_inherited_author_cost_uses_measured_resume_cost(
+def test_role_conversation_uses_nonprogress_not_author_cost_as_pause_boundary(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -789,6 +925,20 @@ def test_nonpositive_inherited_author_cost_uses_measured_resume_cost(
             {
                 "stage": "solution_selection",
                 "response": json.dumps({"state": "b"}),
+                "session": _UNKNOWN_SESSION,
+                "resume": _UNKNOWN_SESSION,
+                "elapsed": 1.0,
+            },
+            {
+                "stage": "solution_selection",
+                "response": json.dumps({"state": "c"}),
+                "session": _UNKNOWN_SESSION,
+                "resume": _UNKNOWN_SESSION,
+                "elapsed": 1.0,
+            },
+            {
+                "stage": "solution_selection",
+                "response": json.dumps({"state": "d"}),
                 "session": _UNKNOWN_SESSION,
                 "resume": _UNKNOWN_SESSION,
                 "elapsed": 1.0,
@@ -818,9 +968,13 @@ def test_nonpositive_inherited_author_cost_uses_measured_resume_cost(
         author_cost_seconds=0.0,
     )
 
-    assert run["status"] == "repairable_paused:correction_cost_reached_original"
-    assert run["metrics"]["attempt_count"] == 2
-    assert run["correction_cost_since_progress"] == 1.0
+    assert run["status"] == (
+        "repairable_paused:"
+        "consecutive_nonadvancing_corrections_require_adjudication"
+    )
+    assert run["metrics"]["attempt_count"] == 4
+    assert run["correction_cost_since_progress"] == 2.0
+    assert run["total_correction_cost"] == 3.0
 
 
 def test_unknown_role_error_is_repaired_without_allowlist(

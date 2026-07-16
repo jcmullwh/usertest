@@ -53,14 +53,32 @@ genuinely distinct mechanisms may use the same family label.
 
 - Return zero to three options; do not create rhetorical direct/robust/comprehensive
   variants around one mechanism.
-- Return `insufficient_evidence` with no options when a material unknown affects the
-  mechanism, change surface, or interface choice.
+- Return `insufficient_evidence` with no options when a material present-state fact about the
+  mechanism, reachable change surface, indispensable requirement, or available protection
+  signal remains unknown. Do not use it merely because Stage 4 must choose a prospective
+  finite threshold, configurable default, identity/alias rule, or interface extension. State
+  such a choice explicitly with bounded tradeoffs, safety constraints, and verification.
 - Return `no_safe_option` with no options when adequate evidence shows no considered
   mechanism is safe.
 - Multiple runs count as independent scope evidence only when they expose distinct
   consumers or failure paths. Repeated observations of one path count once.
 - A canonical source, shared contract, centralized mechanism, or class-level change must
   cite at least two independent consumers or paths from source or research evidence.
+- Use that two-path gate for broad problem coverage or a new reusable abstraction, not for
+  several edits along one evidenced operation. A single path can cross existing call sites or
+  components, extend an existing helper, and require ordering or protection changes. Keep it
+  `single_path`, inspect affected callers for compatibility, and retain each causally necessary
+  change.
+- Trace the reachable operation through its earliest same-resource failure boundary. A later
+  intervention cannot recover an operation that already failed; move the control earlier when
+  the inspected path supports that sequencing.
+- Maximize safe successful throughput. Report partial supporting-operation errors, but do not
+  automatically abort when verified safe progress is enough for the intended operation to
+  continue. Require proof of both a safe postcondition and sufficient actual progress; do not
+  swallow errors or assume progress.
+- An observed benchmark or current default may inform a prospective default or test case. It
+  is not a universal supported maximum without an explicit repository requirement or capacity
+  constraint.
 
 ## Output contract
 
@@ -99,7 +117,14 @@ options containing the existing option fields plus:
     "unsupported_assumptions": [],
     "residual_recurrence_paths": [],
     "compatibility_risks": [],
-    "testability": {"before": "...", "after": "..."}
+    "testability": {"before": "...", "after": "..."},
+    "outcome_strategy": {
+      "intended_operation": "the useful bounded behavior that proves the maintenance problem is solved",
+      "success_properties": ["problem-specific properties beyond error disappearance or exit zero"],
+      "safety_constraints": ["evidenced behavior that must remain protected"],
+      "post_change_replay_mode": "verified_fail_first | stage6_planned_unverified",
+      "original_scenario_experiment_ids": ["prefer a verified fail-first experiment ID; otherwise use a verified original_replay, faithful_replay, or live_runtime baseline ID"]
+    }
   },
   "scope_evidence": {
     "scope_level": "single_path | multiple_independent_paths | shared_abstraction",
@@ -124,6 +149,15 @@ every selected scope path; the explanation cannot substitute for those receipts.
 add an edit for every traversed symbol, bind an option to a different hypothesis,
 paraphrase the research statement, or invent an uninspected intervention target. Return
 to research when the common causal boundary is not evidenced.
+
+The outcome strategy is Stage-4 prospective design. It must say what useful operation or
+bounded lifecycle state demonstrates success and which retained Stage-3 baseline is replayed.
+Do not require Stage 3 to have already designed or passed a future implementation test.
+Prefer an unchanged runner-verified fail-first command for the same source atoms and mark it
+`verified_fail_first`. An exit-zero test that asserts the old symptom is not an exact
+post-change replay and its retained research asset must not be rewritten. If no fail-first
+exists, mark the baseline `stage6_planned_unverified` so Stage 6 can specify a distinct future
+proof without sending the case back to research solely for pre-execution.
 
 Select exactly one runner-owned causal proof route. Normally copy all verified
 falsification attempt IDs and leave `deterministic_closure_refs` empty. For a runner-minted

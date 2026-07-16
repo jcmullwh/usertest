@@ -12,6 +12,7 @@ from usertest_backlog.workflows.qualification_healing import (
     _compatible_route_groups,
     build_pending_repaired_shadow_run,
     consume_qualification_corrections,
+    correction_feedback_document,
     pending_repaired_shadow_run_errors,
     qualification_correction_consumption_errors,
     qualification_correction_route_errors,
@@ -215,19 +216,25 @@ def test_paused_frontier_resumes_same_payload_session_cost_and_attempt_chain() -
         "original_author_cost_seconds": 1.0,
     }
     route["route_sha256"] = _hash(route)
+    first_revisions = iter(
+        [
+            AuthorRevision(
+                payload={"revision": revision},
+                validation_errors=("different_error",),
+                valid_item_keys=(),
+                agent_session_id=route["agent_session_id"],
+                workspace_dir=route["workspace_dir"],
+                cost_seconds=1.0,
+            )
+            for revision in (2, 3, 4)
+        ]
+    )
     first = consume_qualification_corrections(
         routes=[route],
         source_pending_run_sha256="d" * 64,
         source_adjudication_sha256="e" * 64,
         load_current_payload=lambda _route: {"revision": 1},
-        invoke_exact_author=lambda **_kwargs: AuthorRevision(
-            payload={"revision": 2},
-            validation_errors=("different_error",),
-            valid_item_keys=(),
-            agent_session_id=route["agent_session_id"],
-            workspace_dir=route["workspace_dir"],
-            cost_seconds=1.0,
-        ),
+        invoke_exact_author=lambda **_kwargs: next(first_revisions),
         rerun_downstream=lambda **_kwargs: {},
     )
     frontier = first["route_receipts"][0]["correction_frontier"]
@@ -236,7 +243,7 @@ def test_paused_frontier_resumes_same_payload_session_cost_and_attempt_chain() -
     def invoke(**kwargs: Any) -> AuthorRevision:
         calls.append(kwargs)
         return AuthorRevision(
-            payload={"revision": 3},
+            payload={"revision": 5},
             validation_errors=(),
             valid_item_keys=("fixed",),
             agent_session_id=route["agent_session_id"],
@@ -257,20 +264,23 @@ def test_paused_frontier_resumes_same_payload_session_cost_and_attempt_chain() -
     )
 
     assert first["route_receipts"][0]["status"] == (
-        "repairable_paused:correction_cost_reached_original_authoring_cost"
+        "repairable_paused:"
+        "consecutive_nonadvancing_corrections_require_adjudication"
     )
     assert resumed["accepted_repair_count"] == 1
     assert len(calls) == 1
-    assert calls[0]["attempt_number"] == 3
-    assert calls[0]["current_payload"] == {"revision": 2}
-    assert calls[0]["prior_assessment"].reason == "prior_error_resolved"
+    assert calls[0]["attempt_number"] == 5
+    assert calls[0]["current_payload"] == {"revision": 4}
+    assert calls[0]["prior_assessment"].reason == "new_state_remains_repairable"
     resumed_frontier = resumed["route_receipts"][0]["correction_frontier"]
     assert [item["payload"] for item in resumed_frontier["attempts"]] == [
         {"revision": 1},
         {"revision": 2},
         {"revision": 3},
+        {"revision": 4},
+        {"revision": 5},
     ]
-    assert resumed_frontier["total_correction_cost"] == 3.0
+    assert resumed_frontier["total_correction_cost"] == 5.0
 
 
 def test_resume_frontier_rejects_workspace_binding_rewrite() -> None:
@@ -281,19 +291,25 @@ def test_resume_frontier_rejects_workspace_binding_rewrite() -> None:
         "original_author_cost_seconds": 1.0,
     }
     route["route_sha256"] = _hash(route)
+    first_revisions = iter(
+        [
+            AuthorRevision(
+                payload={"revision": revision},
+                validation_errors=("different_error",),
+                valid_item_keys=(),
+                agent_session_id=route["agent_session_id"],
+                workspace_dir=route["workspace_dir"],
+                cost_seconds=1.0,
+            )
+            for revision in (2, 3, 4)
+        ]
+    )
     first = consume_qualification_corrections(
         routes=[route],
         source_pending_run_sha256="d" * 64,
         source_adjudication_sha256="e" * 64,
         load_current_payload=lambda _route: {"revision": 1},
-        invoke_exact_author=lambda **_kwargs: AuthorRevision(
-            payload={"revision": 2},
-            validation_errors=("different_error",),
-            valid_item_keys=(),
-            agent_session_id=route["agent_session_id"],
-            workspace_dir=route["workspace_dir"],
-            cost_seconds=1.0,
-        ),
+        invoke_exact_author=lambda **_kwargs: next(first_revisions),
         rerun_downstream=lambda **_kwargs: {},
     )
     frontier = dict(first["route_receipts"][0]["correction_frontier"])
@@ -406,7 +422,7 @@ def test_grouped_partial_revision_retains_every_route_until_all_targets_are_pres
     assert all(
         receipt["accepted_payload_sha256"] is None
         and receipt["authored_work_disposition"] == "retained"
-        and receipt["status"].startswith("repairable_paused:")
+        and receipt["status"].startswith(("repairable_paused:", "stalled:"))
         for receipt in result["route_receipts"]
     )
     assert any(
@@ -509,7 +525,68 @@ def test_uncorrectable_route_is_retained_without_wasteful_invocation() -> None:
     assert result["route_receipts"][0]["status"] == "uncorrectable"
 
 
-def test_novel_but_nonimproving_corrections_pause_at_original_author_cost() -> None:
+def test_same_author_feedback_carries_hash_bound_original_source_finding() -> None:
+    finding_body = {
+        "finding_id": "qualification-source-finding:one",
+        "source_adjudication_sha256": "e" * 64,
+        "finding_kind": "accepted_output_quality",
+        "source_item_sha256": "f" * 64,
+        "source_output_ref": {
+            "output_kind": "plan",
+            "output_sha256": "a" * 64,
+        },
+        "actionable_label_ids": ["held-out:case"],
+        "quality": "bad",
+        "bad_severity": "noncritical",
+        "bad_categories": ["root_path_unchanged"],
+        "rationale": "The original causal mechanism remains unchanged.",
+        "correctability": "correctable",
+        "causal_target": {
+            "problem_ids": ["problem:one"],
+            "case_ids": ["case:one"],
+            "evidence_atom_ids": ["atom:one"],
+            "actionable_label_ids": ["held-out:case"],
+            "expected_item_keys": ["plan:one"],
+        },
+        "route_sha256s": ["1" * 64],
+    }
+    finding = {**finding_body, "finding_sha256": _hash(finding_body)}
+    context_body = {
+        "finding_id": finding["finding_id"],
+        "finding_sha256": finding["finding_sha256"],
+        "original_finding": finding,
+        "origin_finding_contexts": [],
+        "current_resolution": {
+            "finding_id": finding["finding_id"],
+            "status": "partially_resolved",
+            "rationale": "One recurrence path still remains.",
+        },
+        "required_outcome": "Address the original finding and retain valid work.",
+    }
+    context = {**context_body, "content_sha256": _hash(context_body)}
+    route = _route(categories=["root_path_unchanged"])
+    route.pop("route_sha256")
+    route["source_correction_finding_ids"] = [finding["finding_id"]]
+    route["source_correction_finding_sha256s"] = [finding["finding_sha256"]]
+    route["source_correction_findings"] = [finding]
+    route["source_correction_required_contexts"] = [context]
+    route["route_sha256"] = _hash(route)
+
+    feedback = correction_feedback_document(
+        route,
+        source_pending_run_sha256="d" * 64,
+        source_adjudication_sha256="e" * 64,
+    )
+
+    assert feedback["source_correction_finding_ids"] == [finding["finding_id"]]
+    assert feedback["source_correction_findings"] == [finding]
+    assert feedback["source_correction_required_contexts"] == [context]
+    assert feedback["content_sha256"] == _hash(
+        {key: value for key, value in feedback.items() if key != "content_sha256"}
+    )
+
+
+def test_novel_but_nonimproving_corrections_pause_after_bounded_churn() -> None:
     route = _route(categories=["one_finding"])
     calls = 0
 
@@ -535,11 +612,12 @@ def test_novel_but_nonimproving_corrections_pause_at_original_author_cost() -> N
     )
 
     receipt = result["route_receipts"][0]
-    assert calls == 2
+    assert calls == 3
     assert receipt["status"] == (
-        "repairable_paused:correction_cost_reached_original_authoring_cost"
+        "repairable_paused:"
+        "consecutive_nonadvancing_corrections_require_adjudication"
     )
-    assert receipt["metrics"]["total_correction_cost_seconds"] == 120.0
+    assert receipt["metrics"]["total_correction_cost_seconds"] == 180.0
     assert receipt["accepted_payload_sha256"] is None
 
 

@@ -35,6 +35,9 @@ _OUTPUT_QUALITIES = frozenset({"good", "bad", "unknown"})
 _REPAIR_STATUSES = frozenset({"repaired", "not_repaired", "unknown"})
 _BAD_SEVERITIES = frozenset({"critical", "noncritical"})
 _CORRECTABILITIES = frozenset({"correctable", "uncorrectable", "unknown"})
+_SOURCE_CORRECTION_RESOLUTIONS = frozenset(
+    {"resolved", "partially_resolved", "unresolved", "superseded"}
+)
 _OUTPUT_KINDS = (
     "problem",
     "relation",
@@ -115,6 +118,661 @@ def _valid_sha256(value: Any) -> bool:
         and len(value) == 64
         and all(character in "0123456789abcdef" for character in value.casefold())
     )
+
+
+def _normalized_strings(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return list(
+        dict.fromkeys(
+            item.strip() for item in value if isinstance(item, str) and item.strip()
+        )
+    )
+
+
+_CAUSAL_TARGET_FIELDS = (
+    "problem_ids",
+    "case_ids",
+    "evidence_atom_ids",
+    "actionable_label_ids",
+    "expected_item_keys",
+)
+
+
+def _normalized_causal_target(
+    value: Any,
+    *,
+    actionable_label_ids: Sequence[Any] = (),
+) -> dict[str, list[str]]:
+    source = value if isinstance(value, Mapping) else {}
+    result = {
+        field: _normalized_strings(source.get(field))
+        for field in _CAUSAL_TARGET_FIELDS
+    }
+    result["actionable_label_ids"] = list(
+        dict.fromkeys(
+            [
+                *result["actionable_label_ids"],
+                *[
+                    normalized
+                    for item in actionable_label_ids
+                    for normalized in [_text(item)]
+                    if normalized is not None
+                ],
+            ]
+        )
+    )
+    return result
+
+
+def _merge_causal_targets(*values: Any) -> dict[str, list[str]]:
+    targets = [_normalized_causal_target(value) for value in values]
+    return {
+        field: list(
+            dict.fromkeys(
+                item
+                for target in targets
+                for item in target[field]
+            )
+        )
+        for field in _CAUSAL_TARGET_FIELDS
+    }
+
+
+def _causal_target_tokens(value: Any) -> set[str]:
+    target = _normalized_causal_target(value)
+    return {
+        token
+        for field, prefix in (
+            ("problem_ids", "problem:"),
+            ("case_ids", "case:"),
+            ("evidence_atom_ids", "atom:"),
+            ("actionable_label_ids", "label:"),
+            ("expected_item_keys", "item:"),
+        )
+        for item in target[field]
+        for token in (
+            item if field == "expected_item_keys" else prefix + item,
+        )
+    }
+
+
+def _output_ref_identity(value: Any) -> str | None:
+    if not isinstance(value, Mapping):
+        return None
+    output_kind = _text(value.get("output_kind"))
+    output_sha256 = _text(value.get("output_sha256"))
+    if output_kind not in _OUTPUT_KINDS or not _valid_sha256(output_sha256):
+        return None
+    return f"{output_kind}:{output_sha256}"
+
+
+def _finding_context_projection(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Retain immutable semantics without recursively embedding prior ledgers."""
+
+    return {
+        "finding_id": value.get("finding_id"),
+        "finding_sha256": value.get("finding_sha256"),
+        "finding_kind": value.get("finding_kind"),
+        "source_adjudication_sha256": value.get("source_adjudication_sha256"),
+        "source_item_sha256": value.get("source_item_sha256"),
+        "source_output_ref": value.get("source_output_ref"),
+        "actionable_label_ids": list(value.get("actionable_label_ids") or []),
+        "bad_severity": value.get("bad_severity"),
+        "bad_categories": list(value.get("bad_categories") or []),
+        "rationale": value.get("rationale"),
+        "correctability": value.get("correctability"),
+        "causal_target": _normalized_causal_target(value.get("causal_target")),
+    }
+
+
+def _finding_lineage_output_ids(value: Mapping[str, Any]) -> set[str]:
+    refs: list[Any] = [value.get("source_output_ref")]
+    prior_resolution = value.get("prior_resolution")
+    if isinstance(prior_resolution, Mapping):
+        repaired_refs = prior_resolution.get("repaired_output_refs")
+        if isinstance(repaired_refs, list):
+            refs.extend(repaired_refs)
+    origin_contexts = value.get("origin_finding_contexts")
+    if isinstance(origin_contexts, list):
+        refs.extend(
+            item.get("source_output_ref")
+            for item in origin_contexts
+            if isinstance(item, Mapping)
+        )
+    return {
+        identity
+        for ref in refs
+        for identity in [_output_ref_identity(ref)]
+        if identity is not None
+    }
+
+
+def _conservative_correctability(*values: Any) -> str:
+    normalized = {_text(value) for value in values}
+    if "uncorrectable" in normalized:
+        return "uncorrectable"
+    if "unknown" in normalized or None in normalized:
+        return "unknown"
+    return "correctable"
+
+
+def _source_finding_identity(value: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "source_adjudication_sha256": value.get("source_adjudication_sha256"),
+        "finding_kind": value.get("finding_kind"),
+        "source_item_sha256": value.get("source_item_sha256"),
+        "source_output_ref": value.get("source_output_ref"),
+        "actionable_label_ids": value.get("actionable_label_ids"),
+        "correctability": value.get("correctability"),
+        "causal_target": value.get("causal_target"),
+        "origin_finding_ids": value.get("origin_finding_ids"),
+    }
+
+
+def qualification_source_correction_findings(
+    *,
+    source_adjudication: Mapping[str, Any],
+    source_adjudication_sha256: str,
+    manifest: Mapping[str, Any],
+    correction_routes: Iterable[Mapping[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    """Project immutable semantic findings and bind every derived correction route.
+
+    The source adjudication is canonical.  Routes add author/frontier information, but
+    cannot redefine the finding.  A false-rejection route synthesized for an omitted
+    actionable disposition is retained as an explicit derived finding so it cannot
+    disappear between repair and fresh adjudication.
+    """
+
+    if not _valid_sha256(source_adjudication_sha256):
+        raise ValueError("qualification_source_adjudication_sha256_invalid")
+    if (
+        source_adjudication.get("contract_kind")
+        != "qualification_output_adjudication"
+        or not _valid_sha256(source_adjudication.get("content_sha256"))
+        or source_adjudication.get("content_sha256")
+        != _content_hash(source_adjudication)
+    ):
+        raise ValueError("qualification_source_adjudication_invalid")
+
+    routes_materialized = [dict(route) for route in correction_routes]
+    seen_route_sha256s: set[str] = set()
+    for route in routes_materialized:
+        route_sha256 = _text(route.get("route_sha256"))
+        if (
+            not _valid_sha256(route_sha256)
+            or route_sha256
+            != _canonical_hash(
+                {key: value for key, value in route.items() if key != "route_sha256"}
+            )
+            or route_sha256 in seen_route_sha256s
+        ):
+            raise ValueError("qualification_source_correction_route_invalid")
+        seen_route_sha256s.add(str(route_sha256))
+
+    findings_by_key: dict[tuple[str, ...], dict[str, Any]] = {}
+    explicit_source_ids_by_key: dict[tuple[str, ...], set[str]] = {}
+    source_key_by_inherited_id: dict[str, tuple[str, ...]] = {}
+    source_items = source_adjudication.get("output_adjudications")
+    for item in source_items if isinstance(source_items, list) else []:
+        if not isinstance(item, Mapping) or _text(item.get("quality")) not in {"bad", "unknown"}:
+            continue
+        output_kind = _text(item.get("output_kind"))
+        output_sha256 = _text(item.get("output_sha256"))
+        if output_kind not in _OUTPUT_KINDS or not _valid_sha256(output_sha256):
+            raise ValueError("qualification_source_output_finding_identity_invalid")
+        key = ("accepted_output_quality", output_kind, output_sha256)
+        explicit_source_ids_by_key[key] = set(
+            _normalized_strings(item.get("source_correction_finding_ids"))
+        )
+        findings_by_key[key] = {
+            "source_adjudication_sha256": source_adjudication_sha256,
+            "finding_kind": "accepted_output_quality",
+            "source_item_sha256": _canonical_hash(item),
+            "source_output_ref": {
+                "output_kind": output_kind,
+                "output_sha256": output_sha256,
+            },
+            "actionable_label_ids": _normalized_strings(item.get("actionable_label_ids")),
+            "quality": _text(item.get("quality")),
+            "bad_severity": _text(item.get("bad_severity")),
+            "bad_categories": _normalized_strings(item.get("bad_categories")),
+            "rationale": _text(item.get("rationale")),
+            "correctability": _text(item.get("correctability")) or "unknown",
+            "causal_target": _normalized_causal_target(
+                None,
+                actionable_label_ids=_normalized_strings(
+                    item.get("actionable_label_ids")
+                ),
+            ),
+            "route_sha256s": [],
+        }
+
+    rejections = source_adjudication.get("false_rejections")
+    for item in rejections if isinstance(rejections, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        label_id = _text(item.get("label_id"))
+        if label_id is None:
+            raise ValueError("qualification_source_false_rejection_identity_invalid")
+        key = ("false_rejection", label_id)
+        findings_by_key[key] = {
+            "source_adjudication_sha256": source_adjudication_sha256,
+            "finding_kind": "false_rejection",
+            "source_item_sha256": _canonical_hash(item),
+            "source_output_ref": None,
+            "actionable_label_ids": [label_id],
+            "quality": "bad",
+            "bad_severity": _text(item.get("bad_severity")) or "noncritical",
+            "bad_categories": _normalized_strings(item.get("bad_categories"))
+            or ["false_rejection"],
+            "rationale": _text(item.get("rationale")),
+            "correctability": _text(item.get("correctability")) or "unknown",
+            "causal_target": _normalized_causal_target(
+                None,
+                actionable_label_ids=[label_id],
+            ),
+            "route_sha256s": [],
+        }
+
+    inherited_findings_raw = source_adjudication.get("source_correction_findings")
+    inherited_findings = (
+        [dict(item) for item in inherited_findings_raw if isinstance(item, Mapping)]
+        if isinstance(inherited_findings_raw, list)
+        else []
+    )
+    inherited_resolutions_raw = source_adjudication.get(
+        "source_correction_resolutions"
+    )
+    inherited_resolutions = (
+        [item for item in inherited_resolutions_raw if isinstance(item, Mapping)]
+        if isinstance(inherited_resolutions_raw, list)
+        else []
+    )
+    inherited_resolution_by_id = {
+        str(item["finding_id"]): item
+        for item in inherited_resolutions
+        if _text(item.get("finding_id")) is not None
+    }
+    for inherited in inherited_findings:
+        inherited_id = _text(inherited.get("finding_id"))
+        inherited_source_sha256 = _text(inherited.get("source_adjudication_sha256"))
+        if (
+            inherited_id is None
+            or inherited_source_sha256 is None
+            or qualification_source_correction_findings_errors(
+                [inherited],
+                source_adjudication_sha256=inherited_source_sha256,
+            )
+        ):
+            raise ValueError("qualification_inherited_source_correction_finding_invalid")
+        resolution = inherited_resolution_by_id.get(inherited_id)
+        status = _text(resolution.get("status")) if isinstance(resolution, Mapping) else None
+        if status in {"resolved", "superseded"}:
+            continue
+        repaired_refs_raw = (
+            resolution.get("repaired_output_refs")
+            if isinstance(resolution, Mapping)
+            else None
+        )
+        repaired_refs = (
+            [dict(item) for item in repaired_refs_raw if isinstance(item, Mapping)]
+            if isinstance(repaired_refs_raw, list)
+            else []
+        )
+        source_output_ref = (
+            repaired_refs[0]
+            if repaired_refs
+            else dict(inherited["source_output_ref"])
+            if isinstance(inherited.get("source_output_ref"), Mapping)
+            else None
+        )
+        inherited_item = {
+            "prior_finding_sha256": inherited.get("finding_sha256"),
+            "resolution": dict(resolution) if isinstance(resolution, Mapping) else None,
+        }
+        inherited_labels = _normalized_strings(inherited.get("actionable_label_ids"))
+        inherited_categories = _normalized_strings(inherited.get("bad_categories"))
+        inherited_target = _normalized_causal_target(
+            inherited.get("causal_target")
+        )
+        candidate_keys = [
+            candidate_key
+            for candidate_key, candidate in findings_by_key.items()
+            if candidate.get("finding_kind") == "accepted_output_quality"
+            and inherited_id in explicit_source_ids_by_key.get(candidate_key, set())
+        ]
+
+        # Explicit adjudicator lineage is authoritative.  Similar labels, categories,
+        # targets, or hashes are evidence context, never an identity inference.
+        coalesced_key = candidate_keys[0] if len(candidate_keys) == 1 else None
+        prior_contexts = [
+            dict(item)
+            for item in inherited.get("origin_finding_contexts", [])
+            if isinstance(item, Mapping)
+        ]
+        origin_contexts = [*prior_contexts, _finding_context_projection(inherited)]
+        origin_contexts = list(
+            {
+                _canonical_hash(item): item
+                for item in origin_contexts
+            }.values()
+        )
+        residual_rationale = (
+            _text(resolution.get("rationale"))
+            if isinstance(resolution, Mapping)
+            else None
+        ) or (
+            "The prior immutable source finding was not explicitly resolved by "
+            "fresh independent adjudication."
+        )
+        if coalesced_key is not None:
+            coalesced = findings_by_key[coalesced_key]
+            coalesced["source_item_sha256"] = _canonical_hash(
+                {
+                    "current_source_item_sha256": coalesced.get("source_item_sha256"),
+                    **inherited_item,
+                }
+            )
+            coalesced["actionable_label_ids"] = list(
+                dict.fromkeys(
+                    [
+                        *_normalized_strings(
+                            coalesced.get("actionable_label_ids")
+                        ),
+                        *inherited_labels,
+                    ]
+                )
+            )
+            coalesced["bad_categories"] = list(
+                dict.fromkeys(
+                    [
+                        *_normalized_strings(coalesced.get("bad_categories")),
+                        *inherited_categories,
+                        (
+                            "source_correction_finding_missing_resolution"
+                            if status is None
+                            else f"source_correction_finding_{status}"
+                        ),
+                    ]
+                )
+            )
+            coalesced["correctability"] = _conservative_correctability(
+                coalesced.get("correctability"),
+                inherited.get("correctability"),
+            )
+            coalesced["causal_target"] = _merge_causal_targets(
+                coalesced.get("causal_target"),
+                inherited_target,
+            )
+            coalesced["origin_finding_ids"] = list(
+                dict.fromkeys(
+                    [
+                        *_normalized_strings(coalesced.get("origin_finding_ids")),
+                        inherited_id,
+                    ]
+                )
+            )
+            coalesced["origin_finding_contexts"] = origin_contexts
+            coalesced["prior_resolution"] = (
+                dict(resolution) if isinstance(resolution, Mapping) else None
+            )
+            source_key_by_inherited_id[inherited_id] = coalesced_key
+        else:
+            key = ("inherited_source_correction", inherited_id)
+            findings_by_key[key] = {
+                "source_adjudication_sha256": source_adjudication_sha256,
+                "finding_kind": "inherited_source_correction",
+                "source_item_sha256": _canonical_hash(inherited_item),
+                "source_output_ref": source_output_ref,
+                "actionable_label_ids": inherited_labels,
+                "quality": "bad",
+                "bad_severity": _text(inherited.get("bad_severity")) or "noncritical",
+                "bad_categories": list(
+                    dict.fromkeys(
+                        [
+                            *inherited_categories,
+                            (
+                                "source_correction_finding_missing_resolution"
+                                if status is None
+                                else f"source_correction_finding_{status}"
+                            ),
+                        ]
+                    )
+                ),
+                "rationale": residual_rationale,
+                "correctability": _text(inherited.get("correctability")) or "unknown",
+                "causal_target": inherited_target,
+                "origin_finding_ids": [inherited_id],
+                "origin_finding_contexts": origin_contexts,
+                "prior_resolution": (
+                    dict(resolution) if isinstance(resolution, Mapping) else None
+                ),
+                "route_sha256s": [],
+            }
+            source_key_by_inherited_id[inherited_id] = key
+
+    labels_raw = manifest.get("atom_labels")
+    labels_by_id = {
+        str(item["label_id"]): item
+        for item in (labels_raw if isinstance(labels_raw, list) else [])
+        if isinstance(item, Mapping)
+        if _text(item.get("label_id")) is not None
+    }
+    mapped_route_sha256s: set[str] = set()
+    for route in routes_materialized:
+        route_sha256 = _text(route.get("route_sha256"))
+        if (
+            not _valid_sha256(route_sha256)
+            or route_sha256 in mapped_route_sha256s
+        ):
+            raise ValueError("qualification_source_correction_route_invalid")
+        feedback_kind = _text(route.get("feedback_kind"))
+        routed_source_finding_ids = _normalized_strings(
+            route.get("source_correction_finding_ids")
+        )
+        if routed_source_finding_ids:
+            if len(routed_source_finding_ids) != 1:
+                raise ValueError("qualification_source_correction_route_unmapped")
+            key = source_key_by_inherited_id.get(routed_source_finding_ids[0])
+            if key is None or key not in findings_by_key:
+                raise ValueError("qualification_source_correction_route_unmapped")
+        elif feedback_kind == "accepted_output_quality":
+            output_kind = _text(route.get("output_kind"))
+            output_sha256 = _text(route.get("output_sha256"))
+            key = ("accepted_output_quality", output_kind or "", output_sha256 or "")
+            if key not in findings_by_key:
+                raise ValueError("qualification_source_correction_route_unmapped")
+        elif feedback_kind == "false_rejection":
+            route_labels = _normalized_strings(route.get("actionable_label_ids"))
+            if len(route_labels) != 1:
+                raise ValueError("qualification_source_correction_route_unmapped")
+            label_id = route_labels[0]
+            key = ("false_rejection", label_id)
+            if key not in findings_by_key:
+                label = labels_by_id.get(label_id)
+                if not isinstance(label, Mapping) or label.get("classification") != "actionable":
+                    raise ValueError("qualification_source_correction_route_unmapped")
+                implicit_item = {
+                    "label_id": label_id,
+                    "disposition": "missing",
+                    "manifest_label_sha256": _canonical_hash(label),
+                }
+                key = ("unrecovered_actionable_source_group", label_id)
+                findings_by_key[key] = {
+                    "source_adjudication_sha256": source_adjudication_sha256,
+                    "finding_kind": "unrecovered_actionable_source_group",
+                    "source_item_sha256": _canonical_hash(implicit_item),
+                    "source_output_ref": None,
+                    "actionable_label_ids": [label_id],
+                    "quality": "bad",
+                    "bad_severity": _text(route.get("bad_severity")) or "noncritical",
+                    "bad_categories": _normalized_strings(route.get("bad_categories"))
+                    or ["unrecovered_actionable_source_group"],
+                    "rationale": _text(route.get("rationale")),
+                    "correctability": _text(route.get("correctability")) or "unknown",
+                    "causal_target": _normalized_causal_target(
+                        route.get("causal_target"),
+                        actionable_label_ids=[label_id],
+                    ),
+                    "route_sha256s": [],
+                }
+            elif key not in findings_by_key:
+                raise ValueError("qualification_source_correction_route_unmapped")
+        else:
+            raise ValueError("qualification_source_correction_route_unmapped")
+        findings_by_key[key]["route_sha256s"].append(route_sha256)
+        findings_by_key[key]["causal_target"] = _merge_causal_targets(
+            findings_by_key[key].get("causal_target"),
+            route.get("causal_target"),
+        )
+        findings_by_key[key]["correctability"] = _conservative_correctability(
+            findings_by_key[key].get("correctability"),
+            route.get("correctability"),
+        )
+        mapped_route_sha256s.add(route_sha256)
+
+    findings: list[dict[str, Any]] = []
+    for finding in findings_by_key.values():
+        finding["route_sha256s"] = sorted(set(finding["route_sha256s"]))
+        identity_sha256 = _canonical_hash(_source_finding_identity(finding))
+        body = {
+            **finding,
+            "finding_id": f"qualification-source-finding:{identity_sha256}",
+        }
+        findings.append({**body, "finding_sha256": _canonical_hash(body)})
+    findings.sort(key=lambda item: str(item["finding_id"]))
+    finding_errors = qualification_source_correction_findings_errors(
+        findings,
+        source_adjudication_sha256=source_adjudication_sha256,
+    )
+    if finding_errors:
+        raise ValueError(
+            "qualification_source_correction_findings_invalid:"
+            + ",".join(finding_errors)
+        )
+    return findings
+
+
+def qualification_source_correction_findings_errors(
+    value: Any,
+    *,
+    source_adjudication_sha256: str,
+) -> list[str]:
+    """Validate the self-contained source finding ledger."""
+
+    if not isinstance(value, list):
+        return ["qualification_source_correction_findings_invalid"]
+    errors: list[str] = []
+    finding_ids: set[str] = set()
+    route_sha256s: set[str] = set()
+    for index, raw in enumerate(value):
+        if not isinstance(raw, Mapping):
+            errors.append(f"qualification_source_correction_finding_invalid:{index}")
+            continue
+        finding_id = _text(raw.get("finding_id"))
+        finding_sha256 = _text(raw.get("finding_sha256"))
+        expected_id = "qualification-source-finding:" + _canonical_hash(
+            _source_finding_identity(raw)
+        )
+        if finding_id != expected_id or finding_id in finding_ids:
+            errors.append(f"qualification_source_correction_finding_id_invalid:{index}")
+        elif finding_id is not None:
+            finding_ids.add(finding_id)
+        body = {key: item for key, item in raw.items() if key != "finding_sha256"}
+        if not _valid_sha256(finding_sha256) or finding_sha256 != _canonical_hash(body):
+            errors.append(f"qualification_source_correction_finding_hash_invalid:{index}")
+        if raw.get("source_adjudication_sha256") != source_adjudication_sha256:
+            errors.append(f"qualification_source_correction_finding_source_invalid:{index}")
+        if raw.get("finding_kind") not in {
+            "accepted_output_quality",
+            "false_rejection",
+            "unrecovered_actionable_source_group",
+            "inherited_source_correction",
+        }:
+            errors.append(f"qualification_source_correction_finding_kind_invalid:{index}")
+        if not _valid_sha256(raw.get("source_item_sha256")):
+            errors.append(f"qualification_source_correction_finding_item_hash_invalid:{index}")
+        if raw.get("correctability") not in _CORRECTABILITIES:
+            errors.append(
+                f"qualification_source_correction_finding_correctability_invalid:{index}"
+            )
+        causal_target = raw.get("causal_target")
+        if (
+            not isinstance(causal_target, Mapping)
+            or dict(causal_target) != _normalized_causal_target(causal_target)
+        ):
+            errors.append(
+                f"qualification_source_correction_finding_causal_target_invalid:{index}"
+            )
+        output_ref = raw.get("source_output_ref")
+        if output_ref is not None and (
+            not isinstance(output_ref, Mapping)
+            or _text(output_ref.get("output_kind")) not in _OUTPUT_KINDS
+            or not _valid_sha256(output_ref.get("output_sha256"))
+        ):
+            errors.append(f"qualification_source_correction_finding_output_ref_invalid:{index}")
+        for field in ("actionable_label_ids", "bad_categories", "route_sha256s"):
+            values = raw.get(field)
+            if (
+                not isinstance(values, list)
+                or any(_text(item) is None for item in values)
+                or len(values) != len(set(values))
+            ):
+                errors.append(f"qualification_source_correction_finding_{field}_invalid:{index}")
+        origin_finding_ids = raw.get("origin_finding_ids")
+        if origin_finding_ids is not None and (
+            not isinstance(origin_finding_ids, list)
+            or not origin_finding_ids
+            or any(_text(item) is None for item in origin_finding_ids)
+            or len(origin_finding_ids) != len(set(origin_finding_ids))
+        ):
+            errors.append(
+                f"qualification_source_correction_finding_origin_ids_invalid:{index}"
+            )
+        origin_contexts = raw.get("origin_finding_contexts")
+        if origin_contexts is not None:
+            contexts = (
+                [item for item in origin_contexts if isinstance(item, Mapping)]
+                if isinstance(origin_contexts, list)
+                else []
+            )
+            context_hashes = [_canonical_hash(item) for item in contexts]
+            if (
+                not isinstance(origin_contexts, list)
+                or not contexts
+                or len(contexts) != len(origin_contexts)
+                or len(context_hashes) != len(set(context_hashes))
+                or any(
+                    _text(item.get("finding_id")) is None
+                    or not _valid_sha256(item.get("finding_sha256"))
+                    or _text(item.get("rationale")) is None
+                    for item in contexts
+                )
+            ):
+                errors.append(
+                    "qualification_source_correction_finding_origin_contexts_invalid:"
+                    f"{index}"
+                )
+        prior_resolution = raw.get("prior_resolution")
+        if prior_resolution is not None and (
+            not isinstance(prior_resolution, Mapping)
+            or _text(prior_resolution.get("status"))
+            not in {"partially_resolved", "unresolved"}
+            or _text(prior_resolution.get("rationale")) is None
+        ):
+            errors.append(
+                f"qualification_source_correction_finding_prior_resolution_invalid:{index}"
+            )
+        if _text(raw.get("rationale")) is None:
+            errors.append(f"qualification_source_correction_finding_rationale_missing:{index}")
+        for route_sha256 in raw.get("route_sha256s", []):
+            if not _valid_sha256(route_sha256) or route_sha256 in route_sha256s:
+                errors.append(f"qualification_source_correction_finding_route_invalid:{index}")
+            else:
+                route_sha256s.add(route_sha256)
+    return list(dict.fromkeys(errors))
 
 
 def _eligible_atom_receipts(atoms: Iterable[Mapping[str, Any]]) -> list[dict[str, str]]:
@@ -330,6 +988,9 @@ def build_qualification_output_adjudication(
     pending_run_sha256: str,
     adjudicator: str,
     method: str,
+    source_adjudication_sha256: str | None = None,
+    source_correction_findings: Iterable[Mapping[str, Any]] = (),
+    source_correction_resolutions: Iterable[Mapping[str, Any]] = (),
 ) -> QualificationOutputAdjudication:
     """Build and validate post-run semantic judgments over exact output hashes."""
 
@@ -346,6 +1007,17 @@ def build_qualification_output_adjudication(
         "output_adjudications": [dict(item) for item in output_adjudications],
         "false_rejections": [dict(item) for item in false_rejections],
     }
+    findings_materialized = [dict(item) for item in source_correction_findings]
+    resolutions_materialized = [dict(item) for item in source_correction_resolutions]
+    if source_adjudication_sha256 is not None or findings_materialized or resolutions_materialized:
+        adjudication.update(
+            {
+                "source_adjudication_sha256": source_adjudication_sha256,
+                "source_correction_findings": findings_materialized,
+                "source_correction_findings_sha256": _canonical_hash(findings_materialized),
+                "source_correction_resolutions": resolutions_materialized,
+            }
+        )
     adjudication["content_sha256"] = _content_hash(adjudication)
     errors = qualification_output_adjudication_errors(
         adjudication,
@@ -515,6 +1187,8 @@ def qualification_output_adjudication_errors(
     manifest: Mapping[str, Any],
     accepted_outputs_by_kind: Mapping[str, Iterable[Mapping[str, Any]]],
     expected_pending_run_sha256: str | None = None,
+    expected_source_adjudication_sha256: str | None = None,
+    expected_source_correction_findings: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[str]:
     """Verify post-run output bindings and independent quality judgments."""
 
@@ -635,6 +1309,213 @@ def qualification_output_adjudication_errors(
         errors.append("qualification_output_adjudication_partition_incomplete")
     if len(adjudicated_ids) != len(set(adjudicated_ids)):
         errors.append("qualification_output_adjudication_partition_overlapping")
+
+    source_binding_present = any(
+        field in adjudication
+        for field in (
+            "source_adjudication_sha256",
+            "source_correction_findings",
+            "source_correction_findings_sha256",
+            "source_correction_resolutions",
+        )
+    )
+    source_adjudication_sha256 = adjudication.get("source_adjudication_sha256")
+    source_findings_raw = adjudication.get("source_correction_findings")
+    source_resolutions_raw = adjudication.get("source_correction_resolutions")
+    if expected_source_correction_findings is not None or source_binding_present:
+        if not _valid_sha256(source_adjudication_sha256):
+            errors.append("qualification_source_adjudication_binding_invalid")
+        if (
+            expected_source_adjudication_sha256 is not None
+            and source_adjudication_sha256 != expected_source_adjudication_sha256
+        ):
+            errors.append("qualification_source_adjudication_binding_mismatch")
+        source_findings = (
+            [dict(item) for item in source_findings_raw if isinstance(item, Mapping)]
+            if isinstance(source_findings_raw, list)
+            else []
+        )
+        if (
+            not isinstance(source_findings_raw, list)
+            or len(source_findings) != len(source_findings_raw)
+        ):
+            errors.append("qualification_source_correction_findings_invalid")
+        elif adjudication.get("source_correction_findings_sha256") != _canonical_hash(
+            source_findings
+        ):
+            errors.append("qualification_source_correction_findings_hash_mismatch")
+        elif _valid_sha256(source_adjudication_sha256):
+            errors.extend(
+                qualification_source_correction_findings_errors(
+                    source_findings,
+                    source_adjudication_sha256=str(source_adjudication_sha256),
+                )
+            )
+        if expected_source_correction_findings is not None and source_findings != [
+            dict(item) for item in expected_source_correction_findings
+        ]:
+            errors.append("qualification_source_correction_findings_binding_mismatch")
+
+        source_resolutions = (
+            [item for item in source_resolutions_raw if isinstance(item, Mapping)]
+            if isinstance(source_resolutions_raw, list)
+            else []
+        )
+        if (
+            not isinstance(source_resolutions_raw, list)
+            or len(source_resolutions) != len(source_resolutions_raw)
+        ):
+            errors.append("qualification_source_correction_resolutions_invalid")
+        finding_ids = {
+            str(item["finding_id"])
+            for item in source_findings
+            if _text(item.get("finding_id")) is not None
+        }
+        finding_by_id = {
+            str(item["finding_id"]): item
+            for item in source_findings
+            if _text(item.get("finding_id")) is not None
+        }
+        accepted_output_ids = {
+            f"{receipt['output_kind']}:{receipt['output_sha256']}"
+            for receipt in expected_outputs
+        }
+        quality_by_output_id = {
+            f"{_text(item.get('output_kind'))}:{_text(item.get('output_sha256'))}": _text(
+                item.get("quality")
+            )
+            for item in items
+        }
+        adjudication_by_output_id = {
+            f"{_text(item.get('output_kind'))}:{_text(item.get('output_sha256'))}": item
+            for item in items
+        }
+        causal_target_by_output_id = _accepted_output_causal_targets(
+            outputs_materialized
+        )
+
+        def ref_is_causally_bound(
+            finding: Mapping[str, Any],
+            output_identity: str,
+        ) -> bool:
+            output_item = adjudication_by_output_id.get(output_identity, {})
+            finding_labels = set(
+                _normalized_strings(finding.get("actionable_label_ids"))
+            )
+            output_labels = set(
+                _normalized_strings(output_item.get("actionable_label_ids"))
+            )
+            if finding_labels:
+                return bool(finding_labels.intersection(output_labels))
+            if output_identity in _finding_lineage_output_ids(finding):
+                return True
+            return bool(
+                _causal_target_tokens(finding.get("causal_target")).intersection(
+                    _causal_target_tokens(
+                        causal_target_by_output_id.get(output_identity)
+                    )
+                )
+            )
+
+        for output_identity, output_item in adjudication_by_output_id.items():
+            linked_raw = output_item.get("source_correction_finding_ids")
+            if linked_raw is None:
+                continue
+            linked_ids = _normalized_strings(linked_raw)
+            if (
+                not isinstance(linked_raw, list)
+                or len(linked_ids) != len(linked_raw)
+                or len(linked_ids) != len(set(linked_ids))
+                or any(linked_id not in finding_ids for linked_id in linked_ids)
+            ):
+                errors.append(
+                    "qualification_output_source_correction_links_invalid:"
+                    f"{output_identity}"
+                )
+                continue
+            for linked_id in linked_ids:
+                linked_finding = finding_by_id[linked_id]
+                if not ref_is_causally_bound(linked_finding, output_identity):
+                    errors.append(
+                        "qualification_output_source_correction_link_causally_unbound:"
+                        f"{linked_id}:{output_identity}"
+                    )
+
+        resolved_finding_ids: set[str] = set()
+        for index, resolution in enumerate(source_resolutions):
+            finding_id = _text(resolution.get("finding_id"))
+            status = _text(resolution.get("status"))
+            if finding_id not in finding_ids or finding_id in resolved_finding_ids:
+                errors.append(
+                    f"qualification_source_correction_resolution_finding_invalid:{index}"
+                )
+            elif finding_id is not None:
+                resolved_finding_ids.add(finding_id)
+            if status not in _SOURCE_CORRECTION_RESOLUTIONS:
+                errors.append(
+                    "qualification_source_correction_resolution_status_invalid:"
+                    f"{finding_id or index}"
+                )
+            if _text(resolution.get("rationale")) is None:
+                errors.append(
+                    "qualification_source_correction_resolution_rationale_missing:"
+                    f"{finding_id or index}"
+                )
+            repaired_refs_raw = resolution.get("repaired_output_refs")
+            repaired_refs = (
+                [item for item in repaired_refs_raw if isinstance(item, Mapping)]
+                if isinstance(repaired_refs_raw, list)
+                else []
+            )
+            repaired_ids: list[str] = []
+            refs_shape_invalid = (
+                repaired_refs_raw is not None
+                and not isinstance(repaired_refs_raw, list)
+            ) or (
+                isinstance(repaired_refs_raw, list)
+                and len(repaired_refs) != len(repaired_refs_raw)
+            )
+            if refs_shape_invalid or (status != "unresolved" and not repaired_refs):
+                errors.append(
+                    f"qualification_source_correction_resolution_refs_invalid:{finding_id or index}"
+                )
+            for repaired_ref in repaired_refs:
+                output_kind = _text(repaired_ref.get("output_kind"))
+                output_sha256 = _text(repaired_ref.get("output_sha256"))
+                identity = f"{output_kind}:{output_sha256}"
+                if (
+                    output_kind not in _OUTPUT_KINDS
+                    or not _valid_sha256(output_sha256)
+                    or identity not in accepted_output_ids
+                ):
+                    errors.append(
+                        "qualification_source_correction_resolution_ref_unbound:"
+                        f"{finding_id or index}"
+                    )
+                repaired_ids.append(identity)
+            if len(repaired_ids) != len(set(repaired_ids)):
+                errors.append(
+                    "qualification_source_correction_resolution_refs_duplicate:"
+                    f"{finding_id or index}"
+                )
+            finding = finding_by_id.get(finding_id or "")
+            if finding is not None:
+                for repaired_id in repaired_ids:
+                    if (
+                        repaired_id in accepted_output_ids
+                        and not ref_is_causally_bound(finding, repaired_id)
+                    ):
+                        errors.append(
+                            "qualification_source_correction_resolution_ref_"
+                            f"causally_unbound:{finding_id or index}:{repaired_id}"
+                        )
+            if status in {"resolved", "superseded"} and any(
+                quality_by_output_id.get(identity) != "good" for identity in repaired_ids
+            ):
+                errors.append(
+                    "qualification_source_correction_terminal_resolution_not_good:"
+                    f"{finding_id or index}"
+                )
 
     rejections_raw = adjudication.get("false_rejections")
     rejections = (
@@ -1070,6 +1951,11 @@ def _qualification_correction_routes(
             "consumption_status": "pending_orchestration",
             "consumption_receipt": None,
         }
+        linked_source_ids = _normalized_strings(
+            item.get("source_correction_finding_ids")
+        )
+        if linked_source_ids:
+            route["source_correction_finding_ids"] = linked_source_ids
         route["route_sha256"] = _canonical_hash(route)
         routes.append(route)
 
@@ -1110,6 +1996,258 @@ def _qualification_correction_routes(
             str(item.get("authoring_stage") or ""),
             str(item.get("output_kind") or ""),
             str(item.get("output_sha256") or item.get("target_identity") or ""),
+        ),
+    )
+
+
+def _source_correction_followup_routes(
+    *,
+    findings: Sequence[Mapping[str, Any]],
+    resolutions_by_finding_id: Mapping[str, Mapping[str, Any]],
+    accepted_output_ids: set[str],
+    output_author_provenance: Mapping[str, Mapping[str, Any]] | None,
+    output_causal_targets: Mapping[str, Mapping[str, Any]] | None,
+    false_rejection_author_provenance: Mapping[
+        str,
+        Mapping[str, Any] | Sequence[Mapping[str, Any]],
+    ]
+    | None,
+) -> list[dict[str, Any]]:
+    """Route every nonterminal source finding without inventing a successful repair."""
+
+    routes: list[dict[str, Any]] = []
+    for finding in findings:
+        finding_id = _text(finding.get("finding_id"))
+        if finding_id is None:
+            continue
+        resolution = resolutions_by_finding_id.get(finding_id)
+        status = _text(resolution.get("status")) if isinstance(resolution, Mapping) else None
+        if status in {"resolved", "superseded"}:
+            continue
+        refs_raw = (
+            resolution.get("repaired_output_refs")
+            if isinstance(resolution, Mapping)
+            else None
+        )
+        refs = (
+            [dict(item) for item in refs_raw if isinstance(item, Mapping)]
+            if isinstance(refs_raw, list)
+            else []
+        )
+        source_ref = finding.get("source_output_ref")
+        if not refs and isinstance(source_ref, Mapping):
+            source_identity = (
+                f"{_text(source_ref.get('output_kind'))}:"
+                f"{_text(source_ref.get('output_sha256'))}"
+            )
+            if source_identity in accepted_output_ids:
+                refs = [dict(source_ref)]
+        rationale = (
+            _text(resolution.get("rationale"))
+            if isinstance(resolution, Mapping)
+            else None
+        ) or (
+            "Fresh adjudication omitted an explicit resolution for the immutable source "
+            f"finding {finding_id}."
+        )
+        original_rationale = _text(finding.get("rationale")) or rationale
+        correction_rationale = (
+            f"Original independent finding: {original_rationale}\n"
+            f"Current resolution state: {status or 'missing'} — {rationale}"
+        )
+        correctability = _text(finding.get("correctability")) or "unknown"
+        required_context = {
+            "finding_id": finding_id,
+            "finding_sha256": finding.get("finding_sha256"),
+            "original_finding": dict(finding),
+            "origin_finding_contexts": [
+                dict(item)
+                for item in finding.get("origin_finding_contexts", [])
+                if isinstance(item, Mapping)
+            ],
+            "current_resolution": (
+                dict(resolution) if isinstance(resolution, Mapping) else None
+            ),
+            "required_outcome": (
+                "Address the original causal finding while retaining valid work; a fresh "
+                "independent adjudicator must bind the result to this finding."
+            ),
+        }
+        required_context["content_sha256"] = _canonical_hash(required_context)
+        category = (
+            "source_correction_finding_missing_resolution"
+            if status is None
+            else f"source_correction_finding_{status}"
+        )
+        categories = list(
+            dict.fromkeys(
+                [*_normalized_strings(finding.get("bad_categories")), category]
+            )
+        )
+        synthetic_items = [
+            {
+                "output_kind": _text(ref.get("output_kind")),
+                "output_sha256": _text(ref.get("output_sha256")),
+                "quality": "bad",
+                "bad_severity": _text(finding.get("bad_severity")) or "noncritical",
+                "bad_categories": categories,
+                "rationale": correction_rationale,
+                "actionable_label_ids": _normalized_strings(
+                    finding.get("actionable_label_ids")
+                ),
+                "correctability": correctability,
+            }
+            for ref in refs
+            if (
+                _text(ref.get("output_kind")) in _OUTPUT_KINDS
+                and _valid_sha256(ref.get("output_sha256"))
+                and f"{_text(ref.get('output_kind'))}:{_text(ref.get('output_sha256'))}"
+                in accepted_output_ids
+            )
+        ]
+        false_feedback = [
+            {
+                "label_id": label_id,
+                "rationale": correction_rationale,
+                "correctability": correctability,
+                "bad_severity": _text(finding.get("bad_severity")) or "noncritical",
+                "bad_categories": categories,
+            }
+            for label_id in _normalized_strings(finding.get("actionable_label_ids"))
+        ]
+        finding_routes = _qualification_correction_routes(
+            synthetic_items,
+            output_author_provenance=output_author_provenance,
+            output_causal_targets=output_causal_targets,
+            false_rejections=false_feedback if not synthetic_items else (),
+            false_rejection_author_provenance=false_rejection_author_provenance,
+        )
+        if not finding_routes:
+            source_output_kind = (
+                _text(source_ref.get("output_kind"))
+                if isinstance(source_ref, Mapping)
+                else None
+            )
+            source_output_sha256 = (
+                _text(source_ref.get("output_sha256"))
+                if isinstance(source_ref, Mapping)
+                else None
+            )
+            output_kind = source_output_kind if source_output_kind in _OUTPUT_KINDS else "problem"
+            restart_stages = list(_CORRECTION_RESTART_STAGES[output_kind])
+            generic: dict[str, Any] = {
+                "schema_version": 1,
+                "feedback_kind": "source_correction_resolution",
+                "authoring_stage": restart_stages[0],
+                "target_identity": f"source_correction_finding:{finding_id}",
+                "output_kind": source_output_kind,
+                "output_sha256": source_output_sha256,
+                "quality": "bad",
+                "bad_severity": _text(finding.get("bad_severity")) or "noncritical",
+                "bad_categories": categories,
+                "rationale": correction_rationale,
+                "actionable_label_ids": _normalized_strings(
+                    finding.get("actionable_label_ids")
+                ),
+                "correctability": correctability,
+                "route_status": (
+                    "uncorrectable"
+                    if correctability == "uncorrectable"
+                    else "author_provenance_unavailable"
+                ),
+                "agent_session_id": None,
+                "workspace_dir": None,
+                "author_attempt_identity": None,
+                "author_provenance": None,
+                "causal_target": _route_causal_target(
+                    None,
+                    actionable_label_ids=_normalized_strings(
+                        finding.get("actionable_label_ids")
+                    ),
+                ),
+                "restart_from_stage": restart_stages[0],
+                "rerun_downstream_stages": restart_stages,
+                "consumption_status": "pending_orchestration",
+                "consumption_receipt": None,
+            }
+            generic["route_sha256"] = _canonical_hash(generic)
+            finding_routes = [generic]
+        for route in finding_routes:
+            route.pop("route_sha256", None)
+            route["source_correction_finding_ids"] = [finding_id]
+            route["source_correction_finding_sha256s"] = [finding.get("finding_sha256")]
+            route["source_correction_findings"] = [dict(finding)]
+            route["source_correction_required_contexts"] = [required_context]
+            route["superseded_source_route_sha256s"] = list(
+                finding.get("route_sha256s") or []
+            )
+            route["residual_risk_disposition"] = (
+                "terminal_uncorrectable"
+                if correctability == "uncorrectable"
+                else "correction_pending"
+            )
+            route["route_sha256"] = _canonical_hash(route)
+            routes.append(route)
+    return sorted(
+        {str(route["route_sha256"]): route for route in routes}.values(),
+        key=lambda route: (
+            str(route.get("authoring_stage") or ""),
+            str(route.get("target_identity") or ""),
+            str(route.get("route_sha256") or ""),
+        ),
+    )
+
+
+def _coalesce_current_and_source_correction_routes(
+    *,
+    current_routes: Sequence[Mapping[str, Any]],
+    source_routes: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Avoid routing one residual twice while retaining genuinely distinct defects."""
+
+    remaining = [dict(route) for route in current_routes]
+    result: list[dict[str, Any]] = []
+    for source_route_raw in source_routes:
+        source_route = dict(source_route_raw)
+        source_ids = set(
+            _normalized_strings(source_route.get("source_correction_finding_ids"))
+        )
+        matching_indexes = [
+            index
+            for index, current in enumerate(remaining)
+            if source_ids.intersection(
+                _normalized_strings(current.get("source_correction_finding_ids"))
+            )
+        ]
+        if len(matching_indexes) == 1:
+            current = remaining.pop(matching_indexes[0])
+            source_route.pop("route_sha256", None)
+            source_route["coalesced_current_route_sha256s"] = list(
+                dict.fromkeys(
+                    [
+                        *_normalized_strings(
+                            source_route.get("coalesced_current_route_sha256s")
+                        ),
+                        str(current["route_sha256"]),
+                    ]
+                )
+            )
+            source_route["correctability"] = _conservative_correctability(
+                source_route.get("correctability"),
+                current.get("correctability"),
+            )
+            if source_route["correctability"] == "uncorrectable":
+                source_route["route_status"] = "uncorrectable"
+                source_route["residual_risk_disposition"] = "terminal_uncorrectable"
+            source_route["route_sha256"] = _canonical_hash(source_route)
+        result.append(source_route)
+    result.extend(remaining)
+    return sorted(
+        {str(route["route_sha256"]): route for route in result}.values(),
+        key=lambda route: (
+            str(route.get("authoring_stage") or ""),
+            str(route.get("target_identity") or ""),
+            str(route.get("route_sha256") or ""),
         ),
     )
 
@@ -1173,6 +2311,15 @@ def _empty_metrics(
             "undispositioned_actionable_cases": None,
             "repaired": None,
             "repair_unknown": None,
+            "source_correction_findings_total": None,
+            "source_correction_findings_resolved": None,
+            "source_correction_findings_partially_resolved": None,
+            "source_correction_findings_unresolved": None,
+            "source_correction_findings_superseded": None,
+            "source_correction_findings_missing": None,
+            "source_correction_findings_outstanding": None,
+            "source_correction_findings_outstanding_already_counted_outputs": None,
+            "source_correction_terminal_residual_risks": None,
             "zero_output": int(accepted_tickets == 0),
             "zero_accepted_artifacts": int(accepted_outputs == 0),
             "actionable_zero_output": None,
@@ -1187,6 +2334,7 @@ def _empty_metrics(
             "accepted_good_among_adjudicated": _rate(None, None),
             "repair_coverage": _rate(None, accepted_outputs),
             "repair_among_known": _rate(None, None),
+            "source_correction_terminal_resolution": _rate(None, None),
         },
         "good_to_bad_ratio": {
             "good": None,
@@ -1220,6 +2368,8 @@ def evaluate_independent_qualification(
     | None = None,
     same_corpus_feedback_exposed: bool = False,
     correction_metrics: Mapping[str, Any] | None = None,
+    source_adjudication_sha256_expected: str | None = None,
+    source_correction_findings_expected: Sequence[Mapping[str, Any]] | None = None,
     positive_throughput_required: bool,
     minimum_good_ticket_count: int = 1,
     minimum_good_to_bad_ratio: float = 2.0,
@@ -1339,6 +2489,12 @@ def evaluate_independent_qualification(
             if isinstance(no_actionable_receipt, Mapping)
             else None
         ),
+        "source_adjudication_sha256": source_adjudication_sha256_expected,
+        "source_correction_findings_sha256": (
+            _canonical_hash([dict(item) for item in source_correction_findings_expected])
+            if source_correction_findings_expected is not None
+            else None
+        ),
     }
     if manifest is None:
         failures: list[str] = []
@@ -1447,6 +2603,27 @@ def evaluate_independent_qualification(
         receipt_errors.append("no_actionable_evidence_receipt_unexpected_for_actionable_corpus")
 
     output_errors: list[str] = []
+    source_correction_findings = (
+        [dict(item) for item in source_correction_findings_expected]
+        if source_correction_findings_expected is not None
+        else []
+    )
+    if same_corpus_feedback_exposed:
+        if not _valid_sha256(source_adjudication_sha256_expected):
+            output_errors.append(
+                "qualification_source_adjudication_binding_missing_for_repaired_run"
+            )
+        if not source_correction_findings:
+            output_errors.append(
+                "qualification_source_correction_findings_missing_for_repaired_run"
+            )
+        elif _valid_sha256(source_adjudication_sha256_expected):
+            output_errors.extend(
+                qualification_source_correction_findings_errors(
+                    source_correction_findings,
+                    source_adjudication_sha256=str(source_adjudication_sha256_expected),
+                )
+            )
     if output_adjudication is None:
         if output_count > 0 or (positive_throughput_required and actionable_count > 0):
             output_errors.append("qualification_output_adjudication_missing")
@@ -1472,6 +2649,16 @@ def evaluate_independent_qualification(
                 manifest=manifest,
                 accepted_outputs_by_kind=outputs_materialized,
                 expected_pending_run_sha256=pending_run_sha256,
+                expected_source_adjudication_sha256=(
+                    source_adjudication_sha256_expected
+                    if same_corpus_feedback_exposed
+                    else None
+                ),
+                expected_source_correction_findings=(
+                    source_correction_findings
+                    if same_corpus_feedback_exposed
+                    else None
+                ),
             )
         )
     if output_errors:
@@ -1556,9 +2743,106 @@ def evaluate_independent_qualification(
         if isinstance(output_adjudication, Mapping)
         else []
     )
+    source_resolutions = (
+        [
+            item
+            for item in output_adjudication.get("source_correction_resolutions", [])
+            if isinstance(item, Mapping)
+        ]
+        if isinstance(output_adjudication, Mapping)
+        else []
+    )
+    source_resolutions_by_finding_id = {
+        str(item["finding_id"]): item
+        for item in source_resolutions
+        if _text(item.get("finding_id")) is not None
+    }
+    source_resolution_status_by_finding_id = {
+        str(finding["finding_id"]): _text(
+            source_resolutions_by_finding_id.get(str(finding["finding_id"]), {}).get(
+                "status"
+            )
+        )
+        for finding in source_correction_findings
+        if _text(finding.get("finding_id")) is not None
+    }
+    source_resolution_counts = {
+        status: sum(
+            observed == status for observed in source_resolution_status_by_finding_id.values()
+        )
+        for status in _SOURCE_CORRECTION_RESOLUTIONS
+    }
+    source_resolution_missing_ids = sorted(
+        finding_id
+        for finding_id, status in source_resolution_status_by_finding_id.items()
+        if status is None
+    )
+    source_resolution_partial_ids = sorted(
+        finding_id
+        for finding_id, status in source_resolution_status_by_finding_id.items()
+        if status == "partially_resolved"
+    )
+    source_resolution_unresolved_ids = sorted(
+        finding_id
+        for finding_id, status in source_resolution_status_by_finding_id.items()
+        if status == "unresolved"
+    )
+    source_resolution_outstanding_ids = sorted(
+        {
+            *source_resolution_missing_ids,
+            *source_resolution_partial_ids,
+            *source_resolution_unresolved_ids,
+        }
+    )
     accepted_good = sum(item.get("quality") == "good" for item in adjudications)
     accepted_bad = sum(item.get("quality") == "bad" for item in adjudications)
     accepted_unknown = sum(item.get("quality") == "unknown" for item in adjudications)
+    non_good_output_ids = {
+        f"{_text(item.get('output_kind'))}:{_text(item.get('output_sha256'))}"
+        for item in adjudications
+        if item.get("quality") in {"bad", "unknown"}
+    }
+    source_finding_by_id = {
+        str(finding["finding_id"]): finding
+        for finding in source_correction_findings
+        if _text(finding.get("finding_id")) is not None
+    }
+    outstanding_id_set = set(source_resolution_outstanding_ids)
+    explicitly_linked_output_ids = {
+        f"{_text(item.get('output_kind'))}:{_text(item.get('output_sha256'))}"
+        for item in adjudications
+        if item.get("quality") in {"bad", "unknown"}
+        and outstanding_id_set.intersection(
+            _normalized_strings(item.get("source_correction_finding_ids"))
+        )
+    }
+    resolution_linked_output_ids = {
+        identity
+        for finding_id in source_resolution_outstanding_ids
+        for resolution in [source_resolutions_by_finding_id.get(finding_id, {})]
+        for ref in resolution.get("repaired_output_refs", [])
+        if isinstance(ref, Mapping)
+        for identity in [_output_ref_identity(ref)]
+        if identity in non_good_output_ids
+    }
+    outstanding_already_counted_output_ids = (
+        explicitly_linked_output_ids | resolution_linked_output_ids
+    )
+    terminal_residual_risks = [
+        {
+            "finding_id": finding_id,
+            "finding_sha256": finding.get("finding_sha256"),
+            "correctability": "uncorrectable",
+            "rationale": finding.get("rationale"),
+            "actionable_label_ids": list(
+                finding.get("actionable_label_ids") or []
+            ),
+            "bad_categories": list(finding.get("bad_categories") or []),
+        }
+        for finding_id in source_resolution_outstanding_ids
+        for finding in [source_finding_by_id.get(finding_id, {})]
+        if finding.get("correctability") == "uncorrectable"
+    ]
     accepted_critical_bad = sum(
         item.get("quality") == "bad" and item.get("bad_severity") == "critical"
         for item in adjudications
@@ -1609,18 +2893,55 @@ def evaluate_independent_qualification(
         }
         for label_id in sorted(undispositioned_ids)
     )
-    correction_routes = _qualification_correction_routes(
+    current_correction_routes = _qualification_correction_routes(
         adjudications,
         output_author_provenance=output_author_provenance,
         output_causal_targets=_accepted_output_causal_targets(outputs_materialized),
         false_rejections=unrecovered_feedback,
         false_rejection_author_provenance=false_rejection_author_provenance,
     )
+    source_correction_routes = _source_correction_followup_routes(
+        findings=source_correction_findings,
+        resolutions_by_finding_id=source_resolutions_by_finding_id,
+        accepted_output_ids={
+            f"{receipt['output_kind']}:{receipt['output_sha256']}"
+            for receipt in output_receipts
+        },
+        output_author_provenance=output_author_provenance,
+        output_causal_targets=_accepted_output_causal_targets(outputs_materialized),
+        false_rejection_author_provenance=false_rejection_author_provenance,
+    )
+    correction_routes = _coalesce_current_and_source_correction_routes(
+        current_routes=current_correction_routes,
+        source_routes=source_correction_routes,
+    )
     repaired = sum(item.get("repair_status") == "repaired" for item in adjudications)
     repair_unknown = sum(item.get("repair_status") == "unknown" for item in adjudications)
     known_repair = output_count - repair_unknown
 
     failures = list(receipt_errors)
+    if source_resolution_missing_ids:
+        failures.append(
+            "independent_qualification_source_correction_resolution_missing:"
+            + ",".join(source_resolution_missing_ids)
+        )
+    if source_resolution_partial_ids:
+        failures.append(
+            "independent_qualification_source_correction_partially_resolved:"
+            + ",".join(source_resolution_partial_ids)
+        )
+    if source_resolution_unresolved_ids:
+        failures.append(
+            "independent_qualification_source_correction_unresolved:"
+            + ",".join(source_resolution_unresolved_ids)
+        )
+    if terminal_residual_risks:
+        failures.append(
+            "independent_qualification_terminal_uncorrectable_residual_risk:"
+            + ",".join(
+                str(item["finding_id"]) for item in terminal_residual_risks
+            )
+        )
     if positive_throughput_required:
         # A sealed no-actionable receipt is a successful operational exhaustion,
         # not a failed attempt to fabricate positive throughput.  It is classified
@@ -1687,6 +3008,12 @@ def evaluate_independent_qualification(
         unknowns.append("accepted_output_repair_status_unknown")
     if undispositioned_ids:
         unknowns.append("unrecovered_actionable_disposition_unknown")
+    if source_resolution_missing_ids:
+        unknowns.append("source_correction_resolution_missing")
+    if source_resolution_partial_ids:
+        unknowns.append("source_correction_partially_resolved")
+    if source_resolution_unresolved_ids:
+        unknowns.append("source_correction_unresolved")
 
     by_kind: dict[str, Any] = {}
     for output_kind in _OUTPUT_KINDS:
@@ -1755,10 +3082,21 @@ def evaluate_independent_qualification(
         ],
         key=_canonical_hash,
     )
+    source_correction_outcomes = sorted(
+        [
+            {
+                "finding_id": finding_id,
+                "status": status or "missing",
+            }
+            for finding_id, status in source_resolution_status_by_finding_id.items()
+        ],
+        key=_canonical_hash,
+    )
     stability_sha256 = _canonical_hash(
         {
             "source_labels": source_label_projection,
             "source_actionable_outcomes": source_actionable_outcomes,
+            "source_correction_outcomes": source_correction_outcomes,
             "policy": policy,
         }
     )
@@ -1797,8 +3135,19 @@ def evaluate_independent_qualification(
         "final_output_independently_adjudicated": status in {"verified", "failed"},
         "useful_output_verified": useful_output_verified,
         "correction_routes": correction_routes,
+        "terminal_residual_risks": terminal_residual_risks,
         "correction_routing_status": (
-            "pending_orchestration" if correction_routes else "not_required"
+            "terminal_residual_risk"
+            if correction_routes
+            and all(
+                route.get("route_status") == "uncorrectable"
+                for route in correction_routes
+            )
+            else "pending_with_terminal_residual_risk"
+            if terminal_residual_risks
+            else "pending_orchestration"
+            if correction_routes
+            else "not_required"
         ),
         "stability_sha256": stability_sha256,
         "basis_sha256": _canonical_hash(basis),
@@ -1834,6 +3183,23 @@ def evaluate_independent_qualification(
                 route.get("route_status") == "author_provenance_unavailable"
                 for route in correction_routes
             ),
+            "source_correction_findings_total": len(source_correction_findings),
+            "source_correction_findings_resolved": source_resolution_counts["resolved"],
+            "source_correction_findings_partially_resolved": source_resolution_counts[
+                "partially_resolved"
+            ],
+            "source_correction_findings_unresolved": source_resolution_counts["unresolved"],
+            "source_correction_findings_superseded": source_resolution_counts["superseded"],
+            "source_correction_findings_missing": len(source_resolution_missing_ids),
+            "source_correction_findings_outstanding": len(
+                source_resolution_outstanding_ids
+            ),
+            "source_correction_findings_outstanding_already_counted_outputs": len(
+                outstanding_already_counted_output_ids
+            ),
+            "source_correction_terminal_residual_risks": len(
+                terminal_residual_risks
+            ),
             "zero_output": int(ticket_count == 0),
             "zero_accepted_artifacts": int(output_count == 0),
             "actionable_zero_output": int(actionable_count > 0 and ticket_count == 0),
@@ -1851,6 +3217,11 @@ def evaluate_independent_qualification(
             "accepted_good_among_adjudicated": _rate(accepted_good, adjudicated_quality),
             "repair_coverage": _rate(known_repair, output_count),
             "repair_among_known": _rate(repaired, known_repair),
+            "source_correction_terminal_resolution": _rate(
+                source_resolution_counts["resolved"]
+                + source_resolution_counts["superseded"],
+                len(source_correction_findings),
+            ),
         },
         "good_to_bad_ratio": {
             "good": accepted_good,
@@ -1876,4 +3247,6 @@ __all__ = [
     "qualification_manifest_errors",
     "qualification_output_causal_target",
     "qualification_output_adjudication_errors",
+    "qualification_source_correction_findings",
+    "qualification_source_correction_findings_errors",
 ]

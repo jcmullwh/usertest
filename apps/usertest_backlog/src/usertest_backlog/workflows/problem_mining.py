@@ -2279,28 +2279,6 @@ def _run_problem_mining_job_with_response_retry(
             normalized_event_paths.append(corrected_events)
         return observation(corrected)
 
-    original_author_cost = initial.cost_seconds
-
-    def pause_policy(
-        _current: CorrectionObservation[dict[str, Any]],
-        _assessment: Any,
-        correction_cost_since_progress: float,
-        _total_correction_cost: float,
-    ) -> str | None:
-        if (
-            _assessment is not None
-            and _assessment.reason == "first_noop_receives_feedback"
-        ):
-            # One exact no-op is not clear nonprogress; the author has now received
-            # validator feedback and must get the distinguishing follow-up turn.
-            return None
-        if (
-            original_author_cost > 0.0
-            and correction_cost_since_progress >= original_author_cost
-        ):
-            return "correction_cost_reached_original"
-        return None
-
     if acquisition_status.startswith("repairable_paused:"):
         correction = CorrectionRunResult(
             status=acquisition_status,
@@ -2319,7 +2297,6 @@ def _run_problem_mining_job_with_response_retry(
         correction = run_progressive_correction(
             initial=initial,
             invoke_correction=invoke_correction,
-            pause_policy=pause_policy,
         )
     correction_metrics = correction_run_metrics(correction, expected_quality=None)
     if acquisition_attempts:
@@ -4668,7 +4645,6 @@ def _run_relation_review_batches(
                 acquisition_status = acquisition.status
                 acquisition_attempts = acquisition.attempts
                 initial = acquisition.current
-            original_cost = initial.cost_seconds
             prompt_sha256 = sha256(prompt.encode("utf-8")).hexdigest()
 
             def invoke_relation_correction(
@@ -4745,11 +4721,6 @@ def _run_relation_review_batches(
                 correction = run_progressive_correction(
                     initial=initial,
                     invoke_correction=invoke_relation_correction,
-                    pause_policy=lambda _current, _assessment, since_progress, _total, original_cost=original_cost: (
-                        "correction_cost_reached_original"
-                        if original_cost > 0.0 and since_progress >= original_cost
-                        else None
-                    ),
                 )
             correction_metrics = correction_run_metrics(correction, expected_quality=None)
             if acquisition_attempts:

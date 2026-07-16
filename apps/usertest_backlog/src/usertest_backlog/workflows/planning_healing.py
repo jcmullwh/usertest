@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 from collections import Counter
 from collections.abc import Mapping
+from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -109,11 +110,14 @@ def _validate_research_required(
             errors.append(f"planner_research_gap_not_an_object:{index}")
             continue
         gap = _nonempty(gap_raw.get("gap"))
+        evidence_phase = _nonempty(gap_raw.get("evidence_phase"))
         evidence_needed = _nonempty(gap_raw.get("evidence_needed"))
         blocks = _string_list(gap_raw.get("blocks"), require_nonempty=True)
         refs = _string_list(gap_raw.get("evidence_refs"), require_nonempty=True)
         if gap is None:
             errors.append(f"planner_research_gap_description_missing:{index}")
+        if evidence_phase != "pre_change_decision_evidence":
+            errors.append(f"planner_research_gap_evidence_phase_invalid:{index}")
         if evidence_needed is None:
             errors.append(f"planner_research_gap_evidence_needed_missing:{index}")
         # ``blocks`` is deliberately an open descriptive vocabulary.  Requiring a
@@ -125,6 +129,7 @@ def _validate_research_required(
             errors.append(f"planner_research_gap_refs_unbound:{index}")
         if (
             gap is not None
+            and evidence_phase == "pre_change_decision_evidence"
             and evidence_needed is not None
             and blocks is not None
             and refs is not None
@@ -132,6 +137,7 @@ def _validate_research_required(
             normalized_gaps.append(
                 {
                     "gap": gap,
+                    "evidence_phase": evidence_phase,
                     "blocks": blocks,
                     "evidence_needed": evidence_needed,
                     "evidence_refs": refs,
@@ -172,6 +178,31 @@ def _server_research_return(
     }
 
 
+def _bind_stage5_selected_option_contracts(
+    plan: Mapping[str, Any],
+    *,
+    selection_decision: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Copy immutable selected-option contracts onto a Stage 6 plan.
+
+    Stage 6 owns implementation detail, not prose rewrites of the causal-coverage and
+    scope-evidence contracts already selected and falsified in Stage 5. Binding the exact
+    upstream JSON here keeps strict downstream linkage while avoiding correction turns for
+    semantically irrelevant copy drift. Deep copies prevent plan enrichment from mutating
+    Stage 5.
+    """
+
+    selected_option = selection_decision.get("selected_option")
+    if not isinstance(selected_option, Mapping):
+        return dict(plan)
+    bound = dict(plan)
+    for field in ("causal_coverage", "scope_evidence"):
+        immutable_contract = selected_option.get(field)
+        if isinstance(immutable_contract, Mapping):
+            bound[field] = deepcopy(dict(immutable_contract))
+    return bound
+
+
 def _finalize_plan_candidate(
     item: Mapping[str, Any],
     *,
@@ -194,6 +225,10 @@ def _finalize_plan_candidate(
     )
     errors = [str(warning) for warning in parse_warnings if str(warning).strip()]
     plan = dict(parsed[0]) if parsed and isinstance(parsed[0], dict) else dict(item)
+    plan = _bind_stage5_selected_option_contracts(
+        plan,
+        selection_decision=selection_decision,
+    )
     if model_plan_id is not None and model_plan_id in duplicate_plan_ids:
         errors.append(f"change_plan_duplicate_model_plan_id:{model_plan_id}")
     try:

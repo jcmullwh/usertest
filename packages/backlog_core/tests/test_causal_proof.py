@@ -207,6 +207,21 @@ def test_causal_proof_contract_accepts_adapter_without_method_whitelist() -> Non
     assert validate_causal_proof_receipt(receipt) == []
 
 
+def test_causal_proof_accepts_only_the_explicit_causal_contrast_role() -> None:
+    receipt = _valid_receipt()
+    receipt["positive_outcome"]["contract_role"] = "causal_contrast"
+    receipt["proof_receipt_id"] = proof_receipt_id_for(receipt)
+
+    assert validate_causal_proof_receipt(receipt) == []
+
+    receipt["positive_outcome"]["contract_role"] = "looks_positive_but_is_not_registered"
+    receipt["proof_receipt_id"] = proof_receipt_id_for(receipt)
+
+    assert "causal_proof_positive_contract_role_invalid" in (
+        validate_causal_proof_receipt(receipt)
+    )
+
+
 def test_replay_inputs_and_portable_observation_are_content_bound() -> None:
     receipt = _valid_receipt()
     baseline = receipt["observations"]["baseline"]

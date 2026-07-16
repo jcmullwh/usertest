@@ -12,7 +12,191 @@ from backlog_miner.proof_adapters import (
     RepositoryContractQuoteBasisAdapter,
     RepositoryFailFirstCommandBasisAdapter,
     builtin_positive_basis_registry,
+    builtin_proof_adapter_registry,
 )
+from backlog_miner.proof_adapters.base import (
+    ProofAdapterContext,
+    build_receipt,
+    observed_value,
+)
+
+
+def test_builtin_registry_only_advertises_live_wired_adapters() -> None:
+    adapter_ids = set(builtin_proof_adapter_registry().adapter_ids())
+
+    assert "structured_replay.v1" in adapter_ids
+    assert "python_call_chain.v1" not in adapter_ids
+    assert "pytest_controlled_difference.v1" not in adapter_ids
+
+
+def test_event_json_selects_content_bound_json_amid_progress_lines(tmp_path: Path) -> None:
+    stdout = tmp_path / "stdout.txt"
+    stdout.write_text(
+        '{"remaining_image_ids": 3}\n.\n1 passed in 0.02s\n',
+        encoding="utf-8",
+    )
+
+    ok, value, value_sha256, paths = observed_value(
+        {"stdout_path": str(stdout)},
+        {"source": "event_json", "json_pointer": "/remaining_image_ids"},
+    )
+
+    assert ok is True
+    assert value == 3
+    assert value_sha256 == canonical_json_sha256(3)
+    assert paths == [stdout]
+
+
+def test_well_formed_but_false_positive_predicate_has_explicit_diagnostic() -> None:
+    def replay_inputs(experiment_id: str) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "source_experiment_id": experiment_id,
+            "runner_approved": True,
+            "environment": {},
+            "disposable_state_paths": [],
+        }
+        payload["replay_inputs_sha256"] = canonical_json_sha256(payload)
+        return payload
+
+    context = ProofAdapterContext(
+        case_id="case:test",
+        problem_id="problem:test",
+        hypothesis_id="hypothesis:test",
+        claim={
+            "intervention": {
+                "kind": "config",
+                "target": "config:/agents/codex/config_overrides",
+                "predicted_polarity": "removes_failure",
+                "before": "warning is fatal",
+                "after": "warning is a runtime notice",
+            },
+            "positive_outcome": {
+                "predicate": {"kind": "equals", "expected": True},
+            },
+        },
+        experiments={},
+        clean_replays={
+            "experiment:baseline": {
+                "replay_inputs": replay_inputs("experiment:baseline"),
+            },
+            "experiment:challenge": {
+                "replay_inputs": replay_inputs("experiment:challenge"),
+            },
+        },
+        source_root={},
+        planning_workspace=None,
+        atom_bindings=[],
+        symbol_receipts=[],
+        artifact_receipts=[],
+        services={},
+    )
+
+    result = build_receipt(
+        adapter_id="structured_replay.v1",
+        adapter_version="1",
+        context=context,
+        baseline_id="experiment:baseline",
+        challenge_id="experiment:challenge",
+        baseline_observed=True,
+        baseline_observed_sha256=canonical_json_sha256(True),
+        baseline_selector={"source": "exit_code"},
+        challenge_observed=False,
+        challenge_observed_sha256=canonical_json_sha256(False),
+        challenge_selector={"source": "exit_code"},
+        observation_source="exit_code",
+        nodes=[],
+        edges=[],
+        artifacts=[],
+        adapter_evidence={},
+    )
+
+    assert result.receipts == ()
+    assert result.diagnostics == ("proof_adapter_positive_predicate_not_satisfied:equals",)
+
+
+def test_causal_contrast_role_is_opt_in_and_legacy_receipt_shape_is_unchanged() -> None:
+    def replay_inputs(experiment_id: str) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": 1,
+            "source_experiment_id": experiment_id,
+            "runner_approved": True,
+            "environment": {},
+            "disposable_state_paths": [],
+        }
+        payload["replay_inputs_sha256"] = canonical_json_sha256(payload)
+        return payload
+
+    def build(*, contract_role: str | None) -> dict[str, object]:
+        positive: dict[str, object] = {
+            "predicate": {"kind": "equals", "expected": 3},
+        }
+        if contract_role is not None:
+            positive["contract_role"] = contract_role
+        context = ProofAdapterContext(
+            case_id="case:test",
+            problem_id="problem:test",
+            hypothesis_id="hypothesis:test",
+            claim={
+                "intervention": {
+                    "kind": "age_delta",
+                    "target": "cleanup.run",
+                    "predicted_polarity": "reduces retained identities",
+                },
+                "positive_outcome": positive,
+            },
+            experiments={},
+            clean_replays={
+                "experiment:fresh": {
+                    "replay_inputs": replay_inputs("experiment:fresh"),
+                },
+                "experiment:aged": {
+                    "replay_inputs": replay_inputs("experiment:aged"),
+                },
+            },
+            source_root={
+                "origin_atom_ids": ["atom:burst"],
+                "positive_basis": {
+                    "basis_kind": "authenticated_semantic_citation",
+                    "basis_sha256": "a" * 64,
+                },
+            },
+            planning_workspace=None,
+            atom_bindings=[],
+            symbol_receipts=[],
+            artifact_receipts=[],
+            services={},
+        )
+        result = build_receipt(
+            adapter_id="structured_replay.v1",
+            adapter_version="1",
+            context=context,
+            baseline_id="experiment:fresh",
+            challenge_id="experiment:aged",
+            baseline_observed=49,
+            baseline_observed_sha256=canonical_json_sha256(49),
+            baseline_selector={"source": "event_json"},
+            challenge_observed=3,
+            challenge_observed_sha256=canonical_json_sha256(3),
+            challenge_selector={"source": "event_json"},
+            observation_source="event_json",
+            nodes=[
+                {"node_id": "proof:source"},
+                {"node_id": "proof:outcome"},
+            ],
+            edges=[],
+            artifacts=[],
+            adapter_evidence={},
+        )
+        assert result.diagnostics == ()
+        return result.receipts[0]
+
+    legacy = build(contract_role=None)
+    contrast = build(contract_role="causal_contrast")
+
+    assert "contract_role" not in legacy["positive_outcome"]
+    assert contrast["positive_outcome"]["contract_role"] == "causal_contrast"
+    assert legacy["proof_receipt_id"] != contrast["proof_receipt_id"]
 
 
 def _basis_context(

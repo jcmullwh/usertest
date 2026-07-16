@@ -42,10 +42,30 @@ mechanisms may use the same family; family uniqueness is not a depth signal.
 - Use `insufficient_evidence` with no options if material unknowns prevent a safe causal
   choice. Use `no_safe_option` with no options if the evidence is adequate but every
   considered mechanism has unacceptable residual risk.
+- Stage 4 owns prospective policy and interface design. You may explicitly choose a new finite
+  threshold, configurable default, identity/alias ownership rule, or interface extension
+  without claiming the old code already intended it. State the choice, tradeoffs,
+  compatibility change, safety constraints, and verification. Use `insufficient_evidence`
+  only when a material fact about the existing mechanism, reachable control surface,
+  indispensable requirement, or available protection signal remains unknown.
 - A class-level, canonical, centralized, or shared abstraction requires evidence for at
   least two independent runner-verified mechanism paths or consumers. They may come from
   typed runtime, controlled, harness, static, or observed-output evidence; distinct
   `independence_key` values establish path independence.
+- That independence gate applies to broad problem coverage or a new reusable abstraction,
+  not to the number of edits needed to make one evidenced operation recover. A single path
+  may cross multiple existing callers or components, extend an existing shared helper, and
+  require ordering or protection changes. Keep its `scope_level` as `single_path`, inspect
+  affected callers for compatibility, and include every causally necessary change.
+- Trace the reachable operation to its earliest same-resource failure boundary. An
+  intervention that runs only afterward cannot recover that operation; place the control
+  before the boundary when the inspected path supports it.
+- Design for safe useful throughput. Do not require every partial supporting-operation error
+  to abort if the option can report it, verify a safe postcondition, verify sufficient actual
+  progress, and let the intended operation continue. Do not swallow errors or assume progress.
+- A repository value observed in a benchmark or current default may be a prospective default
+  or test case. Do not declare it a universal supported maximum without an explicit repository
+  requirement or capacity constraint.
 - Do not select an option here.
 
 ## Output contract
@@ -108,6 +128,13 @@ that genuinely describes the mechanism. Omitting it has no effect on option vali
     "testability": {
       "before": "how the mechanism is shown to fail before the change",
       "after": "how the same mechanism is shown to succeed after the change"
+    },
+    "outcome_strategy": {
+      "intended_operation": "the useful operation or bounded lifecycle state that must actually succeed, not merely the error marker that must disappear",
+      "success_properties": ["problem-specific properties a post-change check must demonstrate"],
+      "safety_constraints": ["behavior the solution must preserve; may be empty when none is evidenced"],
+      "post_change_replay_mode": "verified_fail_first | stage6_planned_unverified",
+      "original_scenario_experiment_ids": ["prefer verified fail-first experiment IDs; otherwise copy supporting original_replay, faithful_replay, or live_runtime baseline IDs"]
     }
   },
   "scope_evidence": {
@@ -129,6 +156,24 @@ for an additional evidenced edit that is actually necessary. Do not add an edit 
 traversed symbol, bind an option to a different hypothesis, paraphrase the research
 statement, or invent an uninspected target. Return to research when the common causal
 boundary is not runner-evidenced.
+
+`outcome_strategy` is prospective Stage-4 design, not a claim that the fix has already
+worked. Ground it in the source problem and verified Stage-3 baseline. It must say what
+useful operation or bounded state proves success, identify the retained scenario to replay,
+and preserve relevant safety constraints. Do not accept “the error is gone,” “exit 0,” or a
+new log marker as the only success property. The independent Stage-5 falsifier will reject
+surface-only strategies, and Stage 6 will turn the selected strategy into exact executable
+commands and predicates.
+
+Prefer a runner-verified fail-first experiment covering the same source atoms: its unchanged
+command fails at the researched revision and can pass after the change. Set
+`post_change_replay_mode="verified_fail_first"` and select that experiment. A supporting
+experiment that exits zero by asserting the old symptom is baseline/mechanism evidence, not
+an exact post-change replay; Stage 6 must not rewrite its assertion or retained
+`.usertest_research` asset. When research has no verified fail-first command for the source
+scenario, keep the useful baseline ID and set
+`post_change_replay_mode="stage6_planned_unverified"`; Stage 6 may then design a distinct
+solution-specific proof. Do not return to research merely to pre-execute that future proof.
 
 For `adapter_proof` evidence, keep the causal locator separate from implementation files. Copy
 `causal_locator` from the attested adapter intervention target and copy only

@@ -530,6 +530,14 @@ def _broad_option(
             "residual_recurrence_paths": [],
             "compatibility_risks": [],
             "testability": {"before": "both fail", "after": "both pass"},
+            "outcome_strategy": {
+                "intended_operation": "Both consumers preserve and expose error provenance.",
+                "success_properties": [
+                    "The original replay completes with the expected provenance value."
+                ],
+                "safety_constraints": ["Existing successful results remain unchanged."],
+                "original_scenario_experiment_ids": ["experiment:support"],
+            },
         },
         "scope_evidence": {
             "scope_level": "shared_abstraction",
@@ -1309,7 +1317,328 @@ def _falsification_review(
                 "evidence_refs": [control_id],
             }
         ],
+        "outcome_strategy_review": {
+            "verdict": "sufficient",
+            "semantic_relation_assessment": (
+                "The option strategy requires the intended provenance value on the retained "
+                "original replay rather than merely removing the failure marker."
+            ),
+            "proves_intended_operation": True,
+            "problem_coverage": "full",
+            "residual_untested_paths": [],
+            "evidence_refs": [control_id],
+        },
     }
+
+
+def _research_without_future_outcome() -> tuple[
+    dict[str, object], dict[str, object], str
+]:
+    research, paths = _runner_research()
+    research["repo_revision"] = "a" * 40
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    verification["outcome_oracles"] = []
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+        first_name=str(paths[0]["path_name"]),
+        second_name=str(paths[1]["path_name"]),
+    )
+    evidence_id = str(verification["verified_mechanism_provenance"]["mechanism_evidence_ids"][0])
+    return research, option, evidence_id
+
+
+def _outcome_strategy_falsification_review(evidence_id: str) -> dict[str, object]:
+    return {
+        "problem_id": "problem:test",
+        "selected_option_id": "option:test:shared",
+        "verdict": "accept",
+        "strongest_counterargument": (
+            "Preserving a value at only one caller could leave the second path unchanged."
+        ),
+        "evidence_refs": [
+            {
+                "ref": evidence_id,
+                "finding": "The controlled replay binds the failure to the shared boundary.",
+            }
+        ],
+        "unsupported_assumptions": [],
+        "residual_risks": [],
+        "critical_findings": [],
+        "material_risk_dispositions": [],
+        "evidence_that_would_change_verdict": (
+            "A retained replay showing that either caller bypasses the selected boundary."
+        ),
+        "outcome_strategy_review": {
+            "verdict": "sufficient",
+            "semantic_relation_assessment": (
+                "The strategy requires the useful provenance value on the original replay, "
+                "rather than only removal of the failure marker."
+            ),
+            "proves_intended_operation": True,
+            "problem_coverage": "full",
+            "residual_untested_paths": [],
+            "evidence_refs": [evidence_id],
+        },
+    }
+
+
+def test_optioning_owns_outcome_strategy_when_research_has_no_future_oracle() -> None:
+    research, option, _evidence_id = _research_without_future_outcome()
+
+    ready, reasons = assess_solution_option_readiness(option, research=research)
+    assert ready is True
+    assert reasons == []
+
+    option["causal_coverage"].pop("outcome_strategy")
+    ready, reasons = assess_solution_option_readiness(option, research=research)
+    assert ready is False
+    assert "solution_option_outcome_strategy_missing_or_unbound" in reasons
+
+
+def test_optioning_requires_outcome_strategy_even_with_stage3_positive_contract() -> None:
+    research, paths = _runner_research()
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+        first_name=str(paths[0]["path_name"]),
+        second_name=str(paths[1]["path_name"]),
+    )
+    coverage = option["causal_coverage"]
+    assert isinstance(coverage, dict)
+    coverage.pop("outcome_strategy")
+
+    ready, reasons = assess_solution_option_readiness(option, research=research)
+
+    assert ready is False
+    assert "solution_option_outcome_strategy_missing_or_unbound" in reasons
+
+
+def test_stage5_binds_reviewed_option_outcome_without_stage3_future_oracle() -> None:
+    research, option, evidence_id = _research_without_future_outcome()
+    bound = bind_falsification_review(
+        _outcome_strategy_falsification_review(evidence_id),
+        problem_id="problem:test",
+        selected_option=option,
+        research=research,
+    )
+
+    contract = bound["selected_outcome_contract"]
+    assert contract["kind"] == "selected_option_outcome_strategy"
+    assert contract["strategy"] == option["causal_coverage"]["outcome_strategy"]
+    assert contract["outcome_contract_id"].startswith("stage5_outcome_contract:")
+    assert bound["outcome_claim_status"] == "resolved"
+    assert (
+        falsification_review_receipt_errors(
+            bound,
+            problem_id="problem:test",
+            selected_option=option,
+            research=research,
+        )
+        == []
+    )
+
+
+def test_stage5_rejects_surface_only_option_outcome_strategy() -> None:
+    research, option, evidence_id = _research_without_future_outcome()
+    review = _outcome_strategy_falsification_review(evidence_id)
+    strategy_review = review["outcome_strategy_review"]
+    assert isinstance(strategy_review, dict)
+    strategy_review["verdict"] = "surface_only"
+    strategy_review["proves_intended_operation"] = False
+
+    with pytest.raises(
+        ValueError,
+        match="falsification_accepts_insufficient_outcome_semantics",
+    ):
+        bind_falsification_review(
+            review,
+            problem_id="problem:test",
+            selected_option=option,
+            research=research,
+        )
+
+
+def test_material_risk_disposition_names_missing_evidence_refs_field() -> None:
+    research, paths = _runner_research()
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+    )
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    evidence = verification["mechanism_evidence"]
+    assert isinstance(evidence, list)
+    evidence_id = str(evidence[0]["mechanism_evidence_id"])
+    review = _falsification_review(evidence_id, research=research)
+    risk = "The selected option retains one bounded compatibility risk."
+    coverage = option["causal_coverage"]
+    assert isinstance(coverage, dict)
+    coverage["compatibility_risks"] = [risk]
+    review["material_risk_dispositions"] = [
+        {
+            "risk": risk,
+            "disposition": "accepted",
+            "mechanism_evidence_ids": [evidence_id],
+            "rationale": "The risk is explicit and bounded.",
+        }
+    ]
+
+    with pytest.raises(
+        ValueError,
+        match="falsification_risk_evidence_refs_missing:0",
+    ):
+        bind_falsification_review(
+            review,
+            problem_id="problem:test",
+            selected_option=option,
+            research=research,
+        )
+
+
+def test_surface_only_stage3_baseline_does_not_veto_sufficient_stage4_strategy() -> None:
+    research, paths = _runner_research()
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+        first_name=str(paths[0]["path_name"]),
+        second_name=str(paths[1]["path_name"]),
+    )
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    evidence_id = str(verification["verified_mechanism_provenance"]["mechanism_evidence_ids"][0])
+    review = _falsification_review(evidence_id, research=research)
+    baseline_review = review["outcome_contract_reviews"][0]
+    assert isinstance(baseline_review, dict)
+    baseline_review.update(
+        {
+            "verdict": "surface_only",
+            "semantic_relation_assessment": (
+                "The Stage-3 contract authenticates the pre-change scalar baseline but does "
+                "not express the option's prospective useful-operation recovery."
+            ),
+            "proves_intended_operation": False,
+            "problem_coverage": "partial",
+            "residual_untested_paths": [
+                "The baseline contract does not prove future useful-operation recovery."
+            ],
+        }
+    )
+
+    bound = bind_falsification_review(
+        review,
+        problem_id="problem:test",
+        selected_option=option,
+        research=research,
+    )
+
+    assert bound["outcome_strategy_review"]["verdict"] == "sufficient"
+    assert bound["outcome_contract_reviews"][0]["verdict"] == "surface_only"
+    assert bound["selected_outcome_contract"]["strategy"] == option["causal_coverage"][
+        "outcome_strategy"
+    ]
+    assert bound["selected_outcome_contract"]["post_change_evidence_status"] == "unverified"
+    assert bound["outcome_contract_status"] == "approved_for_planning"
+    assert bound["post_change_evidence_status"] == "unverified"
+    assert (
+        falsification_review_receipt_errors(
+            bound,
+            problem_id="problem:test",
+            selected_option=option,
+            research=research,
+        )
+        == []
+    )
+
+
+def test_stage3_baseline_review_is_optional_additional_evidence() -> None:
+    research, paths = _runner_research()
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+        first_name=str(paths[0]["path_name"]),
+        second_name=str(paths[1]["path_name"]),
+    )
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    evidence_id = str(verification["verified_mechanism_provenance"]["mechanism_evidence_ids"][0])
+    review = _falsification_review(evidence_id, research=research)
+    review.pop("selected_positive_outcome_contract_id")
+    review.pop("outcome_contract_reviews")
+
+    bound = bind_falsification_review(
+        review,
+        problem_id="problem:test",
+        selected_option=option,
+        research=research,
+    )
+
+    assert bound["selected_positive_outcome_contract_ids"] == []
+    assert bound["outcome_contract_reviews"] == []
+    assert bound["selected_outcome_contract"][
+        "research_baseline_positive_outcome_contract_ids"
+    ]
+
+
+def test_stage6_binds_exact_plan_checks_to_stage5_outcome_contract() -> None:
+    research, option, evidence_id = _research_without_future_outcome()
+    review = bind_falsification_review(
+        _outcome_strategy_falsification_review(evidence_id),
+        problem_id="problem:test",
+        selected_option=option,
+        research=research,
+    )
+    selection = {
+        "selected_option_id": option["option_id"],
+        "selected_option": option,
+        "falsification_review": review,
+    }
+    command = "pytest tests/test_shared.py::test_failure -q"
+    plan = {
+        "case_id": "case:test",
+        "before_after_reproduction": {
+            "research_experiment_id": "experiment:support",
+            "after_change": {
+                "command": command,
+                "expected_exit_code": 0,
+                "expected_result": "The original operation preserves provenance.",
+                "observable_assertions": [
+                    {
+                        "source": "stdout",
+                        "operator": "contains",
+                        "expected": "provenance=preserved",
+                    }
+                ],
+            },
+        },
+        "outcome_verification_roles": {
+            "original_scenario": {
+                "description": "Replay the original failing scenario after the change."
+            },
+            "live": None,
+            "mitigation_effect": None,
+            "recurrence": {
+                "description": "Check later canonical cycles.",
+                "verification_owner": "centralized_case_refresh",
+                "commands": [],
+                "predicates": [],
+            },
+        },
+    }
+
+    bound = bind_plan_outcome_oracle(plan, research=research, selection=selection)
+    original = bound["outcome_verification_roles"]["original_scenario"]
+    assert original["commands"] == [command]
+    assert original["oracle"]["kind"] == "stage5_planned_outcome"
+    assert original["oracle"]["selected_outcome_contract"] == review[
+        "selected_outcome_contract"
+    ]
+    assert {
+        "type": "command_stdout_contains",
+        "command_index": 0,
+        "value": "provenance=preserved",
+    } in original["predicates"]
 
 
 def _two_oracle_falsification_fixture() -> tuple[
@@ -1456,10 +1785,10 @@ def test_bounded_noncritical_residual_accepts_only_as_mitigated() -> None:
             "rationale": "The retained evidence bounds this to the second platform path.",
         }
     ]
-    contract_review = review["outcome_contract_reviews"][0]
-    assert isinstance(contract_review, dict)
-    contract_review["problem_coverage"] = "partial"
-    contract_review["residual_untested_paths"] = [risk]
+    strategy_review = review["outcome_strategy_review"]
+    assert isinstance(strategy_review, dict)
+    strategy_review["problem_coverage"] = "partial"
+    strategy_review["residual_untested_paths"] = [risk]
 
     bound = bind_falsification_review(
         review,
@@ -1508,7 +1837,7 @@ def test_bounded_noncritical_residual_accepts_only_as_mitigated() -> None:
     assert reasons == []
 
 
-def test_evidenced_compatibility_mitigation_does_not_bound_root_cause_outcome() -> None:
+def test_evidenced_compatibility_risk_bounds_confidence_not_root_cause_outcome() -> None:
     research, paths = _runner_research()
     option = _broad_option(
         first_ref=str(paths[0]["failure_path_id"]),
@@ -1543,7 +1872,107 @@ def test_evidenced_compatibility_mitigation_does_not_bound_root_cause_outcome() 
     )
 
     assert bound["outcome_claim_status"] == "resolved"
-    assert bound["outcome_confidence"] == "full"
+    assert bound["outcome_confidence"] == "bounded"
+    assert (
+        falsification_review_receipt_errors(
+            bound,
+            problem_id="problem:test",
+            selected_option=option,
+            research=research,
+        )
+        == []
+    )
+
+
+def test_full_outcome_remains_resolved_with_accepted_scope_and_future_risks() -> None:
+    research, paths = _runner_research()
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+        first_name=str(paths[0]["path_name"]),
+        second_name=str(paths[1]["path_name"]),
+    )
+    coverage = option["causal_coverage"]
+    assert isinstance(coverage, dict)
+    scope_risk = "Uninspected callers may rely on the previous exception contract."
+    recurrence_risk = "A future edit may reintroduce the verified failure."
+    compatibility_risk = "External callers may observe a compatibility change."
+    review_scope_risk = "No complete caller inventory proves universal compatibility."
+    review_recurrence_risk = "Removing the regression oracle could allow recurrence."
+    coverage["unsupported_assumptions"] = [scope_risk]
+    coverage["residual_recurrence_paths"] = [recurrence_risk]
+    coverage["compatibility_risks"] = [compatibility_risk]
+    option["scope_evidence"] = {
+        "scope_level": "single_path",
+        "independent_consumers_or_failure_paths": [
+            {
+                "name": str(paths[0]["path_name"]),
+                "evidence_refs": [str(paths[0]["failure_path_id"])],
+            }
+        ],
+    }
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    evidence = verification["mechanism_evidence"]
+    assert isinstance(evidence, list)
+    evidence_id = str(evidence[0]["mechanism_evidence_id"])
+    review = _falsification_review(evidence_id, research=research)
+    review["unsupported_assumptions"] = [review_scope_risk]
+    review["residual_risks"] = [review_recurrence_risk]
+    review["material_risk_dispositions"] = [
+        {
+            "risk": risk,
+            "disposition": disposition,
+            "evidence_refs": [evidence_id],
+            "rationale": rationale,
+        }
+        for risk, disposition, rationale in (
+            (
+                scope_risk,
+                "accepted",
+                "The verified claim is limited to the source problem rather than all callers.",
+            ),
+            (
+                recurrence_risk,
+                "mitigated",
+                "The retained outcome oracle detects recurrence on the verified path.",
+            ),
+            (
+                compatibility_risk,
+                "accepted",
+                "Compatibility remains a disclosed implementation risk outside the proof claim.",
+            ),
+            (
+                review_scope_risk,
+                "accepted",
+                "The source problem is fully covered without claiming universal compatibility.",
+            ),
+            (
+                review_recurrence_risk,
+                "mitigated",
+                "The retained oracle checks the verified failure path after implementation.",
+            ),
+        )
+    ]
+
+    bound = bind_falsification_review(
+        review,
+        problem_id="problem:test",
+        selected_option=option,
+        research=research,
+    )
+
+    assert bound["outcome_claim_status"] == "resolved"
+    assert bound["outcome_confidence"] == "bounded"
+    assert (
+        falsification_review_receipt_errors(
+            bound,
+            problem_id="problem:test",
+            selected_option=option,
+            research=research,
+        )
+        == []
+    )
 
 
 def test_evidenced_mitigation_cannot_erase_unsupported_root_cause_assumption() -> None:
@@ -1596,14 +2025,14 @@ def test_partial_outcome_with_undisposed_residual_cannot_be_accepted() -> None:
     assert isinstance(evidence, list)
     evidence_id = str(evidence[0]["mechanism_evidence_id"])
     review = _falsification_review(evidence_id, research=research)
-    contract_review = review["outcome_contract_reviews"][0]
-    assert isinstance(contract_review, dict)
-    contract_review["problem_coverage"] = "partial"
-    contract_review["residual_untested_paths"] = ["Unbounded platform path"]
+    strategy_review = review["outcome_strategy_review"]
+    assert isinstance(strategy_review, dict)
+    strategy_review["problem_coverage"] = "partial"
+    strategy_review["residual_untested_paths"] = ["Unbounded platform path"]
 
     with pytest.raises(
         ValueError,
-        match="falsification_accepts_insufficient_outcome_semantics",
+        match="falsification_accepts_undisposed_outcome_strategy_residual",
     ):
         bind_falsification_review(
             review,
@@ -2164,6 +2593,7 @@ def _observable_change_plan_fixture(
             "mitigation_effect": mitigation_role,
             "recurrence": {
                 "description": "Check later canonical-case cycles for recurrence.",
+                "verification_owner": "centralized_case_refresh",
                 "commands": [],
                 "predicates": [],
             },
@@ -2242,6 +2672,7 @@ def test_nonoriginal_outcome_commands_use_evidence_bindings_not_tool_allowlists(
         "mitigation_effect": None,
         "recurrence": {
             "description": "Use later canonical-case refresh evidence.",
+            "verification_owner": "centralized_case_refresh",
             "commands": [],
             "predicates": [],
         },
@@ -2268,6 +2699,657 @@ def test_nonoriginal_outcome_commands_use_evidence_bindings_not_tool_allowlists(
         research=research,
     )
     assert "change_plan_outcome_role_command_bindings_invalid:live" in unbound_reasons
+
+
+def test_centralized_recurrence_owner_is_the_only_empty_role_exception() -> None:
+    roles = {
+        "original_scenario": None,
+        "live": None,
+        "mitigation_effect": None,
+        "recurrence": {
+            "description": "Use two later canonical-case shadow snapshots.",
+            "verification_owner": "centralized_case_refresh",
+            "commands": [],
+            "predicates": [],
+        },
+    }
+
+    accepted = ticket_readiness._outcome_role_contract_errors(
+        roles,
+        verification_commands=["python scripts/unit_contract.py"],
+        reproduction=None,
+        requires_live=False,
+        research=None,
+    )
+    assert not any("recurrence" in reason for reason in accepted)
+
+    unowned = json.loads(json.dumps(roles))
+    unowned["recurrence"].pop("verification_owner")
+    rejected = ticket_readiness._outcome_role_contract_errors(
+        unowned,
+        verification_commands=["python scripts/unit_contract.py"],
+        reproduction=None,
+        requires_live=False,
+        research=None,
+    )
+    assert "change_plan_outcome_role_commands_invalid:recurrence" in rejected
+    assert "change_plan_outcome_role_predicates_invalid:recurrence" in rejected
+
+
+def test_plan_owned_recurrence_still_requires_verified_command_binding() -> None:
+    command = "python scripts/recurrence_probe.py"
+    research = {
+        "evidence_verification": {
+            "status": "verified",
+            "experiments": [{"experiment_id": "exp-recurrence", "command": command}],
+        }
+    }
+    roles = {
+        "original_scenario": None,
+        "live": None,
+        "mitigation_effect": None,
+        "recurrence": {
+            "description": "Run a verified problem-specific recurrence observation.",
+            "commands": [command],
+            "command_bindings": [
+                {"command_index": 0, "research_experiment_id": "exp-recurrence"}
+            ],
+            "predicates": [
+                {"type": "command_exit_code", "command_index": 0, "equals": 0}
+            ],
+        },
+    }
+
+    accepted = ticket_readiness._outcome_role_contract_errors(
+        roles,
+        verification_commands=["python scripts/unit_contract.py"],
+        reproduction=None,
+        requires_live=False,
+        research=research,
+    )
+    assert not any("recurrence" in reason for reason in accepted)
+
+    roles["recurrence"].pop("command_bindings")
+    rejected = ticket_readiness._outcome_role_contract_errors(
+        roles,
+        verification_commands=["python scripts/unit_contract.py"],
+        reproduction=None,
+        requires_live=False,
+        research=research,
+    )
+    assert "change_plan_outcome_role_command_bindings_invalid:recurrence" in rejected
+
+
+def test_stage6_can_bind_prospective_live_command_without_claiming_execution() -> None:
+    research, option, evidence_id = _research_without_future_outcome()
+    research["repo_revision"] = "a" * 40
+    review = bind_falsification_review(
+        _outcome_strategy_falsification_review(evidence_id),
+        problem_id="problem:test",
+        selected_option=option,
+        research=research,
+    )
+    selection = {
+        "selected_option_id": option["option_id"],
+        "selected_option": option,
+        "falsification_review": review,
+    }
+    original_command = "pytest tests/test_shared.py::test_failure -q"
+    bound = bind_plan_outcome_oracle(
+        {
+            "case_id": "case:test",
+            "before_after_reproduction": {
+                "research_experiment_id": "experiment:support",
+                "after_change": {
+                    "command": original_command,
+                    "expected_exit_code": 0,
+                    "expected_result": "The original operation preserves provenance.",
+                    "observable_assertions": [
+                        {
+                            "source": "stdout",
+                            "operator": "contains",
+                            "expected": "provenance=preserved",
+                        }
+                    ],
+                },
+            },
+            "outcome_verification_roles": {
+                "original_scenario": {
+                    "description": "Replay the original failing scenario after the change."
+                },
+                "live": None,
+                "mitigation_effect": None,
+                "recurrence": {
+                    "description": "Check later canonical cycles.",
+                    "verification_owner": "centralized_case_refresh",
+                    "commands": [],
+                    "predicates": [],
+                },
+            },
+        },
+        research=research,
+        selection=selection,
+    )
+    roles = bound["outcome_verification_roles"]
+    assert isinstance(roles, dict)
+    contract_id = review["selected_outcome_contract"]["outcome_contract_id"]
+    repo_revision = research["repo_revision"]
+    roles["live"] = {
+        "description": "Execute the selected post-change capacity recovery.",
+        "execution_status": "planned_unverified",
+        "commands": ["python scripts/live_capacity_recovery.py --verify"],
+        "command_bindings": [
+            {
+                "command_index": 0,
+                "binding_kind": "stage6_planned_post_change",
+                "selected_outcome_contract_id": contract_id,
+                "repo_revision": repo_revision,
+            }
+        ],
+        "predicates": [
+            {"type": "command_exit_code", "command_index": 0, "equals": 0},
+            {
+                "type": "command_stdout_contains",
+                "command_index": 0,
+                "value": "capacity_recovered=true",
+            },
+        ],
+    }
+
+    reasons = ticket_readiness._outcome_role_contract_errors(
+        roles,
+        verification_commands=[original_command],
+        reproduction=bound["before_after_reproduction"],
+        requires_live=True,
+        research=research,
+    )
+
+    assert not any("command_binding" in reason for reason in reasons)
+    assert not any("execution_status" in reason for reason in reasons)
+
+    wrong_contract_roles = json.loads(json.dumps(roles))
+    wrong_contract_roles["live"]["command_bindings"][0][
+        "selected_outcome_contract_id"
+    ] = "stage5_outcome_contract:wrong"
+    wrong_contract_reasons = ticket_readiness._outcome_role_contract_errors(
+        wrong_contract_roles,
+        verification_commands=[original_command],
+        reproduction=bound["before_after_reproduction"],
+        requires_live=True,
+        research=research,
+    )
+    assert (
+        "change_plan_outcome_role_planned_command_binding_invalid:live:0"
+        in wrong_contract_reasons
+    )
+
+    wrong_revision_roles = json.loads(json.dumps(roles))
+    wrong_revision_roles["live"]["command_bindings"][0]["repo_revision"] = "b" * 40
+    wrong_revision_reasons = ticket_readiness._outcome_role_contract_errors(
+        wrong_revision_roles,
+        verification_commands=[original_command],
+        reproduction=bound["before_after_reproduction"],
+        requires_live=True,
+        research=research,
+    )
+    assert (
+        "change_plan_outcome_role_planned_command_binding_invalid:live:0"
+        in wrong_revision_reasons
+    )
+
+    missing_status_roles = json.loads(json.dumps(roles))
+    missing_status_roles["live"].pop("execution_status")
+    missing_status_reasons = ticket_readiness._outcome_role_contract_errors(
+        missing_status_roles,
+        verification_commands=[original_command],
+        reproduction=bound["before_after_reproduction"],
+        requires_live=True,
+        research=research,
+    )
+    assert (
+        "change_plan_outcome_role_planned_execution_status_invalid:live"
+        in missing_status_reasons
+    )
+
+
+def test_option_strategy_prefers_verified_fail_first_over_exit_zero_old_behavior() -> None:
+    research, paths = _runner_research()
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+    )
+    old_behavior = {
+        "experiment_id": "experiment:old-behavior",
+        "scenario_kind": "faithful_replay",
+        "command": "pytest tests/test_shared.py::test_old_behavior -q",
+        "result": "The old symptom remains observable.",
+        "outcome": "supports",
+        "exit_code": 0,
+        "addresses_atom_ids": ["atom:a"],
+        "observable_assertion": {
+            "source": "stdout",
+            "operator": "contains",
+            "expected": "old behavior retained",
+        },
+        "artifact_refs": ["artifact:mechanism"],
+    }
+    research["experiments"].append(old_behavior)
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    verification["experiments"].append(
+        {
+            **old_behavior,
+            "assertion_passed": True,
+            "stdout_sha256": "5" * 64,
+            "stderr_sha256": "6" * 64,
+        }
+    )
+    strategy = option["causal_coverage"]["outcome_strategy"]
+    strategy["original_scenario_experiment_ids"] = ["experiment:old-behavior"]
+    strategy["post_change_replay_mode"] = "verified_fail_first"
+
+    assert ticket_readiness._option_outcome_strategy(option, research=research) is None
+
+    strategy["post_change_replay_mode"] = "stage6_planned_unverified"
+    assert ticket_readiness._option_outcome_strategy(option, research=research) is None
+
+    # Without a clean fail-first command for the same source atom, the honest future-proof
+    # mode remains available instead of blocking option throughput.
+    for receipt in verification["experiments"]:
+        if isinstance(receipt, dict) and receipt.get("experiment_id") != (
+            "experiment:old-behavior"
+        ):
+            receipt["exit_code"] = 0
+    strategy["post_change_replay_mode"] = "stage6_planned_unverified"
+    normalized = ticket_readiness._option_outcome_strategy(option, research=research)
+    assert normalized is not None
+    assert normalized["post_change_replay_mode"] == "stage6_planned_unverified"
+
+
+def test_stage5_fail_first_mode_reuses_retained_oracle_without_rewriting_asset() -> None:
+    research, paths = _runner_research()
+    research["case_id"] = "case:test"
+    research["repo_revision"] = "a" * 40
+    option = _broad_option(
+        first_ref=str(paths[0]["failure_path_id"]),
+        second_ref=str(paths[1]["failure_path_id"]),
+    )
+    strategy = option["causal_coverage"]["outcome_strategy"]
+    strategy["post_change_replay_mode"] = "verified_fail_first"
+    command = "python .usertest_research/fail_first.py"
+    argv = command.split()
+    source_experiment = next(
+        item
+        for item in research["experiments"]
+        if item["experiment_id"] == "experiment:support"
+    )
+    source_experiment["command"] = command
+    source_experiment["scenario_kind"] = "fail_first_contract"
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    source_receipt = next(
+        item
+        for item in verification["experiments"]
+        if item["experiment_id"] == "experiment:support"
+    )
+    source_receipt["command"] = command
+    source_receipt["scenario_kind"] = "fail_first_contract"
+    source_receipt["executed_argv"] = argv
+    source_receipt["command_authorization"] = {
+        "authorization_kind": "attested_research_harness",
+        "executed_argv_sha256": _canonical_hash(argv),
+        "shell": False,
+        "workspace_confined": True,
+        "runner_attested": True,
+    }
+    manifest = {
+        ".usertest_research/fail_first.py": {
+            "kind": "file",
+            "mode": 0o644,
+            "sha256": "7" * 64,
+            "size_bytes": 12,
+        }
+    }
+    asset = {
+        "asset_id": "outcome_asset:"
+        + _canonical_hash({"schema_version": 1, "manifest": manifest}),
+        "runs_relative_path": "research/outcome_asset/bundle",
+        "manifest": manifest,
+        "manifest_sha256": _canonical_hash(manifest),
+    }
+    oracle = {
+        "schema_version": 1,
+        "case_id": "case:test",
+        "repo_revision": research["repo_revision"],
+        "research_experiment_id": "experiment:asset-source",
+        "scenario_kind": "retained_overlay_source",
+        "baseline": {"exit_code": 1},
+        "kind": "staged_replay",
+        "proof_scope": "behavioral",
+        "execution": {
+            "argv": argv,
+            "command_authorization": {
+                "authorization_kind": "attested_research_harness",
+                "executed_argv_sha256": _canonical_hash(argv),
+                "shell": False,
+                "workspace_confined": True,
+            },
+            "shell": False,
+        },
+        "asset": asset,
+    }
+    oracle["outcome_oracle_id"] = _content_id(
+        "outcome_oracle", oracle, "outcome_oracle_id"
+    )
+    verification["outcome_oracles"].append(oracle)
+    contract = {
+        "schema_version": 1,
+        "kind": "selected_option_outcome_strategy",
+        "outcome_contract_status": "approved_for_planning",
+        "post_change_evidence_status": "unverified",
+        "problem_id": "problem:test",
+        "selected_option_id": option["option_id"],
+        "strategy": strategy,
+        "review": {"verdict": "sufficient"},
+    }
+    contract["outcome_contract_id"] = _content_id(
+        "stage5_outcome_contract", contract, "outcome_contract_id"
+    )
+    selection = {
+        "selected_option_id": option["option_id"],
+        "selected_option": option,
+        "falsification_review": {"selected_outcome_contract": contract},
+    }
+    bound = bind_plan_outcome_oracle(
+        {
+            "case_id": "case:test",
+            "before_after_reproduction": {
+                "research_experiment_id": "experiment:support",
+                "after_change": {
+                    "command": command,
+                    "expected_exit_code": 0,
+                    "observable_assertions": [
+                        {
+                            "source": "stdout",
+                            "operator": "contains",
+                            "expected": "provenance=preserved",
+                        }
+                    ],
+                },
+            },
+            "outcome_verification_roles": {
+                "original_scenario": {"description": "Run the fail-first replay."},
+                "live": None,
+                "mitigation_effect": None,
+                "recurrence": None,
+            },
+        },
+        research=research,
+        selection=selection,
+    )
+
+    original = bound["outcome_verification_roles"]["original_scenario"]
+    assert original["oracle"]["kind"] == "staged_replay"
+    assert original["oracle"]["asset"] == asset
+    assert original["oracle"]["selected_outcome_contract"] == contract
+    assert original["oracle"]["derived_replay_source"] == {
+        "kind": "verified_fail_first_from_retained_stage3_overlay",
+        "experiment_receipt_sha256": _canonical_hash(
+            next(
+                item
+                for item in verification["experiments"]
+                if item["experiment_id"] == "experiment:support"
+            )
+        ),
+        "retained_asset_source_outcome_oracle_id": oracle["outcome_oracle_id"],
+    }
+    assert original["commands"] == []
+    assert ticket_readiness.verified_staged_replay_command_asset_paths(
+        bound,
+        research=research,
+    ) == {command: {".usertest_research/fail_first.py"}}
+
+    planned_binding = {
+        "command_index": 0,
+        "binding_kind": "stage6_planned_post_change",
+        "selected_outcome_contract_id": contract["outcome_contract_id"],
+        "repo_revision": research["repo_revision"],
+    }
+    roles = bound["outcome_verification_roles"]
+    assert isinstance(roles, dict)
+    roles["live"] = {
+        "description": "Exercise the selected post-change live route.",
+        "execution_status": "planned_unverified",
+        "commands": ["python scripts/live_recovery.py --verify"],
+        "command_bindings": [planned_binding],
+        "predicates": [
+            {"type": "command_exit_code", "command_index": 0, "equals": 0}
+        ],
+    }
+    roles["mitigation_effect"] = {
+        "description": "Measure the selected mitigation effect.",
+        "execution_status": "planned_unverified",
+        "commands": ["python scripts/measure_mitigation.py --verify"],
+        "command_bindings": [planned_binding],
+        "predicates": [
+            {"type": "command_exit_code", "command_index": 0, "equals": 0}
+        ],
+    }
+    roles["recurrence"] = {
+        "description": "Use later canonical-case refresh evidence.",
+        "verification_owner": "centralized_case_refresh",
+        "commands": [],
+        "predicates": [],
+    }
+    role_reasons = ticket_readiness._outcome_role_contract_errors(
+        roles,
+        verification_commands=[command],
+        reproduction=bound["before_after_reproduction"],
+        requires_live=True,
+        research=research,
+    )
+    assert not any("planned_command_binding_invalid" in reason for reason in role_reasons)
+
+    wrong_contract_roles = json.loads(json.dumps(roles))
+    wrong_contract_roles["live"]["command_bindings"][0][
+        "selected_outcome_contract_id"
+    ] = "stage5_outcome_contract:wrong"
+    wrong_contract_reasons = ticket_readiness._outcome_role_contract_errors(
+        wrong_contract_roles,
+        verification_commands=[command],
+        reproduction=bound["before_after_reproduction"],
+        requires_live=True,
+        research=research,
+    )
+    assert (
+        "change_plan_outcome_role_planned_command_binding_invalid:live:0"
+        in wrong_contract_reasons
+    )
+    wrong_revision_roles = json.loads(json.dumps(roles))
+    wrong_revision_roles["mitigation_effect"]["command_bindings"][0][
+        "repo_revision"
+    ] = "b" * 40
+    wrong_revision_reasons = ticket_readiness._outcome_role_contract_errors(
+        wrong_revision_roles,
+        verification_commands=[command],
+        reproduction=bound["before_after_reproduction"],
+        requires_live=True,
+        research=research,
+    )
+    assert (
+        "change_plan_outcome_role_planned_command_binding_invalid:mitigation_effect:0"
+        in wrong_revision_reasons
+    )
+
+    reproduction = bound["before_after_reproduction"]
+    assert isinstance(reproduction, dict)
+    reproduction.update(
+        {
+            "original_scenario": "Replay the retained fail-first contract.",
+            "expected_outcome_state": "mitigated",
+            "before_change": {
+                "command": command,
+                "expected_exit_code": 1,
+                "expected_result": "The retained fail-first assertion fails.",
+                "observable_assertion": source_experiment["observable_assertion"],
+            },
+        }
+    )
+    after_change = reproduction["after_change"]
+    assert isinstance(after_change, dict)
+    after_change["expected_result"] = "The unchanged fail-first replay passes."
+    after_change["observable_assertions"] = [
+        source_experiment["observable_assertion"],
+        {
+            "source": "stdout",
+            "operator": "contains",
+            "expected": '"provenance_record_count": 5',
+        },
+    ]
+    bound = bind_plan_outcome_oracle(
+        bound,
+        research=research,
+        selection=selection,
+    )
+    bound = assign_plan_revision_id(bound)
+    _ready, reasons = assess_change_plan_readiness(
+        bound,
+        problem={"case_id": "case:test", "problem_id": "problem:test"},
+        research=research,
+        selection=selection,
+    )
+    assert "change_plan_research_experiment_not_original_support" not in reasons
+    assert "change_plan_after_oracle_does_not_reverse_original_symptom" not in reasons
+
+    generic_positive = json.loads(json.dumps(bound))
+    generic_after = generic_positive["before_after_reproduction"]["after_change"]
+    generic_after["observable_assertions"] = [
+        source_experiment["observable_assertion"],
+        {
+            "source": "stdout",
+            "operator": "contains",
+            "expected": "provenance=preserved",
+        },
+    ]
+    generic_positive = bind_plan_outcome_oracle(
+        generic_positive,
+        research=research,
+        selection=selection,
+    )
+    generic_positive = assign_plan_revision_id(generic_positive)
+    _ready, generic_reasons = assess_change_plan_readiness(
+        generic_positive,
+        problem={"case_id": "case:test", "problem_id": "problem:test"},
+        research=research,
+        selection=selection,
+    )
+    assert "change_plan_after_oracle_does_not_reverse_original_symptom" in generic_reasons
+
+    exit_only = json.loads(json.dumps(bound))
+    exit_only_after = exit_only["before_after_reproduction"]["after_change"]
+    exit_only_after["observable_assertions"] = [
+        {"source": "exit_code", "operator": "equals", "expected": 0}
+    ]
+    with pytest.raises(ValueError, match="stage5_outcome_positive_predicate_missing"):
+        bind_plan_outcome_oracle(
+            exit_only,
+            research=research,
+            selection=selection,
+        )
+
+    tampered = json.loads(json.dumps(bound))
+    tampered_oracle = tampered["outcome_verification_roles"]["original_scenario"]["oracle"]
+    tampered_manifest = tampered_oracle["asset"]["manifest"]
+    tampered_manifest[".usertest_research/forged.py"] = {
+        "kind": "file",
+        "mode": 0o644,
+        "sha256": "9" * 64,
+        "size_bytes": 10,
+    }
+    tampered_oracle["asset"]["manifest_sha256"] = _canonical_hash(tampered_manifest)
+    tampered_oracle["asset"]["asset_id"] = "outcome_asset:" + _canonical_hash(
+        {"schema_version": 1, "manifest": tampered_manifest}
+    )
+    tampered_oracle["outcome_oracle_id"] = _content_id(
+        "outcome_oracle",
+        tampered_oracle,
+        "outcome_oracle_id",
+    )
+    tampered = assign_plan_revision_id(tampered)
+    assert (
+        ticket_readiness.verified_staged_replay_command_asset_paths(
+            tampered,
+            research=research,
+        )
+        == {}
+    )
+    _ready, tampered_reasons = assess_change_plan_readiness(
+        tampered,
+        problem={"case_id": "case:test", "problem_id": "problem:test"},
+        research=research,
+        selection=selection,
+    )
+    assert "change_plan_outcome_oracle_binding_changed" in tampered_reasons
+    assert "change_plan_research_experiment_not_original_support" in tampered_reasons
+
+
+def test_change_plan_cannot_create_or_move_over_retained_oracle_asset() -> None:
+    plan, problem, research, selection = _observable_change_plan_fixture()
+    manifest = {
+        ".usertest_research/replay.py": {
+            "kind": "file",
+            "mode": 0o644,
+            "sha256": "8" * 64,
+            "size_bytes": 20,
+        }
+    }
+    asset = {
+        "asset_id": "outcome_asset:"
+        + _canonical_hash({"schema_version": 1, "manifest": manifest}),
+        "runs_relative_path": "research/outcome_asset/bundle",
+        "manifest": manifest,
+        "manifest_sha256": _canonical_hash(manifest),
+    }
+    oracle = {"schema_version": 1, "kind": "staged_replay", "asset": asset}
+    oracle["outcome_oracle_id"] = _content_id(
+        "outcome_oracle", oracle, "outcome_oracle_id"
+    )
+    verification = research["evidence_verification"]
+    assert isinstance(verification, dict)
+    verification["outcome_oracles"] = [oracle]
+    targets = plan["change_targets"]
+    assert isinstance(targets, list)
+    targets.extend(
+        [
+            {
+                "action": "create",
+                "path": ".usertest_research/replay.py",
+                "symbols": [],
+                "change": "Rewrite the retained replay.",
+            },
+            {
+                "action": "move",
+                "path": "tests/new_replay.py",
+                "destination_path": ".usertest_research/replay.py",
+                "symbols": [],
+                "change": "Move a replacement over the retained replay.",
+            },
+        ]
+    )
+    target_contract = plan["target_contract"]
+    assert isinstance(target_contract, dict)
+    target_contract["targets"] = targets
+    plan = assign_plan_revision_id(plan)
+
+    _ready, reasons = assess_change_plan_readiness(
+        plan,
+        problem=problem,
+        research=research,
+        selection=selection,
+    )
+
+    assert "change_plan_target_rewrites_retained_outcome_asset:1" in reasons
+    assert "change_plan_target_rewrites_retained_outcome_asset:2" in reasons
 
 
 def test_mitigated_falsification_bound_cannot_be_planned_as_resolved() -> None:
@@ -2923,7 +4005,7 @@ def test_nonzero_to_zero_requires_positive_behavior_not_only_swallowed_failure()
     ]
     with pytest.raises(
         ValueError,
-        match="research_positive_outcome_contract_missing",
+        match="stage5_selection_missing",
     ):
         _bind_staged_outcome_oracle(
             plan,
@@ -3459,7 +4541,7 @@ def test_exact_origin_boundary_rejects_atom_snapshot_command_tampering() -> None
     assert "change_plan_resolution_requires_verified_boundary" in reasons
 
 
-def test_research_prompts_expose_open_positive_outcome_and_correction_contract() -> None:
+def test_research_prompts_expose_causal_boundary_and_correction_contract() -> None:
     repo_root = Path(__file__).resolve().parents[3]
     mission_path = (
         repo_root / "configs" / "missions" / "builtin" / "backlog_repro_research.mission.md"
@@ -3468,20 +4550,19 @@ def test_research_prompts_expose_open_positive_outcome_and_correction_contract()
     prompt_requirements = {
         mission_path: {
             "authenticated origin/repository meaning",
-            "runner-evaluated",
-            "registered predicate",
+            "open registered proof adapter",
+            "future solution oracle is optional",
             "stage guidance",
             "exact author session",
             "do not start over",
         },
         guidance_path: {
             "authenticated_semantic_citation",
-            "semantic_review_required",
-            "stage 5",
+            "future solution success is Stage-4/5 work",
             "json_pointer",
-            "registered domain predicates",
-            "same session",
-            "session and workspace",
+            "registered deterministic predicate",
+            "same author session",
+            "same workspace",
         },
     }
     for prompt_path, required_fragments in prompt_requirements.items():
@@ -3489,5 +4570,5 @@ def test_research_prompts_expose_open_positive_outcome_and_correction_contract()
         missing = sorted(
             fragment for fragment in required_fragments if fragment.casefold() not in text
         )
-        assert missing == [], f"{prompt_path}: missing open positive-outcome guidance: {missing}"
+        assert missing == [], f"{prompt_path}: missing causal-boundary guidance: {missing}"
         assert "complementary control establishes the exact corrected value" not in text

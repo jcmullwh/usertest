@@ -54,12 +54,33 @@ You may inspect source to check claims. Do not modify files or mutate the checko
 - Repeated runs of one execution path do not prove class-level scope.
 - Select a shared abstraction or class-level mechanism only when at least two independent
   consumers or failure paths have evidence references.
+- Reserve that two-path rule for a broad problem claim or a new reusable abstraction. One
+  evidenced operation may require changes across several existing call sites or components,
+  an extension to an existing helper, and ordering or protection changes. That is still
+  single-path scope when every change is necessary for the same reachable operation; inspect
+  affected callers for compatibility instead of stripping out those changes.
+- Trace the complete reachable operation and its first same-resource failure boundary. An
+  intervention that runs only after that boundary cannot recover the operation. Moving an
+  existing control before it can be required causal coverage rather than scope expansion.
+- Prefer safe successful throughput over fail-fast ceremony. A partial supporting-operation
+  error may be reported without aborting when verified safe progress is sufficient for the
+  intended operation to continue; require proof of both a safe postcondition and sufficient
+  actual progress, and never treat a swallowed error as success.
+- Do not promote an observed benchmark or configured default into a universal supported
+  maximum unless a repository requirement or capacity constraint establishes that maximum.
 - When `symptom_facets` or `same_mechanism_outcome_oracles` are present on the canonical
   problem, reject options that omit a retained facet or rely only on the representative
   dossier's scenario. Preserve verification for every bundled oracle.
 - Do not reward canonical/shared/centralized language by itself.
 - If no supplied option adequately addresses the evidenced mechanism, request revision from
   the original optioner instead of choosing the least-bad option.
+- Require every candidate to define its own prospective `outcome_strategy` that demonstrates
+  intended maintenance behavior on the retained original scenario. An executed Stage-3
+  positive contract is baseline evidence, not a substitute for that option-level strategy.
+- Prefer a runner-verified fail-first command for the same source atoms. Reject an exit-zero
+  old-behavior assertion presented as exact post-change proof or any plan to rewrite its
+  retained research asset. `stage6_planned_unverified` is acceptable when no fail-first exists;
+  the later solution-specific proof need not have run before implementation.
 
 ## Output contract
 

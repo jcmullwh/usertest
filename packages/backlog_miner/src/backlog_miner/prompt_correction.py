@@ -17,6 +17,13 @@ from typing import Generic, TypeVar
 
 T = TypeVar("T")
 
+# This is deliberately a non-progress boundary, not an attempt limit.  A correction
+# conversation may run for any number of turns while the current frontier is reducing
+# errors or adding independently valid work.  Three consecutive structurally different
+# outputs with neither form of progress are enough to require adjudication instead of
+# allowing changing validator identities to reset the economic clock forever.
+_CONSECUTIVE_NONADVANCING_CORRECTION_LIMIT = 3
+
 
 def normalize_validation_error(error: str) -> str:
     """Normalize presentation whitespace while preserving an unknown error's identity."""
@@ -216,7 +223,11 @@ class CorrectionFrontier(Generic[T]):
                 repeated_state=repeated_state,
                 safe_frontier_updated=frontier_updated,
                 global_best_updated=best_updated,
-                reset_progress_clock=best_updated,
+                # Resolving the prior validator identity is real forward progress even when
+                # the correction exposes a different child error and the aggregate count is
+                # unchanged.  Preserve the objective best separately, but do not economically
+                # time out an author that is still moving the safe feedback frontier forward.
+                reset_progress_clock=best_updated or bool(resolved),
             )
 
         if (
@@ -532,6 +543,9 @@ def run_progressive_correction(
 
     There is intentionally no ordinary attempt-count or elapsed-time cap. Operational budget
     owners may pause outside this primitive, preserving ``best`` and the complete attempt chain.
+    The controller does pause a run of consecutive nonadvancing corrections: changing payloads
+    or validator identities without reducing the *current* error count or adding valid keyed
+    work is not an unlimited source of progress.
     """
 
     if resume_from is not None:
@@ -586,6 +600,17 @@ def run_progressive_correction(
     }
     attempt_number = len(attempts) + len(invocation_failures) + 1
     prior_assessment = assessments[-1] if assessments else None
+    consecutive_nonadvancing = 0
+    for retained_assessment in reversed(assessments):
+        if retained_assessment.decision != "continue":
+            break
+        if (
+            retained_assessment.after_error_count
+            < retained_assessment.before_error_count
+            or retained_assessment.global_best_updated
+        ):
+            break
+        consecutive_nonadvancing += 1
     while True:
         invocation_started = time.monotonic()
         try:
@@ -679,6 +704,31 @@ def run_progressive_correction(
         if assessment.decision == "stalled":
             return CorrectionRunResult(
                 status="stalled:" + assessment.reason,
+                current=tracker.current,
+                best=tracker.best,
+                attempts=tuple(attempts),
+                assessments=tuple(assessments),
+                invocation_failures=tuple(invocation_failures),
+                correction_cost_since_progress=correction_cost_since_progress,
+                total_correction_cost=total_correction_cost,
+            )
+        material_current_progress = bool(
+            assessment.after_error_count < assessment.before_error_count
+            or assessment.global_best_updated
+        )
+        if material_current_progress:
+            consecutive_nonadvancing = 0
+        else:
+            consecutive_nonadvancing += 1
+        if (
+            consecutive_nonadvancing
+            >= _CONSECUTIVE_NONADVANCING_CORRECTION_LIMIT
+        ):
+            return CorrectionRunResult(
+                status=(
+                    "repairable_paused:"
+                    "consecutive_nonadvancing_corrections_require_adjudication"
+                ),
                 current=tracker.current,
                 best=tracker.best,
                 attempts=tuple(attempts),

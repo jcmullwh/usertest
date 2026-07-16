@@ -344,6 +344,7 @@ def _plan(pid: str, number: int) -> dict[str, Any]:
             "mitigation_effect": None,
             "recurrence": {
                 "description": "Inspect fresh same-class recurrence evidence.",
+                "verification_owner": "centralized_case_refresh",
                 "commands": [],
                 "predicates": [],
             },
@@ -417,6 +418,15 @@ def _research_proof(pid: str, **overrides: object) -> dict[str, Any]:
         "research_method": "reproduction",
         "reproduction_status": "reproduced",
         "research_status": "evidence_sufficient",
+        "case_relation_assessment": {
+            "disposition": "retain",
+            "rationale": (
+                "The signed occurrences and reproduced guard mechanism remain one "
+                "causal work unit."
+            ),
+            "facets": [],
+            "material_unknowns": [],
+        },
         "writes_used": True,
         "writes_purpose": ["failing_test"],
         "implementation_performed": False,
@@ -1393,7 +1403,14 @@ def test_generic_tests_cannot_substitute_for_recurrence_role() -> None:
     assert isinstance(roles, dict)
     recurrence = roles["recurrence"]
     assert isinstance(recurrence, dict)
+    recurrence.pop("verification_owner")
     recurrence["commands"] = ["pytest -q tests/test_core.py::test_reported_failure"]
+    recurrence["command_bindings"] = [
+        {"command_index": 0, "research_experiment_id": "exp-1"}
+    ]
+    recurrence["predicates"] = [
+        {"type": "command_exit_code", "command_index": 0, "equals": 0}
+    ]
     plan = assign_plan_revision_id(plan)
 
     tickets = assemble_backlog_tickets(

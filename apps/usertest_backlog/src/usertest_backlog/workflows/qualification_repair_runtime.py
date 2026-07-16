@@ -20,10 +20,13 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from backlog_core import assemble_backlog_tickets
+from backlog_core import assemble_backlog_tickets, assess_research_readiness
 from backlog_miner import BacklogProviderExternalWait
 from backlog_miner.pipeline import PipelinePromptManifest
-from backlog_miner.research_evidence import ReplayExecutor
+from backlog_miner.research_evidence import (
+    ReplayExecutor,
+    verify_persisted_research_evidence,
+)
 from backlog_miner.research_runner import (
     continue_research_dossier_from_independent_feedback,
 )
@@ -74,6 +77,18 @@ def _items(document: Mapping[str, Any]) -> list[dict[str, Any]]:
         if isinstance(raw, list)
         else []
     )
+
+
+def _payload_records(payload: Any) -> list[dict[str, Any]]:
+    """Project a correction payload without falling back to an older stage frontier."""
+
+    if isinstance(payload, Mapping):
+        if isinstance(payload.get("items"), list):
+            return _items(payload)
+        return [dict(payload)]
+    if isinstance(payload, list):
+        return [dict(item) for item in payload if isinstance(item, Mapping)]
+    return []
 
 
 def _stage3_external_wait(document: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -1358,8 +1373,60 @@ def run_stage456_qualification_repairs(
                 receipt_evidence=document,
             )
         if stage == "repro_research":
-            source_dossiers = _records_for_problem(research_dossiers, problem_id=pid)
-            if len(source_dossiers) != 1 or repo_input is None:
+            # The generic correction controller owns the active frontier.  Reusing the
+            # Stage-3 document captured before correction caused every outer turn to reopen
+            # the original dossier, even after the same author had produced a complete one.
+            source_dossiers = _records_for_problem(
+                _payload_records(kwargs["current_payload"]),
+                problem_id=pid,
+            )
+            if len(source_dossiers) != 1:
+                return revision(
+                    payload=kwargs["current_payload"],
+                    validation_errors=(
+                        "qualification_research_correction_source_context_missing",
+                    ),
+                    valid_item_keys=(),
+                    agent_session_id=str(route.get("agent_session_id") or ""),
+                    workspace_dir=str(route.get("workspace_dir") or ""),
+                )
+            source_dossier = source_dossiers[0]
+            research_ready, _readiness_reasons = assess_research_readiness(
+                source_dossier
+            )
+            if research_ready:
+                evidence_verified, _evidence_errors = (
+                    verify_persisted_research_evidence(source_dossier)
+                )
+                if evidence_verified:
+                    # Stage completion is a monotonic boundary.  A later optioning or
+                    # selection concern may correct that downstream author, but it cannot
+                    # make an authenticated, verifier-clean research proof incomplete.  No
+                    # model invocation is needed here; retain the exact dossier and advance.
+                    document = dict(stage3)
+                    document["items"] = [source_dossier]
+                    meta_raw = document.get("input_meta")
+                    meta = dict(meta_raw) if isinstance(meta_raw, Mapping) else {}
+                    meta["qualification_research_completion_advance"] = {
+                        "status": "already_complete",
+                        "problem_id": pid,
+                        "readiness_verified": True,
+                        "persisted_evidence_verified": True,
+                        "source": "current_correction_frontier",
+                    }
+                    document["input_meta"] = meta
+                    candidate_docs[str(route["route_sha256"])] = document
+                    return revision(
+                        payload=source_dossier,
+                        validation_errors=(),
+                        valid_item_keys=("research:" + pid,),
+                        agent_session_id=str(route.get("agent_session_id") or ""),
+                        workspace_dir=str(route.get("workspace_dir") or ""),
+                        receipt_evidence=meta[
+                            "qualification_research_completion_advance"
+                        ],
+                    )
+            if repo_input is None:
                 return revision(
                     payload=kwargs["current_payload"],
                     validation_errors=(
@@ -1378,7 +1445,7 @@ def run_stage456_qualification_repairs(
                 + str(route.get("rationale") or "semantic_research_failure")
             ]
             research_result = continue_research_dossier_from_independent_feedback(
-                dossier=source_dossiers[0],
+                dossier=source_dossier,
                 validation_errors=findings,
                 repo_input=repo_input,
                 requested_repo_ref=research_ref,

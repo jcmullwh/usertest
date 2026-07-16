@@ -539,6 +539,60 @@ def test_artifact_hash_changes_occurrence_not_disk_full_signature_or_case() -> N
     assert recurrence["case_id"] == first_case["case_id"]
 
 
+def test_broad_signature_after_split_stays_on_parent_pending_relation() -> None:
+    first_run = "implementation/run/split-parent-1"
+    second_run = "implementation/run/split-parent-2"
+    first_atom = _atom(
+        first_run,
+        f"{first_run}:run_failure_event:1",
+        role="implementation",
+    )
+    first_candidate = build_operational_failure_candidates(
+        [_disk_signal_record(first_run, "a" * 64)],
+        [first_atom],
+    )[0]
+    parent_case = assign_problem_case_ids(
+        [_problem_record("problem:disk:parent", first_candidate["atom_id"])],
+        [first_candidate],
+    )[0]
+    registry = build_case_registry([parent_case], supporting_atoms=[first_candidate])
+    parent_case_id = parent_case["case_id"]
+    registry["cases"][parent_case_id]["state"] = "split"
+    registry["cases"][parent_case_id]["child_case_ids"] = ["case:child-a", "case:child-b"]
+
+    second_atom = _atom(
+        second_run,
+        f"{second_run}:run_failure_event:1",
+        role="implementation",
+    )
+    expanded = build_operational_failure_candidates(
+        [
+            _disk_signal_record(first_run, "a" * 64),
+            _disk_signal_record(second_run, "b" * 64),
+        ],
+        [first_atom, second_atom],
+    )[0]
+    normalized = normalize_atom_lineage(
+        [expanded],
+        case_registry=registry,
+        strict_new_output=True,
+    )[0]
+
+    [broad_recurrence] = assign_problem_case_ids(
+        [_problem_record("problem:disk:broad-recurrence", expanded["atom_id"])],
+        [normalized],
+        case_registry=registry,
+    )
+
+    assert broad_recurrence["case_id"] == parent_case_id
+    assert broad_recurrence["case_identity_status"] == "pending_relation"
+    assert broad_recurrence["case_identity_candidate_ids"] == [
+        "case:child-a",
+        "case:child-b",
+    ]
+    assert broad_recurrence["related_case_ids"] == ["case:child-a", "case:child-b"]
+
+
 def test_many_occurrences_keep_full_audit_ledger_and_bounded_prompt_projection() -> None:
     records: list[dict[str, object]] = []
     atoms: list[dict[str, object]] = []

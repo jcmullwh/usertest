@@ -106,6 +106,85 @@ def qualification_correction_route_errors(route: Any) -> list[str]:
     label_ids = route.get("actionable_label_ids")
     if not isinstance(label_ids, list) or any(_text(item) is None for item in label_ids):
         errors.append("qualification_correction_label_ids_invalid")
+    source_ids_raw = route.get("source_correction_finding_ids")
+    source_hashes_raw = route.get("source_correction_finding_sha256s")
+    source_findings_raw = route.get("source_correction_findings")
+    source_contexts_raw = route.get("source_correction_required_contexts")
+    rich_source_binding = any(
+        value is not None
+        for value in (source_hashes_raw, source_findings_raw, source_contexts_raw)
+    )
+    if source_ids_raw is not None:
+        source_ids = (
+            [item for item in source_ids_raw if _text(item) is not None]
+            if isinstance(source_ids_raw, list)
+            else []
+        )
+        if (
+            not isinstance(source_ids_raw, list)
+            or not source_ids
+            or len(source_ids) != len(source_ids_raw)
+            or len(source_ids) != len(set(source_ids))
+        ):
+            errors.append("qualification_correction_source_finding_ids_invalid")
+    else:
+        source_ids = []
+    if rich_source_binding:
+        source_hashes = (
+            list(source_hashes_raw) if isinstance(source_hashes_raw, list) else []
+        )
+        source_findings = (
+            [item for item in source_findings_raw if isinstance(item, Mapping)]
+            if isinstance(source_findings_raw, list)
+            else []
+        )
+        source_contexts = (
+            [item for item in source_contexts_raw if isinstance(item, Mapping)]
+            if isinstance(source_contexts_raw, list)
+            else []
+        )
+        if not (
+            source_ids
+            and len(source_ids)
+            == len(source_hashes)
+            == len(source_findings)
+            == len(source_contexts)
+        ):
+            errors.append("qualification_correction_source_binding_partition_invalid")
+        else:
+            for index, (finding_id, finding_sha256, finding, context) in enumerate(
+                zip(
+                    source_ids,
+                    source_hashes,
+                    source_findings,
+                    source_contexts,
+                    strict=True,
+                )
+            ):
+                finding_body = {
+                    key: value
+                    for key, value in finding.items()
+                    if key != "finding_sha256"
+                }
+                context_body = {
+                    key: value
+                    for key, value in context.items()
+                    if key != "content_sha256"
+                }
+                if (
+                    finding.get("finding_id") != finding_id
+                    or finding.get("finding_sha256") != finding_sha256
+                    or not _valid_sha256(finding_sha256)
+                    or finding_sha256 != _canonical_hash(finding_body)
+                    or context.get("finding_id") != finding_id
+                    or context.get("finding_sha256") != finding_sha256
+                    or context.get("original_finding") != finding
+                    or context.get("content_sha256") != _canonical_hash(context_body)
+                ):
+                    errors.append(
+                        "qualification_correction_source_binding_invalid:"
+                        f"{index}"
+                    )
     causal_target = route.get("causal_target")
     if causal_target is not None:
         if not isinstance(causal_target, Mapping):
@@ -173,6 +252,22 @@ def correction_feedback_document(
         "bad_severity": route.get("bad_severity"),
         "bad_categories": list(route.get("bad_categories") or []),
         "rationale": route["rationale"],
+        "source_correction_finding_ids": list(
+            route.get("source_correction_finding_ids") or []
+        ),
+        "source_correction_finding_sha256s": list(
+            route.get("source_correction_finding_sha256s") or []
+        ),
+        "source_correction_findings": [
+            dict(item)
+            for item in route.get("source_correction_findings", [])
+            if isinstance(item, Mapping)
+        ],
+        "source_correction_required_contexts": [
+            dict(item)
+            for item in route.get("source_correction_required_contexts", [])
+            if isinstance(item, Mapping)
+        ],
         "causal_target": (
             dict(route["causal_target"])
             if isinstance(route.get("causal_target"), Mapping)
@@ -376,6 +471,36 @@ def _group_feedback(
                 if isinstance(category, str) and category.strip()
             )
         ),
+        "source_correction_finding_ids": list(
+            dict.fromkeys(
+                finding_id
+                for route in routes
+                for finding_id in route.get("source_correction_finding_ids", [])
+                if isinstance(finding_id, str) and finding_id.strip()
+            )
+        ),
+        "source_correction_finding_sha256s": list(
+            dict.fromkeys(
+                finding_sha256
+                for route in routes
+                for finding_sha256 in route.get(
+                    "source_correction_finding_sha256s", []
+                )
+                if isinstance(finding_sha256, str) and finding_sha256.strip()
+            )
+        ),
+        "source_correction_findings": [
+            dict(finding)
+            for route in routes
+            for finding in route.get("source_correction_findings", [])
+            if isinstance(finding, Mapping)
+        ],
+        "source_correction_required_contexts": [
+            dict(context)
+            for route in routes
+            for context in route.get("source_correction_required_contexts", [])
+            if isinstance(context, Mapping)
+        ],
         "findings": [
             {
                 "route_sha256": route["route_sha256"],
@@ -397,6 +522,21 @@ def _group_feedback(
                     )
                 ),
                 "independent_finding": dict(item.get("independent_finding") or {}),
+                "source_correction_finding_ids": list(
+                    route.get("source_correction_finding_ids") or []
+                ),
+                "source_correction_findings": [
+                    dict(finding)
+                    for finding in route.get("source_correction_findings", [])
+                    if isinstance(finding, Mapping)
+                ],
+                "source_correction_required_contexts": [
+                    dict(context)
+                    for context in route.get(
+                        "source_correction_required_contexts", []
+                    )
+                    if isinstance(context, Mapping)
+                ],
                 "problem_id": (
                     route.get("author_provenance", {}).get("problem_id")
                     if isinstance(route.get("author_provenance"), Mapping)
@@ -787,11 +927,10 @@ def consume_qualification_corrections(
 ) -> dict[str, Any]:
     """Consume route feedback, preserving every frontier and rerunning only downstream.
 
-    There is no attempt-count cap.  The only ordinary economic pause is when correction
-    cost since the last objective improvement reaches the originating authoring cost.
-    Exact recurrence, exact-session loss, or an explicitly uncorrectable route may stop a
-    chain earlier.  A changed mistake with fewer total errors is objective progress through
-    :mod:`backlog_miner.prompt_correction` and resets the economic clock.
+    There is no attempt-count or elapsed-cost cap. Exact recurrence, three consecutive
+    materially nonadvancing rewrites, exact-session loss, or an explicitly uncorrectable
+    route may stop a chain. A changed mistake with fewer total errors is objective progress
+    through :mod:`backlog_miner.prompt_correction` and keeps the same author working.
     """
 
     if not _valid_sha256(source_pending_run_sha256):
@@ -940,36 +1079,10 @@ def consume_qualification_corrections(
                 cost_seconds=max(0.0, float(revision.cost_seconds)),
             )
 
-        original_cost_candidates = [
-            provenance.get("original_author_cost_seconds")
-            for route_item in route_group
-            for provenance in [route_item.get("author_provenance")]
-            if isinstance(provenance, Mapping)
-            and isinstance(provenance.get("original_author_cost_seconds"), (int, float))
-            and not isinstance(provenance.get("original_author_cost_seconds"), bool)
-            and float(provenance.get("original_author_cost_seconds")) > 0.0
-        ]
-        original_cost = (
-            max(float(item) for item in original_cost_candidates)
-            if original_cost_candidates
-            else None
-        )
         correction = run_progressive_correction(
             initial=initial,
             resume_from=resume_from,
             invoke_correction=invoke,
-            pause_policy=(
-                (
-                    lambda _current, _assessment, since_progress, _total,
-                    _original_cost=original_cost: (
-                        "correction_cost_reached_original_authoring_cost"
-                        if since_progress >= _original_cost
-                        else None
-                    )
-                )
-                if original_cost is not None
-                else None
-            ),
         )
         accepted = correction.status in {"accepted", "corrected"}
         retained = correction.current if accepted else correction.best

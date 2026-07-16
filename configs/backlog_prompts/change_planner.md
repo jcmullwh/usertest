@@ -46,31 +46,41 @@ The pipeline has already inferred the live-verification requirement from provena
   test inside command substitution or inline interpreter code such as `python -c`.
 - Map the original scenario before and after the change. If faithful proof is impossible,
   name the concrete limitation and alternate verification.
-- Every plan claiming `resolved` must use a positive post-change contract already minted in
-  `research.evidence_verification.outcome_oracles[*].positive_outcome_contracts`. Do not invent
-  a stream marker, artifact value, or config value. The server discards planner-only positive
-  wishes and returns the case to research with `research_positive_outcome_contract_missing`
-  when no grounded contract exists. A repository-test contract makes that exact test's zero
-  exit semantic because the runner hashed its mechanism-dependent assertion; generic exit zero
-  remains insufficient.
+- Every plan must implement the Stage-5-selected outcome contract. Stage 6 owns the exact
+  executable after-change command and predicates because the solution now exists as a selected
+  design. Ground them in inspected repository behavior, the Stage-3 baseline, and Stage-5
+  intended-operation/safety properties. Do not invent a stream marker, artifact value, or config
+  value merely because it is easy to make green. Generic exit zero and disappearance of the old
+  error remain insufficient; prove the useful operation or bounded lifecycle state.
+- A post-change live or mitigation command is prospective when the selected solution does not
+  exist yet. If research already ran the exact command, preserve its verified experiment binding.
+  Otherwise specify the exact command and predicates from inspected repository behavior and the
+  accepted Stage-5 contract, mark the role `execution_status="planned_unverified"`, and use a
+  `stage6_planned_post_change` binding to the selected outcome-contract ID and inspected revision.
+  Do not return to research merely to execute a future solution before implementation.
 - Copy the falsifier's server-bound outcome claim into
   `before_after_reproduction.expected_outcome_state`. A bounded noncritical residual produces
   `mitigated` and must never be upgraded to `resolved`. A separate bound proof limitation
   remains `unverified`.
-- Use only the contracts named by
-  `selection.falsification_review.selected_positive_outcome_contract_ids`, exactly one for
-  every retained research experiment/oracle. Stage 5 has independently compared each
-  predicate with the source problem and rejected marker-only or partial proof. A different
-  green test or easier surface contract is not an acceptable substitution. The server binds
-  all retained scenarios into one outcome role for a consolidated case.
+- Honor `selection.falsification_review.selected_outcome_contract.strategy.post_change_replay_mode`.
+  With `verified_fail_first`, use the exact unchanged runner-retained command; never create,
+  modify, rename, move, or delete any path in its retained `.usertest_research` asset manifest.
+  With `stage6_planned_unverified`, define a distinct future solution-specific command and
+  predicates and leave its evidence unverified until the outcome runner executes it. An
+  exit-zero assertion of old behavior is not an exact post-change oracle and must not be
+  rewritten to make it one.
+- When Stage 3 retained optional positive outcome contracts, use only the contracts selected by
+  Stage 5. Otherwise use `selection.falsification_review.selected_outcome_contract`, which binds
+  the selected option's reviewed intended operation, success properties, safety constraints,
+  and baseline scenarios. A different green test or easier surface contract is not an
+  acceptable substitution.
 - A complementary control over a different input is causal boundary evidence, not the
   original input's desired value, unless research carries a runner-attested input-equivalence
   or invariant receipt. Do not project a control value onto the original scenario.
-- Copy positive values only from the selected runner contract's `postconditions`. For
-  `repository_test_assertion`, do not add a test-runner success string such as `1 passed`; the
-  server binds the exact test command and its unchanged assertion source. For
-  `origin_evidence_semantic_contract`, copy the exact stream/artifact/config predicate. If the
-  selected oracle has no positive contract, do not produce an implementation-ready plan.
+- For an optional runner-minted research contract, copy its bound positive values. Otherwise
+  derive exact post-change values from inspected repository semantics and the Stage-5 outcome
+  contract, and explain them in `expected_result`/success criteria. Do not use a test-runner
+  status string such as `1 passed` as the useful outcome.
 - Describe preserved compatibility, intentional behavior changes, migrations, and
   credible failure modes.
 - Copy the supplied `requires_live_verification` boolean exactly. Explain how the named
@@ -117,8 +127,12 @@ outcome oracle. Return exactly one grounded `research_required` item instead of 
 `evidence_refs` must use identifiers or material-boundary text already present in the research
 dossier, and `blocks` must describe the actual unresolved planning decision in open language.
 Do not choose from a fixed category vocabulary. Name the evidence needed to make that decision.
-This route is for a material evidence gap, not for avoiding ordinary planning work or repairing
-JSON; structural and plan-quality feedback will be returned to this same planner session.
+Every gap must set `evidence_phase="pre_change_decision_evidence"`: it must request an observation
+needed before choosing or validating the root cause, interface, change surface, compatibility
+behavior, or selected outcome semantics. An unexecuted future live/post-change command is Stage-6
+planned work, not a research return. This route is for a material evidence gap, not for avoiding
+ordinary planning work or repairing JSON; structural and plan-quality feedback will be returned
+to this same planner session.
 
 ## Output contract
 
@@ -137,6 +151,7 @@ research return. A research return has this shape:
     "evidence_gaps": [
       {
         "gap": "the concrete unresolved evidence question",
+        "evidence_phase": "pre_change_decision_evidence",
         "blocks": ["an open-language description of the decision this prevents"],
         "evidence_needed": "the exact experiment, trace, or inspection needed",
         "evidence_refs": ["existing research identifier or material-boundary text"]
@@ -189,10 +204,16 @@ content-addresses the case, selected option, target paths/symbols, and intervent
       ]
     },
     "live": {
-      "description": "faithful live-runtime check; null only when requires_live_verification is false",
-      "commands": ["exact runner-verified live probe"],
+      "description": "faithful post-change live-runtime check; null only when requires_live_verification is false",
+      "execution_status": "planned_unverified",
+      "commands": ["exact post-change live probe derived from inspected source and the selected outcome contract"],
       "command_bindings": [
-        {"command_index": 0, "research_experiment_id": "the verified experiment that ran this exact command"}
+        {
+          "command_index": 0,
+          "binding_kind": "stage6_planned_post_change",
+          "selected_outcome_contract_id": "the server-bound Stage-5 outcome contract ID",
+          "repo_revision": "the exact inspected revision"
+        }
       ],
       "predicates": [
         {"type": "command_exit_code", "command_index": 0, "equals": 0},
@@ -202,6 +223,7 @@ content-addresses the case, selected option, target paths/symbols, and intervent
     "mitigation_effect": null,
     "recurrence": {
       "description": "two later stable shadow cycles retain the plan-time case evidence baseline without a recurrence reopen",
+      "verification_owner": "centralized_case_refresh",
       "commands": [],
       "predicates": []
     }
@@ -268,7 +290,7 @@ content-addresses the case, selected option, target paths/symbols, and intervent
 }
 ```
 
-An evidence-sufficient dossier already includes a runner-verified original or faithful
+An evidence-sufficient dossier includes a runner-verified original or faithful baseline
 replay, so a planner may not replace that available proof with a model-authored
 `proof_limitation`. If a separate required runtime/live proof is impossible because of a
 research-recorded boundary, preserve every available replay, cite the exact boundary in
@@ -276,20 +298,14 @@ research-recorded boundary, preserve every available replay, cite the exact boun
 set `expected_outcome_state` to `unverified`. This permits code/test planning but does not claim
 runtime resolution. If the limitation leaves root cause, interface, or change surface undecided,
 return the case to research instead. `research_experiment_id` must
-identify a verified supporting original/faithful replay or a runner-minted
-`config_state` outcome oracle. For a config-state oracle, copy the exact
-`oracle_state_equals` postcondition already minted from expected-behavior evidence into
-`after_change.state_expectations`; do not invent a target value, config path, pointer,
-command, asset, hash, or proof scope. The server injects those fields. Otherwise the
-experiment must identify an
+identify a verified supporting original/faithful replay. The experiment must identify an
 original/faithful
 replay, the before command, exit code, and `observable_assertion` must exactly match it.
 The after command must replay that same scenario, appear in `verification_commands`, and
 carry executable observable assertions that reverse the original symptom. Every resolved
-outcome also requires a runner-grounded repository assertion, exact control value, retained
-JSON artifact, or runner-addressed state postcondition. Exit status alone is insufficient
-unless the runner has bound it to an unchanged repository semantic assertion: swallowing the
-exception can make it zero without completing the operation.
+outcome also requires a concrete positive stream, retained JSON artifact, repository assertion,
+or state postcondition that demonstrates the Stage-5 intended operation. Exit status alone is
+insufficient: swallowing the exception can make it zero without completing the operation.
 Use `artifact_expectations` for a repository-retained JSON result and a positive stream
 assertion for runtime behavior; include `not_contains` separately when the old failure marker
 must disappear. Merely making that marker disappear does not establish resolution.
@@ -299,15 +315,22 @@ original-scenario role must replay the exact `after_change.command` and bind the
 experiment. The live role is required when `requires_live_verification` is true. The recurrence
 role is always required, but its `commands` and `predicates` should normally be empty: the
 centralized refresh workflow supplies its two fresh shadow cycles and canonical-case evidence
-baseline, so do not invent a bespoke recurrence probe. A mitigation-effect role is optional
+baseline. Mark that boundary with `verification_owner="centralized_case_refresh"`; the empty
+contract is invalid without this explicit ownership marker. Do not invent a bespoke recurrence
+probe. A mitigation-effect role is optional
 for a plan intended to resolve the case and required for `expected_outcome_state="mitigated"`.
 An underlying provider, platform, storage, or context failure may correctly remain nonzero
 when the plan fixes classification, cleanup, recovery, or diagnostics; prove that effect rather
 than forcing a false success. Every supplied role command needs an exact `command_exit_code`
-predicate. Every live, mitigation-effect, or nonempty recurrence command must carry one
-`command_bindings` entry with its index and a verified research experiment that ran that exact
-command. This evidence binding is tool-neutral: executable names do not prove or disprove that a
-command is an operational probe. A command reused from `verification_commands` remains invalid.
+predicate. Every live or mitigation-effect command must carry one binding per index: either a
+verified research experiment that already ran the exact command, or a
+`stage6_planned_post_change` binding to the accepted Stage-5 outcome-contract ID and inspected
+revision with `execution_status="planned_unverified"`. The latter is a content-addressed plan,
+not proof that execution passed. A genuinely plan-owned recurrence probe must omit the centralized
+owner marker, supply nonempty commands and predicates, and retain a verified research-experiment
+binding for every command. These bindings are tool-neutral: executable names do not prove or
+disprove that a command is an operational probe. A command reused from `verification_commands`
+remains invalid.
 Use additional
 `command_stdout_contains`, `command_stdout_not_contains`, corresponding stderr/combined
 predicates, or `artifact_json_value` when exit status alone does not prove the claimed effect.

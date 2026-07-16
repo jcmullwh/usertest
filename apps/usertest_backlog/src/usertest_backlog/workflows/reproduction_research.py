@@ -5,10 +5,15 @@ from collections.abc import Mapping
 
 from backlog_core import (
     SOURCE_EVIDENCE_PROJECTION_VERSION,
+    operational_candidate_receipt_errors,
     source_evidence_atom_projection,
     source_evidence_atom_sha256,
 )
 from backlog_core.stage_contracts import evidence_assignment_sha256
+from backlog_miner.origin_evidence import (
+    RESEARCH_RUN_CONTEXT_FILES,
+    source_observation_classification,
+)
 from backlog_miner.research_evidence import (
     BlockedReplayExecutor,
     DockerReplayExecutor,
@@ -25,6 +30,9 @@ from backlog_miner.research_runner import (
 )
 
 from usertest_backlog.shared import *
+from usertest_backlog.workflows.post_research_relations import (
+    authenticated_split_child_occurrence_evidence,
+)
 
 _REPLAY_EXECUTOR_MODES = frozenset({"blocked", "docker", "platform_router", "trusted_host"})
 
@@ -243,16 +251,28 @@ def _configured_replay_executor(
     }
 
 
-def _research_file_receipt(path: Path) -> dict[str, Any]:
+def _research_file_receipt(path: Path, *, run_dir: Path | None = None) -> dict[str, Any]:
     digest = sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
-    return {
+    receipt = {
         "path": str(path.resolve()),
         "sha256": digest.hexdigest(),
         "size_bytes": path.stat().st_size,
     }
+    if run_dir is not None:
+        try:
+            relative = path.resolve().relative_to(run_dir.resolve())
+        except ValueError:
+            relative = None
+        if relative is not None:
+            receipt["source_relpath"] = relative.as_posix()
+            if len(relative.parts) == 1:
+                role = RESEARCH_RUN_CONTEXT_FILES.get(relative.name)
+                if role is not None:
+                    receipt["research_context_role"] = role
+    return receipt
 
 
 def _origin_artifact_receipts(atom: dict[str, Any], *, repo_root: Path) -> list[dict[str, Any]]:
@@ -308,12 +328,19 @@ def _origin_artifact_receipts(atom: dict[str, Any], *, repo_root: Path) -> list[
         # exist so research receives the actual diagnostic, not only an excerpt.
         candidates.extend([run_dir / "agent_stderr.txt", run_dir / "agent_last_message.txt"])
     for name in (
+        "preflight.json",
+        "agent_attempts.json",
+        "settings_ref.json",
+        "effective_run_spec.json",
         "report.json",
         "error.json",
         "report_validation_errors.json",
         "normalized_events.jsonl",
+        "raw_events.jsonl",
         "metrics.json",
+        "workspace_ref.json",
         "target_ref.json",
+        "run_meta.json",
     ):
         candidates.append(run_dir / name)
 
@@ -321,6 +348,8 @@ def _origin_artifact_receipts(atom: dict[str, Any], *, repo_root: Path) -> list[
     seen: set[Path] = set()
     for candidate in candidates:
         try:
+            if candidate.is_symlink():
+                continue
             resolved = candidate.resolve()
             resolved.relative_to(run_dir)
         except (OSError, ValueError):
@@ -328,7 +357,7 @@ def _origin_artifact_receipts(atom: dict[str, Any], *, repo_root: Path) -> list[
         if resolved in seen or not resolved.is_file():
             continue
         seen.add(resolved)
-        receipts.append(_research_file_receipt(resolved))
+        receipts.append(_research_file_receipt(resolved, run_dir=run_dir))
     return receipts
 
 
@@ -360,6 +389,7 @@ def _evidence_assignment(
                 "atom_sha256": source_evidence_atom_sha256(atom),
                 "atom_snapshot": atom_projection,
                 "source_projection_version": SOURCE_EVIDENCE_PROJECTION_VERSION,
+                "source_classification": source_observation_classification(atom),
                 "artifact_receipts": artifacts,
                 "origin_evidence_mode": (
                     "snapshot_and_artifacts" if artifacts else "signed_snapshot"
@@ -376,6 +406,77 @@ def _evidence_assignment(
     }
     assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
     return assignment, missing
+
+
+def _expand_operational_candidate_evidence(
+    *,
+    evidence_atom_ids: list[str],
+    atoms_by_id: Mapping[str, dict[str, Any]],
+) -> tuple[list[str], list[str], list[str]]:
+    """Attach the observed occurrences behind verified operational candidates.
+
+    Operational candidates intentionally expose only a compact typed-signal projection to
+    problem mining.  Stage 3 needs the underlying occurrence atoms, however, or it can prove
+    only that the classifier emitted a candidate rather than establish the original failure's
+    locus, actionability, or causal mechanism.  The runner-owned candidate receipt is the
+    authority for this one-hop expansion; arbitrary model-authored lineage is not followed.
+    """
+
+    expanded_ids = list(dict.fromkeys(evidence_atom_ids))
+    occurrence_ids: list[str] = []
+    errors: list[str] = []
+    for atom_id in evidence_atom_ids:
+        atom = atoms_by_id.get(atom_id)
+        if atom is None or atom.get("source") != "operational_failure_candidate":
+            continue
+        receipt_errors = operational_candidate_receipt_errors(atom)
+        if receipt_errors:
+            errors.extend(
+                f"operational_candidate_lineage_invalid:{atom_id}:{error}"
+                for error in receipt_errors
+            )
+            continue
+        receipt_raw = atom.get("operational_candidate_receipt")
+        receipt = receipt_raw if isinstance(receipt_raw, Mapping) else {}
+        source_ids_raw = receipt.get("source_derived_atom_ids")
+        source_ids = (
+            [value.strip() for value in source_ids_raw if isinstance(value, str) and value.strip()]
+            if isinstance(source_ids_raw, list)
+            else []
+        )
+        if not source_ids:
+            errors.append(f"operational_candidate_lineage_empty:{atom_id}")
+            continue
+        for source_id in source_ids:
+            if source_id not in occurrence_ids:
+                occurrence_ids.append(source_id)
+            if source_id not in expanded_ids:
+                expanded_ids.append(source_id)
+    return expanded_ids, occurrence_ids, errors
+
+
+def _initial_research_evidence_roles(
+    evidence_atom_ids: list[str],
+    *,
+    atoms_by_id: Mapping[str, dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    """Separate aggregate case signals from the occurrences research must explain.
+
+    A normal source atom is itself an occurrence.  The only current aggregate
+    evidence contract is the runner-minted operational candidate, whose authenticated
+    receipt is expanded separately.  This keeps splitting general: it works for any
+    case with multiple direct observations, not only for operational aggregates.
+    """
+
+    case_evidence_ids: list[str] = []
+    occurrence_evidence_ids: list[str] = []
+    for atom_id in evidence_atom_ids:
+        atom = atoms_by_id.get(atom_id)
+        if isinstance(atom, Mapping) and atom.get("source") == "operational_failure_candidate":
+            case_evidence_ids.append(atom_id)
+        else:
+            occurrence_evidence_ids.append(atom_id)
+    return case_evidence_ids, occurrence_evidence_ids
 
 
 def _render_research_dossiers_markdown(
@@ -596,6 +697,29 @@ def _run_repro_research_stage(
             else [atom_id for atom_id in all_evidence_ids if atom_id not in set(derived_ids)]
         )
         evidence_ids = list(dict.fromkeys(evidence_ids))
+        case_evidence_ids, occurrence_evidence_ids = _initial_research_evidence_roles(
+            evidence_ids,
+            atoms_by_id=atoms_by_id,
+        )
+        evidence_ids, expanded_occurrence_ids, evidence_lineage_errors = (
+            _expand_operational_candidate_evidence(
+                evidence_atom_ids=evidence_ids,
+                atoms_by_id=atoms_by_id,
+            )
+        )
+        occurrence_evidence_ids = list(
+            dict.fromkeys([*occurrence_evidence_ids, *expanded_occurrence_ids])
+        )
+        split_occurrence_ids, split_lineage_errors = authenticated_split_child_occurrence_evidence(
+            rec,
+            atoms_by_id=atoms_by_id,
+        )
+        for atom_id in split_occurrence_ids:
+            if atom_id not in evidence_ids:
+                evidence_ids.append(atom_id)
+            if atom_id not in occurrence_evidence_ids:
+                occurrence_evidence_ids.append(atom_id)
+        evidence_lineage_errors.extend(split_lineage_errors)
         derived_ids = list(
             dict.fromkeys(
                 [
@@ -627,12 +751,15 @@ def _run_repro_research_stage(
             evidence_atoms=evidence_atoms,
             repo_root=repo_root,
         )
+        assignment["case_evidence_atom_ids"] = list(case_evidence_ids)
+        assignment["occurrence_evidence_atom_ids"] = list(occurrence_evidence_ids)
         missing_evidence_atom_ids.extend(assignment_missing)
         missing_evidence_atom_ids = list(dict.fromkeys(missing_evidence_atom_ids))
-        assignment["status"] = "incomplete" if missing_evidence_atom_ids else "complete"
-        assignment["errors"] = [
+        assignment_errors = [
             f"origin_evidence_unavailable:{item}" for item in missing_evidence_atom_ids
-        ]
+        ] + evidence_lineage_errors
+        assignment["status"] = "incomplete" if assignment_errors else "complete"
+        assignment["errors"] = assignment_errors
         assignment["assignment_sha256"] = evidence_assignment_sha256(assignment)
         payload = {
             "case_id": case_id,
@@ -640,6 +767,9 @@ def _run_repro_research_stage(
             "problem_record": rec,
             "priority_decision": dec,
             "expected_evidence_atom_ids": evidence_ids,
+            "case_evidence_atom_ids": case_evidence_ids,
+            "occurrence_evidence_atom_ids": occurrence_evidence_ids,
+            "evidence_lineage_errors": evidence_lineage_errors,
             "missing_evidence_atom_ids": missing_evidence_atom_ids,
             "evidence_atoms": evidence_atoms,
             # Prior research/implementation output is context, never a mandatory
@@ -832,6 +962,33 @@ def _run_repro_research_stage(
             ),
             "insufficient_evidence_count": sum(
                 item.get("research_status") == "insufficient_evidence" for item in all_dossiers
+            ),
+            "requires_change_count": sum(
+                isinstance(item.get("actionability_assessment"), Mapping)
+                and item["actionability_assessment"].get("disposition") == "requires_change"
+                for item in all_dossiers
+            ),
+            "already_addressed_count": sum(
+                isinstance(item.get("actionability_assessment"), Mapping)
+                and item["actionability_assessment"].get("disposition") == "already_addressed"
+                for item in all_dossiers
+            ),
+            "non_actionable_count": sum(
+                isinstance(item.get("actionability_assessment"), Mapping)
+                and item["actionability_assessment"].get("disposition") == "non_actionable"
+                for item in all_dossiers
+            ),
+            "actionability_undetermined_count": sum(
+                not isinstance(item.get("actionability_assessment"), Mapping)
+                or item["actionability_assessment"].get("disposition") == "undetermined"
+                for item in all_dossiers
+            ),
+            "successful_negative_research_count": sum(
+                item.get("research_status") == "evidence_sufficient"
+                and isinstance(item.get("actionability_assessment"), Mapping)
+                and item["actionability_assessment"].get("disposition")
+                in {"already_addressed", "non_actionable"}
+                for item in all_dossiers
             ),
             "useful_research_output_count": sum(
                 item.get("research_status") in {"evidence_sufficient", "insufficient_evidence"}

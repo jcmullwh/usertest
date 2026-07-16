@@ -39,15 +39,20 @@ from backlog_core.causal_proof import (
 from backlog_core.stage_contracts import (
     evidence_assignment_sha256,
     evidence_verification_sha256,
+    is_interrupted_inconclusive_experiment,
     replay_invocation_references_model_overlay,
     research_attempt_sha256,
     research_claims_sha256,
+    research_evidence_verification_contract_errors,
+    research_required_experiment_coverage_atom_ids,
 )
 from runner_core.codex_execpolicy import verify_controlled_codex_execpolicy_receipt
 from runner_core.target_acquire import acquire_target
 from sandbox_runner import DockerSandbox, SandboxSpec
 
 from backlog_miner.origin_evidence import (
+    RESEARCH_RUN_CONTEXT_FILES,
+    origin_attachment_read_scope,
     origin_attachment_requirements,
     verify_materialized_origin_attachments,
 )
@@ -85,6 +90,37 @@ _PYTEST_AMBIGUOUS_SELECTION_OPTIONS = frozenset(
         "--ignore-glob",
         "--collect-only",
         "--co",
+    }
+)
+_PYTEST_PATH_VALUE_OPTIONS = frozenset(
+    {
+        "--basetemp",
+        "--confcutdir",
+        "--deselect",
+        "--ignore",
+        "--ignore-glob",
+        "--junit-xml",
+        "--junitxml",
+        "--log-file",
+        "--rootdir",
+    }
+)
+_PYTHON_PYTEST_SAFE_PREFIX_FLAGS = frozenset(
+    {
+        "-B",  # Do not write bytecode caches.
+        "-E",  # Ignore PYTHON* environment variables.
+        "-I",  # Run in isolated mode.
+        "-P",  # Do not prepend an unsafe path to sys.path.
+        "-S",  # Do not import site during interpreter initialization.
+        "-s",  # Do not add the user site-packages directory.
+        "-u",  # Use unbuffered standard streams.
+    }
+)
+_WORKSPACE_OVERLAY_ADDITIVE_EMPTY_LIST_FIELDS = frozenset(
+    {
+        "excluded_non_regular_research_paths",
+        "ignored_tool_environment_roots",
+        "ignored_tool_environment_paths",
     }
 )
 _REPLAY_FORBIDDEN_CHARACTERS = frozenset("&|;<>`")
@@ -195,9 +231,35 @@ def _expected_semantic_field_path(value: Any) -> bool:
     )
 
 
-def _source_observation_atom(snapshot: Any) -> bool:
-    """Return whether a snapshot is original observation evidence, not commentary."""
+def _source_observation_atom(snapshot: Any, *, receipt: Any = None) -> bool:
+    """Return whether runner-authenticated evidence is an original observation."""
 
+    if isinstance(snapshot, dict) and isinstance(receipt, Mapping):
+        classification_raw = receipt.get("source_classification")
+        classification = (
+            classification_raw if isinstance(classification_raw, Mapping) else {}
+        )
+        expected_classification_sha = _canonical_json_sha256(
+            {
+                key: value
+                for key, value in classification.items()
+                if key != "classification_sha256"
+            }
+        )
+        if (
+            classification.get("schema_version") == 1
+            and classification.get("classification_sha256")
+            == expected_classification_sha
+            and receipt.get("atom_sha256") == _canonical_json_sha256(snapshot)
+        ):
+            return (
+                classification.get("evidence_role") == "observation"
+                and classification.get("is_source_observation") is True
+            )
+
+    # Retained pre-classification snapshots carried these runner-owned fields
+    # inline. Keep them readable without reintroducing decision metadata into
+    # the current signed source projection.
     if not isinstance(snapshot, dict) or snapshot.get("evidence_role") != "observation":
         return False
     if str(snapshot.get("origin_stage") or "").casefold() in {
@@ -460,12 +522,25 @@ def _workspace_manifest(workspace: Path) -> dict[str, dict[str, Any]]:
                     "target": target,
                 }
             elif stat.S_ISREG(metadata.st_mode):
-                manifest[relative_key] = {
-                    "kind": "file",
-                    "mode": mode,
-                    "sha256": _sha256_path(path),
-                    "size_bytes": metadata.st_size,
-                }
+                try:
+                    path_sha256 = _sha256_path(path)
+                except OSError as exc:
+                    # A replay can create a host-unreadable filename (for example a Docker/WSL
+                    # encoding of a character forbidden by Win32). Keep that state observable and
+                    # fail closed through the normal mutation checks instead of aborting Stage 3.
+                    manifest[relative_key] = {
+                        "kind": "unreadable_file",
+                        "mode": mode,
+                        "size_bytes": metadata.st_size,
+                        "error": type(exc).__name__,
+                    }
+                else:
+                    manifest[relative_key] = {
+                        "kind": "file",
+                        "mode": mode,
+                        "sha256": path_sha256,
+                        "size_bytes": metadata.st_size,
+                    }
             elif stat.S_ISDIR(metadata.st_mode):
                 pending.append(path)
             else:
@@ -597,16 +672,44 @@ def _workspace_overlay_errors(
     runner_materialized_paths = [
         path for path in all_overlay_paths if path.startswith(".usertest_research/origin_evidence/")
     ]
-    overlay_paths = [path for path in all_overlay_paths if path not in runner_materialized_paths]
-    unsafe_overlay_paths = [
+    non_regular_overlay_paths = [
         path for path in all_overlay_paths if research_manifest.get(path, {}).get("kind") != "file"
     ]
+    overlay_paths = [
+        path
+        for path in all_overlay_paths
+        if path not in runner_materialized_paths and path not in non_regular_overlay_paths
+    ]
+    virtualenv_roots = sorted(
+        {
+            PurePosixPath(*PurePosixPath(path).parts[: index + 1]).as_posix()
+            for path in extras
+            for index, part in enumerate(PurePosixPath(path).parts)
+            if part == ".venv"
+            and (
+                PurePosixPath(*PurePosixPath(path).parts[: index + 1]) / "pyvenv.cfg"
+            ).as_posix()
+            in research_manifest
+        }
+    )
+    ignored_tool_environment_paths = sorted(
+        path
+        for path in extras
+        if any(
+            PurePosixPath(path) == PurePosixPath(root)
+            or PurePosixPath(root) in PurePosixPath(path).parents
+            or PurePosixPath(path)
+            == PurePosixPath(root).parent / ".pdm-python"
+            for root in virtualenv_roots
+        )
+    )
     suspicious_extras = [
         path
         for path in extras
-        if path not in _RUNNER_WORKSPACE_FILES and path not in all_overlay_paths
+        if path not in _RUNNER_WORKSPACE_FILES
+        and path not in all_overlay_paths
+        and path not in ignored_tool_environment_paths
     ]
-    suspicious_extras.extend(unsafe_overlay_paths)
     suspicious_extras = sorted(set(suspicious_extras))
     index_changed = any(
         research_state.get(field) != baseline_state.get(field)
@@ -621,7 +724,7 @@ def _workspace_overlay_errors(
     overlay_manifest = {
         path: research_manifest[path]
         for path in all_overlay_paths
-        if path not in unsafe_overlay_paths
+        if path not in non_regular_overlay_paths
     }
     return errors, {
         "baseline_manifest_sha256": _canonical_json_sha256(baseline_manifest),
@@ -643,11 +746,35 @@ def _workspace_overlay_errors(
         "changed_baseline_paths": changed_baseline,
         "research_overlay_paths": overlay_paths,
         "runner_materialized_evidence_paths": runner_materialized_paths,
+        "excluded_non_regular_research_paths": non_regular_overlay_paths,
         "research_overlay_manifest": overlay_manifest,
         "research_overlay_manifest_sha256": _canonical_json_sha256(overlay_manifest),
+        "ignored_tool_environment_roots": virtualenv_roots,
+        "ignored_tool_environment_paths": ignored_tool_environment_paths,
         "suspicious_extra_paths": suspicious_extras,
         "git_index_changed": index_changed,
     }
+
+
+def _persisted_workspace_overlay_matches(
+    persisted: Any,
+    recomputed: dict[str, Any],
+) -> bool:
+    """Compare an overlay with compatibility for additive empty-list fields only.
+
+    Retained receipts created before an additive diagnostic field existed encode
+    the same state by omitting it.  That omission is compatible only when the
+    current recomputation is exactly an empty list.  A persisted value, a current
+    nonempty value, or drift in any established field remains a hard mismatch.
+    """
+
+    if not isinstance(persisted, Mapping):
+        return False
+    normalized = dict(persisted)
+    for field in _WORKSPACE_OVERLAY_ADDITIVE_EMPTY_LIST_FIELDS:
+        if field not in normalized and recomputed.get(field) == []:
+            normalized[field] = []
+    return normalized == recomputed
 
 
 def _verified_diff_classification(
@@ -691,7 +818,7 @@ def _parse_argv_without_shell(command: str) -> list[str] | None:
 
 
 def _portable_replay_path_argv(argv: list[str]) -> tuple[list[str], bool]:
-    """Normalize only positional Python-harness and pytest path arguments."""
+    """Normalize repository-local paths without changing selectors or non-path options."""
 
     portable = list(argv)
     normalized = tuple(token.casefold() for token in portable)
@@ -718,20 +845,65 @@ def _portable_replay_path_argv(argv: list[str]) -> tuple[list[str], bool]:
                 break
 
     changed = False
+
+    def portable_repo_path(token: str) -> str:
+        # Codex command events can retain JSON/PowerShell spelling with doubled
+        # Windows separators even though Windows executes it as the same relative
+        # path.  Treat repeated separators as equivalent only after a token has
+        # been identified as a repository-local path; applying this to arbitrary
+        # arguments could corrupt regexes or domain-specific values.
+        return re.sub(r"[\\/]+", "/", token).removeprefix("./")
+
+    def portable_pytest_path(token: str) -> str:
+        path_token, selector_separator, selector = token.partition("::")
+        normalized_path = portable_repo_path(path_token)
+        return normalized_path + selector_separator + selector
+
     for index in path_indexes:
         token = portable[index]
         if pytest_paths:
-            path_token, selector_separator, selector = token.partition("::")
-            normalized_path = path_token.replace("\\", "/").removeprefix("./")
-            path_part = normalized_path.casefold()
+            normalized_path = portable_pytest_path(token)
+            path_part = normalized_path.partition("::")[0].casefold()
             if not (
                 path_part.endswith(".py")
                 or path_part.startswith((".usertest_research/", "apps/", "packages/", "tests/"))
             ):
                 continue
-            portable[index] = normalized_path + selector_separator + selector
+            portable[index] = normalized_path
         else:
-            portable[index] = token.replace("\\", "/").removeprefix("./")
+            portable[index] = portable_repo_path(token)
+        changed = changed or portable[index] != token
+
+    if pytest_paths:
+        index = 0
+        while index < len(portable):
+            token = portable[index]
+            option, separator, value = token.partition("=")
+            normalized_option = option.casefold()
+            if separator and normalized_option in _PYTEST_PATH_VALUE_OPTIONS:
+                portable[index] = option + separator + portable_pytest_path(value)
+                changed = changed or portable[index] != token
+            elif normalized_option in _PYTEST_PATH_VALUE_OPTIONS and index + 1 < len(portable):
+                value_token = portable[index + 1]
+                portable[index + 1] = portable_pytest_path(value_token)
+                changed = changed or portable[index + 1] != value_token
+                index += 1
+            index += 1
+
+    # Research harnesses commonly accept output/config paths through arbitrary option names. The
+    # namespace itself is runner-defined, so normalize it without guessing whether other option
+    # values are paths (which could corrupt regexes, selectors, or domain-specific values).
+    for index, token in enumerate(portable):
+        option, separator, value = token.partition("=")
+        candidate = value if separator else token
+        path_token, selector_separator, selector = candidate.partition("::")
+        normalized_candidate = portable_repo_path(path_token)
+        if not normalized_candidate.casefold().startswith(".usertest_research/"):
+            continue
+        normalized_candidate += selector_separator + selector
+        portable[index] = (
+            option + separator + normalized_candidate if separator else normalized_candidate
+        )
         changed = changed or portable[index] != token
     return portable, changed
 
@@ -1006,14 +1178,45 @@ def _practical_command_authorization(
     if bindings_declared:
         if not repository_bindings:
             return None
+        receipt: dict[str, Any] = {
+            "authorization_kind": "declared_repository_bindings",
+            "executed_argv_sha256": _canonical_json_sha256(argv),
+            "shell": False,
+            "workspace_confined": True,
+            "repository_bindings": repository_bindings,
+        }
+        entrypoint = _resolve_repository_entrypoint(argv, workspace=workspace)
+        entrypoint_path = (
+            _text(entrypoint.get("entrypoint_path"))
+            if isinstance(entrypoint, Mapping)
+            else None
+        )
+        artifacts_raw = dossier.get("artifact_refs")
+        artifact = (
+            next(
+                (
+                    item
+                    for item in artifacts_raw
+                    if isinstance(item, dict)
+                    and entrypoint_path is not None
+                    and _normalize_path(str(item.get("path") or ""))
+                    == _normalize_path(entrypoint_path)
+                ),
+                None,
+            )
+            if isinstance(artifacts_raw, list)
+            else None
+        )
+        if (
+            entrypoint_path is not None
+            and entrypoint_path.replace("\\", "/").startswith(".usertest_research/")
+            and isinstance(artifact, dict)
+            and isinstance(entrypoint, Mapping)
+        ):
+            receipt.update(entrypoint)
+            receipt["artifact_id"] = artifact.get("artifact_id")
         return _command_authorization_receipt(
-            {
-                "authorization_kind": "declared_repository_bindings",
-                "executed_argv_sha256": _canonical_json_sha256(argv),
-                "shell": False,
-                "workspace_confined": True,
-                "repository_bindings": repository_bindings,
-            }
+            receipt
         )
     entrypoint = _resolve_repository_entrypoint(argv, workspace=workspace)
     if entrypoint is None:
@@ -1177,6 +1380,76 @@ def _sanitized_replay_environment() -> dict[str, str]:
         for key, value in os.environ.items()
         if _SENSITIVE_ENVIRONMENT_RE.search(key) is None
     } | {"CI": "1"}
+
+
+def _repository_python_import_environment(
+    workspace: Path,
+    *,
+    execution_root: str | None = None,
+    path_separator: str = os.pathsep,
+) -> tuple[str | None, dict[str, Any]]:
+    """Derive the pinned checkout's src-layout import path for clean replays.
+
+    Research commands often execute from an application virtualenv, where editable
+    workspace packages mask an incomplete harness ``sys.path``.  Clean replay must
+    use the isolated checkout's code without inheriting those host editables.  The
+    runner therefore discovers src-layout projects from the acquired revision and
+    applies the same deterministic import closure to every replay environment.
+    """
+
+    root = workspace.resolve()
+    ignored = {
+        *_IGNORED_WORKSPACE_DIRS,
+        ".usertest_research",
+        ".venv",
+        "node_modules",
+    }
+    relative_roots: list[str] = []
+
+    def add_project_source(project_root: Path) -> None:
+        source_root = project_root / "src"
+        if not source_root.is_dir() or source_root.is_symlink():
+            return
+        resolved = source_root.resolve()
+        if not _within(resolved, root):
+            return
+        relative_roots.append(resolved.relative_to(root).as_posix())
+
+    if (root / "pyproject.toml").is_file():
+        add_project_source(root)
+    # This repository's executable workspace boundary is explicit: deployable
+    # applications and shared packages.  Do not import cookiecutter/template src
+    # trees merely because they contain example pyproject files.
+    for namespace in (root / "apps", root / "packages"):
+        if not namespace.is_dir():
+            continue
+        for current, directories, filenames in os.walk(namespace):
+            directories[:] = sorted(
+                directory
+                for directory in directories
+                if directory not in ignored and not directory.startswith(".usertest_replay")
+            )
+            if "pyproject.toml" in filenames:
+                add_project_source(Path(current))
+    relative_roots = sorted(dict.fromkeys(relative_roots))
+    if execution_root is None:
+        rendered_roots = [str(root / Path(relative)) for relative in relative_roots]
+    else:
+        prefix = execution_root.rstrip("/")
+        rendered_roots = [f"{prefix}/{relative}" for relative in relative_roots]
+    pythonpath = path_separator.join(rendered_roots) if rendered_roots else None
+    receipt = content_bound_payload(
+        {
+            "schema_version": 1,
+            "runner_applied": pythonpath is not None,
+            "source_roots": relative_roots,
+            "pythonpath_value_sha256": (
+                sha256(pythonpath.encode("utf-8")).hexdigest() if pythonpath is not None else None
+            ),
+        },
+        hash_field="repository_python_import_sha256",
+    )
+    return pythonpath, receipt
 
 
 def _replay_environment_overrides(
@@ -1432,6 +1705,9 @@ class TrustedHostReplayExecutor:
     def isolation_receipt(self, *, source_workspace: Path) -> dict[str, Any]:
         approved = self._approved_root(source_workspace)
         environment = _sanitized_replay_environment() if approved is not None else {}
+        pythonpath, _import_receipt = _repository_python_import_environment(source_workspace)
+        if pythonpath is not None:
+            environment["PYTHONPATH"] = pythonpath
         return {
             "executor": "trusted_host",
             "platform": platform.system().casefold(),
@@ -1459,7 +1735,13 @@ class TrustedHostReplayExecutor:
         if self._approved_root(source_workspace) is None:
             raise PermissionError("source_outside_approved_roots")
         environment = _sanitized_replay_environment()
+        pythonpath, import_receipt = _repository_python_import_environment(cwd)
         absent_keys: list[str] = []
+        if pythonpath is None:
+            environment.pop("PYTHONPATH", None)
+            absent_keys.append("PYTHONPATH")
+        else:
+            environment["PYTHONPATH"] = pythonpath
         for key, value in (environment_overrides or {}).items():
             if value is None:
                 environment.pop(key, None)
@@ -1489,6 +1771,7 @@ class TrustedHostReplayExecutor:
                     environment,
                     absent_keys=absent_keys,
                 ),
+                "repository_python_import": import_receipt,
             },
         )
 
@@ -1501,6 +1784,11 @@ class DockerReplayExecutor:
 
     def isolation_receipt(self, *, source_workspace: Path) -> dict[str, Any]:
         image = self.image_ref.strip()
+        pythonpath, _import_receipt = _repository_python_import_environment(
+            source_workspace,
+            execution_root="/workspace",
+            path_separator=":",
+        )
         return {
             "executor": "docker",
             # Usertest's maintenance image is a Linux container.  Record this
@@ -1513,7 +1801,10 @@ class DockerReplayExecutor:
             "trust_decision": "explicit_image" if image else "denied",
             "trust_reason": image or "docker_image_missing",
             "source_workspace": str(source_workspace.resolve()),
-            "sanitized_environment_keys": ["CI"],
+            "sanitized_environment_keys": [
+                "CI",
+                *(["PYTHONPATH"] if pythonpath is not None else []),
+            ],
         }
 
     def execute(
@@ -1531,11 +1822,19 @@ class DockerReplayExecutor:
             raise PermissionError("docker_image_missing")
         sandbox_artifacts = cwd.parent / f".{cwd.name}.docker_replay"
         overrides = dict(environment_overrides or {})
+        pythonpath, import_receipt = _repository_python_import_environment(
+            cwd,
+            execution_root="/workspace",
+            path_separator=":",
+        )
         applied_environment = {
             "CI": "1",
+            **({"PYTHONPATH": pythonpath} if pythonpath is not None else {}),
             **{key: value for key, value in overrides.items() if value is not None},
         }
         absent_keys = [key for key, value in overrides.items() if value is None]
+        if pythonpath is None:
+            absent_keys.append("PYTHONPATH")
         spec = SandboxSpec(
             backend="docker",
             image_ref=image,
@@ -1621,6 +1920,7 @@ class DockerReplayExecutor:
                     applied_environment,
                     absent_keys=absent_keys,
                 ),
+                "repository_python_import": import_receipt,
             },
         )
 
@@ -1719,6 +2019,39 @@ def _execution_metadata_errors(
     ):
         errors.append("replay_docker_cleanup_unconfirmed")
     return errors
+
+
+def _selected_replay_isolation(
+    replay_isolation: Any,
+    *,
+    platform_requirement: Any,
+) -> dict[str, Any] | None:
+    """Resolve the exact isolation receipt used for one declared experiment.
+
+    ``PlatformRoutingReplayExecutor`` persists an aggregate router receipt at the
+    dossier level, while each experiment is executed by one selected route.  A
+    persisted verifier must compare execution metadata with that selected route,
+    not with the aggregate router that never executes commands itself.
+    """
+
+    if not isinstance(replay_isolation, dict):
+        return None
+    requirement = _text(platform_requirement) or "any"
+    if replay_isolation.get("executor") != "platform_router":
+        selected = replay_isolation
+    elif requirement == "any":
+        selected = replay_isolation.get("default")
+    else:
+        routes = replay_isolation.get("routes")
+        selected = routes.get(requirement.casefold()) if isinstance(routes, dict) else None
+    if not isinstance(selected, dict):
+        return None
+    actual_platform = _text(selected.get("platform"))
+    if requirement != "any" and (
+        actual_platform is None or actual_platform.casefold() != requirement.casefold()
+    ):
+        return None
+    return selected
 
 
 def _copy_attested_overlay(
@@ -1826,6 +2159,13 @@ def _clean_replay_receipts(
         experiment_id = _text(experiment.get("experiment_id"))
         command = _text(experiment.get("command"))
         if experiment_id is None or command is None:
+            continue
+        if is_interrupted_inconclusive_experiment(experiment):
+            errors.append(
+                "research_dossier_interrupted_inconclusive_not_replayable:"
+                f"{dossier.get('problem_id') or 'unknown'}:"
+                f"experiment={experiment_id}:exit_code={experiment.get('exit_code')}"
+            )
             continue
         setup_error_count = len(errors)
         environment_overrides = _replay_environment_overrides(
@@ -2915,6 +3255,90 @@ def _workspace_file(
     return resolved if _within(resolved, workspace) else None
 
 
+_READ_ATTESTATION_FIELDS = (
+    "content_observed",
+    "whole_file_observed",
+    "observed_content",
+    "observed_content_sha256",
+    "observed_bytes",
+    "observed_start_line",
+    "observed_end_line",
+    "file_sha256",
+    "file_size_bytes",
+)
+
+
+def _revalidated_read_event_attestation(
+    *,
+    path: Path,
+    data: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Recompute one normalized read event from the immutable file it cites.
+
+    Generic shell output may attest only a whole-file read.  The Codex
+    normalizer has one narrower partial-shell contract: an exact PowerShell
+    ``Get-Content | Select-Object -Skip/-First`` range whose stdout was already
+    matched byte-for-byte to the requested slice.  Recompute that slice here so
+    a model-authored or tampered partial shell observation cannot become source
+    evidence merely by claiming the attestation kind.
+    """
+
+    read_source = _text(data.get("read_source"))
+    source_exit_code = data.get("source_exit_code")
+    observed_content = data.get("observed_content")
+    if (
+        read_source not in {"tool", "shell_command"}
+        or source_exit_code != 0
+        or not isinstance(observed_content, str)
+        or not path.is_file()
+    ):
+        return None
+
+    allow_partial = read_source == "tool"
+    if read_source == "shell_command" and data.get("attestation_kind") == "exact_line_range":
+        skip_lines = data.get("requested_skip_lines")
+        first_lines = data.get("requested_first_lines")
+        if (
+            isinstance(skip_lines, bool)
+            or not isinstance(skip_lines, int)
+            or skip_lines < 0
+            or isinstance(first_lines, bool)
+            or not isinstance(first_lines, int)
+            or first_lines <= 0
+            or first_lines > 2_000
+        ):
+            return None
+        try:
+            file_text = path.read_bytes().decode("utf-8", errors="replace")
+        except OSError:
+            return None
+        normalized_file = file_text.replace("\r\n", "\n").replace("\r", "\n")
+        selected_text = "".join(
+            normalized_file.splitlines(keepends=True)[skip_lines : skip_lines + first_lines]
+        )
+        normalized_observed = observed_content.replace("\r\n", "\n").replace("\r", "\n")
+        if normalized_observed != selected_text:
+            return None
+        allow_partial = True
+
+    expected = observed_read_attestation(
+        path=path,
+        observed_text=observed_content,
+        source_exit_code=source_exit_code,
+        allow_partial=allow_partial,
+    )
+    if expected.get("content_observed") is not True:
+        return None
+    if (
+        data.get("bytes") != path.stat().st_size
+        or data.get("file_size_bytes") != path.stat().st_size
+        or data.get("file_sha256") != _sha256_path(path)
+        or any(data.get(field) != expected.get(field) for field in _READ_ATTESTATION_FIELDS)
+    ):
+        return None
+    return expected
+
+
 def _inspection_receipts(
     dossier: dict[str, Any],
     *,
@@ -2933,47 +3357,11 @@ def _inspection_receipts(
             or _text(data.get("path")) is None
         ):
             continue
-        read_source = _text(data.get("read_source"))
-        source_exit_code = data.get("source_exit_code")
-        bytes_read = data.get("bytes")
-        observed_content = data.get("observed_content")
-        observed_hash = data.get("observed_content_sha256")
-        observed_start = data.get("observed_start_line")
-        observed_end = data.get("observed_end_line")
-        observed_bytes = data.get("observed_bytes")
-        if (
-            data.get("content_observed") is not True
-            or read_source not in {"tool", "shell_command"}
-            or source_exit_code != 0
-            or isinstance(bytes_read, bool)
-            or not isinstance(bytes_read, int)
-            or bytes_read < 0
-            or not isinstance(observed_content, str)
-            or observed_hash != sha256(observed_content.encode("utf-8")).hexdigest()
-            or isinstance(observed_bytes, bool)
-            or not isinstance(observed_bytes, int)
-            or observed_bytes != len(observed_content.encode("utf-8"))
-            or isinstance(observed_start, bool)
-            or not isinstance(observed_start, int)
-            or isinstance(observed_end, bool)
-            or not isinstance(observed_end, int)
-            or observed_start < 1
-            or observed_end < observed_start
-        ):
-            continue
         read_paths.setdefault(_normalize_path(str(data.get("path"))), []).append(
             {
                 "event_index": event_index,
                 "event_sha256": _canonical_json_sha256(event),
-                "read_source": read_source,
-                "file_size_bytes": bytes_read,
-                "file_sha256": data.get("file_sha256"),
-                "whole_file_observed": data.get("whole_file_observed") is True,
-                "observed_content": observed_content,
-                "observed_content_sha256": observed_hash,
-                "observed_bytes": observed_bytes,
-                "observed_start_line": observed_start,
-                "observed_end_line": observed_end,
+                "data": data,
             }
         )
 
@@ -2994,24 +3382,50 @@ def _inspection_receipts(
         relative = path.relative_to(workspace).as_posix()
         normalized_relative = _normalize_path(relative)
         read_candidates = read_paths.get(normalized_relative, [])
+        matching_read_candidates: list[dict[str, Any]] = []
+        for candidate in read_candidates:
+            data = candidate.get("data")
+            attestation = (
+                _revalidated_read_event_attestation(path=path, data=data)
+                if isinstance(data, Mapping)
+                else None
+            )
+            if attestation is None:
+                continue
+            matching_read_candidates.append(
+                {
+                    "event_index": candidate["event_index"],
+                    "event_sha256": candidate["event_sha256"],
+                    "read_source": data.get("read_source"),
+                    "file_size_bytes": attestation["file_size_bytes"],
+                    "file_sha256": attestation["file_sha256"],
+                    "whole_file_observed": attestation["whole_file_observed"],
+                    "observed_content": attestation["observed_content"],
+                    "observed_content_sha256": attestation["observed_content_sha256"],
+                    "observed_bytes": attestation["observed_bytes"],
+                    "observed_start_line": attestation["observed_start_line"],
+                    "observed_end_line": attestation["observed_end_line"],
+                }
+            )
         read_receipt = next(
-            (
-                candidate
-                for candidate in sorted(
-                    read_candidates,
+            iter(
+                sorted(
+                    matching_read_candidates,
                     key=lambda item: (bool(item["whole_file_observed"]), item["event_index"]),
                     reverse=True,
                 )
-                if candidate.get("file_sha256") == _sha256_path(path)
-                and candidate.get("file_size_bytes") == path.stat().st_size
             ),
             None,
         )
         if read_receipt is None:
             errors.append(f"inspected_file_not_observed:{raw_path}")
             continue
-        observed_content = str(read_receipt["observed_content"])
-        file_texts.append((relative, observed_content))
+        # A researcher may inspect several disjoint ranges of one immutable file.
+        # Keep every attested range available for symbol resolution; selecting only
+        # the newest range falsely erases earlier inspection work.
+        file_texts.extend(
+            (relative, str(candidate["observed_content"])) for candidate in matching_read_candidates
+        )
         git_blob = _git_blob_sha(workspace, relative)
         if git_blob is None:
             errors.append(f"inspected_file_not_in_baseline_revision:{raw_path}")
@@ -3277,8 +3691,20 @@ def _symbol_definition_exists(*, path: str, content: str, symbol: str) -> bool:
             else components
         )
         expected = ".".join(expected_components)
-        return expected in definitions or any(
+        if expected in definitions or any(
             definition.endswith(f".{expected}") for definition in definitions
+        ):
+            return True
+        # Range reads can begin inside a function and therefore cannot always be
+        # parsed as a standalone module.  An attested exact definition/assignment
+        # line is still direct observation of a local mechanism binding.
+        leaf = re.escape(components[-1])
+        return any(
+            re.search(pattern, content, flags=re.MULTILINE)
+            for pattern in (
+                rf"^\s*(?:async\s+)?(?:def|class)\s+{leaf}\b",
+                rf"^\s*{leaf}\s*(?::[^=\n]+)?=(?!=)",
+            )
         )
     leaf = re.escape(components[-1])
     definition_patterns = (
@@ -3290,18 +3716,42 @@ def _symbol_definition_exists(*, path: str, content: str, symbol: str) -> bool:
 
 def _pytest_args(executed_argv: list[str]) -> list[str] | None:
     normalized = tuple(token.casefold() for token in executed_argv)
-    for prefix in _PYTEST_ARGV_PREFIXES:
+    for prefix in (("pytest",), ("pdm", "run", "pytest")):
         if normalized[: len(prefix)] == prefix:
             return executed_argv[len(prefix) :]
-    return None
+
+    python_index: int | None = None
+    if normalized[:1] == ("python",):
+        python_index = 0
+    elif normalized[:3] == ("pdm", "run", "python"):
+        python_index = 2
+    if python_index is None:
+        return None
+
+    module_index = python_index + 1
+    while (
+        module_index < len(executed_argv)
+        and executed_argv[module_index] in _PYTHON_PYTEST_SAFE_PREFIX_FLAGS
+    ):
+        module_index += 1
+    if normalized[module_index : module_index + 2] != ("-m", "pytest"):
+        return None
+    return executed_argv[module_index + 2 :]
 
 
-def _exact_pytest_selector(executed_argv: list[str]) -> tuple[str, list[str]] | None:
+def _exact_pytest_selector(
+    executed_argv: list[str],
+    *,
+    allow_research_harness: bool = False,
+) -> tuple[str, list[str]] | None:
     """Resolve one unambiguous pytest file/function selector from executed argv."""
     arguments = _pytest_args(executed_argv)
     if arguments is None:
         return None
-    for argument in arguments:
+    positional: list[str] = []
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
         lowered = argument.casefold()
         if (
             lowered in _PYTEST_AMBIGUOUS_SELECTION_OPTIONS
@@ -3312,15 +3762,32 @@ def _exact_pytest_selector(executed_argv: list[str]) -> tuple[str, list[str]] | 
             or (lowered.startswith("-m") and not lowered.startswith("--"))
         ):
             return None
-        if ".usertest_research" in argument.replace("\\", "/").casefold():
+        if (
+            not allow_research_harness
+            and ".usertest_research" in argument.replace("\\", "/").casefold()
+        ):
             return None
-    candidates = [argument for argument in arguments if "::" in argument]
+        option, separator, _value = lowered.partition("=")
+        if argument.startswith("-"):
+            if separator:
+                index += 1
+                continue
+            if option in (_PYTEST_PATH_VALUE_OPTIONS | {"-p"}):
+                if index + 1 >= len(arguments):
+                    return None
+                index += 2
+                continue
+            index += 1
+            continue
+        positional.append(argument)
+        index += 1
+    candidates = [argument for argument in positional if "::" in argument]
     if len(candidates) != 1:
         return None
     candidate = candidates[0]
-    # Fail closed when another positional argument could change collection. Options
-    # with separate values are intentionally unsupported; use ``--option=value``.
-    if any(argument != candidate and not argument.startswith("-") for argument in arguments):
+    # Fail closed when another positional argument could change collection.  Values
+    # are consumed only for the small runner-owned option vocabulary above.
+    if positional != [candidate]:
         return None
     path_raw, *selector_parts = candidate.split("::")
     normalized_path = path_raw.replace("\\", "/").removeprefix("./")
@@ -3336,6 +3803,49 @@ def _exact_pytest_selector(executed_argv: list[str]) -> tuple[str, list[str]] | 
     if path.is_absolute() or windows_path.is_absolute() or ".." in path.parts:
         return None
     return normalized_path, selector_parts
+
+
+def _attested_research_pytest_entrypoint(
+    *,
+    test_path: str,
+    path: Path,
+    replay: Mapping[str, Any],
+    executed_argv: list[str],
+) -> dict[str, Any] | None:
+    """Authenticate one retained pytest harness from the runner's command receipt.
+
+    A research-overlay test is not a baseline repository test.  It is nevertheless
+    useful causal evidence when the runner independently bound the exact entrypoint
+    bytes, argv, artifact identity, and workspace confinement.  Keep that provenance
+    distinct so callers cannot accidentally promote the harness into a repository
+    regression contract.
+    """
+
+    normalized = PurePosixPath(test_path.replace("\\", "/"))
+    if not normalized.parts or normalized.parts[0] != ".usertest_research":
+        return None
+    authorization_raw = replay.get("command_authorization")
+    if not isinstance(authorization_raw, Mapping) or not _command_authorization_attested(
+        authorization_raw,
+        argv=executed_argv,
+    ):
+        return None
+    entrypoint = _text(authorization_raw.get("entrypoint_path"))
+    artifact_id = _text(authorization_raw.get("artifact_id"))
+    if (
+        entrypoint is None
+        or artifact_id is None
+        or entrypoint.replace("\\", "/").removeprefix("./") != normalized.as_posix()
+        or authorization_raw.get("entrypoint_sha256") != _sha256_path(path)
+        or authorization_raw.get("entrypoint_git_blob_sha") is not None
+    ):
+        return None
+    return {
+        "provenance_kind": "retained_research_harness",
+        "artifact_id": artifact_id,
+        "authorization_sha256": authorization_raw.get("authorization_sha256"),
+        "entrypoint_sha256": authorization_raw.get("entrypoint_sha256"),
+    }
 
 
 def _selected_test_function(
@@ -3505,6 +4015,29 @@ def _reachable_test_functions(
     return sorted(reached.items())
 
 
+def _local_test_function_name(
+    expression: str | None,
+    *,
+    current_function: str,
+    functions: Mapping[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    shadowed_names: set[str] | None = None,
+) -> str | None:
+    """Resolve a statically named call within one retained pytest module."""
+
+    if expression is None or expression.split(".", 1)[0] in (shadowed_names or set()):
+        return None
+    if expression in functions:
+        return expression
+    if "." not in current_function:
+        return None
+    class_name = current_function.rsplit(".", 1)[0]
+    for prefix in ("self.", "cls."):
+        if expression.startswith(prefix):
+            candidate = f"{class_name}.{expression.removeprefix(prefix)}"
+            return candidate if candidate in functions else None
+    return None
+
+
 def _reachable_function_contracts(
     reachable: list[tuple[str, ast.FunctionDef | ast.AsyncFunctionDef]],
 ) -> list[dict[str, str]]:
@@ -3615,6 +4148,38 @@ def _research_harness_relative_path(executed_argv: Any) -> str | None:
     return path.as_posix()
 
 
+def _executed_research_paths(executed_argv: Any) -> set[str]:
+    """Return research-overlay paths present in shell-free argv, for any runtime."""
+
+    if not isinstance(executed_argv, list) or any(
+        not isinstance(argument, str) for argument in executed_argv
+    ):
+        return set()
+    candidates: set[str] = set()
+    for argument in executed_argv:
+        candidate = argument.split("=", 1)[-1].partition("::")[0].replace("\\", "/")
+        path = PurePosixPath(candidate)
+        if (
+            not path.is_absolute()
+            and ".." not in path.parts
+            and len(path.parts) >= 2
+            and path.parts[0] == ".usertest_research"
+            and bool(path.name)
+        ):
+            candidates.add(path.as_posix())
+    return candidates
+
+
+def _executed_research_harness_path(executed_argv: Any) -> str | None:
+    """Identify one unambiguous executed research path from argv itself."""
+
+    candidates = _executed_research_paths(executed_argv)
+    direct = _research_harness_relative_path(executed_argv)
+    if direct is not None:
+        candidates.add(direct)
+    return next(iter(candidates)) if len(candidates) == 1 else None
+
+
 def _harness_mechanism_touches(
     *,
     replay: dict[str, Any],
@@ -3646,10 +4211,32 @@ def _harness_mechanism_touches(
     except (OSError, UnicodeDecodeError, SyntaxError):
         return relative, [], None
 
-    aliases = _module_import_aliases(tree)
+    module_aliases = _module_import_aliases(tree)
     parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    function_scopes: dict[
+        ast.FunctionDef | ast.AsyncFunctionDef,
+        _FunctionScopeVisitor,
+    ] = {}
+    for candidate in ast.walk(tree):
+        if not isinstance(candidate, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        visitor = _FunctionScopeVisitor(candidate)
+        visitor.visit(candidate)
+        function_scopes[candidate] = visitor
+    function_definitions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
 
     assertion_source = str(observable_assertion.get("source") or "")
+
+    def sink_matches_assertion_source(sink: str | None) -> bool:
+        return bool(
+            (assertion_source == "combined" and sink in {"stdout", "stderr"})
+            or sink == assertion_source
+            or (assertion_source == "exit_code" and sink in {"exit_code", "stderr"})
+        )
 
     def call_name(call: ast.Call) -> str:
         return (_dotted_expression(call.func) or "").casefold()
@@ -3715,6 +4302,153 @@ def _harness_mechanism_touches(
                     names.add(candidate.id)
         return names
 
+    def containing_function(node: ast.AST) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        cursor: ast.AST | None = node
+        while cursor is not None:
+            if isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                return cursor
+            cursor = parents.get(cursor)
+        return None
+
+    def import_aliases_at(node: ast.AST) -> dict[str, str]:
+        """Resolve imports visible at *node*, including function-local imports.
+
+        Research harnesses commonly keep production imports inside ``main`` so
+        importing the retained harness has no side effects.  Module-only alias
+        resolution incorrectly treated those harnesses as if they never called
+        the production mechanism.  Apply enclosing scopes from outermost to
+        innermost and conservatively drop aliases shadowed by a local binding.
+        """
+
+        scopes: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+        cursor: ast.AST | None = node
+        while cursor is not None:
+            if isinstance(cursor, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                scopes.append(cursor)
+            cursor = parents.get(cursor)
+
+        aliases = dict(module_aliases)
+        for scope in reversed(scopes):
+            visitor = function_scopes[scope]
+            for bound_name in visitor.bound_names:
+                aliases.pop(bound_name, None)
+            aliases.update(
+                {
+                    local_name: target
+                    for local_name, target in visitor.aliases.items()
+                    if local_name not in visitor.bound_names
+                }
+            )
+        return aliases
+
+    def stored_names(targets: Sequence[ast.AST]) -> set[str]:
+        return {
+            candidate.id
+            for target in targets
+            for candidate in ast.walk(target)
+            if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store)
+        }
+
+    assignments = [node for node in ast.walk(tree) if isinstance(node, (ast.Assign, ast.AnnAssign))]
+    local_calls = [node for node in ast.walk(tree) if isinstance(node, ast.Call)]
+    returns = [node for node in ast.walk(tree) if isinstance(node, ast.Return)]
+
+    def local_function(call: ast.Call) -> ast.FunctionDef | ast.AsyncFunctionDef | None:
+        expression = _dotted_expression(call.func)
+        return function_definitions.get(expression or "")
+
+    def expression_is_tainted(
+        node: ast.AST,
+        *,
+        tainted_names: set[tuple[ast.AST | None, str]],
+        tainted_returns: set[ast.AST],
+    ) -> bool:
+        for candidate in ast.walk(node):
+            if (
+                isinstance(candidate, ast.Name)
+                and isinstance(candidate.ctx, ast.Load)
+                and (containing_function(candidate), candidate.id) in tainted_names
+            ):
+                return True
+            if isinstance(candidate, ast.Call) and local_function(candidate) in tainted_returns:
+                return True
+        return False
+
+    def propagate_taint(
+        initial_names: set[tuple[ast.AST | None, str]],
+    ) -> tuple[set[tuple[ast.AST | None, str]], set[ast.AST]]:
+        """Follow bounded, statically resolved local assignments, calls, and returns."""
+
+        tainted_names = set(initial_names)
+        tainted_returns: set[ast.AST] = set()
+        while True:
+            before = (len(tainted_names), len(tainted_returns))
+            for local_call in local_calls:
+                callee = local_function(local_call)
+                if callee is None:
+                    continue
+                positional = [*callee.args.posonlyargs, *callee.args.args]
+                for argument, parameter in zip(local_call.args, positional, strict=False):
+                    if expression_is_tainted(
+                        argument,
+                        tainted_names=tainted_names,
+                        tainted_returns=tainted_returns,
+                    ):
+                        tainted_names.add((callee, parameter.arg))
+                keyword_parameters = {
+                    parameter.arg: parameter for parameter in [*positional, *callee.args.kwonlyargs]
+                }
+                for keyword in local_call.keywords:
+                    parameter = keyword_parameters.get(keyword.arg or "")
+                    if parameter is not None and expression_is_tainted(
+                        keyword.value,
+                        tainted_names=tainted_names,
+                        tainted_returns=tainted_returns,
+                    ):
+                        tainted_names.add((callee, parameter.arg))
+            for assignment in assignments:
+                value = assignment.value
+                if value is None or not expression_is_tainted(
+                    value,
+                    tainted_names=tainted_names,
+                    tainted_returns=tainted_returns,
+                ):
+                    continue
+                targets = (
+                    assignment.targets
+                    if isinstance(assignment, ast.Assign)
+                    else [assignment.target]
+                )
+                scope = containing_function(assignment)
+                tainted_names.update((scope, name) for name in stored_names(targets))
+            for return_node in returns:
+                scope = containing_function(return_node)
+                if (
+                    scope is not None
+                    and return_node.value is not None
+                    and expression_is_tainted(
+                        return_node.value,
+                        tainted_names=tainted_names,
+                        tainted_returns=tainted_returns,
+                    )
+                ):
+                    tainted_returns.add(scope)
+            if before == (len(tainted_names), len(tainted_returns)):
+                return tainted_names, tainted_returns
+
+    def assertion_json_field() -> tuple[str, Any] | None:
+        expected = observable_assertion.get("expected")
+        if not isinstance(expected, str):
+            return None
+        for candidate in (expected, "{" + expected + "}"):
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict) and len(parsed) == 1:
+                return next(iter(parsed.items()))
+        return None
+
     def asserted_value_is_hard_coded(dynamic_node: ast.AST) -> bool:
         expected = observable_assertion.get("expected")
         operator = observable_assertion.get("operator")
@@ -3751,19 +4485,62 @@ def _harness_mechanism_touches(
 
     def linked_sink(call: ast.Call) -> tuple[str, ast.AST] | None:
         direct = observable_sink(call)
-        if direct is not None:
+        if sink_matches_assertion_source(direct):
+            assert direct is not None
             return direct, call
         names = assigned_names(call)
         if not names:
             return None
+        call_scope = containing_function(call)
+        tainted_names, tainted_returns = propagate_taint({(call_scope, name) for name in names})
+
+        assertion_field = assertion_json_field()
+        if assertion_field is not None:
+            field_name, _field_value = assertion_field
+            field_names: set[tuple[ast.AST | None, str]] = set()
+            for assignment in assignments:
+                value = assignment.value
+                if not isinstance(value, ast.Dict):
+                    continue
+                matching_values = [
+                    child
+                    for key, child in zip(value.keys, value.values, strict=True)
+                    if isinstance(key, ast.Constant) and key.value == field_name
+                ]
+                if not any(
+                    expression_is_tainted(
+                        child,
+                        tainted_names=tainted_names,
+                        tainted_returns=tainted_returns,
+                    )
+                    for child in matching_values
+                ):
+                    continue
+                targets = (
+                    assignment.targets
+                    if isinstance(assignment, ast.Assign)
+                    else [assignment.target]
+                )
+                scope = containing_function(assignment)
+                field_names.update((scope, name) for name in stored_names(targets))
+            if not field_names:
+                return None
+            tainted_names, tainted_returns = propagate_taint(field_names)
+
         for candidate in ast.walk(tree):
             if (
                 isinstance(candidate, ast.Name)
                 and isinstance(candidate.ctx, ast.Load)
-                and candidate.id in names
+                and (containing_function(candidate), candidate.id) in tainted_names
             ):
                 sink = observable_sink(candidate)
-                if sink is not None:
+                if sink_matches_assertion_source(sink):
+                    assert sink is not None
+                    return sink, candidate
+            if isinstance(candidate, ast.Call) and local_function(candidate) in tainted_returns:
+                sink = observable_sink(candidate)
+                if sink_matches_assertion_source(sink):
+                    assert sink is not None
                     return sink, candidate
         return None
 
@@ -3775,7 +4552,7 @@ def _harness_mechanism_touches(
         expression = _dotted_expression(node.func)
         if expression is None:
             continue
-        resolved = _resolved_call_expression(expression, aliases)
+        resolved = _resolved_call_expression(expression, import_aliases_at(node))
         for symbol in mechanism_symbols:
             source_path = symbol_paths.get(symbol)
             if source_path is None:
@@ -3785,14 +4562,9 @@ def _harness_mechanism_touches(
                 linked = linked_sink(node)
                 sink = linked[0] if linked is not None else None
                 dynamic_node = linked[1] if linked is not None else None
-                source_matches = (
-                    (assertion_source == "combined" and sink in {"stdout", "stderr"})
-                    or sink == assertion_source
-                    or (assertion_source == "exit_code" and sink in {"exit_code", "stderr"})
-                )
                 if (
                     sink is not None
-                    and source_matches
+                    and sink_matches_assertion_source(sink)
                     and dynamic_node is not None
                     and not asserted_value_is_hard_coded(dynamic_node)
                 ):
@@ -3949,6 +4721,26 @@ def _experiment_consumer_identity(
     # being manufactured by adding more temporary probes.
     if harness_path is not None:
         return {"kind": "research_harness", "entrypoint": harness_path}
+    authorization = replay.get("command_authorization")
+    executed_argv = replay.get("executed_argv")
+    authorized_entrypoint = (
+        _text(authorization.get("entrypoint_path"))
+        if isinstance(authorization, Mapping)
+        and isinstance(executed_argv, list)
+        and all(isinstance(argument, str) for argument in executed_argv)
+        and _command_authorization_attested(authorization, argv=executed_argv)
+        else None
+    )
+    if (
+        authorized_entrypoint is not None
+        and authorized_entrypoint.replace("\\", "/").removeprefix("./").startswith(
+            ".usertest_research/"
+        )
+    ):
+        return {
+            "kind": "research_harness",
+            "entrypoint": authorized_entrypoint.replace("\\", "/").removeprefix("./"),
+        }
     if isinstance(mechanism_link, dict):
         entrypoint = _text(mechanism_link.get("entrypoint"))
         if entrypoint is not None:
@@ -4142,6 +4934,289 @@ def _repository_test_semantic_assertions(
     )
 
 
+def _retained_research_helper_flows(
+    *,
+    content: str,
+    selected_name: str,
+    selected_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    functions: Mapping[str, ast.FunctionDef | ast.AsyncFunctionDef],
+    module_aliases: dict[str, str],
+    mechanism_symbols: list[str],
+    symbol_paths: dict[str, str],
+    observable_assertion: Mapping[str, Any],
+) -> list[dict[str, Any]]:
+    """Bind a selected test input through one local helper to production output.
+
+    This route exists only for runner-attested research pytest harnesses.  It is
+    intentionally narrower than general Python data-flow: the selected test must
+    assign one helper result, assert on it, and expose it to the declared sink; the
+    helper must return the production call (directly or through one immutable local),
+    and the changed helper parameter must be a direct mechanism-call argument.
+    """
+
+    parents = {
+        child: parent
+        for parent in ast.walk(ast.Module(body=list(functions.values()), type_ignores=[]))
+        for child in ast.iter_child_nodes(parent)
+    }
+    selected_scope = _FunctionScopeVisitor(selected_node)
+    selected_scope.visit(selected_node)
+    targets_by_symbol = {
+        symbol: _mechanism_call_targets(symbol=symbol, source_path=symbol_paths[symbol])
+        for symbol in mechanism_symbols
+        if symbol in symbol_paths
+    }
+
+    def simple_assignment_name(call: ast.Call) -> str | None:
+        parent = parents.get(call)
+        if (
+            isinstance(parent, ast.Assign)
+            and parent.value is call
+            and len(parent.targets) == 1
+            and isinstance(parent.targets[0], ast.Name)
+        ):
+            return parent.targets[0].id
+        if (
+            isinstance(parent, ast.AnnAssign)
+            and parent.value is call
+            and isinstance(parent.target, ast.Name)
+        ):
+            return parent.target.id
+        return None
+
+    def assigned_count(node: ast.AST, name: str) -> int:
+        return sum(
+            1
+            for candidate in ast.walk(node)
+            if isinstance(candidate, ast.Name)
+            and isinstance(candidate.ctx, ast.Store)
+            and candidate.id == name
+        )
+
+    def loaded(node: ast.AST, name: str) -> bool:
+        return any(
+            isinstance(candidate, ast.Name)
+            and isinstance(candidate.ctx, ast.Load)
+            and candidate.id == name
+            for candidate in ast.walk(node)
+        )
+
+    def observable_sink_receipt(name: str) -> dict[str, Any] | None:
+        source = str(observable_assertion.get("source") or "")
+        for candidate in ast.walk(selected_node):
+            if not isinstance(candidate, ast.Call) or not loaded(candidate, name):
+                continue
+            expression = (_dotted_expression(candidate.func) or "").casefold()
+            sink: str | None = None
+            if expression in {"print", "builtins.print"}:
+                sink = "stdout"
+                for keyword in candidate.keywords:
+                    if keyword.arg == "file" and (
+                        _dotted_expression(keyword.value) or ""
+                    ).casefold() == "sys.stderr":
+                        sink = "stderr"
+            elif expression in {"sys.exit", "exit", "builtins.exit"}:
+                sink = "exit_code"
+            if not (
+                sink == source
+                or source == "combined" and sink in {"stdout", "stderr"}
+                or source == "exit_code" and sink == "exit_code"
+            ):
+                continue
+            projection = ast.dump(candidate, annotate_fields=True, include_attributes=False)
+            return {
+                "source": sink,
+                "line": candidate.lineno,
+                "sink_ast_sha256": sha256(projection.encode("utf-8")).hexdigest(),
+            }
+        if source == "exit_code":
+            assertion = next(
+                (
+                    candidate
+                    for candidate in ast.walk(selected_node)
+                    if isinstance(candidate, ast.Assert) and loaded(candidate.test, name)
+                ),
+                None,
+            )
+            if assertion is not None:
+                projection = ast.dump(
+                    assertion.test,
+                    annotate_fields=True,
+                    include_attributes=False,
+                )
+                return {
+                    "source": "exit_code",
+                    "line": assertion.lineno,
+                    "sink_ast_sha256": sha256(projection.encode("utf-8")).hexdigest(),
+                }
+        return None
+
+    def returned_mechanism_calls(
+        helper_name: str,
+        helper_node: ast.FunctionDef | ast.AsyncFunctionDef,
+    ) -> list[dict[str, Any]]:
+        helper_scope = _FunctionScopeVisitor(helper_node)
+        helper_scope.visit(helper_node)
+        aliases = {**module_aliases, **helper_scope.aliases}
+        for bound_name in helper_scope.bound_names - set(helper_scope.aliases):
+            aliases.pop(bound_name, None)
+        positional_parameters = [
+            *helper_node.args.posonlyargs,
+            *helper_node.args.args,
+        ]
+        parameter_names = {
+            parameter.arg
+            for parameter in [*positional_parameters, *helper_node.args.kwonlyargs]
+        }
+        result: list[dict[str, Any]] = []
+        for call in helper_scope.calls:
+            expression = _dotted_expression(call.func)
+            if expression is None:
+                continue
+            resolved = _resolved_call_expression(expression, aliases)
+            symbols = [
+                symbol
+                for symbol, targets in targets_by_symbol.items()
+                if expression in targets or resolved in targets
+            ]
+            if not symbols:
+                continue
+            returned = isinstance(parents.get(call), ast.Return)
+            assigned_name = simple_assignment_name(call)
+            if assigned_name is not None:
+                returned = assigned_count(helper_node, assigned_name) == 1 and any(
+                    isinstance(candidate, ast.Return)
+                    and isinstance(candidate.value, ast.Name)
+                    and candidate.value.id == assigned_name
+                    for candidate in ast.walk(helper_node)
+                )
+            if not returned:
+                continue
+            bindings: list[dict[str, Any]] = []
+            for index, argument in enumerate(call.args):
+                if isinstance(argument, ast.Name) and argument.id in parameter_names:
+                    bindings.append(
+                        {
+                            "parameter": argument.id,
+                            "mechanism_slot": f"positional:{index}",
+                        }
+                    )
+            for keyword in call.keywords:
+                if (
+                    keyword.arg is not None
+                    and isinstance(keyword.value, ast.Name)
+                    and keyword.value.id in parameter_names
+                ):
+                    bindings.append(
+                        {
+                            "parameter": keyword.value.id,
+                            "mechanism_slot": f"keyword:{keyword.arg}",
+                        }
+                    )
+            if not bindings:
+                continue
+            result.append(
+                {
+                    "helper_function": helper_name,
+                    "mechanism_symbols": symbols,
+                    "mechanism_call_line": call.lineno,
+                    "parameter_bindings": bindings,
+                }
+            )
+        return result
+
+    flows: list[dict[str, Any]] = []
+    for call in selected_scope.calls:
+        expression = _dotted_expression(call.func)
+        helper_name = _local_test_function_name(
+            expression,
+            current_function=selected_name,
+            functions=functions,
+            shadowed_names=selected_scope.bound_names,
+        )
+        if helper_name is None:
+            continue
+        helper_node = functions[helper_name]
+        mechanism_calls = returned_mechanism_calls(helper_name, helper_node)
+        if len(mechanism_calls) != 1:
+            continue
+        result_name = simple_assignment_name(call)
+        if result_name is None or assigned_count(selected_node, result_name) != 1:
+            continue
+        assertions = [
+            candidate
+            for candidate in ast.walk(selected_node)
+            if isinstance(candidate, ast.Assert) and loaded(candidate.test, result_name)
+        ]
+        sink = observable_sink_receipt(result_name)
+        if not assertions or sink is None:
+            continue
+        arguments, arguments_complete = _call_argument_receipts(call, content=content)
+        if not arguments_complete:
+            continue
+        positional_parameters = [
+            *helper_node.args.posonlyargs,
+            *helper_node.args.args,
+        ]
+        caller_slots: dict[str, str] = {
+            f"positional:{index}": parameter.arg
+            for index, parameter in enumerate(positional_parameters)
+        }
+        caller_slots.update(
+            {
+                f"keyword:{parameter.arg}": parameter.arg
+                for parameter in [*positional_parameters, *helper_node.args.kwonlyargs]
+            }
+        )
+        downstream = mechanism_calls[0]
+        bound_parameters = {
+            str(binding["parameter"])
+            for binding in downstream["parameter_bindings"]
+        }
+        helper_parameter_bindings = [
+            {
+                "helper_call_slot": str(argument["slot"]),
+                "parameter": caller_slots[str(argument["slot"])],
+                "mechanism_slots": sorted(
+                    str(binding["mechanism_slot"])
+                    for binding in downstream["parameter_bindings"]
+                    if binding["parameter"] == caller_slots[str(argument["slot"])]
+                ),
+            }
+            for argument in arguments
+            if str(argument["slot"]) in caller_slots
+            and caller_slots[str(argument["slot"])] in bound_parameters
+        ]
+        if not helper_parameter_bindings:
+            continue
+        flows.append(
+            {
+                "helper_function": helper_name,
+                "helper_call_line": call.lineno,
+                "helper_call_arguments": arguments,
+                "helper_parameter_bindings": helper_parameter_bindings,
+                "mechanism_symbols": downstream["mechanism_symbols"],
+                "mechanism_call_line": downstream["mechanism_call_line"],
+                "result_local": result_name,
+                "semantic_assertions": [
+                    {
+                        "line": assertion.lineno,
+                        "assertion_ast_sha256": sha256(
+                            ast.dump(
+                                assertion.test,
+                                annotate_fields=True,
+                                include_attributes=False,
+                            ).encode("utf-8")
+                        ).hexdigest(),
+                    }
+                    for assertion in assertions
+                ],
+                "observable_sink": sink,
+            }
+        )
+    return flows
+
+
 def _pytest_test_selection_receipt(
     *,
     hypothesis_id: str,
@@ -4163,21 +5238,55 @@ def _pytest_test_selection_receipt(
     ):
         errors.append(f"causal_control_command_unverified:{hypothesis_id}:{experiment_id}")
         return None
-    selection = _exact_pytest_selector(executed_argv)
+    selection = _exact_pytest_selector(
+        executed_argv,
+        allow_research_harness=True,
+    )
     if selection is None:
         errors.append(
             f"causal_control_exact_pytest_selector_required:{hypothesis_id}:{experiment_id}"
         )
         return None
     test_path, selector_parts = selection
-    path = (planning_workspace / test_path).resolve()
-    if not _within(path, planning_workspace.resolve()) or not path.is_file() or path.is_symlink():
+    is_research_harness = (
+        bool(PurePosixPath(test_path).parts)
+        and PurePosixPath(test_path).parts[0] == ".usertest_research"
+    )
+    research_workspace_raw = _text(replay.get("workspace_dir"))
+    research_workspace = (
+        Path(research_workspace_raw).resolve()
+        if is_research_harness and research_workspace_raw is not None
+        else None
+    )
+    content_workspace = research_workspace or planning_workspace.resolve()
+    path = (content_workspace / test_path).resolve()
+    if (
+        not _within(path, content_workspace)
+        or not path.is_file()
+        or path.is_symlink()
+    ):
         errors.append(
             f"causal_control_test_file_unavailable:{hypothesis_id}:{experiment_id}:{test_path}"
         )
         return None
     git_blob_sha = _git_blob_sha(planning_workspace, test_path)
-    if git_blob_sha is None:
+    research_provenance = (
+        _attested_research_pytest_entrypoint(
+            test_path=test_path,
+            path=path,
+            replay=replay,
+            executed_argv=executed_argv,
+        )
+        if is_research_harness
+        else None
+    )
+    if is_research_harness and research_provenance is None:
+        errors.append(
+            f"causal_control_research_harness_unattested:"
+            f"{hypothesis_id}:{experiment_id}:{test_path}"
+        )
+        return None
+    if not is_research_harness and git_blob_sha is None:
         errors.append(
             f"causal_control_test_file_not_in_baseline:{hypothesis_id}:{experiment_id}:{test_path}"
         )
@@ -4270,6 +5379,24 @@ def _pytest_test_selection_receipt(
         mechanism_symbols=mechanism_symbols,
         symbol_paths=symbol_paths,
     )
+    retained_research_helper_flows = (
+        _retained_research_helper_flows(
+            content=content,
+            selected_name=selected_name,
+            selected_node=selected_node,
+            functions=functions,
+            module_aliases=module_aliases,
+            mechanism_symbols=mechanism_symbols,
+            symbol_paths=symbol_paths,
+            observable_assertion=(
+                experiment["observable_assertion"]
+                if isinstance(experiment.get("observable_assertion"), Mapping)
+                else {}
+            ),
+        )
+        if research_provenance is not None
+        else []
+    )
     return {
         "selection_id": f"{hypothesis_id}:{experiment_id}",
         "hypothesis_id": hypothesis_id,
@@ -4280,6 +5407,11 @@ def _pytest_test_selection_receipt(
         "test_path": test_path,
         "test_file_sha256": _sha256_path(path),
         "test_file_git_blob_sha": git_blob_sha,
+        "test_file_provenance": (
+            research_provenance
+            if research_provenance is not None
+            else {"provenance_kind": "baseline_repository_test"}
+        ),
         "selector": "::".join(selector_parts),
         "selector_parts": selector_parts,
         "test_function": selected_name,
@@ -4290,6 +5422,7 @@ def _pytest_test_selection_receipt(
         "reachable_functions": [name for name, _ in reachable],
         "mechanism_touches": mechanism_touches,
         "semantic_assertions": semantic_assertions,
+        "retained_research_helper_flows": retained_research_helper_flows,
     }
 
 
@@ -4305,6 +5438,117 @@ def _mechanism_calls_by_symbol(selection: dict[str, Any]) -> dict[str, list[dict
         if symbol is not None and isinstance(calls_raw, list):
             calls_by_symbol[symbol] = [call for call in calls_raw if isinstance(call, dict)]
     return calls_by_symbol
+
+
+def _shared_helper_controlled_difference(
+    *,
+    mechanism_symbols: list[str],
+    support_selection: Mapping[str, Any],
+    control_selection: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Prove one causal input delta through the same attested research helper."""
+
+    provenances = (
+        support_selection.get("test_file_provenance"),
+        control_selection.get("test_file_provenance"),
+    )
+    if not all(
+        isinstance(provenance, Mapping)
+        and provenance.get("provenance_kind") == "retained_research_harness"
+        for provenance in provenances
+    ):
+        return None
+    support_flows_raw = support_selection.get("retained_research_helper_flows")
+    control_flows_raw = control_selection.get("retained_research_helper_flows")
+    support_flows = support_flows_raw if isinstance(support_flows_raw, list) else []
+    control_flows = control_flows_raw if isinstance(control_flows_raw, list) else []
+    if (
+        len(support_flows) != 1
+        or len(control_flows) != 1
+        or not isinstance(support_flows[0], Mapping)
+        or not isinstance(control_flows[0], Mapping)
+    ):
+        return None
+    support = support_flows[0]
+    control = control_flows[0]
+    if (
+        support.get("helper_function") != control.get("helper_function")
+        or support_selection.get("test_file_sha256")
+        != control_selection.get("test_file_sha256")
+        or set(support.get("mechanism_symbols", [])) != set(mechanism_symbols)
+        or set(control.get("mechanism_symbols", [])) != set(mechanism_symbols)
+        or not support.get("semantic_assertions")
+        or not control.get("semantic_assertions")
+        or not isinstance(support.get("observable_sink"), Mapping)
+        or not isinstance(control.get("observable_sink"), Mapping)
+    ):
+        return None
+    support_arguments = {
+        str(argument.get("slot")): argument
+        for argument in support.get("helper_call_arguments", [])
+        if isinstance(argument, Mapping) and _text(argument.get("slot")) is not None
+    }
+    control_arguments = {
+        str(argument.get("slot")): argument
+        for argument in control.get("helper_call_arguments", [])
+        if isinstance(argument, Mapping) and _text(argument.get("slot")) is not None
+    }
+    if set(support_arguments) != set(control_arguments):
+        return None
+    changed_slots = [
+        slot
+        for slot in sorted(support_arguments)
+        if support_arguments[slot].get("ast_sha256")
+        != control_arguments[slot].get("ast_sha256")
+    ]
+    if len(changed_slots) != 1:
+        return None
+    changed_slot = changed_slots[0]
+
+    def binding_for(flow: Mapping[str, Any]) -> Mapping[str, Any] | None:
+        matches = [
+            binding
+            for binding in flow.get("helper_parameter_bindings", [])
+            if isinstance(binding, Mapping)
+            and binding.get("helper_call_slot") == changed_slot
+        ]
+        return matches[0] if len(matches) == 1 else None
+
+    support_binding = binding_for(support)
+    control_binding = binding_for(control)
+    if (
+        support_binding is None
+        or control_binding is None
+        or support_binding.get("parameter") != control_binding.get("parameter")
+        or support_binding.get("mechanism_slots") != control_binding.get("mechanism_slots")
+        or not support_binding.get("mechanism_slots")
+    ):
+        return None
+    return {
+        "verification_method": "python_ast_shared_helper_parameter_delta_v1",
+        "difference_count": 1,
+        "difference": {
+            "helper_function": support.get("helper_function"),
+            "helper_parameter": support_binding.get("parameter"),
+            "helper_call_slot": changed_slot,
+            "mechanism_symbols": mechanism_symbols,
+            "mechanism_slots": support_binding.get("mechanism_slots"),
+            "support_argument": support_arguments[changed_slot],
+            "control_argument": control_arguments[changed_slot],
+            "support_assertion_sha256s": sorted(
+                str(assertion.get("assertion_ast_sha256"))
+                for assertion in support.get("semantic_assertions", [])
+                if isinstance(assertion, Mapping)
+            ),
+            "control_assertion_sha256s": sorted(
+                str(assertion.get("assertion_ast_sha256"))
+                for assertion in control.get("semantic_assertions", [])
+                if isinstance(assertion, Mapping)
+            ),
+            "support_observable_sink": support.get("observable_sink"),
+            "control_observable_sink": control.get("observable_sink"),
+        },
+    }
 
 
 def _structural_controlled_difference(
@@ -4376,6 +5620,14 @@ def _structural_controlled_difference(
                     "control_argument": control_argument,
                 }
             )
+    if not differences:
+        helper_difference = _shared_helper_controlled_difference(
+            mechanism_symbols=mechanism_symbols,
+            support_selection=support_selection,
+            control_selection=control_selection,
+        )
+        if helper_difference is not None:
+            return helper_difference
     if len(differences) != 1:
         errors.append(
             f"causal_control_requires_exactly_one_structural_difference:"
@@ -4789,6 +6041,109 @@ def _structured_argv_intervention_difference(
     }
 
 
+def _retained_harness_replay_context(
+    replay: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Project the material, workspace-independent context of a clean replay."""
+
+    setup = replay.get("replay_setup_receipt")
+    if not isinstance(setup, Mapping) or setup.get("runner_applied") is not True:
+        return None
+    setup_projection = {key: value for key, value in setup.items() if key != "replay_setup_sha256"}
+    setup_sha256 = setup.get("replay_setup_sha256")
+    if setup_sha256 != _canonical_json_sha256(setup_projection):
+        return None
+
+    isolation = replay.get("execution_isolation")
+    metadata = replay.get("execution_metadata")
+    if not isinstance(isolation, Mapping) or not isinstance(metadata, Mapping):
+        return None
+    executor = _text(isolation.get("executor"))
+    platform_name = _text(isolation.get("platform"))
+    network = _text(isolation.get("network"))
+    filesystem_isolation = _text(isolation.get("filesystem_isolation"))
+    trust_decision = _text(isolation.get("trust_decision"))
+    environment_keys = isolation.get("sanitized_environment_keys")
+    if (
+        executor is None
+        or platform_name is None
+        or network is None
+        or filesystem_isolation is None
+        or trust_decision is None
+        or not isinstance(isolation.get("os_sandbox"), bool)
+        or metadata.get("executor") != executor
+        or not isinstance(environment_keys, list)
+        or any(not isinstance(key, str) or not key for key in environment_keys)
+    ):
+        return None
+
+    environment = replay_environment_attestation(replay)
+    if environment is None:
+        return None
+    environment_variables = environment.get("variables")
+    if not isinstance(environment_variables, Mapping):
+        return None
+    setup_environment = setup.get("environment")
+    if not isinstance(setup_environment, Mapping) or any(
+        environment_variables.get(key) != value for key, value in setup_environment.items()
+    ):
+        return None
+
+    repository_import = metadata.get("repository_python_import")
+    if not isinstance(repository_import, Mapping):
+        return None
+    import_projection = {
+        key: value
+        for key, value in repository_import.items()
+        if key != "repository_python_import_sha256"
+    }
+    if repository_import.get("repository_python_import_sha256") != _canonical_json_sha256(
+        import_projection
+    ):
+        return None
+    source_roots = repository_import.get("source_roots")
+    import_applied = repository_import.get("runner_applied")
+    pythonpath = environment_variables.get("PYTHONPATH")
+    if (
+        repository_import.get("schema_version") != 1
+        or not isinstance(import_applied, bool)
+        or not isinstance(source_roots, list)
+        or any(not isinstance(path, str) or not path for path in source_roots)
+        or not isinstance(pythonpath, Mapping)
+        or pythonpath.get("present") is not import_applied
+        or (
+            import_applied
+            and pythonpath.get("value_sha256") != repository_import.get("pythonpath_value_sha256")
+        )
+    ):
+        return None
+
+    # PYTHONPATH necessarily contains the isolated workspace's absolute path on
+    # trusted-host replays. Its attested value is validated above, then compared
+    # through the workspace-independent source-root projection.
+    effective_environment = {
+        key: value for key, value in environment_variables.items() if key != "PYTHONPATH"
+    }
+    return {
+        "replay_setup_sha256": setup_sha256,
+        "effective_environment": effective_environment,
+        "repository_python_import": {
+            "schema_version": repository_import.get("schema_version"),
+            "runner_applied": import_applied,
+            "source_roots": list(source_roots),
+        },
+        "execution_boundary": {
+            "executor": executor,
+            "platform": platform_name.casefold(),
+            "os_sandbox": isolation.get("os_sandbox"),
+            "network": network,
+            "filesystem_isolation": filesystem_isolation,
+            "trust_decision": trust_decision,
+            "sanitized_environment_keys": sorted(set(environment_keys)),
+        },
+    }
+
+
 def _retained_harness_scalar_argv_difference(
     *,
     baseline_replay: dict[str, Any],
@@ -4841,19 +6196,39 @@ def _retained_harness_scalar_argv_difference(
         or any(character in baseline_value + challenge_value for character in ("/", "\\", "\n"))
     ):
         return None
-    workspace_raw = _text(baseline_replay.get("workspace_dir"))
-    if workspace_raw is None or workspace_raw != _text(challenge_replay.get("workspace_dir")):
+    baseline_workspace_raw = _text(baseline_replay.get("workspace_dir"))
+    challenge_workspace_raw = _text(challenge_replay.get("workspace_dir"))
+    if baseline_workspace_raw is None or challenge_workspace_raw is None:
         return None
-    workspace = Path(workspace_raw).resolve()
-    harness_path = (workspace / baseline_harness).resolve()
-    if (
-        not _within(harness_path, workspace)
-        or not harness_path.is_file()
-        or harness_path.is_symlink()
+    baseline_workspace = Path(baseline_workspace_raw).resolve()
+    challenge_workspace = Path(challenge_workspace_raw).resolve()
+    baseline_harness_path = (baseline_workspace / baseline_harness).resolve()
+    challenge_harness_path = (challenge_workspace / challenge_harness).resolve()
+    for workspace, harness_path in (
+        (baseline_workspace, baseline_harness_path),
+        (challenge_workspace, challenge_harness_path),
     ):
+        if (
+            not _within(harness_path, workspace)
+            or not harness_path.is_file()
+            or harness_path.is_symlink()
+        ):
+            return None
+    baseline_harness_sha256 = _sha256_path(baseline_harness_path)
+    if baseline_harness_sha256 != _sha256_path(challenge_harness_path):
         return None
+    baseline_context = _retained_harness_replay_context(baseline_replay)
+    challenge_context = _retained_harness_replay_context(challenge_replay)
+    if baseline_context is None or baseline_context != challenge_context:
+        return None
+    if baseline_workspace != challenge_workspace:
+        for seal_field in ("workspace_head", "overlay_manifest_sha256"):
+            baseline_seal = _text(baseline_replay.get(seal_field))
+            challenge_seal = _text(challenge_replay.get(seal_field))
+            if baseline_seal is None or baseline_seal != challenge_seal:
+                return None
     try:
-        content = harness_path.read_text(encoding="utf-8", errors="strict")
+        content = baseline_harness_path.read_text(encoding="utf-8", errors="strict")
         tree = ast.parse(content)
     except (OSError, UnicodeDecodeError, SyntaxError):
         return None
@@ -4941,7 +6316,9 @@ def _retained_harness_scalar_argv_difference(
             "baseline_value_sha256": _canonical_json_sha256(baseline_value),
             "challenge_value_sha256": _canonical_json_sha256(challenge_value),
             "harness_path": baseline_harness,
-            "harness_sha256": _sha256_path(harness_path),
+            "harness_sha256": baseline_harness_sha256,
+            "workspace_head": baseline_replay.get("workspace_head"),
+            "overlay_manifest_sha256": baseline_replay.get("overlay_manifest_sha256"),
             "mechanism_argument_bindings": bindings,
         },
     }
@@ -6007,6 +7384,304 @@ def _rooted_support_connectivity(
     return connected_supports, best_symbols, support_connectivity, disconnected
 
 
+def _python_harness_scan_roots(
+    tree: ast.Module,
+    *,
+    relative_path: str,
+    executed_argv: Sequence[str],
+) -> list[ast.AST]:
+    """Limit pytest harness inspection to the selected test and its local helpers."""
+
+    selection = _exact_pytest_selector(list(executed_argv))
+    if selection is None:
+        normalized_relative = _normalize_path(relative_path)
+        selector_candidates: list[list[str]] = []
+        for argument in executed_argv:
+            path_token, separator, selector = argument.partition("::")
+            if (
+                separator
+                and _normalize_path(path_token) == normalized_relative
+                and selector
+                and "[" not in selector
+                and "]" not in selector
+            ):
+                selector_candidates.append(selector.split("::"))
+        if len(selector_candidates) == 1:
+            selection = (relative_path, selector_candidates[0])
+    if selection is None:
+        return [tree]
+    selected_path, selector_parts = selection
+    if _normalize_path(selected_path) != _normalize_path(relative_path):
+        return [tree]
+    functions = _test_module_functions(tree)
+    selected_name = ".".join(selector_parts)
+    selected = functions.get(selected_name)
+    if selected is None:
+        return []
+    return [node for _name, node in _reachable_test_functions(
+        selected_name=selected_name,
+        selected_node=selected,
+        functions=functions,
+    )]
+
+
+def _local_harness_module_edges(
+    *,
+    tree: ast.Module,
+    scan_roots: Sequence[ast.AST],
+    source_path: str,
+    source_sha256: str,
+    workspace: Path,
+) -> list[tuple[str, dict[str, Any]]]:
+    """Resolve explicit sibling-module loads from an authenticated Python harness.
+
+    The retained maintenance probes use ``Path(__file__).with_name(...)`` with
+    ``importlib``.  This is a normal Python harness shape, not evidence by itself;
+    the returned edge only lets the verifier continue inspecting the exact local
+    module that the selected harness references.
+    """
+
+    aliases = _module_import_aliases(tree)
+    discovered: dict[str, dict[str, Any]] = {}
+    for root in scan_roots:
+        for node in ast.walk(root):
+            if (
+                not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Attribute)
+                or node.func.attr != "with_name"
+                or len(node.args) != 1
+                or not isinstance(node.args[0], ast.Constant)
+                or not isinstance(node.args[0].value, str)
+            ):
+                continue
+            base = node.func.value
+            if (
+                not isinstance(base, ast.Call)
+                or len(base.args) != 1
+                or not isinstance(base.args[0], ast.Name)
+                or base.args[0].id != "__file__"
+            ):
+                continue
+            constructor = _dotted_expression(base.func)
+            resolved_constructor = (
+                _resolved_call_expression(constructor, aliases)
+                if constructor is not None
+                else None
+            )
+            if constructor not in {"Path", "pathlib.Path"} and resolved_constructor != (
+                "pathlib.Path"
+            ):
+                continue
+            filename = node.args[0].value.replace("\\", "/")
+            name = PurePosixPath(filename)
+            if name.name != filename or name.suffix.casefold() != ".py":
+                continue
+            target_relative = (PurePosixPath(source_path).parent / name).as_posix()
+            if not target_relative.startswith(".usertest_research/"):
+                continue
+            target = (workspace / Path(*PurePosixPath(target_relative).parts)).resolve()
+            if (
+                not _within(target, workspace)
+                or not target.is_file()
+                or target.is_symlink()
+            ):
+                continue
+            target_sha256 = _sha256_path(target)
+            edge = content_bound_payload(
+                {
+                    "edge_kind": "python_local_module_reference",
+                    "source_path": source_path,
+                    "source_sha256": source_sha256,
+                    "target_path": target_relative,
+                    "target_sha256": target_sha256,
+                    "reference_ast_sha256": sha256(
+                        ast.dump(
+                            node,
+                            annotate_fields=True,
+                            include_attributes=False,
+                        ).encode("utf-8")
+                    ).hexdigest(),
+                    "runner_attested": True,
+                },
+                hash_field="dependency_edge_sha256",
+            )
+            discovered[target_relative] = edge
+    return [(path, discovered[path]) for path in sorted(discovered)]
+
+
+def _research_harness_dependency_edges(
+    replay: Mapping[str, Any],
+    *,
+    implementation_touchpoints: Sequence[Mapping[str, Any]],
+) -> list[dict[str, Any]]:
+    """Bind an executed Python research harness to inspected production symbols.
+
+    Relationship prose is deliberately absent.  Every accepted edge is derived
+    from the content-hashed executed entrypoint, optional content-hashed local
+    harness modules, and an exact AST reference to a runner-attested touchpoint
+    symbol.  This proves a dependency edge while preserving the honest consumer
+    identity as a research harness.  The current analyzer is intentionally
+    Python-only.  Other runtimes remain research harnesses, retain their other
+    proof receipts, and report ``proof_adapter_harness_dependency_unverified``;
+    they cannot establish an evidence-sufficient mechanism from this adapter
+    alone until a runtime-specific authenticated edge or another proof route is
+    available.
+    """
+
+    authorization = replay.get("command_authorization")
+    argv = replay.get("executed_argv")
+    workspace_raw = _text(replay.get("workspace_dir"))
+    if (
+        not isinstance(authorization, Mapping)
+        or not isinstance(argv, list)
+        or any(not isinstance(argument, str) for argument in argv)
+        or workspace_raw is None
+    ):
+        return []
+    entrypoint = _text(authorization.get("entrypoint_path"))
+    entrypoint_sha256 = _text(authorization.get("entrypoint_sha256"))
+    if (
+        entrypoint is None
+        or entrypoint_sha256 is None
+        or not entrypoint.replace("\\", "/").startswith(".usertest_research/")
+        or _text(authorization.get("artifact_id")) is None
+    ):
+        return []
+    workspace = Path(workspace_raw).resolve()
+    entrypoint_path = (workspace / Path(*PurePosixPath(entrypoint).parts)).resolve()
+    if (
+        not _within(entrypoint_path, workspace)
+        or not entrypoint_path.is_file()
+        or entrypoint_path.is_symlink()
+        or _sha256_path(entrypoint_path) != entrypoint_sha256
+    ):
+        return []
+
+    pending: list[tuple[str, list[dict[str, Any]]]] = [(entrypoint, [])]
+    visited: set[str] = set()
+    sources: list[tuple[str, str, ast.Module, list[ast.AST], list[dict[str, Any]]]] = []
+    while pending:
+        relative, chain = pending.pop(0)
+        if relative in visited:
+            continue
+        visited.add(relative)
+        path = (workspace / Path(*PurePosixPath(relative).parts)).resolve()
+        if not _within(path, workspace) or not path.is_file() or path.is_symlink():
+            continue
+        try:
+            content = path.read_text(encoding="utf-8", errors="strict")
+            tree = ast.parse(content)
+        except (OSError, UnicodeDecodeError, SyntaxError):
+            continue
+        content_sha256 = _sha256_path(path)
+        scan_roots = (
+            _python_harness_scan_roots(
+                tree,
+                relative_path=relative,
+                executed_argv=argv,
+            )
+            if relative == entrypoint
+            else [tree]
+        )
+        sources.append((relative, content_sha256, tree, scan_roots, chain))
+        for target_relative, local_edge in _local_harness_module_edges(
+            tree=tree,
+            scan_roots=scan_roots,
+            source_path=relative,
+            source_sha256=content_sha256,
+            workspace=workspace,
+        ):
+            pending.append((target_relative, [*chain, local_edge]))
+
+    edges: list[dict[str, Any]] = []
+    for touchpoint in implementation_touchpoints:
+        touchpoint_id = _text(touchpoint.get("touchpoint_id"))
+        touchpoint_path = _text(touchpoint.get("path"))
+        symbols_raw = touchpoint.get("symbols")
+        symbols = (
+            sorted({str(symbol) for symbol in symbols_raw if _text(symbol) is not None})
+            if isinstance(symbols_raw, list)
+            else []
+        )
+        if (
+            touchpoint.get("runner_attested") is not True
+            or touchpoint_id is None
+            or touchpoint_path is None
+            or not symbols
+        ):
+            continue
+        matched: dict[str, Any] | None = None
+        for source_relative, source_sha256, tree, scan_roots, chain in sources:
+            aliases = _module_import_aliases(tree)
+            for root in scan_roots:
+                for node in ast.walk(root):
+                    reference_node: ast.AST | None = None
+                    reference_kind: str | None = None
+                    if isinstance(node, ast.Call):
+                        reference_node = node.func
+                        reference_kind = "python_symbol_call"
+                    elif isinstance(node, ast.Attribute):
+                        reference_node = node
+                        reference_kind = "python_symbol_reference"
+                    elif isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                        reference_node = node
+                        reference_kind = "python_symbol_reference"
+                    if reference_node is None or reference_kind is None:
+                        continue
+                    expression = _dotted_expression(reference_node)
+                    if expression is None:
+                        continue
+                    resolved = _resolved_call_expression(expression, aliases) or expression
+                    for symbol in symbols:
+                        targets = _mechanism_call_targets(
+                            symbol=symbol,
+                            source_path=touchpoint_path,
+                        )
+                        if expression not in targets and resolved not in targets:
+                            continue
+                        matched = content_bound_payload(
+                            {
+                                "edge_kind": "authenticated_python_harness_dependency",
+                                "entrypoint_path": entrypoint,
+                                "entrypoint_sha256": entrypoint_sha256,
+                                "source_path": source_relative,
+                                "source_sha256": source_sha256,
+                                "local_dependency_chain": chain,
+                                "touchpoint_id": touchpoint_id,
+                                "touchpoint_path": touchpoint_path.replace("\\", "/"),
+                                "touchpoint_symbol": symbol,
+                                "reference_kind": reference_kind,
+                                "resolved_reference": resolved,
+                                "reference_ast_sha256": sha256(
+                                    ast.dump(
+                                        reference_node,
+                                        annotate_fields=True,
+                                        include_attributes=False,
+                                    ).encode("utf-8")
+                                ).hexdigest(),
+                                "runner_attested": True,
+                            },
+                            hash_field="dependency_edge_sha256",
+                        )
+                        break
+                    if matched is not None:
+                        break
+                if matched is not None:
+                    break
+            if matched is not None:
+                break
+        if matched is not None:
+            edges.append(matched)
+    return sorted(
+        edges,
+        key=lambda value: (
+            str(value.get("touchpoint_id")),
+            str(value.get("touchpoint_symbol")),
+            str(value.get("source_path")),
+        ),
+    )
+
+
 def _adapter_executed_consumer_receipt(
     proof: Mapping[str, Any],
     *,
@@ -6034,6 +7709,9 @@ def _adapter_executed_consumer_receipt(
         return None
 
     authorization_identity: dict[str, Any] | None = None
+    consumer_kind: str | None = None
+    attestation_basis: str | None = None
+    authenticated_dependency_edges: list[dict[str, Any]] | None = None
     invocations: list[dict[str, Any]] = []
     for experiment_id in experiment_ids:
         replay = clean_replays.get(str(experiment_id))
@@ -6045,19 +7723,78 @@ def _adapter_executed_consumer_receipt(
             or any(not isinstance(argument, str) or not argument for argument in argv)
             or not isinstance(authorization, Mapping)
             or command_authorization_errors(authorization, argv=argv)
-            or authorization.get("authorization_kind") == "attested_research_harness"
         ):
             return None
         current_identity = command_authorization_identity(authorization)
         entrypoint_path = _text(authorization.get("entrypoint_path"))
+        executed_research_paths = _executed_research_paths(argv)
+        normalized_entrypoint = (
+            _normalize_path(entrypoint_path) if entrypoint_path is not None else None
+        )
+        executed_harness_path = next(
+            (
+                path
+                for path in sorted(executed_research_paths)
+                if normalized_entrypoint == _normalize_path(path)
+            ),
+            None,
+        )
+        research_harness = executed_harness_path is not None or (
+            entrypoint_path is None and bool(executed_research_paths)
+        )
+        if research_harness and (
+            executed_harness_path is None
+            or _text(authorization.get("artifact_id")) is None
+            or _text(authorization.get("entrypoint_sha256")) is None
+        ):
+            # Repository bindings may authorize production inputs, but they must
+            # never disguise the temporary entrypoint that actually executed.
+            return None
+        if research_harness and isinstance(current_identity, dict):
+            current_identity = {
+                **current_identity,
+                "research_harness_entrypoint": {
+                    "entrypoint_path": entrypoint_path,
+                    "entrypoint_sha256": authorization.get("entrypoint_sha256"),
+                    "artifact_id": authorization.get("artifact_id"),
+                },
+            }
+        current_kind = (
+            "runner_observed_research_harness_consumer"
+            if research_harness
+            else "runner_observed_repository_consumer"
+        )
+        current_basis = (
+            "executed_research_harness_with_authenticated_production_dependency"
+            if research_harness
+            else "executed_entrypoint_and_inspected_change_surface"
+        )
         if not isinstance(current_identity, dict) or (
             entrypoint_path is not None
             and entrypoint_path.replace("\\", "/").startswith(".usertest_research/")
+            and not research_harness
         ):
             return None
+        if research_harness:
+            current_dependency_edges = _research_harness_dependency_edges(
+                replay,
+                implementation_touchpoints=implementation_touchpoints,
+            )
+            if not current_dependency_edges:
+                return None
+            if authenticated_dependency_edges is None:
+                authenticated_dependency_edges = current_dependency_edges
+            elif current_dependency_edges != authenticated_dependency_edges:
+                return None
         if authorization_identity is None:
             authorization_identity = current_identity
-        elif current_identity != authorization_identity:
+            consumer_kind = current_kind
+            attestation_basis = current_basis
+        elif (
+            current_identity != authorization_identity
+            or current_kind != consumer_kind
+            or current_basis != attestation_basis
+        ):
             return None
         invocations.append(
             {
@@ -6067,6 +7804,20 @@ def _adapter_executed_consumer_receipt(
             }
         )
 
+    connected_touchpoint_ids = (
+        {
+            str(edge["touchpoint_id"])
+            for edge in authenticated_dependency_edges
+            if _text(edge.get("touchpoint_id")) is not None
+        }
+        if authenticated_dependency_edges is not None
+        else {
+            str(touchpoint["touchpoint_id"])
+            for touchpoint in implementation_touchpoints
+            if isinstance(touchpoint, Mapping)
+            and _text(touchpoint.get("touchpoint_id")) is not None
+        }
+    )
     change_surfaces = sorted(
         [
             {
@@ -6084,25 +7835,40 @@ def _adapter_executed_consumer_receipt(
             for touchpoint in implementation_touchpoints
             if isinstance(touchpoint, Mapping)
             and _text(touchpoint.get("touchpoint_id")) is not None
+            and str(touchpoint.get("touchpoint_id")) in connected_touchpoint_ids
             and _text(touchpoint.get("path")) is not None
             and touchpoint.get("runner_attested") is True
         ],
         key=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")),
     )
-    if authorization_identity is None or not change_surfaces:
+    if (
+        authorization_identity is None
+        or consumer_kind is None
+        or attestation_basis is None
+        or not change_surfaces
+    ):
         return None
-    entrypoint = _text(authorization_identity.get("entrypoint_path")) or (
+    harness_anchor = authorization_identity.get("research_harness_entrypoint")
+    identity_entrypoint = (
+        _text(harness_anchor.get("entrypoint_path"))
+        if isinstance(harness_anchor, Mapping)
+        else _text(authorization_identity.get("entrypoint_path"))
+    )
+    entrypoint = identity_entrypoint or (
         "command_authorization:" + _canonical_json_sha256(authorization_identity)
     )
-    consumer_identity = content_bound_payload(
-        {
-            "kind": "runner_observed_repository_consumer",
+    consumer_projection: dict[str, Any] = {
+            "kind": consumer_kind,
             "entrypoint": entrypoint,
             "command_authorization_identity": authorization_identity,
             "change_surfaces": change_surfaces,
-            "attestation_basis": "executed_entrypoint_and_inspected_change_surface",
+            "attestation_basis": attestation_basis,
             "runner_attested": True,
-        },
+    }
+    if authenticated_dependency_edges is not None:
+        consumer_projection["authenticated_dependency_edges"] = authenticated_dependency_edges
+    consumer_identity = content_bound_payload(
+        consumer_projection,
         hash_field="consumer_identity_sha256",
     )
     intervention = proof.get("intervention")
@@ -6113,10 +7879,7 @@ def _adapter_executed_consumer_receipt(
             "consumer_identity": consumer_identity,
             "invocations": sorted(invocations, key=lambda value: str(value["experiment_id"])),
             "implementation_touchpoint_ids": sorted(
-                str(touchpoint["touchpoint_id"])
-                for touchpoint in implementation_touchpoints
-                if isinstance(touchpoint, Mapping)
-                and _text(touchpoint.get("touchpoint_id")) is not None
+                connected_touchpoint_ids
             ),
             "causal_target": causal_target,
             "runner_attested": True,
@@ -6502,6 +8265,33 @@ def _typed_mechanism_evidence_receipts(
                 atom_bindings=atom_bindings,
                 clean_replays=clean_replays,
             )
+            observations = proof.get("observations")
+            proof_experiment_ids = [
+                _text(observation.get("experiment_id"))
+                for observation in (
+                    observations.get("baseline"),
+                    observations.get("challenge"),
+                )
+                if isinstance(observations, Mapping) and isinstance(observation, Mapping)
+            ]
+            uses_research_harness = any(
+                _executed_research_paths(replay.get("executed_argv"))
+                for experiment_id in proof_experiment_ids
+                if experiment_id is not None
+                and isinstance((replay := clean_replays.get(experiment_id)), Mapping)
+            )
+            if (
+                uses_research_harness
+                and (
+                    not isinstance(adapter_receipt, Mapping)
+                    or not isinstance(adapter_receipt.get("executed_consumer"), Mapping)
+                )
+            ):
+                errors.append(
+                    "proof_adapter_harness_dependency_unverified:"
+                    f"{hypothesis_id}:{proof.get('proof_receipt_id') or 'unknown'}"
+                )
+                continue
             if adapter_receipt is None or not set(
                 adapter_receipt.get("experiment_ids", [])
             ).intersection(str(value) for value in support_ids):
@@ -7031,6 +8821,117 @@ def _typed_mechanism_evidence_receipts(
     return receipts
 
 
+def _partition_mechanism_validation_errors(
+    dossier: Mapping[str, Any],
+    mechanism_errors: Sequence[str],
+) -> tuple[list[str], list[str]]:
+    """Separate claim-integrity failure from an honestly incomplete research boundary.
+
+    A sufficient dossier promises a planning-grade *primary* mechanism, so defects bound to that
+    hypothesis (and integrity defects that cannot be bound to any declared alternative) remain
+    fatal.  An incomplete secondary hypothesis is retained as a diagnostic instead: readiness
+    separately requires every plausible/unresolved alternative to be materialized as an unknown,
+    so quarantining its projection cannot silently erase the open question.
+
+    Blocked/insufficient dossiers preserve all diagnostics but cannot advance; their lack of a
+    verified mechanism is the reported outcome rather than a malformed report.
+    """
+
+    normalized = list(dict.fromkeys(str(error) for error in mechanism_errors))
+    if dossier.get("research_status") != "evidence_sufficient":
+        return [], normalized
+
+    hypotheses_raw = dossier.get("root_cause_hypotheses")
+    hypotheses = hypotheses_raw if isinstance(hypotheses_raw, list) else []
+    primary_id = (
+        _text(hypotheses[0].get("hypothesis_id"))
+        if hypotheses and isinstance(hypotheses[0], Mapping)
+        else None
+    )
+    alternative_ids = [
+        hypothesis_id
+        for hypothesis in hypotheses[1:]
+        if isinstance(hypothesis, Mapping)
+        for hypothesis_id in [_text(hypothesis.get("hypothesis_id"))]
+        if hypothesis_id is not None
+    ]
+
+    def binds(error: str, hypothesis_id: str) -> bool:
+        return error.endswith(f":{hypothesis_id}") or f":{hypothesis_id}:" in error
+
+    fatal: list[str] = []
+    diagnostics: list[str] = []
+    for error in normalized:
+        if primary_id is not None and binds(error, primary_id):
+            fatal.append(error)
+        elif any(binds(error, hypothesis_id) for hypothesis_id in alternative_ids):
+            diagnostics.append(error)
+        else:
+            # Unattributed mechanism-integrity failures cannot be assumed secondary.
+            fatal.append(error)
+    return fatal, diagnostics
+
+
+_LEGACY_CONSUMER_REINTERPRETATION_ERRORS = (
+    "proof_adapter_harness_dependency_unverified:",
+    "observed_output_mechanism_link_missing:",
+    "primary_hypothesis_mechanism_evidence_missing:",
+    "primary_hypothesis_mechanism_coverage_incomplete:",
+    "primary_hypothesis_causal_root_missing:",
+)
+
+
+def _persisted_legacy_mechanism_projection(
+    dossier: Mapping[str, Any],
+    *,
+    receipt: Mapping[str, Any],
+    recomputed_adapter_receipts: Sequence[Mapping[str, Any]],
+    mechanism_errors: Sequence[str],
+) -> list[dict[str, Any]] | None:
+    """Validate, rather than reinterpret, a content-bound pre-harness-edge projection.
+
+    The current analyzer correctly identifies an executed ``.usertest_research`` selector as a
+    research-harness consumer.  Early v1 receipts represented the same authenticated adapter as
+    a repository consumer.  The stage contract has a frozen, exact validator for that shape.  A
+    persisted receipt may keep that original content identity only when every upstream adapter
+    receipt rederives exactly and the complete frozen stage contract validates it.
+    """
+
+    stored_raw = receipt.get("mechanism_evidence")
+    stored = (
+        [dict(item) for item in stored_raw if isinstance(item, Mapping)]
+        if isinstance(stored_raw, list)
+        else []
+    )
+    legacy_consumers = [
+        item
+        for item in stored
+        if item.get("evidence_type") == "adapter_proof"
+        and isinstance(item.get("executed_consumer"), Mapping)
+        and isinstance(item["executed_consumer"].get("consumer_identity"), Mapping)
+        and item["executed_consumer"]["consumer_identity"].get("kind")
+        == "runner_observed_repository_consumer"
+        and item["executed_consumer"]["consumer_identity"].get(
+            "authenticated_dependency_edges"
+        )
+        is None
+    ]
+    if (
+        not stored
+        or not legacy_consumers
+        or receipt.get("proof_adapter_receipts")
+        != [dict(item) for item in recomputed_adapter_receipts]
+        or not mechanism_errors
+        or any(
+            not str(error).startswith(_LEGACY_CONSUMER_REINTERPRETATION_ERRORS)
+            for error in mechanism_errors
+        )
+        or research_evidence_verification_contract_errors(dict(dossier))
+    ):
+        return None
+    return stored
+
+
 def _verified_mechanism_projection(
     dossier: dict[str, Any],
     *,
@@ -7379,6 +9280,319 @@ def _persist_outcome_overlay_asset(
     }
 
 
+def _authenticated_retained_overlay_workspace(
+    *,
+    dossier: Mapping[str, Any],
+    receipt: Mapping[str, Any],
+    run_dir: Path | None,
+    planning_workspace: Path | None,
+) -> tuple[Path | None, dict[str, dict[str, Any]], list[str]]:
+    """Authenticate the runner-retained stage-3 overlay for persisted revalidation.
+
+    Research workspaces are disposable and a resumed model session can reuse one after a
+    dossier has already been accepted.  Outcome-oracle assets are the runner's immutable,
+    content-addressed copy of that overlay.  This fallback accepts only the deterministic
+    asset location below the accepted run and never trusts an arbitrary path from JSON.
+    """
+
+    errors: list[str] = []
+    if run_dir is None or not run_dir.is_dir():
+        return None, {}, ["research_retained_overlay_run_unavailable"]
+    runs_root = _runs_root_for(run_dir)
+    if runs_root is None:
+        return None, {}, ["research_retained_overlay_runs_root_unavailable"]
+    overlay_raw = receipt.get("workspace_overlay")
+    overlay = overlay_raw if isinstance(overlay_raw, Mapping) else {}
+    expected_manifest_raw = overlay.get("research_overlay_manifest")
+    expected_manifest = (
+        {
+            str(path): dict(entry)
+            for path, entry in expected_manifest_raw.items()
+            if isinstance(path, str) and isinstance(entry, Mapping)
+        }
+        if isinstance(expected_manifest_raw, Mapping)
+        else {}
+    )
+    expected_manifest_sha256 = _text(overlay.get("research_overlay_manifest_sha256"))
+    if (
+        not expected_manifest
+        or expected_manifest_sha256 != _canonical_json_sha256(expected_manifest)
+    ):
+        return None, {}, ["research_retained_overlay_receipt_manifest_invalid"]
+
+    if planning_workspace is None or not planning_workspace.is_dir():
+        errors.append("research_retained_overlay_planning_workspace_unavailable")
+    else:
+        baseline_state = _canonical_workspace_state(planning_workspace)
+        baseline_manifest = baseline_state.get("entries")
+        if not isinstance(baseline_manifest, Mapping):
+            errors.append("research_retained_overlay_baseline_unavailable")
+        else:
+            expected_baseline_hashes = {
+                "baseline_manifest_sha256": _canonical_json_sha256(baseline_manifest),
+                "baseline_state_sha256": _canonical_json_sha256(baseline_state),
+                "baseline_git_index_sha256": _canonical_json_sha256(
+                    {
+                        "stage": baseline_state.get("git_index_stage_sha256"),
+                        "flags": baseline_state.get("git_index_flags_sha256"),
+                    }
+                ),
+            }
+            for field, expected in expected_baseline_hashes.items():
+                if overlay.get(field) != expected:
+                    errors.append(f"research_retained_overlay_{field}_changed")
+
+    oracle_values = receipt.get("outcome_oracles")
+    oracles = oracle_values if isinstance(oracle_values, list) else []
+    assets: dict[str, Mapping[str, Any]] = {}
+    for oracle in oracles:
+        if not isinstance(oracle, Mapping):
+            continue
+        asset = oracle.get("asset")
+        asset_id = _text(asset.get("asset_id")) if isinstance(asset, Mapping) else None
+        if asset_id is None:
+            continue
+        if (
+            oracle.get("case_id") != dossier.get("case_id")
+            or oracle.get("repo_revision") != dossier.get("repo_revision")
+            or oracle.get("primary_verified_mechanism_sha256")
+            != receipt.get("verified_mechanism_sha256")
+            or oracle.get("primary_verified_mechanism_provenance_sha256")
+            != receipt.get("verified_mechanism_provenance_sha256")
+        ):
+            errors.append("research_retained_overlay_oracle_binding_invalid")
+            continue
+        assets[asset_id] = asset
+    if len(assets) != 1:
+        errors.append("research_retained_overlay_asset_ambiguous")
+        return None, {}, list(dict.fromkeys(errors))
+
+    asset_id, asset = next(iter(assets.items()))
+    manifest_raw = asset.get("manifest")
+    manifest = (
+        {
+            str(path): dict(entry)
+            for path, entry in manifest_raw.items()
+            if isinstance(path, str) and isinstance(entry, Mapping)
+        }
+        if isinstance(manifest_raw, Mapping)
+        else {}
+    )
+    projection = {"schema_version": 1, "manifest": manifest}
+    expected_asset_id = f"outcome_asset:{_canonical_json_sha256(projection)}"
+    digest = asset_id.split(":", 1)[1] if asset_id.startswith("outcome_asset:") else ""
+    relative_raw = _text(asset.get("runs_relative_path"))
+    relative = Path(relative_raw) if relative_raw is not None else None
+    run_root = run_dir.resolve()
+    expected_bundle_path = run_root / "outcome_oracle_assets" / digest / "bundle"
+    expected_bundle = expected_bundle_path.resolve()
+    supplied_bundle = (runs_root / relative).resolve() if relative is not None else None
+    current_component = expected_bundle_path
+    unsafe_component = False
+    while current_component != run_root:
+        try:
+            metadata = current_component.lstat()
+        except OSError:
+            unsafe_component = True
+            break
+        file_attributes = getattr(metadata, "st_file_attributes", 0)
+        if stat.S_ISLNK(metadata.st_mode) or bool(
+            file_attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+        ):
+            unsafe_component = True
+            break
+        if current_component.parent == current_component:
+            unsafe_component = True
+            break
+        current_component = current_component.parent
+    if (
+        asset_id != expected_asset_id
+        or not digest
+        or asset.get("manifest_sha256") != _canonical_json_sha256(manifest)
+        or manifest != expected_manifest
+        or asset.get("manifest_sha256") != expected_manifest_sha256
+        or relative is None
+        or relative.is_absolute()
+        or ".." in relative.parts
+        or supplied_bundle != expected_bundle
+        or expected_bundle != expected_bundle_path
+        or not _within(expected_bundle, runs_root)
+        or not expected_bundle.is_dir()
+        or expected_bundle.is_symlink()
+        or unsafe_component
+    ):
+        errors.append("research_retained_overlay_asset_binding_invalid")
+        return None, {}, list(dict.fromkeys(errors))
+    if any(
+        not path.startswith(".usertest_research/")
+        or PurePosixPath(path).is_absolute()
+        or ".." in PurePosixPath(path).parts
+        or entry.get("kind") != "file"
+        or _text(entry.get("sha256")) is None
+        or isinstance(entry.get("size_bytes"), bool)
+        or not isinstance(entry.get("size_bytes"), int)
+        for path, entry in manifest.items()
+    ):
+        errors.append("research_retained_overlay_asset_manifest_unsafe")
+        return None, {}, list(dict.fromkeys(errors))
+    observed = _workspace_manifest(expected_bundle)
+    if observed != manifest:
+        errors.append("research_retained_overlay_asset_content_changed")
+        return None, {}, list(dict.fromkeys(errors))
+    if errors:
+        return None, {}, list(dict.fromkeys(errors))
+    return expected_bundle, manifest, []
+
+
+def _persisted_artifact_path(
+    artifact: Mapping[str, Any],
+    *,
+    original_research_workspace: Path | None,
+    retained_overlay_workspace: Path | None,
+    retained_overlay_manifest: Mapping[str, Mapping[str, Any]],
+    planning_workspace: Path | None,
+) -> Path | None:
+    """Resolve a receipt artifact without changing its stored path or identity."""
+
+    path_raw = _text(artifact.get("path"))
+    path = Path(path_raw) if path_raw is not None else None
+
+    def matches(candidate: Path | None) -> bool:
+        return bool(
+            candidate is not None
+            and candidate.is_file()
+            and not candidate.is_symlink()
+            and artifact.get("sha256") == _sha256_path(candidate)
+            and artifact.get("size_bytes") == candidate.stat().st_size
+        )
+
+    if matches(path):
+        return path
+    if path is None or original_research_workspace is None:
+        return None
+    try:
+        relative = path.resolve().relative_to(original_research_workspace.resolve()).as_posix()
+    except (OSError, ValueError):
+        return None
+    if relative in retained_overlay_manifest and retained_overlay_workspace is not None:
+        candidate = retained_overlay_workspace / Path(*PurePosixPath(relative).parts)
+        expected = retained_overlay_manifest[relative]
+        if (
+            matches(candidate)
+            and expected.get("sha256") == artifact.get("sha256")
+            and expected.get("size_bytes") == artifact.get("size_bytes")
+        ):
+            return candidate
+    if relative not in retained_overlay_manifest and planning_workspace is not None:
+        candidate = planning_workspace / Path(*PurePosixPath(relative).parts)
+        if matches(candidate):
+            return candidate
+    return None
+
+
+def _persisted_retained_authorized_invocation(
+    *,
+    command: str,
+    experiment: dict[str, Any],
+    dossier: dict[str, Any],
+    assignment: dict[str, Any],
+    retained_workspace: Path,
+    retained_manifest: Mapping[str, Mapping[str, Any]],
+    planning_workspace: Path | None,
+    persisted_authorization: Any,
+) -> tuple[list[str], dict[str, Any]] | None:
+    """Revalidate a stored argv against split immutable repository/overlay roots.
+
+    Current authorizations rederive directly from the retained overlay when possible.  A
+    pre-entrypoint v1 ``declared_repository_bindings`` receipt is accepted only when its
+    repository bindings independently rederive from the pinned checkout *and* its executed
+    research harness independently resolves to the authenticated retained asset.
+    """
+
+    direct = _authorized_replay_invocation(
+        command=command,
+        experiment=experiment,
+        dossier=dossier,
+        assignment=assignment,
+        workspace=retained_workspace,
+    )
+    if direct is not None and direct[1] == persisted_authorization:
+        return direct
+    argv = _parse_replay_argv(command)
+    if argv is None or planning_workspace is None or not planning_workspace.is_dir():
+        return None
+    bindings_declared, repository_bindings = _declared_repository_binding_receipts(
+        experiment=experiment,
+        dossier=dossier,
+        workspace=planning_workspace,
+    )
+    entrypoint = _resolve_repository_entrypoint(argv, workspace=retained_workspace)
+    entrypoint_path = (
+        _text(entrypoint.get("entrypoint_path")) if isinstance(entrypoint, Mapping) else None
+    )
+    artifacts_raw = dossier.get("artifact_refs")
+    artifact = (
+        next(
+            (
+                item
+                for item in artifacts_raw
+                if isinstance(item, Mapping)
+                and entrypoint_path is not None
+                and _normalize_path(str(item.get("path") or ""))
+                == _normalize_path(entrypoint_path)
+            ),
+            None,
+        )
+        if isinstance(artifacts_raw, list)
+        else None
+    )
+    expected_entry = retained_manifest.get(entrypoint_path or "")
+    base_authorization: dict[str, Any] | None = (
+        {
+            "authorization_kind": "declared_repository_bindings",
+            "executed_argv_sha256": _canonical_json_sha256(argv),
+            "shell": False,
+            "workspace_confined": True,
+            "repository_bindings": repository_bindings,
+        }
+        if bindings_declared and repository_bindings
+        else None
+    )
+    current_authorization: dict[str, Any] | None = None
+    if (
+        base_authorization is not None
+        and isinstance(entrypoint, Mapping)
+        and entrypoint_path is not None
+        and entrypoint_path.startswith(".usertest_research/")
+        and isinstance(artifact, Mapping)
+    ):
+        current_authorization = _command_authorization_receipt(
+            {
+                **base_authorization,
+                **dict(entrypoint),
+                "artifact_id": artifact.get("artifact_id"),
+            }
+        )
+    legacy_authorization = (
+        _command_authorization_receipt(base_authorization)
+        if base_authorization is not None
+        else None
+    )
+    if (
+        not isinstance(persisted_authorization, Mapping)
+        or persisted_authorization not in (current_authorization, legacy_authorization)
+        or not isinstance(entrypoint, Mapping)
+        or entrypoint_path is None
+        or not entrypoint_path.startswith(".usertest_research/")
+        or not isinstance(artifact, Mapping)
+        or not isinstance(expected_entry, Mapping)
+        or entrypoint.get("entrypoint_sha256") != expected_entry.get("sha256")
+        or command_authorization_errors(persisted_authorization, argv=argv)
+    ):
+        return None
+    return argv, dict(persisted_authorization)
+
+
 def _replay_output(replay: Mapping[str, Any]) -> str:
     chunks: list[str] = []
     for field in ("stdout_path", "stderr_path"):
@@ -7428,7 +9642,7 @@ def _source_case_bindings(
         if (
             binding.get("experiment_id") != experiment_id
             or atom_id not in addressed
-            or not _source_observation_atom(snapshot)
+            or not _source_observation_atom(snapshot, receipt=atom_receipt)
             or _text(binding.get("match_kind")) is None
         ):
             continue
@@ -7508,7 +9722,12 @@ def _repository_test_positive_contract(
         planning_workspace=planning_workspace,
         errors=optional_errors,
     )
-    if not isinstance(selection, dict):
+    if (
+        not isinstance(selection, dict)
+        or not isinstance(selection.get("test_file_provenance"), dict)
+        or selection["test_file_provenance"].get("provenance_kind")
+        != "baseline_repository_test"
+    ):
         return None
     output = _replay_output(replay)
     assertions_raw = selection.get("semantic_assertions")
@@ -7622,15 +9841,15 @@ def _semantic_basis_receipt(
         or declared.get("expected_value") != expected_value
     ):
         return None
-    exact_quote = _text(basis.get("exact_quote"))
-    if exact_quote is None or not _expectation_quote(
-        exact_quote,
-        expected_value=expected_value,
-    ):
-        return None
     provenance: dict[str, Any]
     basis_kind = basis.get("kind")
     if basis_kind == "source_atom_quote":
+        exact_quote = _text(basis.get("exact_quote"))
+        if exact_quote is None or not _expectation_quote(
+            exact_quote,
+            expected_value=expected_value,
+        ):
+            return None
         atom_id = _text(basis.get("atom_id"))
         field_path = _text(basis.get("field_path"))
         addressed = {
@@ -7653,7 +9872,7 @@ def _semantic_basis_receipt(
             or atom_id not in addressed
             or field_path is None
             or not _semantic_quote_field_path(field_path)
-            or not _source_observation_atom(snapshot)
+            or not _source_observation_atom(snapshot, receipt=atom_receipt)
             or not found
             or not isinstance(field_value, str)
             or exact_quote not in field_value
@@ -7671,6 +9890,12 @@ def _semantic_basis_receipt(
             "evidence_role": "observation",
         }
     elif basis_kind == "repository_contract_quote":
+        exact_quote = _text(basis.get("exact_quote"))
+        if exact_quote is None or not _expectation_quote(
+            exact_quote,
+            expected_value=expected_value,
+        ):
+            return None
         provenance = repository_contract_quote_provenance(
             basis,
             planning_workspace=planning_workspace,
@@ -7681,6 +9906,31 @@ def _semantic_basis_receipt(
         )
         if provenance is None:
             return None
+    elif basis_kind == "authenticated_semantic_citation":
+        basis_result = builtin_positive_basis_registry().evaluate(
+            PositiveBasisContext(
+                semantic_claim={
+                    **basis,
+                    "semantic_rationale": rationale,
+                    "semantic_relation": semantic_relation,
+                },
+                predicate={"kind": "equals", "expected": expected_value},
+                source_atom_ids=frozenset(
+                    atom_id
+                    for atom_id in experiment.get("addresses_atom_ids", [])
+                    if isinstance(atom_id, str) and atom_id
+                ),
+                evidence_assignment=evidence_assignment,
+                planning_workspace=planning_workspace,
+                inspected_file_receipts=inspected_file_receipts,
+                symbol_receipts=inspected_symbol_receipts,
+                mechanism_symbols=frozenset(mechanism_symbols),
+                config_value_resolver=_config_value_for_symbol,
+            )
+        )
+        if not isinstance(basis_result.basis, dict):
+            return None
+        provenance = dict(basis_result.basis)
     else:
         # A metamorphic/invariant basis will be added only when the runner has an
         # actual input-equivalence receipt.  Model-authored control prose is not it.
@@ -7709,7 +9959,7 @@ def _semantic_basis_receipt(
     )
     if relevant_interventions and adversarial_basis is None:
         return None
-    return {
+    receipt = {
         "schema_version": 1,
         "expected_value": expected_value,
         "expected_value_sha256": _canonical_json_sha256(expected_value),
@@ -7720,6 +9970,635 @@ def _semantic_basis_receipt(
         "adversarial_basis": adversarial_basis,
         "independent_review_requirement": "stage5_solution_falsification",
     }
+    if basis_kind == "authenticated_semantic_citation":
+        receipt["semantic_review_required"] = True
+    return receipt
+
+
+def _restricted_outcome_assertion_dataflow(
+    *,
+    experiment: Mapping[str, Any],
+    replay: Mapping[str, Any],
+    expected_value: Any,
+    mechanism_symbols: list[str],
+    symbol_paths: Mapping[str, str],
+) -> dict[str, Any] | None:
+    """Bind one immutable production-derived value to the exact failing assertion.
+
+    This is intentionally not general taint analysis.  The accepted projection is a
+    direct expression or a chain of unconditional, single-assignment locals in one
+    executed module/test scope.  Reassignments, branch-dependent values, reflexive
+    comparisons, both-sides-tainted comparisons, and obvious constant-dominated
+    boolean expressions fail closed.
+    """
+
+    argv_raw = replay.get("executed_argv")
+    argv = argv_raw if isinstance(argv_raw, list) else []
+    harness_path = _executed_research_harness_path(argv)
+    workspace_raw = _text(replay.get("workspace_dir"))
+    if harness_path is None or workspace_raw is None:
+        return None
+    workspace = Path(workspace_raw).resolve()
+    path = (workspace / harness_path).resolve()
+    if not _within(path, workspace) or not path.is_file() or path.is_symlink():
+        return None
+    try:
+        content = path.read_text(encoding="utf-8", errors="strict")
+        tree = ast.parse(content)
+    except (OSError, UnicodeDecodeError, SyntaxError):
+        return None
+
+    selector = _exact_pytest_selector(argv, allow_research_harness=True)
+    selected_name: str | None = None
+    scope: ast.AST = tree
+    if selector is not None:
+        selected_path, selector_parts = selector
+        if selected_path != harness_path:
+            return None
+        selected = _selected_test_function(tree, selector_parts)
+        if selected is None:
+            return None
+        selected_name, scope = selected
+
+    class ScopeVisitor(ast.NodeVisitor):
+        def __init__(self, root: ast.AST) -> None:
+            self.root = root
+            self.assignments: list[ast.Assign | ast.AnnAssign] = []
+            self.assertions: list[ast.Assert] = []
+            self.calls: list[ast.Call] = []
+            self.returns: list[ast.Return] = []
+            self.stores: dict[str, int] = {}
+
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            if node is self.root:
+                self.generic_visit(node)
+
+        def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> None:
+            if node is self.root:
+                self.generic_visit(node)
+
+        def visit_Lambda(self, node: ast.Lambda) -> None:
+            del node
+
+        def visit_Assign(self, node: ast.Assign) -> None:
+            self.assignments.append(node)
+            self.generic_visit(node)
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            self.assignments.append(node)
+            self.generic_visit(node)
+
+        def visit_Assert(self, node: ast.Assert) -> None:
+            self.assertions.append(node)
+            self.generic_visit(node)
+
+        def visit_Call(self, node: ast.Call) -> None:
+            self.calls.append(node)
+            self.generic_visit(node)
+
+        def visit_Return(self, node: ast.Return) -> None:
+            self.returns.append(node)
+            self.generic_visit(node)
+
+        def visit_Name(self, node: ast.Name) -> None:
+            if isinstance(node.ctx, ast.Store):
+                self.stores[node.id] = self.stores.get(node.id, 0) + 1
+
+    visitor = ScopeVisitor(scope)
+    visitor.visit(scope)
+    parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
+    aliases = _module_import_aliases(tree)
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)):
+        function_scope = _FunctionScopeVisitor(scope)
+        function_scope.visit(scope)
+        aliases.update(function_scope.aliases)
+        for bound_name in function_scope.bound_names - set(function_scope.aliases):
+            aliases.pop(bound_name, None)
+    targets_by_symbol = {
+        symbol: _mechanism_call_targets(symbol=symbol, source_path=symbol_paths[symbol])
+        for symbol in mechanism_symbols
+        if symbol in symbol_paths
+    }
+
+    safe_projection_calls = {"len", "set", "frozenset", "min", "max", "bool"}
+
+    def production_call_symbols(call: ast.Call) -> set[str]:
+        expression = _dotted_expression(call.func)
+        if expression is None:
+            return set()
+        resolved = _resolved_call_expression(expression, aliases)
+        return {
+            symbol
+            for symbol, targets in targets_by_symbol.items()
+            if expression in targets or resolved in targets
+        }
+
+    def projection_allowed(node: ast.AST) -> bool:
+        """Accept only transparent extraction/cardinality/boolean projections."""
+
+        rejected = (
+            ast.BinOp,
+            ast.Lambda,
+            ast.NamedExpr,
+            ast.Await,
+            ast.Yield,
+            ast.YieldFrom,
+            ast.ListComp,
+            ast.SetComp,
+            ast.DictComp,
+            ast.GeneratorExp,
+        )
+        for candidate in ast.walk(node):
+            if isinstance(candidate, rejected):
+                return False
+            if isinstance(candidate, ast.Call):
+                if production_call_symbols(candidate):
+                    continue
+                expression = _dotted_expression(candidate.func)
+                if expression not in safe_projection_calls:
+                    return False
+        return True
+
+    def selected_symbol_rebound() -> bool:
+        exact_targets = set(mechanism_symbols)
+        for assignment in visitor.assignments:
+            targets = (
+                assignment.targets
+                if isinstance(assignment, ast.Assign)
+                else [assignment.target]
+            )
+            for target in targets:
+                expression = _dotted_expression(target)
+                resolved = (
+                    _resolved_call_expression(expression, aliases)
+                    if expression is not None
+                    else None
+                )
+                if expression in exact_targets or resolved in exact_targets:
+                    return True
+        for call in visitor.calls:
+            expression = (_dotted_expression(call.func) or "").casefold()
+            if not (
+                expression in {"setattr", "builtins.setattr"}
+                or expression.endswith(".setattr")
+                or expression in {"patch", "mock.patch"}
+                or expression.endswith(".patch")
+                or expression.endswith(".patch.object")
+            ):
+                continue
+            literal_targets = {
+                value
+                for argument in call.args
+                for value in (
+                    [argument.value]
+                    if isinstance(argument, ast.Constant) and isinstance(argument.value, str)
+                    else []
+                )
+            }
+            dotted_targets = {
+                value
+                for argument in call.args
+                for value in [_dotted_expression(argument)]
+                if value is not None
+            }
+            combined_targets = set(literal_targets) | set(dotted_targets)
+            if len(call.args) >= 2 and isinstance(call.args[1], ast.Constant):
+                owner = _dotted_expression(call.args[0])
+                attribute = call.args[1].value
+                if owner is not None and isinstance(attribute, str):
+                    combined_targets.add(
+                        f"{_resolved_call_expression(owner, aliases)}.{attribute}"
+                    )
+            if exact_targets & combined_targets:
+                return True
+        return False
+
+    if selected_symbol_rebound():
+        return None
+
+    conditional_nodes = (
+        ast.If,
+        ast.IfExp,
+        ast.For,
+        ast.AsyncFor,
+        ast.While,
+        ast.Try,
+        ast.With,
+        ast.AsyncWith,
+        ast.Match,
+        ast.comprehension,
+    )
+
+    def unconditional(node: ast.AST) -> bool:
+        cursor = parents.get(node)
+        while cursor is not None and cursor is not scope:
+            if isinstance(cursor, conditional_nodes):
+                return False
+            cursor = parents.get(cursor)
+        return cursor is scope
+
+    def direct_symbols(node: ast.AST) -> set[str]:
+        result: set[str] = set()
+        for candidate in ast.walk(node):
+            if not isinstance(candidate, ast.Call):
+                continue
+            expression = _dotted_expression(candidate.func)
+            if expression is None:
+                continue
+            resolved = _resolved_call_expression(expression, aliases)
+            for symbol, targets in targets_by_symbol.items():
+                if expression in targets or resolved in targets:
+                    result.add(symbol)
+        return result
+
+    def loaded_names(node: ast.AST) -> set[str]:
+        return {
+            candidate.id
+            for candidate in ast.walk(node)
+            if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Load)
+        }
+
+    def constant_dominated(node: ast.AST) -> bool:
+        for candidate in ast.walk(node):
+            if isinstance(candidate, ast.BoolOp):
+                literal_values: list[Any] = []
+                for value in candidate.values:
+                    try:
+                        literal_values.append(ast.literal_eval(value))
+                    except (ValueError, TypeError):
+                        continue
+                if isinstance(candidate.op, ast.Or) and any(
+                    value is True for value in literal_values
+                ):
+                    return True
+                if isinstance(candidate.op, ast.And) and any(
+                    value is False for value in literal_values
+                ):
+                    return True
+            if (
+                isinstance(candidate, ast.Compare)
+                and len(candidate.comparators) == 1
+                and ast.dump(candidate.left, include_attributes=False)
+                == ast.dump(candidate.comparators[0], include_attributes=False)
+            ):
+                return True
+            if isinstance(candidate, ast.IfExp):
+                try:
+                    body = ast.literal_eval(candidate.body)
+                    otherwise = ast.literal_eval(candidate.orelse)
+                except (ValueError, TypeError):
+                    continue
+                if type(body) is type(otherwise) and body == otherwise:
+                    return True
+        return False
+
+    tainted: dict[str, set[str]] = {}
+    assignment_receipts: dict[str, dict[str, Any]] = {}
+    for assignment in sorted(visitor.assignments, key=lambda node: node.lineno):
+        targets = assignment.targets if isinstance(assignment, ast.Assign) else [assignment.target]
+        if len(targets) != 1 or not isinstance(targets[0], ast.Name):
+            continue
+        target = targets[0].id
+        value = assignment.value
+        if (
+            value is None
+            or visitor.stores.get(target) != 1
+            or not unconditional(assignment)
+            or not projection_allowed(value)
+            or constant_dominated(value)
+        ):
+            continue
+        symbols = direct_symbols(value)
+        for name in loaded_names(value):
+            symbols.update(tainted.get(name, set()))
+        if not symbols:
+            continue
+        tainted[target] = symbols
+        projection = ast.dump(value, annotate_fields=True, include_attributes=False)
+        assignment_receipts[target] = {
+            "line": assignment.lineno,
+            "local": target,
+            "expression": ast.get_source_segment(content, value) or ast.unparse(value),
+            "expression_ast_sha256": sha256(projection.encode("utf-8")).hexdigest(),
+            "mechanism_symbols": sorted(symbols),
+        }
+
+    output = _replay_output(replay)
+    if re.search(
+        r"(?:ModuleNotFoundError|ImportError|SyntaxError|IndentationError|TabError|"
+        r"ERROR\s+collecting|ERROR\s+at\s+setup)",
+        output,
+        re.IGNORECASE,
+    ):
+        return None
+    if "AssertionError" not in output and re.search(r"(?m)^E\s+assert\b", output) is None:
+        return None
+
+    pytest_baseline_receipt: dict[str, Any] | None = None
+    if isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef)) and selected_name is not None:
+        forbidden_decorators = {
+            (_dotted_expression(decorator.func) if isinstance(decorator, ast.Call) else (
+                _dotted_expression(decorator)
+            ))
+            for decorator in scope.decorator_list
+        }
+        forbidden_calls = {
+            (_dotted_expression(call.func) or "").casefold() for call in visitor.calls
+        }
+        if (
+            visitor.returns
+            or any(
+                value is not None
+                and (
+                    value.casefold().endswith(".skip")
+                    or value.casefold().endswith(".skipif")
+                    or value.casefold().endswith(".xfail")
+                    or value.casefold().endswith(".parametrize")
+                )
+                for value in forbidden_decorators
+            )
+            or any(
+                value in {"pytest.skip", "pytest.xfail"}
+                or value.endswith(".pytest.skip")
+                or value.endswith(".pytest.xfail")
+                for value in forbidden_calls
+            )
+        ):
+            return None
+        node_id = f"{harness_path}::{selected_name.replace('.', '::')}"
+        if (
+            re.search(rf"(?m)^FAILED\s+{re.escape(node_id)}(?:\s|$)", output) is None
+            or re.search(r"(?<!\w)collected\s+1\s+item\b", output) is None
+            or re.search(r"(?<!\d)1 failed(?:[,\s]|$)", output) is None
+            or re.search(
+                r"(?<!\d)\d+ (?:error|errors|passed|skipped|xfailed)",
+                output,
+            )
+            is not None
+        ):
+            return None
+        pytest_baseline_receipt = {
+            "schema_version": 1,
+            "node_id": node_id,
+            "selector": selected_name,
+            "collection_cardinality": 1,
+            "call_phase_outcome": "failed_bound_assertion",
+            "baseline_output_sha256": _canonical_json_sha256(output),
+            "future_required_summary": "\n1 passed",
+            "runner_attested": True,
+        }
+    else:
+        # A direct Python harness remains useful investigation evidence, but it
+        # cannot mint a closure-capable binding until assertion execution is
+        # independently attested by the outcome runner.
+        return None
+
+    assertions: list[dict[str, Any]] = []
+    for assertion in visitor.assertions:
+        if not unconditional(assertion) or not isinstance(assertion.test, ast.Compare):
+            continue
+        comparison = assertion.test
+        if (
+            len(comparison.ops) != 1
+            or not isinstance(comparison.ops[0], (ast.Eq, ast.Is))
+            or len(comparison.comparators) != 1
+        ):
+            continue
+        left = comparison.left
+        right = comparison.comparators[0]
+
+        def literal_matches(node: ast.AST) -> bool:
+            try:
+                value = ast.literal_eval(node)
+            except (ValueError, TypeError):
+                return False
+            return type(value) is type(expected_value) and value == expected_value
+
+        left_expected = literal_matches(left)
+        right_expected = literal_matches(right)
+        if left_expected == right_expected:
+            continue
+        dynamic = right if left_expected else left
+        expected_node = left if left_expected else right
+        dynamic_symbols = direct_symbols(dynamic)
+        for name in loaded_names(dynamic):
+            dynamic_symbols.update(tainted.get(name, set()))
+        expected_symbols = direct_symbols(expected_node)
+        for name in loaded_names(expected_node):
+            expected_symbols.update(tainted.get(name, set()))
+        if (
+            not dynamic_symbols
+            or expected_symbols
+            or not projection_allowed(dynamic)
+            or constant_dominated(dynamic)
+            or not _output_references_assertion(
+                output=output,
+                test_path=harness_path,
+                line=assertion.lineno,
+            )
+        ):
+            continue
+        projection = ast.dump(comparison, annotate_fields=True, include_attributes=False)
+        assertions.append(
+            {
+                "line": assertion.lineno,
+                "expression": (
+                    ast.get_source_segment(content, comparison) or ast.unparse(comparison)
+                ),
+                "assertion_ast_sha256": sha256(projection.encode("utf-8")).hexdigest(),
+                "mechanism_symbols": sorted(dynamic_symbols),
+                "expected_value_sha256": _canonical_json_sha256(expected_value),
+            }
+        )
+    if len(assertions) != 1:
+        return None
+    observed_symbols = assertions[0]["mechanism_symbols"]
+    return {
+        "verification_method": "runner_restricted_single_assignment_assertion_dataflow_v1",
+        "runner_attested": True,
+        "harness_path": harness_path,
+        "harness_sha256": _sha256_path(path),
+        "pytest_selector": selected_name,
+        "pytest_baseline_receipt": pytest_baseline_receipt,
+        "selected_mechanism_symbols": list(mechanism_symbols),
+        "observable_mechanism_symbols": list(observed_symbols),
+        "unobserved_selected_mechanism_symbols": [
+            symbol for symbol in mechanism_symbols if symbol not in set(observed_symbols)
+        ],
+        "code_paths": [
+            {"symbol": symbol, "path": symbol_paths[symbol]}
+            for symbol in mechanism_symbols
+            if symbol in symbol_paths
+        ],
+        "assignment_chain": [
+            assignment_receipts[key]
+            for key in sorted(
+                assignment_receipts,
+                key=lambda name: int(assignment_receipts[name]["line"]),
+            )
+            if set(assignment_receipts[key]["mechanism_symbols"]) & set(observed_symbols)
+        ],
+        "assertion_receipts": assertions,
+        "coverage_statement": "selected_production_entrypoint_to_exact_failing_assertion",
+    }
+
+
+def _outcome_mechanism_binding_receipt(
+    *,
+    experiment_id: str,
+    experiment: Mapping[str, Any],
+    replay: Mapping[str, Any],
+    verified_mechanism: Mapping[str, Any],
+    verified_mechanism_sha256: str,
+    verified_mechanism_provenance: Mapping[str, Any],
+    verified_mechanism_provenance_sha256: str,
+    selected_mechanism_evidence: Sequence[Mapping[str, Any]],
+    repo_revision: str,
+    errors: list[str],
+) -> dict[str, Any] | None:
+    """Mint the non-circular bridge from a fail-first oracle to selected evidence."""
+
+    declared = experiment.get("positive_outcome_contract")
+    binds_hypothesis_id = (
+        _text(declared.get("binds_hypothesis_id")) if isinstance(declared, Mapping) else None
+    )
+    if binds_hypothesis_id is None:
+        return None
+
+    def reject(reason: str) -> None:
+        errors.append(f"outcome_mechanism_binding_invalid:{experiment_id}:{reason}")
+
+    primary_hypothesis_id = _text(verified_mechanism_provenance.get("primary_hypothesis_id"))
+    selected_ids = sorted(
+        value
+        for value in verified_mechanism_provenance.get("mechanism_evidence_ids", [])
+        if isinstance(value, str) and value
+    )
+    root_ids = sorted(
+        value
+        for value in verified_mechanism_provenance.get("causal_root_evidence_ids", [])
+        if isinstance(value, str) and value
+    )
+    selected_receipts = {
+        str(value.get("mechanism_evidence_id")): value
+        for value in selected_mechanism_evidence
+        if isinstance(value, Mapping)
+        and _text(value.get("mechanism_evidence_id")) is not None
+    }
+    symbols = [
+        value
+        for value in verified_mechanism.get("mechanism_symbols", [])
+        if isinstance(value, str) and value
+    ]
+    code_paths = [
+        dict(value)
+        for value in verified_mechanism.get("code_paths", [])
+        if isinstance(value, Mapping)
+        and _text(value.get("symbol")) is not None
+        and _text(value.get("path")) is not None
+    ]
+    symbol_paths = {str(value["symbol"]): str(value["path"]) for value in code_paths}
+    argv_raw = replay.get("executed_argv")
+    argv = argv_raw if isinstance(argv_raw, list) else []
+    authorization = replay.get("command_authorization")
+    setup = replay.get("replay_setup_receipt")
+    expected_value = declared.get("expected_value") if isinstance(declared, Mapping) else object()
+    if binds_hypothesis_id != primary_hypothesis_id:
+        reject("primary_hypothesis_mismatch")
+        return None
+    if (
+        not selected_ids
+        or not root_ids
+        or not set(root_ids).issubset(selected_ids)
+        or set(selected_receipts) != set(selected_ids)
+        or any(
+            receipt.get("hypothesis_id") != primary_hypothesis_id
+            or experiment_id in receipt.get("experiment_ids", [])
+            for receipt in selected_receipts.values()
+        )
+        or not symbols
+        or len(symbol_paths) != len(symbols)
+    ):
+        reject("selected_mechanism_unavailable")
+        return None
+    if (
+        replay.get("assertion_passed") is not True
+        or not isinstance(replay.get("exit_code"), int)
+        or isinstance(replay.get("exit_code"), bool)
+        or replay.get("exit_code") == 0
+        or replay.get("workspace_head") != repo_revision
+        or replay.get("undeclared_post_replay_mutations") not in (None, [])
+        or not argv
+        or any(not isinstance(token, str) or not token for token in argv)
+        or not _command_authorization_attested(authorization, argv=argv)
+        or not isinstance(setup, Mapping)
+        or setup.get("runner_applied") is not True
+        or setup.get("replay_setup_sha256")
+        != _canonical_json_sha256(
+            {key: value for key, value in setup.items() if key != "replay_setup_sha256"}
+        )
+    ):
+        reject("clean_authorized_replay_required")
+        return None
+    dataflow = _restricted_outcome_assertion_dataflow(
+        experiment=experiment,
+        replay=replay,
+        expected_value=expected_value,
+        mechanism_symbols=symbols,
+        symbol_paths=symbol_paths,
+    )
+    if dataflow is None:
+        reject("production_assertion_dataflow_unresolved")
+        return None
+    authorization_raw = authorization if isinstance(authorization, Mapping) else {}
+    authorized_entrypoint = _text(authorization_raw.get("entrypoint_path"))
+    if (
+        authorized_entrypoint is None
+        or authorized_entrypoint.replace("\\", "/").removeprefix("./")
+        != dataflow["harness_path"]
+        or authorization_raw.get("entrypoint_sha256") != dataflow["harness_sha256"]
+    ):
+        reject("harness_authorization_mismatch")
+        return None
+    receipt: dict[str, Any] = {
+        "schema_version": 1,
+        "research_experiment_id": experiment_id,
+        "hypothesis_id": binds_hypothesis_id,
+        "verified_mechanism_sha256": verified_mechanism_sha256,
+        "verified_mechanism_provenance_sha256": verified_mechanism_provenance_sha256,
+        "selected_mechanism_evidence_ids": selected_ids,
+        "causal_root_evidence_ids": root_ids,
+        "mechanism_symbols": symbols,
+        "code_paths": code_paths,
+        "harness_path": dataflow["harness_path"],
+        "harness_sha256": dataflow["harness_sha256"],
+        "assertion_receipts": dataflow["assertion_receipts"],
+        "dataflow_receipt": dataflow,
+        "clean_replay_receipt": {
+            "workspace_head": replay.get("workspace_head"),
+            "executed_argv_sha256": _canonical_json_sha256(argv),
+            "command_authorization_sha256": authorization_raw.get("authorization_sha256"),
+            "replay_setup_sha256": setup.get("replay_setup_sha256"),
+            "stdout_sha256": replay.get("stdout_sha256"),
+            "stderr_sha256": replay.get("stderr_sha256"),
+            "exit_code": replay.get("exit_code"),
+            "assertion_passed": True,
+        },
+        "post_change_execution_evidence": {
+            "current_contract": "exact_pytest_node_call_phase_pass_v1",
+            "baseline_call_phase_receipt": dataflow.get("pytest_baseline_receipt"),
+            "assertion_execution_attestation": "unverified_until_outcome_execution",
+            "future_required_summary": "\n1 passed",
+            "stage5_review_required": True,
+        },
+        "runner_attested": True,
+    }
+    receipt["outcome_mechanism_binding_id"] = _content_addressed_receipt_id(
+        "outcome_mechanism_binding",
+        receipt,
+        "outcome_mechanism_binding_id",
+    )
+    return receipt
 
 
 def _retained_harness_positive_contract(
@@ -7733,8 +10612,95 @@ def _retained_harness_positive_contract(
     inspected_file_receipts: Sequence[Mapping[str, Any]],
     inspected_symbol_receipts: Sequence[Mapping[str, Any]],
     falsification_interventions: Sequence[Mapping[str, Any]],
+    outcome_mechanism_binding: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     """Mint a fail-first semantic contract from a retained research assertion."""
+
+    if isinstance(outcome_mechanism_binding, Mapping):
+        harness_path = _text(outcome_mechanism_binding.get("harness_path"))
+        workspace_raw = _text(replay.get("workspace_dir"))
+        declared = experiment.get("positive_outcome_contract")
+        expected_value = declared.get("expected_value") if isinstance(declared, dict) else object()
+        if (
+            harness_path is None
+            or workspace_raw is None
+            or outcome_mechanism_binding.get("research_experiment_id") != experiment_id
+            or outcome_mechanism_binding.get("hypothesis_id")
+            != (declared.get("binds_hypothesis_id") if isinstance(declared, dict) else None)
+        ):
+            return None
+        workspace = Path(workspace_raw).resolve()
+        path = (workspace / harness_path).resolve()
+        if (
+            not _within(path, workspace)
+            or not path.is_file()
+            or path.is_symlink()
+            or _sha256_path(path) != outcome_mechanism_binding.get("harness_sha256")
+        ):
+            return None
+        mechanism_symbols = {
+            symbol
+            for symbol in outcome_mechanism_binding.get("mechanism_symbols", [])
+            if isinstance(symbol, str)
+        }
+        hypothesis_ids = {
+            str(outcome_mechanism_binding.get("hypothesis_id"))
+        }
+        semantic_basis = _semantic_basis_receipt(
+            experiment=experiment,
+            expected_value=expected_value,
+            evidence_assignment=evidence_assignment,
+            planning_workspace=planning_workspace,
+            inspected_file_receipts=inspected_file_receipts,
+            inspected_symbol_receipts=inspected_symbol_receipts,
+            falsification_interventions=falsification_interventions,
+            hypothesis_ids=hypothesis_ids,
+            mechanism_symbols=mechanism_symbols,
+        )
+        assertions = outcome_mechanism_binding.get("assertion_receipts")
+        if semantic_basis is None or not isinstance(assertions, list) or not assertions:
+            return None
+        contract: dict[str, Any] = {
+            "schema_version": 1,
+            "kind": "retained_research_harness_assertion",
+            "research_experiment_id": experiment_id,
+            "mechanism_evidence_ids": list(
+                outcome_mechanism_binding.get("selected_mechanism_evidence_ids", [])
+            ),
+            "outcome_mechanism_binding_id": outcome_mechanism_binding.get(
+                "outcome_mechanism_binding_id"
+            ),
+            "research_assertion_contract": {
+                "harness_path": harness_path,
+                "harness_sha256": outcome_mechanism_binding.get("harness_sha256"),
+                "semantic_assertions": [dict(assertion) for assertion in assertions],
+                "baseline_failure": {
+                    "exit_code": replay.get("exit_code"),
+                    "stdout_sha256": replay.get("stdout_sha256"),
+                    "stderr_sha256": replay.get("stderr_sha256"),
+                    "failure_kind": "bound_semantic_assertion_failed",
+                },
+                "post_change_execution_evidence": dict(
+                    outcome_mechanism_binding.get("post_change_execution_evidence", {})
+                ),
+            },
+            "semantic_basis": semantic_basis,
+            "semantic_review_required": semantic_basis.get("semantic_review_required") is True,
+            "postconditions": [
+                {"type": "command_exit_code", "command_index": 0, "equals": 0},
+                {
+                    "type": "command_stdout_contains",
+                    "command_index": 0,
+                    "value": "\n1 passed",
+                },
+            ],
+        }
+        contract["positive_outcome_contract_id"] = _content_addressed_receipt_id(
+            "positive_outcome_contract",
+            contract,
+            "positive_outcome_contract_id",
+        )
+        return contract
 
     harness_evidence = [
         item
@@ -8063,7 +11029,8 @@ def _origin_semantic_positive_contract(
         or not isinstance(expected_behavior_binding, dict)
         or not found
         or not _source_observation_atom(
-            atom_receipt.get("atom_snapshot") if isinstance(atom_receipt, dict) else None
+            atom_receipt.get("atom_snapshot") if isinstance(atom_receipt, dict) else None,
+            receipt=atom_receipt,
         )
         or grounded_predicate is None
     ):
@@ -8127,6 +11094,12 @@ def _causal_proof_positive_contract(
         or not isinstance(positive, Mapping)
         or not isinstance(positive_basis, Mapping)
     ):
+        return None
+    # A controlled challenge may establish why the mechanism behaves differently
+    # without representing acceptable post-change behavior. It remains causal
+    # evidence, but its challenge predicate must not silently become the product
+    # success contract. Field omission preserves the exact legacy behavior.
+    if positive.get("contract_role") == "causal_contrast":
         return None
     proof_id = _text(proof_receipt.get("proof_receipt_id"))
     intervention_id = _text(proof_receipt.get("intervention_id"))
@@ -8200,6 +11173,7 @@ def _positive_outcome_contracts(
     oracle_kind: str,
     state_targets: list[dict[str, Any]],
     proof_adapter_receipts: Sequence[Mapping[str, Any]] = (),
+    outcome_mechanism_binding: Mapping[str, Any] | None = None,
     primary_hypothesis_id: str,
     primary_verified_mechanism_sha256: str,
     primary_verified_mechanism_provenance_sha256: str,
@@ -8235,6 +11209,7 @@ def _positive_outcome_contracts(
         inspected_file_receipts=inspected_file_receipts,
         inspected_symbol_receipts=inspected_symbol_receipts,
         falsification_interventions=falsification_interventions,
+        outcome_mechanism_binding=outcome_mechanism_binding,
     )
     if harness_contract is not None:
         contracts.append(harness_contract)
@@ -8403,6 +11378,14 @@ def _outcome_oracle_receipts(
         for experiment_id in evidence.get("experiment_ids", []):
             if isinstance(experiment_id, str):
                 evidence_by_experiment.setdefault(experiment_id, []).append(evidence)
+    selected_mechanism_evidence = [
+        evidence
+        for evidence in mechanism_evidence
+        if isinstance(evidence, dict)
+        and _text(evidence.get("mechanism_evidence_id")) in selected_evidence_ids
+        and evidence.get("hypothesis_id") == primary_hypothesis_id
+        and evidence.get("adversarial_effect") == "supports_selection"
+    ]
     proofs_by_baseline: dict[str, list[Mapping[str, Any]]] = {}
     for proof in proof_adapter_receipts:
         if validate_causal_proof_receipt(proof):
@@ -8421,6 +11404,33 @@ def _outcome_oracle_receipts(
     for experiment_id, experiment in sorted(experiments.items()):
         replay = clean_replays.get(experiment_id)
         evidence = evidence_by_experiment.get(experiment_id, [])
+        declared_contract = experiment.get("positive_outcome_contract")
+        binding_requested = bool(
+            isinstance(declared_contract, Mapping)
+            and _text(declared_contract.get("binds_hypothesis_id")) is not None
+        )
+        outcome_mechanism_binding = (
+            _outcome_mechanism_binding_receipt(
+                experiment_id=experiment_id,
+                experiment=experiment,
+                replay=replay,
+                verified_mechanism=verified_mechanism,
+                verified_mechanism_sha256=str(verified_mechanism_sha256),
+                verified_mechanism_provenance=verified_mechanism_provenance,
+                verified_mechanism_provenance_sha256=str(
+                    verified_mechanism_provenance_sha256
+                ),
+                selected_mechanism_evidence=selected_mechanism_evidence,
+                repo_revision=str(repo_revision),
+                errors=errors,
+            )
+            if binding_requested and isinstance(replay, Mapping) and repo_revision is not None
+            else None
+        )
+        if binding_requested and outcome_mechanism_binding is None:
+            continue
+        if outcome_mechanism_binding is not None:
+            evidence = selected_mechanism_evidence
         if (
             not isinstance(replay, dict)
             or experiment.get("outcome") != "supports"
@@ -8457,6 +11467,11 @@ def _outcome_oracle_receipts(
             "scenario_kind": scenario_kind,
             "origin_atom_ids": origin_atom_ids,
             "mechanism_evidence_ids": mechanism_ids,
+            **(
+                {"outcome_mechanism_binding": outcome_mechanism_binding}
+                if outcome_mechanism_binding is not None
+                else {}
+            ),
             "baseline": {
                 "exit_code": replay.get("exit_code"),
                 "observable_assertion": experiment.get("observable_assertion"),
@@ -8681,6 +11696,7 @@ def _outcome_oracle_receipts(
                 if isinstance(item, dict)
             ],
             proof_adapter_receipts=experiment_proofs,
+            outcome_mechanism_binding=outcome_mechanism_binding,
             primary_hypothesis_id=primary_hypothesis_id,
             primary_verified_mechanism_sha256=verified_mechanism_sha256,
             primary_verified_mechanism_provenance_sha256=(verified_mechanism_provenance_sha256),
@@ -9343,16 +12359,34 @@ def _falsification_attempt_receipts(
             )
             verified_intervention_symbols = intervention_symbols or proof_symbols
             required_relationship_symbols = relationship_symbols or verified_intervention_symbols
+            intervention_covers_pair = bool(
+                isinstance(intervention_receipt, dict)
+                and intervention_receipt.get("baseline_experiment_id") == baseline_id
+                and intervention_receipt.get("challenge_experiment_id") == challenge_id
+                and intervention_receipt.get("baseline_verified_mechanism_symbols")
+                == required_relationship_symbols
+                and intervention_receipt.get("challenge_verified_mechanism_symbols")
+                == required_relationship_symbols
+                and intervention_receipt.get("shared_verified_mechanism_symbols")
+                == required_relationship_symbols
+            )
+            effective_challenge_symbols = (
+                set(required_relationship_symbols or [])
+                if intervention_covers_pair
+                else challenge_symbols
+            )
             if hypothesis_index == 0:
                 if not baseline_mechanism_ids:
                     reasons.append("baseline_mechanism_unbound")
-                if not challenge_mechanism_ids:
+                if not challenge_mechanism_ids and not intervention_covers_pair:
                     reasons.append("challenge_mechanism_unbound")
                 if not required_relationship_symbols:
                     reasons.append("shared_mechanism_subset_missing")
                 elif (
                     not set(required_relationship_symbols).issubset(baseline_symbols)
-                    or not set(required_relationship_symbols).issubset(challenge_symbols)
+                    or not set(required_relationship_symbols).issubset(
+                        effective_challenge_symbols
+                    )
                     or verified_intervention_symbols != required_relationship_symbols
                 ):
                     reasons.append("shared_mechanism_subset_unverified")
@@ -9379,7 +12413,12 @@ def _falsification_attempt_receipts(
                     "stdout_sha256": challenge_replay.get("stdout_sha256"),
                     "stderr_sha256": challenge_replay.get("stderr_sha256"),
                     "mechanism_symbols": required_relationship_symbols,
-                    "mechanism_evidence_ids": sorted(challenge_mechanism_ids),
+                    "mechanism_evidence_ids": sorted(
+                        challenge_mechanism_ids
+                        or baseline_mechanism_ids
+                        if intervention_covers_pair
+                        else challenge_mechanism_ids
+                    ),
                     "intervention_receipt_id": (
                         intervention_receipt.get("intervention_receipt_id")
                         if isinstance(intervention_receipt, dict)
@@ -9563,6 +12602,38 @@ def _verify_assignment_files(
                 continue
             path_raw = _text(artifact.get("path"))
             path = Path(path_raw) if path_raw is not None else None
+            context_role = _text(artifact.get("research_context_role"))
+            if context_role is not None:
+                rel_raw = _text(artifact.get("source_relpath"))
+                rel = Path(rel_raw) if rel_raw is not None else None
+                run_dir_raw = _text(
+                    atom_snapshot.get("run_dir")
+                    if isinstance(atom_snapshot, Mapping)
+                    else None
+                )
+                run_dir = Path(run_dir_raw) if run_dir_raw is not None else None
+                context_invalid = (
+                    context_role not in set(RESEARCH_RUN_CONTEXT_FILES.values())
+                    or rel is None
+                    or rel.is_absolute()
+                    or len(rel.parts) != 1
+                    or RESEARCH_RUN_CONTEXT_FILES.get(rel.name) != context_role
+                    or path is None
+                    or path.is_symlink()
+                    or path.name != rel.name
+                    or run_dir is None
+                    or not run_dir.is_absolute()
+                )
+                if not context_invalid and path is not None and run_dir is not None:
+                    try:
+                        context_invalid = path.resolve().relative_to(run_dir.resolve()) != rel
+                    except (OSError, ValueError):
+                        context_invalid = True
+                if context_invalid:
+                    errors.append(
+                        f"origin_atom_context_artifact_invalid:{atom_id}:{path_raw}"
+                    )
+                    continue
             if path is None or not path.is_file():
                 errors.append(f"origin_atom_artifact_unavailable:{atom_id}:{path_raw}")
                 continue
@@ -9584,7 +12655,7 @@ def _atom_field_path_value(snapshot: dict[str, Any], field_path: str) -> tuple[b
     cursor = 1
     while cursor < len(field_path):
         if field_path[cursor] == ".":
-            match = re.match(r"\.([A-Za-z0-9_:-]+)", field_path[cursor:])
+            match = re.match(r"\.([A-Za-z_][A-Za-z0-9_]*)", field_path[cursor:])
             if match is None or not isinstance(current, dict):
                 return False, None
             key = match.group(1)
@@ -9605,6 +12676,102 @@ def _atom_field_path_value(snapshot: dict[str, Any], field_path: str) -> tuple[b
             continue
         return False, None
     return True, current
+
+
+def _atom_field_paths_matching_value(
+    snapshot: dict[str, Any],
+    expected_value: Any,
+    *,
+    limit: int = 8,
+) -> tuple[list[str], int]:
+    """Return bounded, end-to-end-valid paths whose values are JSON-identical."""
+
+    expected_sha256 = _canonical_json_sha256(expected_value)
+    matches: list[str] = []
+
+    def visit(value: Any, path: str) -> None:
+        if _canonical_json_sha256(value) == expected_sha256:
+            matches.append(path)
+        if isinstance(value, dict):
+            for key, child in value.items():
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", key):
+                    visit(child, f"{path}.{key}")
+        elif isinstance(value, list):
+            for index, child in enumerate(value):
+                visit(child, f"{path}[{index}]")
+
+    visit(snapshot, "$")
+    matches.sort(key=lambda path: (path.count(".") + path.count("["), len(path), path))
+    return matches[: max(0, limit)], len(matches)
+
+
+def _atom_binding_error_with_path_candidates(
+    *,
+    prefix: str,
+    reason: str,
+    snapshot: dict[str, Any],
+    declared_value: Any,
+    declared_value_key: str,
+    search_candidates: bool = True,
+) -> str:
+    details: dict[str, Any] = {"declared_value_key": declared_value_key}
+    if search_candidates:
+        paths, total = _atom_field_paths_matching_value(snapshot, declared_value)
+        details.update(
+            candidate_field_path_count=total,
+            candidate_field_paths=paths,
+            truncated=total > len(paths),
+        )
+    else:
+        details.update(
+            candidate_search_performed=False,
+            required_value_key="value",
+        )
+    return f"{prefix}:{reason}:details=" + json.dumps(
+        details,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _asserted_text_binds_scalar(*, asserted: str, actual_value: str, operator: str) -> bool:
+    """Bind a text assertion to a scalar without accepting incidental prose substrings."""
+
+    if asserted.strip() == actual_value.strip():
+        return True
+    if operator != "contains":
+        return False
+
+    try:
+        tokens = shlex.split(asserted, posix=True)
+    except ValueError:
+        tokens = []
+    if any(
+        key.strip()
+        and value.strip() == actual_value.strip()
+        for token in tokens
+        for key, separator, value in [token.partition("=")]
+        if separator
+    ):
+        # A complete key=value token is structured output, unlike an incidental
+        # prose substring such as "no error occurred".
+        return True
+
+    parsed_values: list[Any] = []
+    for candidate in (asserted, "{" + asserted + "}"):
+        try:
+            parsed_values.append(json.loads(candidate))
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+    def contains_value(value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(contains_value(child) for child in value.values())
+        if isinstance(value, list):
+            return any(contains_value(child) for child in value)
+        return value == actual_value
+
+    return any(contains_value(value) for value in parsed_values)
 
 
 def _explicit_atom_binding_receipts(
@@ -9637,7 +12804,23 @@ def _explicit_atom_binding_receipts(
     for index, declaration in enumerate(declarations):
         role = declaration.get("role")
         field_path = declaration.get("field_path")
+        has_value = "value" in declaration
+        has_source_value = "source_value" in declaration
         expected_value = declaration.get("value")
+        diagnostic_value = (
+            declaration.get("source_value")
+            if has_source_value and not has_value
+            else expected_value
+        )
+        declared_value_key = (
+            "value_and_source_value"
+            if has_value and has_source_value
+            else "value"
+            if has_value
+            else "source_value"
+            if has_source_value
+            else "missing"
+        )
         declared_hash = declaration.get("value_sha256")
         prefix = f"experiment_atom_binding_invalid:{experiment_id}:{atom_id}:{index}"
         if role not in {
@@ -9649,16 +12832,44 @@ def _explicit_atom_binding_receipts(
         }:
             errors.append(f"{prefix}:role")
             continue
+        if not has_value or has_source_value:
+            errors.append(
+                _atom_binding_error_with_path_candidates(
+                    prefix=prefix,
+                    reason="value_key",
+                    snapshot=snapshot,
+                    declared_value=diagnostic_value,
+                    declared_value_key=declared_value_key,
+                    search_candidates=has_value or has_source_value,
+                )
+            )
+            continue
         if not isinstance(field_path, str) or not field_path.strip():
-            errors.append(f"{prefix}:field_path")
+            errors.append(
+                _atom_binding_error_with_path_candidates(
+                    prefix=prefix,
+                    reason="field_path",
+                    snapshot=snapshot,
+                    declared_value=expected_value,
+                    declared_value_key=declared_value_key,
+                )
+            )
             continue
         expected_hash = _canonical_json_sha256(expected_value)
         if declared_hash is not None and declared_hash != expected_hash:
             errors.append(f"{prefix}:value_hash")
             continue
         found, actual_value = _atom_field_path_value(snapshot, field_path)
-        if not found or actual_value != expected_value:
-            errors.append(f"{prefix}:snapshot_value")
+        if not found or _canonical_json_sha256(actual_value) != expected_hash:
+            errors.append(
+                _atom_binding_error_with_path_candidates(
+                    prefix=prefix,
+                    reason="snapshot_value",
+                    snapshot=snapshot,
+                    declared_value=expected_value,
+                    declared_value_key=declared_value_key,
+                )
+            )
             continue
         binding_is_direct = False
         observation_predicate = declaration.get("observation_predicate")
@@ -9701,10 +12912,10 @@ def _explicit_atom_binding_receipts(
                 and isinstance(asserted, str)
                 and isinstance(actual_value, str)
             ):
-                binding_is_direct = (
-                    asserted.strip() == actual_value.strip()
-                    if operator == "equals"
-                    else asserted in actual_value
+                binding_is_direct = _asserted_text_binds_scalar(
+                    asserted=asserted,
+                    actual_value=actual_value,
+                    operator=operator,
                 )
         if role in {"symptom", "command"} and not binding_is_direct:
             errors.append(f"{prefix}:not_bound_to_observation")
@@ -9778,7 +12989,13 @@ def _experiment_atom_bindings(
 
     def snapshot_text_match(value: Any, expected: str, *, path: str = "$") -> str | None:
         if isinstance(value, str):
-            return path if expected.casefold() in value.casefold() else None
+            direct_narrative_match = expected.casefold() in value.casefold()
+            asserted_scalar_match = _asserted_text_binds_scalar(
+                asserted=expected,
+                actual_value=value,
+                operator="contains",
+            )
+            return path if direct_narrative_match or asserted_scalar_match else None
         if isinstance(value, dict):
             for key, child in value.items():
                 match = snapshot_text_match(
@@ -9801,6 +13018,17 @@ def _experiment_atom_bindings(
 
     experiments_raw = dossier.get("experiments")
     experiments = experiments_raw if isinstance(experiments_raw, list) else []
+    coverage_item = dict(dossier)
+    coverage_item["evidence_assignment"] = dict(assignment)
+    required_atom_ids = research_required_experiment_coverage_atom_ids(coverage_item)
+    assigned_expected = {
+        atom_id
+        for atom_id in assignment.get("expected_atom_ids", [])
+        if isinstance(atom_id, str)
+    }
+    representative_aggregate_coverage = bool(
+        required_atom_ids and required_atom_ids != assigned_expected
+    )
     bindings: list[dict[str, Any]] = []
     supported_atoms: set[str] = set()
     directly_supported_atoms: set[str] = set()
@@ -9820,6 +13048,11 @@ def _experiment_atom_bindings(
         assertion = assertion_raw if isinstance(assertion_raw, dict) else {}
         for atom_id in experiment.get("addresses_atom_ids", []):
             if not isinstance(atom_id, str):
+                continue
+            if representative_aggregate_coverage and atom_id not in required_atom_ids:
+                # The authenticated aggregate is the direct evidence requirement. Retain
+                # occurrence IDs as lineage without multiplying one identical binding error
+                # across every represented occurrence.
                 continue
             snapshot = snapshots.get(atom_id)
             if not isinstance(snapshot, dict):
@@ -9918,12 +13151,6 @@ def _experiment_atom_bindings(
                 if matched_artifact is not None:
                     binding["origin_artifact_sha256"] = _sha256_path(Path(matched_artifact))
             bindings.append(binding)
-    expected_raw = assignment.get("expected_atom_ids")
-    expected = {
-        atom_id
-        for atom_id in (expected_raw if isinstance(expected_raw, list) else [])
-        if isinstance(atom_id, str)
-    }
     requires_advancing_coverage = dossier.get("research_status") not in {
         "insufficient_evidence",
         "blocked",
@@ -9931,14 +13158,14 @@ def _experiment_atom_bindings(
     if (
         requires_advancing_coverage
         and assignment.get("status") == "complete"
-        and supported_atoms != expected
+        and not required_atom_ids.issubset(supported_atoms)
     ):
         errors.append("supporting_experiments_do_not_cover_origin_atoms")
     if (
         requires_advancing_coverage
         and assignment.get("status") == "complete"
-        and expected
-        and not directly_supported_atoms
+        and required_atom_ids
+        and not required_atom_ids.intersection(directly_supported_atoms)
     ):
         errors.append("supporting_experiments_have_no_direct_symptom_binding")
     return bindings
@@ -10439,6 +13666,17 @@ def _proof_adapter_receipts(
     return [by_id[key] for key in sorted(by_id)], diagnostics
 
 
+def _clear_failed_receipt_success_projections(receipt: dict[str, Any]) -> None:
+    """Keep a failed proof useful without retaining success-only projections."""
+
+    receipt["verified_mechanism"] = None
+    receipt["verified_mechanism_sha256"] = None
+    receipt["verified_mechanism_provenance"] = None
+    receipt["verified_mechanism_provenance_sha256"] = None
+    receipt["outcome_oracles"] = []
+    receipt["verification_boundaries"] = []
+
+
 def verify_research_evidence(
     dossier: dict[str, Any],
     *,
@@ -10679,6 +13917,7 @@ def verify_research_evidence(
         symbol_receipts=symbol_receipts,
         mechanism_evidence=preliminary_mechanism_evidence,
     )
+    mechanism_errors: list[str] = []
     mechanism_evidence = _typed_mechanism_evidence_receipts(
         dossier,
         clean_replays=clean_replays,
@@ -10689,8 +13928,12 @@ def verify_research_evidence(
         deterministic_closures=deterministic_closures,
         proof_adapter_receipts=proof_adapter_receipts,
         atom_bindings=atom_bindings,
-        errors=errors,
+        errors=mechanism_errors,
     )
+    fatal_mechanism_errors, blocked_mechanism_diagnostics = _partition_mechanism_validation_errors(
+        dossier, mechanism_errors
+    )
+    errors.extend(fatal_mechanism_errors)
     (
         verified_mechanism,
         verified_mechanism_sha256,
@@ -10703,6 +13946,7 @@ def verify_research_evidence(
         falsification_interventions=falsification_interventions,
         deterministic_closures=deterministic_closures,
     )
+    optional_outcome_errors: list[str] = []
     outcome_oracles = _outcome_oracle_receipts(
         dossier,
         clean_replays=clean_replays,
@@ -10727,8 +13971,10 @@ def verify_research_evidence(
         ),
         run_dir=run_dir,
         repo_revision=repo_revision,
-        errors=errors,
+        errors=optional_outcome_errors,
     )
+    if optional_outcome_errors:
+        outcome_oracles = []
     verification_boundaries, verification_boundary_errors = _verification_boundary_receipts(
         experiments=declared_experiments,
         clean_replays=clean_replays,
@@ -10737,7 +13983,8 @@ def verify_research_evidence(
         outcome_oracles=outcome_oracles,
         verified_mechanism_provenance=verified_mechanism_provenance,
     )
-    errors.extend(verification_boundary_errors)
+    if verification_boundary_errors:
+        verification_boundaries = []
     falsification_attempts = _falsification_attempt_receipts(
         dossier,
         clean_replays=clean_replays,
@@ -10770,6 +14017,12 @@ def verify_research_evidence(
                 optional_falsification_intervention_errors if proof_adapter_receipts else [],
             ),
             ("preliminary_mechanism_projection", preliminary_mechanism_errors),
+            (
+                "blocked_or_insufficient_mechanism_projection",
+                blocked_mechanism_diagnostics,
+            ),
+            ("optional_post_change_outcome", optional_outcome_errors),
+            ("optional_verification_boundary", verification_boundary_errors),
         )
         if component_errors
     ]
@@ -10827,7 +14080,18 @@ def verify_research_evidence(
         "atom_bindings": atom_bindings,
         "errors": unique_errors,
     }
+    if receipt["status"] == "failed":
+        _clear_failed_receipt_success_projections(receipt)
     receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
+    if receipt["status"] == "verified":
+        contract_item = dict(dossier)
+        contract_item["evidence_verification"] = receipt
+        projection_errors = research_evidence_verification_contract_errors(contract_item)
+        if projection_errors:
+            receipt["status"] = "failed"
+            receipt["errors"] = list(dict.fromkeys([*receipt["errors"], *projection_errors]))
+            _clear_failed_receipt_success_projections(receipt)
+            receipt["receipt_sha256"] = evidence_verification_sha256(receipt)
     return receipt
 
 
@@ -10837,6 +14101,7 @@ def _persisted_origin_attachment_errors(
     receipt: dict[str, Any],
     research_workspace: Path | None,
     persisted_events: Sequence[dict[str, Any]],
+    dossier: Mapping[str, Any] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     assignment_manifest_raw = assignment.get("origin_attachment_evidence")
@@ -10855,6 +14120,7 @@ def _persisted_origin_attachment_errors(
         verify_materialized_origin_attachments(
             workspace_dir=research_workspace,
             manifest=assignment_manifest,
+            evidence_assignment=assignment,
         )
     )
     materialization_errors_raw = assignment_manifest.get("errors")
@@ -10921,7 +14187,30 @@ def _persisted_origin_attachment_errors(
             errors.append(f"research_origin_attachment_read_attestation_duplicate:{rel_path}")
             continue
         observed.add(rel_path)
-    if observed != set(expected):
+    coverage_raw = receipt.get("origin_attachment_read_coverage")
+    if isinstance(coverage_raw, Mapping):
+        if not isinstance(dossier, Mapping):
+            errors.append("research_origin_attachment_read_coverage_dossier_unavailable")
+        else:
+            recomputed_coverage = origin_attachment_read_scope(
+                assignment_manifest,
+                dossier=dossier,
+                verification=receipt,
+                observed_files=sorted(observed),
+            )
+            if dict(coverage_raw) != recomputed_coverage:
+                errors.append("research_origin_attachment_read_coverage_changed")
+            required_files = set(recomputed_coverage["required_files"])
+            if not required_files.issubset(observed):
+                errors.append("research_origin_attachment_required_read_coverage_mismatch")
+            errors.extend(
+                "research_" + error
+                for error in recomputed_coverage.get("selection_errors", [])
+                if isinstance(error, str) and error
+            )
+    elif observed != set(expected):
+        # Legacy receipts predate selective coverage and retain their original all-read
+        # semantics; existing verified evidence is never silently reinterpreted.
         errors.append("research_origin_attachment_read_coverage_mismatch")
     return errors
 
@@ -11110,24 +14399,51 @@ def verify_persisted_research_evidence(
         ):
             errors.append("research_planning_workspace_changed")
 
-    research_raw = _text(receipt.get("workspace_dir"))
-    research_workspace = Path(research_raw) if research_raw is not None else None
-    if research_workspace is None or not research_workspace.is_dir():
-        errors.append("research_workspace_unavailable")
-    else:
-        if _workspace_head(research_workspace) != receipt.get("workspace_head"):
-            errors.append("research_workspace_head_changed")
-        if planning_workspace is not None and planning_workspace.is_dir():
-            overlay_errors, overlay = _workspace_overlay_errors(
-                research_workspace=research_workspace,
-                baseline_workspace=planning_workspace,
-            )
-            errors.extend(overlay_errors)
-            if overlay != receipt.get("workspace_overlay"):
-                errors.append("research_workspace_overlay_changed")
-
     run_dir_raw = _text(receipt.get("run_dir"))
     run_dir = Path(run_dir_raw) if run_dir_raw is not None else None
+    research_raw = _text(receipt.get("workspace_dir"))
+    original_research_workspace = Path(research_raw) if research_raw is not None else None
+    research_workspace = original_research_workspace
+    retained_overlay_workspace: Path | None = None
+    retained_overlay_manifest: dict[str, dict[str, Any]] = {}
+    live_workspace_errors: list[str] = []
+    live_workspace_valid = False
+    if original_research_workspace is None or not original_research_workspace.is_dir():
+        live_workspace_errors.append("research_workspace_unavailable")
+    else:
+        if _workspace_head(original_research_workspace) != receipt.get("workspace_head"):
+            live_workspace_errors.append("research_workspace_head_changed")
+        if planning_workspace is not None and planning_workspace.is_dir():
+            overlay_errors, overlay = _workspace_overlay_errors(
+                research_workspace=original_research_workspace,
+                baseline_workspace=planning_workspace,
+            )
+            live_workspace_errors.extend(overlay_errors)
+            if not _persisted_workspace_overlay_matches(
+                receipt.get("workspace_overlay"),
+                overlay,
+            ):
+                live_workspace_errors.append("research_workspace_overlay_changed")
+        else:
+            live_workspace_errors.append("research_workspace_baseline_unavailable")
+        live_workspace_valid = not live_workspace_errors
+    if not live_workspace_valid:
+        retained_candidate, retained_manifest, retained_errors = (
+            _authenticated_retained_overlay_workspace(
+                dossier=dossier,
+                receipt=receipt,
+                run_dir=run_dir,
+                planning_workspace=planning_workspace,
+            )
+        )
+        if retained_candidate is not None and not retained_errors:
+            retained_overlay_workspace = retained_candidate
+            retained_overlay_manifest = retained_manifest
+            research_workspace = retained_candidate
+        else:
+            errors.extend(live_workspace_errors)
+            errors.extend(retained_errors)
+
     attempts_raw = dossier.get("research_attempts")
     research_attempts = (
         [attempt for attempt in attempts_raw if isinstance(attempt, Mapping)]
@@ -11146,6 +14462,7 @@ def verify_persisted_research_evidence(
             receipt=receipt,
             research_workspace=research_workspace,
             persisted_events=persisted_events,
+            dossier=dossier,
         )
     )
     for hash_field, filename in (
@@ -11159,6 +14476,7 @@ def verify_persisted_research_evidence(
     artifacts_raw = receipt.get("artifacts")
     artifacts = artifacts_raw if isinstance(artifacts_raw, list) else []
     artifacts_by_id: dict[str, dict[str, Any]] = {}
+    artifact_paths_by_id: dict[str, Path] = {}
     for artifact in artifacts:
         if not isinstance(artifact, dict):
             errors.append("research_artifact_receipt_invalid")
@@ -11166,21 +14484,18 @@ def verify_persisted_research_evidence(
         artifact_id = _text(artifact.get("artifact_id"))
         if artifact_id is not None:
             artifacts_by_id[artifact_id] = artifact
-        path_raw = _text(artifact.get("path"))
-        path = Path(path_raw) if path_raw is not None else None
-        if (
-            path is None
-            or not path.is_file()
-            or artifact.get("sha256") != _sha256_path(path)
-            or artifact.get("size_bytes") != path.stat().st_size
-        ):
+        path = _persisted_artifact_path(
+            artifact,
+            original_research_workspace=original_research_workspace,
+            retained_overlay_workspace=retained_overlay_workspace,
+            retained_overlay_manifest=retained_overlay_manifest,
+            planning_workspace=planning_workspace,
+        )
+        if path is None:
             errors.append(f"research_artifact_changed:{artifact.get('artifact_id')}")
-    target_ref_artifact = artifacts_by_id.get("runner:target_ref")
-    target_ref_path = (
-        Path(str(target_ref_artifact.get("path")))
-        if isinstance(target_ref_artifact, dict)
-        else None
-    )
+        elif artifact_id is not None:
+            artifact_paths_by_id[artifact_id] = path
+    target_ref_path = artifact_paths_by_id.get("runner:target_ref")
     target_agent: str | None = None
     if target_ref_path is None or not target_ref_path.is_file():
         errors.append("research_target_ref_artifact_missing")
@@ -11206,9 +14521,7 @@ def verify_persisted_research_evidence(
                 errors.append("research_target_ref_resolved_ref_changed")
 
     if target_agent == "codex":
-        auth_artifact = artifacts_by_id.get("runner:codex_subscription_auth")
-        auth_path_raw = auth_artifact.get("path") if isinstance(auth_artifact, dict) else None
-        auth_path = Path(auth_path_raw) if isinstance(auth_path_raw, str) else None
+        auth_path = artifact_paths_by_id.get("runner:codex_subscription_auth")
         if auth_path is None or not auth_path.is_file():
             errors.append("research_codex_subscription_receipt_missing")
         else:
@@ -11260,17 +14573,30 @@ def verify_persisted_research_evidence(
             errors.append(f"research_experiment_receipt_changed:{experiment_id}:result")
         if experiment_receipt.get("exit_code") != declared.get("exit_code"):
             errors.append(f"research_experiment_receipt_changed:{experiment_id}:exit_code")
-        expected_authorized = (
-            _authorized_replay_invocation(
-                command=str(declared.get("command") or ""),
-                experiment=declared,
-                dossier=dossier,
-                assignment=assignment,
-                workspace=planning_workspace,
+        expected_authorized = None
+        if research_workspace is not None and research_workspace.is_dir():
+            expected_authorized = (
+                _persisted_retained_authorized_invocation(
+                    command=str(declared.get("command") or ""),
+                    experiment=declared,
+                    dossier=dossier,
+                    assignment=assignment,
+                    retained_workspace=research_workspace,
+                    retained_manifest=retained_overlay_manifest,
+                    planning_workspace=planning_workspace,
+                    persisted_authorization=experiment_receipt.get(
+                        "command_authorization"
+                    ),
+                )
+                if retained_overlay_workspace is not None
+                else _authorized_replay_invocation(
+                    command=str(declared.get("command") or ""),
+                    experiment=declared,
+                    dossier=dossier,
+                    assignment=assignment,
+                    workspace=research_workspace,
+                )
             )
-            if planning_workspace is not None and planning_workspace.is_dir()
-            else None
-        )
         expected_argv = expected_authorized[0] if expected_authorized is not None else None
         expected_authorization = expected_authorized[1] if expected_authorized is not None else None
         if expected_argv is None or experiment_receipt.get("executed_argv") != expected_argv:
@@ -11314,6 +14640,14 @@ def verify_persisted_research_evidence(
                 errors.append(f"research_agent_event_output_changed:{experiment_id}")
         replay_workspace_raw = _text(experiment_receipt.get("workspace_dir"))
         replay_workspace = Path(replay_workspace_raw) if replay_workspace_raw is not None else None
+        selected_isolation = _selected_replay_isolation(
+            replay_isolation,
+            platform_requirement=declared.get("platform_requirement"),
+        )
+        if selected_isolation is None:
+            errors.append(f"research_replay_isolation_changed:{experiment_id}:route_unavailable")
+        elif experiment_receipt.get("execution_isolation") != selected_isolation:
+            errors.append(f"research_replay_isolation_changed:{experiment_id}:route_mismatch")
         if (
             replay_workspace is None
             or not replay_workspace.is_dir()
@@ -11357,12 +14691,11 @@ def verify_persisted_research_evidence(
             if (
                 experiment_receipt.get("post_replay_state_sha256") != current_replay_state_sha
                 or not mutation_contract_valid
-                or experiment_receipt.get("execution_isolation") != replay_isolation
             ):
                 errors.append(f"research_replay_workspace_state_changed:{experiment_id}")
             for metadata_error in _execution_metadata_errors(
                 experiment_receipt.get("execution_metadata"),
-                isolation=replay_isolation if isinstance(replay_isolation, dict) else {},
+                isolation=selected_isolation or {},
             ):
                 errors.append(f"research_replay_isolation_changed:{experiment_id}:{metadata_error}")
             overlay_raw = receipt.get("workspace_overlay")
@@ -11430,7 +14763,7 @@ def verify_persisted_research_evidence(
         files_raw = receipt.get("inspected_files")
         files = files_raw if isinstance(files_raw, list) else []
         persisted_file_paths: set[str] = set()
-        persisted_observed_contents: dict[str, str] = {}
+        persisted_observed_contents: dict[str, list[str]] = {}
         for file_receipt in files:
             if not isinstance(file_receipt, dict):
                 errors.append("research_inspected_file_receipt_invalid")
@@ -11438,7 +14771,11 @@ def verify_persisted_research_evidence(
             path_raw = _text(file_receipt.get("path"))
             if path_raw is not None:
                 persisted_file_paths.add(path_raw)
-            path = planning_workspace / path_raw if path_raw is not None else None
+            path = (
+                _workspace_file(path_raw, workspace=planning_workspace)
+                if path_raw is not None
+                else None
+            )
             if (
                 path is None
                 or not path.is_file()
@@ -11448,6 +14785,32 @@ def verify_persisted_research_evidence(
             ):
                 errors.append(f"research_inspected_file_changed:{path_raw}")
                 continue
+            validated_contents: list[str] = []
+            for candidate_event in persisted_events:
+                candidate_data = (
+                    candidate_event.get("data")
+                    if isinstance(candidate_event, dict)
+                    and isinstance(candidate_event.get("data"), dict)
+                    else None
+                )
+                if (
+                    not isinstance(candidate_event, dict)
+                    or candidate_event.get("type") != "read_file"
+                    or not isinstance(candidate_data, dict)
+                    or _normalize_path(str(candidate_data.get("path") or ""))
+                    != _normalize_path(path_raw or "")
+                ):
+                    continue
+                candidate_attestation = _revalidated_read_event_attestation(
+                    path=path,
+                    data=candidate_data,
+                )
+                if candidate_attestation is not None and isinstance(
+                    candidate_attestation.get("observed_content"), str
+                ):
+                    validated_contents.append(candidate_attestation["observed_content"])
+            if path_raw is not None:
+                persisted_observed_contents[path_raw] = validated_contents
             read_event_index = file_receipt.get("read_event_index")
             read_event = (
                 persisted_events[read_event_index]
@@ -11462,57 +14825,27 @@ def verify_persisted_research_evidence(
                 else None
             )
             expected_attestation = (
-                observed_read_attestation(
-                    path=path,
-                    observed_text=read_data.get("observed_content"),
-                    source_exit_code=(
-                        read_data["source_exit_code"]
-                        if isinstance(read_data.get("source_exit_code"), int)
-                        and not isinstance(read_data.get("source_exit_code"), bool)
-                        else -1
-                    ),
-                    allow_partial=read_data.get("read_source") == "tool",
-                )
-                if isinstance(read_data, dict) and path is not None and path.is_file()
-                else {}
+                _revalidated_read_event_attestation(path=path, data=read_data)
+                if isinstance(read_data, dict)
+                else None
             )
             if (
                 not isinstance(read_event, dict)
                 or read_event.get("type") != "read_file"
                 or file_receipt.get("read_event_sha256") != _canonical_json_sha256(read_event)
                 or not isinstance(read_data, dict)
+                or expected_attestation is None
                 or _normalize_path(str(read_data.get("path") or ""))
                 != _normalize_path(path_raw or "")
-                or read_data.get("content_observed") is not True
-                or read_data.get("source_exit_code") != 0
                 or read_data.get("read_source") != file_receipt.get("read_source")
-                or read_data.get("bytes") != path.stat().st_size
-                or read_data.get("file_size_bytes") != path.stat().st_size
-                or read_data.get("file_sha256") != _sha256_path(path)
                 or read_data.get("observed_bytes") != file_receipt.get("bytes_observed")
                 or read_data.get("observed_content_sha256")
                 != file_receipt.get("observed_content_sha256")
                 or read_data.get("whole_file_observed") != file_receipt.get("whole_file_observed")
                 or read_data.get("observed_start_line") != file_receipt.get("observed_start_line")
                 or read_data.get("observed_end_line") != file_receipt.get("observed_end_line")
-                or any(
-                    read_data.get(field) != expected_attestation.get(field)
-                    for field in (
-                        "content_observed",
-                        "whole_file_observed",
-                        "observed_content",
-                        "observed_content_sha256",
-                        "observed_bytes",
-                        "observed_start_line",
-                        "observed_end_line",
-                        "file_sha256",
-                        "file_size_bytes",
-                    )
-                )
             ):
                 errors.append(f"research_inspected_file_event_changed:{path_raw}")
-            elif isinstance(read_data.get("observed_content"), str) and path_raw is not None:
-                persisted_observed_contents[path_raw] = read_data["observed_content"]
         declared_file_paths = {
             str(path).replace("\\", "/").removeprefix("./")
             for path in dossier.get("inspected_files", [])
@@ -11535,10 +14868,13 @@ def verify_persisted_research_evidence(
             if (
                 symbol is None
                 or symbol_path not in persisted_file_paths
-                or not _symbol_definition_exists(
-                    path=symbol_path,
-                    content=persisted_observed_contents.get(symbol_path, ""),
-                    symbol=symbol,
+                or not any(
+                    _symbol_definition_exists(
+                        path=symbol_path,
+                        content=content,
+                        symbol=symbol,
+                    )
+                    for content in persisted_observed_contents.get(symbol_path, [])
                 )
             ):
                 errors.append(f"research_inspected_symbol_changed:{symbol}")
@@ -11630,7 +14966,6 @@ def verify_persisted_research_evidence(
             deterministic_closures=[],
             atom_bindings=recomputed_bindings,
             errors=preliminary_mechanism_errors,
-            proof_adapter_receipts=recomputed_adapter_receipts,
         )
         recomputed_deterministic_closures = _deterministic_mechanism_closure_receipts(
             dossier,
@@ -11653,7 +14988,46 @@ def verify_persisted_research_evidence(
             atom_bindings=recomputed_bindings,
             errors=mechanism_errors,
         )
-        errors.extend(mechanism_errors)
+        legacy_mechanism_projection = _persisted_legacy_mechanism_projection(
+            dossier,
+            receipt=receipt,
+            recomputed_adapter_receipts=recomputed_adapter_receipts,
+            mechanism_errors=mechanism_errors,
+        )
+        if legacy_mechanism_projection is not None:
+            recomputed_mechanism_evidence = legacy_mechanism_projection
+            mechanism_errors = []
+        fatal_mechanism_errors, blocked_mechanism_diagnostics = (
+            _partition_mechanism_validation_errors(dossier, mechanism_errors)
+        )
+        errors.extend(fatal_mechanism_errors)
+        recomputed_quarantined_diagnostics = [
+            {
+                "component": component,
+                "diagnostics": list(dict.fromkeys(component_errors)),
+            }
+            for component, component_errors in (
+                ("optional_causal_trace", causal_errors),
+                ("optional_control", control_errors),
+                (
+                    "optional_falsification_intervention",
+                    intervention_errors if recomputed_adapter_receipts else [],
+                ),
+                ("preliminary_mechanism_projection", preliminary_mechanism_errors),
+                (
+                    "blocked_or_insufficient_mechanism_projection",
+                    blocked_mechanism_diagnostics,
+                ),
+            )
+            if component_errors
+        ]
+        if legacy_mechanism_projection is not None:
+            stored_diagnostics = receipt.get("quarantined_diagnostics")
+            recomputed_quarantined_diagnostics = (
+                [dict(item) for item in stored_diagnostics if isinstance(item, Mapping)]
+                if isinstance(stored_diagnostics, list)
+                else []
+            )
         if receipt.get("mechanism_evidence") != recomputed_mechanism_evidence:
             errors.append("research_mechanism_evidence_changed")
         (
@@ -11713,7 +15087,8 @@ def verify_persisted_research_evidence(
             repo_revision=_text(dossier.get("repo_revision")),
             errors=oracle_errors,
         )
-        errors.extend(oracle_errors)
+        if oracle_errors:
+            recomputed_outcome_oracles = []
         if receipt.get("outcome_oracles") != recomputed_outcome_oracles:
             errors.append("research_outcome_oracles_changed")
         recomputed_verification_boundaries, boundary_errors = _verification_boundary_receipts(
@@ -11724,9 +15099,23 @@ def verify_persisted_research_evidence(
             outcome_oracles=recomputed_outcome_oracles,
             verified_mechanism_provenance=(recomputed_verified_mechanism_provenance),
         )
-        errors.extend(boundary_errors)
+        if boundary_errors:
+            recomputed_verification_boundaries = []
         if receipt.get("verification_boundaries", []) != recomputed_verification_boundaries:
             errors.append("research_verification_boundaries_changed")
+        for component, component_errors in (
+            ("optional_post_change_outcome", oracle_errors),
+            ("optional_verification_boundary", boundary_errors),
+        ):
+            if component_errors:
+                recomputed_quarantined_diagnostics.append(
+                    {
+                        "component": component,
+                        "diagnostics": list(dict.fromkeys(component_errors)),
+                    }
+                )
+        if receipt.get("quarantined_diagnostics", []) != recomputed_quarantined_diagnostics:
+            errors.append("research_quarantined_diagnostics_changed")
         falsification_errors: list[str] = []
         recomputed_falsification_attempts = _falsification_attempt_receipts(
             dossier,

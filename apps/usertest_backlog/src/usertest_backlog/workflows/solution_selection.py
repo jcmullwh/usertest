@@ -1,6 +1,8 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from backlog_core import (
     assess_research_readiness,
     bind_falsification_review,
@@ -649,7 +651,21 @@ def _run_solution_selection_stage(
                     }
                     for contract in dry_positive_contracts
                 ],
+                "outcome_strategy_review": {
+                    "verdict": "sufficient",
+                    "semantic_relation_assessment": (
+                        "dry_run placeholder; no independent outcome-strategy review ran"
+                    ),
+                    "proves_intended_operation": True,
+                    "problem_coverage": "partial",
+                    "residual_untested_paths": [dry_review_risk],
+                    "evidence_refs": [dry_evidence_ref],
+                },
             }
+            if not dry_positive_contracts:
+                review.pop("selected_positive_outcome_contract_id", None)
+                review.pop("selected_positive_outcome_contract_ids", None)
+                review.pop("outcome_contract_reviews", None)
         try:
             review = bind_falsification_review(
                 review,

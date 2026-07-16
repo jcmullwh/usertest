@@ -147,6 +147,14 @@ def _text(value: Any) -> str | None:
     return value or None
 
 
+def _clean_string_set(value: Any) -> set[str]:
+    return {
+        item.strip()
+        for item in (value if isinstance(value, list) else [])
+        if isinstance(item, str) and item.strip()
+    }
+
+
 def _items(document: dict[str, Any]) -> list[dict[str, Any]]:
     raw = document.get("items")
     return [item for item in raw if isinstance(item, dict)] if isinstance(raw, list) else []
@@ -2621,6 +2629,25 @@ def _case_conservation_errors(
         options = options_by_case.get(case_id, [])
         if not options:
             option_outcomes = option_outcomes_by_case.get(case_id, [])
+            evidence_bound_no_change = any(
+                _text(outcome.get("optioning_status")) == "not_required"
+                and _text(outcome.get("research_actionability_disposition"))
+                in {"already_addressed", "non_actionable"}
+                and any(
+                    isinstance(research_item.get("actionability_assessment"), Mapping)
+                    and _text(research_item["actionability_assessment"].get("disposition"))
+                    == _text(outcome.get("research_actionability_disposition"))
+                    and _clean_string_set(
+                        research_item["actionability_assessment"].get("evidence_refs")
+                    )
+                    == _clean_string_set(outcome.get("evidence_refs"))
+                    and bool(_clean_string_set(outcome.get("evidence_refs")))
+                    for research_item in research
+                )
+                for outcome in option_outcomes
+            )
+            if evidence_bound_no_change:
+                continue
             if any(
                 _text(item.get("optioning_status"))
                 in {"insufficient_evidence", "no_safe_option", "invalid_output"}
@@ -3516,6 +3543,23 @@ def evaluate_shadow_invariants(
             )
             else None
         ),
+        source_adjudication_sha256_expected=_text(
+            shadow_qualification.get(
+                "source_qualification_output_adjudication_sha256"
+            )
+        ),
+        source_correction_findings_expected=(
+            [
+                dict(item)
+                for item in shadow_qualification.get("source_correction_findings", [])
+                if isinstance(item, Mapping)
+            ]
+            if isinstance(
+                shadow_qualification.get("source_correction_findings"),
+                list,
+            )
+            else None
+        ),
         positive_throughput_required=qualification["require_nonempty_throughput"],
         minimum_good_ticket_count=qualification["minimum_good_ticket_count"],
         minimum_good_to_bad_ratio=qualification["minimum_good_to_bad_ratio"],
@@ -3996,8 +4040,26 @@ def _qualification_report_errors(value: Any) -> list[str]:
     if not isinstance(routes_raw, list) or len(routes) != len(routes_raw):
         errors.append("shadow_independent_qualification_correction_routes_invalid")
     else:
+        terminal_risks_raw = value.get("terminal_residual_risks", [])
+        terminal_risks = (
+            [item for item in terminal_risks_raw if isinstance(item, Mapping)]
+            if isinstance(terminal_risks_raw, list)
+            else []
+        )
+        if (
+            not isinstance(terminal_risks_raw, list)
+            or len(terminal_risks) != len(terminal_risks_raw)
+        ):
+            errors.append(
+                "shadow_independent_qualification_terminal_residual_risks_invalid"
+            )
         expected_routing_status = (
-            "pending_orchestration"
+            "terminal_residual_risk"
+            if routes
+            and all(route.get("route_status") == "uncorrectable" for route in routes)
+            else "pending_with_terminal_residual_risk"
+            if terminal_risks
+            else "pending_orchestration"
             if routes
             else "not_evaluated"
             if value.get("status") in {"missing", "invalid"}
@@ -4032,6 +4094,9 @@ def _qualification_report_errors(value: Any) -> list[str]:
             route_count = counts.get("correction_routes")
             same_author_count = counts.get("same_author_correction_routes")
             unrouteable_count = counts.get("unrouteable_corrections")
+            terminal_risk_count = counts.get(
+                "source_correction_terminal_residual_risks"
+            )
             if route_count is not None and route_count != len(routes):
                 errors.append("shadow_independent_qualification_correction_route_count_mismatch")
             if same_author_count is not None and same_author_count != sum(
@@ -4042,6 +4107,13 @@ def _qualification_report_errors(value: Any) -> list[str]:
                 route.get("route_status") == "author_provenance_unavailable" for route in routes
             ):
                 errors.append("shadow_independent_qualification_unrouteable_route_count_mismatch")
+            if (
+                terminal_risk_count is not None
+                and terminal_risk_count != len(terminal_risks)
+            ):
+                errors.append(
+                    "shadow_independent_qualification_terminal_residual_risk_count_mismatch"
+                )
     return errors
 
 

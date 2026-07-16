@@ -2,8 +2,9 @@
 
 Each model role owns a distinct conversation frontier.  Structural errors return to the
 authoring role; substantive falsifier findings cross role boundaries as content-addressed
-feedback.  The coordinator has no fixed cycle count: exact recurrence, unavailable exact
-continuation, or explicit correction/rework economics pause the case without discarding it.
+feedback.  The coordinator has no elapsed-time or cost cutoff: exact recurrence, unavailable exact
+continuation, or three consecutive materially nonadvancing cycles pause the case while retaining
+the strongest frontier and complete authored history.
 """
 
 from __future__ import annotations
@@ -38,6 +39,7 @@ from usertest_backlog.workflows.depth_contracts import (
 from usertest_backlog.workflows.solution_options import _optioning_response_projection
 
 RoleValidator = Callable[[str], tuple[dict[str, Any], list[str], list[str]]]
+_CROSS_ROLE_NONADVANCING_LIMIT = 3
 
 
 def _canonical_sha256(value: object) -> str:
@@ -424,18 +426,17 @@ def _run_role_conversation(
             resume_session_id=initial.agent_session_id,
         )
 
-    supplied_author_cost = (
-        max(0.0, float(author_cost_seconds)) if author_cost_seconds is not None else 0.0
-    )
-    correction_budget = supplied_author_cost if supplied_author_cost > 0.0 else initial.cost_seconds
+    # ``author_cost_seconds`` remains part of the persisted provenance contract, but it is
+    # telemetry rather than a correction limit. Model latency says nothing about whether an
+    # invalid output is repairable. The stage-neutral controller already stops exact state
+    # recurrence and three consecutive materially nonadvancing rewrites while retaining the
+    # objective-best frontier. Applying the old elapsed-cost boundary here could therefore
+    # pause immediately after a 37 -> 8 -> 2 improvement merely because one later rewrite took
+    # longer than the original author turn.
+    _ = author_cost_seconds
     correction = run_progressive_correction(
         initial=initial,
         invoke_correction=invoke_correction,
-        pause_policy=lambda _current, _assessment, since_progress, _total: (
-            "correction_cost_reached_original"
-            if correction_budget > 0.0 and since_progress >= correction_budget
-            else None
-        ),
     )
     retained = (
         correction.current if correction.status in {"accepted", "corrected"} else correction.best
@@ -795,8 +796,10 @@ def _run_status_outcome(
     warnings: list[str],
     rework_cost_since_progress: float,
     total_rework_cost: float,
+    consecutive_material_nonprogress: int = 0,
+    retained_frontier: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    return {
+    result = {
         "status": status,
         "decision": None,
         "outcome": {
@@ -807,6 +810,7 @@ def _run_status_outcome(
             "cross_role_feedback": feedback,
             "rework_cost_since_progress": rework_cost_since_progress,
             "total_rework_cost": total_rework_cost,
+            "consecutive_material_nonprogress": consecutive_material_nonprogress,
         },
         "role_runs": role_runs,
         "feedback": feedback,
@@ -814,6 +818,10 @@ def _run_status_outcome(
         "revised_options": revised_options,
         "warnings": [*warnings, reason],
     }
+    if retained_frontier is not None:
+        result["retained_frontier"] = dict(retained_frontier)
+        result["outcome"]["retained_frontier"] = dict(retained_frontier)
+    return result
 
 
 def run_stage5_live_case(
@@ -946,13 +954,17 @@ def run_stage5_live_case(
     falsifier_count = 0
     option_revision_count = 0
     selector_rework_count = 0
-    first_falsifier_cost = 0.0
     prior_falsifier_defect_count: int | None = None
     rework_cost_since_progress = 0.0
     total_rework_cost = 0.0
-
-    def economics_budget() -> float:
-        return selector_origin_cost + first_falsifier_cost
+    consecutive_material_nonprogress = 0
+    pending_selector_progress: bool | None = None
+    retained_best_frontier: dict[str, Any] = {
+        "selector_response_sha256": selector_run["response_sha256"],
+        "selected_option_id": None,
+        "options_sha256": _canonical_sha256(effective_options),
+        "falsifier_defect_count": None,
+    }
 
     def add_rework_cost(run: Mapping[str, Any], *, progress: bool) -> None:
         nonlocal rework_cost_since_progress, total_rework_cost
@@ -963,9 +975,13 @@ def run_stage5_live_case(
         else:
             rework_cost_since_progress += cost
 
-    def economics_exhausted() -> bool:
-        budget = economics_budget()
-        return budget > 0.0 and rework_cost_since_progress >= budget
+    def record_material_progress(progress: bool) -> int:
+        nonlocal consecutive_material_nonprogress
+        if progress:
+            consecutive_material_nonprogress = 0
+        else:
+            consecutive_material_nonprogress += 1
+        return consecutive_material_nonprogress
 
     while True:
         selector_kind = selector_payload.get("kind")
@@ -1245,15 +1261,19 @@ def run_stage5_live_case(
                     total_rework_cost=total_rework_cost,
                 )
             selector_seen_states.add(selector_state)
+            if selector_payload.get("kind") == "option_revision_requested":
+                record_material_progress(revision_progress)
+                pending_selector_progress = None
+            else:
+                pending_selector_progress = revision_progress
             if (
-                economics_exhausted()
-                and not revision_progress
-                and selector_payload.get("kind") == "option_revision_requested"
+                selector_payload.get("kind") == "option_revision_requested"
+                and consecutive_material_nonprogress >= _CROSS_ROLE_NONADVANCING_LIMIT
             ):
                 return _run_status_outcome(
                     problem_id=problem_id,
-                    status="repairable_paused:rework_cost_reached_original",
-                    reason="option_revision_rework_cost_reached_original",
+                    status="repairable_paused:consecutive_nonadvancing_corrections_require_adjudication",
+                    reason="consecutive_nonadvancing_corrections_require_adjudication",
                     role_runs=role_runs,
                     feedback=feedback_records,
                     effective_options=effective_options,
@@ -1261,6 +1281,8 @@ def run_stage5_live_case(
                     warnings=warnings,
                     rework_cost_since_progress=rework_cost_since_progress,
                     total_rework_cost=total_rework_cost,
+                    consecutive_material_nonprogress=consecutive_material_nonprogress,
+                    retained_frontier=retained_best_frontier,
                 )
             continue
 
@@ -1378,11 +1400,7 @@ def run_stage5_live_case(
                 prompt=falsifier_prompt,
             )
         )
-        if falsifier_count == 1:
-            first_falsifier_cost = float(
-                falsifier_run["metrics"].get("initial_cost_seconds") or 0.0
-            )
-        else:
+        if falsifier_count > 1:
             add_rework_cost(falsifier_run, progress=False)
         if not falsifier_run["accepted"]:
             return _run_status_outcome(
@@ -1417,6 +1435,22 @@ def run_stage5_live_case(
             and current_falsifier_defect_count < prior_falsifier_defect_count
         )
         prior_falsifier_defect_count = current_falsifier_defect_count
+        if retained_best_frontier["falsifier_defect_count"] is None or (
+            current_falsifier_defect_count
+            < int(retained_best_frontier["falsifier_defect_count"])
+        ):
+            retained_best_frontier = {
+                "selector_response_sha256": selector_run["response_sha256"],
+                "selected_option_id": selected_option_id,
+                "options_sha256": _canonical_sha256(effective_options),
+                "falsifier_defect_count": current_falsifier_defect_count,
+            }
+        if prior_falsifier_defect_count is not None and falsifier_count > 1:
+            cycle_material_progress = bool(pending_selector_progress) or falsifier_defect_progress
+            record_material_progress(cycle_material_progress)
+            if cycle_material_progress:
+                rework_cost_since_progress = 0.0
+        pending_selector_progress = None
         if falsifier_defect_progress:
             rework_cost_since_progress = 0.0
         cycle_state = _canonical_sha256(
@@ -1451,7 +1485,9 @@ def run_stage5_live_case(
                 expected_problem_id=problem_id,
                 options_by_id=options_index(),
                 research_dossier=research_dossier,
-                require_complete=True,
+                # The independent labeler owns change-surface metadata. Validate the
+                # selector/falsifier decision now and run the complete gate after labeling.
+                require_complete=False,
             )
             if complete_errors:
                 review = {
@@ -1533,32 +1569,57 @@ def run_stage5_live_case(
                 selected_decision["selected_solution_label_status"] = label.get(
                     "label_status", "verified"
                 )
-                selected_decision["role_healing"] = {
-                    "role_runs": role_runs,
-                    "cross_role_feedback": feedback_records,
-                    "rework_cost_since_progress": rework_cost_since_progress,
-                    "total_rework_cost": total_rework_cost,
-                }
-                return {
-                    "status": "selected",
-                    "decision": selected_decision,
-                    "outcome": {
-                        "problem_id": problem_id,
-                        "selection_status": "selected",
-                        "selected_option_id": selected_option_id,
-                        "falsification_verdict": "accept",
-                        "label_status": selected_decision["selected_solution_label_status"],
+                complete_errors = selection_quality_errors(
+                    selected_decision,
+                    expected_problem_id=problem_id,
+                    options_by_id=options_index(),
+                    research_dossier=research_dossier,
+                    require_complete=True,
+                )
+                if complete_errors:
+                    review = {
+                        **review,
+                        "verdict": "reject",
+                        "strongest_counterargument": (
+                            "Runner complete-selection gate rejected the labeled acceptance: "
+                            + "; ".join(complete_errors)
+                        ),
+                    }
+                else:
+                    selected_decision["role_healing"] = {
                         "role_runs": role_runs,
                         "cross_role_feedback": feedback_records,
                         "rework_cost_since_progress": rework_cost_since_progress,
                         "total_rework_cost": total_rework_cost,
-                    },
-                    "role_runs": role_runs,
-                    "feedback": feedback_records,
-                    "effective_options": effective_options,
-                    "revised_options": revised_options,
-                    "warnings": warnings,
-                }
+                        "consecutive_material_nonprogress": consecutive_material_nonprogress,
+                        "retained_best_frontier": retained_best_frontier,
+                    }
+                    return {
+                        "status": "selected",
+                        "decision": selected_decision,
+                        "outcome": {
+                            "problem_id": problem_id,
+                            "selection_status": "selected",
+                            "selected_option_id": selected_option_id,
+                            "falsification_verdict": "accept",
+                            "label_status": selected_decision[
+                                "selected_solution_label_status"
+                            ],
+                            "role_runs": role_runs,
+                            "cross_role_feedback": feedback_records,
+                            "rework_cost_since_progress": rework_cost_since_progress,
+                            "total_rework_cost": total_rework_cost,
+                            "consecutive_material_nonprogress": (
+                                consecutive_material_nonprogress
+                            ),
+                            "retained_best_frontier": retained_best_frontier,
+                        },
+                        "role_runs": role_runs,
+                        "feedback": feedback_records,
+                        "effective_options": effective_options,
+                        "revised_options": revised_options,
+                        "warnings": warnings,
+                    }
 
         critique = {
             "selected_option_id": selected_option_id,
@@ -1594,11 +1655,11 @@ def run_stage5_live_case(
                 prompt=selector_prompt,
             )
         )
-        if economics_exhausted() and not falsifier_defect_progress:
+        if consecutive_material_nonprogress >= _CROSS_ROLE_NONADVANCING_LIMIT:
             return _run_status_outcome(
                 problem_id=problem_id,
-                status="repairable_paused:rework_cost_reached_original",
-                reason="cross_role_rework_cost_reached_original",
+                status="repairable_paused:consecutive_nonadvancing_corrections_require_adjudication",
+                reason="consecutive_nonadvancing_corrections_require_adjudication",
                 role_runs=role_runs,
                 feedback=feedback_records,
                 effective_options=effective_options,
@@ -1606,6 +1667,8 @@ def run_stage5_live_case(
                 warnings=warnings,
                 rework_cost_since_progress=rework_cost_since_progress,
                 total_rework_cost=total_rework_cost,
+                consecutive_material_nonprogress=consecutive_material_nonprogress,
+                retained_frontier=retained_best_frontier,
             )
         old_selected_option_id = selected_option_id
         selector_run = _run_role_conversation(
@@ -1652,6 +1715,7 @@ def run_stage5_live_case(
         )
         progress = new_option_id is not None and new_option_id != old_selected_option_id
         add_rework_cost(selector_run, progress=progress)
+        pending_selector_progress = progress
         selector_state = _canonical_sha256(
             {
                 "response_sha256": selector_run["response_sha256"],

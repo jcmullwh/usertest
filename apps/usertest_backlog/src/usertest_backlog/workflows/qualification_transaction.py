@@ -38,6 +38,8 @@ from usertest_backlog.workflows.problem_mining_evidence import (
 from usertest_backlog.workflows.qualification import (
     build_qualification_output_adjudication,
     qualification_manifest_errors,
+    qualification_source_correction_findings,
+    qualification_source_correction_findings_errors,
 )
 from usertest_backlog.workflows.shadow_validation import (
     qualification_accepted_outputs,
@@ -1198,6 +1200,81 @@ def build_qualification_adjudication_template(
         )
     stages = _backlog_stage_documents(backlog)
     accepted = qualification_accepted_outputs(backlog=backlog, **stages)
+    source_binding: dict[str, Any] = {}
+    if qualification.get("same_corpus_feedback_exposed") is True:
+        source_adjudication_path_raw = _text(
+            qualification.get("source_qualification_output_adjudication_path")
+        )
+        source_adjudication_sha256 = _text(
+            qualification.get("source_qualification_output_adjudication_sha256")
+        )
+        source_report_path_raw = _text(qualification.get("source_correction_report_path"))
+        source_report_sha256 = _text(qualification.get("source_correction_report_sha256"))
+        if (
+            source_adjudication_path_raw is None
+            or not _valid_sha256(source_adjudication_sha256)
+            or source_report_path_raw is None
+            or not _valid_sha256(source_report_sha256)
+        ):
+            raise ValueError("qualification_adjudication_source_correction_binding_missing")
+        source_adjudication_path = Path(source_adjudication_path_raw).resolve()
+        source_report_path = Path(source_report_path_raw).resolve()
+        if (
+            not source_adjudication_path.is_file()
+            or _file_sha256(source_adjudication_path) != source_adjudication_sha256
+            or not source_report_path.is_file()
+            or _file_sha256(source_report_path) != source_report_sha256
+        ):
+            raise ValueError("qualification_adjudication_source_correction_binding_changed")
+        source_adjudication = _load_json_object(
+            source_adjudication_path,
+            name="qualification_source_output_adjudication",
+        )
+        source_report = _load_json_object(
+            source_report_path,
+            name="qualification_source_correction_report",
+        )
+        report_raw = source_report.get("report")
+        report = report_raw if isinstance(report_raw, Mapping) else {}
+        report_qualification_raw = report.get("qualification")
+        report_qualification = (
+            report_qualification_raw
+            if isinstance(report_qualification_raw, Mapping)
+            else {}
+        )
+        routes_raw = report_qualification.get("correction_routes")
+        routes = (
+            [dict(item) for item in routes_raw if isinstance(item, Mapping)]
+            if isinstance(routes_raw, list)
+            else []
+        )
+        findings = qualification_source_correction_findings(
+            source_adjudication=source_adjudication,
+            source_adjudication_sha256=str(source_adjudication_sha256),
+            manifest=manifest,
+            correction_routes=routes,
+        )
+        recorded_findings_raw = qualification.get("source_correction_findings")
+        recorded_findings = (
+            [dict(item) for item in recorded_findings_raw if isinstance(item, Mapping)]
+            if isinstance(recorded_findings_raw, list)
+            else []
+        )
+        if (
+            findings != recorded_findings
+            or qualification.get("source_correction_findings_sha256")
+            != _canonical_hash(findings)
+            or qualification_source_correction_findings_errors(
+                findings,
+                source_adjudication_sha256=str(source_adjudication_sha256),
+            )
+        ):
+            raise ValueError("qualification_adjudication_source_correction_findings_changed")
+        source_binding = {
+            "source_adjudication_sha256": source_adjudication_sha256,
+            "source_correction_findings": findings,
+            "source_correction_findings_sha256": _canonical_hash(findings),
+        }
     template: dict[str, Any] = {
         "schema_version": QUALIFICATION_ADJUDICATION_TEMPLATE_SCHEMA_VERSION,
         "contract_kind": "qualification_output_adjudication_template",
@@ -1209,9 +1286,25 @@ def build_qualification_adjudication_template(
         "pending_run_sha256": pending["content_sha256"],
         "qualification_manifest": manifest,
         "accepted_outputs_by_kind": accepted,
+        **source_binding,
         "decision_contract": {
             "output_adjudications": "one row for every accepted output",
             "false_rejections": "one row for every actionable source group not recovered",
+            **(
+                {
+                    "source_correction_resolutions": (
+                        "one explicit resolved, partially_resolved, unresolved, or superseded "
+                        "row per immutable source finding, with rationale and exact repaired-"
+                        "output references; unresolved may omit a reference when none exists"
+                    ),
+                    "source_correction_output_links": (
+                        "when a current output finding is the same residual, include its "
+                        "source_correction_finding_ids; do not link a genuinely new defect"
+                    ),
+                }
+                if source_binding
+                else {}
+            ),
         },
     }
     template["content_sha256"] = _content_hash(template)
@@ -1237,7 +1330,12 @@ def finalize_qualification_adjudication(
     manifest = manifest_raw if isinstance(manifest_raw, Mapping) else {}
     adjudications_raw = decisions.get("output_adjudications")
     false_rejections_raw = decisions.get("false_rejections", [])
-    if not isinstance(adjudications_raw, list) or not isinstance(false_rejections_raw, list):
+    source_resolutions_raw = decisions.get("source_correction_resolutions", [])
+    if (
+        not isinstance(adjudications_raw, list)
+        or not isinstance(false_rejections_raw, list)
+        or not isinstance(source_resolutions_raw, list)
+    ):
         raise ValueError("qualification_adjudication_decisions_invalid")
     return dict(
         build_qualification_output_adjudication(
@@ -1256,6 +1354,17 @@ def finalize_qualification_adjudication(
             pending_run_sha256=str(template.get("pending_run_sha256") or ""),
             adjudicator=adjudicator,
             method=method,
+            source_adjudication_sha256=_text(
+                template.get("source_adjudication_sha256")
+            ),
+            source_correction_findings=[
+                dict(item)
+                for item in template.get("source_correction_findings", [])
+                if isinstance(item, Mapping)
+            ],
+            source_correction_resolutions=[
+                dict(item) for item in source_resolutions_raw if isinstance(item, Mapping)
+            ],
         )
     )
 

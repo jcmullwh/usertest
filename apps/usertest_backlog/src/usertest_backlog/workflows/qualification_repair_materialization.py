@@ -17,6 +17,9 @@ from usertest_backlog.commands.export_tickets import (
     _build_export_projection,
     _export_artifact_paths,
 )
+from usertest_backlog.workflows.qualification import (
+    qualification_source_correction_findings,
+)
 from usertest_backlog.workflows.qualification_healing import (
     build_pending_repaired_shadow_run,
     pending_repaired_shadow_run_errors,
@@ -29,6 +32,8 @@ from usertest_backlog.workflows.shadow_validation import (
     shadow_pending_run_path,
     write_pending_shadow_run,
 )
+
+_REPAIR_MATERIALIZATION_SCHEMA_VERSION = 2
 
 
 def _file_sha256(path: Path) -> str:
@@ -46,6 +51,14 @@ def _text(value: Any) -> str | None:
     return normalized or None
 
 
+def _valid_sha256(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value.casefold())
+    )
+
+
 def _canonical_hash(value: Any) -> str:
     return sha256(
         json.dumps(
@@ -55,6 +68,57 @@ def _canonical_hash(value: Any) -> str:
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()
+
+
+def _legacy_materialization_audit(
+    *,
+    legacy_root: Path,
+    expected_consumption: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Classify an immutable pre-binding bundle without treating it as corruption."""
+
+    required = (
+        "qualification_correction_consumption.json",
+        "repaired.backlog.json",
+        "repaired.backlog.md",
+        "pending_repaired_shadow_run.json",
+    )
+    required_paths = [legacy_root / name for name in required]
+    required_paths.append(shadow_pending_run_path(legacy_root / "repaired.backlog.json"))
+    if not legacy_root.exists():
+        status = "legacy_v1_not_present"
+        complete = False
+        consumption_matches = None
+    else:
+        complete = all(path.is_file() for path in required_paths)
+        consumption_matches = False
+        consumption_path = legacy_root / "qualification_correction_consumption.json"
+        if consumption_path.is_file():
+            try:
+                consumption_matches = (
+                    _read_json_object(consumption_path) == dict(expected_consumption)
+                )
+            except ValueError:
+                consumption_matches = False
+        status = (
+            "legacy_v1_complete_non_reusable_v2_materialization_required"
+            if complete and consumption_matches
+            else "legacy_v1_retained_non_reusable_v2_materialization_required"
+        )
+    body = {
+        "schema_version": 1,
+        "contract_kind": "qualification_repair_legacy_audit",
+        "legacy_root": str(legacy_root.resolve()),
+        "status": status,
+        "complete": complete,
+        "consumption_matches": consumption_matches,
+        "mutation_allowed": False,
+        "reuse_allowed": False,
+        "required_materialization_schema_version": (
+            _REPAIR_MATERIALIZATION_SCHEMA_VERSION
+        ),
+    }
+    return {**body, "content_sha256": _canonical_hash(body)}
 
 
 def _qualification_error_count(report: Mapping[str, Any]) -> int | None:
@@ -69,14 +133,29 @@ def _qualification_error_count(report: Mapping[str, Any]) -> int | None:
         "accepted_unknown",
         "false_rejected_good",
         "undispositioned_actionable_cases",
+        "source_correction_findings_outstanding",
     )
     values: list[int] = []
     for field in fields:
         value = counts.get(field)
+        if field == "source_correction_findings_outstanding" and value is None:
+            # Pre-binding clean first passes had no source correction ledger.
+            value = 0
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             return None
         values.append(value)
-    return sum(values)
+    already_counted = counts.get(
+        "source_correction_findings_outstanding_already_counted_outputs",
+        0,
+    )
+    if (
+        isinstance(already_counted, bool)
+        or not isinstance(already_counted, int)
+        or already_counted < 0
+        or already_counted > values[-1]
+    ):
+        return None
+    return sum(values) - already_counted
 
 
 def best_qualified_fallback_errors(
@@ -334,6 +413,61 @@ def _read_json_object(path: Path) -> dict[str, Any]:
     return value
 
 
+def _source_correction_routes(
+    *,
+    scored_qualification: Mapping[str, Any],
+    consumption: Mapping[str, Any],
+) -> tuple[Path, dict[str, Any], list[dict[str, Any]]]:
+    """Load the immutable score report and prove it contains every consumed route."""
+
+    report_path_raw = _text(
+        scored_qualification.get("latest_failed_adjudication_report_path")
+        or scored_qualification.get("raw_first_pass_report_path")
+    )
+    report_sha256 = _text(
+        scored_qualification.get("latest_failed_adjudication_report_sha256")
+        or scored_qualification.get("raw_first_pass_report_sha256")
+    )
+    if report_path_raw is None or not _valid_sha256(report_sha256):
+        raise ValueError("qualification_repair_source_correction_report_missing")
+    report_path = Path(report_path_raw).resolve()
+    if not report_path.is_file() or _file_sha256(report_path) != report_sha256:
+        raise ValueError("qualification_repair_source_correction_report_changed")
+    wrapper = _read_json_object(report_path)
+    wrapper_projection = {
+        key: item for key, item in wrapper.items() if key != "content_sha256"
+    }
+    if (
+        wrapper.get("contract_kind") != "qualification_raw_first_pass_report"
+        or wrapper.get("content_sha256") != _canonical_hash(wrapper_projection)
+    ):
+        raise ValueError("qualification_repair_source_correction_report_invalid")
+    report_raw = wrapper.get("report")
+    report = report_raw if isinstance(report_raw, Mapping) else {}
+    qualification_raw = report.get("qualification")
+    qualification = qualification_raw if isinstance(qualification_raw, Mapping) else {}
+    routes_raw = qualification.get("correction_routes")
+    routes = (
+        [dict(item) for item in routes_raw if isinstance(item, Mapping)]
+        if isinstance(routes_raw, list)
+        else []
+    )
+    route_sha256s = [route.get("route_sha256") for route in routes]
+    receipts_raw = consumption.get("route_receipts")
+    receipt_sha256s = (
+        [item.get("route_sha256") for item in receipts_raw if isinstance(item, Mapping)]
+        if isinstance(receipts_raw, list)
+        else []
+    )
+    if (
+        len(routes) != len(routes_raw if isinstance(routes_raw, list) else [])
+        or route_sha256s != receipt_sha256s
+        or consumption.get("route_set_sha256") != _canonical_hash(route_sha256s)
+    ):
+        raise ValueError("qualification_repair_source_correction_routes_mismatch")
+    return report_path, wrapper, routes
+
+
 def _validate_bound_receipts(receipts: Any) -> None:
     if not isinstance(receipts, list):
         raise ValueError("qualification_repair_existing_pending_receipts_invalid")
@@ -501,6 +635,62 @@ def _existing_materialization_result(
     if pending.get("backlog_sha256") != _file_sha256(repaired_backlog_path):
         raise ValueError("qualification_repair_existing_backlog_changed")
     _validate_bound_receipts(pending.get("artifact_receipts"))
+    repaired_backlog = _read_json_object(repaired_backlog_path)
+    artifacts_raw = repaired_backlog.get("artifacts")
+    artifacts = artifacts_raw if isinstance(artifacts_raw, Mapping) else {}
+    qualification_raw = artifacts.get("shadow_qualification")
+    qualification = qualification_raw if isinstance(qualification_raw, Mapping) else {}
+    legacy_audit_raw = qualification.get("legacy_materialization_audit")
+    legacy_audit = (
+        dict(legacy_audit_raw) if isinstance(legacy_audit_raw, Mapping) else {}
+    )
+    legacy_audit_body = {
+        key: value
+        for key, value in legacy_audit.items()
+        if key != "content_sha256"
+    }
+    if (
+        qualification.get("qualification_repair_materialization_schema_version")
+        != _REPAIR_MATERIALIZATION_SCHEMA_VERSION
+        or legacy_audit.get("contract_kind")
+        != "qualification_repair_legacy_audit"
+        or legacy_audit.get("reuse_allowed") is not False
+        or legacy_audit.get("content_sha256")
+        != _canonical_hash(legacy_audit_body)
+    ):
+        raise ValueError("qualification_repair_existing_materialization_version_invalid")
+    findings_raw = qualification.get("source_correction_findings")
+    findings = (
+        [dict(item) for item in findings_raw if isinstance(item, Mapping)]
+        if isinstance(findings_raw, list)
+        else []
+    )
+    if (
+        not findings
+        or len(findings) != len(findings_raw if isinstance(findings_raw, list) else [])
+        or qualification.get("source_correction_findings_sha256")
+        != _canonical_hash(findings)
+        or qualification.get("source_qualification_output_adjudication_sha256")
+        != expected_consumption.get("source_adjudication_sha256")
+    ):
+        raise ValueError("qualification_repair_existing_source_findings_invalid")
+    for path_field, sha_field in (
+        (
+            "source_qualification_output_adjudication_path",
+            "source_qualification_output_adjudication_sha256",
+        ),
+        ("source_correction_report_path", "source_correction_report_sha256"),
+    ):
+        bound_path_raw = _text(qualification.get(path_field))
+        bound_sha256 = _text(qualification.get(sha_field))
+        bound_path = Path(bound_path_raw).resolve() if bound_path_raw is not None else None
+        if (
+            bound_path is None
+            or not bound_path.is_file()
+            or not _valid_sha256(bound_sha256)
+            or _file_sha256(bound_path) != bound_sha256
+        ):
+            raise ValueError("qualification_repair_existing_source_binding_invalid")
 
     repaired_contract = _read_json_object(repaired_contract_path)
     contract_errors = pending_repaired_shadow_run_errors(repaired_contract)
@@ -529,6 +719,10 @@ def _existing_materialization_result(
         "pending_shadow_run_sha256": pending_hash,
         "pending_repaired_shadow_run_path": str(repaired_contract_path.resolve()),
         "pending_repaired_shadow_run_sha256": repaired_contract["content_sha256"],
+        "qualification_repair_materialization_schema_version": (
+            _REPAIR_MATERIALIZATION_SCHEMA_VERSION
+        ),
+        "legacy_materialization_audit": legacy_audit,
         "fresh_independent_readjudication_required": True,
         "release_qualification_eligible": False,
     }
@@ -606,7 +800,13 @@ def materialize_repaired_shadow_run(
         source_backlog_path.parent
         / f"{source_backlog_path.stem}.qualification_repair"
     )
-    repair_root = repair_parent / consumption_sha256
+    legacy_materialization_audit = _legacy_materialization_audit(
+        legacy_root=repair_parent / consumption_sha256,
+        expected_consumption=runtime.consumption,
+    )
+    repair_root = repair_parent / (
+        f"v{_REPAIR_MATERIALIZATION_SCHEMA_VERSION}-{consumption_sha256}"
+    )
     existing_result = _existing_materialization_result(
         repair_root=repair_root,
         expected_consumption=runtime.consumption,
@@ -632,6 +832,34 @@ def materialize_repaired_shadow_run(
         if isinstance(scored_qualification_raw, Mapping)
         else {}
     )
+    if qualification_output_adjudication_path is None:
+        raise ValueError("qualification_repair_source_adjudication_missing")
+    source_adjudication_path = qualification_output_adjudication_path.resolve()
+    if (
+        not source_adjudication_path.is_file()
+        or _file_sha256(source_adjudication_path)
+        != qualification_output_adjudication_sha256
+        or runtime.consumption.get("source_adjudication_sha256")
+        != qualification_output_adjudication_sha256
+    ):
+        raise ValueError("qualification_repair_source_adjudication_changed")
+    source_adjudication = _read_json_object(source_adjudication_path)
+    source_correction_report_path, _source_report, source_correction_routes = (
+        _source_correction_routes(
+            scored_qualification=scored_qualification,
+            consumption=runtime.consumption,
+        )
+    )
+    manifest_document = _read_json_object(qualification_manifest_path.resolve())
+    source_correction_findings = qualification_source_correction_findings(
+        source_adjudication=source_adjudication,
+        source_adjudication_sha256=qualification_output_adjudication_sha256,
+        manifest=manifest_document,
+        correction_routes=source_correction_routes,
+    )
+    if not source_correction_findings:
+        raise ValueError("qualification_repair_source_correction_findings_missing")
+    source_correction_findings_sha256 = _canonical_hash(source_correction_findings)
     source_artifacts_raw = source_backlog.get("artifacts")
     source_artifacts = (
         dict(source_artifacts_raw) if isinstance(source_artifacts_raw, dict) else {}
@@ -756,26 +984,38 @@ def materialize_repaired_shadow_run(
             raise ValueError("qualification_repair_manifest_binding_mismatch")
         bundle_receipts.append(manifest_receipt)
 
-        bundled_source_adjudication_path: Path | None = None
-        if qualification_output_adjudication_path is not None:
-            bundled_source_adjudication_path = (
-                repair_root / "provenance" / "source_output_adjudication.json"
-            )
-            temp_source_adjudication_path = (
-                temp_root / bundled_source_adjudication_path.relative_to(repair_root)
-            )
-            adjudication_receipt = _copy_bundle_artifact(
-                name="source_output_adjudication",
-                source_path=qualification_output_adjudication_path.resolve(),
-                temp_path=temp_source_adjudication_path,
-                final_path=bundled_source_adjudication_path,
-            )
-            if (
-                adjudication_receipt["bundled_sha256"]
-                != qualification_output_adjudication_sha256
-            ):
-                raise ValueError("qualification_repair_adjudication_binding_mismatch")
-            bundle_receipts.append(adjudication_receipt)
+        bundled_source_adjudication_path = (
+            repair_root / "provenance" / "source_output_adjudication.json"
+        )
+        temp_source_adjudication_path = (
+            temp_root / bundled_source_adjudication_path.relative_to(repair_root)
+        )
+        adjudication_receipt = _copy_bundle_artifact(
+            name="source_output_adjudication",
+            source_path=source_adjudication_path,
+            temp_path=temp_source_adjudication_path,
+            final_path=bundled_source_adjudication_path,
+        )
+        if (
+            adjudication_receipt["bundled_sha256"]
+            != qualification_output_adjudication_sha256
+        ):
+            raise ValueError("qualification_repair_adjudication_binding_mismatch")
+        bundle_receipts.append(adjudication_receipt)
+
+        bundled_source_correction_report_path = (
+            repair_root / "provenance" / "source_correction_report.json"
+        )
+        temp_source_correction_report_path = (
+            temp_root / bundled_source_correction_report_path.relative_to(repair_root)
+        )
+        source_report_receipt = _copy_bundle_artifact(
+            name="source_correction_report",
+            source_path=source_correction_report_path,
+            temp_path=temp_source_correction_report_path,
+            final_path=bundled_source_correction_report_path,
+        )
+        bundle_receipts.append(source_report_receipt)
 
         repaired_pipeline = {
             **source_pipeline,
@@ -930,6 +1170,20 @@ def materialize_repaired_shadow_run(
                 "source_qualification_output_adjudication_sha256": (
                     qualification_output_adjudication_sha256
                 ),
+                "source_correction_report_path": str(
+                    bundled_source_correction_report_path.resolve()
+                ),
+                "source_correction_report_sha256": source_report_receipt[
+                    "bundled_sha256"
+                ],
+                "source_correction_findings": source_correction_findings,
+                "source_correction_findings_sha256": (
+                    source_correction_findings_sha256
+                ),
+                "qualification_repair_materialization_schema_version": (
+                    _REPAIR_MATERIALIZATION_SCHEMA_VERSION
+                ),
+                "legacy_materialization_audit": legacy_materialization_audit,
                 "pending_run_receipt_path": str(repaired_pending_path.resolve()),
                 "pending_repaired_run_receipt_path": str(repaired_contract_path.resolve()),
                 "qualification_correction_consumption_path": str(
@@ -955,6 +1209,10 @@ def materialize_repaired_shadow_run(
             input_meta={
                 **source_input,
                 "qualification_repair": {
+                    "materialization_schema_version": (
+                        _REPAIR_MATERIALIZATION_SCHEMA_VERSION
+                    ),
+                    "legacy_materialization_audit": legacy_materialization_audit,
                     "source_backlog_path": str(source_backlog_path.resolve()),
                     "source_backlog_sha256": _file_sha256(source_backlog_path),
                     "consumption_sha256": consumption_sha256,

@@ -715,6 +715,9 @@ def validate_causal_proof_receipt(receipt: Any) -> list[str]:
     if not isinstance(positive, Mapping):
         errors.append("causal_proof_positive_outcome_missing")
     else:
+        contract_role = positive.get("contract_role")
+        if contract_role is not None and contract_role != "causal_contrast":
+            errors.append("causal_proof_positive_contract_role_invalid")
         binding = positive.get("problem_binding")
         bound_atoms = (
             {

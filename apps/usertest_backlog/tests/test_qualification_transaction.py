@@ -13,6 +13,7 @@ import yaml
 from backlog_core import BacklogPolicyConfig, assign_plan_revision_id
 from runner_core import find_repo_root
 
+import usertest_backlog.workflows.qualification as qualification_module
 import usertest_backlog.workflows.shadow_validation as shadow_module
 import usertest_backlog.workflows.staged as staged_module
 from usertest_backlog.cli import main
@@ -872,20 +873,20 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
 ) -> None:
     # Reuse the repository's fully productive semantic fixture, but keep the
     # transaction/materializer/template/finalizer/scorer/state path real.
-    from test_positive_depth_acceptance import (
+    from apps.usertest_backlog.tests.test_positive_depth_acceptance import (
         _option as _productive_option,
     )
-    from test_positive_depth_acceptance import (
+    from apps.usertest_backlog.tests.test_positive_depth_acceptance import (
         _plan as _productive_plan,
     )
-    from test_positive_depth_acceptance import (
+    from apps.usertest_backlog.tests.test_positive_depth_acceptance import (
         _selection as _productive_selection,
     )
-    from test_positive_depth_acceptance import (
+    from apps.usertest_backlog.tests.test_positive_depth_acceptance import (
         _source_problem_record,
         _verified_research_proof,
     )
-    from test_shadow_validation import (
+    from apps.usertest_backlog.tests.test_shadow_validation import (
         _accept_productive_fixture_contracts,
         _mixed_productive_inputs,
         _target_contract,
@@ -995,9 +996,35 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
         tmp_path / "custody" / "manifest.json",
         fixture["qualification_manifest"],
     )
+    source_adjudication = deepcopy(fixture["qualification_output_adjudication"])
+    source_ticket_finding = next(
+        item
+        for item in source_adjudication["output_adjudications"]
+        if item["output_kind"] == "ticket"
+    )
+    source_ticket_finding.update(
+        {
+            "quality": "bad",
+            "repair_status": "not_repaired",
+            "bad_severity": "noncritical",
+            "bad_categories": ["limited_causal_coverage"],
+            "rationale": "The original ticket did not fully address the verified cause.",
+        }
+    )
+    source_adjudication["content_sha256"] = shadow_module._canonical_hash(
+        {
+            key: item
+            for key, item in source_adjudication.items()
+            if key != "content_sha256"
+        }
+    )
+    source_routes = qualification_module._qualification_correction_routes(
+        [source_ticket_finding],
+        output_author_provenance=None,
+    )
     source_adjudication_path = _write_json(
         tmp_path / "custody" / "source_adjudication.json",
-        fixture["qualification_output_adjudication"],
+        source_adjudication,
     )
     manifest_sha256 = sha256(manifest_path.read_bytes()).hexdigest()
     cycle_contract = _qualification_cycle_contract(
@@ -1081,9 +1108,23 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
             }
         )
     atoms_path = _write_json(cycle_root / "atoms.json", fixture["atoms"])
+    raw_report_body = {
+        "schema_version": 1,
+        "contract_kind": "qualification_raw_first_pass_report",
+        "pending_run_sha256": "8" * 64,
+        "report": {
+            "passed": False,
+            "qualification": {"correction_routes": source_routes},
+        },
+    }
     raw_report = _write_json(
         cycle_root / "raw_first_pass.json",
-        {"contract_kind": "qualification_raw_first_pass_report", "passed": False},
+        {
+            **raw_report_body,
+            "content_sha256": staged_module._qualification_canonical_sha256(
+                raw_report_body
+            ),
+        },
     )
     policy_path = repo_root / "configs" / "backlog_policy.yaml"
     policy_root = yaml.safe_load(policy_path.read_text(encoding="utf-8"))
@@ -1149,7 +1190,7 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
         "requested_downstream_stages": list(stage_keys),
         "materialized_stage_receipts": stage_receipts,
     }
-    route_sha256 = "7" * 64
+    route_sha256 = source_routes[0]["route_sha256"]
     route_receipts = [
         {
             "route_sha256": route_sha256,
@@ -1224,6 +1265,8 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
         backlog_path=repaired_backlog_path,
         manifest_path=repaired_manifest_path,
     )
+    assert len(template["source_correction_findings"]) == 1
+    source_finding_id = template["source_correction_findings"][0]["finding_id"]
     decisions = {
         "output_adjudications": [
             {
@@ -1238,6 +1281,23 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
             for output in outputs
         ],
         "false_rejections": [],
+        "source_correction_resolutions": [
+            {
+                "finding_id": source_finding_id,
+                "status": "resolved",
+                "rationale": (
+                    "Fresh review confirmed the repaired ticket now covers the verified cause."
+                ),
+                "repaired_output_refs": [
+                    {
+                        "output_kind": "ticket",
+                        "output_sha256": shadow_module._canonical_hash(
+                            template["accepted_outputs_by_kind"]["ticket"][-1]
+                        ),
+                    }
+                ],
+            }
+        ],
     }
     final_adjudication = finalize_qualification_adjudication(
         template=template,
@@ -1396,8 +1456,10 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
     second_raw_report = _write_json(
         second_cycle_root / "raw_first_pass.json",
         {
-            "contract_kind": "qualification_raw_first_pass_report",
-            "passed": False,
+            **raw_report_body,
+            "content_sha256": staged_module._qualification_canonical_sha256(
+                raw_report_body
+            ),
         },
     )
     second_source_backlog = deepcopy(fixture["backlog"])
@@ -1469,7 +1531,7 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
         "requested_downstream_stages": list(stage_keys),
         "materialized_stage_receipts": second_stage_receipts,
     }
-    second_route_sha256 = "6" * 64
+    second_route_sha256 = source_routes[0]["route_sha256"]
     second_route_receipts = [
         {
             "route_sha256": second_route_sha256,
@@ -1568,6 +1630,25 @@ def test_materialized_repair_is_independently_readjudicated_and_records_final_cy
             for output in outputs
         ],
         "false_rejections": [],
+        "source_correction_resolutions": [
+            {
+                "finding_id": second_template["source_correction_findings"][0][
+                    "finding_id"
+                ],
+                "status": "resolved",
+                "rationale": (
+                    "Fresh review confirmed the repaired ticket now covers the verified cause."
+                ),
+                "repaired_output_refs": [
+                    {
+                        "output_kind": "ticket",
+                        "output_sha256": shadow_module._canonical_hash(
+                            second_template["accepted_outputs_by_kind"]["ticket"][-1]
+                        ),
+                    }
+                ],
+            }
+        ],
     }
     second_final_adjudication = finalize_qualification_adjudication(
         template=second_template,

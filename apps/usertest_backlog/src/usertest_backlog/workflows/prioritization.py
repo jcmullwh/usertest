@@ -936,20 +936,6 @@ def _run_problem_prioritization_stage(
                 resume_session_id=initial.agent_session_id,
             )
 
-        supplied_author_cost = (
-            float(external_correction.get("original_author_cost_seconds"))
-            if isinstance(external_correction, Mapping)
-            and isinstance(
-                external_correction.get("original_author_cost_seconds"),
-                (int, float),
-            )
-            and not isinstance(
-                external_correction.get("original_author_cost_seconds"), bool
-            )
-            and float(external_correction.get("original_author_cost_seconds")) > 0.0
-            else 0.0
-        )
-        original_author_cost = supplied_author_cost or initial.cost_seconds
         if acquisition_status.startswith("repairable_paused:"):
             correction = CorrectionRunResult(
                 status=acquisition_status,
@@ -968,11 +954,6 @@ def _run_problem_prioritization_stage(
             correction = run_progressive_correction(
                 initial=initial,
                 invoke_correction=invoke_correction,
-                pause_policy=lambda _current, _assessment, since_progress, _total: (
-                    "correction_cost_reached_original"
-                    if original_author_cost > 0.0 and since_progress >= original_author_cost
-                    else None
-                ),
             )
         retained = (
             correction.current

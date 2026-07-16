@@ -38,8 +38,6 @@ from backlog_miner.proof_adapters.structured import (
 def builtin_proof_adapter_registry() -> ProofAdapterRegistry:
     return ProofAdapterRegistry(
         [
-            PythonCallChainProofAdapter(),
-            PytestControlledDifferenceProofAdapter(),
             ConfigRepositoryStateProofAdapter(),
             EnvironmentProofAdapter(),
             FilesystemStateProofAdapter(),

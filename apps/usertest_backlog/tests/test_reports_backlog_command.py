@@ -14,6 +14,10 @@ from typing import Any
 import pytest
 import yaml
 from backlog_core.case_lineage import eligible_problem_mining_atoms
+from backlog_miner.research_runner import (
+    _completed_prefix_checkpoint,
+    completed_stage3_checkpoint,
+)
 from runner_core import find_repo_root
 
 import usertest_backlog.workflows.staged as staged_module
@@ -93,6 +97,78 @@ def test_stage3_progress_checkpoint_integrity_detects_dossier_tampering() -> Non
             expected_compatibility_contract=compatibility,
         )
         is None
+    )
+
+
+def test_mixed_split_annotation_preserves_completed_stage3_resume_checkpoint() -> None:
+    split = {
+        "case_id": "case:split",
+        "problem_id": "problem:split",
+        "case_relation_assessment": {"disposition": "split"},
+    }
+    non_split = {
+        "case_id": "case:retain",
+        "problem_id": "problem:retain",
+        "case_relation_assessment": {"disposition": "retain"},
+    }
+    items = [split, non_split]
+    compatibility = staged_module.stage3_research_compatibility_contract(agent="codex")
+    selected = [
+        {
+            "case_id": item["case_id"],
+            "problem_id": item["problem_id"],
+            "evidence_assignment": {"assignment_sha256": value * 64},
+        }
+        for item, value in zip(items, ("a", "b"), strict=True)
+    ]
+    progress = _completed_prefix_checkpoint(
+        selected_problems=selected,
+        completed_dossiers=items,
+        resolved_repo_ref="c" * 40,
+        compatibility_contract=compatibility,
+    )
+    completion = completed_stage3_checkpoint(
+        dossiers=items,
+        fresh_research_dossier_count=2,
+        retained_research_reused_count=0,
+        compatibility_contract=compatibility,
+        progress_checkpoint=progress,
+    )
+    document = {
+        "stage": "repro_research",
+        "items": items,
+        "item_count": 2,
+        "input_meta": {
+            "stage_status": "completed",
+            "research_compatibility": compatibility,
+            "progress_checkpoint": progress,
+            "completed_stage_checkpoint": completion,
+            "resume_upstream": {},
+        },
+        "artifacts": {},
+    }
+
+    annotated = staged_module._annotate_completed_stage3_document(
+        document,
+        input_meta_updates={
+            "post_research_split_groups": [
+                {"parent_case_id": "case:split", "child_case_ids": ["case:left", "case:right"]}
+            ],
+            "post_research_canonical_research_count": 1,
+        },
+        artifact_updates={"post_research_split_receipt_dir": "C:/receipts"},
+    )
+
+    assert annotated["items"] == [split, non_split]
+    assert annotated["item_count"] == 2
+    assert annotated["input_meta"]["progress_checkpoint"] == progress
+    assert annotated["input_meta"]["completed_stage_checkpoint"] == completion
+    assert (
+        staged_module._stage3_completed_stage(
+            annotated,
+            expected_compatibility_contract=compatibility,
+        )
+        == completion
     )
 
 
@@ -1245,18 +1321,45 @@ def _qualification_execution_route(
     component: str = "case:one",
 ) -> dict[str, Any]:
     session_id = f"{marker * 8}-{marker * 4}-4{marker * 3}-8{marker * 3}-{marker * 12}"
-    return {
-        "route_sha256": marker * 64,
+    workspace_dir = f"C:/retained/{marker}" if status == "same_author_resume" else None
+    route: dict[str, Any] = {
+        "schema_version": 1,
+        "feedback_kind": "accepted_output_quality",
         "route_status": status,
         "authoring_stage": "implementation_planning",
+        "target_identity": f"plan:{marker}",
+        "output_kind": "plan",
+        "output_sha256": marker * 64,
+        "quality": "bad",
+        "bad_severity": "noncritical",
+        "bad_categories": ["limited_causal_coverage"],
+        "rationale": "The retained plan does not yet address the verified cause.",
+        "correctability": "correctable",
         "agent_session_id": session_id if status == "same_author_resume" else None,
-        "workspace_dir": (f"C:/retained/{marker}" if status == "same_author_resume" else None),
+        "workspace_dir": workspace_dir,
         "actionable_label_ids": [component],
+        "author_attempt_identity": {"attempt_number": 1},
         "author_provenance": {
             "exact_session_continuation": status == "same_author_resume",
+            "workspace_continuity_verified": status == "same_author_resume",
+            "agent_session_id": session_id if status == "same_author_resume" else None,
+            "workspace_dir": workspace_dir,
             "problem_id": component,
         },
+        "causal_target": {
+            "problem_ids": [component],
+            "case_ids": [],
+            "evidence_atom_ids": [],
+            "actionable_label_ids": [component],
+            "expected_item_keys": [],
+        },
+        "restart_from_stage": "implementation_planning",
+        "rerun_downstream_stages": ["implementation_planning", "ticket_assembly"],
+        "consumption_status": "pending_orchestration",
+        "consumption_receipt": None,
     }
+    route["route_sha256"] = staged_module._qualification_canonical_sha256(route)
+    return route
 
 
 def _qualification_execution_runtime(
@@ -1612,6 +1715,66 @@ def test_scheduler_materializes_six_stage_and_auxiliary_receipts_without_mock(
     repo_root = find_repo_root(Path(__file__).resolve())
     inputs = _qualification_execute_inputs(tmp_path=tmp_path, repo_root=repo_root)
     route = _qualification_execution_route("8")
+    source_adjudication_body = {
+        "schema_version": 1,
+        "contract_kind": "qualification_output_adjudication",
+        "output_adjudications": [
+            {
+                key: route.get(key)
+                for key in (
+                    "output_kind",
+                    "output_sha256",
+                    "quality",
+                    "bad_severity",
+                    "bad_categories",
+                    "rationale",
+                    "actionable_label_ids",
+                    "correctability",
+                )
+            }
+            | {"repair_status": "not_repaired"}
+        ],
+        "false_rejections": [],
+    }
+    source_adjudication_path = Path(inputs["qualification_output_adjudication_path"])
+    _write_json(
+        source_adjudication_path,
+        {
+            **source_adjudication_body,
+            "content_sha256": staged_module._qualification_canonical_sha256(
+                source_adjudication_body
+            ),
+        },
+    )
+    inputs["source_adjudication_sha256"] = hashlib.sha256(
+        source_adjudication_path.read_bytes()
+    ).hexdigest()
+    source_report_body = {
+        "schema_version": 1,
+        "contract_kind": "qualification_raw_first_pass_report",
+        "pending_run_sha256": inputs["source_pending_run_sha256"],
+        "report": {
+            "passed": False,
+            "qualification": {"correction_routes": [route]},
+        },
+    }
+    source_report_path = tmp_path / "snapshot" / "source_report.json"
+    _write_json(
+        source_report_path,
+        {
+            **source_report_body,
+            "content_sha256": staged_module._qualification_canonical_sha256(source_report_body),
+        },
+    )
+    inputs["backlog"]["artifacts"] = {
+        "shadow_qualification": {
+            "raw_first_pass_report_path": str(source_report_path.resolve()),
+            "raw_first_pass_report_sha256": hashlib.sha256(
+                source_report_path.read_bytes()
+            ).hexdigest(),
+        }
+    }
+    _write_json(Path(inputs["out_json"]), inputs["backlog"])
     stage_documents: dict[str, dict[str, Any]] = {}
     receipts: list[dict[str, Any]] = []
     for stage in (

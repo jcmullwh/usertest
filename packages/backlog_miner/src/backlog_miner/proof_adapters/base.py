@@ -132,7 +132,22 @@ def observed_value(
         try:
             document = json.loads(content)
         except json.JSONDecodeError:
-            return False, None, None, []
+            if source != "event_json":
+                return False, None, None, []
+            # Event-oriented commands commonly interleave one or more JSON records with
+            # runner/test progress lines. Retain only independently parseable JSON events;
+            # every byte remains content-bound by the replay receipt, so ignored progress
+            # text cannot forge the selected value. A single record keeps object-shaped
+            # pointers convenient, while multiple records form an explicit ordered list.
+            records: list[Any] = []
+            for line in content.splitlines():
+                try:
+                    records.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+            if not records:
+                return False, None, None, []
+            document = records[0] if len(records) == 1 else records
         pointer = str(spec.get("json_pointer") or "")
         found, value = json_pointer_value(document, pointer)
         path_raw = text(replay.get(f"{stream}_path"))
@@ -383,9 +398,13 @@ def build_receipt(
         challenge_observed if positive_observed is _MISSING else positive_observed
     )
     passed, predicate_errors = evaluate_proof_predicate(predicate, evaluated_observed)
-    if predicate_errors or not passed:
+    if predicate_errors:
         return ProofAdapterResult(
             diagnostics=tuple(f"proof_adapter_positive_{error}" for error in predicate_errors)
+        )
+    if not passed:
+        return ProofAdapterResult(
+            diagnostics=("proof_adapter_positive_predicate_not_satisfied",)
         )
     root_atoms = [
         atom_id
@@ -400,6 +419,19 @@ def build_receipt(
         "basis_kind": positive_basis.get("basis_kind"),
         "basis_sha256": positive_basis.get("basis_sha256"),
     }
+    positive_outcome: dict[str, Any] = {
+        "problem_binding": binding,
+        "predicate": predicate,
+        "observed": evaluated_observed,
+        "observation_source": observation_source,
+        "runner_evaluated": True,
+        "passed": passed,
+    }
+    # Omission is the legacy operational-post-change contract. Never serialize a
+    # default: retained proof and outcome IDs must remain byte-for-byte stable.
+    if positive_raw.get("contract_role") is not None:
+        positive_outcome["contract_role"] = positive_raw.get("contract_role")
+
     receipt: dict[str, Any] = {
         "schema_version": CAUSAL_PROOF_SCHEMA_VERSION,
         "adapter_id": adapter_id,
@@ -439,14 +471,7 @@ def build_receipt(
             "edges": edges,
         },
         "artifacts": artifacts,
-        "positive_outcome": {
-            "problem_binding": binding,
-            "predicate": predicate,
-            "observed": evaluated_observed,
-            "observation_source": observation_source,
-            "runner_evaluated": True,
-            "passed": passed,
-        },
+        "positive_outcome": positive_outcome,
         "adapter_evidence": dict(adapter_evidence),
     }
     receipt["intervention_id"] = intervention_id_for(

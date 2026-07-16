@@ -3,7 +3,11 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from backlog_core import assess_research_readiness, priority_decision_allows_downstream
+from backlog_core import (
+    assess_research_readiness,
+    priority_decision_allows_downstream,
+    research_actionability_assessment,
+)
 from backlog_miner.prompt_correction import (
     CorrectionRunResult,
     acquire_author_session,
@@ -433,13 +437,9 @@ def _run_optioning_prompt_with_correction(
             resume_session_id=initial.agent_session_id,
         )
 
-    original_author_cost = (
-        float(author_cost_seconds)
-        if isinstance(author_cost_seconds, (int, float))
-        and not isinstance(author_cost_seconds, bool)
-        and float(author_cost_seconds) > 0.0
-        else initial.cost_seconds
-    )
+    # Retain inherited author duration as provenance/telemetry only. Whether a model turn
+    # happens to take longer than its author turn is not evidence that repair has stalled.
+    _ = author_cost_seconds
     if acquisition_status.startswith("repairable_paused:"):
         correction = CorrectionRunResult(
             status=acquisition_status,
@@ -458,11 +458,6 @@ def _run_optioning_prompt_with_correction(
         correction = run_progressive_correction(
             initial=initial,
             invoke_correction=invoke_correction,
-            pause_policy=lambda _current, _assessment, since_progress, _total: (
-                "correction_cost_reached_original"
-                if original_author_cost > 0.0 and since_progress >= original_author_cost
-                else None
-            ),
         )
     retained = (
         correction.current
@@ -774,6 +769,37 @@ def _run_solution_optioning_stage(
                         + ", ".join(research_blockers)
                     ),
                     "research_readiness_blockers": research_blockers,
+                    "option_count": 0,
+                    "rejected_option_count": 0,
+                }
+            )
+            continue
+        actionability = research_actionability_assessment(dossier)
+        actionability_disposition = _coerce_string(actionability.get("disposition"))
+        if actionability_disposition in {"already_addressed", "non_actionable"}:
+            optioning_outcomes.append(
+                {
+                    "problem_id": pid,
+                    "optioning_status": "not_required",
+                    "research_actionability_disposition": actionability_disposition,
+                    "decision_rationale": _coerce_string(actionability.get("rationale"))
+                    or "Stage 3 established that this case does not require a product change.",
+                    "evidence_refs": list(actionability.get("evidence_refs", [])),
+                    "research_readiness_blockers": [],
+                    "option_count": 0,
+                    "rejected_option_count": 0,
+                }
+            )
+            continue
+        if actionability_disposition == "undetermined":
+            optioning_outcomes.append(
+                {
+                    "problem_id": pid,
+                    "optioning_status": "insufficient_evidence",
+                    "research_actionability_disposition": "undetermined",
+                    "decision_rationale": _coerce_string(actionability.get("rationale"))
+                    or "Stage 3 did not determine whether a product change is required.",
+                    "research_readiness_blockers": ["research_actionability_undetermined"],
                     "option_count": 0,
                     "rejected_option_count": 0,
                 }

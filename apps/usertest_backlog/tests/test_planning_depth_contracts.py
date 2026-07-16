@@ -57,6 +57,29 @@ def test_planner_symbol_grounding_accepts_python_bindings(symbol: str) -> None:
     )
 
 
+def test_planner_symbol_grounding_accepts_utf8_bom_prefixed_python_binding() -> None:
+    assert depth_contracts._target_symbol_exists(
+        path=Path("scripts/batch_preflight.py"),
+        content="\ufeffdef batch_preflight() -> None:\n    pass\n",
+        symbol="batch_preflight.batch_preflight",
+    )
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "def batch_preflight(:\n    pass\n",
+        "\ufeffdef batch_preflight(:\n    pass\n",
+    ],
+)
+def test_planner_symbol_grounding_rejects_python_syntax_errors(content: str) -> None:
+    assert not depth_contracts._target_symbol_exists(
+        path=Path("scripts/batch_preflight.py"),
+        content=content,
+        symbol="batch_preflight.batch_preflight",
+    )
+
+
 @pytest.mark.parametrize(
     ("path", "content", "symbol"),
     [
@@ -183,6 +206,19 @@ def _valid_option(
             "testability": {
                 "before": "Fixture produces the malformed report.",
                 "after": "The same fixture produces a classified report.",
+            },
+            "outcome_strategy": {
+                "intended_operation": (
+                    "The original runner operation produces a classified report."
+                ),
+                "success_properties": [
+                    "The original malformed-result replay reaches report assembly "
+                    "as the expected classified result."
+                ],
+                "safety_constraints": [
+                    "Already valid runner results retain their existing report semantics."
+                ],
+                "original_scenario_experiment_ids": ["exp-1"],
             },
         },
         "scope_evidence": {
@@ -868,6 +904,16 @@ def test_falsification_review_can_explicitly_reject_without_being_malformed() ->
                 "rationale": "The bypass leaves a recurrence path.",
             },
         ],
+        "outcome_strategy_review": {
+            "verdict": "contradicted",
+            "semantic_relation_assessment": (
+                "The bypass means the proposed strategy does not cover every observed path."
+            ),
+            "proves_intended_operation": False,
+            "problem_coverage": "partial",
+            "residual_untested_paths": ["Alternate path remains unnormalized"],
+            "evidence_refs": [control_id],
+        },
     }
     review = bind_falsification_review(
         review,
@@ -916,6 +962,18 @@ def test_falsification_critical_finding_accepts_open_effect_description() -> Non
             ],
             "evidence_that_would_change_verdict": "A controlled replay for both versions.",
             "material_risk_dispositions": [],
+            "outcome_strategy_review": {
+                "verdict": "insufficient_evidence",
+                "semantic_relation_assessment": (
+                    "The proposed result semantics are not established across provider versions."
+                ),
+                "proves_intended_operation": False,
+                "problem_coverage": "unknown",
+                "residual_untested_paths": [
+                    "Cross-version provider compatibility remains untested"
+                ],
+                "evidence_refs": [control_id],
+            },
         },
         problem_id="problem:case",
         selected_option=option,
@@ -972,6 +1030,16 @@ def test_falsification_must_dispose_every_material_risk_with_bound_evidence() ->
                 "evidence_refs": [control_id],
             }
         ],
+        "outcome_strategy_review": {
+            "verdict": "sufficient",
+            "semantic_relation_assessment": (
+                "The proposed strategy proves the intended normalized report behavior."
+            ),
+            "proves_intended_operation": True,
+            "problem_coverage": "full",
+            "residual_untested_paths": [],
+            "evidence_refs": [control_id],
+        },
     }
     review = bind_falsification_review(
         review,
@@ -1132,6 +1200,70 @@ def test_change_plan_contract_accepts_decision_complete_plan() -> None:
     )
 
 
+def test_change_plan_accepts_centrally_owned_recurrence_without_bespoke_probe() -> None:
+    plan = _valid_change_plan()
+    roles = plan["outcome_verification_roles"]
+    assert isinstance(roles, dict)
+    roles["recurrence"] = {
+        "description": "Use two later canonical-case shadow snapshots.",
+        "verification_owner": "centralized_case_refresh",
+        "commands": [],
+        "predicates": [],
+    }
+    plan = assign_plan_revision_id(plan)
+
+    errors = change_plan_quality_errors(
+        plan,
+        expected_revision="abc123",
+        expected_case_id="case:case",
+    )
+
+    assert not any("outcome_role_commands" in error for error in errors)
+    assert not any("centralized_recurrence" in error for error in errors)
+
+
+def test_change_plan_rejects_unowned_empty_recurrence_contract() -> None:
+    plan = _valid_change_plan()
+    roles = plan["outcome_verification_roles"]
+    assert isinstance(roles, dict)
+    roles["recurrence"] = {
+        "description": "Use later recurrence evidence.",
+        "commands": [],
+        "predicates": [],
+    }
+    plan = assign_plan_revision_id(plan)
+
+    errors = change_plan_quality_errors(
+        plan,
+        expected_revision="abc123",
+        expected_case_id="case:case",
+    )
+
+    assert any("missing_outcome_role_commands" in error for error in errors)
+
+
+def test_change_plan_keeps_bespoke_recurrence_probe_under_command_validation() -> None:
+    plan = _valid_change_plan()
+    roles = plan["outcome_verification_roles"]
+    assert isinstance(roles, dict)
+    roles["recurrence"] = {
+        "description": "Run the verified problem-specific recurrence probe.",
+        "commands": ["pytest tests/test_recurrence.py || echo ok"],
+        "predicates": [
+            {"type": "command_exit_code", "command_index": 0, "equals": 0}
+        ],
+    }
+    plan = assign_plan_revision_id(plan)
+
+    errors = change_plan_quality_errors(
+        plan,
+        expected_revision="abc123",
+        expected_case_id="case:case",
+    )
+
+    assert any("unsafe_outcome_role_recurrence" in error for error in errors)
+
+
 @pytest.mark.parametrize(
     "command",
     [
@@ -1189,6 +1321,42 @@ def test_verification_commands_accept_safe_repo_specific_tools(
     )
 
 
+def test_pytest_plugin_option_is_not_misread_as_project_path(tmp_path: Path) -> None:
+    test_path = tmp_path / "tests" / "test_core.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text("def test_core(): pass\n", encoding="utf-8")
+
+    assert _command_quality_errors(
+        "python -B -m pytest -p no:cacheprovider -q tests/test_core.py::test_core",
+        plan_id="plan:pytest-plugin",
+        repo_root=tmp_path,
+        label="verification_command",
+    ) == []
+
+
+def test_wrapper_project_option_before_pytest_remains_project_bound(tmp_path: Path) -> None:
+    project_root = tmp_path / "packages" / "core"
+    test_path = project_root / "tests" / "test_core.py"
+    test_path.parent.mkdir(parents=True)
+    test_path.write_text("def test_core(): pass\n", encoding="utf-8")
+
+    assert _command_quality_errors(
+        "pdm -p packages/core run pytest -p no:cacheprovider -q tests/test_core.py",
+        plan_id="plan:wrapped-pytest",
+        repo_root=tmp_path,
+        label="verification_command",
+    ) == []
+    assert any(
+        "project_path_missing" in error
+        for error in _command_quality_errors(
+            "pdm -p packages/missing run pytest -p no:cacheprovider -q tests/test_core.py",
+            plan_id="plan:missing-wrapper-project",
+            repo_root=tmp_path,
+            label="verification_command",
+        )
+    )
+
+
 def test_verification_command_can_bind_an_unlisted_runner_to_a_planned_create_target(
     tmp_path: Path,
 ) -> None:
@@ -1210,6 +1378,93 @@ def test_verification_command_can_bind_an_unlisted_runner_to_a_planned_create_ta
             repo_root=tmp_path,
             label="verification_command",
         )
+    )
+
+
+def test_retained_replay_path_requires_exact_bound_command_and_asset_path(
+    tmp_path: Path,
+) -> None:
+    command = (
+        "python -B -m pytest -p no:cacheprovider -q -s "
+        ".usertest_research/test_retained_replay.py::test_fail_first"
+    )
+    retained_path = ".usertest_research/test_retained_replay.py"
+
+    assert _command_quality_errors(
+        command,
+        plan_id="plan:retained-replay",
+        repo_root=tmp_path,
+        label="verification_command",
+        bound_asset_paths={retained_path},
+    ) == []
+    assert any(
+        "command_path_missing" in error
+        for error in _command_quality_errors(
+            command,
+            plan_id="plan:unbound-retained-replay",
+            repo_root=tmp_path,
+            label="verification_command",
+        )
+    )
+    sibling_command = command.replace("test_retained_replay.py", "forged_replay.py")
+    assert any(
+        "command_path_missing" in error
+        for error in _command_quality_errors(
+            sibling_command,
+            plan_id="plan:wrong-retained-path",
+            repo_root=tmp_path,
+            label="verification_command",
+            bound_asset_paths={retained_path},
+        )
+    )
+
+
+def test_change_plan_path_resolution_is_scoped_to_bound_replay_command(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    command = (
+        "python -B -m pytest -p no:cacheprovider -q -s "
+        ".usertest_research/test_retained_replay.py::test_fail_first"
+    )
+    retained_path = ".usertest_research/test_retained_replay.py"
+    normalized_command = " ".join(command.split())
+    monkeypatch.setattr(
+        depth_contracts,
+        "verified_staged_replay_command_asset_paths",
+        lambda _plan, *, research: {normalized_command: {retained_path}},
+    )
+    plan = _valid_change_plan()
+    plan["verification_commands"] = [command]
+    reproduction = plan["before_after_reproduction"]
+    assert isinstance(reproduction, dict)
+    reproduction["before_change"]["command"] = command
+    reproduction["after_change"]["command"] = command
+    plan = assign_plan_revision_id(plan)
+
+    errors = change_plan_quality_errors(
+        plan,
+        expected_revision="abc123",
+        expected_case_id="case:case",
+        repo_root=tmp_path,
+    )
+    assert not any(
+        "path_missing" in error and ".usertest_research" in error for error in errors
+    )
+
+    sibling_command = command.replace("test_retained_replay.py", "forged_replay.py")
+    reproduction["after_change"]["command"] = sibling_command
+    plan = assign_plan_revision_id(plan)
+    sibling_errors = change_plan_quality_errors(
+        plan,
+        expected_revision="abc123",
+        expected_case_id="case:case",
+        repo_root=tmp_path,
+    )
+    assert any(
+        "change_plan_after_command_path_missing" in error
+        and "forged_replay.py" in error
+        for error in sibling_errors
     )
 
 
@@ -1649,6 +1904,25 @@ def test_optioning_uses_orchestrator_prompts_but_inspects_exact_target_workspace
     )
     assert orchestrator_intent.strip() in prompt
     assert "TARGET INTENT MUST NOT ENTER THE PROMPT" not in prompt
+
+    for disposition in ("already_addressed", "non_actionable"):
+        common_args["research_dossiers"][0]["actionability_assessment"] = {
+            "disposition": disposition,
+            "rationale": "The retained Stage 3 proof establishes that no change is required.",
+            "evidence_refs": ["exp-1"],
+        }
+        captured.clear()
+        terminal = _run_solution_optioning_stage(
+            target_repo_roots_by_problem=None,
+            **common_args,  # type: ignore[arg-type]
+        )
+        assert captured == {}
+        assert terminal["items"] == []
+        terminal_outcome = terminal["input_meta"]["optioning_outcomes"][0]
+        assert terminal_outcome["optioning_status"] == "not_required"
+        assert terminal_outcome["research_actionability_disposition"] == disposition
+        assert terminal_outcome["evidence_refs"] == ["exp-1"]
+    common_args["research_dossiers"][0].pop("actionability_assessment")
 
     captured.clear()
     blocked = _run_solution_optioning_stage(

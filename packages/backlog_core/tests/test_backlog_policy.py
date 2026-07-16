@@ -166,6 +166,15 @@ def _research_proof() -> dict[str, object]:
         "research_method": "reproduction",
         "reproduction_status": "reproduced",
         "research_status": "evidence_sufficient",
+        "case_relation_assessment": {
+            "disposition": "retain",
+            "rationale": (
+                "The signed occurrence and reproduced guard mechanism remain one "
+                "causal work unit."
+            ),
+            "facets": [],
+            "material_unknowns": [],
+        },
         "writes_used": True,
         "writes_purpose": ["failing_test"],
         "implementation_performed": False,
@@ -1143,6 +1152,7 @@ def _strict_ticket(*, kinds: list[str], breadth: dict[str, int]) -> dict[str, ob
             "mitigation_effect": None,
             "recurrence": {
                 "description": "Inspect fresh same-class recurrence evidence.",
+                "verification_owner": "centralized_case_refresh",
                 "commands": [],
                 "predicates": [],
             },

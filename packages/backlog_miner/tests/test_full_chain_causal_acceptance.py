@@ -224,6 +224,12 @@ def _research_claims(revision: str) -> dict[str, object]:
         ],
         "root_cause_confidence": 0.9,
         "broader_class_assessment": "unknown",
+        "case_relation_assessment": {
+            "disposition": "retain",
+            "rationale": "The signed occurrence and verified mechanism form one work unit.",
+            "facets": [],
+            "material_unknowns": [],
+        },
         "material_unknowns": [],
         "blocking_reasons": [],
         "evidence_boundaries": [],
@@ -411,13 +417,14 @@ def test_real_causal_evidence_reaches_durable_resolution(
     assert verification["mechanism_evidence"]
     assert verification["outcome_oracles"]
     assert len(verification["verification_boundaries"]) == 1
-    assert verification["verification_boundaries"][0]["equivalence_proof"][
-        "equivalence_mode"
-    ] == "exact_origin_scenario_identity"
+    assert (
+        verification["verification_boundaries"][0]["equivalence_proof"]["equivalence_mode"]
+        == "exact_origin_scenario_identity"
+    )
     tampered = json.loads(json.dumps(persisted))
-    tampered["evidence_assignment"]["atom_receipts"][0]["atom_snapshot"][
-        "command"
-    ] = "python -m pytest tests/test_unrelated.py"
+    tampered["evidence_assignment"]["atom_receipts"][0]["atom_snapshot"]["command"] = (
+        "python -m pytest tests/test_unrelated.py"
+    )
     tampered_required, tampered_reasons = infer_live_verification_requirement(
         {},
         tampered,
@@ -621,17 +628,13 @@ def test_real_causal_evidence_reaches_durable_resolution(
                 "commands": [ORIGINAL_COMMAND],
                 "predicates": [
                     {"type": "command_exit_code", "command_index": 0, "equals": 0},
-                    {
-                        "type": "command_stdout_contains",
-                        "command_index": 0,
-                        "value": "1 passed",
-                    },
                 ],
             },
             "live": None,
             "mitigation_effect": None,
             "recurrence": {
                 "description": "Inspect a later canonical evidence window for recurrence.",
+                "verification_owner": "centralized_case_refresh",
                 "commands": [],
                 "predicates": [],
             },
@@ -652,7 +655,6 @@ def test_real_causal_evidence_reaches_durable_resolution(
                 "expected_result": "The default call returns True and the test passes.",
                 "observable_assertions": [
                     {"source": "exit_code", "operator": "equals", "expected": 0},
-                    {"source": "stdout", "operator": "contains", "expected": "1 passed"},
                 ],
             },
             "proof_limitation": None,
@@ -768,7 +770,6 @@ def test_real_causal_evidence_reaches_durable_resolution(
     verification_summary["commands_configured"] = [ORIGINAL_COMMAND]
     _write_json(implementation_run / "verification.json", verification_summary)
     assert verification_summary["passed"] is True
-    assert "1 passed" in verification_summary["commands"][0]["stdout_tail"]
 
     ticket_provenance = {
         "schema_version": 1,

@@ -1,6 +1,8 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from collections.abc import Mapping
+
 from backlog_core import (
     assess_research_readiness,
     assess_selection_readiness,

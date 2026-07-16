@@ -725,13 +725,15 @@ def test_registry_revision_tracks_same_id_source_content_changes() -> None:
     changed_case = changed["cases"]["case:same-id"]
     assert first_case["source_evidence_snapshot_complete"] is True
     assert unchanged_case["case_revision"] == first_case["case_revision"] == 1
-    assert unchanged_case["source_evidence_snapshot_sha256"] == first_case[
-        "source_evidence_snapshot_sha256"
-    ]
+    assert (
+        unchanged_case["source_evidence_snapshot_sha256"]
+        == first_case["source_evidence_snapshot_sha256"]
+    )
     assert changed_case["case_revision"] == 2
-    assert changed_case["source_evidence_snapshot_sha256"] != first_case[
-        "source_evidence_snapshot_sha256"
-    ]
+    assert (
+        changed_case["source_evidence_snapshot_sha256"]
+        != first_case["source_evidence_snapshot_sha256"]
+    )
 
 
 def test_source_snapshot_is_explicitly_incomplete_when_current_atom_is_missing() -> None:
@@ -871,6 +873,107 @@ def test_split_parent_is_durable_nonactive_graph_node() -> None:
         "case:child-1",
         "case:child-2",
     }
+
+
+def test_revised_split_supersedes_prior_children_and_rebuilds_occurrence_membership() -> None:
+    parent = build_case_registry(
+        [
+            {
+                "problem_id": "problem:parent",
+                "case_id": "case:parent",
+                "evidence_atom_ids": ["atom:broad-aggregate"],
+            }
+        ]
+    )
+    first_receipt = {
+        "receipt_kind": "post_research_case_split",
+        "receipt_path": "C:/receipts/first.json",
+        "receipt_sha256": "1" * 64,
+        "content_sha256": "2" * 64,
+    }
+    first_children = [
+        {
+            "problem_id": "problem:child-a",
+            "case_id": "case:child-a",
+            "evidence_atom_ids": ["atom:context-a"],
+            "derived_evidence_atom_ids": ["atom:context-a"],
+            "occurrence_evidence_atom_ids": ["atom:a"],
+            "split_from_case_id": "case:parent",
+            "split_parent_problem_id": "problem:parent",
+            "post_research_split_receipt": first_receipt,
+        },
+        {
+            "problem_id": "problem:child-bc",
+            "case_id": "case:child-bc",
+            "evidence_atom_ids": ["atom:context-bc"],
+            "derived_evidence_atom_ids": ["atom:context-bc"],
+            "occurrence_evidence_atom_ids": ["atom:b", "atom:c"],
+            "split_from_case_id": "case:parent",
+            "split_parent_problem_id": "problem:parent",
+            "post_research_split_receipt": first_receipt,
+        },
+    ]
+    first = build_case_registry(first_children, previous=parent)
+
+    assert first["atom_id_to_case_ids"]["atom:a"] == ["case:child-a"]
+    assert first["atom_id_to_case_id"]["atom:broad-aggregate"] == "case:parent"
+
+    second_receipt = {
+        "receipt_kind": "post_research_case_split",
+        "receipt_path": "C:/receipts/second.json",
+        "receipt_sha256": "3" * 64,
+        "content_sha256": "4" * 64,
+    }
+    revised_children = [
+        {
+            "problem_id": "problem:child-ab",
+            "case_id": "case:child-ab",
+            "evidence_atom_ids": ["atom:context-ab"],
+            "derived_evidence_atom_ids": ["atom:context-ab"],
+            "occurrence_evidence_atom_ids": ["atom:a", "atom:b"],
+            "split_from_case_id": "case:parent",
+            "split_parent_problem_id": "problem:parent",
+            "post_research_split_receipt": second_receipt,
+        },
+        {
+            "problem_id": "problem:child-c",
+            "case_id": "case:child-c",
+            "evidence_atom_ids": ["atom:context-c"],
+            "derived_evidence_atom_ids": ["atom:context-c"],
+            "occurrence_evidence_atom_ids": ["atom:c"],
+            "split_from_case_id": "case:parent",
+            "split_parent_problem_id": "problem:parent",
+            "post_research_split_receipt": second_receipt,
+        },
+    ]
+    revised = build_case_registry(revised_children, previous=first)
+
+    parent_entry = revised["cases"]["case:parent"]
+    assert parent_entry["child_case_ids"] == ["case:child-ab", "case:child-c"]
+    assert parent_entry["historical_child_case_ids"] == [
+        "case:child-a",
+        "case:child-bc",
+        "case:child-ab",
+        "case:child-c",
+    ]
+    assert parent_entry["split_revision"] == 2
+    assert parent_entry["current_post_research_split_receipt"] == second_receipt
+    assert parent_entry["post_research_split_receipts"] == [first_receipt, second_receipt]
+    assert revised["cases"]["case:child-a"]["state"] == "superseded"
+    assert revised["cases"]["case:child-a"]["superseded_by_case_ids"] == ["case:child-ab"]
+    assert revised["cases"]["case:child-bc"]["state"] == "superseded"
+    assert revised["cases"]["case:child-bc"]["superseded_by_case_ids"] == [
+        "case:child-ab",
+        "case:child-c",
+    ]
+    assert {record["case_id"] for record in problem_case_records_from_registry(revised)} == {
+        "case:child-ab",
+        "case:child-c",
+    }
+    assert revised["atom_id_to_case_ids"]["atom:a"] == ["case:child-ab"]
+    assert revised["atom_id_to_case_ids"]["atom:b"] == ["case:child-ab"]
+    assert revised["atom_id_to_case_ids"]["atom:c"] == ["case:child-c"]
+    assert revised["atom_id_to_case_id"]["atom:broad-aggregate"] == "case:parent"
 
 
 def test_exact_identity_records_coalesce_before_research() -> None:
@@ -1185,9 +1288,10 @@ def test_incomplete_historical_provisional_group_is_locally_pending() -> None:
 
     entry = previous["cases"]["case:a"]
     assert entry["case_identity_status"] == "pending_relation"
-    assert "provisional_same_cause_facets_incomplete" in entry[
-        "provisional_same_cause_integrity_errors"
-    ]
+    assert (
+        "provisional_same_cause_facets_incomplete"
+        in entry["provisional_same_cause_integrity_errors"]
+    )
     assert problem_case_records_from_registry(previous)[0]["case_id"] == "case:a"
 
 
@@ -1387,6 +1491,11 @@ def test_stage_lineage_is_cumulative_and_carried_cases_reuse_proof_context() -> 
         ],
         "blocking_reasons": [],
         "artifact_refs": [{"kind": "test_output", "path": "repro.txt"}],
+        "actionability_assessment": {
+            "disposition": "requires_change",
+            "rationale": "The pinned revision still reproduces the failure.",
+            "evidence_refs": ["experiment:one"],
+        },
     }
     registry = update_case_registry_stage_lineage(
         registry,
@@ -1507,6 +1616,9 @@ def test_stage_lineage_is_cumulative_and_carried_cases_reuse_proof_context() -> 
     assert entry["evidence_atom_ids"] == original_evidence
     assert entry["root_cause_status"] == "established"
     assert entry["root_cause_confidence"] == 0.91
+    assert entry["current_research_proof"]["actionability_assessment"] == (
+        research["actionability_assessment"]
+    )
     assert entry["material_unknown_summary"][0]["affects"] == ["scope"]
     assert entry["current_option_set"]["option_ids"] == [
         "option:one:direct",
@@ -1686,9 +1798,7 @@ def test_registry_exposes_only_runner_persisted_full_causal_identity() -> None:
         ]
     )
 
-    assert verified_causal_identities_from_case_registry(registry) == {
-        "case:one": "a" * 64
-    }
+    assert verified_causal_identities_from_case_registry(registry) == {"case:one": "a" * 64}
     registry["cases"]["case:one"]["verified_causal_signature_source"] = "model_claim"
     assert verified_causal_identities_from_case_registry(registry) == {}
 

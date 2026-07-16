@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -13,9 +14,12 @@ from agent_adapters.codex_cli import (
     CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
     CodexLoginStatusResult,
     _resolve_executable,
+    _resolve_windows_desktop_codex_executable,
+    _windows_desktop_codex_candidates,
     build_codex_subscription_config_overrides,
     codex_subscription_config_errors,
     probe_codex_login_status,
+    resolve_codex_executable,
     run_codex_exec,
     validate_codex_personality_config_overrides,
     validate_codex_reasoning_effort_config_overrides,
@@ -129,6 +133,52 @@ def _make_refresh_token_reused_dummy_codex(tmp_path: Path) -> str:
     return str(wrapper)
 
 
+def _make_completed_turn_hanging_dummy_codex(tmp_path: Path) -> str:
+    script = tmp_path / "dummy_codex_completed_turn_hang.py"
+    script.write_text(
+        "\n".join(
+            [
+                "import json",
+                "import sys",
+                "import time",
+                "from pathlib import Path",
+                "",
+                "sys.stdin.read()",
+                "output_index = sys.argv.index('--output-last-message') + 1",
+                "Path(sys.argv[output_index]).write_text(",
+                "    '{\"status\":\"partial\"}', encoding='utf-8'",
+                ")",
+                "print(json.dumps({'type': 'thread.started', 'thread_id': "
+                "'019f2cca-9011-7e32-88ae-6c25af578b49'}), flush=True)",
+                "print(json.dumps({'type': 'agent_message', 'text': "
+                "'{\"status\":\"partial\"}'}), flush=True)",
+                "print(json.dumps({'type': 'turn.completed', 'usage': {}}), flush=True)",
+                "time.sleep(15)",
+                "raise SystemExit(7)",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+        newline="\n",
+    )
+    if os.name == "nt":
+        wrapper = tmp_path / "dummy_codex_completed_turn_hang.cmd"
+        wrapper.write_text(
+            f'@echo off\r\n"{sys.executable}" "{script}" %*\r\n',
+            encoding="utf-8",
+            newline="\n",
+        )
+        return str(wrapper)
+    wrapper = tmp_path / "dummy_codex_completed_turn_hang.sh"
+    wrapper.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{script}" "$@"\n',
+        encoding="utf-8",
+        newline="\n",
+    )
+    wrapper.chmod(0o755)
+    return str(wrapper)
+
+
 def _make_argv_dump_dummy_codex(tmp_path: Path) -> str:
     script = tmp_path / "dummy_codex_argv_dump.py"
     script.write_text(
@@ -198,6 +248,100 @@ def test_resolve_executable_finds_cmd_on_path(
     assert "dummy_ok" in proc.stdout
 
 
+def test_windows_desktop_codex_candidates_are_discovered_by_structure_and_recency(
+    tmp_path: Path,
+) -> None:
+    bin_dir = tmp_path / "OpenAI" / "Codex" / "bin"
+    older = bin_dir / "opaque-old-install" / "codex.exe"
+    newer = bin_dir / "opaque-current-install" / "codex.exe"
+    unrelated = bin_dir / "not-a-codex-install" / "helper.exe"
+    for path in (older, newer, unrelated):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fixture")
+    os.utime(older, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(newer, ns=(2_000_000_000, 2_000_000_000))
+
+    candidates = _windows_desktop_codex_candidates(local_app_data=str(tmp_path))
+
+    assert candidates == [newer, older]
+
+
+def test_windows_desktop_codex_resolution_skips_unusable_newer_candidate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bin_dir = tmp_path / "OpenAI" / "Codex" / "bin"
+    older_usable = bin_dir / "older" / "codex.exe"
+    newer_unusable = bin_dir / "newer" / "codex.exe"
+    for path in (older_usable, newer_unusable):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"fixture")
+    os.utime(older_usable, ns=(1_000_000_000, 1_000_000_000))
+    os.utime(newer_unusable, ns=(2_000_000_000, 2_000_000_000))
+    observed: list[Path] = []
+
+    def _usable(candidate: Path) -> bool:
+        observed.append(candidate)
+        return candidate == older_usable
+
+    monkeypatch.setattr("agent_adapters.codex_cli._codex_executable_is_usable", _usable)
+
+    resolved = _resolve_windows_desktop_codex_executable(local_app_data=str(tmp_path))
+
+    assert resolved == str(older_usable)
+    assert observed == [newer_unusable, older_usable]
+
+
+def test_resolve_codex_executable_honors_explicit_configured_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    explicit = tmp_path / "pinned" / "codex.exe"
+    monkeypatch.setattr(
+        "agent_adapters.codex_cli._resolve_windows_desktop_codex_executable",
+        lambda **_: pytest.fail("Desktop discovery must not replace an explicit path"),
+    )
+
+    assert resolve_codex_executable(str(explicit)) == str(explicit)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Codex Desktop binary preference")
+def test_resolve_plain_codex_prefers_desktop_binary_over_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desktop = tmp_path / "desktop" / "codex.exe"
+    path_binary = tmp_path / "npm" / "codex.cmd"
+    monkeypatch.setattr(
+        "agent_adapters.codex_cli._resolve_windows_desktop_codex_executable",
+        lambda **_: str(desktop),
+    )
+    monkeypatch.setattr(
+        "agent_adapters.codex_cli.shutil.which",
+        lambda *_args, **_kwargs: str(path_binary),
+    )
+
+    assert resolve_codex_executable("codex") == str(desktop)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Codex Desktop binary fallback")
+def test_resolve_plain_codex_falls_back_to_path_when_desktop_is_unusable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    path_binary = tmp_path / "npm" / "codex.cmd"
+    monkeypatch.setattr(
+        "agent_adapters.codex_cli._resolve_windows_desktop_codex_executable",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        "agent_adapters.codex_cli.shutil.which",
+        lambda *_args, **_kwargs: str(path_binary),
+    )
+
+    assert resolve_codex_executable("codex") == str(path_binary)
+
+
 def test_probe_codex_login_status_uses_direct_host_home_and_blanks_alternate_auth(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -243,6 +387,67 @@ def test_probe_codex_login_status_uses_direct_host_home_and_blanks_alternate_aut
     assert observed["argv"].index('forced_login_method="chatgpt"') < observed["argv"].index("login")
     redacted = result.to_redacted_dict()
     assert redacted["status_kind"] == "chatgpt"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Codex Desktop login resolution")
+def test_probe_codex_login_status_uses_desktop_resolver_without_changing_auth_controls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desktop_binary = _make_login_status_dummy_codex(tmp_path)
+    capture = tmp_path / "desktop-status-capture.json"
+    host_codex_home = tmp_path / "host-codex-home"
+    host_codex_home.mkdir()
+    monkeypatch.setattr(
+        "agent_adapters.codex_cli._resolve_windows_desktop_codex_executable",
+        lambda **_: desktop_binary,
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "must-not-reach-child")
+
+    result = probe_codex_login_status(
+        binary="codex",
+        codex_home=host_codex_home,
+        cwd=tmp_path,
+        env_overrides={"CODEX_STATUS_CAPTURE": str(capture)},
+    )
+
+    assert result.ok is True
+    assert Path(result.argv[0]).resolve() == Path(desktop_binary).resolve()
+    observed = json.loads(capture.read_text(encoding="utf-8"))
+    assert Path(observed["CODEX_HOME"]).resolve() == host_codex_home.resolve()
+    assert observed["OPENAI_API_KEY"] == ""
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Codex Desktop execution resolution")
+def test_run_codex_exec_uses_desktop_resolver_for_plain_codex(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desktop_binary = _make_argv_dump_dummy_codex(tmp_path)
+    argv_path = tmp_path / "desktop-exec-argv.json"
+    monkeypatch.setattr(
+        "agent_adapters.codex_cli._resolve_windows_desktop_codex_executable",
+        lambda **_: desktop_binary,
+    )
+
+    result = run_codex_exec(
+        workspace_dir=tmp_path,
+        prompt="exercise local resolution only",
+        raw_events_path=tmp_path / "desktop-exec-events.jsonl",
+        last_message_path=tmp_path / "desktop-exec-last.txt",
+        stderr_path=tmp_path / "desktop-exec-stderr.txt",
+        sandbox="read-only",
+        ask_for_approval="never",
+        binary="codex",
+        env_overrides={"CODEX_ARGV_OUT": str(argv_path)},
+    )
+
+    assert result.exit_code == 0
+    assert Path(result.argv[0]).resolve() == Path(desktop_binary).resolve()
+    assert json.loads(argv_path.read_text(encoding="utf-8"))[0:2] == [
+        "--ask-for-approval",
+        "never",
+    ]
 
 
 def test_codex_login_status_accepts_exact_chatgpt_status_on_stderr() -> None:
@@ -372,6 +577,37 @@ def test_run_codex_exec_fails_fast_on_refresh_token_reused(tmp_path: Path) -> No
     assert "codex login" in stderr_text
 
 
+def test_run_codex_exec_salvages_persisted_terminal_turn_from_orphaned_process(
+    tmp_path: Path,
+) -> None:
+    dummy_binary = _make_completed_turn_hanging_dummy_codex(tmp_path)
+    stderr_path = tmp_path / "stderr.txt"
+    raw_events_path = tmp_path / "raw_events.jsonl"
+    last_message_path = tmp_path / "last_message.txt"
+
+    started = time.monotonic()
+    result = run_codex_exec(
+        workspace_dir=tmp_path,
+        prompt="complete normally, then leave an orphan helper",
+        raw_events_path=raw_events_path,
+        last_message_path=last_message_path,
+        stderr_path=stderr_path,
+        sandbox="read-only",
+        ask_for_approval="never",
+        binary=dummy_binary,
+    )
+
+    assert time.monotonic() - started < 10.0
+    assert result.exit_code == 0
+    assert result.terminal_turn_salvaged is True
+    assert result.thread_id == "019f2cca-9011-7e32-88ae-6c25af578b49"
+    assert json.loads(last_message_path.read_text(encoding="utf-8")) == {
+        "status": "partial"
+    }
+    assert '"type": "turn.completed"' in raw_events_path.read_text(encoding="utf-8")
+    assert "retained the completed turn" in stderr_path.read_text(encoding="utf-8")
+
+
 def test_run_codex_exec_ignores_user_config_for_headless_runs(tmp_path: Path) -> None:
     dummy_binary = _make_argv_dump_dummy_codex(tmp_path)
     argv_path = tmp_path / "argv.json"
@@ -415,7 +651,9 @@ def test_run_codex_exec_can_ignore_rules_for_isolated_runs(tmp_path: Path) -> No
     assert "--ignore-rules" in argv
 
 
-def test_run_codex_exec_resumes_exact_session_and_never_uses_last(tmp_path: Path) -> None:
+def test_run_codex_exec_resumes_exact_session_with_effective_workspace_and_sandbox(
+    tmp_path: Path,
+) -> None:
     dummy_binary = _make_argv_dump_dummy_codex(tmp_path)
     argv_path = tmp_path / "resume-argv.json"
     thread_id = "019f2cca-9011-7e32-88ae-6c25af578b49"
@@ -426,7 +664,7 @@ def test_run_codex_exec_resumes_exact_session_and_never_uses_last(tmp_path: Path
         raw_events_path=tmp_path / "resume-events.jsonl",
         last_message_path=tmp_path / "resume-last.txt",
         stderr_path=tmp_path / "resume-stderr.txt",
-        sandbox="read-only",
+        sandbox="workspace-write",
         ask_for_approval="never",
         binary=dummy_binary,
         ignore_rules=True,
@@ -437,12 +675,19 @@ def test_run_codex_exec_resumes_exact_session_and_never_uses_last(tmp_path: Path
     assert result.exit_code == 0
     assert result.thread_id == thread_id
     argv = json.loads(argv_path.read_text(encoding="utf-8"))
-    assert argv[argv.index("exec") + 1] == "resume"
+    exec_index = argv.index("exec")
+    cd_index = argv.index("--cd")
+    sandbox_index = argv.index("--sandbox")
+    assert argv[exec_index + 1] == "resume"
+    assert cd_index < exec_index
+    assert argv[cd_index + 1] == str(tmp_path)
+    assert sandbox_index < exec_index
+    assert argv[sandbox_index + 1] == "workspace-write"
+    assert argv.count("--cd") == 1
+    assert argv.count("--sandbox") == 1
     assert thread_id in argv
     assert argv[-1] == "-"
     assert "--last" not in argv
-    assert "--cd" not in argv
-    assert "--sandbox" not in argv
     assert "--ignore-user-config" in argv
     assert "--ignore-rules" in argv
 

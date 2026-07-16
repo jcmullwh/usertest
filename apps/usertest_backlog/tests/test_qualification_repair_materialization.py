@@ -140,6 +140,30 @@ def test_best_qualified_fallback_persists_across_regression_and_only_strictly_im
     assert carried == improved
 
 
+def test_qualification_error_count_does_not_double_count_same_output_residual() -> None:
+    counts = {
+        "accepted_bad": 1,
+        "accepted_unknown": 0,
+        "false_rejected_good": 0,
+        "undispositioned_actionable_cases": 0,
+        "source_correction_findings_outstanding": 1,
+        "source_correction_findings_outstanding_already_counted_outputs": 1,
+    }
+    assert materialization._qualification_error_count(
+        {"qualification": {"counts": counts}}
+    ) == 1
+    assert materialization._qualification_error_count(
+        {
+            "qualification": {
+                "counts": {
+                    **counts,
+                    "source_correction_findings_outstanding": 2,
+                }
+            }
+        }
+    ) == 2
+
+
 def test_best_qualified_fallback_rejects_report_backlog_cross_transaction_binding(
     tmp_path: Path,
 ) -> None:
@@ -223,10 +247,42 @@ def test_materialization_preserves_scored_source_and_writes_bound_pending_contra
         "consumption_receipt": None,
     }
     route["route_sha256"] = _hash(route)
+    source_backlog_path = tmp_path / "scored.backlog.json"
+    atoms_path = tmp_path / "atoms.json"
+    evidence_path = tmp_path / "problem_mining_evidence.json"
+    case_registry_path = tmp_path / "case_registry.json"
+    manifest_path = tmp_path / "manifest.json"
+    adjudication_path = tmp_path / "adjudication.json"
+    source_report_path = tmp_path / "source_report.json"
+    source_adjudication_body = {
+        "schema_version": 1,
+        "contract_kind": "qualification_output_adjudication",
+        "output_adjudications": [
+            {
+                "output_kind": route["output_kind"],
+                "output_sha256": route["output_sha256"],
+                "quality": route["quality"],
+                "repair_status": "not_repaired",
+                "bad_severity": route["bad_severity"],
+                "bad_categories": route["bad_categories"],
+                "actionable_label_ids": route["actionable_label_ids"],
+                "rationale": route["rationale"],
+            }
+        ],
+        "false_rejections": [],
+    }
+    _write(
+        adjudication_path,
+        {
+            **source_adjudication_body,
+            "content_sha256": _hash(source_adjudication_body),
+        },
+    )
+    adjudication_sha256 = sha256(adjudication_path.read_bytes()).hexdigest()
     consumption = consume_qualification_corrections(
         routes=[route],
         source_pending_run_sha256="d" * 64,
-        source_adjudication_sha256="e" * 64,
+        source_adjudication_sha256=adjudication_sha256,
         load_current_payload=lambda _route: {"plan": "old"},
         invoke_exact_author=lambda **_kwargs: AuthorRevision(
             payload={"plan": "fixed"},
@@ -246,20 +302,29 @@ def test_materialization_preserves_scored_source_and_writes_bound_pending_contra
         tickets=[],
         affected_problem_ids=["problem:one"],
     )
-    source_backlog_path = tmp_path / "scored.backlog.json"
-    atoms_path = tmp_path / "atoms.json"
-    evidence_path = tmp_path / "problem_mining_evidence.json"
-    case_registry_path = tmp_path / "case_registry.json"
-    manifest_path = tmp_path / "manifest.json"
-    adjudication_path = tmp_path / "adjudication.json"
     for path, value in (
         (atoms_path, []),
         (evidence_path, {}),
         (case_registry_path, {}),
         (manifest_path, {}),
-        (adjudication_path, {}),
     ):
         _write(path, value)
+    source_report_body = {
+        "schema_version": 1,
+        "contract_kind": "qualification_raw_first_pass_report",
+        "pending_run_sha256": "d" * 64,
+        "report": {
+            "passed": False,
+            "qualification": {"correction_routes": [route]},
+        },
+    }
+    _write(
+        source_report_path,
+        {
+            **source_report_body,
+            "content_sha256": _hash(source_report_body),
+        },
+    )
     source_backlog = {
         "input": {"agent": "codex"},
         "totals": {"source_counts": {}, "severity_hint_counts": {}},
@@ -272,13 +337,18 @@ def test_materialization_preserves_scored_source_and_writes_bound_pending_contra
                 "case_registry_json": str(case_registry_path),
             },
             "export_contract": {},
-            "shadow_qualification": {"model_readable_roots": [str(tmp_path)]},
+            "shadow_qualification": {
+                "model_readable_roots": [str(tmp_path)],
+                "raw_first_pass_report_path": str(source_report_path),
+                "raw_first_pass_report_sha256": sha256(
+                    source_report_path.read_bytes()
+                ).hexdigest(),
+            },
         },
     }
     _write(source_backlog_path, source_backlog)
     source_bytes = source_backlog_path.read_bytes()
     manifest_sha256 = sha256(manifest_path.read_bytes()).hexdigest()
-    adjudication_sha256 = sha256(adjudication_path.read_bytes()).hexdigest()
 
     def artifact_paths(**kwargs: Any) -> dict[str, Path]:
         backlog = kwargs["backlog"]
@@ -329,13 +399,44 @@ def test_materialization_preserves_scored_source_and_writes_bound_pending_contra
     repair_parent = source_backlog_path.parent / (
         f"{source_backlog_path.stem}.qualification_repair"
     )
-    assert not (repair_parent / consumption["content_sha256"]).exists()
+    assert not (
+        repair_parent / f"v2-{consumption['content_sha256']}"
+    ).exists()
     assert any(
         path.name.startswith(f".{consumption['content_sha256']}.failed-")
         for path in repair_parent.iterdir()
     )
     assert source_backlog_path.read_bytes() == source_bytes
     monkeypatch.setattr(materialization, "write_backlog", original_write_backlog)
+
+    # A completed pre-binding bundle is immutable evidence, but it is not safe to
+    # reuse under the stronger source-finding contract.  The v2 materialization must
+    # proceed beside it instead of rejecting or overwriting an impossible retry path.
+    legacy_root = repair_parent / consumption["content_sha256"]
+    _write(
+        legacy_root / "qualification_correction_consumption.json",
+        consumption,
+    )
+    _write(legacy_root / "repaired.backlog.json", {"legacy": True})
+    (legacy_root / "repaired.backlog.md").write_text(
+        "legacy immutable repair\n",
+        encoding="utf-8",
+    )
+    _write(
+        materialization.shadow_pending_run_path(
+            legacy_root / "repaired.backlog.json"
+        ),
+        {"legacy": True},
+    )
+    _write(
+        legacy_root / "pending_repaired_shadow_run.json",
+        {"legacy": True},
+    )
+    legacy_bytes = {
+        path.relative_to(legacy_root).as_posix(): path.read_bytes()
+        for path in legacy_root.rglob("*")
+        if path.is_file()
+    }
 
     result = materialization.materialize_repaired_shadow_run(
         source_backlog=source_backlog,
@@ -354,6 +455,18 @@ def test_materialization_preserves_scored_source_and_writes_bound_pending_contra
     )
 
     assert result is not None
+    assert Path(result["repaired_backlog_path"]).parent.name == (
+        f"v2-{consumption['content_sha256']}"
+    )
+    assert result["legacy_materialization_audit"]["status"] == (
+        "legacy_v1_complete_non_reusable_v2_materialization_required"
+    )
+    assert result["legacy_materialization_audit"]["reuse_allowed"] is False
+    assert {
+        path.relative_to(legacy_root).as_posix(): path.read_bytes()
+        for path in legacy_root.rglob("*")
+        if path.is_file()
+    } == legacy_bytes
     assert source_backlog_path.read_bytes() == source_bytes
     repaired_backlog = Path(result["repaired_backlog_path"])
     standard_pending = Path(result["pending_shadow_run_path"])

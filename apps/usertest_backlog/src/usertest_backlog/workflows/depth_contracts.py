@@ -28,6 +28,7 @@ from backlog_core import (
     plan_revision_id_for,
     research_limitation_references,
     verified_mechanism_evidence,
+    verified_staged_replay_command_asset_paths,
 )
 from backlog_core.stage_contracts import parse_solution_option_sets
 from backlog_core.ticket_readiness import falsification_acceptance_has_adversarial_basis
@@ -35,6 +36,7 @@ from runner_core import verification_command_safety_errors
 
 _OPTIONING_STATUSES = frozenset({"options_produced", "insufficient_evidence", "no_safe_option"})
 _SCOPE_LEVELS = frozenset({"single_path", "multiple_independent_paths", "shared_abstraction"})
+_CENTRALIZED_RECURRENCE_OWNER = "centralized_case_refresh"
 _MECHANISM_TOKEN_RE = re.compile(r"[a-z0-9]+")
 _CLASS_SCOPE_RE = re.compile(
     r"\b(?:canonical|central(?:ize|ized|ization)|class[- ]level|shared(?:\s+internal)?"
@@ -518,20 +520,33 @@ def falsification_review_errors(
             material_risks.update(
                 value.strip() for value in values if isinstance(value, str) and value.strip()
             )
-    for contract_review in (
-        review.get("outcome_contract_reviews")
-        if isinstance(review.get("outcome_contract_reviews"), list)
-        else []
-    ):
-        if not isinstance(contract_review, dict):
-            continue
-        values = contract_review.get("residual_untested_paths")
+    outcome_strategy_review = review.get("outcome_strategy_review")
+    if isinstance(outcome_strategy_review, dict):
+        values = outcome_strategy_review.get("residual_untested_paths")
         if isinstance(values, list):
             material_risks.update(
                 value.strip()
                 for value in values
                 if isinstance(value, str) and value.strip()
             )
+    else:
+        # Compatibility for persisted pre-strategy reviews.  In the current contract,
+        # Stage-3 positive contracts are baseline evidence and their limited scope does
+        # not itself limit a sufficient Stage-4 outcome strategy.
+        for contract_review in (
+            review.get("outcome_contract_reviews")
+            if isinstance(review.get("outcome_contract_reviews"), list)
+            else []
+        ):
+            if not isinstance(contract_review, dict):
+                continue
+            values = contract_review.get("residual_untested_paths")
+            if isinstance(values, list):
+                material_risks.update(
+                    value.strip()
+                    for value in values
+                    if isinstance(value, str) and value.strip()
+                )
     dispositions = review.get("material_risk_dispositions")
     if not isinstance(dispositions, list):
         errors.append(f"falsification_invalid_material_risk_dispositions: {expected_problem_id}")
@@ -595,7 +610,7 @@ def _python_target_bindings(content: str) -> set[str]:
     """Return concrete Python definitions, assignments, and import bindings."""
 
     try:
-        tree = ast.parse(content)
+        tree = ast.parse(content.removeprefix("\ufeff"))
     except SyntaxError:
         return set()
     bindings: set[str] = set()
@@ -768,6 +783,7 @@ def _command_quality_errors(
     repo_root: Path | None,
     label: str,
     planned_create_paths: set[str] | None = None,
+    bound_asset_paths: set[str] | None = None,
 ) -> list[str]:
     errors: list[str] = []
     safety_errors = verification_command_safety_errors(command)
@@ -788,8 +804,27 @@ def _command_quality_errors(
     if repo_root is None:
         return errors
     project_root = repo_root
+    pytest_argument_start = next(
+        (
+            index
+            for index, token in enumerate(tokens)
+            if Path(token.replace("\\", "/")).name.casefold().removesuffix(".exe")
+            in {"pytest", "py.test"}
+        ),
+        None,
+    )
     for index, token in enumerate(tokens[:-1]):
         if token in {"-p", "--project"}:
+            # ``pytest -p NAME`` is its plugin-registration option, not a project
+            # directory.  A wrapper may still have a real project option before the
+            # pytest executable (for example ``pdm -p packages/core run pytest``), so
+            # only exempt ``-p`` once pytest's own argument list has begun.
+            if (
+                token == "-p"
+                and pytest_argument_start is not None
+                and index > pytest_argument_start
+            ):
+                continue
             candidate = _path_within_repo(repo_root, tokens[index + 1])
             if candidate is None or not candidate.is_dir():
                 errors.append(
@@ -804,6 +839,9 @@ def _command_quality_errors(
             continue
         normalized_path = Path(path_without_selector.replace("\\", "/")).as_posix()
         if normalized_path in (planned_create_paths or set()):
+            continue
+        normalized_asset_path = normalized_path.removeprefix("./").casefold()
+        if normalized_asset_path in (bound_asset_paths or set()):
             continue
         candidate = _path_within_repo(repo_root, path_without_selector)
         if candidate is None or not candidate.exists():
@@ -827,6 +865,10 @@ def change_plan_quality_errors(
 
     plan_id = plan.get("change_plan_id") or "(no change_plan_id)"
     errors: list[str] = []
+    staged_replay_paths_by_command = verified_staged_replay_command_asset_paths(
+        plan,
+        research=research_dossier,
+    )
     if _nonempty_string(plan.get("_parse_warning")):
         errors.append(f"change_plan_stage_contract_invalid: {plan_id}")
     if not _nonempty_string(plan.get("change_plan_id")):
@@ -948,6 +990,10 @@ def change_plan_quality_errors(
                     repo_root=repo_root,
                     label="verification_command",
                     planned_create_paths=planned_create_paths,
+                    bound_asset_paths=staged_replay_paths_by_command.get(
+                        " ".join(command.split()),
+                        set(),
+                    ),
                 )
             )
 
@@ -969,9 +1015,28 @@ def change_plan_quality_errors(
                 "config_state",
                 "multi_scenario",
             }
-            if not _string_list(role_commands, allow_empty=oracle_bound):
+            owner = role_contract.get("verification_owner")
+            centralized_recurrence = (
+                role == "recurrence" and owner == _CENTRALIZED_RECURRENCE_OWNER
+            )
+            if owner is not None and not centralized_recurrence:
+                errors.append(
+                    f"change_plan_outcome_role_verification_owner_invalid: {plan_id}: {role}"
+                )
+            if not _string_list(
+                role_commands,
+                allow_empty=oracle_bound or centralized_recurrence,
+            ):
                 errors.append(f"change_plan_missing_outcome_role_commands: {plan_id}: {role}")
                 continue
+            if centralized_recurrence and role_commands:
+                errors.append(
+                    f"change_plan_centralized_recurrence_commands_invalid: {plan_id}"
+                )
+            if centralized_recurrence and role_contract.get("predicates") != []:
+                errors.append(
+                    f"change_plan_centralized_recurrence_predicates_invalid: {plan_id}"
+                )
             for command in role_commands:
                 errors.extend(
                     _command_quality_errors(
@@ -1003,6 +1068,10 @@ def change_plan_quality_errors(
                         repo_root=repo_root,
                         label="alternate_verification",
                         planned_create_paths=planned_create_paths,
+                        bound_asset_paths=staged_replay_paths_by_command.get(
+                            " ".join(str(alternate).split()),
+                            set(),
+                        ),
                     )
                 )
                 commands_raw = plan.get("verification_commands")
@@ -1091,6 +1160,10 @@ def change_plan_quality_errors(
                             repo_root=repo_root,
                             label=f"{phase}_command",
                             planned_create_paths=planned_create_paths,
+                            bound_asset_paths=staged_replay_paths_by_command.get(
+                                " ".join(str(mapping.get("command")).split()),
+                                set(),
+                            ),
                         )
                     )
                 if not _nonempty_string(mapping.get("expected_result")):

@@ -34,6 +34,9 @@ _OUTCOME_ROLES = (
     "mitigation_effect",
     "recurrence",
 )
+_CENTRALIZED_RECURRENCE_OWNER = "centralized_case_refresh"
+
+
 def _canonical_json(value: Any) -> str:
     return json.dumps(
         value,
@@ -331,6 +334,45 @@ def _normalize_causal_proof_receipts(raw: Any) -> dict[str, dict[str, Any]]:
     return normalized
 
 
+def _validated_stage5_outcome_contract(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    contract_id = raw.get("outcome_contract_id")
+    projection = {
+        key: value for key, value in raw.items() if key != "outcome_contract_id"
+    }
+    if (
+        contract_id
+        != f"stage5_outcome_contract:{sha256_text(_canonical_json(projection))}"
+        or raw.get("kind") != "selected_option_outcome_strategy"
+        or raw.get("outcome_contract_status") != "approved_for_planning"
+        or raw.get("post_change_evidence_status") != "unverified"
+        or not isinstance(raw.get("strategy"), dict)
+        or not isinstance(raw.get("review"), dict)
+    ):
+        return None
+    return dict(raw)
+
+
+def _is_fail_first_planned_replay(raw: Any) -> bool:
+    if (
+        not isinstance(raw, dict)
+        or raw.get("kind") != "staged_replay"
+        or raw.get("scenario_kind") != "fail_first_contract"
+        or raw.get("positive_outcome_contracts") not in (None, [])
+        or _validated_stage5_outcome_contract(raw.get("selected_outcome_contract"))
+        is None
+    ):
+        return False
+    baseline = raw.get("baseline")
+    baseline_exit = baseline.get("exit_code") if isinstance(baseline, dict) else None
+    return bool(
+        isinstance(baseline_exit, int)
+        and not isinstance(baseline_exit, bool)
+        and baseline_exit != 0
+    )
+
+
 def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise ValueError("outcome_role_oracle_invalid")
@@ -341,7 +383,26 @@ def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:
         raise ValueError("outcome_role_oracle_hash_invalid")
     kind = raw.get("kind")
     proof_scope = raw.get("proof_scope")
-    if kind in {"staged_replay", "causal_proof_replay"}:
+    if kind == "stage5_planned_outcome":
+        if (
+            proof_scope != "planned_post_change_verification"
+            or raw.get("positive_outcome_contracts") not in (None, [])
+            or _validated_stage5_outcome_contract(
+                raw.get("selected_outcome_contract")
+            )
+            is None
+        ):
+            raise ValueError("outcome_role_stage5_planned_oracle_invalid")
+    elif kind in {"staged_replay", "causal_proof_replay"}:
+        if raw.get("scenario_kind") == "fail_first_contract" and not (
+            kind == "staged_replay" and _is_fail_first_planned_replay(raw)
+        ):
+            raise ValueError("outcome_role_fail_first_planned_oracle_invalid")
+        if (
+            raw.get("scenario_kind") != "fail_first_contract"
+            and raw.get("selected_outcome_contract") is not None
+        ):
+            raise ValueError("outcome_role_selected_outcome_contract_unexpected")
         execution = raw.get("execution")
         argv = execution.get("argv") if isinstance(execution, dict) else None
         authorization = (
@@ -471,6 +532,33 @@ def normalize_outcome_role_contracts(
             f"outcome_role_contract_fields_invalid: missing={missing!r} unknown={unknown!r}"
         )
     generic_commands = set(normalize_verification_commands(test_commands))
+    original_raw = raw.get("original_scenario")
+    original_oracle_raw = (
+        original_raw.get("oracle") if isinstance(original_raw, dict) else None
+    )
+    fail_first_planned_replay = _is_fail_first_planned_replay(original_oracle_raw)
+    selected_outcome_contract_raw = (
+        original_oracle_raw.get("selected_outcome_contract")
+        if isinstance(original_oracle_raw, dict)
+        and (
+            original_oracle_raw.get("kind") == "stage5_planned_outcome"
+            or fail_first_planned_replay
+        )
+        else None
+    )
+    selected_outcome_contract = _validated_stage5_outcome_contract(
+        selected_outcome_contract_raw
+    )
+    planned_outcome_contract_id = (
+        selected_outcome_contract.get("outcome_contract_id")
+        if selected_outcome_contract is not None
+        else None
+    )
+    planned_repo_revision = (
+        original_oracle_raw.get("repo_revision")
+        if isinstance(original_oracle_raw, dict)
+        else None
+    )
     normalized: dict[str, dict[str, Any] | None] = {}
     for role in _OUTCOME_ROLES:
         value = raw.get(role)
@@ -490,6 +578,8 @@ def normalize_outcome_role_contracts(
             "required_proof_scope",
             "causal_proof_receipts",
             "command_bindings",
+            "execution_status",
+            "verification_owner",
             "role_contract_sha256",
         }
         unknown_fields = sorted(set(value) - allowed)
@@ -505,6 +595,13 @@ def normalize_outcome_role_contracts(
             raise ValueError(f"outcome_role_oracle_forbidden: {role}")
         oracle = _normalize_outcome_oracle(oracle_raw) if oracle_raw is not None else None
         oracle_kind = oracle.get("kind") if oracle is not None else None
+        verification_owner = value.get("verification_owner")
+        centralized_recurrence = (
+            role == "recurrence"
+            and verification_owner == _CENTRALIZED_RECURRENCE_OWNER
+        )
+        if verification_owner is not None and not centralized_recurrence:
+            raise ValueError(f"outcome_role_verification_owner_invalid: {role}")
         proof_scope = value.get("required_proof_scope")
         if oracle is not None and proof_scope != oracle.get("proof_scope"):
             raise ValueError("outcome_role_oracle_scope_mismatch")
@@ -513,14 +610,16 @@ def normalize_outcome_role_contracts(
         commands_raw = value.get("commands")
         if not isinstance(commands_raw, list):
             raise ValueError(f"outcome_role_commands_invalid: {role}")
-        if oracle is not None:
+        if oracle is not None and oracle_kind != "stage5_planned_outcome":
             if commands_raw:
                 raise ValueError("outcome_role_oracle_commands_forbidden")
             commands = []
-        elif role == "recurrence" and not commands_raw:
+        elif centralized_recurrence and not commands_raw:
             commands = []
         else:
             commands = normalize_verification_commands(commands_raw)
+        if centralized_recurrence and commands:
+            raise ValueError("outcome_role_centralized_recurrence_commands_invalid")
         if role in {"live", "mitigation_effect", "recurrence"}:
             if generic_commands.intersection(commands):
                 raise ValueError(f"outcome_role_generic_command_reused: {role}")
@@ -529,6 +628,7 @@ def normalize_outcome_role_contracts(
                 if not isinstance(bindings_raw, list):
                     raise ValueError(f"outcome_role_command_bindings_invalid: {role}")
                 bound_indices: set[int] = set()
+                planned_binding_indices: set[int] = set()
                 normalized_bindings: list[dict[str, Any]] = []
                 for binding_index, binding in enumerate(bindings_raw):
                     if not isinstance(binding, dict):
@@ -537,13 +637,59 @@ def normalize_outcome_role_contracts(
                         )
                     command_index = binding.get("command_index")
                     experiment_id = binding.get("research_experiment_id")
-                    if (
+                    index_invalid = bool(
                         isinstance(command_index, bool)
                         or not isinstance(command_index, int)
                         or command_index < 0
                         or command_index >= len(commands)
                         or command_index in bound_indices
-                        or not isinstance(experiment_id, str)
+                    )
+                    if index_invalid:
+                        raise ValueError(
+                            f"outcome_role_command_binding_invalid:{role}:{binding_index}"
+                        )
+                    assert isinstance(command_index, int)
+                    if binding.get("binding_kind") == "stage6_planned_post_change":
+                        selected_contract_id = binding.get(
+                            "selected_outcome_contract_id"
+                        )
+                        repo_revision = binding.get("repo_revision")
+                        if (
+                            role not in {"live", "mitigation_effect"}
+                            or set(binding)
+                            != {
+                                "command_index",
+                                "binding_kind",
+                                "selected_outcome_contract_id",
+                                "repo_revision",
+                            }
+                            or not isinstance(selected_contract_id, str)
+                            or not selected_contract_id.strip()
+                            or selected_contract_id.strip()
+                            != planned_outcome_contract_id
+                            or not isinstance(repo_revision, str)
+                            or not repo_revision.strip()
+                            or repo_revision.strip() != planned_repo_revision
+                        ):
+                            raise ValueError(
+                                "outcome_role_planned_command_binding_invalid:"
+                                f"{role}:{binding_index}"
+                            )
+                        bound_indices.add(command_index)
+                        planned_binding_indices.add(command_index)
+                        normalized_bindings.append(
+                            {
+                                "command_index": command_index,
+                                "binding_kind": "stage6_planned_post_change",
+                                "selected_outcome_contract_id": (
+                                    selected_contract_id.strip()
+                                ),
+                                "repo_revision": repo_revision.strip(),
+                            }
+                        )
+                        continue
+                    if (
+                        not isinstance(experiment_id, str)
                         or not experiment_id.strip()
                         or set(binding) != {"command_index", "research_experiment_id"}
                     ):
@@ -561,19 +707,36 @@ def normalize_outcome_role_contracts(
                     raise ValueError(
                         f"outcome_role_command_binding_coverage_invalid:{role}"
                     )
+                if planned_binding_indices:
+                    if value.get("execution_status") != "planned_unverified":
+                        raise ValueError(
+                            f"outcome_role_planned_execution_status_invalid:{role}"
+                        )
+                elif value.get("execution_status") is not None:
+                    raise ValueError(
+                        f"outcome_role_execution_status_unexpected:{role}"
+                    )
             elif bindings_raw not in (None, []):
                 raise ValueError(f"outcome_role_command_bindings_without_commands:{role}")
             else:
                 normalized_bindings = []
+                if value.get("execution_status") is not None:
+                    raise ValueError(
+                        f"outcome_role_execution_status_unexpected:{role}"
+                    )
         else:
             if value.get("command_bindings") not in (None, []):
                 raise ValueError(f"outcome_role_command_bindings_forbidden:{role}")
+            if value.get("execution_status") is not None:
+                raise ValueError(f"outcome_role_execution_status_forbidden:{role}")
             normalized_bindings = []
         predicates_raw = value.get("predicates")
         if not isinstance(predicates_raw, list) or (
-            not predicates_raw and role != "recurrence"
+            not predicates_raw and not centralized_recurrence
         ):
             raise ValueError(f"outcome_role_predicates_invalid: {role}")
+        if centralized_recurrence and predicates_raw:
+            raise ValueError("outcome_role_centralized_recurrence_predicates_invalid")
         oracle_target_ids = {
             str(target.get("target_id"))
             for target in (oracle.get("state_targets", []) if oracle is not None else [])
@@ -682,7 +845,11 @@ def normalize_outcome_role_contracts(
                 if len(oracle_contract_ids) == 1
                 else []
             )
-            if oracle is not None and (
+            planned_or_fail_first_oracle = bool(
+                oracle_kind == "stage5_planned_outcome"
+                or _is_fail_first_planned_replay(oracle)
+            )
+            if oracle is not None and not planned_or_fail_first_oracle and (
                 not normalized_selected_ids
                 or len(normalized_selected_ids) != len(set(normalized_selected_ids))
                 or any(value not in oracle_contract_ids for value in normalized_selected_ids)
@@ -696,6 +863,10 @@ def normalize_outcome_role_contracts(
                 )
             ):
                 raise ValueError("outcome_role_selected_positive_contract_ids_invalid")
+            if planned_or_fail_first_oracle and selected_contract_ids not in (None, []):
+                raise ValueError(
+                    "outcome_role_selected_positive_contract_unexpected_for_planned_outcome"
+                )
             if oracle is None and selected_contract_ids is not None:
                 raise ValueError("outcome_role_selected_positive_contract_without_oracle")
         elif research_experiment_id is not None:
@@ -707,8 +878,12 @@ def normalize_outcome_role_contracts(
             "commands": commands,
             "predicates": predicates,
         }
+        if centralized_recurrence:
+            role_payload["verification_owner"] = _CENTRALIZED_RECURRENCE_OWNER
         if normalized_bindings:
             role_payload["command_bindings"] = normalized_bindings
+        if value.get("execution_status") == "planned_unverified":
+            role_payload["execution_status"] = "planned_unverified"
         if role == "original_scenario":
             role_payload["research_experiment_id"] = research_experiment_id.strip()
             if research_experiment_ids is not None:

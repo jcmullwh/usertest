@@ -326,6 +326,89 @@ def test_stage2_transient_exact_session_exception_retries_same_author(
     ] == ["invalid", "invocation_failed", "verified"]
 
 
+def test_stage2_improved_frontier_is_not_paused_by_elapsed_author_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    manifest = load_pipeline_prompt_manifest(repo_root / "configs" / "backlog_prompts")
+    record = {
+        "problem_id": "problem:one",
+        "title": "One",
+        "problem": "One fails",
+        "user_impact": "One is blocked",
+        "severity": "high",
+        "confidence": 0.9,
+        "evidence_atom_ids": ["atom:one"],
+        "evidence_summary": "One observed failure",
+    }
+    responses = ["initial", "reduced", "best", "replacement", "regression", "valid"]
+    errors_by_response = {
+        "initial": [f"initial:error:{index}" for index in range(37)],
+        "reduced": [f"reduced:error:{index}" for index in range(8)],
+        "best": ["near_ready:error:a", "near_ready:error:b"],
+        "replacement": [
+            "replacement:error:a",
+            "replacement:error:b",
+            "replacement:error:c",
+        ],
+        "regression": [
+            "replacement:error:a",
+            "replacement:error:b",
+            "replacement:error:c",
+            "regression:error:d",
+        ],
+        "valid": [],
+    }
+    elapsed = [10.0, 20.0, 20.0, 5.0, 30.0, 5.0]
+    calls: list[dict[str, Any]] = []
+
+    def projection(response: str, **_kwargs: Any):
+        errors = errors_by_response[response]
+        return (
+            [_priority_decision("problem:one", "atom:one")] if not errors else [],
+            list(errors),
+            ["priority_decision:problem:one"] if not errors else [],
+        )
+
+    def transport(**kwargs: Any) -> SimpleNamespace:
+        index = len(calls)
+        calls.append(dict(kwargs))
+        return _write_fake_invocation(
+            kwargs=kwargs,
+            response=responses[index],
+            session_id=_SESSION_ID,
+            elapsed_seconds=elapsed[index],
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.prioritization._priority_response_projection",
+        projection,
+    )
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.prioritization.run_stage_prompt_json",
+        transport,
+    )
+    doc = _run_problem_prioritization_stage(
+        atoms=[{"atom_id": "atom:one", "severity_hint": "high"}],
+        problem_records=[record],
+        pipeline_manifest=manifest,
+        artifacts_dir=tmp_path / "artifacts",
+        out_json=tmp_path / "prioritized.json",
+        out_md=tmp_path / "prioritized.md",
+        agent="codex",
+        model=None,
+        cfg=object(),  # type: ignore[arg-type]
+        dry_run=False,
+        stage_guidance_text="Prioritize every canonical problem.",
+    )
+
+    assert len(calls) == 6
+    assert doc["input_meta"]["prioritizer_correction_status"] == "corrected"
+    assert doc["input_meta"]["prioritizer_correction_metrics"]["attempt_count"] == 6
+    assert doc["items"][0]["model_priority_accepted"] is True
+
+
 def test_stage2_nonblocking_fallback_preserves_valid_decision(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -468,6 +551,87 @@ def test_stage4_accepts_honest_zero_option_correction_in_exact_session(
     assert result["outcome"]["optioning_status"] == "insufficient_evidence"
     assert result["correction_metrics"]["attempt_count"] == 2
     assert result["correction_metrics"]["repaired"] is True
+
+
+def test_stage4_improved_frontier_is_not_paused_by_elapsed_author_cost(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = ["initial", "reduced", "best", "replacement", "regression", "valid"]
+    errors_by_response = {
+        "initial": [f"initial:error:{index}" for index in range(37)],
+        "reduced": [f"reduced:error:{index}" for index in range(8)],
+        "best": ["near_ready:error:a", "near_ready:error:b"],
+        "replacement": [
+            "replacement:error:a",
+            "replacement:error:b",
+            "replacement:error:c",
+        ],
+        "regression": [
+            "replacement:error:a",
+            "replacement:error:b",
+            "replacement:error:c",
+            "regression:error:d",
+        ],
+        "valid": [],
+    }
+    elapsed = [10.0, 20.0, 20.0, 5.0, 30.0, 5.0]
+    calls: list[dict[str, Any]] = []
+
+    def projection(response: str, **_kwargs: Any):
+        errors = errors_by_response[response]
+        return (
+            {
+                "problem_id": "problem:case",
+                "optioning_status": (
+                    "insufficient_evidence" if not errors else "invalid_output"
+                ),
+                "decision_rationale": "No safe option is established.",
+                "option_count": 0,
+                "rejected_option_count": 0,
+            },
+            [],
+            list(errors),
+            [],
+        )
+
+    def transport(**kwargs: Any) -> SimpleNamespace:
+        index = len(calls)
+        calls.append(dict(kwargs))
+        return _write_fake_invocation(
+            kwargs=kwargs,
+            response=responses[index],
+            session_id=_SESSION_ID,
+            elapsed_seconds=elapsed[index],
+        )
+
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.solution_options._optioning_response_projection",
+        projection,
+    )
+    monkeypatch.setattr(
+        "usertest_backlog.workflows.solution_options.run_stage_prompt_json",
+        transport,
+    )
+    result = _run_optioning_prompt_with_correction(
+        stage="solution_optioning",
+        prompt="ORIGINAL OPTIONING EVIDENCE",
+        out_dir=tmp_path,
+        tag="solution_optioning_001",
+        agent="codex",
+        model=None,
+        cfg=object(),  # type: ignore[arg-type]
+        workspace_dir=tmp_path,
+        expected_problem_id="problem:case",
+        repo_revision="f" * 40,
+        known_family_ids=set(),
+        research_dossier={},
+    )
+
+    assert len(calls) == 6
+    assert result["correction_status"] == "corrected"
+    assert result["correction_metrics"]["attempt_count"] == 6
+    assert result["outcome"]["optioning_status"] == "insufficient_evidence"
 
 
 def test_stage4_retries_fresh_until_codex_author_session_exists(
