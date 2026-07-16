@@ -1,6 +1,6 @@
 # Backlog-depth supervision issue ledger
 
-Updated: 2026-07-16 02:20 America/New_York
+Updated: 2026-07-16 02:23 America/New_York
 
 This is the supervisor-owned ledger for defects and unresolved findings discovered while bringing the automated backlog pipeline to a working baseline. Generated atoms, dossiers, options, plans, and tickets remain system-owned evidence; this ledger records work that the supervising Codex process must ensure is addressed rather than silently losing it between reruns.
 
@@ -56,7 +56,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-047 - Broad suites exposed shared fixture drift after causal-contract expansion
 
-- Status: `corrections_verified_frozen_broad_replay_pending`
+- Status: `corrections_committed_frozen_broad_replay_pending`
 - Priority: validation-integrity, intervention-cost
 - Objective impact: stale test producers obscured real regressions with many duplicate failures and made broad validation appear less stable than the production behavior.
 - Exact evidence: five core policy/assembly failures shared one missing outcome-strategy fixture; 35 problem-mining failures shared omitted reads of the new hash-bound origin-evidence index; two positive-path failures plus one qualification failure shared one missing Stage-5 strategy binding; one full-chain fixture used a stale atom snapshot and actionability shape; the research mission was one redundant blank line over its prompt budget. After shared-helper corrections, core passes 100%, problem mining passes 91/91, positive depth passes 9/9, qualification passes, and the mission budget test passes at 99 lines.
@@ -140,7 +140,7 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 
 ### BDS-055 - Secondary postprocessing overwrote a precise missing-artifact failure
 
-- Status: `local_correction_verified_pending_commit`
+- Status: `local_correction_committed_broad_replay_pending`
 - Priority: validation integrity, self-healing feedback quality
 - Objective impact: a selected implementation attempt could pass its broker verification but lose a required retained artifact. The runner initially detected that exact evidence-integrity failure, then replaced it with `binary_or_command_missing`. Incorrect causal feedback can send the same author or supervisor toward Codex installation/authentication instead of repairing the actual missing artifact.
 - Exact evidence: the broad delivery/runtime partition passed 927 checks with four skips and failed this one node. The isolated node reproduced in 6.19 seconds. Its artifacts show agent exit 0, broker source `broker_reuse`, successful verification, matched workspace state, and no missing broker response artifacts. The fake agent deliberately removed only `raw_events.attempt1.jsonl`. `error_traceback.txt` shows all-attempt normalization reopened that missing path after final materialization had already written `selected_attempt_artifacts_incomplete`; the outer catch then overwrote `error.json`, and the generic text classifier mislabeled `No such file or directory` as a missing binary.

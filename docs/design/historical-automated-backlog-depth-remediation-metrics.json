@@ -4,14 +4,14 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 1,
-    "as_of": "2026-07-16T06:20:50Z",
+    "as_of": "2026-07-16T06:23:02Z",
     "current_run_id": "controller-remediation-integration",
     "counting_rule": "One row is one meaningful pipeline or case lifecycle cycle, not one model turn or test command. Error and intervention counts use only explicitly retained events; unavailable totals are unknown. Automatic self-correction means the system continued an existing frontier without supervisor-authored content. Supervisor intervention means feedback, rerouting, process containment, lifecycle action, or code correction performed outside that automatic path.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
         "value": "Controller PR qualification",
-        "detail": "Integration is committed; focused suites are green; one real runner postprocessing regression is corrected; final broad replays await a frozen commit",
+        "detail": "The exact corrected tree is committed at 0dec442f; focused suites are green; final broad replays are next on frozen bytes",
         "tone": "warn"
       },
       {
@@ -563,13 +563,13 @@
         "timing": {
           "start_at": "2026-07-16T04:52:15Z",
           "end_at": null,
-          "elapsed_seconds": 5315,
+          "elapsed_seconds": 5447,
           "coverage": "active",
-          "display": "1 h 28 m 35 s so far",
+          "display": "1 h 30 m 47 s so far",
           "note": "Wall time from the completed PR #215 outcome row through this dashboard observation. This cycle remains in progress; the value will be finalized at its terminal PR disposition."
         },
         "furthest_stage": "Integrated branch qualification",
-        "current_state": "Controller and outcome changes are committed; verified PR #213/#215 maintenance history is semantically reconciled; focused suites are green. The authoritative causal/readiness rerun passed 271 with one skip, and the remote-integration rerun passed 289 with two skips. Broad backlog baseline passed 1,734 with one skip before one stale fixture failure; its correction passed, while a replay was invalidated by a supervisor git-status change and the exact transaction then passed on stable bytes. Broad delivery/runtime passed 927 with four skips before one real postprocessing error-precedence regression; that correction and both healthy controls now pass four targeted checks. Final owning-partition replays await a frozen commit. The remediation PR is not yet published.",
+        "current_state": "Controller and outcome changes are committed; verified PR #213/#215 maintenance history is semantically reconciled; focused suites are green. The authoritative causal/readiness rerun passed 271 with one skip, and the remote-integration rerun passed 289 with two skips. Broad backlog baseline passed 1,734 with one skip before one stale fixture failure; its correction passed, while a replay was invalidated by a supervisor git-status change and the exact transaction then passed on stable bytes. Broad delivery/runtime passed 927 with four skips before one real postprocessing error-precedence regression; that correction and both healthy controls now pass four targeted checks. The exact corrected tree is committed at 0dec442f; final owning-partition replays are next with repository writes frozen. The remediation PR is not yet published.",
         "outcome": "In progress; no production regression established",
         "errors": {
           "count": 4,
@@ -3690,19 +3690,21 @@
       "path": "I:\\code\\usertest_backlog_depth",
       "kind": "controller_remediation_integration_git_history",
       "branch": "codex/backlog-depth-remediation",
-      "head_revision_at_dashboard_snapshot": "efda056cfe8d380202b1def12b0572a19cc23698",
+      "head_revision_at_dashboard_snapshot": "0dec442f",
       "consolidation_commit": "b7244c2ae0063d0771e9b3a565073636b4b4ae6d",
       "operational_evidence_commit": "64a2f858",
       "verified_maintenance_history_merge": "e2614d225b96ff7d567751335bda2deafeec133f",
       "integration_fixture_commit": "efda056cfe8d380202b1def12b0572a19cc23698",
-      "limitations": "The integration cycle is still in progress and has one fixture-only correction after this snapshot head. PR, CI, review, merge, and full shadow-cycle evidence do not yet exist."
+      "qualification_correction_commit": "0dec442f",
+      "limitations": "The exact corrected tree is committed, but final broad qualification, isolated-Docker controls, PR, CI, review, merge, and full shadow-cycle evidence do not yet exist."
     },
     {
       "id": "controller_remediation_integration_session",
-      "path": "C:\\Users\\jason\\.codex\\sessions\\2026\\07\\16\\rollout-2026-07-16T01-18-44-019f695c-d53e-7db3-ba16-959861e0ddae.jsonl",
+      "path": "C:\\Users\\jason\\.codex\\sessions\\2026\\07\\09\\rollout-2026-07-09T16-48-05-019f48a3-2bef-7132-a25b-cdb32dfd0fbc.jsonl",
       "kind": "controller_integration_and_qualification_session_log",
-      "file_sha256_at_dashboard_snapshot": "BDF84A15D6E36F4D933739DD04E5D02EFE7C78048A0925E21D0F7307455AA2A4",
-      "limitations": "Snapshot-specific appendable session log. It retains exact test commands, exits, findings, corrections, and timing, but the current broad qualification and PR lifecycle are incomplete."
+      "file_length_at_dashboard_snapshot": 247815292,
+      "snapshot_at": "2026-07-16T06:23:02Z",
+      "limitations": "Live appendable root task log; a stable hash cannot be taken while Codex owns the file. It retains exact test commands, exits, findings, corrections, and timing, but the current broad qualification and PR lifecycle are incomplete."
     },
     {
       "id": "execution_plan",
