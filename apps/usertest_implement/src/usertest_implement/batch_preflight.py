@@ -12,7 +12,12 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import yaml
-from runner_core.execution_backend import resolve_maintenance_docker_image
+from runner_core.execution_backend import (
+    _load_maintenance_docker_config,
+    cleanup_local_maintenance_images,
+    prepare_maintenance_docker_image,
+    resolve_maintenance_docker_image,
+)
 
 from usertest_implement.batch_state import utc_now_z
 
@@ -387,6 +392,10 @@ def run_batch_preflight(
             )
 
     if exec_backend == "docker":
+        maintenance_image_metadata: dict[str, Any] | None = None
+        maintenance_preparation = None
+        batch_prewrite: dict[str, Any] | None = None
+        maintenance_metadata_path: Path | None = None
         docker_version = _run(["docker", "version"], cwd=repo_root)
         _write_log(preflight_dir / "docker_version.log", docker_version)
         if docker_version.returncode != 0:
@@ -409,6 +418,60 @@ def run_batch_preflight(
                     evidence={"path": str(preflight_dir / "docker_buildx.log")},
                 )
             )
+        if resolve_maintenance_image and exec_docker_profile == "maintenance":
+            maintenance_metadata_path = preflight_dir / "maintenance_image.json"
+            try:
+                preparation_dir = batch_dir / "preflight_maintenance_image"
+                maintenance_preparation = prepare_maintenance_docker_image(
+                    repo_root=repo_root,
+                    run_dir=preparation_dir,
+                    timeout_seconds=docker_timeout_seconds,
+                )
+                prewrite_artifact_path = preflight_dir / "maintenance_image_batch_prewrite.json"
+                cleanup_cfg = _load_maintenance_docker_config(repo_root=repo_root)
+                if not (cleanup_cfg.cleanup_enabled and cleanup_cfg.cleanup_on_prepare):
+                    batch_prewrite = {
+                        "schema_version": 1,
+                        "phase": "batch_prewrite",
+                        "skipped": True,
+                        "cleanup_enabled": cleanup_cfg.cleanup_enabled,
+                        "cleanup_on_prepare": cleanup_cfg.cleanup_on_prepare,
+                        "dry_run": cleanup_cfg.cleanup_dry_run_default,
+                        "errors": [],
+                    }
+                else:
+                    try:
+                        batch_prewrite = cleanup_local_maintenance_images(
+                            repo_root=repo_root,
+                            dry_run=cleanup_cfg.cleanup_dry_run_default,
+                            timeout_seconds=docker_timeout_seconds,
+                            artifact_path=prewrite_artifact_path,
+                            protected_refs=(
+                                maintenance_preparation.local_ref,
+                                maintenance_preparation.published_ref,
+                            ),
+                        )
+                    except Exception as exc:  # noqa: BLE001
+                        batch_prewrite = {
+                            "schema_version": 1,
+                            "phase": "batch_prewrite",
+                            "errors": [f"Batch prewrite maintenance cleanup failed: {exc}"],
+                        }
+            except Exception as exc:  # noqa: BLE001
+                blockers.append(
+                    _blocker(
+                        blocker_id="infra_transient",
+                        failure_class="infra_transient",
+                        summary=(
+                            "Maintenance Docker image resolution failed during batch preflight."
+                        ),
+                        evidence={
+                            "path": str(maintenance_metadata_path),
+                            "type": type(exc).__name__,
+                            "message": str(exc),
+                        },
+                    )
+                )
         with tempfile.TemporaryDirectory(prefix="usertest_batch_docker_preflight_") as temp_dir:
             temp_root = Path(temp_dir)
             (temp_root / "Dockerfile").write_text(
@@ -439,8 +502,7 @@ def run_batch_preflight(
                     evidence={"path": str(preflight_dir / "docker_build.log")},
                 )
             )
-        if resolve_maintenance_image and exec_docker_profile == "maintenance":
-            maintenance_metadata_path = preflight_dir / "maintenance_image.json"
+        if maintenance_preparation is not None and maintenance_metadata_path is not None:
             try:
                 resolution = resolve_maintenance_docker_image(
                     repo_root=repo_root,
@@ -448,6 +510,8 @@ def run_batch_preflight(
                     force_rebuild=False,
                     timeout_seconds=docker_timeout_seconds,
                     artifact_path=maintenance_metadata_path,
+                    preparation=maintenance_preparation,
+                    prewrite_cleanup=batch_prewrite,
                 )
                 maintenance_image_metadata = {
                     "path": str(maintenance_metadata_path),
@@ -456,9 +520,9 @@ def run_batch_preflight(
                     "source": resolution.image_source,
                     "timings": resolution.metadata.get("timings", {}),
                     "artifacts": resolution.metadata.get("artifacts", {}),
+                    "batch_prewrite": batch_prewrite,
                 }
             except Exception as exc:  # noqa: BLE001
-                maintenance_image_metadata = None
                 blockers.append(
                     _blocker(
                         blocker_id="infra_transient",
@@ -473,8 +537,6 @@ def run_batch_preflight(
                         },
                     )
                 )
-        else:
-            maintenance_image_metadata = None
     else:
         maintenance_image_metadata = None
 

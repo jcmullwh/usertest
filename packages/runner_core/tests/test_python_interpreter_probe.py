@@ -27,6 +27,7 @@ probe_mod = _load_probe_module()
 
 
 def test_probe_rejects_windowsapps_alias(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("USERTEST_PYTHON", raising=False)
     monkeypatch.setattr(
         probe_mod.shutil,
         "which",
@@ -123,6 +124,8 @@ def test_probe_classifies_inaccessible_file_as_access_denied(
 
 
 def test_probe_selects_verified_fallback_candidate(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("USERTEST_PYTHON", raising=False)
+
     def _which(command: str) -> str | None:
         if command == "python":
             return r"C:\Users\tester\AppData\Local\Microsoft\WindowsApps\python.exe"
