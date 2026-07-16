@@ -132,7 +132,7 @@ def test_extracted_modules_do_not_import_cli_facade(module_relpath: str) -> None
             (
                 ["outcome", "--help"],
                 [
-                    "{run-role,advance}",
+                    "{bind-verification-amendment,run-role,advance}",
                     "Atomically advance the outcome embedded in a completed",
                 ],
             ),

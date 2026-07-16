@@ -333,6 +333,10 @@ def test_health_probe_returns_when_exited_interpreter_leaves_inherited_handles_o
         "'version': sys.version.split()[0]}), flush=True)"
     )
     monkeypatch.setattr(probe_mod, "_PYTHON_HEALTH_PROBE", health_probe)
+    # This test exercises bounded process-tree cleanup, not WindowsApps policy. The
+    # pytest interpreter itself may be a fully runnable Store Python whose path still
+    # matches the deliberately conservative WindowsApps rejection rule.
+    monkeypatch.setattr(probe_mod, "_is_windowsapps_alias", lambda *_args, **_kwargs: False)
 
     started = time.monotonic()
     result = probe_mod.probe_python_interpreters(
