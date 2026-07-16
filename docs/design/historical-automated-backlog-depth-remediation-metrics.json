@@ -4,15 +4,15 @@
   "title": "Historical automated-backlog depth remediation: measurement companion",
   "operational_dashboard": {
     "schema_version": 1,
-    "as_of": "2026-07-16T08:15:40Z",
-    "current_run_id": "controller-remediation-integration",
+    "as_of": "2026-07-16T08:33:58Z",
+    "current_run_id": "postmerge-shadow-cycle-1",
     "counting_rule": "One row is one meaningful pipeline or case lifecycle cycle, not one model turn or test command. Error and intervention counts use only explicitly retained events; unavailable totals are unknown. Automatic self-correction means the system continued an existing frontier without supervisor-authored content. Supervisor intervention means feedback, rerouting, process containment, lifecycle action, or code correction performed outside that automatic path.",
     "summary_cards": [
       {
         "label": "Current pipeline state",
-        "value": "PR #216 review correction in progress",
-        "detail": "Replacement CI is 40/40 unique green; exact-head review accepted the causal mechanism and oracle but requested two provenance/reporting corrections",
-        "tone": "warn"
+        "value": "Shadow cycle 1 initializing",
+        "detail": "PR #216 merged to dev at e0527e23 after exact-head CI and same-session system review passed; automated export remains disabled",
+        "tone": "info"
       },
       {
         "label": "Current case disposition",
@@ -28,8 +28,8 @@
       },
       {
         "label": "Next delivery gate",
-        "value": "Same-reviewer correction, green CI, merge",
-        "detail": "Version the selected plan, clarify historical/current outcome evidence, return the delta to the same reviewer on the new exact head, then merge and begin shadow cycle 1",
+        "value": "Complete shadow cycle 1",
+        "detail": "Run the full post-merge pipeline with exports disabled, then inspect evidence coverage, causal research, plans, dispositions, errors, and intervention burden",
         "tone": "warn"
       }
     ],
@@ -562,19 +562,19 @@
         "scope": "Consolidated causal-depth, self-healing, planning, delivery, and outcome contracts plus the system-authored maintenance implementation; changed-project qualification and exact-head system review before merge",
         "timing": {
           "start_at": "2026-07-16T04:52:15Z",
-          "end_at": null,
-          "elapsed_seconds": 12206,
-          "coverage": "active",
-          "display": "3 h 23 m 25 s so far",
-          "note": "Wall time from the completed PR #215 outcome row through this dashboard observation. This cycle remains in progress; the value will be finalized at its terminal PR disposition."
+          "end_at": "2026-07-16T08:32:39Z",
+          "elapsed_seconds": 13224,
+          "coverage": "complete",
+          "display": "3 h 40 m 24 s",
+          "note": "Complete wall time from the completed PR #215 outcome row through the guarded merge of PR #216."
         },
-        "furthest_stage": "System review; changes requested on two provenance/reporting findings",
-        "current_state": "PR #216 remains an open draft against dev at exact head 9190f49e. The two replacement CI triggers each passed all 40 jobs (40 unique checks observed twice). A 380.6-second Terra system review bound to that exact head found the approach aligned, the historical mechanism addressed, the composite original-scenario oracle exercised, and scope appropriate. It requested a versioned selected-intervention record and clearer separation between current outcome truth and explicitly superseded historical snapshots. The durable maintenance case remains mitigated with verified terminal provenance, not resolved. Accepted re-review, merge, and shadow-cycle proof do not yet exist.",
-        "outcome": "Replacement CI green; causal implementation accepted in substance; review correction required",
+        "furthest_stage": "Merged to dev after exact-head CI and same-session system approval",
+        "current_state": "PR #216 merged to dev as e0527e23 at exact head f6c93c97. The same Terra reviewer session that requested two provenance/reporting corrections continued on the corrected head and returned approved with confidence 0.94 and zero findings. Both CI triggers are green: 80/80 observed checks representing 40 unique jobs run twice. One push-trigger Windows job initially passed all 27 package tests but failed in GitHub post-job cleanup without an error; the identical PR job and a targeted rerun passed, so no code was changed. The durable maintenance case remains mitigated with verified terminal provenance, not resolved. Shadow qualification remains 0/2.",
+        "outcome": "Controller remediation merged; post-merge shadow qualification required",
         "errors": {
-          "count": 8,
+          "count": 9,
           "count_kind": "high-level integration, runtime, and review categories encountered",
-          "summary": "The prior five categories remain: synthetic fixture/contract drift, semantic reconciliation, supervisor/result-capture instability, one production postprocessing regression, and missed isolated-package CI boundaries. A stale installed review runtime then selected obsolete npm Codex and misclassified the model/CLI rejection as a shell failure. The substantive review added two evidence-presentation findings: the selected controller plan was absent from git, and historical outcome snapshots were not unmistakably separated from current verified mitigated evidence."
+          "summary": "Five integration categories were synthetic fixture/contract drift, semantic reconciliation, supervisor/result-capture instability, one production postprocessing regression, and missed isolated-package CI boundaries. A stale installed review runtime selected obsolete npm Codex and misclassified the rejection as a shell failure. Review found a missing versioned plan and an ambiguous historical/current presentation boundary. The ninth category was a transient GitHub-hosted Windows post-job cleanup failure after all package tests passed."
         },
         "automatic_self_corrections": {
           "count": 0,
@@ -582,17 +582,57 @@
           "summary": "This remains controller integration and review qualification. The model reviewer diagnosed findings but did not automatically modify or correct the branch; every recovery and correction was supervisor-owned."
         },
         "supervisor_interventions": {
-          "count": 26,
-          "count_kind": "explicit material interventions so far",
-          "summary": "The prior eighteen interventions covered semantic integration, fixture/evidence correction, stable qualification, the production postprocessing fix, draft publication, initial CI diagnosis/correction, and exact-boundary recovery. Eight later actions were explicit: push and observe replacement CI; design and launch the controller-specific review; diagnose the stale-runtime failure; test the ineffective LOCALAPPDATA allowlist route; locate and live-probe the Desktop CLI; reroute the unchanged review through that CLI; add the missing durable plan record; and clarify/update the high-level dashboard without rewriting historical snapshots."
+          "count": 31,
+          "count_kind": "explicit material interventions",
+          "summary": "The first 26 interventions covered semantic integration, shared evidence/fixture corrections, stable qualification, the production postprocessing repair, draft publication, CI correction, runtime diagnosis/rerouting, controller review, versioning the selected plan, and clarifying the outcome evidence boundary. Five terminal actions remained: commit/push the review correction, resume the same reviewer with focused delta evidence, diagnose the cleanup-only CI failure, rerun only that job, and perform the documented ready/guarded-merge transition."
         },
-        "next_action": "Commit and push the plan/dashboard correction as one coherent review response, require green CI on the new exact head, return focused evidence to the same reviewer session, merge only if that reviewer accepts the current head, then finalize this row and open shadow cycle 1 as a new current row.",
-        "tone": "warn",
-        "data_quality": "Exact git and GitHub CI state; retained failed pre-dispatch artifacts; exact-head Terra review report and session; exact focused, broad, isolated-Docker, outcome, and subscription receipts; active wall duration and explicit intervention ledger",
+        "next_action": "Use the merged controller as the baseline for export-disabled shadow cycle 1; do not reopen this integration row for later shadow results.",
+        "tone": "good",
+        "data_quality": "Exact git/GitHub merge and CI state; initial and same-session correction review artifacts; exact focused, broad, isolated-Docker, outcome, and subscription receipts; complete wall-time endpoints and explicit intervention ledger",
         "source_ids": [
           "controller_remediation_integration_git",
           "controller_remediation_integration_session",
           "controller_remediation_pr216",
+          "backlog_depth_supervision_issue_ledger"
+        ]
+      },
+      {
+        "run_id": "postmerge-shadow-cycle-1",
+        "label": "Post-merge full shadow cycle 1",
+        "scope": "First full automated non-IDEA backlog cycle on merged controller revision e0527e23, with ticket export disabled and every eligible evidence item required to reach an explicit disposition",
+        "timing": {
+          "start_at": "2026-07-16T08:32:39Z",
+          "end_at": null,
+          "elapsed_seconds": 79,
+          "coverage": "active",
+          "display": "1 m 19 s so far",
+          "note": "Active wall time from the merge of PR #216 through post-merge branch and dashboard initialization."
+        },
+        "furthest_stage": "Post-merge baseline initialized",
+        "current_state": "The qualification branch is based exactly on merged dev revision e0527e23. Automated export remains disabled. No Stage 1-6 model work has yet run in this cycle, so it has produced neither good nor bad throughput and has consumed no model correction turns.",
+        "outcome": "In progress; no qualification credit",
+        "errors": {
+          "count": 0,
+          "count_kind": "high-level error categories encountered",
+          "summary": "No shadow-cycle execution has started, so there are no cycle findings yet."
+        },
+        "automatic_self_corrections": {
+          "count": 0,
+          "count_kind": "automatic pipeline corrections",
+          "summary": "No model stage has started."
+        },
+        "supervisor_interventions": {
+          "count": 1,
+          "count_kind": "explicit material interventions so far",
+          "summary": "Fetched the exact merged dev revision and initialized a clean qualification branch/current dashboard row."
+        },
+        "next_action": "Run post-merge preflight and the complete export-disabled shadow pipeline from workspace-current source with gpt-5.6-terra and the verified signed-in host Codex subscription route; inspect stage outputs before granting cycle credit.",
+        "tone": "info",
+        "data_quality": "Exact PR merge commit, local branch base, and active wall-time endpoints; no model or stage result is claimed before execution",
+        "source_ids": [
+          "controller_remediation_integration_git",
+          "controller_remediation_pr216",
+          "controller_remediation_integration_session",
           "backlog_depth_supervision_issue_ledger"
         ]
       }
@@ -3691,20 +3731,22 @@
       "path": "I:\\code\\usertest_backlog_depth",
       "kind": "controller_remediation_integration_git_history",
       "branch": "codex/backlog-depth-remediation",
-      "head_revision_at_dashboard_snapshot": "f46d751b",
+      "head_revision_at_dashboard_snapshot": "e0527e23c50c801488bf2b43892baca36de7a2a4",
       "consolidation_commit": "b7244c2ae0063d0771e9b3a565073636b4b4ae6d",
       "operational_evidence_commit": "64a2f858",
       "verified_maintenance_history_merge": "e2614d225b96ff7d567751335bda2deafeec133f",
       "integration_fixture_commit": "efda056cfe8d380202b1def12b0572a19cc23698",
       "qualification_correction_commit": "0dec442f",
       "dashboard_commit": "f46d751b",
+      "review_evidence_commit": "f6c93c9705539e5dec441953c23df7cd12d5b550",
+      "merged_dev_commit": "e0527e23c50c801488bf2b43892baca36de7a2a4",
       "frozen_non_docker_results": {
         "backlog": {"passed": 1735, "skipped": 1, "failed": 0, "elapsed_seconds": 666.9},
         "delivery_runtime": {"passed": 929, "skipped": 4, "failed": 0, "elapsed_seconds": 1157.4},
         "cli_tools": {"passed": 141, "skipped": 3, "failed": 0, "elapsed_seconds": 57.8}
       },
       "isolated_docker_results": {"passed": 2, "failed": 0, "elapsed_seconds": 954.4, "containers_before": 0, "containers_after": 0},
-      "limitations": "The exact corrected tree has complete affected component and live-control qualification, but PR, CI, review, merge, and full shadow-cycle evidence do not yet exist."
+      "limitations": "The exact corrected tree has complete affected component and live-control qualification, exact-head CI and review, and a merged dev commit. Full post-merge shadow-cycle evidence does not yet exist."
     },
     {
       "id": "controller_remediation_integration_session",
@@ -3723,8 +3765,12 @@
       "head_branch": "codex/backlog-depth-remediation",
       "first_ci_head_revision": "e94b6ce8e217fa75aa04295ffa7c0488e78b0bc0",
       "corrected_head_revision": "9190f49e6f483ace34f706c1e43645d5bdd5b397",
+      "final_head_revision": "f6c93c9705539e5dec441953c23df7cd12d5b550",
       "created_at": "2026-07-16T07:08:12Z",
-      "draft": true,
+      "draft": false,
+      "state": "merged",
+      "merged_at": "2026-07-16T08:32:39Z",
+      "merge_commit": "e0527e23c50c801488bf2b43892baca36de7a2a4",
       "ci_runs": [
         {
           "run_id": 29478853671,
@@ -3753,9 +3799,26 @@
           "completed_at": "2026-07-16T07:48:59Z",
           "head_revision": "9190f49e6f483ace34f706c1e43645d5bdd5b397",
           "job_count": 40
+        },
+        {
+          "run_id": 29483155727,
+          "event": "push",
+          "conclusion": "success_after_targeted_rerun",
+          "completed_at": "2026-07-16T08:31:31Z",
+          "head_revision": "f6c93c9705539e5dec441953c23df7cd12d5b550",
+          "job_count": 40,
+          "attempt_1_note": "The runner_core Windows canonical smoke passed 27/27; only GitHub setup-python and checkout post-job cleanup hooks failed without an error. The targeted rerun passed all steps."
+        },
+        {
+          "run_id": 29483158096,
+          "event": "pull_request",
+          "conclusion": "success",
+          "completed_at": "2026-07-16T08:25:49Z",
+          "head_revision": "f6c93c9705539e5dec441953c23df7cd12d5b550",
+          "job_count": 40
         }
       ],
-      "replacement_ci_summary": "Both duplicate triggers passed all 40 jobs at the exact corrected head. This is 40 unique checks observed twice, not 80 independent checks.",
+      "replacement_ci_summary": "Both duplicate triggers passed all 40 jobs at the final exact head after one cleanup-only push job was rerun. This is 40 unique checks observed twice, not 80 independent checks.",
       "unique_failed_jobs": [
         "backlog_miner lint: Ruff I001 import ordering",
         "runner_core test: Windows-only legacy sandbox revalidation fixture ran on Linux",
@@ -3802,6 +3865,24 @@
         ],
         "subscription_route": "The successful reviewer used Desktop-managed codex-cli 0.144.2 through the host ChatGPT login. A live redacted probe reported exact ChatGPT login with all API/provider variables blank."
       },
+      "system_review_correction": {
+        "reviewed_head_revision": "f6c93c9705539e5dec441953c23df7cd12d5b550",
+        "model": "gpt-5.6-terra",
+        "run_path": "I:\\code\\usertest_backlog_depth\\runs\\usertest\\usertest_backlog_depth\\20260716T082302Z\\codex\\216",
+        "wall_seconds": 145.9,
+        "agent_seconds": 101.95,
+        "reviewer_session_id": "019f69f5-bedd-7b00-9941-09502f89765a",
+        "continued_session": true,
+        "review_decision": "approved",
+        "confidence": 0.94,
+        "finding_count": 0,
+        "approach_alignment": "aligned",
+        "mechanism_assessment": "mechanism_addressed",
+        "original_scenario_oracle": "exercised",
+        "remaining_causal_paths": [],
+        "scope_assessment": "appropriate",
+        "subscription_provenance": "verified_host_chatgpt_subscription; API fallback false; API/provider variables blank; host auth cache preserved unchanged"
+      },
       "current_outcome_evidence": {
         "case_id": "case:maintenance-image-burst-retention-unbounded",
         "fingerprint": "03f0d43eb78e28fa",
@@ -3826,7 +3907,7 @@
         "remaining_risk": "The planned bounded-retention mitigation does not establish class-wide resolution."
       },
       "historical_snapshot_boundary": "The JSON intentionally retains point-in-time evidence. Objects marked historical_point_in_time, historical_point_in_time_superseded_for_current_operations, or historical_inventory_snapshot_not_current describe what proof existed at their own measured_at/generated_at timestamp. They do not override the operational_dashboard current row. The current maintenance truth is mitigated with original-scenario, live, mitigation-effect, and terminal provenance evidence; it is not resolved.",
-      "limitations": "Replacement CI is green at the exact corrected head. The first substantive system review accepted the implementation approach, causal mechanism, original-scenario exercise, and scope, but requested two provenance/presentation corrections. Accepted re-review, merge, and shadow-cycle results do not yet exist."
+      "limitations": "Final exact-head CI and same-session correction review passed and PR #216 merged to dev. Shadow-cycle results do not yet exist, so autonomous end-to-end qualification remains 0/2."
     },
     {
       "id": "execution_plan",
