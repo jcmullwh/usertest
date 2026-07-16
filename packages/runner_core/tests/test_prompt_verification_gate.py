@@ -18,7 +18,10 @@ from agent_adapters.codex_cli import (
 
 import runner_core.runner as runner_mod
 from runner_core import RunnerConfig, RunRequest, run_once
-from runner_core.codex_execpolicy import CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE
+from runner_core.codex_execpolicy import (
+    CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+    CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE,
+)
 
 
 def _write(path: Path, text: str) -> None:
@@ -314,6 +317,7 @@ def test_codex_uses_model_instructions_file_for_large_append_prompt(
 
     def _fake_run_codex_exec(**kwargs: object) -> CodexExecResult:
         captured["config_overrides"] = list(kwargs.get("config_overrides", ()))
+        captured["prompt"] = kwargs.get("prompt")
         raw_events_path = kwargs["raw_events_path"]
         last_message_path = kwargs["last_message_path"]
         stderr_path = kwargs["stderr_path"]
@@ -355,6 +359,9 @@ def test_codex_uses_model_instructions_file_for_large_append_prompt(
     overrides = [str(item) for item in captured["config_overrides"]]
     assert any(item.startswith("model_instructions_file=") for item in overrides)
     assert not any(item.startswith("developer_instructions=") for item in overrides)
+    assert "X" * 100 not in str(captured["prompt"])
+    assert (result.run_dir / "prompt.txt").read_text(encoding="utf-8") == captured["prompt"]
+    assert not (result.run_dir / "prompt.base.txt").exists()
 
 
 def test_codex_report_followups_resume_exact_author_thread(
@@ -683,6 +690,7 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
             persona_id="p",
             mission_id="m",
             agent_append_system_prompt="RESEARCH MISSION SENTINEL",
+            agent_user_prompt="RESEARCH MISSION SENTINEL",
             codex_execpolicy_allow_prefixes=(),
             codex_resume_session_id=session_id,
             keep_workspace=True,
@@ -777,6 +785,10 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
         )
         assert 'forced_login_method="chatgpt"' in call["config_overrides"]
         assert 'model_provider="openai"' in call["config_overrides"]
+        assert all(
+            override in call["config_overrides"]
+            for override in CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES
+        )
         assert any(str(value).startswith("projects.") for value in call["config_overrides"])
         assert (
             CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE in call["config_overrides"]
@@ -787,7 +799,7 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
         assert not any("alternate.invalid" in str(value) for value in call["config_overrides"])
     assert probe_call["resume_session_id"] is None
     assert mission_call["resume_session_id"] == session_id
-    assert any(
+    assert not any(
         str(value).startswith("model_instructions_file=")
         for value in probe_call["config_overrides"]
     )
@@ -798,6 +810,13 @@ def test_codex_controlled_execpolicy_is_loaded_then_restored_before_diff(
     assert "model_reasoning_effort=low" in probe_call["config_overrides"]
     assert "model_reasoning_effort=low" not in mission_call["config_overrides"]
     assert "RESEARCH MISSION SENTINEL" not in str(probe_call["prompt"])
+    assert mission_call["prompt"] == "RESEARCH MISSION SENTINEL"
+    assert (result.run_dir / "prompt.txt").read_text(encoding="utf-8") == (
+        "RESEARCH MISSION SENTINEL"
+    )
+    assert "RESEARCH MISSION SENTINEL" not in (result.run_dir / "prompt.base.txt").read_text(
+        encoding="utf-8"
+    )
     assert receipt["activation_probe"]["ok"] is True
     assert receipt["activation_probe"]["workspace_unchanged"] is True
     # A dossier-correction resume deliberately authorizes no research commands; the marker-only
@@ -826,14 +845,20 @@ def test_docker_codex_resume_uses_host_login_without_local_research_overlay() ->
         exec_use_host_agent_login=True,
     )
 
-    assert runner_mod._controlled_codex_overlay_required(
-        docker_resume,
-        has_sandbox_backend=True,
-    ) is False
-    assert runner_mod._controlled_codex_overlay_required(
-        local_resume,
-        has_sandbox_backend=False,
-    ) is True
+    assert (
+        runner_mod._controlled_codex_overlay_required(
+            docker_resume,
+            has_sandbox_backend=True,
+        )
+        is False
+    )
+    assert (
+        runner_mod._controlled_codex_overlay_required(
+            local_resume,
+            has_sandbox_backend=False,
+        )
+        is True
+    )
 
 
 @pytest.mark.parametrize(

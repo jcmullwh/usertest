@@ -100,7 +100,7 @@ def test_extracted_modules_do_not_import_cli_facade(module_relpath: str) -> None
         (
             ["--help"],
             [
-                    "{run,resume,review,outcome,maintenance-images,reports,tickets,batch}",
+                    "{run,resume,handoff,review,outcome,maintenance-images,reports,tickets,batch}",
                 "Run one ticket implementation.",
                 "Resume a verification-failed implementation run from",
                     "Review and merge PR-backed implementation tickets.",
@@ -123,7 +123,7 @@ def test_extracted_modules_do_not_import_cli_facade(module_relpath: str) -> None
         (
             ["review", "--help"],
             [
-                "{run,status,merge}",
+                    "{run,adopt-run,status,merge}",
                 "Run an implementation review for a PR-backed ticket.",
                 "Show the latest review summary for a ticket.",
                 "Merge a reviewed PR when review + CI are green.",

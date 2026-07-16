@@ -8,6 +8,7 @@ import pytest
 from backlog_repo.plan_scope import build_plan_target_contract
 
 from usertest_implement.implementation_provenance import (
+    record_existing_verified_implementation_head,
     record_verified_implementation_head,
     validate_verified_implementation_head,
 )
@@ -117,3 +118,49 @@ def test_initial_implementation_receipt_requires_exact_researched_base(
 
     with pytest.raises(ValueError, match="target_revision_mismatch"):
         record_verified_implementation_head(run_dir=run_dir, require_exact_base=True)
+
+
+def test_existing_head_receipt_is_explicitly_noncommitting_and_revalidated(
+    tmp_path: Path,
+) -> None:
+    run_dir, repo, revision, head = _fixture(tmp_path)
+    branch = _git(repo, "branch", "--show-current")
+    _write_json(
+        run_dir / "git_ref.json",
+        {
+            "branch": branch,
+            "commit_attempted": False,
+            "commit_performed": False,
+            "commit_observed": True,
+            "base_commit": head,
+            "head_commit": head,
+        },
+    )
+
+    receipt = record_existing_verified_implementation_head(run_dir=run_dir)
+
+    assert receipt["schema_version"] == 2
+    assert receipt["provenance_mode"] == "existing_clean_head"
+    assert receipt["repo_revision"] == revision
+    assert receipt["verified_implementation_head"] == head
+    assert validate_verified_implementation_head(run_dir=run_dir) == receipt
+
+
+def test_existing_head_receipt_rejects_dirty_workspace(tmp_path: Path) -> None:
+    run_dir, repo, _revision, head = _fixture(tmp_path)
+    branch = _git(repo, "branch", "--show-current")
+    _write_json(
+        run_dir / "git_ref.json",
+        {
+            "branch": branch,
+            "commit_attempted": False,
+            "commit_performed": False,
+            "commit_observed": True,
+            "base_commit": head,
+            "head_commit": head,
+        },
+    )
+    (repo / "untracked.txt").write_text("dirty\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="dirty_existing_head"):
+        record_existing_verified_implementation_head(run_dir=run_dir)

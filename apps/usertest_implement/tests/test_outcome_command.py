@@ -79,6 +79,7 @@ def _runner_receipt(
     configured: list[str] | None = None,
     verification_configured: list[str] | None = None,
     executed: list[dict[str, object]] | None = None,
+    include_commands_configured: bool = True,
 ) -> dict[str, object]:
     binding_commands = PLAN_COMMANDS if configured is None else configured
     receipt_commands = (
@@ -137,19 +138,19 @@ def _runner_receipt(
         encoding="utf-8",
     )
     verification_path = run_dir / "verification.json"
+    verification = {
+        "schema_version": 1,
+        "passed": True,
+        "status": "passed",
+        "terminal_reason": "passed",
+        "timed_out": False,
+        "cancelled": False,
+        "commands": command_results,
+    }
+    if include_commands_configured:
+        verification["commands_configured"] = receipt_commands
     verification_path.write_text(
-        json.dumps(
-            {
-                "schema_version": 1,
-                "passed": True,
-                "status": "passed",
-                "terminal_reason": "passed",
-                "timed_out": False,
-                "cancelled": False,
-                "commands_configured": receipt_commands,
-                "commands": command_results,
-            }
-        ),
+        json.dumps(verification),
         encoding="utf-8",
     )
     return {
@@ -211,6 +212,42 @@ def test_outcome_updates_accept_exact_plan_bound_test_receipt(tmp_path: Path) ->
     assert receipt["verification_producer"] == "runner_core"
     assert receipt["commands"] == PLAN_COMMANDS
     assert receipt["ticket_body_sha256"] == provenance["ticket_body_sha256"]
+
+
+def test_outcome_updates_accept_legacy_receipt_when_executed_commands_exactly_match_binding(
+    tmp_path: Path,
+) -> None:
+    owner_root = tmp_path / "repo"
+    provenance = _ticket_provenance(owner_root)
+    runs_root = tmp_path / "runs"
+    evidence_path = tmp_path / "evidence.json"
+    _write_evidence(
+        evidence_path,
+        {
+            "test_evidence": [
+                {
+                    "kind": "runner_verification",
+                    "reference": "legacy exact ticket-bound tests",
+                    "result": "passed",
+                    "runner_receipt": _runner_receipt(
+                        runs_root,
+                        owner_root=owner_root,
+                        provenance=provenance,
+                        include_commands_configured=False,
+                    ),
+                }
+            ]
+        },
+    )
+
+    updates = _load(
+        evidence_path,
+        runs_root=runs_root,
+        owner_root=owner_root,
+        provenance=provenance,
+    )
+
+    assert updates["test_evidence"][0]["runner_receipt"]["commands"] == PLAN_COMMANDS
 
 
 @pytest.mark.parametrize(

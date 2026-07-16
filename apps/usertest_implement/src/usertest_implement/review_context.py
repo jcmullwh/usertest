@@ -227,8 +227,14 @@ def _build_review_append_prompt(
         "An approval requires `mechanism_addressed`, `exercised`, and `closed`. A test that "
         "does not replay the bound oracle is not original-scenario verification. Put every "
         "symptom-only change, unexercised oracle, or residual causal path in `issues[]`; use "
-        "high or critical severity when it invalidates the claimed resolution. Do not modify "
-        "repository source files. Do not merge the PR.\n\n"
+        "high or critical severity when it invalidates the claimed resolution. The "
+        "`review_decision` is your causal/code acceptance judgment, not the mutable merge "
+        "gate. A draft PR, pending CI, an infrastructure failure, or an unrelated/base-branch "
+        "failure makes the PR operationally not merge-ready, but must not by itself turn an "
+        "otherwise sound implementation into `changes_requested` or `blocked`. A CI failure "
+        "caused by this diff is an implementation defect and should affect the decision. The "
+        "runner computes merge readiness separately. Do not modify repository source files. "
+        "Do not merge the PR.\n\n"
         "# Ticket markdown\n\n"
         f"{selected.ticket_markdown.rstrip()}\n\n"
         "# Handoff summary\n\n"
@@ -503,18 +509,22 @@ def _build_final_review_summary(
         if str(finding.get("severity") or "").strip().casefold()
         in {"error", "high", "critical", "blocker", "fatal"}
     ]
-    merge_ready = (
+    causal_acceptance = (
         agent_summary["review_decision"] == "approved"
         and agent_summary["approach_alignment"] == "aligned"
         and agent_summary["mechanism_assessment"] == "mechanism_addressed"
         and agent_summary["original_scenario_oracle"] == "exercised"
         and agent_summary["causal_path_assessment"] == "closed"
+        and not agent_summary["remaining_causal_paths"]
+        and deterministic_scope_verified
+        and not blocking_findings
+    )
+    merge_ready = (
+        causal_acceptance
         and ci_conclusion == "success"
         and mergeable
         and not is_draft
         and pr_state == "OPEN"
-        and deterministic_scope_verified
-        and not blocking_findings
     )
     return {
         "schema_version": 1,
@@ -545,6 +555,7 @@ def _build_final_review_summary(
         "rationale": agent_summary["rationale"],
         "findings": findings,
         "blocking_finding_count": len(blocking_findings),
+        "causal_acceptance": causal_acceptance,
         "merge_ready": merge_ready,
         "review_source": "automated",
         "reviewed_at_utc": _utc_now_z(),

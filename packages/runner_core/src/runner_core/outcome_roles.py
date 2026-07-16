@@ -23,6 +23,7 @@ from runner_core.verification_commands import verification_command_safety_errors
 OUTCOME_EVIDENCE_ROLES = frozenset(
     {"original_scenario", "live", "mitigation_effect", "recurrence"}
 )
+_CENTRALIZED_RECURRENCE_OWNER = "centralized_case_refresh"
 _SENSITIVE_ENVIRONMENT_RE = re.compile(
     r"(?:API[_-]?KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|AUTH|COOKIE|SESSION|"
     r"^AWS_|^AZURE_|^GOOGLE_|^GCP_|^GH_|^GITHUB_|^SSH_)",
@@ -707,11 +708,25 @@ def _validate_recurrence_refresh(
     }
 
 
+def _workspace_git_argv(workspace: Path, *args: str) -> list[str]:
+    """Build an exact, command-local Git trust grant for an isolated workspace."""
+
+    resolved = workspace.expanduser().resolve()
+    safe_dir = str(resolved).replace("\\", "/")
+    return [
+        "git",
+        "-c",
+        f"safe.directory={safe_dir}",
+        "-C",
+        str(resolved),
+        *args,
+    ]
+
+
 def _resolved_head(workspace: Path) -> str:
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=str(workspace),
+            _workspace_git_argv(workspace, "rev-parse", "HEAD"),
             capture_output=True,
             text=True,
             check=False,
@@ -727,8 +742,12 @@ def _resolved_head(workspace: Path) -> str:
 def _resolve_commit(workspace: Path, commit: str) -> str:
     try:
         proc = subprocess.run(
-            ["git", "rev-parse", "--verify", f"{commit}^{{commit}}"],
-            cwd=str(workspace),
+            _workspace_git_argv(
+                workspace,
+                "rev-parse",
+                "--verify",
+                f"{commit}^{{commit}}",
+            ),
             capture_output=True,
             text=True,
             check=False,
@@ -743,8 +762,13 @@ def _resolve_commit(workspace: Path, commit: str) -> str:
 
 def _require_ancestor(workspace: Path, *, ancestor: str, descendant: str, field: str) -> None:
     proc = subprocess.run(
-        ["git", "merge-base", "--is-ancestor", ancestor, descendant],
-        cwd=str(workspace),
+        _workspace_git_argv(
+            workspace,
+            "merge-base",
+            "--is-ancestor",
+            ancestor,
+            descendant,
+        ),
         capture_output=True,
         text=True,
         check=False,
@@ -967,6 +991,44 @@ def _causal_positive_contract_valid(
     )
 
 
+def _validated_stage5_outcome_contract(raw: Any) -> dict[str, Any] | None:
+    if not isinstance(raw, dict):
+        return None
+    contract_id = raw.get("outcome_contract_id")
+    projection = {
+        key: value for key, value in raw.items() if key != "outcome_contract_id"
+    }
+    if (
+        contract_id != f"stage5_outcome_contract:{_sha256_json(projection)}"
+        or raw.get("kind") != "selected_option_outcome_strategy"
+        or raw.get("outcome_contract_status") != "approved_for_planning"
+        or raw.get("post_change_evidence_status") != "unverified"
+        or not isinstance(raw.get("strategy"), dict)
+        or not isinstance(raw.get("review"), dict)
+    ):
+        return None
+    return dict(raw)
+
+
+def _is_fail_first_planned_replay(raw: Any) -> bool:
+    if (
+        not isinstance(raw, dict)
+        or raw.get("kind") != "staged_replay"
+        or raw.get("scenario_kind") != "fail_first_contract"
+        or raw.get("positive_outcome_contracts") not in (None, [])
+        or _validated_stage5_outcome_contract(raw.get("selected_outcome_contract"))
+        is None
+    ):
+        return False
+    baseline = raw.get("baseline")
+    baseline_exit = baseline.get("exit_code") if isinstance(baseline, dict) else None
+    return bool(
+        isinstance(baseline_exit, int)
+        and not isinstance(baseline_exit, bool)
+        and baseline_exit != 0
+    )
+
+
 def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict) or raw.get("schema_version") != 1:
         raise ValueError("outcome_role_oracle_invalid")
@@ -974,35 +1036,53 @@ def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:
     projection = {key: value for key, value in raw.items() if key != "outcome_oracle_id"}
     if oracle_id != f"outcome_oracle:{_sha256_json(projection)}":
         raise ValueError("outcome_role_oracle_hash_invalid")
-    positive_contracts = raw.get("positive_outcome_contracts")
-    if not isinstance(positive_contracts, list) or not positive_contracts:
-        raise ValueError("outcome_role_positive_contract_missing")
-    for index, contract in enumerate(positive_contracts):
-        if not isinstance(contract, dict):
-            raise ValueError(f"outcome_role_positive_contract_invalid:{index}")
-        contract_id = contract.get("positive_outcome_contract_id")
-        contract_projection = {
-            key: value
-            for key, value in contract.items()
-            if key != "positive_outcome_contract_id"
-        }
-        postconditions = contract.get("postconditions")
-        if (
-            contract_id
-            != f"positive_outcome_contract:{_sha256_json(contract_projection)}"
-            or contract.get("kind")
-            not in {
-                "repository_test_assertion",
-                "retained_research_harness_assertion",
-                "origin_evidence_semantic_contract",
-                "causal_proof_predicate",
-            }
-            or not isinstance(postconditions, list)
-            or not postconditions
-            or any(not isinstance(value, dict) for value in postconditions)
-        ):
-            raise ValueError(f"outcome_role_positive_contract_invalid:{index}")
     kind = raw.get("kind")
+    positive_contracts = raw.get("positive_outcome_contracts")
+    if kind == "stage5_planned_outcome":
+        if (
+            positive_contracts not in (None, [])
+            or raw.get("proof_scope") != "planned_post_change_verification"
+            or _validated_stage5_outcome_contract(
+                raw.get("selected_outcome_contract")
+            )
+            is None
+        ):
+            raise ValueError("outcome_role_stage5_planned_oracle_invalid")
+    elif kind == "staged_replay" and raw.get("scenario_kind") == (
+        "fail_first_contract"
+    ):
+        if not _is_fail_first_planned_replay(raw):
+            raise ValueError("outcome_role_fail_first_planned_oracle_invalid")
+    else:
+        if raw.get("selected_outcome_contract") is not None:
+            raise ValueError("outcome_role_selected_outcome_contract_unexpected")
+        if not isinstance(positive_contracts, list) or not positive_contracts:
+            raise ValueError("outcome_role_positive_contract_missing")
+        for index, contract in enumerate(positive_contracts):
+            if not isinstance(contract, dict):
+                raise ValueError(f"outcome_role_positive_contract_invalid:{index}")
+            contract_id = contract.get("positive_outcome_contract_id")
+            contract_projection = {
+                key: value
+                for key, value in contract.items()
+                if key != "positive_outcome_contract_id"
+            }
+            postconditions = contract.get("postconditions")
+            if (
+                contract_id
+                != f"positive_outcome_contract:{_sha256_json(contract_projection)}"
+                or contract.get("kind")
+                not in {
+                    "repository_test_assertion",
+                    "retained_research_harness_assertion",
+                    "origin_evidence_semantic_contract",
+                    "causal_proof_predicate",
+                }
+                or not isinstance(postconditions, list)
+                or not postconditions
+                or any(not isinstance(value, dict) for value in postconditions)
+            ):
+                raise ValueError(f"outcome_role_positive_contract_invalid:{index}")
     if kind in {"staged_replay", "causal_proof_replay"}:
         execution = raw.get("execution")
         argv = execution.get("argv") if isinstance(execution, dict) else None
@@ -1062,6 +1142,8 @@ def _normalize_outcome_oracle(raw: Any) -> dict[str, Any]:
                 is None
             ):
                 raise ValueError("outcome_role_causal_replay_oracle_invalid")
+    elif kind == "stage5_planned_outcome":
+        pass
     elif kind == "config_state":
         targets = raw.get("state_targets")
         if (
@@ -1485,6 +1567,13 @@ def _normalize_role_contract(role: str, raw: Any) -> dict[str, Any]:
         raise ValueError("outcome_role_oracle_for_non_original_role")
     oracle = _normalize_outcome_oracle(oracle_raw) if oracle_raw is not None else None
     oracle_kind = oracle.get("kind") if oracle is not None else None
+    verification_owner = unsigned.get("verification_owner")
+    centralized_recurrence = (
+        role == "recurrence"
+        and verification_owner == _CENTRALIZED_RECURRENCE_OWNER
+    )
+    if verification_owner is not None and not centralized_recurrence:
+        raise ValueError("outcome_role_verification_owner_invalid")
     causal_proofs = (
         _normalized_causal_proof_receipts(unsigned.get("causal_proof_receipts"))
         if oracle_kind == "causal_proof_replay"
@@ -1510,7 +1599,11 @@ def _normalize_role_contract(role: str, raw: Any) -> dict[str, Any]:
             raise ValueError("outcome_role_causal_positive_contract_invalid")
     elif unsigned.get("causal_proof_receipts") not in (None, []):
         raise ValueError("outcome_role_causal_proof_receipts_unexpected")
-    if oracle is not None:
+    planned_or_fail_first_oracle = bool(
+        oracle_kind == "stage5_planned_outcome"
+        or _is_fail_first_planned_replay(oracle)
+    )
+    if oracle is not None and not planned_or_fail_first_oracle:
         contract_ids = {
             str(contract.get("positive_outcome_contract_id"))
             for contract in oracle.get("positive_outcome_contracts", [])
@@ -1532,13 +1625,19 @@ def _normalize_role_contract(role: str, raw: Any) -> dict[str, Any]:
             or (oracle_kind != "multi_scenario" and len(selected) != 1)
         ):
             raise ValueError("outcome_role_selected_positive_contract_invalid")
+    elif planned_or_fail_first_oracle and unsigned.get(
+        "selected_positive_outcome_contract_ids"
+    ) not in (None, []):
+        raise ValueError(
+            "outcome_role_selected_positive_contract_unexpected_for_planned_outcome"
+        )
     if oracle is not None and unsigned.get("required_proof_scope") != oracle.get(
         "proof_scope"
     ):
         raise ValueError("outcome_role_oracle_scope_mismatch")
     commands_raw = unsigned.get("commands")
     if not isinstance(commands_raw, list) or (
-        not commands_raw and role != "recurrence" and oracle is None
+        not commands_raw and not centralized_recurrence and oracle is None
     ):
         raise ValueError("outcome_role_commands_invalid")
     commands = [
@@ -1547,8 +1646,10 @@ def _normalize_role_contract(role: str, raw: Any) -> dict[str, Any]:
     ]
     if len(commands) != len(set(commands)):
         raise ValueError("outcome_role_commands_duplicate")
-    if oracle is not None and commands:
+    if oracle is not None and oracle_kind != "stage5_planned_outcome" and commands:
         raise ValueError("outcome_role_oracle_commands_forbidden")
+    if centralized_recurrence and commands:
+        raise ValueError("outcome_role_centralized_recurrence_commands_invalid")
     for command in commands:
         errors = verification_command_safety_errors(command)
         if errors:
@@ -1557,11 +1658,13 @@ def _normalize_role_contract(role: str, raw: Any) -> dict[str, Any]:
             )
     predicates = unsigned.get("predicates")
     if not isinstance(predicates, list) or (
-        not predicates and role != "recurrence"
+        not predicates and not centralized_recurrence
     ) or any(
         not isinstance(predicate, dict) for predicate in predicates
     ):
         raise ValueError("outcome_role_predicates_invalid")
+    if centralized_recurrence and predicates:
+        raise ValueError("outcome_role_centralized_recurrence_predicates_invalid")
     if oracle_kind == "staged_replay" and not any(
         isinstance(predicate, dict)
         and predicate.get("type") == "command_exit_code"
@@ -1907,8 +2010,12 @@ def _causal_observation_results(
 
 def _workspace_status(workspace: Path) -> str:
     proc = subprocess.run(
-        ["git", "status", "--porcelain=v1", "--untracked-files=all"],
-        cwd=str(workspace),
+        _workspace_git_argv(
+            workspace,
+            "status",
+            "--porcelain=v1",
+            "--untracked-files=all",
+        ),
         capture_output=True,
         text=True,
         check=False,

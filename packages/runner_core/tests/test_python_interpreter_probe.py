@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -24,6 +26,25 @@ def _load_probe_module() -> ModuleType:
 
 
 probe_mod = _load_probe_module()
+
+
+def _completed_probe(
+    args: list[str],
+    *,
+    returncode: int,
+    stdout: str,
+    stderr: str,
+) -> subprocess.CompletedProcess[str]:
+    result = subprocess.CompletedProcess(
+        args=args,
+        returncode=returncode,
+        stdout=stdout,
+        stderr=stderr,
+    )
+    result.timed_out = False
+    result.cleanup_succeeded = True
+    result.cleanup_diagnostic = None
+    return result
 
 
 def test_probe_rejects_windowsapps_alias(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -51,8 +72,8 @@ def test_probe_rejects_incomplete_runtime_missing_encodings(
     monkeypatch.setattr(probe_mod.shutil, "which", lambda _cmd: r"C:\Python313\python.exe")
 
     def _run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            args=["python", "-c", "..."],
+        return _completed_probe(
+            ["python", "-c", "..."],
             returncode=1,
             stdout="",
             stderr=(
@@ -61,7 +82,7 @@ def test_probe_rejects_incomplete_runtime_missing_encodings(
             ),
         )
 
-    monkeypatch.setattr(probe_mod.subprocess, "run", _run)
+    monkeypatch.setattr(probe_mod, "_run_bounded_interpreter_probe", _run)
 
     result = probe_mod.probe_python_interpreters(
         candidate_commands=["python"],
@@ -80,7 +101,7 @@ def test_probe_records_launch_failures(monkeypatch: pytest.MonkeyPatch) -> None:
     def _run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
         raise OSError("Access is denied")
 
-    monkeypatch.setattr(probe_mod.subprocess, "run", _run)
+    monkeypatch.setattr(probe_mod, "_run_bounded_interpreter_probe", _run)
 
     result = probe_mod.probe_python_interpreters(
         candidate_commands=["python"],
@@ -99,8 +120,8 @@ def test_probe_classifies_inaccessible_file_as_access_denied(
     monkeypatch.setattr(probe_mod.shutil, "which", lambda _cmd: r"C:\Python313\python.exe")
 
     def _run(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
-        return subprocess.CompletedProcess(
-            args=["python", "-c", "..."],
+        return _completed_probe(
+            ["python", "-c", "..."],
             returncode=1,
             stdout="",
             stderr=(
@@ -109,7 +130,7 @@ def test_probe_classifies_inaccessible_file_as_access_denied(
             ),
         )
 
-    monkeypatch.setattr(probe_mod.subprocess, "run", _run)
+    monkeypatch.setattr(probe_mod, "_run_bounded_interpreter_probe", _run)
 
     result = probe_mod.probe_python_interpreters(
         candidate_commands=["python"],
@@ -133,29 +154,27 @@ def test_probe_selects_verified_fallback_candidate(monkeypatch: pytest.MonkeyPat
     def _run(
         args: list[str],
         *,
-        capture_output: bool,
-        text: bool,
-        encoding: str,
-        errors: str,
-        timeout: float,
-        check: bool,
+        timeout_seconds: float,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         assert args[0] == r"C:\Python313\py.exe"
+        assert timeout_seconds > 0
+        assert env is None
         payload = json.dumps(
             {
                 "executable": r"C:\Python313\python.exe",
                 "version": "3.13.2",
             }
         )
-        return subprocess.CompletedProcess(
-            args=args,
+        return _completed_probe(
+            args,
             returncode=0,
             stdout=payload + "\n",
             stderr="",
         )
 
     monkeypatch.setattr(probe_mod.shutil, "which", _which)
-    monkeypatch.setattr(probe_mod.subprocess, "run", _run)
+    monkeypatch.setattr(probe_mod, "_run_bounded_interpreter_probe", _run)
 
     result = probe_mod.probe_python_interpreters(
         candidate_commands=["python", "py"],
@@ -189,40 +208,37 @@ def test_resolve_can_select_py0p_interpreter_path(
     def _run(
         args: list[str],
         *,
-        capture_output: bool,
-        text: bool,
-        encoding: str,
-        errors: str,
-        timeout: float,
-        check: bool,
-        **_kwargs: object,
+        timeout_seconds: float,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
+        assert timeout_seconds > 0
+        assert env is None or isinstance(env, dict)
         if args[:2] == ["where", "python"]:
-            return subprocess.CompletedProcess(
-                args=args,
+            return _completed_probe(
+                args,
                 returncode=0,
                 stdout=r"C:\Users\tester\AppData\Local\Microsoft\WindowsApps\python.exe" + "\n",
                 stderr="",
             )
         if args[:2] == ["py", "-0p"]:
-            return subprocess.CompletedProcess(
-                args=args,
+            return _completed_probe(
+                args,
                 returncode=0,
                 stdout=f" -V:3.13          {py0p_path}\n",
                 stderr="",
             )
         if args[0] == py0p_path:
             payload = json.dumps({"executable": py0p_path, "version": "3.13.2"})
-            return subprocess.CompletedProcess(
-                args=args,
+            return _completed_probe(
+                args,
                 returncode=0,
                 stdout=payload + "\n",
                 stderr="",
             )
-        return subprocess.CompletedProcess(args=args, returncode=1, stdout="", stderr="")
+        return _completed_probe(args, returncode=1, stdout="", stderr="")
 
     monkeypatch.setattr(probe_mod.shutil, "which", _which)
-    monkeypatch.setattr(probe_mod.subprocess, "run", _run)
+    monkeypatch.setattr(probe_mod, "_run_bounded_interpreter_probe", _run)
 
     resolved = probe_mod.resolve_usable_python_interpreter(
         workspace_dir=None,
@@ -253,29 +269,27 @@ def test_resolve_prefers_workspace_venv_python(
     def _run(
         args: list[str],
         *,
-        capture_output: bool,
-        text: bool,
-        encoding: str,
-        errors: str,
-        timeout: float,
-        check: bool,
+        timeout_seconds: float,
+        env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         assert args[0] == str(venv_python)
+        assert timeout_seconds > 0
+        assert env is None
         payload = json.dumps(
             {
                 "executable": str(venv_python),
                 "version": "3.13.2",
             }
         )
-        return subprocess.CompletedProcess(
-            args=args,
+        return _completed_probe(
+            args,
             returncode=0,
             stdout=payload + "\n",
             stderr="",
         )
 
     monkeypatch.setattr(probe_mod.shutil, "which", _which)
-    monkeypatch.setattr(probe_mod.subprocess, "run", _run)
+    monkeypatch.setattr(probe_mod, "_run_bounded_interpreter_probe", _run)
     monkeypatch.delenv("VIRTUAL_ENV", raising=False)
     monkeypatch.delenv("USERTEST_PYTHON", raising=False)
 
@@ -289,3 +303,43 @@ def test_resolve_prefers_workspace_venv_python(
 
     assert resolved.selected_command == str(venv_python)
     assert resolved.selected_resolved_path == str(venv_python)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows inherited-pipe regression")
+def test_health_probe_returns_when_exited_interpreter_leaves_inherited_handles_open(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    descendant_pid_path = tmp_path / "interpreter-probe-descendant.pid"
+    descendant_program = (
+        "from pathlib import Path; import os, sys, time; "
+        "Path(sys.argv[1]).write_text(str(os.getpid()), encoding='utf-8'); "
+        "print('descendant-stdout-open', flush=True); "
+        "print('descendant-stderr-open', file=sys.stderr, flush=True); "
+        "time.sleep(120)"
+    )
+    health_probe = (
+        "import json, subprocess, sys, time; from pathlib import Path; "
+        f"pid_path = Path({str(descendant_pid_path)!r}); "
+        "subprocess.Popen([sys.executable, '-c', "
+        f"{descendant_program!r}, str(pid_path)], stdin=subprocess.DEVNULL); "
+        "deadline = time.monotonic() + 10.0; "
+        'exec("while not pid_path.exists() and time.monotonic() < deadline:\\n '
+        '   time.sleep(0.01)"); '
+        "print(json.dumps({'executable': sys.executable, "
+        "'version': sys.version.split()[0]}), flush=True)"
+    )
+    monkeypatch.setattr(probe_mod, "_PYTHON_HEALTH_PROBE", health_probe)
+
+    started = time.monotonic()
+    result = probe_mod.probe_python_interpreters(
+        candidate_commands=[sys.executable],
+        timeout_seconds=15.0,
+    )
+    elapsed = time.monotonic() - started
+
+    assert descendant_pid_path.exists()
+    assert elapsed < 30.0
+    candidate = result.by_command()[sys.executable]
+    assert candidate.usable is True, candidate
+    assert result.selected_resolved_path == sys.executable

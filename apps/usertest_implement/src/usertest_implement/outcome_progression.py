@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -45,6 +46,8 @@ _KNOWN_SATISFIED_RISKS = frozenset(
         "Live runtime verification is still required",
     }
 )
+_OUTCOME_WORKTREES_ROOT_ENV = "USERTEST_IMPLEMENT_OUTCOME_WORKTREES_ROOT"
+_OUTCOME_TRUSTED_RUNS_ROOT_ENV = "USERTEST_IMPLEMENT_OUTCOME_TRUSTED_RUNS_ROOT"
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,42 @@ class OutcomeRoleDidNotPass(RuntimeError):
         super().__init__(
             f"Post-merge {role} role {reason}; retained artifact: {artifact_path}"
         )
+
+
+def _resolve_outcome_worktrees_root(*, repo_root: Path) -> Path:
+    """Resolve the disposable outcome checkout root without hiding host policy.
+
+    The default remains beneath the controller repository for compatibility. Hosts
+    whose controller volume is constrained can explicitly place the short-lived
+    detached worktrees on another volume. Relative overrides are rejected so the
+    effective storage boundary is unambiguous in operational commands and logs.
+    """
+
+    configured = os.environ.get(_OUTCOME_WORKTREES_ROOT_ENV)
+    if configured is None or not configured.strip():
+        return (repo_root / ".tmp" / "outcome_worktrees").resolve()
+    candidate = Path(configured.strip()).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError(f"{_OUTCOME_WORKTREES_ROOT_ENV} must be an absolute path")
+    return candidate.resolve()
+
+
+def _resolve_outcome_trusted_runs_root(*, repo_root: Path) -> Path:
+    """Resolve the retained oracle-asset root without creating or probing it.
+
+    Outcome-role outputs and their trusted receipt boundary remain beneath the
+    controller repository. This optional host override is only for retained oracle
+    assets that may live on another volume. Downstream asset validation remains
+    responsible for existence, containment, and provenance checks.
+    """
+
+    configured = os.environ.get(_OUTCOME_TRUSTED_RUNS_ROOT_ENV)
+    if configured is None or not configured.strip():
+        return (repo_root / "runs").resolve()
+    candidate = Path(configured.strip()).expanduser()
+    if not candidate.is_absolute():
+        raise ValueError(f"{_OUTCOME_TRUSTED_RUNS_ROOT_ENV} must be an absolute path")
+    return candidate.resolve()
 
 
 def _utc_now_z() -> str:
@@ -137,8 +176,16 @@ def _git(
 ) -> subprocess.CompletedProcess[str]:
     """Run git without imposing an arbitrary wall-clock timeout."""
 
+    repository = repository.expanduser().resolve()
     proc = subprocess.run(
-        ["git", "-C", str(repository), *args],
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository.as_posix()}",
+            "-C",
+            str(repository),
+            *args,
+        ],
         capture_output=True,
         text=True,
         check=False,
@@ -548,7 +595,7 @@ def verify_premerge_original_scenario(
     with clean_merged_commit_worktree(
         repository=owner_root,
         merged_commit=verified_head,
-        worktrees_root=repo_root / ".tmp" / "outcome_worktrees",
+        worktrees_root=_resolve_outcome_worktrees_root(repo_root=repo_root),
         fingerprint=fingerprint,
     ) as workspace:
         return _run_role(
@@ -558,7 +605,7 @@ def verify_premerge_original_scenario(
             current=provisional,
             selected_provenance=selected_provenance,
             trusted_runs_root=runs_root,
-            trusted_oracle_assets_root=(repo_root / "runs").resolve(),
+            trusted_oracle_assets_root=_resolve_outcome_trusted_runs_root(repo_root=repo_root),
             role_runner=role_runner or run_outcome_evidence_role,
         )
 
@@ -668,6 +715,7 @@ def progress_post_merge_outcome(
 
         requires_live = current.get("requires_live_verification") is True
         runs_root = (repo_root / "runs" / "usertest_implement").resolve()
+        trusted_oracle_assets_root = _resolve_outcome_trusted_runs_root(repo_root=repo_root)
         roles_needed: list[str] = []
         if not _has_bound_passing_role_evidence(
             current=current,
@@ -694,7 +742,7 @@ def progress_post_merge_outcome(
         ):
             roles_needed.append("mitigation_effect")
 
-        worktrees_root = repo_root / ".tmp" / "outcome_worktrees"
+        worktrees_root = _resolve_outcome_worktrees_root(repo_root=repo_root)
         runner = role_runner or run_outcome_evidence_role
         if roles_needed:
             with clean_merged_commit_worktree(
@@ -720,7 +768,7 @@ def progress_post_merge_outcome(
                         current=current,
                         selected_provenance=selected_provenance,
                         trusted_runs_root=runs_root,
-                        trusted_oracle_assets_root=(repo_root / "runs").resolve(),
+                        trusted_oracle_assets_root=trusted_oracle_assets_root,
                         role_runner=runner,
                     )
                     roles_run.append(role)

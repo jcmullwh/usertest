@@ -13,13 +13,20 @@ from runner_core.runner import RunResult
 from usertest_implement.ci import _wait_for_ci_success
 from usertest_implement.commands.review import (
     _build_merge_outcome_record,
+    _build_review_correction_prompt,
     _cmd_review_merge,
     _cmd_review_run,
+    _parse_retained_review_correction_prompt,
+    _recover_noncausal_premerge_rejection,
+    _report_without_runner_added_extensions,
+    _require_causal_review_acceptance,
     _require_explicit_passing_ci,
     _require_unchanged_reviewed_head,
+    _review_correction_context,
 )
 from usertest_implement.commands.run import _run_selected_ticket
 from usertest_implement.outcome_evidence import build_verification_binding
+from usertest_implement.outcome_progression import OutcomeRoleDidNotPass
 from usertest_implement.review_context import (
     _build_final_review_summary,
     _build_pr_review_body,
@@ -265,6 +272,53 @@ def _write_bound_ticket_ref(
     )
 
 
+def _write_adopted_review_state(
+    *,
+    run_dir: Path,
+    ledger_path: Path,
+    owner_root: Path,
+    ticket_path: Path,
+    fingerprint: str,
+    lifecycle_state: str = "awaiting_review",
+) -> None:
+    ticket_sha256 = sha256(ticket_path.read_bytes()).hexdigest()
+    _write_json(
+        run_dir / "ticket_resume_state.json",
+        {
+            "schema_version": 1,
+            "kind": "ticket_resume_state",
+            "ticket": {"fingerprint": fingerprint, "path": str(ticket_path)},
+            "owner_root": str(owner_root),
+            "run_dir": str(run_dir),
+            "lifecycle_state": lifecycle_state,
+        },
+    )
+    _write_json(
+        run_dir / "adoption_ref.json",
+        {
+            "schema_version": 1,
+            "kind": "existing_pr_adoption",
+            "run_dir": str(run_dir),
+            "fingerprint": fingerprint,
+            "ticket_path": str(ticket_path),
+            "ticket_sha256": ticket_sha256,
+            "flags": {"pr_adopted": True, "ticket_mutated": False},
+        },
+    )
+    ledger_path.parent.mkdir(parents=True, exist_ok=True)
+    ledger_path.write_text(
+        "schema_version: 1\nupdated_at: null\nactions:\n"
+        f"  {fingerprint}:\n"
+        f"    fingerprint: {fingerprint}\n"
+        f"    idea_path: {json.dumps(str(ticket_path))}\n"
+        f"    last_run_dir: {json.dumps(str(run_dir))}\n"
+        "    last_handoff_mode: adopt_existing_pr\n"
+        "    last_resume_lifecycle_state: awaiting_review\n"
+        "    pr_adopted: true\n",
+        encoding="utf-8",
+    )
+
+
 def _review_ticket_provenance(ticket_path: Path) -> dict[str, object]:
     provenance = _selected_ticket_provenance(
         _select_ticket_from_path(ticket_path),
@@ -454,6 +508,511 @@ def _review_simple_args(
     )
 
 
+def _prepare_premerge_failure_case(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    raised: Exception,
+) -> dict[str, object]:
+    repo_root = tmp_path / "repo_root"
+    fingerprint = "causalpremerge01"
+    ticket_path = _make_ticket(
+        repo_root,
+        bucket="4 - for_review",
+        fingerprint=fingerprint,
+    )
+    implementation_run_dir = repo_root / "runs" / "implementation" / "1"
+    implementation_run_dir.mkdir(parents=True)
+    review_run_dir = repo_root / "runs" / "review" / "1"
+    pr_url = "https://example.invalid/pr/213"
+    reviewed_head = "a" * 40
+    scope = {
+        "schema_version": 2,
+        "status": "verified",
+        "receipt_sha256": "scope-receipt",
+    }
+    review_summary = {
+        "schema_version": 1,
+        "ticket_fingerprint": fingerprint,
+        "ticket_path": str(ticket_path),
+        "run_dir": str(review_run_dir),
+        "pr_url": pr_url,
+        "reviewed_head_oid": reviewed_head,
+        "review_decision": "approved",
+        "causal_acceptance": True,
+        "merge_ready": True,
+        "ci_conclusion": "success",
+        "mechanism_assessment": "mechanism_addressed",
+        "original_scenario_oracle": "exercised",
+        "causal_path_assessment": "closed",
+        "implementation_scope": scope,
+        "findings": [],
+    }
+    _write_json(review_run_dir / "review_summary.json", review_summary)
+    ledger_path = repo_root / ".agents" / "state" / "backlog_implement_actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        "schema_version: 1\nupdated_at: null\nactions:\n"
+        f"  {fingerprint}:\n"
+        f"    fingerprint: {fingerprint}\n"
+        f"    last_run_dir: {json.dumps(str(implementation_run_dir))}\n"
+        f"    last_review_run_dir: {json.dumps(str(review_run_dir))}\n",
+        encoding="utf-8",
+    )
+    pr_context = {
+        "pr": {
+            "number": 213,
+            "url": pr_url,
+            "state": "OPEN",
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "baseRefName": "dev",
+            "headRefOid": reviewed_head,
+        },
+        "ci_status": "completed",
+        "ci_conclusion": "success",
+        "checks": [{"name": "tests", "state": "SUCCESS", "bucket": "pass"}],
+    }
+    provenance = {
+        "generated_ticket": True,
+        "case_id": "case:premerge-failure",
+        "plan_revision_id": "planrev:premerge-failure:1",
+        "target_contract": {"targets": []},
+    }
+
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._require_review_artifact_bindings",
+        lambda **_: implementation_run_dir,
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._preflight_existing_outcome_stores",
+        lambda **_: None,
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._selected_ticket_provenance",
+        lambda *_args, **_kwargs: provenance,
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._collect_pr_review_context",
+        lambda **_: dict(pr_context),
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review.validate_verified_implementation_head",
+        lambda **_: {"verified_implementation_head": reviewed_head},
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._attach_deterministic_plan_scope",
+        lambda *, pr_context, **_: {**pr_context, "implementation_scope": scope},
+    )
+    preflight_outcome = {
+        "state": "tests_verified",
+        "case_id": provenance["case_id"],
+        "plan_revision_id": provenance["plan_revision_id"],
+        "target_branch": "dev",
+        "merged_commit": reviewed_head,
+        "ticket_provenance": {"verified_implementation_head": reviewed_head},
+    }
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._build_merge_outcome_record",
+        lambda **_: dict(preflight_outcome),
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._reconcile_merge_outcome",
+        lambda **kwargs: kwargs["proposed"],
+    )
+
+    def _raise_premerge(**_kwargs):
+        raise raised
+
+    monkeypatch.setattr(
+        "usertest_implement.commands.review.verify_premerge_original_scenario",
+        _raise_premerge,
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review.write_ticket_resume_state",
+        lambda **_: {"lifecycle_state": "review_changes_requested"},
+    )
+
+    def _unexpected_subprocess(*_args, **_kwargs):
+        raise AssertionError("merge subprocess must not run after premerge failure")
+
+    monkeypatch.setattr(
+        "usertest_implement.commands.review.subprocess.run",
+        _unexpected_subprocess,
+    )
+    return {
+        "repo_root": repo_root,
+        "ticket_path": ticket_path,
+        "review_run_dir": review_run_dir,
+        "ledger_path": ledger_path,
+        "review_summary": review_summary,
+    }
+
+
+def _prepare_legacy_premerge_recovery_case(tmp_path: Path) -> dict[str, object]:
+    owner_root = tmp_path / "owner"
+    fingerprint = "legacyenospace01"
+    ticket_path = _make_ticket(
+        owner_root,
+        bucket="4 - for_review",
+        fingerprint=fingerprint,
+    )
+    selected = _select_ticket_from_path(ticket_path)
+    implementation_run_dir = tmp_path / "runs" / "implementation" / "1"
+    implementation_run_dir.mkdir(parents=True)
+    review_run_dir = tmp_path / "runs" / "review" / "1"
+    pr_url = "https://example.invalid/pr/213"
+    reviewed_head = "b" * 40
+    scope = {
+        "schema_version": 2,
+        "status": "verified",
+        "receipt_sha256": "scope-receipt",
+    }
+    overwritten_summary = {
+        "schema_version": 1,
+        "ticket_fingerprint": fingerprint,
+        "ticket_path": str(ticket_path),
+        "run_dir": str(review_run_dir),
+        "pr_url": pr_url,
+        "reviewed_head_oid": reviewed_head,
+        "review_decision": "changes_requested",
+        "causal_acceptance": True,
+        "merge_ready": False,
+        "ci_conclusion": "success",
+        "mechanism_assessment": "mechanism_not_addressed",
+        "original_scenario_oracle": "not_exercised",
+        "causal_path_assessment": "open",
+        "remaining_causal_paths": ["checkout failed: No space left on device"],
+        "implementation_scope": scope,
+        "rationale": "checkout failed: No space left on device",
+        "findings": [
+            {
+                "severity": "critical",
+                "title": "Original evidence-backed scenario still fails",
+            }
+        ],
+        "correction_count": 4,
+        "review_author_session_id": "review-session",
+    }
+    _write_json(review_run_dir / "review_summary.json", overwritten_summary)
+    _write_json(
+        review_run_dir / "premerge_original_scenario_failure.json",
+        {
+            "schema_version": 1,
+            "status": "changes_requested",
+            "detail": "git worktree add failed: No space left on device",
+            "role_artifact_path": None,
+        },
+    )
+    _write_json(
+        review_run_dir / "report.json",
+        {
+            "schema_version": 1,
+            "kind": "task_run_v1",
+            "status": "success",
+            "summary": "Approved causal implementation.",
+            "issues": [],
+            "extensions": {
+                "reviewed_head_oid": reviewed_head,
+                "review_summary": {
+                    "review_decision": "approved",
+                    "approach_alignment": "aligned",
+                    "mechanism_assessment": "mechanism_addressed",
+                    "original_scenario_oracle": "exercised",
+                    "causal_path_assessment": "closed",
+                    "remaining_causal_paths": [],
+                    "scope_assessment": "appropriate",
+                    "rationale": "The retained review found the causal path closed.",
+                },
+            },
+        },
+    )
+    _write_json(
+        review_run_dir / "review_ref.json",
+        {
+            "schema_version": 2,
+            "pr_url": pr_url,
+            "reviewed_head_oid": reviewed_head,
+        },
+    )
+    ledger_path = tmp_path / ".agents" / "state" / "backlog_implement_actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        "schema_version: 1\nupdated_at: null\nactions:\n"
+        f"  {fingerprint}:\n"
+        f"    fingerprint: {fingerprint}\n"
+        f"    last_review_run_dir: {json.dumps(str(review_run_dir))}\n"
+        "    last_review_decision: changes_requested\n",
+        encoding="utf-8",
+    )
+    pr_context = {
+        "pr": {
+            "number": 213,
+            "url": pr_url,
+            "title": "PR",
+            "state": "OPEN",
+            "isDraft": False,
+            "mergeable": "MERGEABLE",
+            "headRefName": "backlog/test",
+            "headRefOid": reviewed_head,
+            "baseRefName": "dev",
+        },
+        "ci_status": "completed",
+        "ci_conclusion": "success",
+        "checks": [{"name": "tests", "state": "SUCCESS", "bucket": "pass"}],
+        "implementation_scope": scope,
+    }
+    return {
+        "selected": selected,
+        "implementation_run_dir": implementation_run_dir,
+        "review_run_dir": review_run_dir,
+        "ledger_path": ledger_path,
+        "pr_url": pr_url,
+        "reviewed_head": reviewed_head,
+        "pr_context": pr_context,
+        "overwritten_summary": overwritten_summary,
+    }
+
+
+def test_review_merge_classifies_failed_outcome_role_as_causal_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    role_artifact = tmp_path / "roles" / "original_scenario" / "outcome_role.json"
+    case = _prepare_premerge_failure_case(
+        monkeypatch,
+        tmp_path,
+        raised=OutcomeRoleDidNotPass(
+            role="original_scenario",
+            artifact_path=role_artifact,
+            timed_out=False,
+        ),
+    )
+
+    exit_code = _cmd_review_merge(
+        _review_simple_args(
+            repo_root=case["repo_root"],
+            owner_root=case["repo_root"],
+            ticket_path=case["ticket_path"],
+            ledger=case["ledger_path"],
+        )
+    )
+
+    assert exit_code == 4
+    review_run_dir = case["review_run_dir"]
+    failure = _read_json(review_run_dir / "premerge_original_scenario_failure.json")
+    assert isinstance(failure, dict)
+    assert failure["status"] == "changes_requested"
+    assert failure["role_artifact_path"] == str(role_artifact)
+    assert not (review_run_dir / "premerge_original_scenario_blocked.json").exists()
+    summary = _read_json(review_run_dir / "review_summary.json")
+    assert isinstance(summary, dict)
+    assert summary["review_decision"] == "changes_requested"
+    assert summary["causal_acceptance"] is False
+    assert summary["mechanism_assessment"] == "mechanism_not_addressed"
+    assert summary["original_scenario_oracle"] == "not_exercised"
+    assert summary["causal_path_assessment"] == "open"
+    assert summary["findings"][-1]["title"] == "Original evidence-backed scenario still fails"
+    ledger_text = case["ledger_path"].read_text(encoding="utf-8")
+    assert "last_premerge_original_scenario_status: failed" in ledger_text
+    assert "last_review_decision: changes_requested" in ledger_text
+
+
+@pytest.mark.parametrize(
+    "raised",
+    [
+        OSError("No space left on device"),
+        RuntimeError("git worktree setup failed"),
+        ValueError("outcome contract unavailable"),
+    ],
+    ids=["oserror", "runtimeerror", "valueerror"],
+)
+def test_review_merge_classifies_premerge_setup_errors_as_infrastructure_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    raised: Exception,
+) -> None:
+    case = _prepare_premerge_failure_case(
+        monkeypatch,
+        tmp_path,
+        raised=raised,
+    )
+    review_run_dir = case["review_run_dir"]
+    summary_path = review_run_dir / "review_summary.json"
+    summary_before = summary_path.read_bytes()
+
+    exit_code = _cmd_review_merge(
+        _review_simple_args(
+            repo_root=case["repo_root"],
+            owner_root=case["repo_root"],
+            ticket_path=case["ticket_path"],
+            ledger=case["ledger_path"],
+        )
+    )
+
+    assert exit_code == 3
+    assert summary_path.read_bytes() == summary_before
+    assert not (review_run_dir / "premerge_original_scenario_failure.json").exists()
+    blocked = _read_json(review_run_dir / "premerge_original_scenario_blocked.json")
+    assert isinstance(blocked, dict)
+    assert blocked["status"] == "blocked"
+    assert blocked["classification"] == "premerge_infrastructure"
+    assert blocked["causal_result"] == "not_run"
+    assert blocked["review_preserved"] is True
+    assert str(raised) in blocked["detail"]
+    ledger_text = case["ledger_path"].read_text(encoding="utf-8")
+    assert "last_premerge_original_scenario_status: blocked_infrastructure" in ledger_text
+    assert "last_review_decision: approved" in ledger_text
+
+
+def test_legacy_enospc_recovery_restores_approved_review_and_is_idempotent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _prepare_legacy_premerge_recovery_case(tmp_path)
+    monkeypatch.setattr(
+        "usertest_implement.commands.review.write_ticket_resume_state",
+        lambda **_: {"lifecycle_state": "awaiting_merge"},
+    )
+
+    restored = _recover_noncausal_premerge_rejection(
+        selected=case["selected"],
+        ledger_path=case["ledger_path"],
+        review_run_dir=case["review_run_dir"],
+        review_summary=case["overwritten_summary"],
+        pr_url=case["pr_url"],
+        pr_context=case["pr_context"],
+        implementation_run_dir=case["implementation_run_dir"],
+    )
+
+    assert restored["review_decision"] == "approved"
+    assert restored["causal_acceptance"] is True
+    assert restored["mechanism_assessment"] == "mechanism_addressed"
+    assert restored["original_scenario_oracle"] == "exercised"
+    assert restored["causal_path_assessment"] == "closed"
+    assert restored["remaining_causal_paths"] == []
+    assert "No space left on device" not in restored["rationale"]
+    review_run_dir = case["review_run_dir"]
+    reclassification_path = (
+        review_run_dir / "premerge_original_scenario_infrastructure_reclassification.json"
+    )
+    reclassification = _read_json(reclassification_path)
+    assert isinstance(reclassification, dict)
+    assert reclassification["classification"] == "premerge_infrastructure"
+    assert reclassification["causal_result"] == "not_run"
+    assert reclassification["review_preserved"] is True
+    assert reclassification["source_failure_path"] == str(
+        review_run_dir / "premerge_original_scenario_failure.json"
+    )
+    assert (review_run_dir / "premerge_original_scenario_failure.json").exists()
+    ledger_text = case["ledger_path"].read_text(encoding="utf-8")
+    assert "last_review_decision: approved" in ledger_text
+    assert "last_premerge_original_scenario_status: blocked_infrastructure" in ledger_text
+    assert "last_resume_lifecycle_state: awaiting_merge" in ledger_text
+
+    stable_paths = [
+        review_run_dir / "review_summary.json",
+        reclassification_path,
+        case["ledger_path"],
+    ]
+    stable_bytes = {path: path.read_bytes() for path in stable_paths}
+    second = _recover_noncausal_premerge_rejection(
+        selected=case["selected"],
+        ledger_path=case["ledger_path"],
+        review_run_dir=review_run_dir,
+        review_summary=restored,
+        pr_url=case["pr_url"],
+        pr_context=case["pr_context"],
+        implementation_run_dir=case["implementation_run_dir"],
+    )
+    assert second == restored
+    assert {path: path.read_bytes() for path in stable_paths} == stable_bytes
+
+
+def test_legacy_premerge_recovery_does_not_reclassify_a_role_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    case = _prepare_legacy_premerge_recovery_case(tmp_path)
+    failure_path = case["review_run_dir"] / "premerge_original_scenario_failure.json"
+    failure = _read_json(failure_path)
+    assert isinstance(failure, dict)
+    failure["role_artifact_path"] = str(tmp_path / "outcome_role.json")
+    _write_json(failure_path, failure)
+    summary_path = case["review_run_dir"] / "review_summary.json"
+    summary_before = summary_path.read_bytes()
+    ledger_before = case["ledger_path"].read_bytes()
+
+    observed = _recover_noncausal_premerge_rejection(
+        selected=case["selected"],
+        ledger_path=case["ledger_path"],
+        review_run_dir=case["review_run_dir"],
+        review_summary=case["overwritten_summary"],
+        pr_url=case["pr_url"],
+        pr_context=case["pr_context"],
+        implementation_run_dir=case["implementation_run_dir"],
+    )
+
+    assert observed == case["overwritten_summary"]
+    assert summary_path.read_bytes() == summary_before
+    assert case["ledger_path"].read_bytes() == ledger_before
+    assert not (
+        case["review_run_dir"]
+        / "premerge_original_scenario_infrastructure_reclassification.json"
+    ).exists()
+
+
+@pytest.mark.parametrize(
+    "mismatch",
+    ["current_pr_url", "current_head", "report_head", "review_ref_head"],
+)
+def test_legacy_premerge_recovery_refuses_provenance_mismatches_without_mutation(
+    tmp_path: Path,
+    mismatch: str,
+) -> None:
+    case = _prepare_legacy_premerge_recovery_case(tmp_path)
+    if mismatch == "current_pr_url":
+        case["pr_context"]["pr"]["url"] = "https://example.invalid/pr/other"
+    elif mismatch == "current_head":
+        case["pr_context"]["pr"]["headRefOid"] = "c" * 40
+    elif mismatch == "report_head":
+        report_path = case["review_run_dir"] / "report.json"
+        report = _read_json(report_path)
+        assert isinstance(report, dict)
+        report["extensions"]["reviewed_head_oid"] = "c" * 40
+        _write_json(report_path, report)
+    else:
+        review_ref_path = case["review_run_dir"] / "review_ref.json"
+        review_ref = _read_json(review_ref_path)
+        assert isinstance(review_ref, dict)
+        review_ref["reviewed_head_oid"] = "c" * 40
+        _write_json(review_ref_path, review_ref)
+
+    review_run_dir = case["review_run_dir"]
+    stable_paths = [
+        review_run_dir / "review_summary.json",
+        review_run_dir / "premerge_original_scenario_failure.json",
+        case["ledger_path"],
+    ]
+    stable_bytes = {path: path.read_bytes() for path in stable_paths}
+
+    with pytest.raises(SystemExit, match="retained review provenance does not match"):
+        _recover_noncausal_premerge_rejection(
+            selected=case["selected"],
+            ledger_path=case["ledger_path"],
+            review_run_dir=review_run_dir,
+            review_summary=case["overwritten_summary"],
+            pr_url=case["pr_url"],
+            pr_context=case["pr_context"],
+            implementation_run_dir=case["implementation_run_dir"],
+        )
+
+    assert {path: path.read_bytes() for path in stable_paths} == stable_bytes
+    assert not (
+        review_run_dir / "premerge_original_scenario_infrastructure_reclassification.json"
+    ).exists()
+
+
 def test_build_final_review_summary_requires_green_ci_and_alignment(tmp_path: Path) -> None:
     owner_root = tmp_path / "repo"
     ticket_path = _make_ticket(owner_root, bucket="4 - for_review", fingerprint="abc123abc123abcd")
@@ -508,6 +1067,7 @@ def test_build_final_review_summary_requires_green_ci_and_alignment(tmp_path: Pa
         },
         report=report,
     )
+    assert summary["causal_acceptance"] is True
     assert summary["merge_ready"] is True
     assert summary["reviewed_head_oid"] == "abc123def456"
     assert len(summary["findings"]) == 1
@@ -560,6 +1120,7 @@ def test_build_final_review_summary_requires_green_ci_and_alignment(tmp_path: Pa
             ]
         },
     )
+    assert critical["causal_acceptance"] is False
     assert critical["merge_ready"] is False
     assert critical["blocking_finding_count"] == 1
 
@@ -598,6 +1159,7 @@ def test_build_final_review_summary_requires_green_ci_and_alignment(tmp_path: Pa
         },
         report=report,
     )
+    assert scope_blocked["causal_acceptance"] is False
     assert scope_blocked["merge_ready"] is False
     assert scope_blocked["deterministic_scope_verified"] is False
 
@@ -621,6 +1183,7 @@ def test_build_final_review_summary_requires_green_ci_and_alignment(tmp_path: Pa
             },
             "ci_status": "pending",
             "ci_conclusion": None,
+            "implementation_scope": {"status": "verified"},
         },
         agent_summary={
             "review_decision": "approved",
@@ -631,6 +1194,7 @@ def test_build_final_review_summary_requires_green_ci_and_alignment(tmp_path: Pa
         },
         report=report,
     )
+    assert blocked["causal_acceptance"] is True
     assert blocked["merge_ready"] is False
 
 
@@ -682,6 +1246,7 @@ def test_build_final_review_summary_rejects_shallow_causal_acceptance(
         report={"issues": []},
     )
 
+    assert summary["causal_acceptance"] is False
     assert summary["merge_ready"] is False
     assert summary[field] == value
 
@@ -725,6 +1290,7 @@ def test_scope_label_is_advisory_without_a_concrete_blocking_finding(
     )
 
     assert summary["scope_assessment"] == "excessive"
+    assert summary["causal_acceptance"] is True
     assert summary["merge_ready"] is True
 
 
@@ -756,10 +1322,181 @@ def test_review_prompt_centers_causal_acceptance_before_scope() -> None:
     scope_position = prompt.index("# Scope advisory and immutable head/target gate")
     assert causal_position < scope_position
     assert "merely suppresses a visible symptom" in prompt
+    assert "not the mutable merge gate" in prompt
     assert "bound original-scenario oracle" in prompt
     assert "which causal paths, if any, can still reproduce the problem" in prompt
     assert "Scope is secondary to causal correctness" in prompt
     assert "hard-blocks only a missing planned production target" in prompt
+
+
+def test_review_correction_reuses_exact_prior_reviewer_frontier(tmp_path: Path) -> None:
+    fingerprint = "c0rrectc0rrect00"
+    ticket_path = _make_ticket(
+        tmp_path,
+        bucket="2 - ready",
+        fingerprint=fingerprint,
+    )
+    selected = _select_ticket_from_path(ticket_path)
+    implementation_run_dir = tmp_path / "runs" / "implementation"
+    implementation_run_dir.mkdir(parents=True)
+    previous_review_run_dir = tmp_path / "runs" / "review" / "first"
+    previous_review_run_dir.mkdir(parents=True)
+    workspace_dir = tmp_path / "review_workspace"
+    workspace_dir.mkdir()
+    pr_url = "https://example.invalid/pr/213"
+    head_oid = "e" * 40
+    session_id = "019f6733-3afd-7270-839c-5e9d0ca4ff70"
+    _write_json(
+        previous_review_run_dir / "review_summary.json",
+        {
+            "ticket_fingerprint": fingerprint,
+            "pr_url": pr_url,
+            "reviewed_head_oid": head_oid,
+            "review_decision": "changes_requested",
+        },
+    )
+    _write_json(
+        previous_review_run_dir / "review_ref.json",
+        {"implementation_run_dir": str(implementation_run_dir)},
+    )
+    _write_json(
+        previous_review_run_dir / "target_ref.json",
+        {"agent": "codex", "model": "gpt-5.6-terra"},
+    )
+    _write_json(
+        previous_review_run_dir / "workspace_ref.json",
+        {"workspace_dir": str(workspace_dir)},
+    )
+    (previous_review_run_dir / "raw_events.jsonl").write_text(
+        json.dumps({"type": "thread.started", "thread_id": session_id}) + "\n",
+        encoding="utf-8",
+    )
+    ledger_path = tmp_path / ".agents" / "state" / "actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        "schema_version: 1\nactions:\n"
+        f"  {fingerprint}:\n"
+        f"    last_review_run_dir: {json.dumps(str(previous_review_run_dir))}\n",
+        encoding="utf-8",
+    )
+
+    context = _review_correction_context(
+        selected=selected,
+        implementation_run_dir=implementation_run_dir,
+        ledger_path=ledger_path,
+        pr_url=pr_url,
+        reviewed_head_oid=head_oid,
+    )
+
+    assert context["codex_resume_session_id"] == session_id
+    assert context["resume_workspace_dir"] == workspace_dir.resolve()
+    assert context["prior_model"] == "gpt-5.6-terra"
+    prompt = _build_review_correction_prompt(
+        corrections=["Verify that the planned test was dependency-correctly relocated."],
+        correction_context=context,
+        pr_context={"pr": {"url": pr_url}, "checks": []},
+    )
+    assert "Preserve every valid observation" in prompt
+    assert "complete replacement `task_run_v1`" in prompt
+    assert "dependency-correctly relocated" in prompt
+
+
+def test_review_correction_refuses_a_different_pr_head(tmp_path: Path) -> None:
+    fingerprint = "c0rrectc0rrect01"
+    ticket_path = _make_ticket(
+        tmp_path,
+        bucket="2 - ready",
+        fingerprint=fingerprint,
+    )
+    selected = _select_ticket_from_path(ticket_path)
+    implementation_run_dir = tmp_path / "runs" / "implementation"
+    implementation_run_dir.mkdir(parents=True)
+    previous_review_run_dir = tmp_path / "runs" / "review" / "first"
+    _write_json(
+        previous_review_run_dir / "review_summary.json",
+        {
+            "ticket_fingerprint": fingerprint,
+            "pr_url": "https://example.invalid/pr/213",
+            "reviewed_head_oid": "a" * 40,
+        },
+    )
+    _write_json(
+        previous_review_run_dir / "review_ref.json",
+        {"implementation_run_dir": str(implementation_run_dir)},
+    )
+    ledger_path = tmp_path / ".agents" / "state" / "actions.yaml"
+    ledger_path.parent.mkdir(parents=True)
+    ledger_path.write_text(
+        "schema_version: 1\nactions:\n"
+        f"  {fingerprint}:\n"
+        f"    last_review_run_dir: {json.dumps(str(previous_review_run_dir))}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SystemExit, match="different PR head"):
+        _review_correction_context(
+            selected=selected,
+            implementation_run_dir=implementation_run_dir,
+            ledger_path=ledger_path,
+            pr_url="https://example.invalid/pr/213",
+            reviewed_head_oid="b" * 40,
+        )
+
+
+def test_retained_review_correction_prompt_preserves_order_and_prior_binding(
+    tmp_path: Path,
+) -> None:
+    previous = {
+        "ticket_fingerprint": "03f0d43eb78e28fa",
+        "pr_url": "https://example.invalid/pr/213",
+        "reviewed_head_oid": "e" * 40,
+    }
+    context = {
+        "previous_summary": previous,
+        "previous_review_run_dir": tmp_path / "previous",
+    }
+    prompt = _build_review_correction_prompt(
+        corrections=["Keep the valid frontier.", "Correct only the proven defect."],
+        correction_context=context,
+        pr_context={
+            "pr": {
+                "url": "https://example.invalid/pr/213",
+                "headRefOid": "e" * 40,
+            },
+            "checks": [],
+        },
+    )
+    prompt_path = tmp_path / "prompt.txt"
+    prompt_path.write_text(prompt, encoding="utf-8")
+
+    parsed = _parse_retained_review_correction_prompt(prompt_path)
+
+    assert parsed["corrections"] == [
+        "Keep the valid frontier.",
+        "Correct only the proven defect.",
+    ]
+    assert parsed["previous_review_summary"] == previous
+    assert parsed["pr"]["headRefOid"] == "e" * 40
+
+
+def test_retained_review_report_allows_only_documented_runner_extensions() -> None:
+    agent_report = {
+        "schema_version": 1,
+        "kind": "task_run_v1",
+        "extensions": {"review_summary": {"review_decision": "changes_requested"}},
+    }
+    materialized = json.loads(json.dumps(agent_report))
+    materialized["extensions"].update(
+        {
+            "verification": {"status": "disabled"},
+            "python_toolchain_capability": {"toolchain_status": "not_required"},
+            "shell_capability": {"sandbox_mode": "read-only"},
+        }
+    )
+
+    assert _report_without_runner_added_extensions(materialized) == agent_report
+    materialized["summary"] = "runner must not rewrite model-authored content"
+    assert _report_without_runner_added_extensions(materialized) != agent_report
 
 
 def test_extract_agent_review_summary_requires_explicit_causal_path_accounting() -> None:
@@ -1003,45 +1740,16 @@ def test_review_run_writes_review_summary_and_updates_ledger(monkeypatch, tmp_pa
     assert "last_review_merge_ready: true" in ledger_text.lower()
 
 
-def test_review_merge_refuses_when_summary_not_merge_ready(tmp_path: Path) -> None:
-    repo_root = tmp_path / "repo_root"
-    owner_root = repo_root
-    owner_root.mkdir(parents=True)
-    ticket_path = _make_ticket(owner_root, bucket="4 - for_review", fingerprint="deadbeefdeadbeef")
-    ledger_path = repo_root / ".agents" / "state" / "backlog_implement_actions.yaml"
-    review_run_dir = repo_root / "runs" / "review" / "1"
-    _write_json(
-        review_run_dir / "review_summary.json",
-        {
-            "schema_version": 1,
-            "pr_url": "https://example.invalid/pr/3",
-            "review_decision": "changes_requested",
-            "merge_ready": False,
-            "ci_conclusion": "failure",
-        },
-    )
-    ledger_path.parent.mkdir(parents=True, exist_ok=True)
-    ledger_path.write_text(
-        "schema_version: 1\nupdated_at: null\nactions:\n"
-        "  deadbeefdeadbeef:\n"
-        "    fingerprint: deadbeefdeadbeef\n"
-        f"    last_review_run_dir: {json.dumps(str(review_run_dir))}\n",
-        encoding="utf-8",
-    )
-
-    try:
-        _cmd_review_merge(
-            _review_simple_args(
-                repo_root=repo_root,
-                owner_root=owner_root,
-                ticket_path=ticket_path,
-                ledger=ledger_path,
-            )
+def test_review_merge_refuses_when_summary_not_causally_accepted() -> None:
+    with pytest.raises(SystemExit, match="causally accepted"):
+        _require_causal_review_acceptance(
+            {
+                "review_decision": "changes_requested",
+                "causal_acceptance": False,
+                "merge_ready": False,
+                "ci_conclusion": "failure",
+            }
         )
-    except SystemExit as exc:
-        assert exc.code != 0
-    else:
-        raise AssertionError("Expected review merge to refuse non-merge-ready summary")
 
 
 def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> None:
@@ -1105,8 +1813,9 @@ def test_review_merge_moves_ticket_to_complete(monkeypatch, tmp_path: Path) -> N
             "run_dir": str(review_run_dir),
             "pr_url": "https://example.invalid/pr/4",
             "review_decision": "approved",
-            "merge_ready": True,
-            "ci_conclusion": "success",
+            "causal_acceptance": True,
+            "merge_ready": False,
+            "ci_conclusion": "failure",
             "reviewed_head_oid": "abc123def456",
             "ticket_provenance": review_ticket_provenance,
             "implementation_ticket_ref_sha256": implementation_ticket_ref_sha256,
@@ -1656,7 +2365,137 @@ def test_review_run_refuses_when_ticket_not_in_for_review(monkeypatch, tmp_path:
         raise AssertionError("Expected review run to refuse non-for_review tickets")
 
 
-def test_review_run_refuses_when_pr_gate_not_green(monkeypatch, tmp_path: Path) -> None:
+def test_review_run_accepts_bound_adopted_awaiting_review_ticket(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
+    repo_root = tmp_path / "repo_root"
+    owner_root = repo_root
+    owner_root.mkdir(parents=True, exist_ok=True)
+    fingerprint = "ad0ptedad0pted00"
+    ticket_path = _make_ticket(
+        owner_root,
+        bucket="2 - ready",
+        fingerprint=fingerprint,
+    )
+    original_ticket_bytes = ticket_path.read_bytes()
+    ledger_path = repo_root / ".agents" / "state" / "backlog_implement_actions.yaml"
+    impl_run_dir = repo_root / "runs" / "adoptions" / "1"
+    pr_url = "https://example.invalid/pr/58"
+    _write_json(
+        impl_run_dir / "handoff_summary.json",
+        {
+            "schema_version": 1,
+            "handoff_mode": "adopt_existing_pr",
+            "final_status": "success",
+            "pr_adopted": True,
+            "pr_url": pr_url,
+            "review_required": True,
+        },
+    )
+    _write_json(
+        impl_run_dir / "pr_ref.json",
+        {"existing_pr": True, "adopted": True, "url": pr_url},
+    )
+    _write_bound_ticket_ref(
+        impl_run_dir,
+        fingerprint=fingerprint,
+        owner_root=owner_root,
+        ticket_path=ticket_path,
+    )
+    _write_adopted_review_state(
+        run_dir=impl_run_dir,
+        ledger_path=ledger_path,
+        owner_root=owner_root,
+        ticket_path=ticket_path,
+        fingerprint=fingerprint,
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._load_runner_config",
+        lambda _repo_root: object(),
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._collect_pr_review_context",
+        lambda **_: {
+            "pr": {
+                "number": 58,
+                "url": pr_url,
+                "title": "PR",
+                "state": "OPEN",
+                "isDraft": True,
+                "mergeable": "MERGEABLE",
+                "headRefName": "backlog/review",
+                "headRefOid": "a" * 40,
+                "baseRefName": "dev",
+            },
+            "checks": [{"name": "CI", "state": "PENDING"}],
+            "ci_status": "pending",
+            "ci_conclusion": None,
+            "changed_files": [],
+            "diff_excerpt": "",
+            "diff_truncated": False,
+        },
+    )
+    args = _review_run_args(
+        repo_root=repo_root,
+        owner_root=owner_root,
+        ticket_path=ticket_path,
+        ledger=ledger_path,
+    )
+    args.dry_run = True
+
+    assert _cmd_review_run(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["merge_gate_ready_now"] is False
+    assert payload["merge_gate"]["is_draft"] is True
+    assert ticket_path.read_bytes() == original_ticket_bytes
+    for_review_dir = owner_root / ".agents" / "plans" / "4 - for_review"
+    assert not for_review_dir.exists() or not list(for_review_dir.glob("*.md"))
+
+
+def test_review_run_rejects_inconsistent_adopted_lifecycle(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = tmp_path / "repo_root"
+    repo_root.mkdir(parents=True)
+    ticket_path = _make_ticket(
+        repo_root,
+        bucket="2 - ready",
+        fingerprint="badad0ptbadad0pt",
+    )
+    ledger_path = repo_root / ".agents" / "state" / "backlog_implement_actions.yaml"
+    impl_run_dir = repo_root / "runs" / "adoptions" / "bad"
+    _write_adopted_review_state(
+        run_dir=impl_run_dir,
+        ledger_path=ledger_path,
+        owner_root=repo_root,
+        ticket_path=ticket_path,
+        fingerprint="badad0ptbadad0pt",
+        lifecycle_state="implemented",
+    )
+    monkeypatch.setattr(
+        "usertest_implement.commands.review._load_runner_config",
+        lambda _repo_root: object(),
+    )
+
+    with pytest.raises(SystemExit, match="resume-state lifecycle is not one of awaiting_review"):
+        _cmd_review_run(
+            _review_run_args(
+                repo_root=repo_root,
+                owner_root=repo_root,
+                ticket_path=ticket_path,
+                ledger=ledger_path,
+            )
+        )
+
+
+def test_review_run_allows_review_before_pr_gate_is_green(
+    monkeypatch,
+    tmp_path: Path,
+    capsys,
+) -> None:
     repo_root = tmp_path / "repo_root"
     owner_root = repo_root
     owner_root.mkdir(parents=True, exist_ok=True)
@@ -1707,6 +2546,7 @@ def test_review_run_refuses_when_pr_gate_not_green(monkeypatch, tmp_path: Path) 
                 "isDraft": False,
                 "mergeable": "UNKNOWN",
                 "headRefName": "backlog/review",
+                "headRefOid": "b" * 40,
                 "baseRefName": "dev",
             },
             "checks": [{"name": "CI", "state": "PENDING"}],
@@ -1718,19 +2558,17 @@ def test_review_run_refuses_when_pr_gate_not_green(monkeypatch, tmp_path: Path) 
         },
     )
 
-    try:
-        _cmd_review_run(
-            _review_run_args(
-                repo_root=repo_root,
-                owner_root=owner_root,
-                ticket_path=ticket_path,
-                ledger=ledger_path,
-            )
-        )
-    except SystemExit as exc:
-        assert "PR gate is green" in str(exc)
-    else:
-        raise AssertionError("Expected review run to refuse non-green PR gate")
+    args = _review_run_args(
+        repo_root=repo_root,
+        owner_root=owner_root,
+        ticket_path=ticket_path,
+        ledger=ledger_path,
+    )
+    args.dry_run = True
+    assert _cmd_review_run(args) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["merge_gate_ready_now"] is False
+    assert payload["merge_gate"]["ci_status"] == "pending"
 
 
 def test_wait_for_ci_success_polls_view_until_completed_success(

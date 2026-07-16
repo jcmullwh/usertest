@@ -26,6 +26,183 @@ def _sha(value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def test_workspace_git_argv_uses_exact_command_local_safe_directory(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "isolated-worktree"
+
+    argv = outcome_roles._workspace_git_argv(workspace, "rev-parse", "HEAD")
+
+    resolved = workspace.resolve()
+    safe_dir = str(resolved).replace("\\", "/")
+    assert argv == [
+        "git",
+        "-c",
+        f"safe.directory={safe_dir}",
+        "-C",
+        str(resolved),
+        "rev-parse",
+        "HEAD",
+    ]
+
+
+def _stage5_planned_oracle() -> dict[str, object]:
+    selected: dict[str, object] = {
+        "schema_version": 1,
+        "producer": "backlog_core.bind_falsification_review",
+        "kind": "selected_option_outcome_strategy",
+        "problem_id": "problem:runtime",
+        "selected_option_id": "option:runtime",
+        "selected_option_sha256": "a" * 64,
+        "research_receipt_sha256": "b" * 64,
+        "strategy": {
+            "intended_operation": "The original operation emits its useful result.",
+            "success_properties": ["useful-result=ready"],
+            "safety_constraints": [],
+            "original_scenario_experiment_ids": ["experiment:runtime"],
+        },
+        "review": {
+            "verdict": "sufficient",
+            "semantic_relation_assessment": "The check proves intended operation.",
+            "proves_intended_operation": True,
+            "problem_coverage": "full",
+            "residual_untested_paths": [],
+            "evidence_refs": ["mechanism_evidence:runtime"],
+        },
+        "outcome_contract_status": "approved_for_planning",
+        "post_change_evidence_status": "unverified",
+    }
+    selected["outcome_contract_id"] = "stage5_outcome_contract:" + _sha(selected)
+    oracle: dict[str, object] = {
+        "schema_version": 1,
+        "kind": "stage5_planned_outcome",
+        "proof_scope": "planned_post_change_verification",
+        "case_id": "case:runtime",
+        "repo_revision": "c" * 40,
+        "research_experiment_id": "experiment:runtime",
+        "research_experiment_ids": ["experiment:runtime"],
+        "selected_outcome_contract": selected,
+    }
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _sha(oracle)
+    return oracle
+
+
+def _fail_first_stage5_oracle() -> dict[str, object]:
+    planned = _stage5_planned_oracle()
+    selected = planned["selected_outcome_contract"]
+    assert isinstance(selected, dict)
+    argv = ["python", ".usertest_research/fail_first.py"]
+    oracle: dict[str, object] = {
+        "schema_version": 1,
+        "case_id": "case:runtime",
+        "repo_revision": planned["repo_revision"],
+        "research_experiment_id": "experiment:runtime",
+        "scenario_kind": "fail_first_contract",
+        "origin_atom_ids": ["atom:runtime"],
+        "mechanism_evidence_ids": ["mechanism_evidence:runtime"],
+        "baseline": {
+            "exit_code": 1,
+            "observable_assertion": {
+                "source": "stderr",
+                "operator": "contains",
+                "expected": "original failure",
+            },
+            "stdout_sha256": "a" * 64,
+            "stderr_sha256": "b" * 64,
+        },
+        "kind": "staged_replay",
+        "proof_scope": "behavioral",
+        "execution": {
+            "argv": argv,
+            "command_authorization": {
+                "authorization_kind": "attested_research_harness",
+                "executed_argv_sha256": _sha(argv),
+                "shell": False,
+                "workspace_confined": True,
+            },
+            "platform_requirement": "any",
+            "shell": False,
+        },
+        "asset": None,
+        "selected_outcome_contract": selected,
+    }
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _sha(oracle)
+    return oracle
+
+
+def test_stage5_planned_outcome_runtime_schema_accepts_approved_unverified_contract() -> None:
+    oracle = _stage5_planned_oracle()
+
+    assert outcome_roles._normalize_outcome_oracle(oracle) == oracle
+
+
+def test_stage5_planned_outcome_runtime_schema_rejects_false_execution_evidence() -> None:
+    oracle = _stage5_planned_oracle()
+    selected = oracle["selected_outcome_contract"]
+    assert isinstance(selected, dict)
+    selected["post_change_evidence_status"] = "resolved"
+    selected["outcome_contract_id"] = "stage5_outcome_contract:" + _sha(
+        {key: value for key, value in selected.items() if key != "outcome_contract_id"}
+    )
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _sha(
+        {key: value for key, value in oracle.items() if key != "outcome_oracle_id"}
+    )
+
+    with pytest.raises(ValueError, match="outcome_role_stage5_planned_oracle_invalid"):
+        outcome_roles._normalize_outcome_oracle(oracle)
+
+
+def test_fail_first_runtime_accepts_stage5_contract_without_positive_contract() -> None:
+    oracle = _fail_first_stage5_oracle()
+    unsigned = {
+        "description": "Replay the unchanged fail-first contract after implementation.",
+        "research_experiment_id": "experiment:runtime",
+        "research_experiment_ids": ["experiment:runtime"],
+        "commands": [],
+        "predicates": [
+            {"type": "command_exit_code", "command_index": 0, "equals": 0},
+            {
+                "type": "command_stdout_contains",
+                "command_index": 0,
+                "value": "useful-result=ready",
+            },
+        ],
+        "oracle": oracle,
+        "required_proof_scope": "behavioral",
+    }
+
+    normalized = outcome_roles._normalize_role_contract(
+        "original_scenario",
+        {**unsigned, "role_contract_sha256": _sha(unsigned)},
+    )
+
+    assert normalized["oracle"] == oracle
+    assert "selected_positive_outcome_contract_ids" not in normalized
+
+
+def test_fail_first_runtime_schema_rejects_missing_stage5_contract() -> None:
+    oracle = _fail_first_stage5_oracle()
+    oracle.pop("selected_outcome_contract")
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _sha(
+        {key: value for key, value in oracle.items() if key != "outcome_oracle_id"}
+    )
+
+    with pytest.raises(ValueError, match="fail_first_planned_oracle_invalid"):
+        outcome_roles._normalize_outcome_oracle(oracle)
+
+
+def test_ordinary_staged_runtime_schema_still_requires_positive_contract() -> None:
+    oracle = _fail_first_stage5_oracle()
+    oracle["scenario_kind"] = "original_replay"
+    oracle.pop("selected_outcome_contract")
+    oracle["outcome_oracle_id"] = "outcome_oracle:" + _sha(
+        {key: value for key, value in oracle.items() if key != "outcome_oracle_id"}
+    )
+
+    with pytest.raises(ValueError, match="outcome_role_positive_contract_missing"):
+        outcome_roles._normalize_outcome_oracle(oracle)
+
+
 def _git(cwd: Path, *args: str) -> str:
     proc = subprocess.run(
         ["git", *args],
@@ -235,6 +412,66 @@ def test_role_executor_binds_commit_and_machine_predicates(tmp_path: Path) -> No
         verified_implementation_head=commit,
         role_contract=contract,
     )["passed"] is True
+
+
+def test_planned_unverified_live_role_requires_execution_to_pass(tmp_path: Path) -> None:
+    workspace = tmp_path / "repo"
+    workspace.mkdir()
+    _git(workspace, "init")
+    _git(workspace, "config", "user.email", "tests@example.com")
+    _git(workspace, "config", "user.name", "Tests")
+    (workspace / "probe.py").write_text(
+        "raise SystemExit(7)\n",
+        encoding="utf-8",
+    )
+    _git(workspace, "add", "probe.py")
+    _git(workspace, "commit", "-m", "failing prospective probe")
+    commit = _git(workspace, "rev-parse", "HEAD")
+    oracle = _stage5_planned_oracle()
+    selected = oracle["selected_outcome_contract"]
+    assert isinstance(selected, dict)
+    unsigned_contract = {
+        "description": "Run the planned live probe after implementation.",
+        "execution_status": "planned_unverified",
+        "commands": ["python probe.py"],
+        "command_bindings": [
+            {
+                "command_index": 0,
+                "binding_kind": "stage6_planned_post_change",
+                "selected_outcome_contract_id": selected["outcome_contract_id"],
+                "repo_revision": commit,
+            }
+        ],
+        "predicates": [
+            {"type": "command_exit_code", "command_index": 0, "equals": 0}
+        ],
+    }
+    contract = {
+        **unsigned_contract,
+        "role_contract_sha256": _sha(unsigned_contract),
+    }
+
+    artifact = run_outcome_evidence_role(
+        workspace=workspace,
+        output_path=tmp_path / "runs" / "live" / "outcome_role.json",
+        role="live",
+        role_contract=contract,
+        case_id="case:runtime",
+        plan_revision_id="plan:runtime:v1",
+        merged_commit=commit,
+        verification_contract_sha256="a" * 64,
+        target_contract_sha256="b" * 64,
+        verified_implementation_head=commit,
+        timeout_seconds=None,
+    )
+
+    assert artifact["role_contract"]["execution_status"] == "planned_unverified"
+    assert artifact["role_contract"]["command_bindings"] == unsigned_contract[
+        "command_bindings"
+    ]
+    assert artifact["commands"][0]["exit_code"] != 0
+    assert artifact["predicate_results"][0]["passed"] is False
+    assert artifact["passed"] is False
 
 
 def test_role_executor_rejects_checkout_other_than_merged_commit(tmp_path: Path) -> None:
@@ -963,6 +1200,7 @@ def test_recurrence_requires_later_shadow_case_proof_not_just_command(
     commit = _git(workspace, "rev-parse", "HEAD")
     unsigned = {
         "description": "Observe recurrence through the canonical backlog case.",
+        "verification_owner": "centralized_case_refresh",
         "commands": [],
         "predicates": [],
     }
@@ -979,6 +1217,21 @@ def test_recurrence_requires_later_shadow_case_proof_not_just_command(
         "target_contract_sha256": "b" * 64,
         "verified_implementation_head": commit,
     }
+    unowned = {
+        "description": unsigned["description"],
+        "commands": [],
+        "predicates": [],
+    }
+    with pytest.raises(ValueError, match="outcome_role_commands_invalid"):
+        run_outcome_evidence_role(
+            **{
+                **common,
+                "role_contract": {
+                    **unowned,
+                    "role_contract_sha256": _sha(unowned),
+                },
+            }
+        )
     with pytest.raises(ValueError, match="fresh_shadow_receipt_required"):
         run_outcome_evidence_role(**common)
 

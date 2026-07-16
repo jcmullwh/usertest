@@ -189,6 +189,8 @@ The repo default profile also pins maintenance-oriented execution defaults for `
 
 - `persona_id: thoughtful_maintainer`
 - `mission_id: implement_maintenance_backlog_ticket_v1`
+- `exec_keep_container: false` so normal cleanup force-removes execution containers and Docker
+  auto-removes them when they stop; use `--exec-keep-container` only for deliberate debugging.
 
 If the settings file is absent, the CLI falls back to those same maintenance defaults instead of inheriting the
 global catalog quick-start persona.
@@ -260,6 +262,32 @@ completion. It requires a fresh zero-export shadow result for every source, the 
 no nonterminal canonical cases, and no active generated plan files. A pass that created work for PR
 review records `awaiting_terminal_proof` and lets the outer review/outcome loop continue. Only a
 hash-verified passing terminal proof stops that loop as `completed`.
+
+### Adopt an existing implementation PR
+
+When implementation and PR creation happened outside the original runner handoff, reconcile them
+without starting another agent turn or pretending that the reconciliation command committed,
+pushed, or created the PR:
+
+```bash
+usertest-implement handoff adopt-pr \
+  --owner-root /path/to/ticket-owner \
+  --ticket-path "/path/to/ticket-owner/.agents/plans/2 - ready/<ticket>.md" \
+  --source-run-dir /path/to/implemented-local-run \
+  --runs-dir /path/to/runs/usertest_implement \
+  --pr-url https://github.com/owner/repo/pull/123 \
+  --base-branch dev \
+  --remote-name origin
+```
+
+The source must be `implemented_local`, ticket-bound, and tied to the current clean branch head.
+The command checks the open PR before and after verification and rejects a different repository,
+branch, head, base, or moving PR binding. If the source verification ran a broader command set, it
+captures only the exact stage-6 plan commands with the source run's positive timeout and Python
+toolchain. It writes a separate adoption run and updates the attempt ledger. It does not invoke a
+model, mutate the ticket, move queue state, create an outcome record, push, merge, or write GitHub.
+An adopted ready ticket remains in its existing bucket; this command does not broaden `review run`
+eligibility.
 
 ### Review stage
 

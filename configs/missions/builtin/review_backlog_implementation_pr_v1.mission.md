@@ -54,6 +54,8 @@ Use `task_run_v1` and set `report.extensions.review_summary` to an object with:
 
 Approval requires `mechanism_addressed`, `exercised`, and `closed`. Use `issues[]` for concrete findings. Put symptom-only changes, missing oracle coverage, residual causal paths, and other blocking findings there instead of hiding them in prose.
 
+`review_decision` is the causal/code acceptance judgment. The runner computes mutable merge readiness separately. A draft PR, pending CI, an infrastructure failure, or a failure already present on the base branch makes the current PR not merge-ready, but must not by itself change an otherwise sound implementation to `changes_requested` or `blocked`. A CI failure caused by the reviewed diff is an implementation defect and should affect the decision.
+
 ## Approach
 
 1) Reconstruct the researched mechanism and the selected intervention from the ticket evidence.
@@ -62,7 +64,7 @@ Approval requires `mechanism_addressed`, `exercised`, and `closed`. Use `issues[
 4) Enumerate any causal path that remains open, including bypasses, alternate callers, compatibility paths, and runtime-only paths.
 5) Check for implementation defects, regressions, missing tests/docs, or incomplete follow-through.
 6) Treat extra paths and wider changes as a short scope advisory after causal review.
-7) Ground the decision in the current CI and PR state and produce a clear approve / changes_requested / blocked outcome.
+7) Use current CI and PR state to identify implementation-caused failures and report operational readiness separately from the causal/code decision.
 
 ## Delegation guidance
 

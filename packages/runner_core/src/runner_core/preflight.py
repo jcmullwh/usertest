@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from agent_adapters import resolve_codex_executable
+
 from runner_core.python_interpreter_probe import resolve_usable_python_interpreter
 
 # These values bound small preflight probes only. They are deliberately named
@@ -1056,11 +1058,18 @@ def _probe_commands_local(
             probe_details[cmd] = candidate.to_dict()
             continue
 
-        resolved = (
-            shutil.which(cmd, path=effective_path)
-            if effective_path is not None
-            else shutil.which(cmd)
-        )
+        if os.name == "nt" and cmd.strip().casefold() in {"codex", "codex.exe"}:
+            codex_candidate = resolve_codex_executable(
+                cmd,
+                env=effective_env or os.environ,
+            )
+            resolved = str(Path(codex_candidate)) if Path(codex_candidate).is_file() else None
+        else:
+            resolved = (
+                shutil.which(cmd, path=effective_path)
+                if effective_path is not None
+                else shutil.which(cmd)
+            )
         present = resolved is not None
         usable = present
         reason_code: str | None = None if present else "not_found"

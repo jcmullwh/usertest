@@ -50,6 +50,9 @@ CONTROLLED_CODEX_CONFIG_OVERRIDES: tuple[str, ...] = (
 )
 
 _ACTIVATION_SAFE_CONFIG_DELTA: tuple[str, ...] = ("model_reasoning_effort=low",)
+_ACTIVATION_OMITTED_MISSION_CONFIG_KEYS: frozenset[str] = frozenset(
+    {"model_instructions_file"}
+)
 CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE = 'windows.sandbox="unelevated"'
 _CONTROLLED_CODEX_WINDOWS_SANDBOX_MODE = "unelevated"
 
@@ -104,12 +107,49 @@ def _effective_windows_sandbox_is_unelevated(overrides: Sequence[str]) -> bool:
     return False
 
 
+def _activation_overrides_from_mission(
+    mission: Sequence[str],
+    *,
+    omit_mission_instructions: bool = True,
+) -> list[str]:
+    """Build the controlled shell probe config without mission instruction payloads.
+
+    The activation probe proves the host ChatGPT route and controlled shell environment; it
+    does not execute the research mission. Large ``model_instructions_file`` payloads therefore
+    belong only to the mission process. All other controlled configuration, including sandbox,
+    project trust, disabled integrations, and the canonical subscription route, is preserved.
+    """
+
+    mission_values = list(mission)
+    suffix_length = len(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES)
+    if mission_values[-suffix_length:] != list(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES):
+        return []
+    activation_base: list[str] = []
+    for override in mission_values[:-suffix_length]:
+        key, separator, _value = override.partition("=")
+        normalized_key = key.strip().lower().replace("-", "_")
+        if (
+            omit_mission_instructions
+            and separator
+            and normalized_key in _ACTIVATION_OMITTED_MISSION_CONFIG_KEYS
+        ):
+            continue
+        activation_base.append(override)
+    return [
+        *activation_base,
+        *_ACTIVATION_SAFE_CONFIG_DELTA,
+        *CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
+    ]
+
+
 def _config_contract_errors(contract: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     if contract.get("contract_sha256") != _config_contract_sha256(contract):
         errors.append("codex_execpolicy_config_contract_hash_changed")
+    schema_version = contract.get("schema_version")
+    if schema_version not in {2, 3}:
+        errors.append("codex_execpolicy_config_contract_schema_version_invalid")
     exact_fields = {
-        "schema_version": 2,
         "status": "bound",
         "user_config_ignored": True,
         "target_project_config_isolated": True,
@@ -161,15 +201,12 @@ def _config_contract_errors(contract: dict[str, Any]) -> list[str]:
         errors.append("codex_execpolicy_config_contract_preflight_mission_mismatch")
     if lists.get("postcheck") != mission:
         errors.append("codex_execpolicy_config_contract_postcheck_mission_mismatch")
-    suffix_length = len(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES)
-    expected_activation = (
-        [
-            *mission[:-suffix_length],
-            *_ACTIVATION_SAFE_CONFIG_DELTA,
-            *CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
-        ]
-        if mission[-suffix_length:] == list(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES)
-        else []
+    expected_activation = _activation_overrides_from_mission(
+        mission,
+        # Schema v2 retained the mission instruction payload in the activation
+        # probe. Schema v3 makes that probe mission-free while preserving every
+        # controlled route, sandbox, trust, and integration override.
+        omit_mission_instructions=schema_version != 2,
     )
     if lists.get("activation") != expected_activation:
         errors.append("codex_execpolicy_config_contract_activation_delta_invalid")
@@ -300,6 +337,17 @@ def controlled_codex_execpolicy_receipt_errors(
     if activation_probe_required:
         activation_raw = receipt.get("activation_probe")
         activation = activation_raw if isinstance(activation_raw, dict) else {}
+        expected_activation_sandbox_raw = receipt.get(
+            "expected_activation_sandbox_mode",
+            "workspace-write",
+        )
+        expected_activation_sandbox = (
+            str(expected_activation_sandbox_raw).strip()
+            if isinstance(expected_activation_sandbox_raw, str)
+            else ""
+        )
+        if expected_activation_sandbox not in {"read-only", "workspace-write"}:
+            errors.append("codex_execpolicy_expected_activation_sandbox_mode_invalid")
         if (
             activation.get("ok") is not True
             or activation.get("marker_seen") is not True
@@ -311,9 +359,14 @@ def controlled_codex_execpolicy_receipt_errors(
             errors.append("codex_execpolicy_activation_rules_mode_invalid")
         if (
             platform_os_name == "nt"
-            and activation.get("sandbox_mode_observed") != "workspace-write"
+            and activation.get("sandbox_mode_observed") != expected_activation_sandbox
         ):
             errors.append("codex_execpolicy_activation_windows_sandbox_mode_invalid")
+        if activation.get("sandbox_mode_expected") not in {
+            None,
+            expected_activation_sandbox,
+        }:
+            errors.append("codex_execpolicy_activation_expected_sandbox_mismatch")
 
     overrides_raw = receipt.get("controlled_config_overrides")
     overrides = overrides_raw if isinstance(overrides_raw, list) else []
@@ -389,6 +442,150 @@ def verify_controlled_codex_execpolicy_receipt(path: Path) -> list[str]:
     if not isinstance(raw, dict):
         return ["codex_execpolicy_receipt_not_object"]
     return controlled_codex_execpolicy_receipt_errors(raw)
+
+
+def revalidate_controlled_codex_execpolicy_receipt_for_expected_sandbox(
+    path: Path,
+    *,
+    expected_sandbox_mode: str,
+) -> dict[str, Any]:
+    """Re-evaluate an immutable receipt whose sandbox expectation was wrong.
+
+    This is intentionally a supplemental migration receipt, not an edit to the
+    original artifact.  Only derived activation/auth fields are recomputed from
+    the retained login statuses, probe argv/events, and workspace attestation.
+    """
+
+    expected = str(expected_sandbox_mode).strip()
+    if expected not in {"read-only", "workspace-write"}:
+        return {
+            "schema_version": 1,
+            "verified": False,
+            "expected_sandbox_mode": expected or None,
+            "errors": ["codex_execpolicy_revalidation_expected_sandbox_invalid"],
+        }
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        return {
+            "schema_version": 1,
+            "verified": False,
+            "expected_sandbox_mode": expected,
+            "errors": [f"codex_execpolicy_receipt_unreadable:{type(exc).__name__}"],
+        }
+    if not isinstance(raw, dict):
+        return {
+            "schema_version": 1,
+            "verified": False,
+            "expected_sandbox_mode": expected,
+            "errors": ["codex_execpolicy_receipt_not_object"],
+        }
+
+    source_errors = controlled_codex_execpolicy_receipt_errors(raw)
+    source_receipt_sha256 = raw.get("receipt_sha256")
+    if source_receipt_sha256 != codex_execpolicy_receipt_sha256(raw):
+        return {
+            "schema_version": 1,
+            "verified": False,
+            "expected_sandbox_mode": expected,
+            "source_receipt_sha256": source_receipt_sha256,
+            "source_errors": source_errors,
+            "errors": ["codex_execpolicy_revalidation_source_hash_invalid"],
+        }
+
+    normalized = json.loads(json.dumps(raw))
+    activation_raw = normalized.get("activation_probe")
+    activation = activation_raw if isinstance(activation_raw, dict) else {}
+    argv_raw = activation.get("argv")
+    # Final receipts intentionally retain only the observed mode/rules fields,
+    # so prefer them and use argv only for forward-compatible receipts.
+    observed = activation.get("sandbox_mode_observed")
+    rules_ignored = activation.get("rules_ignored_observed")
+    if (not isinstance(observed, str) or not observed) and isinstance(argv_raw, list):
+        if "--sandbox" in argv_raw:
+            index = argv_raw.index("--sandbox")
+            if index + 1 < len(argv_raw) and isinstance(argv_raw[index + 1], str):
+                observed = argv_raw[index + 1]
+    if not isinstance(rules_ignored, bool) and isinstance(argv_raw, list):
+        rules_ignored = "--ignore-rules" in argv_raw
+
+    raw_events_path_raw = activation.get("raw_events_path")
+    raw_events_hash_valid = False
+    if isinstance(raw_events_path_raw, str):
+        raw_events_path = Path(raw_events_path_raw)
+        if raw_events_path.is_file():
+            raw_events_hash_valid = (
+                sha256(raw_events_path.read_bytes()).hexdigest()
+                == activation.get("raw_events_sha256")
+            )
+    required = activation.get("required_commands")
+    seen = activation.get("required_commands_seen")
+    required_commands = required if isinstance(required, list) else []
+    seen_commands = seen if isinstance(seen, list) else []
+    required_commands_satisfied = all(item in seen_commands for item in required_commands)
+    native_windows = normalized.get("platform_os_name") == "nt"
+    controlled_execution_mode_verified = (
+        rules_ignored is native_windows
+        and (not native_windows or observed == expected)
+    )
+    underlying_probe_verified = (
+        activation.get("marker_seen") is True
+        and activation.get("workspace_unchanged") is True
+        and activation.get("reason") in {None, ""}
+        and required_commands_satisfied
+        and raw_events_hash_valid
+    )
+    activation_verified = underlying_probe_verified and controlled_execution_mode_verified
+    activation.update(
+        {
+            "ok": activation_verified,
+            "sandbox_mode_expected": expected,
+            "controlled_execution_mode_verified": controlled_execution_mode_verified,
+        }
+    )
+    normalized["activation_probe"] = activation
+    normalized["expected_activation_sandbox_mode"] = expected
+    normalized["controlled_execution_mode_verified"] = controlled_execution_mode_verified
+    normalized["chatgpt_subscription_activation_probe_verified"] = activation_verified
+
+    def _login_status_verified(value: Any) -> bool:
+        status = value if isinstance(value, dict) else {}
+        blank_raw = status.get("auth_env_vars_blank")
+        blank = blank_raw if isinstance(blank_raw, dict) else {}
+        return (
+            status.get("ok") is True
+            and status.get("chatgpt_status_exact") is True
+            and all(blank.get(name) is True for name in CONTROLLED_CODEX_AUTH_ENV_VARS)
+        )
+
+    login_verified = _login_status_verified(normalized.get("login_status"))
+    post_verified = _login_status_verified(normalized.get("post_login_status"))
+    auth_verified = login_verified and activation_verified and post_verified
+    normalized["chatgpt_subscription_login_status_verified"] = login_verified
+    normalized["chatgpt_subscription_post_login_status_verified"] = post_verified
+    normalized["chatgpt_subscription_auth_verified"] = auth_verified
+    normalized["api_key_auth_environment_disabled"] = login_verified
+    normalized["auth_verification_status"] = "verified" if auth_verified else "failed"
+    normalized["receipt_sha256"] = codex_execpolicy_receipt_sha256(normalized)
+    revalidated_errors = controlled_codex_execpolicy_receipt_errors(normalized)
+    errors = list(revalidated_errors)
+    return {
+        "schema_version": 1,
+        "verified": not errors,
+        "source_receipt_path": str(path.resolve()),
+        "source_receipt_sha256": source_receipt_sha256,
+        "source_errors": source_errors,
+        "expected_sandbox_mode": expected,
+        "observed_sandbox_mode": observed,
+        "raw_events_hash_valid": raw_events_hash_valid,
+        "required_commands_satisfied": required_commands_satisfied,
+        "underlying_probe_verified": underlying_probe_verified,
+        "controlled_execution_mode_verified": controlled_execution_mode_verified,
+        "login_status_verified": login_verified,
+        "post_login_status_verified": post_verified,
+        "normalized_receipt_sha256": normalized["receipt_sha256"],
+        "errors": errors,
+    }
 
 
 def _validate_prefixes(prefixes: Sequence[Sequence[str]]) -> tuple[tuple[str, ...], ...]:
@@ -920,14 +1117,9 @@ class ControlledCodexExecpolicyOverlay:
         route_errors = codex_subscription_config_errors(mission)
         if route_errors:
             raise ValueError("codex_execpolicy_mission_config_invalid:" + ",".join(route_errors))
-        suffix_length = len(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES)
-        activation = [
-            *mission[:-suffix_length],
-            *_ACTIVATION_SAFE_CONFIG_DELTA,
-            *CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
-        ]
+        activation = _activation_overrides_from_mission(mission)
         contract: dict[str, Any] = {
-            "schema_version": 2,
+            "schema_version": 3,
             "status": "bound",
             "platform_os_name": os.name,
             "user_config_ignored": True,
@@ -1003,8 +1195,15 @@ class ControlledCodexExecpolicyOverlay:
             if sandbox_index + 1 < len(argv) and isinstance(argv[sandbox_index + 1], str):
                 sandbox_mode_observed = argv[sandbox_index + 1]
         native_windows = self.receipt.get("platform_os_name") == "nt"
+        expected_sandbox_mode_raw = self.receipt.get("expected_activation_sandbox_mode")
+        expected_sandbox_mode = (
+            str(expected_sandbox_mode_raw).strip()
+            if isinstance(expected_sandbox_mode_raw, str)
+            and str(expected_sandbox_mode_raw).strip()
+            else "workspace-write"
+        )
         controlled_execution_mode_verified = rules_ignored_observed is native_windows and (
-            not native_windows or sandbox_mode_observed == "workspace-write"
+            not native_windows or sandbox_mode_observed == expected_sandbox_mode
         )
         raw_path_value = probe.get("raw_events_path")
         raw_path = Path(raw_path_value) if isinstance(raw_path_value, str) else None
@@ -1025,6 +1224,7 @@ class ControlledCodexExecpolicyOverlay:
             "workspace_unchanged": probe.get("workspace_unchanged") is True,
             "rules_ignored_observed": rules_ignored_observed,
             "sandbox_mode_observed": sandbox_mode_observed,
+            "sandbox_mode_expected": expected_sandbox_mode,
             "controlled_execution_mode_verified": controlled_execution_mode_verified,
         }
         self.receipt["controlled_execution_mode_verified"] = controlled_execution_mode_verified
@@ -1231,6 +1431,7 @@ def install_controlled_codex_execpolicy(
     allow_prefixes: Sequence[Sequence[str]],
     agent_workspace_path: str | Path | None = None,
     activation_probe_required: bool = True,
+    expected_activation_sandbox_mode: str = "workspace-write",
 ) -> ControlledCodexExecpolicyOverlay:
     """Install target rules while retaining the host's managed ChatGPT credential cache.
 
@@ -1243,6 +1444,12 @@ def install_controlled_codex_execpolicy(
     normalized = _validate_prefixes(allow_prefixes)
     if not normalized:
         raise ValueError("codex_execpolicy_prefixes_empty")
+    expected_sandbox_mode = str(expected_activation_sandbox_mode).strip()
+    if expected_sandbox_mode not in {"read-only", "workspace-write"}:
+        raise ValueError(
+            "codex_execpolicy_expected_activation_sandbox_mode_invalid:"
+            f"{expected_sandbox_mode or '<empty>'}"
+        )
     workspace = workspace_dir.resolve()
     agent_workspace = str(agent_workspace_path or workspace)
     host_codex_home = Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).resolve()
@@ -1413,6 +1620,7 @@ def install_controlled_codex_execpolicy(
         "host_auth_shape_before": host_auth_shape,
         "chatgpt_subscription_auth_declared": False,
         "activation_probe_required": bool(activation_probe_required),
+        "expected_activation_sandbox_mode": expected_sandbox_mode,
         "chatgpt_subscription_login_status_verified": False,
         "chatgpt_subscription_activation_probe_verified": False,
         "chatgpt_subscription_post_login_status_verified": False,

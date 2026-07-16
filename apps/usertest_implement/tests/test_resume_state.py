@@ -11,6 +11,7 @@ from usertest_implement.resume_state import (
     LIFECYCLE_REVIEW_CHANGES_REQUESTED,
     LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
     build_ticket_resume_state,
+    implementation_author_continuity,
     write_ticket_resume_state,
 )
 from usertest_implement.shared import SelectedTicket
@@ -116,6 +117,36 @@ def test_resume_state_never_claims_exact_continuity_for_malformed_thread_id(
     assert state["implementation_author"]["session_id"] is None
     assert state["implementation_author"]["status"] == "author_session_unavailable"
     assert state["implementation_author"]["exact_session_available"] is False
+
+
+def test_implementation_author_continuity_survives_existing_pr_adoption(
+    tmp_path: Path,
+) -> None:
+    _selected_ticket, source_run, _workspace = _base_run(tmp_path)
+    adopted_run = tmp_path / "runs" / "adopted" / "0"
+    _write_json(
+        adopted_run / "target_ref.json",
+        {"model_invoked": False, "acquire_mode": "existing_handoff_adoption"},
+    )
+    _write_json(
+        adopted_run / "adoption_ref.json",
+        {
+            "kind": "existing_pr_adoption",
+            "source_run_dir": str(source_run),
+            "flags": {"pr_adopted": True, "model_invoked": False},
+        },
+    )
+
+    continuity = implementation_author_continuity(adopted_run)
+
+    assert continuity["agent"] == "codex"
+    assert continuity["session_id"] == "019f5000-0000-7000-8000-000000000001"
+    assert continuity["exact_session_available"] is True
+    assert continuity["status"] == "exact_session_available_via_adoption"
+    assert continuity["author_source_run_dir"] == str(source_run.resolve())
+    assert continuity["via_adoption_ref"] == str(
+        adopted_run.resolve() / "adoption_ref.json"
+    )
 
 
 def test_resume_state_maps_verification_failure(tmp_path: Path) -> None:

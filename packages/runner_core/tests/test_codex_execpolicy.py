@@ -22,6 +22,7 @@ from runner_core.codex_execpolicy import (
     codex_execpolicy_receipt_sha256,
     codex_project_trust_override,
     install_controlled_codex_execpolicy,
+    revalidate_controlled_codex_execpolicy_receipt_for_expected_sandbox,
     verify_controlled_codex_execpolicy_receipt,
 )
 
@@ -57,6 +58,45 @@ def _bind_default_config(
         ],
     )
     return overlay.bind_effective_config(mission)
+
+
+def _verified_login_status() -> dict[str, object]:
+    return {
+        "ok": True,
+        "chatgpt_status_exact": True,
+        "status_kind": "chatgpt",
+        "auth_env_vars_blank": _blank_subscription_environment(),
+    }
+
+
+def _finalize_verified_overlay(overlay: ControlledCodexExecpolicyOverlay) -> None:
+    status = _verified_login_status()
+    overlay.record_login_status(status)
+    overlay.record_activation_probe(_activation_probe())
+    overlay.record_post_login_status(status)
+    assert overlay.restore() == []
+
+
+def _rewrite_config_contract(
+    overlay: ControlledCodexExecpolicyOverlay,
+    contract: dict[str, object],
+) -> None:
+    contract["contract_sha256"] = execpolicy_mod._config_contract_sha256(contract)
+    overlay.config_contract_path.write_text(
+        json.dumps(contract, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    receipt = json.loads(overlay.receipt_path.read_text(encoding="utf-8"))
+    receipt["controlled_config_contract_sha256"] = sha256(
+        overlay.config_contract_path.read_bytes()
+    ).hexdigest()
+    receipt["receipt_sha256"] = codex_execpolicy_receipt_sha256(receipt)
+    overlay.receipt_path.write_text(
+        json.dumps(receipt, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -175,6 +215,149 @@ def test_controlled_execpolicy_replaces_and_restores_target_rules(tmp_path: Path
         "unelevated" if os.name == "nt" else "not_applicable"
     )
     assert auth_path.read_bytes() == auth_before
+
+
+def test_activation_config_omits_mission_instructions_but_keeps_controlled_config(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    overlay = install_controlled_codex_execpolicy(
+        workspace_dir=workspace,
+        run_dir=run_dir,
+        allow_prefixes=(("python",),),
+    )
+    instruction_override = 'model_instructions_file="C:/run/stage3-evidence-appendix.md"'
+    mission = build_codex_subscription_config_overrides(
+        ["model_reasoning_effort=high", instruction_override],
+        source="test_controlled_mission_instructions",
+        internal_safe_overrides=[
+            *CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+            *(
+                [CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE]
+                if os.name == "nt"
+                else []
+            ),
+            overlay.project_trust_override,
+        ],
+    )
+
+    mission_overrides, activation_overrides = overlay.bind_effective_config(mission)
+
+    assert instruction_override in mission_overrides
+    assert instruction_override not in activation_overrides
+    assert all(
+        override in activation_overrides
+        for override in CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES
+    )
+    assert overlay.project_trust_override in activation_overrides
+    assert (
+        CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE in activation_overrides
+    ) is (os.name == "nt")
+    assert activation_overrides[-len(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES) :] == list(
+        CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES
+    )
+    assert "model_reasoning_effort=low" in activation_overrides
+
+    contract = json.loads(overlay.config_contract_path.read_text(encoding="utf-8"))
+    assert contract["schema_version"] == 3
+    assert contract["mission_overrides"] == mission_overrides
+    assert contract["activation_overrides"] == activation_overrides
+    assert overlay.restore() == []
+
+
+def test_retained_v2_config_contract_uses_historical_activation_rule(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    overlay = install_controlled_codex_execpolicy(
+        workspace_dir=workspace,
+        run_dir=run_dir,
+        allow_prefixes=(("python",),),
+    )
+    instruction_override = 'model_instructions_file="C:/run/retained-stage3-appendix.md"'
+    mission = build_codex_subscription_config_overrides(
+        ["model_reasoning_effort=high", instruction_override],
+        source="test_retained_v2_contract",
+        internal_safe_overrides=[
+            *CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+            *(
+                [CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE]
+                if os.name == "nt"
+                else []
+            ),
+            overlay.project_trust_override,
+        ],
+    )
+    mission_overrides, _activation_overrides = overlay.bind_effective_config(mission)
+    _finalize_verified_overlay(overlay)
+
+    contract = json.loads(overlay.config_contract_path.read_text(encoding="utf-8"))
+    suffix_length = len(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES)
+    historical_activation = [
+        *mission_overrides[:-suffix_length],
+        "model_reasoning_effort=low",
+        *CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
+    ]
+    contract["schema_version"] = 2
+    contract["activation_overrides"] = historical_activation
+    contract["activation_overrides_sha256"] = execpolicy_mod._canonical_json_sha256(
+        historical_activation
+    )
+    _rewrite_config_contract(overlay, contract)
+
+    assert instruction_override in historical_activation
+    assert verify_controlled_codex_execpolicy_receipt(overlay.receipt_path) == []
+
+
+def test_v3_config_contract_rejects_mission_instructions_in_activation(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    overlay = install_controlled_codex_execpolicy(
+        workspace_dir=workspace,
+        run_dir=run_dir,
+        allow_prefixes=(("python",),),
+    )
+    instruction_override = 'model_instructions_file="C:/run/current-stage3-appendix.md"'
+    mission = build_codex_subscription_config_overrides(
+        ["model_reasoning_effort=high", instruction_override],
+        source="test_current_v3_contract",
+        internal_safe_overrides=[
+            *CONTROLLED_CODEX_NON_ROUTING_CONFIG_OVERRIDES,
+            *(
+                [CONTROLLED_CODEX_WINDOWS_SANDBOX_CONFIG_OVERRIDE]
+                if os.name == "nt"
+                else []
+            ),
+            overlay.project_trust_override,
+        ],
+    )
+    mission_overrides, activation_overrides = overlay.bind_effective_config(mission)
+    assert instruction_override not in activation_overrides
+    _finalize_verified_overlay(overlay)
+
+    contract = json.loads(overlay.config_contract_path.read_text(encoding="utf-8"))
+    suffix_length = len(CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES)
+    contract["activation_overrides"] = [
+        *mission_overrides[:-suffix_length],
+        "model_reasoning_effort=low",
+        *CODEX_SUBSCRIPTION_ROUTE_CONFIG_OVERRIDES,
+    ]
+    contract["activation_overrides_sha256"] = execpolicy_mod._canonical_json_sha256(
+        contract["activation_overrides"]
+    )
+    _rewrite_config_contract(overlay, contract)
+
+    assert contract["schema_version"] == 3
+    assert instruction_override in contract["activation_overrides"]
+    assert "codex_execpolicy_config_contract_activation_delta_invalid" in (
+        verify_controlled_codex_execpolicy_receipt(overlay.receipt_path)
+    )
 
 
 def test_controlled_execpolicy_removes_runner_only_directories(tmp_path: Path) -> None:
@@ -552,6 +735,79 @@ def test_failed_activation_probe_never_verifies_subscription(tmp_path: Path) -> 
     assert receipt["chatgpt_subscription_auth_verified"] is False
     assert receipt["auth_verification_status"] == "failed"
     assert overlay.restore() == []
+
+
+def test_read_only_activation_probe_verifies_requested_controlled_sandbox(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    overlay = install_controlled_codex_execpolicy(
+        workspace_dir=workspace,
+        run_dir=run_dir,
+        allow_prefixes=(("python",),),
+        expected_activation_sandbox_mode="read-only",
+    )
+    _bind_default_config(overlay)
+    status = _verified_login_status()
+    overlay.record_login_status(status)
+    argv = ["codex", "exec", "--sandbox", "read-only"]
+    if os.name == "nt":
+        argv.append("--ignore-rules")
+    overlay.record_activation_probe(_activation_probe(argv=argv))
+    overlay.record_post_login_status(status)
+    assert overlay.restore() == []
+
+    receipt = json.loads(overlay.receipt_path.read_text(encoding="utf-8"))
+    assert receipt["expected_activation_sandbox_mode"] == "read-only"
+    assert receipt["activation_probe"]["sandbox_mode_expected"] == "read-only"
+    assert receipt["activation_probe"]["sandbox_mode_observed"] == "read-only"
+    assert receipt["controlled_execution_mode_verified"] is True
+    assert receipt["chatgpt_subscription_auth_verified"] is True
+    assert verify_controlled_codex_execpolicy_receipt(overlay.receipt_path) == []
+
+
+def test_failed_legacy_sandbox_expectation_can_be_revalidated_without_mutation(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    overlay = install_controlled_codex_execpolicy(
+        workspace_dir=workspace,
+        run_dir=run_dir,
+        allow_prefixes=(("Write-Output",),),
+        expected_activation_sandbox_mode="workspace-write",
+    )
+    _bind_default_config(overlay)
+    status = _verified_login_status()
+    overlay.record_login_status(status)
+    raw_events = run_dir / "probe.jsonl"
+    raw_events.write_text('{"type":"turn.completed"}\n', encoding="utf-8")
+    argv = ["codex", "exec", "--sandbox", "read-only"]
+    if os.name == "nt":
+        argv.append("--ignore-rules")
+    overlay.record_activation_probe(
+        _activation_probe(argv=argv, raw_events_path=str(raw_events))
+    )
+    overlay.record_post_login_status(status)
+    assert overlay.restore() == []
+    before = overlay.receipt_path.read_bytes()
+    assert verify_controlled_codex_execpolicy_receipt(overlay.receipt_path)
+
+    revalidation = revalidate_controlled_codex_execpolicy_receipt_for_expected_sandbox(
+        overlay.receipt_path,
+        expected_sandbox_mode="read-only",
+    )
+
+    assert revalidation["verified"] is True
+    assert revalidation["errors"] == []
+    assert revalidation["observed_sandbox_mode"] == "read-only"
+    assert revalidation["raw_events_hash_valid"] is True
+    assert overlay.receipt_path.read_bytes() == before
 
 
 def test_keyring_login_can_be_verified_without_auth_json(tmp_path: Path) -> None:

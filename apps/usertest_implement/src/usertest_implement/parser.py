@@ -5,6 +5,7 @@ import argparse
 from pathlib import Path
 
 from usertest_implement.ci import _ci_timeout_seconds_arg, _optional_timeout_seconds
+from usertest_implement.commands.handoff import _cmd_handoff_adopt_pr
 from usertest_implement.commands.maintenance_images import (
     _cmd_maintenance_images_cleanup,
     _cmd_maintenance_images_list,
@@ -16,6 +17,7 @@ from usertest_implement.commands.outcome import (
 from usertest_implement.commands.reports import _cmd_reports_summarize
 from usertest_implement.commands.resume import _cmd_resume
 from usertest_implement.commands.review import (
+    _cmd_review_adopt_run,
     _cmd_review_merge,
     _cmd_review_run,
     _cmd_review_status,
@@ -76,6 +78,16 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
         default=[],
         help="Repeatable agent config override strings.",
     )
+    parser.add_argument(
+        "--supervisor-instruction",
+        dest="supervisor_instructions",
+        action="append",
+        default=[],
+        help=(
+            "Repeatable runner-owned execution constraint appended after the canonical "
+            "ticket context. It does not modify ticket or export provenance."
+        ),
+    )
     parser.add_argument("--keep-workspace", action="store_true", help="Keep workspace directory after run.")
 
     exec_backend_group = parser.add_mutually_exclusive_group()
@@ -116,8 +128,8 @@ def _add_run_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--exec-keep-container",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Keep Docker container after the run (default: enabled).",
+        default=False,
+        help="Keep Docker container after the run for debugging (default: disabled).",
     )
 
     parser.add_argument(
@@ -350,8 +362,8 @@ def _add_review_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--exec-keep-container",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Keep Docker container after the run (default: enabled).",
+        default=False,
+        help="Keep Docker container after the run for debugging (default: disabled).",
     )
     parser.add_argument(
         "--exec-cache",
@@ -393,6 +405,14 @@ def _add_review_execution_args(parser: argparse.ArgumentParser) -> None:
 def _add_resume_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--repo", help="Fallback repo input when the recorded workspace is gone.")
     parser.add_argument("--ref", help="Override recorded branch/ref for fallback checkout.")
+    parser.add_argument(
+        "--runs-dir",
+        type=Path,
+        help=(
+            "Output root for the resumed runner artifacts. Defaults to "
+            "<repo_root>/runs/usertest_implement."
+        ),
+    )
     parser.add_argument("--agent", choices=["claude", "codex", "gemini"], default="codex")
     parser.add_argument("--model", help="Optional model override.")
     parser.add_argument("--policy", default="write")
@@ -404,6 +424,17 @@ def _add_resume_execution_args(parser: argparse.ArgumentParser) -> None:
         action="append",
         default=[],
         help="Repeatable agent config override strings.",
+    )
+    parser.add_argument(
+        "--supervisor-instruction",
+        dest="supervisor_instructions",
+        action="append",
+        default=[],
+        help=(
+            "Repeatable runner-owned correction or execution constraint appended to "
+            "the exact-session resume user prompt. Previously recorded constraints "
+            "remain in force."
+        ),
     )
 
     exec_backend_group = parser.add_mutually_exclusive_group()
@@ -441,8 +472,8 @@ def _add_resume_execution_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--exec-keep-container",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Keep Docker container after the run (default: enabled).",
+        default=False,
+        help="Keep Docker container after the run for debugging (default: disabled).",
     )
     parser.add_argument(
         "--exec-cache",
@@ -496,6 +527,15 @@ def _add_resume_execution_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--remote-url", help="Remote URL override used when pushing a PR resume.")
     parser.add_argument("--force-push", dest="force_push", action="store_true")
+    parser.add_argument(
+        "--commit",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Commit a passing verification-resume workspace (default: disabled). "
+            "This does not push or create a PR."
+        ),
+    )
     parser.add_argument("--commit-message", dest="commit_message", help="Commit message override for PR resumes.")
     parser.add_argument(
         "--git-user-name",
@@ -581,6 +621,43 @@ def build_parser() -> argparse.ArgumentParser:
     _add_resume_execution_args(resume_p)
     resume_p.set_defaults(func=_cmd_resume)
 
+    handoff_p = sub.add_parser(
+        "handoff",
+        help="Reconcile implementation handoff artifacts without rerunning an agent.",
+    )
+    handoff_sub = handoff_p.add_subparsers(dest="handoff_cmd", required=True)
+    handoff_adopt_p = handoff_sub.add_parser(
+        "adopt-pr",
+        help=(
+            "Bind an existing clean implementation head and open PR to its exact "
+            "ticket without creating, pushing, merging, or moving anything."
+        ),
+    )
+    handoff_adopt_p.add_argument("--owner-root", type=Path, default=Path.cwd())
+    handoff_adopt_p.add_argument("--ticket-path", type=Path, required=True)
+    handoff_adopt_p.add_argument("--source-run-dir", type=Path, required=True)
+    handoff_adopt_p.add_argument(
+        "--runs-dir",
+        type=Path,
+        help=(
+            "Root for the derived non-destructive adoption run. Defaults to "
+            "<repo_root>/runs/usertest_implement."
+        ),
+    )
+    handoff_adopt_p.add_argument("--pr-url", required=True)
+    handoff_adopt_p.add_argument("--base-branch", required=True)
+    handoff_adopt_p.add_argument("--remote-name", default="origin")
+    handoff_adopt_p.add_argument(
+        "--ledger",
+        type=Path,
+        default=_DEFAULT_LEDGER_PATH,
+        help=(
+            "Attempt ledger to reconcile (default: "
+            "<repo_root>/.agents/state/backlog_implement_actions.yaml)."
+        ),
+    )
+    handoff_adopt_p.set_defaults(func=_cmd_handoff_adopt_pr)
+
     review_p = sub.add_parser("review", help="Review and merge PR-backed implementation tickets.")
     review_sub = review_p.add_subparsers(dest="review_cmd", required=True)
 
@@ -589,8 +666,43 @@ def build_parser() -> argparse.ArgumentParser:
     review_run_group = review_run_p.add_mutually_exclusive_group(required=True)
     review_run_group.add_argument("--ticket-path", dest="ticket_path", type=Path)
     review_run_group.add_argument("--fingerprint")
+    review_run_p.add_argument(
+        "--correction",
+        dest="review_corrections",
+        action="append",
+        default=[],
+        help=(
+            "Focused supervisor correction for the exact prior Codex review session "
+            "(repeatable). Preserves the prior frontier and refuses a fresh reviewer."
+        ),
+    )
     _add_review_execution_args(review_run_p)
     review_run_p.set_defaults(func=_cmd_review_run)
+
+    review_adopt_p = review_sub.add_parser(
+        "adopt-run",
+        help=(
+            "Adopt a schema-valid same-author review whose runner failed only "
+            "during retained post-agent provenance verification."
+        ),
+    )
+    review_adopt_p.add_argument("--owner-root", type=Path, default=Path.cwd())
+    review_adopt_group = review_adopt_p.add_mutually_exclusive_group(required=True)
+    review_adopt_group.add_argument("--ticket-path", dest="ticket_path", type=Path)
+    review_adopt_group.add_argument("--fingerprint")
+    review_adopt_p.add_argument("--review-run-dir", type=Path, required=True)
+    review_adopt_p.add_argument("--dry-run", action="store_true")
+    review_adopt_p.add_argument(
+        "--ledger",
+        nargs="?",
+        const=_DEFAULT_LEDGER_PATH,
+        type=Path,
+        help=(
+            "Optional attempt ledger YAML. If provided without a value, defaults to "
+            "<repo_root>/.agents/state/backlog_implement_actions.yaml."
+        ),
+    )
+    review_adopt_p.set_defaults(func=_cmd_review_adopt_run)
 
     review_status_p = review_sub.add_parser("status", help="Show the latest review summary for a ticket.")
     review_status_p.add_argument("--owner-root", type=Path, default=Path.cwd())

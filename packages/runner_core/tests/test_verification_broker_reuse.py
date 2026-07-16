@@ -1546,6 +1546,7 @@ def test_run_verification_commands_mirrors_artifacts_into_workspace_for_local_ba
     )
 
     assert summary["passed"] is True
+    assert summary["commands_configured"] == [_verification_command()]
     # `artifacts_dir` remains the run_dir-relative bookkeeping label...
     assert summary["artifacts_dir"] == "verification/attempt1"
     # ...but `artifacts_dir_for_agent` must resolve to a real, readable file inside the
@@ -1556,6 +1557,7 @@ def test_run_verification_commands_mirrors_artifacts_into_workspace_for_local_ba
     assert (agent_path / "verification.json").exists()
     mirrored = json.loads((agent_path / "verification.json").read_text(encoding="utf-8"))
     assert mirrored["passed"] is True
+    assert mirrored["commands_configured"] == [_verification_command()]
     # The canonical, durable copy remains under run_dir regardless of backend.
     assert (run_dir / "verification" / "attempt1" / "verification.json").exists()
 

@@ -29,12 +29,15 @@ _RUN_EVIDENCE_FILES: tuple[tuple[str, str], ...] = (
     ("raw_events", "raw_events.jsonl"),
     ("ticket_ref", "ticket_ref.json"),
     ("verification", "verification.json"),
+    ("verification_capture_ref", "verification_capture_ref.json"),
+    ("verification_receipt", "verification_receipt.json"),
     ("verification_reuse", "verification_reuse.json"),
     ("agent_attempts", "agent_attempts.json"),
     ("git_ref", "git_ref.json"),
     ("push_ref", "push_ref.json"),
     ("ci_gate", "ci_gate.json"),
     ("pr_ref", "pr_ref.json"),
+    ("adoption_ref", "adoption_ref.json"),
     ("handoff_summary", "handoff_summary.json"),
     ("report", "report.json"),
     ("report_validation_errors", "report_validation_errors.json"),
@@ -99,46 +102,91 @@ def implementation_author_continuity(run_dir: Path) -> dict[str, Any]:
     never represented as exact-session continuity.
     """
 
-    target_ref = _read_json(run_dir / "target_ref.json")
-    agent = _clean_str(target_ref.get("agent")) if isinstance(target_ref, dict) else None
-    session_id: str | None = None
-    raw_events_path = run_dir / "raw_events.jsonl"
-    try:
-        with raw_events_path.open("r", encoding="utf-8") as handle:
-            for line in handle:
-                try:
-                    event = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if not isinstance(event, dict) or event.get("type") != "thread.started":
-                    continue
-                session_id = _canonical_uuid(event.get("thread_id"))
-                if session_id is not None:
-                    break
-    except (FileNotFoundError, OSError, UnicodeError):
-        session_id = None
-
-    exact_session_available = agent == "codex" and session_id is not None
-    if exact_session_available:
-        status = "exact_session_available"
-    elif agent == "codex":
-        status = "author_session_unavailable"
-    elif agent is None:
-        status = "author_provenance_unavailable"
-    else:
-        status = "agent_continuation_unsupported"
-    return {
-        "agent": agent,
-        "session_id": session_id,
-        "status": status,
-        "exact_session_available": exact_session_available,
-        "agent_source": (
-            str(run_dir / "target_ref.json")
-            if (run_dir / "target_ref.json").exists()
+    def _resolve(candidate: Path, *, seen: frozenset[Path]) -> dict[str, Any]:
+        resolved_candidate = candidate.resolve()
+        if resolved_candidate in seen or len(seen) >= 8:
+            return {
+                "agent": None,
+                "session_id": None,
+                "status": "author_provenance_cycle",
+                "exact_session_available": False,
+                "agent_source": None,
+                "session_source": None,
+            }
+        target_ref = _read_json(resolved_candidate / "target_ref.json")
+        agent = (
+            _clean_str(target_ref.get("agent"))
+            if isinstance(target_ref, dict)
             else None
-        ),
-        "session_source": str(raw_events_path) if raw_events_path.exists() else None,
-    }
+        )
+        session_id: str | None = None
+        raw_events_path = resolved_candidate / "raw_events.jsonl"
+        try:
+            with raw_events_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict) or event.get("type") != "thread.started":
+                        continue
+                    session_id = _canonical_uuid(event.get("thread_id"))
+                    if session_id is not None:
+                        break
+        except (FileNotFoundError, OSError, UnicodeError):
+            session_id = None
+
+        exact_session_available = agent == "codex" and session_id is not None
+        if exact_session_available:
+            status = "exact_session_available"
+        elif agent == "codex":
+            status = "author_session_unavailable"
+        elif agent is None:
+            status = "author_provenance_unavailable"
+        else:
+            status = "agent_continuation_unsupported"
+        direct = {
+            "agent": agent,
+            "session_id": session_id,
+            "status": status,
+            "exact_session_available": exact_session_available,
+            "agent_source": (
+                str(resolved_candidate / "target_ref.json")
+                if (resolved_candidate / "target_ref.json").exists()
+                else None
+            ),
+            "session_source": str(raw_events_path) if raw_events_path.exists() else None,
+        }
+        if exact_session_available:
+            return direct
+
+        adoption = _read_json(resolved_candidate / "adoption_ref.json")
+        source_raw = adoption.get("source_run_dir") if isinstance(adoption, dict) else None
+        flags = adoption.get("flags") if isinstance(adoption, dict) else None
+        if (
+            not isinstance(adoption, dict)
+            or adoption.get("kind") != "existing_pr_adoption"
+            or not isinstance(flags, dict)
+            or flags.get("pr_adopted") is not True
+            or not isinstance(source_raw, str)
+            or not source_raw.strip()
+        ):
+            return direct
+        source = Path(source_raw).expanduser().resolve()
+        if not source.is_dir():
+            return direct
+        inherited = _resolve(source, seen=seen | {resolved_candidate})
+        if inherited.get("exact_session_available") is not True:
+            return direct
+        return {
+            **inherited,
+            "status": "exact_session_available_via_adoption",
+            "via_adoption_ref": str(resolved_candidate / "adoption_ref.json"),
+            "adopted_run_dir": str(resolved_candidate),
+            "author_source_run_dir": str(source),
+        }
+
+    return _resolve(run_dir, seen=frozenset())
 
 
 def _existing_evidence_paths(*, run_dir: Path, review_run_dir: Path | None) -> dict[str, str]:
@@ -287,6 +335,18 @@ def _classify_resume_state(
         run_url = _clean_str(ci_gate.get("run_url")) if isinstance(ci_gate, dict) else None
         detail = error or run_url or "CI gate failed."
         return LIFECYCLE_CI_FAILED, detail
+
+    if isinstance(pr_ref, dict) and pr_ref.get("pr_adopted") is True:
+        return (
+            LIFECYCLE_AWAITING_REVIEW,
+            "Existing PR was adopted and is awaiting implementation review.",
+        )
+
+    if isinstance(handoff_summary, dict) and handoff_summary.get("pr_adopted") is True:
+        return (
+            LIFECYCLE_AWAITING_REVIEW,
+            "Existing PR was adopted and is awaiting implementation review.",
+        )
 
     if isinstance(pr_ref, dict):
         requested = pr_ref.get("requested") is True

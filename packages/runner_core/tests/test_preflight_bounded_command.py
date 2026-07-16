@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import runner_core.preflight as preflight_mod
+import runner_core.runner as runner_mod
 from runner_core.preflight import _run_bounded_command_probe
 
 
@@ -234,6 +235,83 @@ def test_probe_timeout_returns_diagnostics_and_kills_descendant_tree(tmp_path: P
         assert _wait_for_process_exit(descendant_pid)
     finally:
         _force_terminate_pid(descendant_pid)
+
+
+def test_agent_version_probe_timeout_owns_and_cleans_descendant_tree(tmp_path: Path) -> None:
+    launcher, descendant = _write_descendant_probe_programs(tmp_path)
+    descendant_pid_path = tmp_path / "version-probe-descendant.pid"
+
+    started = time.monotonic()
+    result = runner_mod._probe_agent_cli_version(
+        binary="dummy-agent",
+        command_prefix=[
+            sys.executable,
+            str(launcher),
+            str(descendant),
+            str(descendant_pid_path),
+            "wait",
+        ],
+        env_overrides=None,
+        timeout_seconds=15.0,
+    )
+    elapsed = time.monotonic() - started
+    assert descendant_pid_path.exists(), result
+    descendant_pid = int(descendant_pid_path.read_text(encoding="utf-8"))
+
+    try:
+        assert elapsed < 30.0
+        assert result["ok"] is False
+        assert result["error"] == "timeout"
+        assert result["exit_code"] == 124
+        assert result["probe_timed_out"] is True
+        assert result["probe_tree_cleanup_succeeded"] is True
+        assert "launcher-stdout" in str(result["stdout_excerpt"])
+        assert "launcher-stderr" in str(result["stderr_excerpt"])
+        assert _wait_for_process_exit(descendant_pid)
+    finally:
+        _force_terminate_pid(descendant_pid)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Codex Desktop preflight resolution")
+def test_agent_version_probe_uses_same_desktop_codex_resolver(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        runner_mod,
+        "resolve_codex_executable",
+        lambda binary, **_: sys.executable if binary == "codex" else binary,
+    )
+
+    result = runner_mod._probe_agent_cli_version(
+        binary="codex",
+        command_prefix=[],
+        env_overrides=None,
+        timeout_seconds=30.0,
+    )
+
+    assert result["ok"] is True
+    assert result["argv"] == [sys.executable, "--version"]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Codex Desktop preflight resolution")
+def test_local_command_preflight_finds_desktop_codex_when_path_entry_is_not_selected(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    desktop_binary = tmp_path / "desktop" / "codex.exe"
+    desktop_binary.parent.mkdir()
+    desktop_binary.write_bytes(b"fixture")
+    monkeypatch.setattr(
+        preflight_mod,
+        "resolve_codex_executable",
+        lambda binary, **_: str(desktop_binary) if binary == "codex" else binary,
+    )
+    monkeypatch.setattr(preflight_mod, "_probe_local_shell_payload", lambda **_: {})
+
+    availability, meta = preflight_mod._probe_commands_local(["codex"])
+
+    assert availability == {"codex": True}
+    assert meta["command_probe_details"]["codex"]["resolved_path"] == str(desktop_binary)
 
 
 @pytest.mark.parametrize(

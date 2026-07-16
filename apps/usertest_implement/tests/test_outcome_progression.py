@@ -78,6 +78,106 @@ def test_expected_outcome_state_comes_from_hashed_plan_section() -> None:
         )
 
 
+@pytest.mark.parametrize(
+    ("resolver", "env_name", "default_relative"),
+    [
+        (
+            progression._resolve_outcome_worktrees_root,
+            progression._OUTCOME_WORKTREES_ROOT_ENV,
+            Path(".tmp") / "outcome_worktrees",
+        ),
+        (
+            progression._resolve_outcome_trusted_runs_root,
+            progression._OUTCOME_TRUSTED_RUNS_ROOT_ENV,
+            Path("runs"),
+        ),
+    ],
+)
+def test_outcome_root_resolvers_handle_default_blank_and_absolute_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    resolver,
+    env_name: str,
+    default_relative: Path,
+) -> None:
+    repo_root = (tmp_path / "controller").resolve()
+    expected_default = (repo_root / default_relative).resolve()
+
+    monkeypatch.delenv(env_name, raising=False)
+    assert resolver(repo_root=repo_root) == expected_default
+
+    monkeypatch.setenv(env_name, "  \t  ")
+    assert resolver(repo_root=repo_root) == expected_default
+
+    external_root = (tmp_path / "external" / env_name.lower()).resolve()
+    assert not external_root.exists()
+    monkeypatch.setenv(env_name, f"  {external_root}  ")
+    assert resolver(repo_root=repo_root) == external_root
+    assert not external_root.exists()
+
+
+@pytest.mark.parametrize(
+    ("resolver", "env_name"),
+    [
+        (
+            progression._resolve_outcome_worktrees_root,
+            progression._OUTCOME_WORKTREES_ROOT_ENV,
+        ),
+        (
+            progression._resolve_outcome_trusted_runs_root,
+            progression._OUTCOME_TRUSTED_RUNS_ROOT_ENV,
+        ),
+    ],
+)
+def test_outcome_root_resolvers_reject_relative_overrides(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    resolver,
+    env_name: str,
+) -> None:
+    monkeypatch.setenv(env_name, str(Path("relative") / "outcome-root"))
+
+    with pytest.raises(ValueError) as exc_info:
+        resolver(repo_root=tmp_path)
+
+    assert env_name in str(exc_info.value)
+    assert "absolute path" in str(exc_info.value)
+
+
+def test_git_uses_an_exact_command_local_safe_directory(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repository = (tmp_path / "cross-volume-worktree").resolve()
+    observed: list[list[str]] = []
+
+    def _capture_run(argv, **kwargs):
+        observed.append(list(argv))
+        assert kwargs == {
+            "capture_output": True,
+            "text": True,
+            "check": False,
+        }
+        return subprocess.CompletedProcess(argv, 0, stdout="clean\n", stderr="")
+
+    monkeypatch.setattr(progression.subprocess, "run", _capture_run)
+
+    result = progression._git(repository, "status", "--porcelain=v1")
+
+    assert result.returncode == 0
+    assert observed == [
+        [
+            "git",
+            "-c",
+            f"safe.directory={repository.as_posix()}",
+            "-C",
+            str(repository),
+            "status",
+            "--porcelain=v1",
+        ]
+    ]
+
+
 def test_outcome_role_alignment_rejects_live_or_mitigation_reclassification() -> None:
     current = {"requires_live_verification": False}
     with pytest.raises(ValueError, match="live role disagrees"):
@@ -208,6 +308,131 @@ def _install_progression_fakes(
 
     monkeypatch.setattr(progression, "_run_role", _fake_run_role)
     return state, roles, ticket_path
+
+
+def test_premerge_propagates_outcome_root_overrides_without_moving_receipt_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = (tmp_path / "controller").resolve()
+    owner_root = (tmp_path / "owner").resolve()
+    worktrees_root = (tmp_path / "external-worktrees").resolve()
+    oracle_assets_root = (tmp_path / "retained-oracle-assets").resolve()
+    monkeypatch.setenv(progression._OUTCOME_WORKTREES_ROOT_ENV, str(worktrees_root))
+    monkeypatch.setenv(
+        progression._OUTCOME_TRUSTED_RUNS_ROOT_ENV,
+        str(oracle_assets_root),
+    )
+    observed: dict[str, dict[str, object]] = {}
+
+    @contextmanager
+    def _capture_worktree(**kwargs):
+        observed["worktree"] = kwargs
+        yield tmp_path / "workspace"
+
+    def _capture_role(**kwargs):
+        observed["role"] = kwargs
+        return {"kind": "runner_outcome_role", "result": "passed"}
+
+    monkeypatch.setattr(
+        progression,
+        "clean_merged_commit_worktree",
+        _capture_worktree,
+    )
+    monkeypatch.setattr(progression, "_run_role", _capture_role)
+    selected_provenance = {
+        "verification_contract": {
+            "outcome_roles": {
+                "original_scenario": {"role_contract_sha256": "d" * 64},
+                "live": None,
+                "mitigation_effect": None,
+            }
+        },
+        "verification_contract_sha256": "b" * 64,
+        "target_contract_sha256": "c" * 64,
+    }
+
+    result = progression.verify_premerge_original_scenario(
+        repo_root=repo_root,
+        owner_root=owner_root,
+        fingerprint="0123456789abcdef",
+        ticket_markdown=_plan_markdown("resolved"),
+        current={
+            "requires_live_verification": False,
+            "ticket_provenance": {"verified_implementation_head": "a" * 40},
+        },
+        selected_provenance=selected_provenance,
+    )
+
+    local_roles_root = (repo_root / "runs" / "usertest_implement").resolve()
+    assert result["result"] == "passed"
+    assert observed["worktree"]["worktrees_root"] == worktrees_root
+    assert observed["role"]["trusted_runs_root"] == local_roles_root
+    assert observed["role"]["trusted_oracle_assets_root"] == oracle_assets_root
+    output_path = observed["role"]["output_path"]
+    assert isinstance(output_path, Path)
+    assert output_path.is_relative_to(local_roles_root)
+
+
+def test_postmerge_propagates_outcome_root_overrides_without_moving_receipt_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    repo_root = (tmp_path / "controller").resolve()
+    worktrees_root = (tmp_path / "external-worktrees").resolve()
+    oracle_assets_root = (tmp_path / "retained-oracle-assets").resolve()
+    monkeypatch.setenv(progression._OUTCOME_WORKTREES_ROOT_ENV, str(worktrees_root))
+    monkeypatch.setenv(
+        progression._OUTCOME_TRUSTED_RUNS_ROOT_ENV,
+        str(oracle_assets_root),
+    )
+    _state, roles, ticket_path = _install_progression_fakes(
+        monkeypatch,
+        tmp_path,
+        expected_state="resolved",
+        requires_live=False,
+    )
+    observed_worktree: dict[str, object] = {}
+    observed_roles: list[dict[str, object]] = []
+
+    @contextmanager
+    def _capture_worktree(**kwargs):
+        observed_worktree.update(kwargs)
+        yield tmp_path / "workspace"
+
+    def _capture_role(*, role: str, output_path: Path, **kwargs):
+        roles.append(role)
+        observed_roles.append({"role": role, "output_path": output_path, **kwargs})
+        return {
+            "kind": "runner_outcome_role",
+            "reference": str(output_path),
+            "result": "passed",
+        }
+
+    monkeypatch.setattr(
+        progression,
+        "clean_merged_commit_worktree",
+        _capture_worktree,
+    )
+    monkeypatch.setattr(progression, "_run_role", _capture_role)
+
+    result = progression.progress_post_merge_outcome(
+        repo_root=repo_root,
+        owner_root=tmp_path,
+        ticket_path=ticket_path,
+        ledger_path=tmp_path / "ledger.yaml",
+    )
+
+    local_roles_root = (repo_root / "runs" / "usertest_implement").resolve()
+    assert result.complete is True
+    assert roles == ["original_scenario"]
+    assert observed_worktree["worktrees_root"] == worktrees_root
+    assert len(observed_roles) == 1
+    assert observed_roles[0]["trusted_runs_root"] == local_roles_root
+    assert observed_roles[0]["trusted_oracle_assets_root"] == oracle_assets_root
+    output_path = observed_roles[0]["output_path"]
+    assert isinstance(output_path, Path)
+    assert output_path.is_relative_to(local_roles_root)
 
 
 @pytest.mark.parametrize(
@@ -711,6 +936,7 @@ def test_real_post_merge_replay_requires_positive_behavior_for_resolution(
             "mitigation_effect": None,
             "recurrence": {
                 "description": "Use a later real source-observation window.",
+                "verification_owner": "centralized_case_refresh",
                 "commands": [],
                 "predicates": [],
             },

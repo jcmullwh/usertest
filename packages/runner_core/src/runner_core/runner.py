@@ -25,6 +25,7 @@ from agent_adapters import (
     normalize_gemini_events,
     probe_agent_shell_launch,
     probe_codex_login_status,
+    resolve_codex_executable,
     run_claude_print,
     run_codex_exec,
     run_gemini,
@@ -49,7 +50,7 @@ from sandbox_runner.diagnostics import (
 from runner_core.agent_docs import obfuscate_target_agent_docs
 from runner_core.agent_prompt_files import _materialize_agent_prompt_into_workspace
 from runner_core.artifacts import (
-    _extract_json_object,
+    _extract_json_object_with_receipt,
     _tail_text_for_prompt,
     _write_json,
 )
@@ -101,6 +102,7 @@ from runner_core.preflight import (
     _build_preflight_command_list,
     _ensure_windows_python_on_path,
     _probe_commands_local,
+    _run_bounded_command_probe,
 )
 from runner_core.prompt import (
     CANONICAL_EXECUTION_NOTES_MD,
@@ -143,6 +145,13 @@ from runner_core.python_runtime import (
     verification_commands_need_pdm,
     verification_commands_need_pytest,
     verification_commands_need_python,
+)
+from runner_core.retained_oracle_assets import (
+    RETAINED_ORACLE_AGENT_NOTE,
+    retained_oracle_asset_summary,
+    stage_retained_oracle_asset,
+    validate_retained_oracle_asset_source,
+    validate_staged_retained_oracle_asset,
 )
 from runner_core.run_spec import resolve_effective_run_inputs
 from runner_core.shell_capability import (
@@ -200,6 +209,7 @@ from runner_core.verification_broker import (
 from runner_core.verification_broker import (
     probe_windows_bash_usable as _probe_windows_bash_usable_impl,
 )
+from runner_core.verification_commands import verification_command_safety_errors
 from runner_core.verification_prompts import (
     _build_followup_prompt,
     _build_verification_followup_prompt,
@@ -259,6 +269,11 @@ class RunRequest:
     agent_system_prompt_file: Path | None = None
     agent_append_system_prompt: str | None = None
     agent_append_system_prompt_file: Path | None = None
+    supervisor_instruction: str | None = None
+    # Explicit user turn for a continued agent conversation. This is distinct from
+    # system-instruction composition because resumed sessions retain their original
+    # instructions and accept feedback through stdin as the next user message.
+    agent_user_prompt: str | None = None
     # Runner-owned backlog lineage. These fields are persisted in target_ref.json
     # and outrank legacy mission-name inference and model-authored extensions.
     evidence_role: str | None = None
@@ -272,6 +287,8 @@ class RunRequest:
     verification_commands: tuple[str, ...] = ()
     verification_timeout_seconds: float | None = None
     verification_reuse_mode: str = "off"
+    retained_oracle_assets_root: Path | None = None
+    retained_oracle_asset_spec: dict[str, Any] | None = None
 
     exec_backend: str = "local"
     exec_docker_profile: str = "standard"
@@ -1155,23 +1172,15 @@ def _probe_agent_cli_version(
 
     binary_to_run = binary
     if os.name == "nt" and not command_prefix:
-        path = (env or os.environ).get("PATH")
-        resolved = shutil.which(binary, path=path)
-        if resolved:
-            binary_to_run = resolved
+        binary_to_run = resolve_codex_executable(binary, env=env or os.environ)
 
     argv = [binary_to_run, "--version"]
     full_argv = [*command_prefix, *argv] if command_prefix else argv
 
     try:
-        proc = subprocess.run(
+        probe = _run_bounded_command_probe(
             full_argv,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout_seconds,
-            check=False,
+            timeout_seconds=timeout_seconds,
             env=env,
         )
     except FileNotFoundError as e:
@@ -1181,13 +1190,6 @@ def _probe_agent_cli_version(
             "error": "FileNotFoundError",
             "details": str(e),
         }
-    except subprocess.TimeoutExpired:
-        return {
-            "ok": False,
-            "argv": full_argv,
-            "error": "timeout",
-            "timeout_seconds": timeout_seconds,
-        }
     except Exception as e:  # noqa: BLE001
         return {
             "ok": False,
@@ -1196,14 +1198,33 @@ def _probe_agent_cli_version(
             "details": str(e),
         }
 
-    stdout = (proc.stdout or "").strip()
-    stderr = (proc.stderr or "").strip()
-    return {
-        "ok": int(proc.returncode or 0) == 0,
+    stdout = (probe.stdout or "").strip()
+    stderr = (probe.stderr or "").strip()
+    common = {
         "argv": full_argv,
-        "exit_code": int(proc.returncode or 0),
+        "exit_code": int(probe.returncode),
         "stdout_excerpt": stdout[:300] if stdout else None,
         "stderr_excerpt": stderr[:300] if stderr else None,
+        "probe_timed_out": bool(probe.timed_out),
+        "probe_tree_cleanup_succeeded": bool(probe.cleanup_succeeded),
+        "probe_tree_cleanup_diagnostic": probe.cleanup_diagnostic,
+    }
+    if probe.timed_out:
+        return {
+            "ok": False,
+            **common,
+            "error": "timeout",
+            "timeout_seconds": timeout_seconds,
+        }
+    if not probe.cleanup_succeeded:
+        return {
+            "ok": False,
+            **common,
+            "error": "probe_cleanup_failed",
+        }
+    return {
+        "ok": int(probe.returncode) == 0,
+        **common,
     }
 
 
@@ -3199,6 +3220,7 @@ def _run_verification_commands(
                 "message": f"verification finished with terminal_reason={terminal_reason}",
                 "updated_utc": finished_utc,
             },
+            "commands_configured": list(commands),
             "commands": results,
         }
     )
@@ -3236,6 +3258,82 @@ def _run_verification_commands(
         except OSError:
             summary["artifacts_dir_for_agent"] = None
 
+    return summary
+
+
+def capture_local_verification(
+    *,
+    run_dir: Path,
+    cwd: Path,
+    commands: Sequence[str],
+    timeout_seconds: float | None,
+    python_executable: str | None = None,
+) -> dict[str, Any]:
+    """Execute an immutable command list without starting an agent turn.
+
+    This is the deliberately small, host-local counterpart to the normal
+    post-agent verification path.  It is used when an already committed clean
+    implementation head needs a fresh receipt for the exact stage-6 command
+    contract.  The command text is retained byte-for-byte, no workspace mirror
+    is produced, and the canonical summary is written at ``verification.json``
+    in ``run_dir``.
+    """
+
+    resolved_run_dir = run_dir.expanduser().resolve()
+    resolved_cwd = cwd.expanduser().resolve()
+    if not resolved_cwd.is_dir():
+        raise ValueError(f"Verification cwd does not exist: {resolved_cwd}")
+    normalized_commands: list[str] = []
+    for command in commands:
+        if not isinstance(command, str) or not command:
+            raise ValueError("Verification commands must be non-empty strings")
+        if command != command.strip():
+            raise ValueError(
+                "Verification commands must not contain leading or trailing whitespace"
+            )
+        safety_errors = verification_command_safety_errors(command)
+        if safety_errors:
+            raise ValueError(
+                f"Unsafe verification command {command!r}: " + "; ".join(safety_errors)
+            )
+        normalized_commands.append(command)
+    if not normalized_commands:
+        raise ValueError("At least one verification command is required")
+    if len(normalized_commands) != len(set(normalized_commands)):
+        raise ValueError("Verification commands must not contain duplicates")
+    if timeout_seconds is not None:
+        if isinstance(timeout_seconds, bool) or float(timeout_seconds) <= 0:
+            raise ValueError("Verification timeout must be positive when provided")
+        timeout_seconds = float(timeout_seconds)
+
+    resolved_run_dir.mkdir(parents=True, exist_ok=True)
+    if (resolved_run_dir / "verification.json").exists() or (
+        resolved_run_dir / "verification" / "capture"
+    ).exists():
+        raise ValueError(
+            f"Refusing to overwrite an existing verification capture: {resolved_run_dir}"
+        )
+    summary = _run_verification_commands(
+        run_dir=resolved_run_dir,
+        attempt_number=1,
+        commands=normalized_commands,
+        command_prefix=[],
+        cwd=resolved_cwd,
+        timeout_seconds=timeout_seconds,
+        python_executable=python_executable,
+        env_overrides=_augment_env_with_workspace_pythonpath(
+            env_overrides=None,
+            workspace_dir=resolved_cwd,
+            workspace_mount=None,
+        ),
+        artifacts_dir_rel=Path("verification") / "capture",
+        run_dir_mount=None,
+        workspace_dir=None,
+    )
+    summary["capture_mode"] = "local_exact_commands"
+    summary["model_invoked"] = False
+    summary["workspace_mirror_written"] = False
+    _write_json(resolved_run_dir / "verification.json", summary)
     return summary
 
 
@@ -3555,6 +3653,20 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
     run_dir = config.runs_dir / target_slug / timestamp / request.agent / str(request.seed)
     run_dir.mkdir(parents=True, exist_ok=True)
 
+    has_retained_asset_root = request.retained_oracle_assets_root is not None
+    has_retained_asset_spec = request.retained_oracle_asset_spec is not None
+    if has_retained_asset_root != has_retained_asset_spec:
+        raise ValueError("retained_oracle_asset_transport_incomplete")
+    if has_retained_asset_spec:
+        if str(request.verification_reuse_mode or "").strip().lower() != "off":
+            raise ValueError("retained_oracle_asset_requires_verification_reuse_off")
+        assert request.retained_oracle_assets_root is not None
+        assert request.retained_oracle_asset_spec is not None
+        validate_retained_oracle_asset_source(
+            spec=request.retained_oracle_asset_spec,
+            trusted_runs_root=request.retained_oracle_assets_root,
+        )
+
     run_start_monotonic = time.monotonic()
     run_meta: dict[str, Any] = {
         "schema_version": 1,
@@ -3640,6 +3752,17 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             **({"model": effective_model} if effective_model is not None else {}),
             **({"model_source": model_source} if model_source is not None else {}),
         }
+        if request.retained_oracle_asset_spec is not None:
+            assert request.retained_oracle_assets_root is not None
+            target_ref["retained_oracle_asset_transport"] = {
+                "trusted_runs_root": str(request.retained_oracle_assets_root.resolve()),
+                "spec": request.retained_oracle_asset_spec,
+            }
+        if (
+            isinstance(request.supervisor_instruction, str)
+            and request.supervisor_instruction.strip()
+        ):
+            target_ref["supervisor_instruction"] = request.supervisor_instruction.strip()
         lineage_values = {
             "evidence_role": request.evidence_role,
             "origin_stage": request.origin_stage,
@@ -3781,6 +3904,25 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         append_text = request.agent_append_system_prompt
         if isinstance(append_text, str) and not append_text.strip():
             append_text = None
+        if request.retained_oracle_asset_spec is not None:
+            append_text = "\n\n".join(
+                part.rstrip()
+                for part in (append_text, RETAINED_ORACLE_AGENT_NOTE)
+                if isinstance(part, str) and part.strip()
+            )
+        if (
+            isinstance(request.supervisor_instruction, str)
+            and request.supervisor_instruction.strip()
+        ):
+            supervisor_section = (
+                "# Runner-owned supervisor execution constraints\n\n"
+                + request.supervisor_instruction.strip()
+            )
+            append_text = "\n\n".join(
+                part.rstrip()
+                for part in (append_text, supervisor_section)
+                if isinstance(part, str) and part.strip()
+            )
 
         if (
             request.agent == "gemini"
@@ -4277,6 +4419,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
         raw_events_ts_path = raw_events_path.with_suffix(".ts.jsonl")
         last_message_path = run_dir / "agent_last_message.txt"
         stderr_path = run_dir / "agent_stderr.txt"
+        attempts_meta: list[dict[str, Any]] = []
 
         backend = prepare_execution_backend(
             repo_root=config.repo_root,
@@ -4529,6 +4672,11 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     allow_prefixes=controlled_allow_prefixes,
                     agent_workspace_path=workspace_dir_for_agent,
                     activation_probe_required=bool(resolved_inputs.mission.requires_shell),
+                    expected_activation_sandbox_mode=_resolve_codex_sandbox_mode(
+                        request=request,
+                        codex_policy=codex_policy,
+                        has_sandbox_backend=False,
+                    ),
                 )
             if codex_execpolicy_overlay is not None:
                 agent_env_overrides = dict(agent_env_overrides or {})
@@ -6079,7 +6227,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     execution_notes_md = (
                         execution_notes_md.rstrip() + "\n" + shell_command_guidance_md.strip()
                     )
-                prompt = build_prompt_from_template(
+                base_prompt = build_prompt_from_template(
                     template_text=effective_spec.prompt_template_text,
                     variables={
                         "persona_name": effective_spec.persona_name,
@@ -6099,6 +6247,12 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 raise TemplateSubstitutionError(
                     f"Prompt template substitution failed for {template_path}:\n{e}"
                 ) from e
+            prompt = base_prompt
+            if request.agent_user_prompt is not None:
+                if not request.agent_user_prompt.strip():
+                    raise ValueError("agent_user_prompt must not be blank")
+                prompt = request.agent_user_prompt
+                (run_dir / "prompt.base.txt").write_text(base_prompt, encoding="utf-8")
             (run_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
 
             if (
@@ -6255,7 +6409,6 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             current_prompt = prompt
             rate_limit_retry_count = 0
             followup_count = 0
-            attempts_meta: list[dict[str, Any]] = []
             selected_raw_events_path = raw_events_path
             selected_raw_events_ts_path = raw_events_ts_path
             selected_last_message_path = last_message_path
@@ -6281,6 +6434,8 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
             report_validation_errors = []
             forced_exit_code: int | None = None
             parked_external_wait: dict[str, Any] | None = None
+            retained_oracle_asset_staged = False
+            retained_oracle_asset_receipt: dict[str, Any] | None = None
 
             while True:
                 attempt_number = len(attempts_meta) + 1
@@ -6461,6 +6616,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
                 attempt_report_validation_errors: list[str] = []
                 attempt_report_json: dict[str, Any] | None = None
+                attempt_json_repair: dict[str, Any] | None = None
                 attempt_last_text = ""
                 if last_message_attempt_path.exists():
                     try:
@@ -6474,7 +6630,10 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 )
                 if agent_exit_code == 0:
                     try:
-                        attempt_report_json = _extract_json_object(attempt_last_text)
+                        (
+                            attempt_report_json,
+                            attempt_json_repair,
+                        ) = _extract_json_object_with_receipt(attempt_last_text)
                     except Exception as e:  # noqa: BLE001
                         attempt_report_validation_errors = [
                             f"$: failed to parse JSON from agent output: {e}"
@@ -6751,6 +6910,38 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
 
                     if attempt_verification_summary is None:
                         attempt_verification_source = "post_agent_rerun"
+                        if request.retained_oracle_asset_spec is not None:
+                            assert request.retained_oracle_assets_root is not None
+                            if not retained_oracle_asset_staged:
+                                retained_oracle_asset_receipt = stage_retained_oracle_asset(
+                                    workspace=acquired.workspace_dir,
+                                    trusted_runs_root=request.retained_oracle_assets_root,
+                                    spec=request.retained_oracle_asset_spec,
+                                )
+                                retained_oracle_asset_staged = True
+                            destination_manifest = validate_staged_retained_oracle_asset(
+                                workspace=acquired.workspace_dir,
+                                spec=request.retained_oracle_asset_spec,
+                            )
+                            assert retained_oracle_asset_receipt is not None
+                            retained_oracle_asset_receipt.update(
+                                {
+                                    "validated_immediately_before_dispatch": True,
+                                    "verification_attempt": attempt_number,
+                                    "verification_dispatch_utc": _utc_now_z(),
+                                    "destination_manifest_sha256": retained_oracle_asset_summary(
+                                        trusted_runs_root=request.retained_oracle_assets_root,
+                                        spec=request.retained_oracle_asset_spec,
+                                    )["manifest_sha256"],
+                                    "destination_manifest_entry_count": len(
+                                        destination_manifest
+                                    ),
+                                }
+                            )
+                            _write_json(
+                                run_dir / "retained_oracle_asset_staging.json",
+                                retained_oracle_asset_receipt,
+                            )
                         verification_kwargs: dict[str, Any] = {
                             "run_dir": run_dir,
                             "attempt_number": attempt_number,
@@ -6942,6 +7133,7 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                     ),
                     "failure_subtype": failure_subtype,
                     "report_validation_errors": attempt_report_validation_errors,
+                    "json_syntax_repair": attempt_json_repair,
                     "warnings": attempt_warnings,
                     "verification": {
                         "status": (
@@ -7656,44 +7848,84 @@ def run_once(config: RunnerConfig, request: RunRequest) -> RunResult:
                 _write_json(run_dir / "error.json", error_payload)
 
         normalized_events_path = run_dir / "normalized_events.jsonl"
-        raw_ts_f = None
-        raw_ts_iter = None
-        if raw_events_ts_path.exists():
-            try:
-                raw_ts_f = raw_events_ts_path.open("r", encoding="utf-8")
-                raw_ts_iter = (line.strip() for line in raw_ts_f if line.strip())
-            except OSError:
-                raw_ts_f = None
-                raw_ts_iter = None
 
-        try:
-            if request.agent == "codex":
-                normalize_codex_events(
-                    raw_events_path=raw_events_path,
-                    normalized_events_path=normalized_events_path,
-                    raw_ts_iter=raw_ts_iter,
-                    workspace_root=acquired.workspace_dir,
-                    workspace_mount=workspace_mount,
-                )
-            elif request.agent == "claude":
-                normalize_claude_events(
-                    raw_events_path=raw_events_path,
-                    normalized_events_path=normalized_events_path,
-                    raw_ts_iter=raw_ts_iter,
-                    workspace_root=acquired.workspace_dir,
-                    workspace_mount=workspace_mount,
-                )
-            else:
-                normalize_gemini_events(
-                    raw_events_path=raw_events_path,
-                    normalized_events_path=normalized_events_path,
-                    raw_ts_iter=raw_ts_iter,
-                    workspace_root=acquired.workspace_dir,
-                    workspace_mount=workspace_mount,
-                )
-        finally:
-            if raw_ts_f is not None:
-                raw_ts_f.close()
+        def _normalize_raw_events(
+            *,
+            source_path: Path,
+            destination_path: Path,
+        ) -> None:
+            source_ts_path = source_path.with_suffix(".ts.jsonl")
+            raw_ts_f = None
+            raw_ts_iter = None
+            if source_ts_path.exists():
+                try:
+                    raw_ts_f = source_ts_path.open("r", encoding="utf-8")
+                    raw_ts_iter = (line.strip() for line in raw_ts_f if line.strip())
+                except OSError:
+                    raw_ts_f = None
+                    raw_ts_iter = None
+            try:
+                if request.agent == "codex":
+                    normalize_codex_events(
+                        raw_events_path=source_path,
+                        normalized_events_path=destination_path,
+                        raw_ts_iter=raw_ts_iter,
+                        workspace_root=acquired.workspace_dir,
+                        workspace_mount=workspace_mount,
+                    )
+                elif request.agent == "claude":
+                    normalize_claude_events(
+                        raw_events_path=source_path,
+                        normalized_events_path=destination_path,
+                        raw_ts_iter=raw_ts_iter,
+                        workspace_root=acquired.workspace_dir,
+                        workspace_mount=workspace_mount,
+                    )
+                else:
+                    normalize_gemini_events(
+                        raw_events_path=source_path,
+                        normalized_events_path=destination_path,
+                        raw_ts_iter=raw_ts_iter,
+                        workspace_root=acquired.workspace_dir,
+                        workspace_mount=workspace_mount,
+                    )
+            finally:
+                if raw_ts_f is not None:
+                    raw_ts_f.close()
+
+        attempt_event_sources = [
+            run_dir / str(attempt["raw_events_path"])
+            for attempt in attempts_meta
+            if isinstance(attempt.get("raw_events_path"), str)
+        ]
+        normalization_source = raw_events_path
+        if len(attempt_event_sources) == 1:
+            normalization_source = attempt_event_sources[0]
+        elif len(attempt_event_sources) > 1:
+            normalization_source = run_dir / "raw_events.all_attempts.jsonl"
+            with normalization_source.open("wb") as cumulative_f:
+                for source_path in attempt_event_sources:
+                    content = source_path.read_bytes()
+                    cumulative_f.write(content)
+                    if content and not content.endswith(b"\n"):
+                        cumulative_f.write(b"\n")
+
+            attempt_ts_sources = [
+                source_path.with_suffix(".ts.jsonl") for source_path in attempt_event_sources
+            ]
+            if all(source_path.is_file() for source_path in attempt_ts_sources):
+                cumulative_ts_path = normalization_source.with_suffix(".ts.jsonl")
+                with cumulative_ts_path.open("wb") as cumulative_ts_f:
+                    for source_path in attempt_ts_sources:
+                        content = source_path.read_bytes()
+                        cumulative_ts_f.write(content)
+                        if content and not content.endswith(b"\n"):
+                            cumulative_ts_f.write(b"\n")
+
+        _normalize_raw_events(
+            source_path=normalization_source,
+            destination_path=normalized_events_path,
+        )
 
         if isinstance(shell_capability_summary, dict):
             _append_shell_capability_normalized_event(

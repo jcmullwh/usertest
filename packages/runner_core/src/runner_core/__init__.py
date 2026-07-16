@@ -7,7 +7,13 @@ from runner_core.outcome_roles import (
 )
 from runner_core.pathing import find_repo_root
 from runner_core.remote_effects import CommandRemoteEffects, RemoteEffectModifier
-from runner_core.runner import RunnerConfig, RunRequest, RunResult, run_once
+from runner_core.runner import (
+    RunnerConfig,
+    RunRequest,
+    RunResult,
+    capture_local_verification,
+    run_once,
+)
 from runner_core.verification_commands import verification_command_safety_errors
 
 __all__ = [
@@ -17,6 +23,7 @@ __all__ = [
     "RunRequest",
     "RunResult",
     "RunnerConfig",
+    "capture_local_verification",
     "find_repo_root",
     "register_causal_observation_source",
     "register_causal_outcome_predicate",

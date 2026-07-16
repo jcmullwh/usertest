@@ -443,11 +443,18 @@ def validate_bound_runner_verification(
     if verification.get("cancelled") is not False:
         raise ValueError("Runner verification must explicitly record cancelled=false")
 
-    configured_raw = verification.get("commands_configured")
-    if not isinstance(configured_raw, list):
-        raise ValueError("Runner verification must contain configured commands")
-    configured = normalize_verification_commands(configured_raw)
     expected_commands = binding["configured_commands"]
+    configured_raw = verification.get("commands_configured")
+    if configured_raw is None and "commands_configured" not in verification:
+        # Early schema-v1 runner receipts retained every executed command but
+        # accidentally omitted the redundant configured-command projection.
+        # The immutable ticket binding remains the authority; exact executed
+        # coverage below must still match it in count, order, and text.
+        configured = list(expected_commands)
+    else:
+        if not isinstance(configured_raw, list):
+            raise ValueError("Runner verification configured commands must be a list")
+        configured = normalize_verification_commands(configured_raw)
     if configured != expected_commands:
         raise ValueError(
             "Runner verification commands do not match the selected plan contract"

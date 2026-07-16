@@ -1,6 +1,11 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from runner_core.retained_oracle_assets import (
+    resolve_retained_oracle_asset_transport,
+    retained_oracle_asset_summary,
+)
+
 from usertest_implement.backlog_refresh import (
     BacklogRefreshRequest,
     run_shadow_backlog_refresh,
@@ -317,6 +322,15 @@ def _run_selected_ticket(
         raise SystemExit(
             f"--verify-reuse must be one of auto/off; got {getattr(args, 'verify_reuse', None)!r}."
         )
+    supervisor_instructions: list[str] = []
+    for raw_instruction in getattr(args, "supervisor_instructions", None) or []:
+        if not isinstance(raw_instruction, str) or not raw_instruction.strip():
+            raise SystemExit(
+                "--supervisor-instruction entries must be non-empty strings; "
+                f"got {raw_instruction!r}."
+            )
+        supervisor_instructions.append(raw_instruction.strip())
+    supervisor_instruction = "\n\n".join(supervisor_instructions)
 
     selected_provenance: dict[str, Any] | None = None
     local_plan_available = bool(
@@ -363,6 +377,32 @@ def _run_selected_ticket(
             and not bool(getattr(args, "skip_verify", False))
         ):
             verification_commands = plan_commands
+
+    retained_oracle_assets_root: Path | None = None
+    retained_oracle_asset_spec: dict[str, Any] | None = None
+    retained_oracle_transport_summary: dict[str, Any] | None = None
+    verification_reuse_forced_reason: str | None = None
+    try:
+        retained_oracle_transport = resolve_retained_oracle_asset_transport(
+            verification_contract=(
+                plan_verification_contract
+                if isinstance(plan_verification_contract, dict)
+                else None
+            ),
+            tickets_export_path=selected.tickets_export_path,
+        )
+    except ValueError as exc:
+        raise SystemExit(
+            f"Selected ticket retained-oracle asset is unavailable or invalid: {exc}"
+        ) from exc
+    if retained_oracle_transport is not None:
+        retained_oracle_assets_root, retained_oracle_asset_spec = retained_oracle_transport
+        verification_reuse_mode = "off"
+        verification_reuse_forced_reason = "retained_oracle_asset_server_staging"
+        retained_oracle_transport_summary = retained_oracle_asset_summary(
+            trusted_runs_root=retained_oracle_assets_root,
+            spec=retained_oracle_asset_spec,
+        )
 
     for command in verification_commands:
         safety_errors = verification_command_safety_errors(command)
@@ -516,10 +556,13 @@ def _run_selected_ticket(
         model=args.model,
         agent_config_overrides=tuple(args.agent_config_override or []),
         agent_append_system_prompt=ticket_blob,
+        supervisor_instruction=supervisor_instruction or None,
         keep_workspace=keep_workspace,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
         verification_reuse_mode=verification_reuse_mode,
+        retained_oracle_assets_root=retained_oracle_assets_root,
+        retained_oracle_asset_spec=retained_oracle_asset_spec,
         exec_backend=exec_backend,
         exec_docker_profile=exec_docker_profile,
         exec_keep_container=bool(args.exec_keep_container),
@@ -568,6 +611,9 @@ def _run_selected_ticket(
                 "verification_commands": list(request.verification_commands),
                 "verification_timeout_seconds": request.verification_timeout_seconds,
                 "verification_reuse_mode": request.verification_reuse_mode,
+                "verification_reuse_forced_reason": verification_reuse_forced_reason,
+                "retained_oracle_asset_transport": retained_oracle_transport_summary,
+                "supervisor_instructions": supervisor_instructions,
                 "commit": bool(args.commit),
                 "push": bool(args.push),
                 "pr": bool(args.pr),
@@ -666,6 +712,17 @@ def _run_selected_ticket(
                 )
             },
             "verification_binding": verification_binding,
+            "retained_oracle_asset_transport": (
+                {
+                    "trusted_runs_root": str(retained_oracle_assets_root.resolve()),
+                    "spec": retained_oracle_asset_spec,
+                    "summary": retained_oracle_transport_summary,
+                }
+                if retained_oracle_assets_root is not None
+                and retained_oracle_asset_spec is not None
+                else None
+            ),
+            "supervisor_instruction": request.supervisor_instruction,
             "owner_repo": {
                 "root": str(selected.owner_root) if selected.owner_root is not None else None,
                 "idea_path": str(selected.idea_path) if selected.idea_path is not None else None,
@@ -965,12 +1022,13 @@ def _run_selected_ticket(
         )
     ):
         try:
-            move_ticket_file(
+            moved_ticket_path = move_ticket_file(
                 owner_root=selected.owner_root,
                 fingerprint=selected.fingerprint,
                 to_bucket="4 - for_review",
                 dry_run=False,
             )
+            selected = _select_ticket_from_path(moved_ticket_path)
             _sync_ticket_atom_actions(repo_root=repo_root, owner_root=selected.owner_root)
         except Exception as e:
             print(f"WARNING: failed to move ticket to for_review: {e}", file=sys.stderr)
@@ -1034,6 +1092,8 @@ def _run_selected_ticket(
                 review_mission_id=_DEFAULT_REVIEW_MISSION_ID,
                 review_seed=int(args.seed),
                 review_agent_config_override=list(getattr(args, "agent_config_override", []) or []),
+                review_corrections=[],
+                adopt_review_run=None,
                 keep_workspace=bool(args.keep_workspace),
                 exec_backend=str(args.exec_backend),
                 exec_use_host_agent_login=bool(args.exec_use_host_agent_login),
