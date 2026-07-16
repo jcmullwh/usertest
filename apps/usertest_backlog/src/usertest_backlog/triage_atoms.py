@@ -248,7 +248,8 @@ def build_implementation_index(
                 pr_error=pr_error,
                 head_commit=head_commit,
                 branch=branch,
-                diff_numstat=diff_numstat,            )
+                diff_numstat=diff_numstat,
+            )
         )
 
     # Sort newest-first when timing is present (else stable by path).
@@ -620,9 +621,7 @@ def render_triage_atoms_markdown(report: dict[str, Any]) -> str:
     exclude_sources = cfg.get("exclude_sources")
     if isinstance(exclude_sources, list):
         cleaned = [
-            item.strip()
-            for item in exclude_sources
-            if isinstance(item, str) and item.strip()
+            item.strip() for item in exclude_sources if isinstance(item, str) and item.strip()
         ]
         if cleaned:
             preview = ", ".join([f"`{item}`" for item in cleaned[:12]])
@@ -751,9 +750,7 @@ def render_triage_atoms_markdown(report: dict[str, Any]) -> str:
                     cited = int(row.get("atoms_cited_in_cluster", 0))
                     parts.append(f"{cid}(cites {cited})")
                 suffix = (
-                    ""
-                    if len(clusters_list) <= 20
-                    else f", ... (+{len(clusters_list) - 20} more)"
+                    "" if len(clusters_list) <= 20 else f", ... (+{len(clusters_list) - 20} more)"
                 )
                 lines.append(f"  - Clusters: {', '.join(parts)}{suffix}")
 

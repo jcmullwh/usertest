@@ -38,6 +38,12 @@ from triage_engine import (
 )
 from triage_engine.text import extract_path_anchors_from_chunks, tokenize
 
+from backlog_core.case_lineage import (
+    apply_atom_disposition_decision,
+    record_lineage_context,
+    validate_atom_lineage,
+)
+
 _SEVERITY_ORDER: dict[str, int] = {"low": 0, "medium": 1, "high": 2, "blocker": 3}
 
 _BACKLOG_EXPORT_PATH_LIKE_RE = re.compile(
@@ -100,6 +106,12 @@ _TRUST_SOURCE_WEIGHTS: dict[str, float] = {
     "capability_notice_artifact": 0.20,
     "agent_last_message_artifact": 0.75,
     "confusion_point": 0.70,
+    "report_outcome": 0.90,
+    "task_step_observation": 0.80,
+    "task_attempt_observation": 0.80,
+    "verification_observation": 0.85,
+    "boundary_observation": 0.75,
+    "batch_result_failure": 0.90,
     "suggested_change": 0.65,
     "confidence_missing": 0.45,
 }
@@ -143,8 +155,14 @@ def _default_capture_policy() -> TextCapturePolicy:
     )
 
 
-def _max_command_failure_atoms_per_run() -> int:
-    """Max number of command-failure atoms emitted per run (env override supported)."""
+def _max_command_failure_atoms_per_run() -> int | None:
+    """Return an explicit operator cap, or ``None`` to retain every failure.
+
+    Evidence capture used to discard all but ten failed commands by default.  Bounded
+    downstream mining jobs now provide the scale control, so default extraction must retain
+    the available evidence.  An operator may still set a positive environment limit; that
+    path emits an explicit truncation atom rather than silently claiming complete coverage.
+    """
 
     names = ("BACKLOG_MAX_COMMAND_FAILURE_ATOMS_PER_RUN", "BACKLOGmax_command_failure_atoms")
     for name in names:
@@ -152,10 +170,11 @@ def _max_command_failure_atoms_per_run() -> int:
         if raw is None:
             continue
         try:
-            return int(str(raw).strip())
+            parsed = int(str(raw).strip())
+            return parsed if parsed > 0 else None
         except ValueError:
             continue
-    return 10
+    return None
 
 
 def _command_head(command: str) -> str | None:
@@ -443,8 +462,8 @@ def _severity_hint_from_report_issue_severity(raw: str | None) -> str:
     return "medium"
 
 
-def _iter_unique_capped_strings(value: Any, *, limit: int) -> list[str]:
-    if limit <= 0:
+def _iter_unique_capped_strings(value: Any, *, limit: int | None) -> list[str]:
+    if limit is not None and limit <= 0:
         return []
     raw_list: list[Any]
     if isinstance(value, str):
@@ -465,7 +484,7 @@ def _iter_unique_capped_strings(value: Any, *, limit: int) -> list[str]:
             continue
         seen.add(key)
         out.append(text)
-        if len(out) >= limit:
+        if limit is not None and len(out) >= limit:
             break
     return out
 
@@ -554,6 +573,105 @@ def _load_token_monitoring_artifacts(record: dict[str, Any], run_dir: Path) -> t
     return monitoring_obj, error_obj
 
 
+def _bounded_terminal_context_text(
+    value: Any,
+    *,
+    max_chars: int = 1_200,
+) -> dict[str, Any] | None:
+    """Return an explicit bounded preview for terminal run context.
+
+    This is routing/interpretation context, not the sole evidence carrier for a problem.
+    Structured issue atoms remain lossless.  The digest and truncation flag make the bound
+    visible rather than silently presenting a prefix as the complete terminal explanation.
+    """
+
+    text = _coerce_string(value)
+    if text is None:
+        return None
+    encoded = text.encode("utf-8")
+    truncated = len(text) > max_chars
+    return {
+        "preview": text[:max_chars].rstrip() if truncated else text,
+        "truncated": truncated,
+        "original_chars": len(text),
+        "sha256": sha256(encoded).hexdigest(),
+    }
+
+
+def _modern_report_terminal_context(
+    *,
+    report: dict[str, Any],
+    report_kind: str,
+    report_status: str,
+) -> tuple[str, dict[str, Any]]:
+    """Build runner-owned terminal context without making success a problem source."""
+
+    summary_value = (
+        report.get("summary")
+        or report.get("failure_point")
+        or (
+            report.get("evidence", {}).get("what_happened")
+            if isinstance(report.get("evidence"), dict)
+            else None
+        )
+    )
+    summary = _bounded_terminal_context_text(summary_value)
+    verification_raw = report.get("verification")
+    verification = verification_raw if isinstance(verification_raw, list) else []
+    verification_results = [
+        result
+        for item in verification
+        if isinstance(item, dict)
+        for result in [_coerce_string(item.get("result"))]
+        if result is not None
+    ]
+    issue_items = [
+        item
+        for block in ("issues", "risks")
+        for item in (
+            report.get(block) if isinstance(report.get(block), list) else []
+        )
+        if isinstance(item, dict)
+    ]
+    issue_severity_counts = Counter(
+        (_coerce_string(item.get("severity")) or "unknown").casefold()
+        for item in issue_items
+    )
+    batch_results_raw = report.get("results")
+    batch_results = batch_results_raw if isinstance(batch_results_raw, list) else []
+    batch_status_counts = Counter(
+        (_coerce_string(item.get("status")) or "unknown").casefold()
+        for item in batch_results
+        if isinstance(item, dict)
+    )
+    outcome_text = (
+        f"Origin run terminal outcome: kind={report_kind}; status={report_status}; "
+        f"verification_checks={len(verification)}; explicit_issues={len(issue_items)}"
+    )
+    if summary is not None:
+        outcome_text += f"; summary={summary['preview']}"
+    return outcome_text, {
+        "terminal_context_schema_version": 1,
+        "terminal_context_scope": "origin_run_outcome_not_case_resolution",
+        "report_kind": report_kind,
+        "report_status": report_status,
+        "report_summary_context": summary,
+        "verification_check_count": len(verification),
+        "verification_result_values": list(dict.fromkeys(verification_results[:20])),
+        "verification_results_omitted_count": max(0, len(verification_results) - 20),
+        "explicit_issue_count": len(issue_items),
+        "issue_severity_counts": dict(sorted(issue_severity_counts.items())),
+        "batch_result_status_counts": dict(sorted(batch_status_counts.items())),
+        "output_count": len(report.get("outputs"))
+        if isinstance(report.get("outputs"), list)
+        else 0,
+        # The context atom must be available to same-run miners but can never originate a case.
+        "problem_mining_context_only": True,
+        "lineage_mining_blocker": "runner_terminal_context_only",
+        "severity_hint": "low",
+    }
+
+
 def _extract_modern_report_atoms(
     *,
     report: dict[str, Any],
@@ -566,6 +684,34 @@ def _extract_modern_report_atoms(
     This is intentionally conservative and additive: legacy extraction remains unchanged.
     """
 
+    report_status = (_coerce_string(report.get("status")) or "").casefold()
+    if report_status in {"partial", "failure"}:
+        extensions_raw = report.get("extensions")
+        extensions = extensions_raw if isinstance(extensions_raw, dict) else {}
+        outcome_summary = (
+            _coerce_string(report.get("summary"))
+            or _coerce_string(report.get("failure_point"))
+            or _coerce_string(extensions.get("status_reason"))
+            or _coerce_string(report.get("goal"))
+            or "The report did not complete successfully."
+        )
+        report_evidence = report.get("evidence")
+        emit(
+            "report_outcome",
+            (
+                f"Report outcome: kind={report_kind}; status={report_status}; "
+                f"{outcome_summary}"
+            ),
+            report_kind=report_kind,
+            report_status=report_status,
+            report_summary=_coerce_string(report.get("summary")),
+            report_goal=_coerce_string(report.get("goal")),
+            report_failure_point=_coerce_string(report.get("failure_point")),
+            report_status_reason=_coerce_string(extensions.get("status_reason")),
+            report_evidence=report_evidence,
+            severity_hint="high" if report_status == "failure" else "medium",
+        )
+
     # issues / risks blocks (issue-like dicts)
     for block_name in ("issues", "risks"):
         items = report.get(block_name)
@@ -574,12 +720,7 @@ def _extract_modern_report_atoms(
 
         title_seen: set[str] = set()
         fix_seen: set[str] = set()
-        title_emitted = 0
-        fix_emitted = 0
-
         for issue in items:
-            if title_emitted >= 10 and fix_emitted >= 10:
-                break
             if not isinstance(issue, dict):
                 continue
 
@@ -589,12 +730,12 @@ def _extract_modern_report_atoms(
             details = _coerce_string(issue.get("details"))
             evidence_text = _coerce_string(issue.get("evidence"))
             suggested_fix = _coerce_string(issue.get("suggested_fix"))
+            issue_payload = dict(issue)
 
-            if title is not None and title_emitted < 10:
+            if title is not None:
                 title_key = _normalize_dedupe_key(title)
                 if title_key not in title_seen:
                     title_seen.add(title_key)
-                    title_emitted += 1
                     emit(
                         "confusion_point",
                         title,
@@ -604,14 +745,14 @@ def _extract_modern_report_atoms(
                         report_issue_block=block_name,
                         issue_severity=severity_raw,
                         issue_title=title,
+                        report_issue=issue_payload,
                         severity_hint=severity_hint,
                     )
 
-            if suggested_fix is not None and fix_emitted < 10:
+            if suggested_fix is not None:
                 fix_key = _normalize_dedupe_key(suggested_fix)
                 if fix_key not in fix_seen:
                     fix_seen.add(fix_key)
-                    fix_emitted += 1
                     emit(
                         "suggested_change",
                         suggested_fix,
@@ -620,26 +761,29 @@ def _extract_modern_report_atoms(
                         issue_severity=severity_raw,
                         issue_title=title,
                         evidence_text=evidence_text,
+                        report_issue=issue_payload,
                         severity_hint=severity_hint,
                     )
 
     ux = report.get("user_experience")
     if isinstance(ux, dict):
-        for text in _iter_unique_capped_strings(ux.get("friction_points"), limit=10):
+        for text in _iter_unique_capped_strings(ux.get("friction_points"), limit=None):
             emit(
                 "confusion_point",
                 text,
                 report_kind=report_kind,
                 report_ux_block="friction_points",
             )
-        for text in _iter_unique_capped_strings(ux.get("unclear_points"), limit=10):
+        for text in _iter_unique_capped_strings(ux.get("unclear_points"), limit=None):
             emit(
                 "confidence_missing",
                 text,
                 report_kind=report_kind,
                 report_ux_block="unclear_points",
             )
-        for text in _iter_unique_capped_strings(ux.get("what_would_help_next_time"), limit=10):
+        for text in _iter_unique_capped_strings(
+            ux.get("what_would_help_next_time"), limit=None
+        ):
             emit(
                 "suggested_change",
                 text,
@@ -647,14 +791,14 @@ def _extract_modern_report_atoms(
                 report_ux_block="what_would_help_next_time",
             )
 
-    for text in _iter_unique_capped_strings(report.get("next_actions"), limit=10):
+    for text in _iter_unique_capped_strings(report.get("next_actions"), limit=None):
         emit(
             "suggested_change",
             text,
             report_kind=report_kind,
             report_block="next_actions",
         )
-    for text in _iter_unique_capped_strings(report.get("recommendations"), limit=10):
+    for text in _iter_unique_capped_strings(report.get("recommendations"), limit=None):
         emit(
             "suggested_change",
             text,
@@ -666,42 +810,141 @@ def _extract_modern_report_atoms(
     if isinstance(failures_and_fixes, list):
         symptom_seen: set[str] = set()
         fix_seen: set[str] = set()
-        symptom_emitted = 0
-        fix_emitted = 0
-
         for entry in failures_and_fixes:
-            if symptom_emitted >= 10 and fix_emitted >= 10:
-                break
             if not isinstance(entry, dict):
                 continue
             symptom = _coerce_string(entry.get("symptom"))
             likely_cause = _coerce_string(entry.get("likely_cause"))
             fix = _coerce_string(entry.get("fix"))
 
-            if symptom is not None and symptom_emitted < 10:
+            if symptom is not None:
                 key = _normalize_dedupe_key(symptom)
                 if key not in symptom_seen:
                     symptom_seen.add(key)
-                    symptom_emitted += 1
                     emit(
                         "confusion_point",
                         symptom,
                         impact=likely_cause,
+                        report_failure_and_fix=dict(entry),
                         report_kind=report_kind,
                         report_block="failures_and_fixes",
                     )
 
-            if fix is not None and fix_emitted < 10:
+            if fix is not None:
                 key = _normalize_dedupe_key(fix)
                 if key not in fix_seen:
                     fix_seen.add(key)
-                    fix_emitted += 1
                     emit(
                         "suggested_change",
                         fix,
+                        report_failure_and_fix=dict(entry),
                         report_kind=report_kind,
                         report_block="failures_and_fixes",
                     )
+
+    # The task schemas make ``issues`` optional, so a failed/partial run can otherwise
+    # retain only proposed next actions while dropping the actual step and verification
+    # evidence.  Free-form result/outcome strings do not provide a safe keyword-free
+    # failure classifier.  Preserve every structured observation for non-success reports
+    # and let problem mining disposition the evidence explicitly.
+    if report_kind == "task_run_v1" and report_status in {"partial", "failure"}:
+        steps_raw = report.get("steps")
+        steps = steps_raw if isinstance(steps_raw, list) else []
+        for step_index, step in enumerate(steps, start=1):
+            if not isinstance(step, dict):
+                continue
+            step_name = _coerce_string(step.get("name")) or f"step {step_index}"
+            step_outcome = _coerce_string(step.get("outcome")) or "outcome not recorded"
+            emit(
+                "task_step_observation",
+                f"Task step outcome ({step_name}): {step_outcome}",
+                report_kind=report_kind,
+                report_status=report_status,
+                step_index=step_index,
+                task_step=dict(step),
+                severity_hint="high" if report_status == "failure" else "medium",
+            )
+            attempts_raw = step.get("attempts")
+            attempts = attempts_raw if isinstance(attempts_raw, list) else []
+            for attempt_index, attempt in enumerate(attempts, start=1):
+                if not isinstance(attempt, dict):
+                    continue
+                action = _coerce_string(attempt.get("action")) or "action not recorded"
+                result = _coerce_string(attempt.get("result")) or "result not recorded"
+                emit(
+                    "task_attempt_observation",
+                    f"Task attempt ({step_name} / {action}): {result}",
+                    report_kind=report_kind,
+                    report_status=report_status,
+                    step_index=step_index,
+                    attempt_index=attempt_index,
+                    task_attempt=dict(attempt),
+                    severity_hint="high" if report_status == "failure" else "medium",
+                )
+
+        verification_raw = report.get("verification")
+        verification = verification_raw if isinstance(verification_raw, list) else []
+        for verification_index, check in enumerate(verification, start=1):
+            if not isinstance(check, dict):
+                continue
+            check_name = _coerce_string(check.get("check")) or f"check {verification_index}"
+            result = _coerce_string(check.get("result")) or "result not recorded"
+            emit(
+                "verification_observation",
+                f"Verification result ({check_name}): {result}",
+                report_kind=report_kind,
+                report_status=report_status,
+                verification_index=verification_index,
+                verification_check=dict(check),
+                severity_hint="high" if report_status == "failure" else "medium",
+            )
+
+    if report_kind == "boundary_v1":
+        observations_raw = report.get("observations")
+        observations = observations_raw if isinstance(observations_raw, list) else []
+        for observation_index, observation in enumerate(observations, start=1):
+            if not isinstance(observation, dict):
+                continue
+            summary = _coerce_string(observation.get("summary"))
+            if summary is None:
+                continue
+            risk_level = (_coerce_string(observation.get("risk_level")) or "unknown").casefold()
+            severity_hint = (
+                "high"
+                if risk_level == "high"
+                else "medium"
+                if risk_level == "medium"
+                else "low"
+            )
+            emit(
+                "boundary_observation",
+                f"Boundary observation (risk={risk_level}): {summary}",
+                report_kind=report_kind,
+                report_status=report_status or None,
+                observation_index=observation_index,
+                boundary_observation=dict(observation),
+                severity_hint=severity_hint,
+            )
+
+    if report_kind == "batch_v1":
+        results_raw = report.get("results")
+        results = results_raw if isinstance(results_raw, list) else []
+        for result_index, result in enumerate(results, start=1):
+            if not isinstance(result, dict):
+                continue
+            if (_coerce_string(result.get("status")) or "").casefold() != "failure":
+                continue
+            input_name = _coerce_string(result.get("input")) or f"input {result_index}"
+            notes = _coerce_string(result.get("notes")) or "No failure notes recorded."
+            emit(
+                "batch_result_failure",
+                f"Batch result failed ({input_name}): {notes}",
+                report_kind=report_kind,
+                report_status=report_status or None,
+                result_index=result_index,
+                batch_result=dict(result),
+                severity_hint="high",
+            )
 
     failure_point = _coerce_string(report.get("failure_point"))
     if failure_point is not None:
@@ -726,7 +969,7 @@ def _extract_modern_report_atoms(
             )
 
     for key in ("recommended_fix_path", "prevent_recurrence"):
-        for text in _iter_unique_capped_strings(report.get(key), limit=10):
+        for text in _iter_unique_capped_strings(report.get(key), limit=None):
             emit(
                 "suggested_change",
                 text,
@@ -771,8 +1014,12 @@ def extract_backlog_atoms(
         target_ref = record.get("target_ref")
         if isinstance(target_ref, dict):
             repo_input = _coerce_string(target_ref.get("repo_input"))
-            mission_id = _coerce_string(target_ref.get("mission_id"))
+            mission_id = _coerce_string(target_ref.get("mission_id")) or _coerce_string(
+                target_ref.get("requested_mission_id")
+            )
             persona_id = _coerce_string(target_ref.get("persona_id"))
+
+        lineage_context = record_lineage_context(record, run_id=run_id)
 
         source_index: Counter[str] = Counter()
 
@@ -791,11 +1038,12 @@ def extract_backlog_atoms(
             _mission_id: str | None = mission_id,
             _persona_id: str | None = persona_id,
             _source_index: Counter[str] = source_index,
+            _lineage_context: dict[str, Any] = lineage_context,
             **extras: Any,
-        ) -> None:
+        ) -> str | None:
             cleaned = _clean_atom_text(text)
             if not cleaned:
-                return
+                return None
             _source_index[source] += 1
             atom_id = f"{_run_id}:{source}:{_source_index[source]}"
             priority_hint = _coerce_string(extras.get("priority"))
@@ -814,8 +1062,12 @@ def extract_backlog_atoms(
                 "timestamp_utc": _timestamp_utc,
                 "source": source,
                 "text": cleaned,
+                "evidence_class": (
+                    "proposal" if source == "suggested_change" else "observed"
+                ),
                 "severity_hint": severity_hint,
                 "severity_score_hint": _severity_rank(severity_hint),
+                **_lineage_context,
             }
             if _target_slug:
                 atom["target_slug"] = _target_slug
@@ -828,12 +1080,30 @@ def extract_backlog_atoms(
             for key, value in extras.items():
                 if value is None:
                     continue
-                if key == "severity_hint":
+                if key == "severity_hint" or key in _lineage_context:
                     continue
                 atom[key] = value
+            if atom.get("disposition") == "supports_case":
+                authorities = atom.get("lineage_authorities")
+                source = (
+                    str(authorities[-1])
+                    if isinstance(authorities, list) and authorities
+                    else "runner_parent_lineage"
+                )
+                atom = apply_atom_disposition_decision(
+                    atom,
+                    disposition="supports_case",
+                    source=source,
+                    rationale=(
+                        "Runner-owned lineage attached this derived atom to "
+                        f"{atom.get('parent_case_id')}."
+                    ),
+                )
+            validate_atom_lineage(atom)
             atoms.append(atom)
             source_counts[source] += 1
             severity_counts[severity_hint] += 1
+            return atom_id
 
         token_monitoring, token_monitoring_error = _load_token_monitoring_artifacts(record, run_dir)
         if isinstance(token_monitoring, dict):
@@ -986,15 +1256,32 @@ def extract_backlog_atoms(
                         seen_identities.add(identity)
                     deduped.append(entry)
                 failed_commands = deduped
-                omitted_after_reconcile = len(failed_commands) - max_command_failure_atoms
-                failed_commands_omitted_hint = (
-                    omitted_after_reconcile if omitted_after_reconcile > 0 else None
-                )
+                if max_command_failure_atoms is None:
+                    failed_commands_omitted_hint = None
+                else:
+                    omitted_after_reconcile = (
+                        len(failed_commands) - max_command_failure_atoms
+                    )
+                    failed_commands_omitted_hint = (
+                        omitted_after_reconcile if omitted_after_reconcile > 0 else None
+                    )
 
         if failed_commands:
+            if (
+                max_command_failure_atoms is not None
+                and len(failed_commands) > max_command_failure_atoms
+            ):
+                cap_omitted = len(failed_commands) - max_command_failure_atoms
+                failed_commands_omitted_hint = max(
+                    cap_omitted,
+                    failed_commands_omitted_hint or 0,
+                )
             emitted = 0
             for entry in failed_commands:
-                if emitted >= max_command_failure_atoms:
+                if (
+                    max_command_failure_atoms is not None
+                    and emitted >= max_command_failure_atoms
+                ):
                     break
                 command = _coerce_string(entry.get("command"))
                 exit_code = entry.get("exit_code")
@@ -1048,6 +1335,7 @@ def extract_backlog_atoms(
                         summary,
                         impact=impact,
                         evidence=evidence if evidence else None,
+                        report_confusion_point=dict(item),
                     )
 
             suggested = report.get("suggested_changes")
@@ -1078,8 +1366,23 @@ def extract_backlog_atoms(
                     _emit("confidence_missing", missing)
 
             report_kind = _coerce_string(report.get("kind"))
-            if report_kind is not None:
-                _extract_modern_report_atoms(report=report, report_kind=report_kind, emit=_emit)
+            report_status = _coerce_string(report.get("status"))
+            if report_kind is not None or report_status is not None:
+                terminal_text, terminal_fields = _modern_report_terminal_context(
+                    report=report,
+                    report_kind=report_kind or "unknown",
+                    report_status=(report_status or "unknown").casefold(),
+                )
+                _emit(
+                    "run_outcome_context",
+                    terminal_text,
+                    **terminal_fields,
+                )
+                _extract_modern_report_atoms(
+                    report=report,
+                    report_kind=report_kind or "unknown",
+                    emit=_emit,
+                )
 
         validation_values = coerce_validation_errors(record.get("report_validation_errors"))
         sanitized_error = sanitize_error(record.get("error"))
@@ -1092,6 +1395,7 @@ def extract_backlog_atoms(
 
         run_capture_entries: list[dict[str, Any]] = []
         attachments: list[dict[str, Any]] = []
+        failure_attachment_atom_ids: list[str] = []
         for filename, source in (
             ("agent_stderr.txt", "agent_stderr_artifact"),
             ("agent_last_message.txt", "agent_last_message_artifact"),
@@ -1118,6 +1422,25 @@ def extract_backlog_atoms(
                         "capture_error": capture.error,
                     }
                 )
+                artifact_text = _clean_atom_text(_compose_artifact_text(capture))
+                if not artifact_text:
+                    artifact_text = (
+                        f"[capture_error] {capture.error}"
+                        if isinstance(capture.error, str) and capture.error.strip()
+                        else "[empty artifact]"
+                    )
+                attachment_atom_id = _emit(
+                    source,
+                    artifact_text,
+                    excerpt_head=excerpt_head,
+                    excerpt_tail=excerpt_tail,
+                    truncated=truncated,
+                    capture_error=capture.error,
+                    artifact_ref=_artifact_ref_public(capture),
+                    severity_hint="high",
+                )
+                if attachment_atom_id is not None:
+                    failure_attachment_atom_ids.append(attachment_atom_id)
                 continue
             if not capture.artifact.exists:
                 continue
@@ -1196,7 +1519,9 @@ def extract_backlog_atoms(
                 report_validation_errors=validation_values,
                 artifacts=artifacts,
                 terminal_artifact_reads=record.get("terminal_artifact_reads"),
-                attachments=attachments,
+                # Full bounded head/tail evidence is emitted as linked artifact atoms so
+                # one large failure record cannot hide or overflow the evidence chunks.
+                attachments=None,
             )
             _emit(
                 "run_failure_event",
@@ -1208,6 +1533,7 @@ def extract_backlog_atoms(
                 artifacts=artifacts,
                 terminal_artifact_reads=record.get("terminal_artifact_reads"),
                 attachments=attachments,
+                linked_atom_ids=failure_attachment_atom_ids,
             )
 
     return {

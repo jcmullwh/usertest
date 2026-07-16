@@ -36,6 +36,18 @@ def test_repository_default_settings_pin_long_verification_timeout() -> None:
     assert timeout_seconds == 10800
 
 
+def test_repository_default_settings_discard_execution_containers() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+    settings_path = repo_root / "configs" / "usertest_implement_settings.yaml"
+    settings = yaml.safe_load(settings_path.read_text(encoding="utf-8"))
+
+    keep_container = settings["profiles"]["default"]["run_common"][
+        "exec_keep_container"
+    ]
+
+    assert keep_container is False
+
+
 def test_resolve_default_branch_name_uses_rerun_suffix_when_remote_branch_exists(
     monkeypatch,
 ) -> None:

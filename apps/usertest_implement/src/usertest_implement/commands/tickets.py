@@ -88,6 +88,11 @@ def _cmd_tickets_run_next(args: argparse.Namespace) -> int:
 def _cmd_tickets_move(args: argparse.Namespace) -> int:
     repo_root = _resolve_repo_root(args.repo_root)
     owner_root = args.owner_root.resolve()
+    if str(args.to_bucket) == "5 - complete":
+        raise SystemExit(
+            "Manual move to 5 - complete is forbidden because completion requires a "
+            "validated outcome record. Use the reviewed merge workflow."
+        )
     if str(args.to_bucket) == DISCARDED_PLAN_BUCKET:
         (owner_root / ".agents" / "plans" / DISCARDED_PLAN_BUCKET).mkdir(
             parents=True,

@@ -299,6 +299,10 @@ def _make_dummy_codex_binary_with_report(tmp_path: Path, report: dict[str, objec
                 "    if out_path is not None:",
                 "        Path(out_path).write_text(json.dumps(report) + '\\n', encoding='utf-8')",
                 "",
+                (
+                    "    print(json.dumps({'type': 'thread.started', "
+                    "'thread_id': '019f2cca-9011-7e32-88ae-6c25af578b49'}))"
+                ),
                 "    msg = {'id': '1', 'msg': {'type': 'agent_message', 'message': 'hi'}}",
                 "    print(json.dumps(msg))",
                 "    return 0",

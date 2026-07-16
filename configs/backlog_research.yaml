@@ -1,0 +1,13 @@
+backlog_research:
+  source_ref: origin/dev
+  # Three hours is an upper safety bound, not a convenience cutoff. A timeout remains
+  # a blocked research proof and cannot advance. Long faithful replays must be allowed
+  # to finish naturally instead of being mislabeled after five minutes.
+  clean_replay_timeout_seconds: 10800
+  # Use Docker for platform-neutral/Linux replays, while routing an explicitly
+  # Windows-only experiment to the approved local host. This prevents the shell
+  # case from being permanently blocked by a Linux-only global executor.
+  replay_executor: platform_router
+  replay_docker_image: ghcr.io/jcmullwh/usertest-maintenance:dev-latest
+  replay_trusted_host_roots:
+    - ..

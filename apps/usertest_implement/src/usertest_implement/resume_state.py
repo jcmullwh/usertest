@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import warnings
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from usertest_implement.shared import SelectedTicket, _utc_now_z, _write_json
 
@@ -24,14 +26,19 @@ LIFECYCLE_IN_PROGRESS = "in_progress"
 
 _RUN_EVIDENCE_FILES: tuple[tuple[str, str], ...] = (
     ("workspace_ref", "workspace_ref.json"),
+    ("target_ref", "target_ref.json"),
+    ("raw_events", "raw_events.jsonl"),
     ("ticket_ref", "ticket_ref.json"),
     ("verification", "verification.json"),
+    ("verification_capture_ref", "verification_capture_ref.json"),
+    ("verification_receipt", "verification_receipt.json"),
     ("verification_reuse", "verification_reuse.json"),
     ("agent_attempts", "agent_attempts.json"),
     ("git_ref", "git_ref.json"),
     ("push_ref", "push_ref.json"),
     ("ci_gate", "ci_gate.json"),
     ("pr_ref", "pr_ref.json"),
+    ("adoption_ref", "adoption_ref.json"),
     ("handoff_summary", "handoff_summary.json"),
     ("report", "report.json"),
     ("report_validation_errors", "report_validation_errors.json"),
@@ -73,6 +80,114 @@ def _clean_str(value: Any) -> str | None:
 
 def _path_str(path: Path | None) -> str | None:
     return str(path) if path is not None else None
+
+
+def _canonical_uuid(value: Any) -> str | None:
+    text = _clean_str(value)
+    if text is None:
+        return None
+    try:
+        canonical = str(UUID(text))
+    except ValueError:
+        return None
+    return canonical if text == canonical else None
+
+
+def implementation_author_continuity(run_dir: Path) -> dict[str, Any]:
+    """Return runner-attested author/session provenance for a repair run.
+
+    Codex emits the durable thread id in ``raw_events.jsonl``.  That id is the
+    only safe continuation target: using the most recent thread would risk
+    sending review feedback to a different author.  Missing provenance remains
+    an explicit fresh-restart condition for legacy or incomplete runs; it is
+    never represented as exact-session continuity.
+    """
+
+    def _resolve(candidate: Path, *, seen: frozenset[Path]) -> dict[str, Any]:
+        resolved_candidate = candidate.resolve()
+        if resolved_candidate in seen or len(seen) >= 8:
+            return {
+                "agent": None,
+                "session_id": None,
+                "status": "author_provenance_cycle",
+                "exact_session_available": False,
+                "agent_source": None,
+                "session_source": None,
+            }
+        target_ref = _read_json(resolved_candidate / "target_ref.json")
+        agent = (
+            _clean_str(target_ref.get("agent"))
+            if isinstance(target_ref, dict)
+            else None
+        )
+        session_id: str | None = None
+        raw_events_path = resolved_candidate / "raw_events.jsonl"
+        try:
+            with raw_events_path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if not isinstance(event, dict) or event.get("type") != "thread.started":
+                        continue
+                    session_id = _canonical_uuid(event.get("thread_id"))
+                    if session_id is not None:
+                        break
+        except (FileNotFoundError, OSError, UnicodeError):
+            session_id = None
+
+        exact_session_available = agent == "codex" and session_id is not None
+        if exact_session_available:
+            status = "exact_session_available"
+        elif agent == "codex":
+            status = "author_session_unavailable"
+        elif agent is None:
+            status = "author_provenance_unavailable"
+        else:
+            status = "agent_continuation_unsupported"
+        direct = {
+            "agent": agent,
+            "session_id": session_id,
+            "status": status,
+            "exact_session_available": exact_session_available,
+            "agent_source": (
+                str(resolved_candidate / "target_ref.json")
+                if (resolved_candidate / "target_ref.json").exists()
+                else None
+            ),
+            "session_source": str(raw_events_path) if raw_events_path.exists() else None,
+        }
+        if exact_session_available:
+            return direct
+
+        adoption = _read_json(resolved_candidate / "adoption_ref.json")
+        source_raw = adoption.get("source_run_dir") if isinstance(adoption, dict) else None
+        flags = adoption.get("flags") if isinstance(adoption, dict) else None
+        if (
+            not isinstance(adoption, dict)
+            or adoption.get("kind") != "existing_pr_adoption"
+            or not isinstance(flags, dict)
+            or flags.get("pr_adopted") is not True
+            or not isinstance(source_raw, str)
+            or not source_raw.strip()
+        ):
+            return direct
+        source = Path(source_raw).expanduser().resolve()
+        if not source.is_dir():
+            return direct
+        inherited = _resolve(source, seen=seen | {resolved_candidate})
+        if inherited.get("exact_session_available") is not True:
+            return direct
+        return {
+            **inherited,
+            "status": "exact_session_available_via_adoption",
+            "via_adoption_ref": str(resolved_candidate / "adoption_ref.json"),
+            "adopted_run_dir": str(resolved_candidate),
+            "author_source_run_dir": str(source),
+        }
+
+    return _resolve(run_dir, seen=frozenset())
 
 
 def _existing_evidence_paths(*, run_dir: Path, review_run_dir: Path | None) -> dict[str, str]:
@@ -222,6 +337,18 @@ def _classify_resume_state(
         detail = error or run_url or "CI gate failed."
         return LIFECYCLE_CI_FAILED, detail
 
+    if isinstance(pr_ref, dict) and pr_ref.get("pr_adopted") is True:
+        return (
+            LIFECYCLE_AWAITING_REVIEW,
+            "Existing PR was adopted and is awaiting implementation review.",
+        )
+
+    if isinstance(handoff_summary, dict) and handoff_summary.get("pr_adopted") is True:
+        return (
+            LIFECYCLE_AWAITING_REVIEW,
+            "Existing PR was adopted and is awaiting implementation review.",
+        )
+
     if isinstance(pr_ref, dict):
         requested = pr_ref.get("requested") is True
         created = pr_ref.get("created") is True
@@ -292,6 +419,7 @@ def build_ticket_resume_state(
     handoff_summary_dict = handoff_summary if isinstance(handoff_summary, dict) else None
     review_summary_dict = review_summary if isinstance(review_summary, dict) else None
     merge_ref_dict = merge_ref if isinstance(merge_ref, dict) else None
+    author_continuity = implementation_author_continuity(run_dir)
 
     lifecycle_state, blocking_reason = _classify_resume_state(
         run_dir=run_dir,
@@ -340,6 +468,7 @@ def build_ticket_resume_state(
             review_summary=review_summary_dict,
         ),
         "review_run_dir": str(review_run_dir) if review_run_dir is not None else None,
+        "implementation_author": author_continuity,
         "lifecycle_state": lifecycle_state,
         "blocking_reason": blocking_reason,
         "source_evidence_paths": _existing_evidence_paths(
@@ -369,4 +498,20 @@ def write_ticket_resume_state(
         ticket_path_override=ticket_path_override,
     )
     _write_json(run_dir / RESUME_STATE_ARTIFACT_NAME, state)
+    try:
+        from usertest_implement.pipeline_efficiency import (
+            write_ticket_pipeline_efficiency,
+        )
+
+        write_ticket_pipeline_efficiency(
+            run_dir=run_dir,
+            review_run_dir=review_run_dir,
+            resume_state=state,
+        )
+    except Exception as exc:  # noqa: BLE001 - telemetry must never become a lifecycle gate
+        warnings.warn(
+            f"Failed to write observational pipeline efficiency telemetry: {exc}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
     return state

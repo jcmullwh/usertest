@@ -107,6 +107,38 @@ def _ticket_owner(ticket: dict[str, Any]) -> str:
     return owner or "unknown"
 
 
+def ticket_export_case_id(ticket: dict[str, Any]) -> str | None:
+    """Return the persisted canonical case identity carried by a ticket.
+
+    The lookup intentionally does not derive identity from title or problem
+    prose. Stage-backed tickets may carry the field at the top level or inside
+    their problem/change-plan payloads.
+    """
+
+    for source in (
+        ticket,
+        _nested_object(ticket.get("problem_record")),
+        _nested_object(ticket.get("change_plan")),
+        _nested_object(ticket.get("selected_solution")),
+    ):
+        for key in ("case_id", "root_case_id"):
+            value = _coerce_string(source.get(key))
+            if value is not None:
+                return value
+    return None
+
+
+def ticket_export_plan_revision_id(ticket: dict[str, Any]) -> str | None:
+    """Return the persisted plan revision/change-plan identity for export."""
+
+    for source in (ticket, _nested_object(ticket.get("change_plan"))):
+        for key in ("plan_revision_id", "change_plan_id"):
+            value = _coerce_string(source.get(key))
+            if value is not None:
+                return value
+    return None
+
+
 def ticket_export_anchors(ticket: dict[str, Any]) -> set[str]:
     """Extract path-like anchors from ticket narrative fields.
 
@@ -149,6 +181,18 @@ def ticket_export_fingerprint(ticket: dict[str, Any]) -> str:
         Stable 16-character hexadecimal fingerprint.
     """
 
+    case_id = ticket_export_case_id(ticket)
+    plan_revision_id = ticket_export_plan_revision_id(ticket)
+    if case_id is not None:
+        payload = {
+            "case_id": case_id,
+            # Pre-plan/research exports deliberately share a single stable
+            # case fingerprint until an explicit plan revision exists.
+            "plan_revision_id": plan_revision_id or "case",
+        }
+        blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
+        return sha256(blob).hexdigest()[:16]
+
     title = _ticket_text_field(ticket, "title") or ""
     title_tokens = sorted(set(_EXPORT_TOKEN_RE.findall(title.lower())))
     anchors = sorted(ticket_export_anchors(ticket))
@@ -166,4 +210,3 @@ def ticket_export_fingerprint(ticket: dict[str, Any]) -> str:
     }
     blob = json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")
     return sha256(blob).hexdigest()[:16]
-

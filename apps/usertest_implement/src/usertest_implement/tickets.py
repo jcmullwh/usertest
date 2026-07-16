@@ -5,8 +5,14 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from backlog_repo.outcomes import (
+    extract_outcome_markdown,
+    reconcile_outcome_records,
+    upsert_outcome_markdown,
+)
 from backlog_repo.plan_index import (
     DISCARDED_PLAN_BUCKET,
+    archive_plan_ticket_file,
     dedupe_actioned_plan_ticket_files,
     dedupe_queued_plan_ticket_files_when_actioned_exists,
     scan_plan_ticket_index,
@@ -18,6 +24,23 @@ _REQUIRED_STAGE_BY_KIND: dict[str, str] = {
 }
 
 
+def _markdown_with_monotonic_outcome(
+    markdown: str,
+    outcome_record: dict[str, object] | None,
+) -> str:
+    existing = extract_outcome_markdown(markdown)
+    if outcome_record is None:
+        if existing is None:
+            raise ValueError("Cannot complete ticket without a validated outcome record")
+        return markdown
+    effective = (
+        reconcile_outcome_records(existing, outcome_record)
+        if existing is not None
+        else outcome_record
+    )
+    return upsert_outcome_markdown(markdown, effective)
+
+
 @dataclass(frozen=True)
 class TicketIndexEntry:
     fingerprint: str
@@ -27,6 +50,10 @@ class TicketIndexEntry:
 
 
 def build_ticket_index(*, owner_root: Path) -> dict[str, TicketIndexEntry]:
+    # Historical same-bucket duplicates cannot be represented by the strict index.
+    # Repair only explicitly generated copies first; manual, IDEA, and unknown bytes
+    # remain protected by the repair contract.
+    dedupe_actioned_plan_ticket_files(owner_root=owner_root)
     raw = scan_plan_ticket_index(owner_root=owner_root)
     out: dict[str, TicketIndexEntry] = {}
     for fingerprint, meta in raw.items():
@@ -128,6 +155,7 @@ def move_ticket_file(
     fingerprint: str,
     to_bucket: str,
     dry_run: bool,
+    outcome_record: dict[str, object] | None = None,
 ) -> Path:
     if not dry_run:
         dedupe_actioned_plan_ticket_files(owner_root=owner_root)
@@ -171,11 +199,23 @@ def move_ticket_file(
     # If it's already in the destination bucket, treat as a no-op.
     already_paths = sorted(bucket_to_paths.get(to_bucket, []), key=lambda p: str(p))
     if already_paths:
+        if not dry_run and to_bucket == "5 - complete":
+            existing_path = already_paths[0]
+            markdown = existing_path.read_text(encoding="utf-8", errors="replace")
+            updated_markdown = _markdown_with_monotonic_outcome(markdown, outcome_record)
+            if updated_markdown != markdown:
+                existing_path.write_text(updated_markdown, encoding="utf-8")
         if not dry_run and to_bucket == DISCARDED_PLAN_BUCKET:
             for path in sorted(entry.paths, key=lambda p: str(p)):
                 if path in already_paths:
                     continue
-                path.unlink(missing_ok=True)
+                archive_plan_ticket_file(
+                    owner_root=owner_root,
+                    path=path,
+                    disposition="duplicate",
+                    related_fingerprint=fingerprint,
+                    reason="Explicitly discarded copy already exists",
+                )
         return already_paths[0]
 
     # Choose a sensible source bucket based on intended promotion direction.
@@ -230,6 +270,11 @@ def move_ticket_file(
     dest_path = dest_dir / src_path.name
     if dry_run:
         return dest_path
+    if to_bucket == "5 - complete":
+        markdown = src_path.read_text(encoding="utf-8", errors="replace")
+        updated_markdown = _markdown_with_monotonic_outcome(markdown, outcome_record)
+        if updated_markdown != markdown:
+            src_path.write_text(updated_markdown, encoding="utf-8")
     dest_dir.mkdir(parents=True, exist_ok=True)
     src_path.replace(dest_path)
     dedupe_actioned_plan_ticket_files(owner_root=owner_root)
@@ -249,8 +294,13 @@ def parse_ticket_markdown_metadata(markdown: str) -> dict[str, str]:
     meta: dict[str, str] = {}
     for key, label in (
         ("fingerprint", "Fingerprint"),
+        ("case_id", "Case ID"),
+        ("plan_revision_id", "Plan revision ID"),
+        ("change_plan_id", "Change plan ID"),
         ("export_kind", "Export kind"),
         ("stage", "Stage"),
+        ("outcome_state", "Outcome state"),
+        ("requires_live_verification", "Requires live verification"),
     ):
         match = re.search(
             rf"^-\s*{re.escape(label)}:\s*`([^`]+)`\s*$",

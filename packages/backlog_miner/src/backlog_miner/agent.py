@@ -4,9 +4,16 @@ from pathlib import Path
 
 from runner_core import RunnerConfig
 
+from backlog_miner.ensemble import BacklogPromptResult, BacklogProviderExternalWait
 from backlog_miner.ensemble import run_backlog_prompt as _run_backlog_prompt
+from backlog_miner.ensemble import run_backlog_prompt_result as _run_backlog_prompt_result
 
-__all__ = ["run_backlog_prompt"]
+__all__ = [
+    "BacklogPromptResult",
+    "BacklogProviderExternalWait",
+    "run_backlog_prompt",
+    "run_backlog_prompt_result",
+]
 
 
 def run_backlog_prompt(
@@ -37,6 +44,8 @@ def run_backlog_prompt(
         Optional model override.
     cfg:
         Runner configuration used to resolve agent binaries and policy.
+    workspace_dir:
+        Optional existing checkout used as the read-only agent working directory.
     allowed_tools:
         Optional list of tool names to allow for this prompt (agent-specific). When
         ``None``, the agent backend uses its default tool configuration.
@@ -60,4 +69,33 @@ def run_backlog_prompt(
         workspace_dir=workspace_dir,
         allowed_tools=allowed_tools,
         include_directories=include_directories,
+    )
+
+
+def run_backlog_prompt_result(
+    *,
+    agent: str,
+    prompt: str,
+    out_dir: Path,
+    tag: str,
+    model: str | None,
+    cfg: RunnerConfig,
+    workspace_dir: Path | None = None,
+    allowed_tools: list[str] | None = None,
+    include_directories: list[str] | None = None,
+    resume_session_id: str | None = None,
+) -> BacklogPromptResult:
+    """Return a structured prompt result suitable for exact-session correction."""
+
+    return _run_backlog_prompt_result(
+        agent=agent,
+        prompt=prompt,
+        out_dir=out_dir,
+        tag=tag,
+        model=model,
+        cfg=cfg,
+        workspace_dir=workspace_dir,
+        allowed_tools=allowed_tools,
+        include_directories=include_directories,
+        resume_session_id=resume_session_id,
     )

@@ -807,6 +807,8 @@ class VerificationBrokerAttempt:
         workspace_hash_fn: Callable[[], WorkspaceStateHash] | None,
         utc_now_fn: Callable[[], str],
         run_async_verifier: bool = True,
+        request_token: str | None = None,
+        existing_client: VerificationBrokerClient | None = None,
     ) -> None:
         self.run_dir = run_dir
         self.attempt_number = attempt_number
@@ -815,7 +817,12 @@ class VerificationBrokerAttempt:
         self.workspace_hash_fn = workspace_hash_fn
         self.utc_now_fn = utc_now_fn
         self.run_async_verifier = bool(run_async_verifier)
-        self.request_token = uuid.uuid4().hex
+        if request_token is None:
+            self.request_token = uuid.uuid4().hex
+        elif request_token.strip():
+            self.request_token = request_token.strip()
+        else:
+            raise ValueError("request_token must be non-empty when provided")
         self.attempt_root = run_dir / "verification_broker" / f"attempt{attempt_number}"
         self.requests_dir = self.attempt_root / "requests"
         self.responses_dir = self.attempt_root / "responses"
@@ -846,12 +853,19 @@ class VerificationBrokerAttempt:
             if self.run_async_verifier
             else None
         )
-        self._client = self._write_client_files(
-            launcher=contract.launcher,
-            python_command=contract.python_command,
-            wait_timeout_seconds=contract.client_wait_timeout_seconds,
-            required_terminal_artifacts=contract.required_terminal_artifacts,
-        )
+        if existing_client is not None:
+            if request_token is None:
+                raise ValueError("existing_client requires its original request_token")
+            if existing_client.python_script != self.python_script:
+                raise ValueError("existing_client must use the configured client_root")
+            self._client = existing_client
+        else:
+            self._client = self._write_client_files(
+                launcher=contract.launcher,
+                python_command=contract.python_command,
+                wait_timeout_seconds=contract.client_wait_timeout_seconds,
+                required_terminal_artifacts=contract.required_terminal_artifacts,
+            )
 
     @property
     def client(self) -> VerificationBrokerClient:
@@ -879,7 +893,13 @@ class VerificationBrokerAttempt:
         with self._active_request_lock:
             if self._cancel_pending_on_stop and self._active_cancel_event is not None:
                 self._active_cancel_event.set()
-        if join_timeout_seconds is None:
+        # Cancellation is a best-effort shutdown path, so retain its bounded join.
+        # Graceful shutdown is different: every accepted request already has the
+        # broker's internal verification deadline, and returning before that request
+        # reaches a terminal result lets callers tear down its workspace underneath it.
+        # Therefore a graceful stop has no additional, shorter join deadline unless a
+        # caller deliberately supplies one.
+        if join_timeout_seconds is None and self._cancel_pending_on_stop:
             join_timeout_seconds = _BROKER_STOP_JOIN_TIMEOUT_SECONDS
         self._thread.join(timeout=join_timeout_seconds)
 

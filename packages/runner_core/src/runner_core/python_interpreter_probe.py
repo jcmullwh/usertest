@@ -4,7 +4,6 @@ import json
 import os
 import re
 import shutil
-import subprocess
 import sys
 import time
 from collections.abc import Sequence
@@ -18,6 +17,28 @@ _PYTHON_HEALTH_PROBE = (
     "import encodings, json, sys; "
     "print(json.dumps({'executable': sys.executable, 'version': sys.version.split()[0]}))"
 )
+
+
+def _run_bounded_interpreter_probe(
+    argv: list[str],
+    *,
+    timeout_seconds: float,
+    env: dict[str, str] | None = None,
+) -> Any:
+    """Use preflight's process-tree-owned, file-captured command probe.
+
+    The import must remain local because ``runner_core.preflight`` imports this module's
+    interpreter resolver. At call time both modules are fully initialized, while keeping the
+    import out of module initialization avoids a circular import.
+    """
+
+    from runner_core.preflight import _run_bounded_command_probe
+
+    return _run_bounded_command_probe(
+        argv,
+        timeout_seconds=timeout_seconds,
+        env=env,
+    )
 
 
 def _coerce_commands(raw: Sequence[str] | None) -> list[str]:
@@ -165,19 +186,14 @@ def resolve_usable_python_interpreter(
             if path is not None:
                 env = dict(os.environ)
                 env["PATH"] = path
-            proc = subprocess.run(
+            proc = _run_bounded_interpreter_probe(
                 ["where", command],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=max(0.1, min(2.0, timeout)),
-                check=False,
+                timeout_seconds=max(0.1, min(2.0, timeout)),
                 env=env,
             )
         except Exception:
             return []
-        if proc.returncode != 0:
+        if proc.timed_out or not proc.cleanup_succeeded or proc.returncode != 0:
             return []
         out: list[str] = []
         for line in proc.stdout.splitlines():
@@ -195,19 +211,14 @@ def resolve_usable_python_interpreter(
             if path is not None:
                 env = dict(os.environ)
                 env["PATH"] = path
-            proc = subprocess.run(
+            proc = _run_bounded_interpreter_probe(
                 ["py", "-0p"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=max(0.1, min(2.0, timeout)),
-                check=False,
+                timeout_seconds=max(0.1, min(2.0, timeout)),
                 env=env,
             )
         except Exception:
             return []
-        if proc.returncode != 0:
+        if proc.timed_out or not proc.cleanup_succeeded or proc.returncode != 0:
             return []
         out: list[str] = []
         for raw_line in proc.stdout.splitlines():
@@ -371,16 +382,24 @@ def probe_python_interpreters(
             continue
 
         try:
-            proc = subprocess.run(
+            proc = _run_bounded_interpreter_probe(
                 [resolved, "-c", _PYTHON_HEALTH_PROBE],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=remaining,
-                check=False,
+                timeout_seconds=remaining,
             )
-        except subprocess.TimeoutExpired:
+        except OSError as exc:
+            candidates.append(
+                PythonCandidateProbe(
+                    command=command,
+                    resolved_path=resolved,
+                    present=True,
+                    usable=False,
+                    reason_code="launch_failed",
+                    reason=str(exc),
+                )
+            )
+            continue
+
+        if proc.timed_out:
             candidates.append(
                 PythonCandidateProbe(
                     command=command,
@@ -395,15 +414,19 @@ def probe_python_interpreters(
                 )
             )
             continue
-        except OSError as exc:
+
+        if not proc.cleanup_succeeded:
             candidates.append(
                 PythonCandidateProbe(
                     command=command,
                     resolved_path=resolved,
                     present=True,
                     usable=False,
-                    reason_code="launch_failed",
-                    reason=str(exc),
+                    reason_code="runtime_probe_failed",
+                    reason=(
+                        "Interpreter health probe process-tree cleanup could not be verified. "
+                        + (proc.cleanup_diagnostic or "")
+                    ).strip(),
                 )
             )
             continue

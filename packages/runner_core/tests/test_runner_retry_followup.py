@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from normalized_events import iter_events_jsonl
 
 from runner_core import RunnerConfig, RunRequest, run_once
 
@@ -111,9 +112,39 @@ def _make_dummy_codex_retry_binary(tmp_path: Path) -> str:
                 "        sys.stderr.flush()",
                 "",
                 (
+                    "    print(json.dumps({'type': 'thread.started', "
+                    "'thread_id': '019f2cca-9011-7e32-88ae-6c25af578b49'}))"
+                ),
+                (
                     "    print(json.dumps({'id': str(attempt), 'msg': {'type': 'agent_message', "
                     "'message': f'attempt-{attempt}'}}))"
                 ),
+                "    if mode == 'invalid_then_valid' and attempt == 1:",
+                "        print(json.dumps({",
+                "            'type': 'item.completed',",
+                "            'item': {",
+                "                'id': 'command-from-attempt-1',",
+                "                'type': 'command_execution',",
+                "                'command': 'python observed_probe.py',",
+                "                'aggregated_output': 'observed',",
+                "                'exit_code': 0,",
+                "                'status': 'completed',",
+                "            },",
+                "        }))",
+                "    if mode == 'invalid_then_valid_with_failed_commands':",
+                "        marker = 'FIRST' if attempt == 1 else 'SECOND'",
+                "        print(json.dumps({",
+                "            'type': 'item.completed',",
+                "            'item': {",
+                "                'id': f'failed-command-{attempt}',",
+                "                'type': 'command_execution',",
+                "                'command': f'python failed_probe_{attempt}.py',",
+                "                'aggregated_output': marker,",
+                "                'stderr': marker,",
+                "                'exit_code': 1,",
+                "                'status': 'failed',",
+                "            },",
+                "        }))",
                 "",
                 "    if mode == 'rate_limit_then_success' and attempt == 1:",
                 (
@@ -130,9 +161,30 @@ def _make_dummy_codex_retry_binary(tmp_path: Path) -> str:
                 ),
                 "        return 1",
                 "",
-                "    if mode == 'invalid_then_valid' and attempt == 1:",
+                "    if mode == 'structured_subscription_usage_limit':",
+                "        message = (",
+                '            "You\'ve hit your usage limit. Visit "',
+                "            'https://chatgpt.com/codex/settings/usage to purchase more credits '",
+                "            'or try again at Jul 18th, 2026 2:33 AM.'",
+                "        )",
+                "        print(json.dumps({'type': 'error', 'message': message}))",
+                "        print(json.dumps({'type': 'turn.failed', 'error': {'message': message}}))",
+                "        return 1",
+                "",
+                "    if (",
+                "        mode in {",
+                "            'invalid_then_valid',",
+                "            'invalid_then_valid_with_failed_commands',",
+                "        }",
+                "        and attempt == 1",
+                "    ):",
                 "        if out_path is not None:",
                 "            Path(out_path).write_text('not valid json\\n', encoding='utf-8')",
+                "        return 0",
+                "",
+                "    if mode == 'missing_eof_brace':",
+                "        if out_path is not None:",
+                "            Path(out_path).write_text('{\"ok\": \"yes\"', encoding='utf-8')",
                 "        return 0",
                 "",
                 "    if mode == 'empty_last_message_auth' and attempt == 1:",
@@ -460,9 +512,120 @@ def test_run_once_followup_prompt_recovers_invalid_json(
     attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
     assert len(attempts["attempts"]) == 2
     assert attempts["attempts"][0]["report_validation_errors"]
+    resumed_attempt = attempts["attempts"][1]
+    assert resumed_attempt["continued_session"] is True
+    resumed_argv = resumed_attempt["argv"]
+    exec_index = resumed_argv.index("exec")
+    cd_index = resumed_argv.index("--cd")
+    sandbox_index = resumed_argv.index("--sandbox")
+    assert resumed_argv[exec_index + 1] == "resume"
+    assert cd_index < exec_index
+    assert sandbox_index < exec_index
+    assert resumed_argv[sandbox_index + 1] == "read-only"
+    workspace_ref = json.loads((result.run_dir / "workspace_ref.json").read_text(encoding="utf-8"))
+    assert Path(resumed_argv[cd_index + 1]).resolve() == Path(
+        workspace_ref["workspace_dir"]
+    ).resolve()
     prompts_text = prompts_file.read_text(encoding="utf-8")
     assert prompts_text.count("===PROMPT===") >= 2
     assert "Follow-up required." in prompts_text
+    events = list(iter_events_jsonl(result.run_dir / "normalized_events.jsonl"))
+    assert any(
+        event.get("type") == "run_command"
+        and event.get("data", {}).get("command") == "python observed_probe.py"
+        for event in events
+    )
+    assert (result.run_dir / "raw_events.all_attempts.jsonl").is_file()
+
+
+def test_run_once_repairs_unique_eof_delimiter_without_model_followup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    state_file = tmp_path / "attempt_state_eof_repair.txt"
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "missing_eof_brace")
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=0,
+            agent_followup_attempts=2,
+        ),
+    )
+
+    assert result.exit_code == 0
+    assert result.report_validation_errors == []
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert attempts["followup_attempts_used"] == 0
+    assert len(attempts["attempts"]) == 1
+    repair = attempts["attempts"][0]["json_syntax_repair"]
+    assert repair["repair_kind"] == "append_missing_eof_delimiters"
+    assert repair["appended_delimiters"] == "}"
+    report = json.loads((result.run_dir / "report.json").read_text(encoding="utf-8"))
+    assert report["ok"] == "yes"
+
+
+def test_run_once_cumulative_retry_events_keep_failure_artifacts_distinct(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(tmp_path / "attempt_state_failures.txt"))
+    monkeypatch.setenv("DUMMY_MODE", "invalid_then_valid_with_failed_commands")
+
+    result = run_once(
+        RunnerConfig(
+            repo_root=runner_root,
+            runs_dir=tmp_path / "runs",
+            agents={"codex": {"binary": dummy_binary}},
+            policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+        ),
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=0,
+            agent_followup_attempts=2,
+        ),
+    )
+
+    assert result.exit_code == 0
+    commands = [
+        event
+        for event in iter_events_jsonl(result.run_dir / "normalized_events.jsonl")
+        if event.get("type") == "run_command"
+    ]
+    assert [event["data"]["command"] for event in commands] == [
+        "python failed_probe_1.py",
+        "python failed_probe_2.py",
+    ]
+    artifacts = [event["data"]["failure_artifacts"] for event in commands]
+    assert artifacts[0]["stderr"] == "command_failures/cmd_01/stderr.txt"
+    assert artifacts[1]["stderr"] == "command_failures/cmd_02/stderr.txt"
+    assert (result.run_dir / artifacts[0]["stderr"]).read_text(encoding="utf-8") == "FIRST"
+    assert (result.run_dir / artifacts[1]["stderr"]).read_text(encoding="utf-8") == "SECOND"
 
 
 def test_run_once_verification_gate_triggers_followup_until_checks_pass(
@@ -750,6 +913,66 @@ def test_run_once_does_not_retry_non_retryable_capacity_failure(
     attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
     assert len(attempts["attempts"]) == 1
     assert attempts["rate_limit_retries_used"] == 0
+
+
+def test_run_once_parks_codex_subscription_limit_from_structured_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner_root = _setup_runner_root(tmp_path)
+    target = _setup_target_repo(tmp_path)
+    dummy_binary = _make_dummy_codex_retry_binary(tmp_path)
+
+    state_file = tmp_path / "attempt_state_subscription_limit.txt"
+    monkeypatch.setenv("DUMMY_STATE_FILE", str(state_file))
+    monkeypatch.setenv("DUMMY_MODE", "structured_subscription_usage_limit")
+    monkeypatch.setenv("DUMMY_INCLUDE_CODEX_METADATA_WARNING", "1")
+
+    cfg = RunnerConfig(
+        repo_root=runner_root,
+        runs_dir=tmp_path / "runs",
+        agents={"codex": {"binary": dummy_binary}},
+        policies={"safe": {"codex": {"sandbox": "read-only", "allow_edits": False}}},
+    )
+
+    result = run_once(
+        cfg,
+        RunRequest(
+            repo=str(target),
+            agent="codex",
+            policy="safe",
+            persona_id="p",
+            mission_id="m",
+            agent_rate_limit_retries=2,
+            agent_followup_attempts=2,
+        ),
+    )
+
+    assert result.exit_code == 1
+    attempts = json.loads((result.run_dir / "agent_attempts.json").read_text(encoding="utf-8"))
+    assert len(attempts["attempts"]) == 1
+    assert attempts["rate_limit_retries_used"] == 0
+    assert attempts["attempts"][0]["failure_subtype"] == ("provider_subscription_usage_limit")
+    assert attempts["attempts"][0]["retry_scheduled"] is False
+    wait = attempts["external_wait"]
+    assert wait["state"] == "parked"
+    assert wait["retry_mode"] == "resume_same_session"
+    assert wait["resume_after"] == {
+        "raw": "Jul 18th, 2026 2:33 AM",
+        "timezone": "provider_account_local_unspecified",
+    }
+    assert wait["route"] == "chatgpt_subscription"
+    assert wait["api_fallback_allowed"] is False
+
+    error = json.loads((result.run_dir / "error.json").read_text(encoding="utf-8"))
+    assert error["type"] == "AgentExternalWait"
+    assert error["code"] == "codex_chatgpt_subscription_usage_limit"
+    assert error["route"] == "chatgpt_subscription"
+    assert error["api_fallback_allowed"] is False
+    assert "You've hit your usage limit" in error["provider_message"]
+    stderr = (result.run_dir / "agent_stderr.txt").read_text(encoding="utf-8")
+    assert "[agent_external_wait]" in stderr
+    assert "do not switch to API billing" in stderr
 
 
 def test_run_once_does_not_followup_when_agent_output_is_empty(

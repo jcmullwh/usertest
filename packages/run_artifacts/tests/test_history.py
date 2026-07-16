@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 from pathlib import Path
 
 from run_artifacts.history import (
@@ -13,6 +14,12 @@ from run_artifacts.history import (
 
 def _write_json(path: Path, obj: object) -> None:
     path.write_text(json.dumps(obj, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+
+
+def _canonical_hash(value: object) -> str:
+    return sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def test_write_report_history_jsonl_filters_and_embeds(tmp_path: Path) -> None:
@@ -308,3 +315,44 @@ def test_load_run_record_includes_terminal_artifact_read_details(tmp_path: Path)
     assert record["status"] == "terminal_artifact_unreadable"
     assert record["terminal_artifact_reads"]["report.json"]["exists"] is True
     assert record["terminal_artifact_reads"]["report.json"]["error_phase"] == "parse"
+
+
+def test_report_history_exposes_only_verified_research_parent_assignment(
+    tmp_path: Path,
+) -> None:
+    runs_dir = tmp_path / "runs"
+    run_dir = runs_dir / "target_a" / "20260102T000000Z" / "codex" / "0"
+    run_dir.mkdir(parents=True)
+    target_ref = {
+        "repo_input": "C:/repo/target_a",
+        "mission_id": "backlog_repro_research",
+    }
+    _write_json(run_dir / "target_ref.json", target_ref)
+    _write_json(run_dir / "report.json", {"schema_version": 1, "status": "success"})
+    assignment = {
+        "status": "complete",
+        "errors": [],
+        "case_id": "case:parent",
+        "problem_id": "problem:parent",
+        "expected_atom_ids": ["atom:source"],
+        "atom_receipts": [],
+    }
+    assignment["assignment_sha256"] = _canonical_hash(assignment)
+    sidecar = {
+        "schema_version": 1,
+        "producer": "backlog_miner.research_runner",
+        "target_ref_sha256": _canonical_hash(target_ref),
+        "evidence_assignment": assignment,
+    }
+    sidecar["sidecar_sha256"] = _canonical_hash(sidecar)
+    _write_json(run_dir / "evidence_assignment.json", sidecar)
+
+    record = next(iter_report_history(runs_dir, target_slug="target_a", embed="none"))
+    assert record["evidence_assignment_read_status"] == "verified"
+    assert record["evidence_assignment"] == assignment
+
+    sidecar["evidence_assignment"]["case_id"] = "case:tampered"
+    _write_json(run_dir / "evidence_assignment.json", sidecar)
+    record = next(iter_report_history(runs_dir, target_slug="target_a", embed="none"))
+    assert record["evidence_assignment_read_status"] == "invalid"
+    assert record["evidence_assignment"] is None

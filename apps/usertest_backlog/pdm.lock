@@ -5,14 +5,14 @@
 groups = ["default", "dev"]
 strategy = ["inherit_metadata"]
 lock_version = "4.5.0"
-content_hash = "sha256:39ba42af7ad31c0a224f9fb0aefc50f96f25ae5fd4cb1f094a96174224806723"
+content_hash = "sha256:09aa614fb79d79c72eafaff302bdafa2081e730b54f9f384cf6fc9d03028dcf2"
 
 [[metadata.targets]]
 requires_python = ">=3.11"
 
 [[package]]
 name = "agent-adapters"
-version = "0.1.0"
+version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/agent_adapters"
 summary = "Thin CLI adapters and event normalizers for Codex, Claude, and Gemini."
@@ -61,7 +61,7 @@ files = [
 
 [[package]]
 name = "backlog-core"
-version = "0.1.0"
+version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/backlog_core"
 summary = "A Python library (PDM)"
@@ -73,7 +73,7 @@ dependencies = [
 
 [[package]]
 name = "backlog-miner"
-version = "0.1.0"
+version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/backlog_miner"
 summary = "A Python library (PDM)"
@@ -81,12 +81,14 @@ groups = ["default"]
 dependencies = [
     "agent-adapters",
     "backlog-core",
+    "pyyaml>=6.0.3",
     "runner-core",
+    "sandbox-runner",
 ]
 
 [[package]]
 name = "backlog-repo"
-version = "0.1.0"
+version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/backlog_repo"
 summary = "A Python library (PDM)"
@@ -481,7 +483,7 @@ files = [
 
 [[package]]
 name = "normalized-events"
-version = "0.1.0"
+version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/normalized_events"
 summary = "Shared normalized-events contract + JSONL helpers"
@@ -755,7 +757,7 @@ files = [
 
 [[package]]
 name = "reporter"
-version = "0.1.0"
+version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/reporter"
 summary = "A Python library (PDM)"
@@ -919,7 +921,7 @@ files = [
 
 [[package]]
 name = "run-artifacts"
-version = "0.1.0"
+version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/run_artifacts"
 summary = "A Python library (PDM)"
@@ -927,7 +929,7 @@ groups = ["default"]
 
 [[package]]
 name = "runner-core"
-version = "0.1.0"
+version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/runner_core"
 summary = "A Python library (PDM)"
@@ -942,7 +944,7 @@ dependencies = [
 
 [[package]]
 name = "sandbox-runner"
-version = "0.1.0"
+version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/sandbox_runner"
 summary = "A Python library (PDM)"
@@ -976,7 +978,7 @@ files = [
 
 [[package]]
 name = "triage-engine"
-version = "0.1.0"
+version = "0.2.0"
 requires_python = ">=3.11"
 path = "../../packages/triage_engine"
 summary = "A Python library (PDM)"

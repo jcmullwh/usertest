@@ -1,15 +1,24 @@
 # ruff: noqa: E501,F401,F403,F405
 from __future__ import annotations
 
+from runner_core.retained_oracle_assets import (
+    retained_oracle_asset_summary,
+    validate_retained_oracle_asset_source,
+)
 from runner_core.verification_prompts import _build_verification_followup_prompt
 
 from usertest_implement.ci import _ci_timeout_seconds_arg, _git_head_sha, _wait_for_ci_success
+from usertest_implement.implementation_provenance import record_verified_implementation_head
 from usertest_implement.resume_state import (
+    LIFECYCLE_AWAITING_REVIEW,
     LIFECYCLE_CI_FAILED,
+    LIFECYCLE_IMPLEMENTED_LOCAL,
+    LIFECYCLE_MERGE_READY,
     LIFECYCLE_REVIEW_CHANGES_REQUESTED,
     LIFECYCLE_VERIFICATION_FAILED,
     LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
     RESUME_STATE_ARTIFACT_NAME,
+    implementation_author_continuity,
     write_ticket_resume_state,
 )
 from usertest_implement.review_context import (
@@ -30,13 +39,48 @@ _VALID_VERIFICATION_RESUME_STATES = {
     LIFECYCLE_VERIFICATION_FAILED_RESUME_READY,
     # Backward-compatible with runs written before the durable resume-ready state existed.
     LIFECYCLE_VERIFICATION_FAILED,
+    # Exact-session/same-workspace enforcement for this state lives in _cmd_resume.
+    LIFECYCLE_IMPLEMENTED_LOCAL,
 }
 _VALID_PR_RESUME_STATES = {
+    # An approved review observed while CI was still pending is represented by
+    # awaiting_review; a later terminal gate can still require the same author.
+    LIFECYCLE_AWAITING_REVIEW,
     LIFECYCLE_CI_FAILED,
+    # A previously accepted exact head can become operationally blocked by a
+    # terminal CI failure or a real merge conflict. The live-gate refresh in
+    # _cmd_resume_pr still no-ops when that condition has already recovered.
+    LIFECYCLE_MERGE_READY,
     LIFECYCLE_REVIEW_CHANGES_REQUESTED,
 }
 _PROMPT_ARTIFACT_MAX_CHARS = 5000
 _PROMPT_REPORT_MAX_CHARS = 6000
+_PR_DIFF_PROMPT_MAX_CHARS = 40_000
+_FULL_RESEARCH_PROOF_PROMPT_PROJECTION_THRESHOLD = 100_000
+_FULL_RESEARCH_PROOF_PROMPT_KEYS = (
+    "artifact_refs",
+    "blocking_reasons",
+    "broader_class_assessment",
+    "case_id",
+    "case_relation_assessment",
+    "diff_classification",
+    "evidence_assignment",
+    "evidence_boundaries",
+    "experiments",
+    "implementation_performed",
+    "inspected_files",
+    "inspected_symbols",
+    "material_unknowns",
+    "problem_id",
+    "repo_revision",
+    "reproduction_status",
+    "research_method",
+    "research_schema_version",
+    "research_status",
+    "root_cause_confidence",
+    "root_cause_hypotheses",
+    "writes_used",
+)
 
 
 def _clean_str(value: Any) -> str | None:
@@ -44,6 +88,140 @@ def _clean_str(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _resume_supervisor_instructions(
+    *, args: argparse.Namespace, ticket_ref: dict[str, Any]
+) -> list[str]:
+    instructions: list[str] = []
+    original = _clean_str(ticket_ref.get("supervisor_instruction"))
+    if original is not None:
+        instructions.append(original)
+    for raw in getattr(args, "supervisor_instructions", None) or []:
+        if not isinstance(raw, str) or not raw.strip():
+            raise SystemExit(
+                "--supervisor-instruction entries must be non-empty strings; "
+                f"got {raw!r}."
+            )
+        normalized = raw.strip()
+        if normalized not in instructions:
+            instructions.append(normalized)
+    return instructions
+
+
+def _append_resume_supervisor_instructions(
+    prompt: str, *, instructions: list[str]
+) -> str:
+    if not instructions:
+        return prompt
+    return (
+        prompt.rstrip()
+        + "\n\n# Runner-owned supervisor execution constraints\n\n"
+        + "\n\n".join(instructions)
+        + "\n"
+    )
+
+
+def _resume_ticket_prompt_context(selected: SelectedTicket) -> str:
+    """Project oversized proof history while preserving causal implementation evidence.
+
+    Generated tickets can retain every research attempt and byte-level evidence receipt.
+    Those are durable audit artifacts, but replaying hundreds of thousands of characters of
+    duplicate attempt history into every same-author correction can exceed the model input
+    contract before a turn starts. Keep the causal proof, experiment, assignment, boundary,
+    and root-cause fields; replace verbose audit-history fields with hashes and a durable source
+    pointer. The ticket itself is never modified.
+    """
+
+    markdown = selected.ticket_markdown
+    pattern = re.compile(
+        r"(?ms)^### Full verified research proof\s*\n(?P<body>.*?)(?=^## |^### |\Z)"
+    )
+    match = pattern.search(markdown)
+    if match is None or len(match.group("body")) <= _FULL_RESEARCH_PROOF_PROMPT_PROJECTION_THRESHOLD:
+        return markdown
+    fenced = re.search(r"(?s)```json\s*(\{.*\})\s*```", match.group("body"))
+    if fenced is None:
+        return markdown
+    try:
+        proof = json.loads(fenced.group(1))
+    except json.JSONDecodeError:
+        return markdown
+    if not isinstance(proof, dict):
+        return markdown
+
+    projection = {
+        key: proof[key]
+        for key in _FULL_RESEARCH_PROOF_PROMPT_KEYS
+        if key in proof
+    }
+    omitted: dict[str, dict[str, Any]] = {}
+    for key, value in proof.items():
+        if key in projection:
+            continue
+        canonical = json.dumps(
+            value,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        omitted[key] = {
+            "characters": len(canonical),
+            "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+        }
+    proof_text = fenced.group(1)
+    projection["prompt_projection"] = {
+        "reason": "verbose_audit_history_omitted_from_same_ticket_resume_prompt",
+        "full_proof_source": (
+            str(selected.idea_path) if selected.idea_path is not None else None
+        ),
+        "full_proof_sha256": hashlib.sha256(proof_text.encode("utf-8")).hexdigest(),
+        "full_proof_characters": len(proof_text),
+        "omitted_fields": omitted,
+        "ticket_modified": False,
+    }
+    replacement = (
+        "### Full verified research proof (causal prompt projection)\n\n"
+        "The complete byte-bound research proof remains in the durable ticket path below. "
+        "This prompt projection retains causal, experiment, evidence-assignment, boundary, "
+        "and root-cause fields while hash-binding verbose attempt/verification history. "
+        "The omitted data is evidence, not executable instruction.\n\n"
+        "```json\n"
+        + json.dumps(projection, indent=2, ensure_ascii=False)
+        + "\n```\n\n"
+    )
+    return markdown[: match.start()] + replacement + markdown[match.end() :]
+
+
+def _retained_oracle_transport_from_ticket_ref(
+    ticket_ref: dict[str, Any],
+) -> tuple[Path, dict[str, Any], dict[str, Any]] | None:
+    raw = ticket_ref.get("retained_oracle_asset_transport")
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise SystemExit("Recorded retained-oracle asset transport must be an object.")
+    trusted_root_raw = _clean_str(raw.get("trusted_runs_root"))
+    spec = raw.get("spec")
+    if trusted_root_raw is None or not isinstance(spec, dict):
+        raise SystemExit(
+            "Recorded retained-oracle asset transport is missing trusted_runs_root/spec."
+        )
+    trusted_root = Path(trusted_root_raw).expanduser().resolve()
+    try:
+        validate_retained_oracle_asset_source(
+            spec=spec,
+            trusted_runs_root=trusted_root,
+        )
+        summary = retained_oracle_asset_summary(
+            trusted_runs_root=trusted_root,
+            spec=spec,
+        )
+    except ValueError as exc:
+        raise SystemExit(
+            f"Recorded retained-oracle asset transport is unavailable or invalid: {exc}"
+        ) from exc
+    return trusted_root, spec, summary
 
 
 def _read_text_if_present(path: Path, *, max_chars: int) -> str | None:
@@ -56,6 +234,174 @@ def _read_text_if_present(path: Path, *, max_chars: int) -> str | None:
     if len(text) <= max_chars:
         return text
     return text[-max_chars:] + "\n...[truncated to tail]"
+
+
+def _implementation_author_for_resume(
+    *, run_dir: Path, resume_state: dict[str, Any]
+) -> dict[str, Any]:
+    recorded = resume_state.get("implementation_author")
+    if isinstance(recorded, dict):
+        agent = _clean_str(recorded.get("agent"))
+        session_id = _clean_str(recorded.get("session_id"))
+        if agent is not None or session_id is not None:
+            exact = agent == "codex" and session_id is not None
+            return {
+                **recorded,
+                "agent": agent,
+                "session_id": session_id,
+                "exact_session_available": exact,
+                "status": (
+                    "exact_session_available"
+                    if exact
+                    else _clean_str(recorded.get("status")) or "author_session_unavailable"
+                ),
+            }
+    return implementation_author_continuity(run_dir)
+
+
+def _resume_agent_continuity(
+    *, run_dir: Path, resume_state: dict[str, Any], requested_agent: str
+) -> tuple[str, str | None, dict[str, Any]]:
+    author = _implementation_author_for_resume(run_dir=run_dir, resume_state=resume_state)
+    author_agent = _clean_str(author.get("agent"))
+    author_session_id = _clean_str(author.get("session_id"))
+    if author_agent == "codex" and author_session_id is not None:
+        return (
+            "codex",
+            author_session_id,
+            {
+                **author,
+                "status": "exact_author_session",
+                "requested_agent": requested_agent,
+                "effective_agent": "codex",
+                "fresh_restart": False,
+            },
+        )
+    # Legacy/incomplete runs may not have a resumable author session. Preserve
+    # throughput, but make the fresh restart explicit instead of claiming that
+    # the author received the feedback.
+    return (
+        requested_agent,
+        None,
+        {
+            **author,
+            "status": _clean_str(author.get("status")) or "author_session_unavailable",
+            "requested_agent": requested_agent,
+            "effective_agent": requested_agent,
+            "fresh_restart": True,
+        },
+    )
+
+
+_CODEX_CONTEXT_EXHAUSTED_FRAGMENT = "ran out of room in the model's context window"
+
+
+def _context_exhaustion_restart_evidence(
+    *,
+    resume_state: dict[str, Any],
+    expected_session_id: str,
+    expected_workspace: Path | None,
+) -> dict[str, Any] | None:
+    """Prove that same-author continuation is impossible before allowing a restart."""
+
+    attempts = resume_state.get("resume_attempts")
+    if not isinstance(attempts, list) or not attempts or not isinstance(attempts[-1], dict):
+        return None
+    latest = attempts[-1]
+    run_raw = _clean_str(latest.get("run_dir"))
+    if run_raw is None:
+        return None
+    failed_run = Path(run_raw).expanduser().resolve()
+    if not failed_run.is_dir():
+        return None
+    failed_state = _read_json(failed_run / RESUME_STATE_ARTIFACT_NAME)
+    target_ref = _read_json(failed_run / "target_ref.json")
+    workspace_ref = _read_json(failed_run / "workspace_ref.json")
+    agent_attempts = _read_json(failed_run / "agent_attempts.json")
+    verification = _read_json(failed_run / "verification.json")
+    if not all(
+        isinstance(value, dict)
+        for value in (failed_state, target_ref, workspace_ref, agent_attempts, verification)
+    ):
+        return None
+    if failed_state.get("lifecycle_state") != "agent_failed":
+        return None
+    if target_ref.get("agent") != "codex":
+        return None
+    if target_ref.get("requested_codex_resume_session_id") != expected_session_id:
+        return None
+    attempt_rows = agent_attempts.get("attempts")
+    if (
+        not isinstance(attempt_rows, list)
+        or not attempt_rows
+        or not isinstance(attempt_rows[-1], dict)
+    ):
+        return None
+    final_attempt = attempt_rows[-1]
+    if (
+        final_attempt.get("continued_session") is not True
+        or final_attempt.get("agent_session_id") != expected_session_id
+        or int(final_attempt.get("exit_code") or 0) == 0
+    ):
+        return None
+    workspace_raw = _clean_str(workspace_ref.get("workspace_dir"))
+    if (
+        expected_workspace is None
+        or workspace_raw is None
+        or Path(workspace_raw).expanduser().resolve() != expected_workspace.resolve()
+    ):
+        return None
+    if verification.get("status") != "skipped_agent_failed":
+        return None
+    if (failed_run / "report.json").exists():
+        return None
+
+    raw_events_path = failed_run / "raw_events.jsonl"
+    raw_events: list[dict[str, Any]] = []
+    try:
+        with raw_events_path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                event = json.loads(line)
+                if not isinstance(event, dict):
+                    return None
+                raw_events.append(event)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    allowed_event_types = {"thread.started", "turn.started", "error", "turn.failed"}
+    if not raw_events or any(event.get("type") not in allowed_event_types for event in raw_events):
+        # A tool/item event would mean the author may have changed the frontier before failing.
+        return None
+    thread_ids = {
+        event.get("thread_id")
+        for event in raw_events
+        if event.get("type") == "thread.started"
+    }
+    messages: list[str] = []
+    for event in raw_events:
+        message = event.get("message")
+        if isinstance(message, str):
+            messages.append(message)
+        error = event.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            messages.append(error["message"])
+    if thread_ids != {expected_session_id} or not any(
+        _CODEX_CONTEXT_EXHAUSTED_FRAGMENT in message for message in messages
+    ):
+        return None
+    return {
+        "schema_version": 1,
+        "kind": "justified_fresh_restart",
+        "reason": "codex_author_context_window_exhausted",
+        "failed_run_dir": str(failed_run),
+        "failed_resume_state_path": str(failed_run / RESUME_STATE_ARTIFACT_NAME),
+        "exhausted_session_id": expected_session_id,
+        "workspace_dir": str(expected_workspace.resolve()),
+        "raw_events_path": str(raw_events_path),
+        "raw_events_sha256": hashlib.sha256(raw_events_path.read_bytes()).hexdigest(),
+        "frontier_mutation_events_observed": False,
+        "report_materialized": False,
+        "verification_status": verification.get("status"),
+    }
 
 
 def _artifact_status(run_dir: Path, filename: str) -> str:
@@ -100,7 +446,9 @@ def _prior_report_block(run_dir: Path) -> str:
     report_text = _read_text_if_present(run_dir / "report.json", max_chars=_PROMPT_REPORT_MAX_CHARS)
     if report_text:
         return "Prior report output (report.json):\n```json\n" + report_text + "\n```"
-    last = _read_text_if_present(run_dir / "agent_last_message.txt", max_chars=_PROMPT_REPORT_MAX_CHARS)
+    last = _read_text_if_present(
+        run_dir / "agent_last_message.txt", max_chars=_PROMPT_REPORT_MAX_CHARS
+    )
     if last:
         return "Prior assistant output (agent_last_message.txt):\n```\n" + last + "\n```"
     return "Prior report output: (not present)"
@@ -137,27 +485,51 @@ def _build_verification_resume_prompt(
     agent_attempts: dict[str, Any] | None,
     workspace_ref: dict[str, Any],
     ticket_ref: dict[str, Any],
+    lifecycle: str,
 ) -> str:
     ticket = resume_state.get("ticket") if isinstance(resume_state.get("ticket"), dict) else {}
-    fingerprint = _clean_str(ticket.get("fingerprint")) or _clean_str(ticket_ref.get("fingerprint")) or "unknown"
-    title = _clean_str(ticket.get("title")) or _clean_str(ticket_ref.get("title")) or "Untitled ticket"
+    fingerprint = (
+        _clean_str(ticket.get("fingerprint"))
+        or _clean_str(ticket_ref.get("fingerprint"))
+        or "unknown"
+    )
+    title = (
+        _clean_str(ticket.get("title")) or _clean_str(ticket_ref.get("title")) or "Untitled ticket"
+    )
     branch = _clean_str(resume_state.get("branch")) or "(not recorded)"
-    workspace_path = _clean_str(resume_state.get("workspace_path")) or _clean_str(workspace_ref.get("workspace_dir")) or "(not recorded)"
+    workspace_path = (
+        _clean_str(resume_state.get("workspace_path"))
+        or _clean_str(workspace_ref.get("workspace_dir"))
+        or "(not recorded)"
+    )
 
     attempt_count = 0
     if isinstance(agent_attempts, dict) and isinstance(agent_attempts.get("attempts"), list):
         attempt_count = len(agent_attempts["attempts"])
 
     artifact_lines = [
-        f"- {name}: {_artifact_status(original_run_dir, name)}" for name in _REQUIRED_RESUME_ARTIFACTS
+        f"- {name}: {_artifact_status(original_run_dir, name)}"
+        for name in _REQUIRED_RESUME_ARTIFACTS
     ]
     artifact_block = "\n".join(artifact_lines)
 
+    implemented_local_correction = lifecycle == LIFECYCLE_IMPLEMENTED_LOCAL
     base_prompt = (
-        "Resume a previous ticket implementation after the verification gate failed.\n"
-        "Do not restart the original full ticket prompt from scratch. Use the current workspace "
-        "state and the structured verification evidence below to make the smallest coherent fix "
-        "that causes the failed verification checks to pass. Preserve unrelated work.\n\n"
+        (
+            "Resume the existing local ticket implementation for semantic supervisor correction.\n"
+            "Do not restart the original full ticket prompt from scratch. Continue in the current "
+            "workspace and address the runner-owned supervisor instructions appended below. The "
+            "recorded verification passed, but that does not establish that the semantic concern "
+            "was resolved. Preserve unrelated work.\n\n"
+        )
+        if implemented_local_correction
+        else (
+            "Resume a previous ticket implementation after the verification gate failed.\n"
+            "Do not restart the original full ticket prompt from scratch. Use the current workspace "
+            "state and the structured verification evidence below to make the smallest coherent fix "
+            "that causes the failed verification checks to pass. Preserve unrelated work.\n\n"
+        )
+    ) + (
         f"Original run dir: {original_run_dir}\n"
         f"Original resume state: {original_run_dir / RESUME_STATE_ARTIFACT_NAME}\n"
         f"Ticket: {fingerprint} — {title}\n"
@@ -168,8 +540,24 @@ def _build_verification_resume_prompt(
         f"{artifact_block}\n\n"
         f"{_prior_report_block(original_run_dir)}\n\n"
         "When you finish, return the required JSON report only. Include in the report summary that "
-        "this was a verification-failure resume and mention the original run dir."
+        + (
+            "this was an implemented-local semantic correction and mention the original run dir."
+            if implemented_local_correction
+            else "this was a verification-failure resume and mention the original run dir."
+        )
     )
+    if implemented_local_correction:
+        return (
+            f"{base_prompt}\n\n"
+            "Previous assistant output:\n"
+            "```\n"
+            f"{_prior_last_message_from_attempts(original_run_dir, agent_attempts)}\n"
+            "```\n\n"
+            "Return ONLY one JSON object that validates against this schema.\n"
+            "Do not include markdown fences, prose, or extra keys.\n\n"
+            "Schema:\n"
+            f"{json.dumps(_schema_for_resume(original_run_dir), indent=2, ensure_ascii=False)}\n"
+        )
     return _build_verification_followup_prompt(
         base_prompt=base_prompt,
         verification_summary=_verification_summary_for_prompt(
@@ -180,7 +568,6 @@ def _build_verification_resume_prompt(
         prior_last_message_text=_prior_last_message_from_attempts(original_run_dir, agent_attempts),
         attempt_number=1,
     )
-
 
 
 def _review_run_dir_from_state(resume_state: dict[str, Any]) -> Path | None:
@@ -235,13 +622,17 @@ def _pr_url_from_resume_artifacts(
     return raw
 
 
-def _owner_root_from_resume(*, resume_state: dict[str, Any], ticket_ref: dict[str, Any]) -> Path | None:
+def _owner_root_from_resume(
+    *, resume_state: dict[str, Any], ticket_ref: dict[str, Any]
+) -> Path | None:
     raw = _clean_str(resume_state.get("owner_root"))
     if raw is not None:
         path = Path(raw)
         if path.exists():
             return path
-    owner_repo = ticket_ref.get("owner_repo") if isinstance(ticket_ref.get("owner_repo"), dict) else {}
+    owner_repo = (
+        ticket_ref.get("owner_repo") if isinstance(ticket_ref.get("owner_repo"), dict) else {}
+    )
     raw = _clean_str(owner_repo.get("root"))
     if raw is not None:
         path = Path(raw)
@@ -281,7 +672,14 @@ def _review_findings_for_resume(review_summary: dict[str, Any] | None) -> list[d
     findings = review_summary.get("findings")
     if not isinstance(findings, list):
         return []
-    return [item for item in findings if isinstance(item, dict)]
+    blocking_severities = {"error", "high", "critical", "blocker", "fatal"}
+    return [
+        item
+        for item in findings
+        if isinstance(item, dict)
+        and str(item.get("severity") or "").strip().casefold()
+        in blocking_severities
+    ]
 
 
 def _failing_check_pointers(pr_context: dict[str, Any]) -> list[dict[str, Any]]:
@@ -307,6 +705,63 @@ def _failing_check_pointers(pr_context: dict[str, Any]) -> list[dict[str, Any]]:
             }
         )
     return out
+
+
+def _pr_metadata_for_resume_prompt(pr_context: dict[str, Any]) -> dict[str, Any]:
+    raw = pr_context.get("pr")
+    pr = raw if isinstance(raw, dict) else {}
+    keys = (
+        "number",
+        "url",
+        "title",
+        "state",
+        "isDraft",
+        "mergeable",
+        "reviewDecision",
+        "headRefName",
+        "headRefOid",
+        "baseRefName",
+        "baseRefOid",
+    )
+    return {key: pr.get(key) for key in keys if key in pr}
+
+
+def _checks_for_resume_prompt(pr_context: dict[str, Any]) -> list[dict[str, Any]]:
+    raw = pr_context.get("checks")
+    checks = raw if isinstance(raw, list) else []
+    keys = (
+        "name",
+        "state",
+        "link",
+        "bucket",
+        "workflow",
+        "event",
+        "startedAt",
+        "completedAt",
+    )
+    return [
+        {key: check.get(key) for key in keys if key in check}
+        for check in checks
+        if isinstance(check, dict)
+    ]
+
+
+def _diff_excerpt_for_resume_prompt(pr_context: dict[str, Any]) -> str:
+    diff = str(pr_context.get("diff_excerpt") or "").rstrip()
+    if len(diff) <= _PR_DIFF_PROMPT_MAX_CHARS:
+        return diff
+    prefix_chars = 25_000
+    suffix_chars = 15_000
+    digest = hashlib.sha256(diff.encode("utf-8")).hexdigest()
+    omitted = len(diff) - prefix_chars - suffix_chars
+    return (
+        diff[:prefix_chars]
+        + "\n\n... [runner prompt projection omitted "
+        + str(omitted)
+        + " middle characters; full diff is available from the retained workspace; "
+        + f"full_diff_sha256={digest}] ...\n\n"
+        + diff[-suffix_chars:]
+    )
 
 
 def _artifact_path_map_for_pr_resume(
@@ -349,12 +804,35 @@ def _build_pr_resume_prompt(
     review_summary: dict[str, Any] | None,
     branch: str,
 ) -> str:
-    pr_json = json.dumps(pr_context.get("pr", {}), indent=2, ensure_ascii=False)
-    checks_json = json.dumps(pr_context.get("checks", []), indent=2, ensure_ascii=False)
-    failing_checks_json = json.dumps(_failing_check_pointers(pr_context), indent=2, ensure_ascii=False)
+    pr_json = json.dumps(
+        _pr_metadata_for_resume_prompt(pr_context),
+        indent=2,
+        ensure_ascii=False,
+    )
+    checks_json = json.dumps(
+        _checks_for_resume_prompt(pr_context),
+        indent=2,
+        ensure_ascii=False,
+    )
+    failing_checks_json = json.dumps(
+        _failing_check_pointers(pr_context), indent=2, ensure_ascii=False
+    )
     review_findings = _review_findings_for_resume(review_summary)
     review_findings_json = json.dumps(review_findings, indent=2, ensure_ascii=False)
-    review_summary_json = json.dumps(review_summary or {}, indent=2, ensure_ascii=False)
+    review_summary_context = dict(review_summary) if isinstance(review_summary, dict) else {}
+    all_findings = review_summary_context.pop("findings", [])
+    review_summary_context["actionable_findings"] = review_findings
+    review_summary_context["nonblocking_findings_omitted"] = max(
+        0,
+        len(all_findings) - len(review_findings)
+        if isinstance(all_findings, list)
+        else 0,
+    )
+    review_summary_json = json.dumps(
+        review_summary_context,
+        indent=2,
+        ensure_ascii=False,
+    )
     artifact_paths = _artifact_path_map_for_pr_resume(
         run_dir=original_run_dir,
         review_run_dir=_review_run_dir_from_state(resume_state),
@@ -362,16 +840,20 @@ def _build_pr_resume_prompt(
     )
     artifact_paths_json = json.dumps(artifact_paths, indent=2, ensure_ascii=False)
     handoff_summary = _read_json(original_run_dir / "handoff_summary.json")
-    handoff_json = json.dumps(handoff_summary if isinstance(handoff_summary, dict) else {}, indent=2, ensure_ascii=False)
+    handoff_json = json.dumps(
+        handoff_summary if isinstance(handoff_summary, dict) else {}, indent=2, ensure_ascii=False
+    )
     ci_gate = _read_json(original_run_dir / "ci_gate.json")
-    ci_gate_json = json.dumps(ci_gate if isinstance(ci_gate, dict) else {}, indent=2, ensure_ascii=False)
+    ci_gate_json = json.dumps(
+        ci_gate if isinstance(ci_gate, dict) else {}, indent=2, ensure_ascii=False
+    )
     changed_files = pr_context.get("changed_files")
     changed_file_lines = (
         "\n".join(f"- {path}" for path in changed_files)
         if isinstance(changed_files, list) and changed_files
         else "- <none>"
     )
-    diff_excerpt = str(pr_context.get("diff_excerpt") or "").rstrip()
+    diff_excerpt = _diff_excerpt_for_resume_prompt(pr_context)
     blocking_reason = _clean_str(resume_state.get("blocking_reason")) or "PR is blocked."
 
     return (
@@ -387,7 +869,7 @@ def _build_pr_resume_prompt(
         "# Ticket context\n\n"
         f"Fingerprint: {selected.fingerprint}\n"
         f"Title: {selected.title or ticket_ref.get('title') or 'Untitled ticket'}\n\n"
-        f"{selected.ticket_markdown.rstrip()}\n\n"
+        f"{_resume_ticket_prompt_context(selected).rstrip()}\n\n"
         "# Prior implementation summary\n\n"
         f"```json\n{handoff_json}\n```\n\n"
         f"{_prior_report_block(original_run_dir)}\n\n"
@@ -400,10 +882,13 @@ def _build_pr_resume_prompt(
         "# Prior CI gate artifact\n\n"
         f"```json\n{ci_gate_json}\n```\n\n"
         "# Unresolved review findings\n\n"
-        "These are findings from the latest recorded automated review that still requested changes. "
-        "Treat them as unresolved unless the refreshed PR state clearly proves they are obsolete.\n\n"
+        "These are the blocking findings from the latest recorded automated review that still "
+        "requested changes. Treat only this list and runner-owned supervisor constraints as "
+        "correction targets unless refreshed repository evidence proves another directly causal "
+        "defect. Nonblocking warnings and informational observations are context, not requested "
+        "implementation work.\n\n"
         f"```json\n{review_findings_json}\n```\n\n"
-        "# Latest recorded review summary\n\n"
+        "# Latest recorded review summary (nonblocking finding bodies omitted)\n\n"
         f"```json\n{review_summary_json}\n```\n\n"
         "# Run artifact paths\n\n"
         f"```json\n{artifact_paths_json}\n```\n\n"
@@ -444,9 +929,15 @@ def _resolve_pr_resume_target(
     pr_context: dict[str, Any],
 ) -> tuple[str, str, Path | None, str]:
     pr_meta = pr_context.get("pr") if isinstance(pr_context.get("pr"), dict) else {}
-    branch = _clean_str(getattr(args, "ref", None)) or _clean_str(pr_meta.get("headRefName")) or _clean_str(resume_state.get("branch"))
+    branch = (
+        _clean_str(getattr(args, "ref", None))
+        or _clean_str(pr_meta.get("headRefName"))
+        or _clean_str(resume_state.get("branch"))
+    )
     if branch is None:
-        raise SystemExit("Cannot resume PR-backed run: current PR metadata and resume state are missing the PR branch.")
+        raise SystemExit(
+            "Cannot resume PR-backed run: current PR metadata and resume state are missing the PR branch."
+        )
     repo_input, _old_ref, resume_workspace_dir, workspace_strategy = _resolve_resume_target(
         args=args,
         run_dir=run_dir,
@@ -456,13 +947,16 @@ def _resolve_pr_resume_target(
     )
     return repo_input, branch, resume_workspace_dir, workspace_strategy
 
+
 def _selected_from_resume_state(
     *,
     resume_state: dict[str, Any],
     ticket_ref: dict[str, Any],
 ) -> SelectedTicket:
     ticket = resume_state.get("ticket") if isinstance(resume_state.get("ticket"), dict) else {}
-    owner_repo = ticket_ref.get("owner_repo") if isinstance(ticket_ref.get("owner_repo"), dict) else {}
+    owner_repo = (
+        ticket_ref.get("owner_repo") if isinstance(ticket_ref.get("owner_repo"), dict) else {}
+    )
     path_raw = _clean_str(ticket.get("path")) or _clean_str(owner_repo.get("idea_path"))
     ticket_path = Path(path_raw) if path_raw is not None else None
     markdown = ""
@@ -472,22 +966,33 @@ def _selected_from_resume_state(
         except (FileNotFoundError, OSError, UnicodeError):
             markdown = ""
     return SelectedTicket(
-        fingerprint=_clean_str(ticket.get("fingerprint")) or _clean_str(ticket_ref.get("fingerprint")) or "unknown",
+        fingerprint=_clean_str(ticket.get("fingerprint"))
+        or _clean_str(ticket_ref.get("fingerprint"))
+        or "unknown",
         title=_clean_str(ticket.get("title")) or _clean_str(ticket_ref.get("title")),
-        export_kind=_clean_str(ticket.get("export_kind")) or _clean_str(ticket_ref.get("export_kind")),
+        export_kind=_clean_str(ticket.get("export_kind"))
+        or _clean_str(ticket_ref.get("export_kind")),
         stage=None,
         owner_root=Path(str(owner_repo["root"])) if _clean_str(owner_repo.get("root")) else None,
         idea_path=ticket_path,
         ticket_markdown=markdown,
-        tickets_export_path=Path(str(ticket_ref["tickets_export_path"])) if _clean_str(ticket_ref.get("tickets_export_path")) else None,
-        export_index=ticket_ref.get("export_index") if isinstance(ticket_ref.get("export_index"), int) else None,
+        tickets_export_path=Path(str(ticket_ref["tickets_export_path"]))
+        if _clean_str(ticket_ref.get("tickets_export_path"))
+        else None,
+        export_index=ticket_ref.get("export_index")
+        if isinstance(ticket_ref.get("export_index"), int)
+        else None,
     )
 
 
 def _commands_from_original_run(run_dir: Path, verification: dict[str, Any]) -> list[str]:
     config = _read_json(run_dir / "verification_config.json")
     if isinstance(config, dict) and isinstance(config.get("commands"), list):
-        out = [str(item).strip() for item in config["commands"] if isinstance(item, str) and item.strip()]
+        out = [
+            str(item).strip()
+            for item in config["commands"]
+            if isinstance(item, str) and item.strip()
+        ]
         if out:
             return out
     commands = verification.get("commands")
@@ -530,12 +1035,18 @@ def _fallback_repo_input(
         return override_repo.strip()
     for value in (
         push_ref.get("remote_url") if isinstance(push_ref, dict) else None,
-        (_read_json(run_dir / "target_ref.json") or {}).get("repo_input") if isinstance(_read_json(run_dir / "target_ref.json"), dict) else None,
+        (_read_json(run_dir / "target_ref.json") or {}).get("repo_input")
+        if isinstance(_read_json(run_dir / "target_ref.json"), dict)
+        else None,
     ):
         cleaned = _clean_str(value)
-        if cleaned is not None and not (_looks_like_local_path(cleaned) and not Path(cleaned).exists()):
+        if cleaned is not None and not (
+            _looks_like_local_path(cleaned) and not Path(cleaned).exists()
+        ):
             return cleaned
-    owner_repo = ticket_ref.get("owner_repo") if isinstance(ticket_ref.get("owner_repo"), dict) else {}
+    owner_repo = (
+        ticket_ref.get("owner_repo") if isinstance(ticket_ref.get("owner_repo"), dict) else {}
+    )
     owner_root = _clean_str(owner_repo.get("root"))
     if owner_root is not None:
         owner_path = Path(owner_root)
@@ -556,7 +1067,9 @@ def _resolve_resume_target(
     ticket_ref: dict[str, Any],
 ) -> tuple[str, str | None, Path | None, str]:
     branch = _clean_str(getattr(args, "ref", None)) or _clean_str(resume_state.get("branch"))
-    workspace_raw = _clean_str(workspace_ref.get("workspace_dir")) or _clean_str(resume_state.get("workspace_path"))
+    workspace_raw = _clean_str(workspace_ref.get("workspace_dir")) or _clean_str(
+        resume_state.get("workspace_path")
+    )
     workspace_dir = Path(workspace_raw).expanduser() if workspace_raw is not None else None
     if workspace_dir is not None and workspace_dir.exists() and workspace_dir.is_dir():
         repo_input = _clean_str(getattr(args, "repo", None)) or str(workspace_dir)
@@ -609,7 +1122,6 @@ def _mark_original_resume_state(
     _write_json(state_path, state)
 
 
-
 def _cmd_resume_pr(
     *,
     args: argparse.Namespace,
@@ -627,13 +1139,20 @@ def _cmd_resume_pr(
         raise SystemExit("Cannot resume PR-backed run: ticket_ref.json must contain an object.")
 
     selected = _selected_from_resume_state(resume_state=resume_state, ticket_ref=ticket_ref)
+    correction_origin = _clean_str(getattr(args, "correction_origin", None))
+    supervisor_instructions = _resume_supervisor_instructions(
+        args=args,
+        ticket_ref=ticket_ref,
+    )
     pr_url = _pr_url_from_resume_artifacts(
         run_dir=run_dir,
         resume_state=resume_state,
         ticket_ref=ticket_ref,
     )
     if pr_url is None:
-        raise SystemExit("Cannot resume PR-backed run: no PR URL is recorded in resume/run artifacts.")
+        raise SystemExit(
+            "Cannot resume PR-backed run: no PR URL is recorded in resume/run artifacts."
+        )
 
     # This is the ticket's current-state refresh boundary: read live PR metadata/checks/diff just
     # before deciding whether to prompt the resumed implementation agent.
@@ -645,9 +1164,15 @@ def _cmd_resume_pr(
     pr_context = _collect_pr_review_context(workspace_dir=pr_workspace, pr_url=pr_url)
     review_summary = _load_review_summary_for_resume(resume_state=resume_state)
     pr_meta = pr_context.get("pr") if isinstance(pr_context.get("pr"), dict) else {}
-    branch = _clean_str(getattr(args, "ref", None)) or _clean_str(pr_meta.get("headRefName")) or _clean_str(resume_state.get("branch"))
+    branch = (
+        _clean_str(getattr(args, "ref", None))
+        or _clean_str(pr_meta.get("headRefName"))
+        or _clean_str(resume_state.get("branch"))
+    )
     if branch is None:
-        raise SystemExit("Cannot resume PR-backed run: current PR metadata and resume state are missing the PR branch.")
+        raise SystemExit(
+            "Cannot resume PR-backed run: current PR metadata and resume state are missing the PR branch."
+        )
 
     noop_reason = _current_pr_resume_noop_reason(
         pr_context=pr_context,
@@ -675,16 +1200,56 @@ def _cmd_resume_pr(
         ticket_ref=ticket_ref,
         pr_context=pr_context,
     )
-    prompt = _build_pr_resume_prompt(
-        original_run_dir=run_dir,
-        state_path=state_path,
+    effective_agent, codex_resume_session_id, author_continuity = _resume_agent_continuity(
+        run_dir=run_dir,
         resume_state=resume_state,
-        ticket_ref=ticket_ref,
-        selected=selected,
-        pr_url=pr_url,
-        pr_context=pr_context,
-        review_summary=review_summary,
-        branch=ref,
+        requested_agent=str(args.agent),
+    )
+    restart_evidence: dict[str, Any] | None = None
+    if codex_resume_session_id is not None:
+        restart_evidence = _context_exhaustion_restart_evidence(
+            resume_state=resume_state,
+            expected_session_id=codex_resume_session_id,
+            expected_workspace=resume_workspace_dir,
+        )
+    if restart_evidence is not None:
+        exhausted_session_id = codex_resume_session_id
+        codex_resume_session_id = None
+        author_continuity = {
+            **author_continuity,
+            "status": "justified_fresh_restart_context_exhausted",
+            "fresh_restart": True,
+            "restart_justified": True,
+            "exhausted_session_id": exhausted_session_id,
+            "restart_evidence": restart_evidence,
+        }
+        restart_instruction = (
+            "The prior Codex author session is provably unable to continue because its context "
+            "window is exhausted. This is a justified fresh-author continuation in the same "
+            "retained workspace, not permission to redo or discard the existing implementation. "
+            "Treat the current clean PR head as the valid frontier, inspect it first, and apply "
+            "only the focused unresolved correction below."
+        )
+        if restart_instruction not in supervisor_instructions:
+            supervisor_instructions.append(restart_instruction)
+    combined_supervisor_instruction = "\n\n".join(supervisor_instructions)
+    resumed_ticket_ref = dict(ticket_ref)
+    resumed_ticket_ref["supervisor_instruction"] = (
+        combined_supervisor_instruction or None
+    )
+    prompt = _append_resume_supervisor_instructions(
+        _build_pr_resume_prompt(
+            original_run_dir=run_dir,
+            state_path=state_path,
+            resume_state=resume_state,
+            ticket_ref=ticket_ref,
+            selected=selected,
+            pr_url=pr_url,
+            pr_context=pr_context,
+            review_summary=review_summary,
+            branch=ref,
+        ),
+        instructions=supervisor_instructions,
     )
 
     verification = _read_json(run_dir / "verification.json")
@@ -706,7 +1271,9 @@ def _cmd_resume_pr(
     exec_docker_profile = _resolve_exec_docker_profile(
         exec_backend=exec_backend,
         requested_profile=getattr(args, "exec_docker_profile", None),
-        maintenance_eligible=_maintenance_profile_is_eligible(repo_root=repo_root, repo_input=repo_input),
+        maintenance_eligible=_maintenance_profile_is_eligible(
+            repo_root=repo_root, repo_input=repo_input
+        ),
     )
     exec_cache_dir = getattr(args, "exec_cache_dir", None)
     if exec_cache_dir is not None:
@@ -714,22 +1281,37 @@ def _cmd_resume_pr(
     exec_cache = str(getattr(args, "exec_cache", "cold") or "cold")
     if exec_cache == "warm" and exec_cache_dir is None:
         exec_cache_dir = repo_root / "runs" / "_cache" / "usertest_implement"
-    maintenance_venv_cache = bool(exec_backend == "docker" and exec_cache == "warm" and bool(getattr(args, "maintenance_venv_cache", True)))
-    exec_maintenance_image_metadata_path = getattr(args, "exec_maintenance_image_metadata_path", None)
+    maintenance_venv_cache = bool(
+        exec_backend == "docker"
+        and exec_cache == "warm"
+        and bool(getattr(args, "maintenance_venv_cache", True))
+    )
+    exec_maintenance_image_metadata_path = getattr(
+        args, "exec_maintenance_image_metadata_path", None
+    )
     if exec_maintenance_image_metadata_path is not None:
         exec_maintenance_image_metadata_path = exec_maintenance_image_metadata_path.resolve()
+
+    requested_runs_dir = getattr(args, "runs_dir", None)
+    effective_runs_dir = (
+        requested_runs_dir.resolve()
+        if isinstance(requested_runs_dir, Path)
+        else (repo_root / "runs" / "usertest_implement").resolve()
+    )
 
     request = RunRequest(
         repo=repo_input,
         ref=ref,
-        agent=str(args.agent),
+        agent=effective_agent,
         policy=str(args.policy),
         persona_id=args.persona_id,
         mission_id=args.mission_id,
         seed=int(args.seed),
         model=args.model,
         agent_config_overrides=tuple(args.agent_config_override or []),
-        agent_append_system_prompt=prompt,
+        agent_append_system_prompt=(prompt if codex_resume_session_id is None else None),
+        agent_user_prompt=(prompt if codex_resume_session_id is not None else None),
+        codex_resume_session_id=codex_resume_session_id,
         keep_workspace=True,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
@@ -758,19 +1340,26 @@ def _cmd_resume_pr(
                     "pr_url": pr_url,
                     "branch": ref,
                     "current_pr_context": pr_context,
+                    "implementation_author_continuity": author_continuity,
                     "unresolved_review_findings": _review_findings_for_resume(review_summary),
                     "failing_check_pointers": _failing_check_pointers(pr_context),
+                    "supervisor_instructions": supervisor_instructions,
+                    "correction_origin": correction_origin,
                     "run_request": {
                         "repo": request.repo,
                         "ref": request.ref,
                         "agent": request.agent,
                         "policy": request.policy,
                         "model": request.model,
+                        "codex_resume_session_id": request.codex_resume_session_id,
                         "keep_workspace": request.keep_workspace,
-                        "resume_workspace_dir": str(request.resume_workspace_dir) if request.resume_workspace_dir is not None else None,
+                        "resume_workspace_dir": str(request.resume_workspace_dir)
+                        if request.resume_workspace_dir is not None
+                        else None,
                         "verification_commands": list(request.verification_commands),
                         "verification_timeout_seconds": request.verification_timeout_seconds,
                         "verification_reuse_mode": request.verification_reuse_mode,
+                        "runs_dir": str(effective_runs_dir),
                         "commit": True,
                         "push": True,
                         "pr": False,
@@ -786,10 +1375,14 @@ def _cmd_resume_pr(
     if exec_backend == "docker":
         _require_docker_available()
 
-    cfg = _load_runner_config(repo_root)
+    cfg = (
+        _load_runner_config(repo_root, runs_dir=effective_runs_dir)
+        if isinstance(requested_runs_dir, Path)
+        else _load_runner_config(repo_root)
+    )
     result = run_once(cfg, request)
     resumed_run_dir = result.run_dir
-    _write_json(resumed_run_dir / "ticket_ref.json", ticket_ref)
+    _write_json(resumed_run_dir / "ticket_ref.json", resumed_ticket_ref)
     _write_json(resumed_run_dir / "current_pr_context.json", pr_context)
     _write_json(
         resumed_run_dir / "resume_ref.json",
@@ -802,6 +1395,10 @@ def _cmd_resume_pr(
             "workspace_strategy": workspace_strategy,
             "pr_url": pr_url,
             "branch": ref,
+            "implementation_author_continuity": author_continuity,
+            "supervisor_instructions": supervisor_instructions,
+            "correction_origin": correction_origin,
+            "runs_dir": str(effective_runs_dir),
             "source_evidence_paths": _artifact_path_map_for_pr_resume(
                 run_dir=run_dir,
                 review_run_dir=_review_run_dir_from_state(resume_state),
@@ -819,7 +1416,7 @@ def _cmd_resume_pr(
             "url": pr_url,
             "branch": ref,
             "title": pr_meta.get("title"),
-            "agent": str(args.agent),
+            "agent": effective_agent,
             "model": args.model,
             "error": None,
         },
@@ -838,8 +1435,7 @@ def _cmd_resume_pr(
     commit_performed = False
     if exit_code == 0:
         commit_message = (
-            getattr(args, "commit_message", None)
-            or f"{selected.fingerprint}: Resume PR feedback"
+            getattr(args, "commit_message", None) or f"{selected.fingerprint}: Resume PR feedback"
         )
         git_ref = finalize_commit(
             run_dir=resumed_run_dir,
@@ -851,13 +1447,33 @@ def _cmd_resume_pr(
         commit_performed = bool(git_ref.get("commit_performed") is True)
         if git_ref.get("error"):
             exit_code = max(exit_code, 3)
+        current_ticket_ref = _read_json(resumed_run_dir / "ticket_ref.json")
+        current_ticket_provenance = (
+            current_ticket_ref.get("ticket_provenance")
+            if isinstance(current_ticket_ref, dict)
+            and isinstance(current_ticket_ref.get("ticket_provenance"), dict)
+            else {}
+        )
+        if commit_performed and isinstance(current_ticket_provenance.get("target_contract"), dict):
+            try:
+                record_verified_implementation_head(
+                    run_dir=resumed_run_dir,
+                    require_exact_base=False,
+                )
+            except ValueError as exc:
+                raise SystemExit(
+                    f"Unable to bind resumed verification to the committed PR head: {exc}"
+                ) from exc
 
     if exit_code == 0:
         push_candidates: list[Path] = []
         workspace_after_for_push = _read_json(resumed_run_dir / "workspace_ref.json")
         if isinstance(workspace_after_for_push, dict):
             raw_workspace_for_push = _clean_str(workspace_after_for_push.get("workspace_dir"))
-            if raw_workspace_for_push is not None and (Path(raw_workspace_for_push) / ".git").exists():
+            if (
+                raw_workspace_for_push is not None
+                and (Path(raw_workspace_for_push) / ".git").exists()
+            ):
                 push_candidates.append(Path(raw_workspace_for_push))
         if selected.owner_root is not None and (selected.owner_root / ".git").exists():
             push_candidates.append(selected.owner_root)
@@ -897,7 +1513,9 @@ def _cmd_resume_pr(
                 "skip_reason": "flag --skip-ci-wait",
                 "started_at_utc": _utc_now_z(),
                 "finished_at_utc": _utc_now_z(),
-                "timeout_seconds": _ci_timeout_seconds_arg(getattr(args, "ci_timeout_seconds", None)),
+                "timeout_seconds": _ci_timeout_seconds_arg(
+                    getattr(args, "ci_timeout_seconds", None)
+                ),
             }
             _write_json(resumed_run_dir / "ci_gate.json", ci_ref)
         elif workspace_dir is None:
@@ -935,7 +1553,9 @@ def _cmd_resume_pr(
                     branch=ref,
                     head_sha=head_sha,
                     workflow="CI",
-                    timeout_seconds=_ci_timeout_seconds_arg(getattr(args, "ci_timeout_seconds", None)),
+                    timeout_seconds=_ci_timeout_seconds_arg(
+                        getattr(args, "ci_timeout_seconds", None)
+                    ),
                 )
                 if ci_ref.get("passed") is not True:
                     exit_code = max(exit_code, 5)
@@ -1013,10 +1633,15 @@ def _cmd_resume_pr(
     print(str(resumed_run_dir))
     return exit_code
 
+
 def _cmd_resume(args: argparse.Namespace) -> int:
     repo_root = _resolve_repo_root(args.repo_root)
 
-    state_path = args.resume_state.resolve() if args.resume_state is not None else (args.run_dir.resolve() / RESUME_STATE_ARTIFACT_NAME)
+    state_path = (
+        args.resume_state.resolve()
+        if args.resume_state is not None
+        else (args.run_dir.resolve() / RESUME_STATE_ARTIFACT_NAME)
+    )
     run_dir = args.run_dir.resolve() if args.run_dir is not None else state_path.parent.resolve()
     resume_state = _read_json(state_path)
     if not isinstance(resume_state, dict):
@@ -1037,6 +1662,8 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             "Cannot resume: resume state must be one of "
             f"{allowed!r}; got {lifecycle!r} in {state_path}."
         )
+    implemented_local_correction = lifecycle == LIFECYCLE_IMPLEMENTED_LOCAL
+    correction_origin = _clean_str(getattr(args, "correction_origin", None))
 
     missing = [name for name in _REQUIRED_RESUME_ARTIFACTS if not (run_dir / name).exists()]
     if missing:
@@ -1050,12 +1677,50 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     agent_attempts = _read_json(run_dir / "agent_attempts.json")
     workspace_ref = _read_json(run_dir / "workspace_ref.json")
     ticket_ref = _read_json(run_dir / "ticket_ref.json")
-    if not isinstance(verification, dict) or verification.get("passed") is not False:
-        raise SystemExit("Cannot resume: verification.json does not record a failed verification run.")
+    if implemented_local_correction:
+        if not isinstance(verification, dict) or verification.get("passed") is not True:
+            raise SystemExit(
+                "Cannot resume implemented_local: verification.json must record the prior "
+                "successful local verification."
+            )
+    elif not isinstance(verification, dict) or verification.get("passed") is not False:
+        raise SystemExit(
+            "Cannot resume: verification.json does not record a failed verification run."
+        )
     if not isinstance(workspace_ref, dict):
         raise SystemExit("Cannot resume: workspace_ref.json must contain an object.")
     if not isinstance(ticket_ref, dict):
         raise SystemExit("Cannot resume: ticket_ref.json must contain an object.")
+    if implemented_local_correction:
+        workspace_raw = _clean_str(workspace_ref.get("workspace_dir")) or _clean_str(
+            resume_state.get("workspace_path")
+        )
+        workspace = Path(workspace_raw).expanduser() if workspace_raw is not None else None
+        if workspace is None or not workspace.exists() or not workspace.is_dir():
+            raise SystemExit(
+                "Cannot resume implemented_local: the exact retained implementation workspace "
+                "is unavailable; a fresh checkout/restart is not allowed."
+            )
+
+    supervisor_instructions = _resume_supervisor_instructions(
+        args=args,
+        ticket_ref=ticket_ref,
+    )
+    combined_supervisor_instruction = "\n\n".join(supervisor_instructions)
+    retained_oracle_transport = _retained_oracle_transport_from_ticket_ref(ticket_ref)
+    retained_oracle_assets_root: Path | None = None
+    retained_oracle_asset_spec: dict[str, Any] | None = None
+    retained_oracle_transport_summary: dict[str, Any] | None = None
+    if retained_oracle_transport is not None:
+        (
+            retained_oracle_assets_root,
+            retained_oracle_asset_spec,
+            retained_oracle_transport_summary,
+        ) = retained_oracle_transport
+    resumed_ticket_ref = dict(ticket_ref)
+    resumed_ticket_ref["supervisor_instruction"] = (
+        combined_supervisor_instruction or None
+    )
 
     verification_reuse_dict = verification_reuse if isinstance(verification_reuse, dict) else None
     agent_attempts_dict = agent_attempts if isinstance(agent_attempts, dict) else None
@@ -1067,18 +1732,24 @@ def _cmd_resume(args: argparse.Namespace) -> int:
         workspace_ref=workspace_ref,
         ticket_ref=ticket_ref,
     )
-    prompt = _build_verification_resume_prompt(
-        original_run_dir=run_dir,
-        resume_state=resume_state,
-        verification=verification,
-        verification_reuse=verification_reuse_dict,
-        agent_attempts=agent_attempts_dict,
-        workspace_ref=workspace_ref,
-        ticket_ref=ticket_ref,
+    prompt = _append_resume_supervisor_instructions(
+        _build_verification_resume_prompt(
+            original_run_dir=run_dir,
+            resume_state=resume_state,
+            verification=verification,
+            verification_reuse=verification_reuse_dict,
+            agent_attempts=agent_attempts_dict,
+            workspace_ref=workspace_ref,
+            ticket_ref=ticket_ref,
+            lifecycle=lifecycle,
+        ),
+        instructions=supervisor_instructions,
     )
 
     verification_commands = [
-        str(cmd).strip() for cmd in (getattr(args, "verification_commands", None) or []) if isinstance(cmd, str) and str(cmd).strip()
+        str(cmd).strip()
+        for cmd in (getattr(args, "verification_commands", None) or [])
+        if isinstance(cmd, str) and str(cmd).strip()
     ]
     if not verification_commands:
         verification_commands = _commands_from_original_run(run_dir, verification)
@@ -1090,7 +1761,9 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     exec_docker_profile = _resolve_exec_docker_profile(
         exec_backend=exec_backend,
         requested_profile=getattr(args, "exec_docker_profile", None),
-        maintenance_eligible=_maintenance_profile_is_eligible(repo_root=repo_root, repo_input=repo_input),
+        maintenance_eligible=_maintenance_profile_is_eligible(
+            repo_root=repo_root, repo_input=repo_input
+        ),
     )
     exec_cache_dir = getattr(args, "exec_cache_dir", None)
     if exec_cache_dir is not None:
@@ -1098,26 +1771,64 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     exec_cache = str(getattr(args, "exec_cache", "cold") or "cold")
     if exec_cache == "warm" and exec_cache_dir is None:
         exec_cache_dir = repo_root / "runs" / "_cache" / "usertest_implement"
-    maintenance_venv_cache = bool(exec_backend == "docker" and exec_cache == "warm" and bool(getattr(args, "maintenance_venv_cache", True)))
-    exec_maintenance_image_metadata_path = getattr(args, "exec_maintenance_image_metadata_path", None)
+    maintenance_venv_cache = bool(
+        exec_backend == "docker"
+        and exec_cache == "warm"
+        and bool(getattr(args, "maintenance_venv_cache", True))
+    )
+    exec_maintenance_image_metadata_path = getattr(
+        args, "exec_maintenance_image_metadata_path", None
+    )
     if exec_maintenance_image_metadata_path is not None:
         exec_maintenance_image_metadata_path = exec_maintenance_image_metadata_path.resolve()
+
+    effective_agent, codex_resume_session_id, author_continuity = _resume_agent_continuity(
+        run_dir=run_dir,
+        resume_state=resume_state,
+        requested_agent=str(args.agent),
+    )
+    if implemented_local_correction and (
+        workspace_strategy != "same_workspace" or codex_resume_session_id is None
+    ):
+        raise SystemExit(
+            "Cannot resume implemented_local: correction requires the exact Codex author session "
+            "in the retained implementation workspace; a fresh restart is not allowed."
+        )
+    requested_verification_reuse_mode = str(
+        getattr(args, "verify_reuse", "auto") or "auto"
+    )
+    verification_reuse_mode = (
+        "off"
+        if retained_oracle_asset_spec is not None
+        else requested_verification_reuse_mode
+    )
+    requested_runs_dir = getattr(args, "runs_dir", None)
+    effective_runs_dir = (
+        requested_runs_dir.resolve()
+        if isinstance(requested_runs_dir, Path)
+        else (repo_root / "runs" / "usertest_implement").resolve()
+    )
 
     request = RunRequest(
         repo=repo_input,
         ref=ref,
-        agent=str(args.agent),
+        agent=effective_agent,
         policy=str(args.policy),
         persona_id=args.persona_id,
         mission_id=args.mission_id,
         seed=int(args.seed),
         model=args.model,
         agent_config_overrides=tuple(args.agent_config_override or []),
-        agent_append_system_prompt=prompt,
+        agent_append_system_prompt=(prompt if codex_resume_session_id is None else None),
+        agent_user_prompt=(prompt if codex_resume_session_id is not None else None),
+        supervisor_instruction=combined_supervisor_instruction or None,
+        codex_resume_session_id=codex_resume_session_id,
         keep_workspace=True,
         verification_commands=tuple(verification_commands),
         verification_timeout_seconds=verification_timeout_seconds,
-        verification_reuse_mode=str(getattr(args, "verify_reuse", "auto") or "auto"),
+        verification_reuse_mode=verification_reuse_mode,
+        retained_oracle_assets_root=retained_oracle_assets_root,
+        retained_oracle_asset_spec=retained_oracle_asset_spec,
         exec_backend=exec_backend,
         exec_docker_profile=exec_docker_profile,
         exec_keep_container=bool(args.exec_keep_container),
@@ -1138,17 +1849,33 @@ def _cmd_resume(args: argparse.Namespace) -> int:
                     "original_run_dir": str(run_dir),
                     "resume_state_path": str(state_path),
                     "workspace_strategy": workspace_strategy,
+                    "implementation_author_continuity": author_continuity,
                     "run_request": {
                         "repo": request.repo,
                         "ref": request.ref,
                         "agent": request.agent,
                         "policy": request.policy,
                         "model": request.model,
+                        "codex_resume_session_id": request.codex_resume_session_id,
                         "keep_workspace": request.keep_workspace,
-                        "resume_workspace_dir": str(request.resume_workspace_dir) if request.resume_workspace_dir is not None else None,
+                        "resume_workspace_dir": str(request.resume_workspace_dir)
+                        if request.resume_workspace_dir is not None
+                        else None,
                         "verification_commands": list(request.verification_commands),
                         "verification_timeout_seconds": request.verification_timeout_seconds,
                         "verification_reuse_mode": request.verification_reuse_mode,
+                        "verification_reuse_forced_reason": (
+                            "retained_oracle_asset_server_staging"
+                            if retained_oracle_asset_spec is not None
+                            else None
+                        ),
+                        "retained_oracle_asset_transport": (
+                            retained_oracle_transport_summary
+                        ),
+                        "supervisor_instructions": supervisor_instructions,
+                        "correction_origin": correction_origin,
+                        "runs_dir": str(effective_runs_dir),
+                        "commit": bool(getattr(args, "commit", False)),
                     },
                     "prompt": prompt,
                 },
@@ -1161,7 +1888,11 @@ def _cmd_resume(args: argparse.Namespace) -> int:
     if exec_backend == "docker":
         _require_docker_available()
 
-    cfg = _load_runner_config(repo_root)
+    cfg = (
+        _load_runner_config(repo_root, runs_dir=effective_runs_dir)
+        if isinstance(requested_runs_dir, Path)
+        else _load_runner_config(repo_root)
+    )
     result = run_once(cfg, request)
     resumed_run_dir = result.run_dir
     _write_json(
@@ -1172,32 +1903,85 @@ def _cmd_resume(args: argparse.Namespace) -> int:
             "resumed_from_resume_state_path": str(state_path),
             "resumed_from_lifecycle_state": lifecycle,
             "workspace_strategy": workspace_strategy,
-            "source_evidence_paths": {name.removesuffix(".json"): str(run_dir / name) for name in _REQUIRED_RESUME_ARTIFACTS},
+            "implementation_author_continuity": author_continuity,
+            "supervisor_instructions": supervisor_instructions,
+            "correction_origin": correction_origin,
+            "retained_oracle_asset_transport": retained_oracle_transport_summary,
+            "runs_dir": str(effective_runs_dir),
+            "source_evidence_paths": {
+                name.removesuffix(".json"): str(run_dir / name)
+                for name in _REQUIRED_RESUME_ARTIFACTS
+            },
         },
     )
-    _write_json(resumed_run_dir / "ticket_ref.json", ticket_ref)
+    _write_json(resumed_run_dir / "ticket_ref.json", resumed_ticket_ref)
 
     verification_after = _read_json(resumed_run_dir / "verification.json")
     exit_code = int(result.exit_code or 0)
+    if result.report_validation_errors:
+        exit_code = max(exit_code, 2)
     if isinstance(verification_after, dict) and verification_after.get("passed") is False:
         exit_code = max(exit_code, 2)
-    if isinstance(verification_after, dict) and verification_after.get("passed") is True and exit_code == 0:
-        _write_json(
-            resumed_run_dir / "handoff_summary.json",
-            {
-                "schema_version": 1,
-                "branch": ref,
-                "commit_requested": False,
-                "commit_performed": False,
-                "push_requested": False,
-                "pushed": False,
-                "pr_requested": False,
-                "pr_created": False,
-                "review_required": False,
-                "final_status": "success",
-                "resumed_from_run_dir": str(run_dir),
-            },
+    verification_passed = bool(
+        isinstance(verification_after, dict)
+        and verification_after.get("passed") is True
+    )
+    commit_requested = bool(getattr(args, "commit", False))
+    commit_performed = False
+    git_ref: dict[str, Any] | None = None
+    if verification_passed and exit_code == 0 and commit_requested:
+        git_ref = finalize_commit(
+            run_dir=resumed_run_dir,
+            branch=ref,
+            commit_message=(
+                getattr(args, "commit_message", None)
+                or f"{selected.fingerprint}: Resume verification fix"
+            ),
+            git_user_name=getattr(args, "git_user_name", None),
+            git_user_email=getattr(args, "git_user_email", None),
         )
+        commit_performed = bool(git_ref.get("commit_performed") is True)
+        if git_ref.get("error"):
+            exit_code = max(exit_code, 3)
+        current_ticket_ref = _read_json(resumed_run_dir / "ticket_ref.json")
+        current_ticket_provenance = (
+            current_ticket_ref.get("ticket_provenance")
+            if isinstance(current_ticket_ref, dict)
+            and isinstance(current_ticket_ref.get("ticket_provenance"), dict)
+            else {}
+        )
+        if commit_performed and isinstance(
+            current_ticket_provenance.get("target_contract"), dict
+        ):
+            try:
+                record_verified_implementation_head(
+                    run_dir=resumed_run_dir,
+                    require_exact_base=False,
+                )
+            except ValueError as exc:
+                raise SystemExit(
+                    "Unable to bind resumed verification to the committed head: "
+                    f"{exc}"
+                ) from exc
+
+    _write_json(
+        resumed_run_dir / "handoff_summary.json",
+        {
+            "schema_version": 1,
+            "branch": ref,
+            "commit_requested": commit_requested,
+            "commit_performed": commit_performed,
+            "push_requested": False,
+            "pushed": False,
+            "pr_requested": False,
+            "pr_created": False,
+            "review_required": False,
+            "final_status": (
+                "success" if verification_passed and exit_code == 0 else "failed"
+            ),
+            "resumed_from_run_dir": str(run_dir),
+        },
+    )
 
     try:
         new_state = write_ticket_resume_state(

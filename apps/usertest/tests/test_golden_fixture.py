@@ -130,3 +130,60 @@ def test_recompute_metrics_is_stable_with_raw_ts_and_diff_numstat(tmp_path: Path
     _recompute()
     assert (fixture_dst / "normalized_events.jsonl").read_bytes() == norm_1
     assert (fixture_dst / "metrics.json").read_bytes() == metrics_1
+
+
+def test_recompute_metrics_preserves_cumulative_retry_evidence(tmp_path: Path) -> None:
+    repo_root = find_repo_root(Path(__file__).resolve())
+    fixture_src = repo_root / "examples" / "golden_runs" / "minimal_codex_run"
+    fixture_dst = tmp_path / "minimal_codex_run"
+    shutil.copytree(fixture_src, fixture_dst)
+
+    substantive_attempt = (fixture_dst / "raw_events.jsonl").read_text(encoding="utf-8")
+    formatting_attempt = json.dumps(
+        {"id": "2", "msg": {"type": "agent_message", "message": "corrected report"}}
+    ) + "\n"
+    (fixture_dst / "raw_events.attempt1.jsonl").write_text(
+        substantive_attempt,
+        encoding="utf-8",
+        newline="\n",
+    )
+    (fixture_dst / "raw_events.attempt2.jsonl").write_text(
+        formatting_attempt,
+        encoding="utf-8",
+        newline="\n",
+    )
+    (fixture_dst / "raw_events.jsonl").write_text(
+        formatting_attempt,
+        encoding="utf-8",
+        newline="\n",
+    )
+    (fixture_dst / "raw_events.all_attempts.jsonl").write_text(
+        substantive_attempt + formatting_attempt,
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    def _recompute() -> None:
+        with pytest.raises(SystemExit) as exc:
+            main(
+                [
+                    "report",
+                    "--repo-root",
+                    str(repo_root),
+                    "--run-dir",
+                    str(fixture_dst),
+                    "--recompute-metrics",
+                ]
+            )
+        assert exc.value.code == 0
+
+    _recompute()
+    normalized_1 = (fixture_dst / "normalized_events.jsonl").read_bytes()
+    metrics_1 = (fixture_dst / "metrics.json").read_bytes()
+    metrics = json.loads(metrics_1)
+    assert metrics["commands_executed"] == 1
+    assert b"run_command" in normalized_1
+
+    _recompute()
+    assert (fixture_dst / "normalized_events.jsonl").read_bytes() == normalized_1
+    assert (fixture_dst / "metrics.json").read_bytes() == metrics_1

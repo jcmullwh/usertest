@@ -138,8 +138,30 @@ except ModuleNotFoundError as exc:
 try:
     from backlog_core.aggregate_metrics import build_aggregate_metrics_atoms
     from backlog_core.backlog_policy import BacklogPolicyConfig, apply_backlog_policy
+    from backlog_core.case_lineage import (
+        ATOM_DISPOSITIONS,
+        TERMINAL_CASE_STATES,
+        apply_atom_disposition_decision,
+        apply_atom_dispositions,
+        assign_problem_case_ids,
+        atom_disposition_summary,
+        atom_is_idea_originated,
+        attach_supporting_atoms_to_problem_cases,
+        build_case_registry,
+        eligible_problem_mining_atoms,
+        load_case_registry,
+        normalize_atom_lineage,
+        problem_case_records_from_registry,
+        propagate_case_lineage,
+        update_case_registry_stage_lineage,
+        write_case_registry,
+    )
     from backlog_core.prioritization import compute_problem_priority_signals
-    from backlog_core.relation_review import apply_relation_decisions, rank_stage_related_items
+    from backlog_core.relation_review import (
+        apply_relation_decisions,
+        canonicalize_problem_cases,
+        rank_stage_related_items,
+    )
     from backlog_core.stage_contracts import (
         build_stage_document,
         parse_change_plan_list,
@@ -147,6 +169,7 @@ try:
         parse_problem_record_list,
         parse_selection_decisions,
         parse_solution_option_sets,
+        research_prompt_projection,
     )
 except ModuleNotFoundError as exc:
     if _is_missing_module(exc, "backlog_core"):
@@ -155,20 +178,36 @@ except ModuleNotFoundError as exc:
 
 try:
     from backlog_miner import (
+        BacklogProviderExternalWait,
         run_backlog_prompt,
         run_repro_research_stage,
     )
     from backlog_miner.pipeline import (
+        ModelInvocationTracker,
         PipelinePromptManifest,
+        attach_stage_model_invocation_contract,
         load_pipeline_prompt_manifest,
+        merge_stage_model_invocation_contract,
         run_stage_prompt_json,
+        run_stage_prompt_json_result,
+        verify_stage_model_invocation_contract,
     )
+    from backlog_miner.prompt_correction import (
+        CorrectionObservation,
+        correction_run_metrics,
+        correction_state_sha256,
+        run_progressive_correction,
+    )
+    from backlog_miner.research_evidence import verify_persisted_research_evidence
 except ModuleNotFoundError as exc:
     if _is_missing_module(exc, "backlog_miner"):
         raise SystemExit(_from_source_import_remediation(missing_module="backlog_miner")) from exc
     raise
 
 try:
+    from backlog_repo import (
+        archive_plan_ticket_file as _archive_plan_ticket_file,
+    )
     from backlog_repo import (
         canonicalize_failure_atom_id as _canonicalize_failure_atom_id,
     )
@@ -185,6 +224,9 @@ try:
         normalize_atom_status as _normalize_atom_status,
     )
     from backlog_repo import (
+        outcome_suppresses_new_case_discovery as _outcome_suppresses_new_case_discovery,
+    )
+    from backlog_repo import (
         promote_atom_status as _promote_atom_status,
     )
     from backlog_repo import (
@@ -196,13 +238,18 @@ try:
     from backlog_repo import (
         sorted_unique_strings as _sorted_unique_strings,
     )
+    from backlog_repo import validate_outcome_record as _validate_outcome_record
     from backlog_repo import (
         write_atom_actions_yaml as _write_atom_actions_yaml,
     )
     from backlog_repo import (
         write_backlog_actions_yaml as _write_backlog_actions_yaml,
     )
-    from backlog_repo.export import ticket_export_fingerprint
+    from backlog_repo.export import (
+        ticket_export_case_id,
+        ticket_export_fingerprint,
+        ticket_export_plan_revision_id,
+    )
 except ModuleNotFoundError as exc:
     if _is_missing_module(exc, "backlog_repo"):
         raise SystemExit(_from_source_import_remediation(missing_module="backlog_repo")) from exc
@@ -486,10 +533,7 @@ def _probe_command_responsive(*, command: str, timeout_seconds: float) -> str | 
             return None
         code = candidate.reason_code or "probe_failed"
         reason = candidate.reason or "interpreter health probe failed"
-        return (
-            f"command {command!r} resolves to an unusable Python interpreter "
-            f"({code}): {reason}"
-        )
+        return f"command {command!r} resolves to an unusable Python interpreter ({code}): {reason}"
 
     resolved = shutil.which(command)
     if resolved is None:
@@ -512,7 +556,6 @@ def _probe_command_responsive(*, command: str, timeout_seconds: float) -> str | 
     except OSError as e:
         return f"command {command!r} probe failed: {e}"
     return None
-
 
 
 def _resolve_repo_root(arg: Path | None) -> Path:
@@ -667,10 +710,7 @@ def _coerce_int(value: Any, *, default: int = 0) -> int:
 
 def _coerce_breadth_counts(value: Any) -> dict[str, int]:
     mapping = value if isinstance(value, dict) else {}
-    return {
-        dim: int(_coerce_int(mapping.get(dim), default=0))
-        for dim in _BREADTH_DIMENSIONS
-    }
+    return {dim: int(_coerce_int(mapping.get(dim), default=0)) for dim in _BREADTH_DIMENSIONS}
 
 
 def compute_problem_breadth(

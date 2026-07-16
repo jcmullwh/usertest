@@ -134,10 +134,7 @@ def _coerce_pr_items(raw_payload: Any) -> list[dict[str, Any]]:
         if title is None:
             title = f"PR {number}"
             warnings.warn(
-                (
-                    "PR triage input item is missing a valid `title`; "
-                    f"falling back to {title!r}."
-                ),
+                (f"PR triage input item is missing a valid `title`; falling back to {title!r}."),
                 RuntimeWarning,
                 stacklevel=2,
             )
@@ -184,7 +181,11 @@ def _render_triage_markdown(doc: dict[str, Any]) -> str:
     lines.append("")
 
     clusters_raw = doc.get("clusters")
-    clusters = [item for item in clusters_raw if isinstance(item, dict)] if isinstance(clusters_raw, list) else []
+    clusters = (
+        [item for item in clusters_raw if isinstance(item, dict)]
+        if isinstance(clusters_raw, list)
+        else []
+    )
     if not clusters:
         lines.append("No clusters were produced.")
         lines.append("")
@@ -201,12 +202,20 @@ def _render_triage_markdown(doc: dict[str, Any]) -> str:
         lines.append(f"- Representative: {representative}")
 
         anchors_raw = cluster.get("common_path_anchors")
-        anchors = [item for item in anchors_raw if isinstance(item, str)] if isinstance(anchors_raw, list) else []
+        anchors = (
+            [item for item in anchors_raw if isinstance(item, str)]
+            if isinstance(anchors_raw, list)
+            else []
+        )
         if anchors:
             lines.append(f"- Common anchors: {', '.join(f'`{anchor}`' for anchor in anchors)}")
 
         prs_raw = cluster.get("pull_requests")
-        prs = [item for item in prs_raw if isinstance(item, dict)] if isinstance(prs_raw, list) else []
+        prs = (
+            [item for item in prs_raw if isinstance(item, dict)]
+            if isinstance(prs_raw, list)
+            else []
+        )
         for pr in prs:
             number = int(pr.get("number", 0))
             title = _coerce_string(pr.get("title")) or "Untitled"
@@ -266,9 +275,7 @@ def _cmd_triage_prs(args: argparse.Namespace) -> int:
             )
             for pr in members_sorted
         ]
-        common_anchors = (
-            sorted(set.intersection(*per_pr_anchors)) if per_pr_anchors else []
-        )
+        common_anchors = sorted(set.intersection(*per_pr_anchors)) if per_pr_anchors else []
         unique_anchors = sorted(set().union(*per_pr_anchors)) if per_pr_anchors else []
         score = float(len(members_sorted)) + math.log1p(float(len(unique_anchors)))
 
@@ -294,9 +301,7 @@ def _cmd_triage_prs(args: argparse.Namespace) -> int:
         key=lambda cluster: (
             -int(cluster.get("size", 0)),
             -float(cluster.get("score", 0.0)),
-            min(
-                [item for item in cluster.get("pr_numbers", []) if isinstance(item, int)] or [0]
-            ),
+            min([item for item in cluster.get("pr_numbers", []) if isinstance(item, int)] or [0]),
         )
     )
     for idx, cluster in enumerate(clusters, start=1):
@@ -401,7 +406,9 @@ def _cmd_triage_atoms(args: argparse.Namespace) -> int:
         "atoms_jsonl": str(atoms_jsonl),
         "backlog_json": str(backlog_json) if backlog_json is not None else None,
         "plans_root": str(plans_root),
-        "implementation_root": str(implementation_root) if implementation_root is not None else None,
+        "implementation_root": str(implementation_root)
+        if implementation_root is not None
+        else None,
         "exclude_sources": list(args.exclude_source or []),
         **embedder_meta,
     }
@@ -416,8 +423,6 @@ def _cmd_triage_atoms(args: argparse.Namespace) -> int:
     print(str(out_json))
     print(str(out_md))
     return 0
-
-
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

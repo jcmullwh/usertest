@@ -79,16 +79,16 @@ def _update_atom_actions_from_backlog(
     """
     Update atom lifecycle status during backlog generation.
 
-    - atom in non-blocked ticket evidence -> at least `ticketed`
-    - atom not cited by ticket evidence -> at least `new`
+    - atom in an exportable research/implementation ticket -> at least `ticketed`
+    - atom cited only by blocked or triage output -> at least `new`
     """
 
     fingerprints_by_atom: dict[str, set[str]] = {}
     for ticket in tickets:
         stage = (_coerce_string(ticket.get("stage")) or "triage").strip().lower()
-        if stage == "blocked":
-            # Blocked tickets are intentionally not treated as "ticket outcomes" for the
-            # atom ledger so evidence can accumulate across runs/models and be re-mined.
+        if stage not in {"ready_for_ticket", "research_required"}:
+            # Blocked and triage records are not ticket outcomes. Their evidence
+            # must remain eligible so later runs can accumulate enough proof.
             continue
         fingerprint = ticket_export_fingerprint(ticket)
         for atom_id in _coerce_string_list(ticket.get("evidence_atom_ids")):
@@ -321,8 +321,6 @@ def _cmd_reports_sync_atom_actions(args: argparse.Namespace) -> int:
     }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
-
-
 
 
 __all__ = [name for name in globals() if not name.startswith("__")]

@@ -18,17 +18,24 @@ def _cmd_maintenance_images_list(args: argparse.Namespace) -> int:
 
 
 def _cmd_maintenance_images_cleanup(args: argparse.Namespace) -> int:
-    """Prune old local maintenance-image tags using the configured retention policy."""
+    """Prune local maintenance-image identities using the configured retention policy."""
 
     repo_root = _resolve_repo_root(getattr(args, "repo_root", None))
     dry_run = args.dry_run
     if dry_run is None:
         dry_run = _load_maintenance_docker_config(repo_root=repo_root).cleanup_dry_run_default
-    payload = cleanup_local_maintenance_images(
+    cleanup = cleanup_local_maintenance_images(
         repo_root=repo_root,
         timeout_seconds=_optional_timeout_seconds(args.timeout_seconds),
         dry_run=bool(dry_run),
     )
+    payload = {
+        "schema_version": 1,
+        "kind": "manual_cleanup",
+        "cleanup": cleanup,
+        "after_inventory": cleanup.get("after_inventory"),
+        "errors": cleanup.get("errors", []),
+    }
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     return 0
 
