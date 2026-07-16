@@ -1145,7 +1145,10 @@ def test_prepare_maintenance_profile_runs_cleanup_and_records_artifact(
         "_compute_install_cache_fingerprints",
         lambda **_kwargs: {"projects": []},
     )
+    cleanup_call: dict[str, object] = {}
+
     def _fake_cleanup(**kwargs):
+        cleanup_call.update(kwargs)
         summary = {
             "schema_version": 1,
             "cleanup_enabled": True,
@@ -1192,6 +1195,7 @@ def test_prepare_maintenance_profile_runs_cleanup_and_records_artifact(
     cleanup_meta = json.loads(cleanup_artifact.read_text(encoding="utf-8"))
     assert cleanup_meta["deleted_tags"] == ["usertest-maintenance:aaaaaaaaaaaaaaaa"]
     assert prep.metadata["cleanup"]["deleted_image_ids"] == ["sha256:a"]
+    assert cleanup_call["active_image_refs"] == ("usertest-maintenance:" + ("b" * 16),)
 
 
 def test_prepare_maintenance_profile_cleanup_failure_is_best_effort(

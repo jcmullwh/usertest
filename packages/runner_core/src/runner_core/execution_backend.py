@@ -50,6 +50,12 @@ _DEFAULT_MAINTENANCE_DOCKER_CONFIG_REL = Path("configs/maintenance_docker.yaml")
 _INSTALL_CACHE_FINGERPRINT_SCRIPT_REL = Path("tools/scaffold/install_cache_fingerprint.py")
 _MAINTENANCE_CONTEXT_PREPARE_SCRIPT_REL = Path("tools/maintenance_image/prepare_context.py")
 _DEFAULT_MAINTENANCE_CACHE_ROOT_SUBDIR = "usertest_maint_venvs"
+_MAINTENANCE_IMAGE_OWNER_LABEL = "io.usertest.maintenance-image"
+_MAINTENANCE_IMAGE_OWNER_VALUE = "true"
+_MAINTENANCE_BUILD_CACHE_LIMITATION = (
+    "Docker build-cache records do not carry a reliably queryable usertest ownership marker; "
+    "broad builder/system prune is intentionally disabled."
+)
 
 
 def _safe_cache_project_id(project_id: str) -> str:
@@ -95,7 +101,7 @@ class MaintenanceDockerConfig:
     cache_root_subdir: str
     publish_branches: tuple[str, ...]
     cleanup_enabled: bool = True
-    keep_local_count: int = 5
+    keep_local_count: int = 2
     keep_local_days: int = 7
     keep_branch_alias_tags: bool = True
     protect_tags: tuple[str, ...] = ()
@@ -264,7 +270,7 @@ def _load_maintenance_docker_config(*, repo_root: Path) -> MaintenanceDockerConf
         cache_root_subdir=_require_nonempty_str("cache_root_subdir"),
         publish_branches=tuple(item.strip() for item in publish_branches_raw),
         cleanup_enabled=_get_bool("cleanup_enabled", True),
-        keep_local_count=_get_nonnegative_int("keep_local_count", 5),
+        keep_local_count=_get_nonnegative_int("keep_local_count", 2),
         keep_local_days=_get_nonnegative_int("keep_local_days", 7),
         keep_branch_alias_tags=_get_bool("keep_branch_alias_tags", True),
         protect_tags=tuple(item.strip() for item in protect_tags_raw),
@@ -277,6 +283,18 @@ def _maintenance_repo_names(*, cfg: MaintenanceDockerConfig) -> tuple[str, ...]:
     """Return the Docker repositories managed by the maintenance image workflow."""
 
     return (cfg.local_image_repo, cfg.published_image_repo)
+
+
+def _maintenance_repo_is_managed(*, repository: str, cfg: MaintenanceDockerConfig) -> bool:
+    """Match configured repos and their delimiter-bound internal qualification families."""
+
+    normalized = repository.strip()
+    if not normalized or normalized == "<none>":
+        return False
+    for base in _maintenance_repo_names(cfg=cfg):
+        if normalized == base or normalized.startswith(f"{base}-"):
+            return True
+    return False
 
 
 def _maintenance_protected_tags(*, cfg: MaintenanceDockerConfig) -> tuple[str, ...]:
@@ -400,11 +418,25 @@ def _docker_tag_image(*, source_ref: str, target_ref: str, timeout_seconds: floa
         )
 
 
-def _docker_image_ls_rows(*, timeout_seconds: float | None) -> list[dict[str, Any]]:
+def _docker_image_ls_rows(
+    *,
+    timeout_seconds: float | None,
+    filters: Sequence[str] = (),
+) -> list[dict[str, Any]]:
     """List local Docker images as parsed JSON rows."""
 
+    filter_args = [part for value in filters for part in ("--filter", value)]
     proc = _run_subprocess(
-        ["docker", "image", "ls", "--format", "{{json .}}"],
+        [
+            "docker",
+            "image",
+            "ls",
+            "--all",
+            "--no-trunc",
+            *filter_args,
+            "--format",
+            "{{json .}}",
+        ],
         timeout_seconds=timeout_seconds,
     )
     if proc.returncode != 0:
@@ -422,6 +454,27 @@ def _docker_image_ls_rows(*, timeout_seconds: float | None) -> list[dict[str, An
         if isinstance(parsed, dict):
             rows.append({str(key): value for key, value in parsed.items()})
     return rows
+
+
+def _docker_running_container_image_ids(*, timeout_seconds: float | None) -> set[str]:
+    """Return immutable image IDs used by running containers."""
+
+    listed = _run_subprocess(
+        ["docker", "container", "ls", "--quiet"],
+        timeout_seconds=timeout_seconds,
+    )
+    if listed.returncode != 0:
+        raise RuntimeError("docker container ls failed")
+    container_ids = [line.strip() for line in (listed.stdout or "").splitlines() if line.strip()]
+    if not container_ids:
+        return set()
+    inspected = _run_subprocess(
+        ["docker", "container", "inspect", "--format", "{{.Image}}", *container_ids],
+        timeout_seconds=timeout_seconds,
+    )
+    if inspected.returncode != 0:
+        raise RuntimeError("docker container inspect failed")
+    return {line.strip() for line in (inspected.stdout or "").splitlines() if line.strip()}
 
 
 def _docker_image_inspect_rows(
@@ -501,54 +554,58 @@ def list_local_maintenance_images(
     repo_root: Path,
     timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
-    """Return a structured inventory of local maintenance images and tags."""
+    """Return tagged managed-family images plus ownership-labelled dangling images."""
 
     cfg = _load_maintenance_docker_config(repo_root=repo_root)
-    repos_scanned = list(_maintenance_repo_names(cfg=cfg))
     protected_tags = list(_maintenance_protected_tags(cfg=cfg))
-    ls_rows = _docker_image_ls_rows(timeout_seconds=timeout_seconds)
-    refs: list[str] = []
-    base_entries: list[dict[str, Any]] = []
-    for row in ls_rows:
+    regular_rows = _docker_image_ls_rows(timeout_seconds=timeout_seconds)
+    labelled_rows = _docker_image_ls_rows(
+        timeout_seconds=timeout_seconds,
+        filters=(f"label={_MAINTENANCE_IMAGE_OWNER_LABEL}={_MAINTENANCE_IMAGE_OWNER_VALUE}",),
+    )
+    candidates: dict[tuple[str, str], dict[str, Any]] = {}
+    for row, labelled in [
+        *((item, False) for item in regular_rows),
+        *((item, True) for item in labelled_rows),
+    ]:
         repository = str(row.get("repository", row.get("Repository", "")) or "").strip()
         tag = str(row.get("tag", row.get("Tag", "")) or "").strip()
         image_id = str(row.get("image_id", row.get("ID", row.get("Id", ""))) or "").strip()
-        if repository not in repos_scanned or not tag or tag == "<none>":
+        managed_repo = _maintenance_repo_is_managed(repository=repository, cfg=cfg)
+        if not managed_repo and not labelled:
             continue
-        ref = f"{repository}:{tag}"
-        refs.append(ref)
-        base_entries.append(
+        ref = f"{repository}:{tag}" if tag and tag != "<none>" else ""
+        key = (image_id, ref)
+        candidates.setdefault(
+            key,
             {
-                "repository": repository,
-                "tag": tag,
+                "repository": repository if ref else "",
+                "tag": tag if ref else "",
                 "ref": ref,
                 "image_id": image_id,
-            }
+            },
         )
 
-    inspect_rows = _docker_image_inspect_rows(refs, timeout_seconds=timeout_seconds)
-    inspect_by_ref: dict[str, dict[str, Any]] = {}
-    inspect_by_id: dict[str, dict[str, Any]] = {}
-    for row in inspect_rows:
-        image_id = str(row.get("Id", "") or "").strip()
-        if image_id:
-            inspect_by_id[image_id] = row
-        repo_tags = row.get("RepoTags") or []
-        if isinstance(repo_tags, list):
-            for tag in repo_tags:
-                if isinstance(tag, str) and tag.strip():
-                    inspect_by_ref[tag.strip()] = row
-
+    targets = sorted({ref or image_id for image_id, ref in candidates if ref or image_id})
+    inspected = _docker_image_inspect_rows(targets, timeout_seconds=timeout_seconds)
+    by_id = {str(row.get("Id") or ""): row for row in inspected}
+    by_ref = {
+        ref: row for row in inspected for ref in (row.get("RepoTags") or []) if isinstance(ref, str)
+    }
     entries: list[dict[str, Any]] = []
-    for entry in base_entries:
-        inspect = inspect_by_ref.get(entry["ref"]) or inspect_by_id.get(entry["image_id"]) or {}
-        created_at = _coerce_iso8601_utc(inspect.get("Created"))
+    for candidate in candidates.values():
+        detail = by_ref.get(candidate["ref"]) or by_id.get(candidate["image_id"]) or {}
+        repo_tags = [str(ref) for ref in (detail.get("RepoTags") or []) if str(ref).strip()]
+        if candidate["ref"] and candidate["ref"] not in repo_tags:
+            repo_tags.append(candidate["ref"])
         entries.append(
             {
-                **entry,
-                "created_at": created_at,
-                "protected": entry["tag"] in protected_tags,
-                "hash_tag": _maintenance_hash_tag(entry["tag"]),
+                **candidate,
+                "image_id": str(detail.get("Id") or candidate["image_id"]),
+                "created_at": _coerce_iso8601_utc(detail.get("Created")),
+                "protected": candidate["tag"] in protected_tags,
+                "hash_tag": _maintenance_hash_tag(candidate["tag"]),
+                "repo_tags": sorted(repo_tags),
             }
         )
 
@@ -558,7 +615,7 @@ def list_local_maintenance_images(
     )
     return {
         "schema_version": 1,
-        "repos_scanned": repos_scanned,
+        "repos_scanned": list(_maintenance_repo_names(cfg=cfg)),
         "protected_tags": protected_tags,
         "entries": entries,
     }
@@ -570,8 +627,9 @@ def cleanup_local_maintenance_images(
     dry_run: bool = False,
     timeout_seconds: float | None = None,
     artifact_path: Path | None = None,
+    active_image_refs: Sequence[str] = (),
 ) -> dict[str, Any]:
-    """Prune old local maintenance-image tags conservatively according to retention settings."""
+    """Hard-cap unique owned image IDs while preserving images known to be in use."""
 
     cfg = _load_maintenance_docker_config(repo_root=repo_root)
     inventory = list_local_maintenance_images(
@@ -584,91 +642,201 @@ def cleanup_local_maintenance_images(
         for item in inventory.get("entries", [])
         if isinstance(item, dict)
     ]
-    hash_entries = [entry for entry in entries if bool(entry.get("hash_tag"))]
-    hash_entries.sort(
-        key=lambda item: _parse_created_at_for_sort(item.get("created_at")),
+    images: dict[str, dict[str, Any]] = {}
+    for entry in entries:
+        image_id = str(entry.get("image_id") or "").strip()
+        if not image_id:
+            continue
+        image = images.setdefault(
+            image_id,
+            {"created_at": entry.get("created_at"), "managed_refs": set(), "all_refs": set()},
+        )
+        refs = {str(ref) for ref in entry.get("repo_tags", []) if str(ref).strip()}
+        if entry.get("ref"):
+            refs.add(str(entry["ref"]))
+        cast(set[str], image["all_refs"]).update(refs)
+        cast(set[str], image["managed_refs"]).update(
+            ref
+            for ref in refs
+            if _maintenance_repo_is_managed(repository=ref.rsplit(":", maxsplit=1)[0], cfg=cfg)
+        )
+
+    active_refs = {str(ref).strip() for ref in active_image_refs if str(ref).strip()}
+    errors: list[str] = []
+    active_missing = bool(
+        active_refs
+        - {ref for image in images.values() for ref in cast(set[str], image["all_refs"])}
+    )
+    fail_closed = active_missing
+    try:
+        running_ids = _docker_running_container_image_ids(timeout_seconds=timeout_seconds)
+    except Exception as exc:  # noqa: BLE001
+        running_ids = set()
+        fail_closed = True
+        errors.append(f"Running-container inventory failed; cleanup skipped: {exc}")
+    if active_missing:
+        errors.append("Active image was absent from inventory; cleanup skipped.")
+
+    protected_ids = {
+        image_id
+        for image_id, image in images.items()
+        if any(
+            ref.rsplit(":", maxsplit=1)[-1] in protected_tags
+            for ref in cast(set[str], image["managed_refs"])
+        )
+    }
+    active_ids = {
+        image_id
+        for image_id, image in images.items()
+        if active_refs & cast(set[str], image["all_refs"])
+    }
+    required_ids = protected_ids | active_ids | (set(images) & running_ids)
+
+    keep_cutoff = datetime.now(timezone.utc) - timedelta(days=cfg.keep_local_days)
+    candidates = sorted(
+        ((image_id, image) for image_id, image in images.items() if image_id not in required_ids),
+        key=lambda pair: _parse_created_at_for_sort(pair[1].get("created_at")),
         reverse=True,
     )
-    keep_cutoff = datetime.now(timezone.utc) - timedelta(days=cfg.keep_local_days)
-    kept_hash_refs: set[str] = set()
-    for index, entry in enumerate(hash_entries):
-        ref = str(entry.get("ref") or "")
-        created_at = _parse_created_at_for_sort(entry.get("created_at"))
-        if index < cfg.keep_local_count or created_at >= keep_cutoff:
-            kept_hash_refs.add(ref)
+    retained_nonrequired_ids = {
+        image_id
+        for image_id, image in candidates[: max(0, cfg.keep_local_count - len(required_ids))]
+        if _parse_created_at_for_sort(image.get("created_at")) >= keep_cutoff
+    }
+    kept_image_ids = required_ids | retained_nonrequired_ids
+    would_delete_image_ids = set(images) - kept_image_ids
+    if fail_closed:
+        kept_image_ids = set(images)
+        would_delete_image_ids = set()
 
-    kept_tags: list[str] = []
-    deleted_tags: list[str] = []
+    kept_tags = sorted(
+        {
+            ref
+            for image_id in kept_image_ids
+            for ref in cast(set[str], images[image_id]["managed_refs"])
+        }
+    )
+    planned_deleted_tags = sorted(
+        {
+            ref
+            for image_id in would_delete_image_ids
+            for ref in cast(set[str], images[image_id]["managed_refs"])
+        }
+    )
+    deleted_tags: list[str] = list(planned_deleted_tags) if dry_run else []
     deleted_image_ids: list[str] = []
-    errors: list[str] = []
-    deleted_candidate_ids: set[str] = set()
-
-    for entry in entries:
-        ref = str(entry.get("ref") or "")
-        tag = str(entry.get("tag") or "")
-        image_id = str(entry.get("image_id") or "")
-        is_hash = bool(entry.get("hash_tag"))
-        if tag in protected_tags or not is_hash or ref in kept_hash_refs:
-            if ref:
-                kept_tags.append(ref)
-            continue
-        deleted_tags.append(ref)
-        if image_id:
-            deleted_candidate_ids.add(image_id)
-        if dry_run:
-            continue
-        proc = _run_subprocess(
-            ["docker", "image", "rm", ref],
-            timeout_seconds=timeout_seconds,
-        )
-        if proc.returncode != 0:
-            errors.append(
-                f"Failed to delete maintenance image tag {ref}: "
-                f"{proc.stderr.strip() or proc.stdout.strip() or 'docker image rm failed'}"
-            )
+    deletion_failed_image_ids: set[str] = set()
+    shared_image_ids: set[str] = set()
 
     if not dry_run:
-        for image_id in sorted(deleted_candidate_ids):
-            try:
-                inspect_rows = _docker_image_inspect_rows(
-                    [image_id],
+        for image_id in sorted(would_delete_image_ids):
+            group = images[image_id]
+            tag_removal_failed = False
+            for ref in sorted(cast(set[str], group["managed_refs"])):
+                proc = _run_subprocess(
+                    ["docker", "image", "rm", ref],
                     timeout_seconds=timeout_seconds,
                 )
-            except Exception as exc:  # noqa: BLE001
-                errors.append(f"Failed to inspect maintenance image id {image_id}: {exc}")
+                if proc.returncode != 0:
+                    tag_removal_failed = True
+                    errors.append(
+                        f"Failed to delete maintenance image tag {ref}: "
+                        f"{proc.stderr.strip() or proc.stdout.strip() or 'docker image rm failed'}"
+                    )
+                    continue
+                deleted_tags.append(ref)
+            if tag_removal_failed:
+                deletion_failed_image_ids.add(image_id)
                 continue
-            if not inspect_rows:
-                continue
-            repo_tags = inspect_rows[0].get("RepoTags") or []
-            if repo_tags:
+            if cast(set[str], group["all_refs"]) - cast(set[str], group["managed_refs"]):
+                shared_image_ids.add(image_id)
                 continue
             proc = _run_subprocess(
                 ["docker", "image", "rm", image_id],
                 timeout_seconds=timeout_seconds,
             )
             if proc.returncode != 0:
+                detail = f"{proc.stderr}\n{proc.stdout}".lower()
+                if "no such image" in detail or "no such object" in detail:
+                    deleted_image_ids.append(image_id)
+                    continue
                 errors.append(
                     f"Failed to delete unreferenced maintenance image id {image_id}: "
                     f"{proc.stderr.strip() or proc.stdout.strip() or 'docker image rm failed'}"
                 )
+                deletion_failed_image_ids.add(image_id)
                 continue
             deleted_image_ids.append(image_id)
 
+    required_overflow = max(0, len(required_ids) - cfg.keep_local_count)
     summary = {
         "schema_version": 1,
         "cleanup_enabled": bool(cfg.cleanup_enabled),
         "dry_run": bool(dry_run),
         "repos_scanned": inventory.get("repos_scanned", []),
         "protected_tags": sorted(protected_tags),
-        "kept_tags": sorted(set(kept_tags)),
+        "retention": {
+            "unit": "unique_owned_image_id",
+            "hard_cap": cfg.keep_local_count,
+            "maximum_age_days": cfg.keep_local_days,
+            "owned_image_count_before": len(images),
+            "required_image_count": len(required_ids),
+            "required_overflow": required_overflow,
+            "planned_kept_image_count": len(kept_image_ids),
+            "planned_delete_image_count": len(would_delete_image_ids),
+        },
+        "required_image_ids": sorted(required_ids),
+        "kept_image_ids": sorted(kept_image_ids),
+        "would_delete_image_ids": sorted(would_delete_image_ids),
+        "kept_tags": kept_tags,
         "deleted_tags": sorted(set(deleted_tags)),
-        "deleted_image_ids": deleted_image_ids,
+        "deleted_image_ids": sorted(set(deleted_image_ids)),
+        "shared_image_ids": sorted(shared_image_ids),
+        "build_cache_cleanup": {
+            "attempted": False,
+            "status": "unsupported_scoped_ownership",
+            "reason": _MAINTENANCE_BUILD_CACHE_LIMITATION,
+        },
         "errors": errors,
     }
     if artifact_path is not None:
         artifact_path.parent.mkdir(parents=True, exist_ok=True)
         _write_json(artifact_path, summary)
     return summary
+
+
+def _run_automatic_maintenance_image_cleanup(
+    *,
+    repo_root: Path,
+    cfg: MaintenanceDockerConfig,
+    timeout_seconds: float | None,
+    artifact_path: Path,
+    active_image_refs: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Run configured cleanup without hiding a cleanup failure from run artifacts."""
+
+    try:
+        return cleanup_local_maintenance_images(
+            repo_root=repo_root,
+            dry_run=cfg.cleanup_dry_run_default,
+            timeout_seconds=timeout_seconds,
+            artifact_path=artifact_path,
+            active_image_refs=active_image_refs,
+        )
+    except Exception as exc:  # noqa: BLE001
+        summary = {
+            "schema_version": 1,
+            "cleanup_enabled": True,
+            "dry_run": bool(cfg.cleanup_dry_run_default),
+            "repos_scanned": list(_maintenance_repo_names(cfg=cfg)),
+            "protected_tags": list(_maintenance_protected_tags(cfg=cfg)),
+            "kept_tags": [],
+            "deleted_tags": [],
+            "deleted_image_ids": [],
+            "errors": [f"Automatic maintenance image cleanup failed: {exc}"],
+        }
+        _write_json(artifact_path, summary)
+        return summary
 
 
 def _git_remote_url(*, repo_dir: Path, remote_name: str = "origin") -> str | None:
@@ -820,6 +988,8 @@ def _build_maintenance_image(
         local_ref,
         "-t",
         published_ref,
+        "--label",
+        f"{_MAINTENANCE_IMAGE_OWNER_LABEL}={_MAINTENANCE_IMAGE_OWNER_VALUE}",
         "-f",
         "Dockerfile",
         *[part for ref in cache_from for part in ("--cache-from", ref)],
@@ -887,6 +1057,19 @@ def resolve_maintenance_docker_image(
     tag_suffix = env_hash[:16]
     local_ref = f"{cfg.local_image_repo}:{tag_suffix}"
     published_ref = f"{cfg.published_image_repo}:{tag_suffix}"
+    local_image_exists = _docker_image_exists_local(
+        ref=local_ref,
+        timeout_seconds=timeout_seconds,
+    )
+    cleanup_before_resolution: dict[str, Any] | None = None
+    if cfg.cleanup_enabled and cfg.cleanup_on_prepare:
+        cleanup_before_resolution = _run_automatic_maintenance_image_cleanup(
+            repo_root=repo_root,
+            cfg=cfg,
+            timeout_seconds=timeout_seconds,
+            artifact_path=sandbox_dir / "maintenance_image_cleanup_pre_resolution.json",
+            active_image_refs=(local_ref,) if local_image_exists else (),
+        )
     pull_attempted = False
     alias_pull_attempts: list[dict[str, Any]] = []
     build_cache_from: list[str] = []
@@ -908,7 +1091,7 @@ def resolve_maintenance_docker_image(
         )
         build_performed = True
         image_source = "built"
-    elif _docker_image_exists_local(ref=local_ref, timeout_seconds=timeout_seconds):
+    elif local_image_exists:
         image_source = "local"
     else:
         if cfg.pull_policy in {"if_missing", "always"}:
@@ -993,26 +1176,14 @@ def resolve_maintenance_docker_image(
     }
     if cfg.cleanup_enabled and cfg.cleanup_on_prepare:
         cleanup_artifact_path = sandbox_dir / "maintenance_image_cleanup.json"
-        try:
-            cleanup_summary = cleanup_local_maintenance_images(
-                repo_root=repo_root,
-                dry_run=cfg.cleanup_dry_run_default,
-                timeout_seconds=timeout_seconds,
-                artifact_path=cleanup_artifact_path,
-            )
-        except Exception as exc:  # noqa: BLE001
-            cleanup_summary = {
-                "schema_version": 1,
-                "cleanup_enabled": True,
-                "dry_run": bool(cfg.cleanup_dry_run_default),
-                "repos_scanned": list(_maintenance_repo_names(cfg=cfg)),
-                "protected_tags": list(_maintenance_protected_tags(cfg=cfg)),
-                "kept_tags": [],
-                "deleted_tags": [],
-                "deleted_image_ids": [],
-                "errors": [f"Automatic maintenance image cleanup failed: {exc}"],
-            }
-            _write_json(cleanup_artifact_path, cleanup_summary)
+        cleanup_summary = _run_automatic_maintenance_image_cleanup(
+            repo_root=repo_root,
+            cfg=cfg,
+            timeout_seconds=timeout_seconds,
+            artifact_path=cleanup_artifact_path,
+            active_image_refs=(local_ref,),
+        )
+        metadata["cleanup_before_resolution"] = cleanup_before_resolution
         metadata["cleanup"] = cleanup_summary
 
     if artifact_path is not None:

@@ -403,6 +403,7 @@ class DockerSandbox:
             "-d",
             "--name",
             container_name,
+            *([] if spec.keep_container else ["--rm"]),
             *_env_args_with_overrides(spec.env_allowlist, spec.env_overrides),
             *_resource_args(spec.resources),
             *network_args,
