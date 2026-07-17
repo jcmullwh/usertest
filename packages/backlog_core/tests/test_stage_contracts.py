@@ -1952,17 +1952,28 @@ def test_stage_contract_accepts_immutable_explicit_atom_field_bindings(
     snapshot = assignment_receipt["atom_snapshot"]
     field_name = field_path.removeprefix("$.")
     existing_symptom_binding = dossier["evidence_verification"]["atom_bindings"][0]
+    binding = {
+        "experiment_id": "exp-support",
+        "atom_id": "atom:test",
+        "match_kind": match_kind,
+        "binding_role": binding_role,
+        "origin_atom_sha256": assignment_receipt["atom_sha256"],
+        "origin_atom_field_path": field_path,
+        "origin_atom_value_sha256": _fixture_json_sha256(snapshot[field_name]),
+    }
+    if match_kind == "explicit_symptom_field_predicate_declaration":
+        predicate = {"kind": "equals", "expected": snapshot[field_name]}
+        binding.update(
+            {
+                "origin_atom_value": snapshot[field_name],
+                "observation_predicate": predicate,
+                "observation_predicate_sha256": _fixture_json_sha256(predicate),
+            }
+        )
+        binding["declared_binding_sha256"] = _fixture_json_sha256(binding)
     dossier["evidence_verification"]["atom_bindings"] = [
         existing_symptom_binding,
-        {
-            "experiment_id": "exp-support",
-            "atom_id": "atom:test",
-            "match_kind": match_kind,
-            "binding_role": binding_role,
-            "origin_atom_sha256": assignment_receipt["atom_sha256"],
-            "origin_atom_field_path": field_path,
-            "origin_atom_value_sha256": _fixture_json_sha256(snapshot[field_name]),
-        },
+        binding,
     ]
     _refresh_receipt_hashes(dossier)
 
@@ -1970,6 +1981,107 @@ def test_stage_contract_accepts_immutable_explicit_atom_field_bindings(
 
     assert len(parsed) == 1
     assert warnings == []
+
+
+def test_typed_mechanism_evidence_accepts_attested_predicate_binding_declaration() -> None:
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    atom_receipt = dossier["evidence_assignment"]["atom_receipts"][0]
+    atom_value = atom_receipt["atom_snapshot"]["text"]
+    predicate = {"kind": "equals", "expected": atom_value}
+    declaration = {
+        "experiment_id": "exp-support",
+        "atom_id": "atom:test",
+        "match_kind": "explicit_symptom_field_predicate_declaration",
+        "binding_role": "symptom",
+        "origin_atom_sha256": atom_receipt["atom_sha256"],
+        "origin_atom_field_path": "$.text",
+        "origin_atom_value": atom_value,
+        "origin_atom_value_sha256": _fixture_json_sha256(atom_value),
+        "observation_predicate": predicate,
+        "observation_predicate_sha256": _fixture_json_sha256(predicate),
+    }
+    declaration["declared_binding_sha256"] = _fixture_json_sha256(declaration)
+    attestation = {
+        "declared_binding_sha256": declaration["declared_binding_sha256"],
+        "atom_id": declaration["atom_id"],
+        "origin_atom_sha256": declaration["origin_atom_sha256"],
+        "origin_atom_field_path": declaration["origin_atom_field_path"],
+        "origin_atom_value": declaration["origin_atom_value"],
+        "origin_atom_value_sha256": declaration["origin_atom_value_sha256"],
+        "observation_predicate": declaration["observation_predicate"],
+        "observation_predicate_sha256": declaration["observation_predicate_sha256"],
+        "baseline_experiment_id": declaration["experiment_id"],
+        "baseline_observation_sha256": "a" * 64,
+        "binding_verification_method": (
+            "runner_bound_source_predicate_with_baseline_experiment_v1"
+        ),
+        "adapter_id": "structured_replay.v1",
+        "adapter_version": "1",
+        "runner_attested": True,
+    }
+    attestation["atom_field_binding_sha256"] = _fixture_json_sha256(attestation)
+    receipt["atom_bindings"] = [declaration]
+    mechanism = receipt["mechanism_evidence"][0]
+    mechanism["origin_symptom_bindings"] = [attestation]
+    mechanism["mechanism_evidence_id"] = "mechanism_evidence:" + _fixture_json_sha256(
+        {
+            key: value
+            for key, value in mechanism.items()
+            if key != "mechanism_evidence_id"
+        }
+    )
+
+    errors = contracts._validate_typed_mechanism_evidence(
+        dossier,
+        receipt,
+        pid=dossier["problem_id"],
+    )
+
+    assert "research_mechanism_evidence_invalid: problem:test-issue: 0" not in errors
+
+
+def test_typed_mechanism_evidence_rejects_unlinked_predicate_binding_attestation() -> None:
+    dossier = _valid_dossier()
+    receipt = dossier["evidence_verification"]
+    mechanism = receipt["mechanism_evidence"][0]
+    attestation = {
+        "declared_binding_sha256": "a" * 64,
+        "atom_id": "atom:test",
+        "origin_atom_sha256": "b" * 64,
+        "origin_atom_field_path": "$.text",
+        "origin_atom_value": "observed failure",
+        "origin_atom_value_sha256": _fixture_json_sha256("observed failure"),
+        "observation_predicate": {"kind": "equals", "expected": "observed failure"},
+        "observation_predicate_sha256": _fixture_json_sha256(
+            {"kind": "equals", "expected": "observed failure"}
+        ),
+        "baseline_experiment_id": "exp-support",
+        "baseline_observation_sha256": "c" * 64,
+        "binding_verification_method": (
+            "runner_bound_source_predicate_with_baseline_experiment_v1"
+        ),
+        "adapter_id": "structured_replay.v1",
+        "adapter_version": "1",
+        "runner_attested": True,
+    }
+    attestation["atom_field_binding_sha256"] = _fixture_json_sha256(attestation)
+    mechanism["origin_symptom_bindings"] = [attestation]
+    mechanism["mechanism_evidence_id"] = "mechanism_evidence:" + _fixture_json_sha256(
+        {
+            key: value
+            for key, value in mechanism.items()
+            if key != "mechanism_evidence_id"
+        }
+    )
+
+    errors = contracts._validate_typed_mechanism_evidence(
+        dossier,
+        receipt,
+        pid=dossier["problem_id"],
+    )
+
+    assert "research_mechanism_evidence_invalid: problem:test-issue: 0" in errors
 
 
 def test_causal_roots_accept_content_bound_unlisted_source_identity_contracts() -> None:

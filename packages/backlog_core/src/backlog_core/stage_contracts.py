@@ -38,6 +38,7 @@ from uuid import UUID
 from backlog_core.causal_proof import (
     command_authorization_errors,
     command_authorization_identity,
+    evaluate_proof_predicate,
     material_unknowns_block_advancement,
     proof_predicate_contract_errors,
     validate_causal_proof_receipt,
@@ -5965,6 +5966,54 @@ def _validate_typed_mechanism_evidence(
     }
     atom_bindings_raw = receipt.get("atom_bindings")
     atom_bindings = atom_bindings_raw if isinstance(atom_bindings_raw, list) else []
+    predicate_declarations = {
+        str(binding.get("declared_binding_sha256")): binding
+        for binding in atom_bindings
+        if isinstance(binding, dict)
+        and binding.get("match_kind")
+        == "explicit_symptom_field_predicate_declaration"
+        and binding.get("binding_role") == "symptom"
+        and _valid_sha256(binding.get("declared_binding_sha256"))
+        and binding.get("declared_binding_sha256")
+        == _canonical_sha256(
+            {
+                field: value
+                for field, value in binding.items()
+                if field != "declared_binding_sha256"
+            }
+        )
+    }
+
+    def runner_predicate_symptom_binding_valid(binding: Any) -> bool:
+        if not isinstance(binding, dict):
+            return False
+        declaration = predicate_declarations.get(str(binding.get("declared_binding_sha256")))
+        if not isinstance(declaration, dict):
+            return False
+        shared_fields = (
+            "atom_id",
+            "origin_atom_sha256",
+            "origin_atom_field_path",
+            "origin_atom_value",
+            "origin_atom_value_sha256",
+            "observation_predicate",
+            "observation_predicate_sha256",
+        )
+        return (
+            binding.get("runner_attested") is True
+            and binding.get("binding_verification_method")
+            == "runner_bound_source_predicate_with_baseline_experiment_v1"
+            and binding.get("atom_field_binding_sha256")
+            == _canonical_sha256(
+                {
+                    field: value
+                    for field, value in binding.items()
+                    if field != "atom_field_binding_sha256"
+                }
+            )
+            and binding.get("baseline_experiment_id") == declaration.get("experiment_id")
+            and all(binding.get(field) == declaration.get(field) for field in shared_fields)
+        )
     proof_adapter_raw = receipt.get("proof_adapter_receipts")
     proof_adapter_receipts = {
         str(proof.get("proof_receipt_id")): proof
@@ -6108,14 +6157,21 @@ def _validate_typed_mechanism_evidence(
         )
         origin_symptom_bindings_valid = all(
             isinstance(binding, dict)
-            and binding in atom_bindings
-            and binding.get("experiment_id") in (experiment_ids or [])
+            and (
+                binding in atom_bindings
+                or runner_predicate_symptom_binding_valid(binding)
+            )
+            and (
+                binding.get("experiment_id") or binding.get("baseline_experiment_id")
+            )
+            in (experiment_ids or [])
             and (
                 binding.get("binding_role") == "symptom"
                 or (
                     _is_nonempty_string(binding.get("match_kind"))
                     and "explicit_" not in str(binding.get("match_kind"))
                 )
+                or runner_predicate_symptom_binding_valid(binding)
             )
             for binding in origin_symptom_bindings
         )
@@ -7757,6 +7813,32 @@ def _validate_evidence_verification(item: dict[str, Any], *, pid: str) -> list[s
                         f"research_evidence_verification_explicit_atom_binding_invalid: "
                         f"{pid}: {index}"
                     )
+                if match_kind == "explicit_symptom_field_predicate_declaration":
+                    predicate = binding.get("observation_predicate")
+                    predicate_passed, predicate_evaluation_errors = evaluate_proof_predicate(
+                        predicate,
+                        binding.get("origin_atom_value"),
+                    )
+                    if (
+                        binding.get("declared_binding_sha256")
+                        != _canonical_sha256(
+                            {
+                                field: value
+                                for field, value in binding.items()
+                                if field != "declared_binding_sha256"
+                            }
+                        )
+                        or binding.get("observation_predicate_sha256")
+                        != _canonical_sha256(predicate)
+                        or proof_predicate_contract_errors(predicate)
+                        or predicate_evaluation_errors
+                        or not predicate_passed
+                    ):
+                        errors.append(
+                            "research_evidence_verification_"
+                            "explicit_atom_predicate_binding_invalid: "
+                            f"{pid}: {index}"
+                        )
         bound_atom_ids = {
             binding.get("atom_id")
             for binding in atom_bindings

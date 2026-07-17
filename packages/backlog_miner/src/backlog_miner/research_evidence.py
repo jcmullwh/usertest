@@ -13595,6 +13595,9 @@ def _proof_adapter_receipts(
                 attested_predicate_bindings.append(
                     content_bound_payload(
                         {
+                            "declared_binding_sha256": binding.get(
+                                "declared_binding_sha256"
+                            ),
                             "atom_id": binding.get("atom_id"),
                             "origin_atom_sha256": binding.get("origin_atom_sha256"),
                             "origin_atom_field_path": binding.get("origin_atom_field_path"),

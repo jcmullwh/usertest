@@ -8350,6 +8350,9 @@ def test_structured_atom_predicate_supports_source_to_mechanism_output_transform
     assert len(attested) == 1
     assert attested[0]["atom_id"] == atom_id
     assert attested[0]["baseline_experiment_id"] == "experiment:baseline"
+    assert attested[0]["declared_binding_sha256"] == bindings[0][
+        "declared_binding_sha256"
+    ]
     assert attested[0]["runner_attested"] is True
     assert attested[0]["binding_verification_method"] == (
         "runner_bound_source_predicate_with_baseline_experiment_v1"
