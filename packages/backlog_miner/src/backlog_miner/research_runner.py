@@ -2824,6 +2824,82 @@ def _verifier_rejected_direct_support_experiments(
     return rejected
 
 
+def _verifier_rejected_falsification_roles(
+    before_dossier: Mapping[str, Any],
+    after_dossier: Mapping[str, Any],
+    validation_errors: Sequence[str],
+) -> dict[str, set[str]]:
+    """Return lost falsification roles explicitly rejected by the current verifier.
+
+    Falsification attempts are optional authored interpretations of retained experiments.  When
+    the verifier proves that a specific attempt is not a valid causal intervention, deleting that
+    attempt is an honest correction rather than a loss of established proof.  Require every
+    proof-bearing attempt whose removal eliminates the hypothesis-level role to be named by an
+    exact hypothesis and attempt identity in a falsification validator finding.  Unrelated
+    findings therefore cannot excuse silent loss of adversarial coverage.
+    """
+
+    def proof_attempts(dossier: Mapping[str, Any]) -> dict[str, set[str]]:
+        result: dict[str, set[str]] = {}
+        hypotheses_raw = dossier.get("root_cause_hypotheses")
+        for hypothesis in hypotheses_raw if isinstance(hypotheses_raw, list) else []:
+            if not isinstance(hypothesis, Mapping):
+                continue
+            hypothesis_id = _coerce_str(hypothesis.get("hypothesis_id"))
+            attempts_raw = hypothesis.get("falsification_attempts")
+            if hypothesis_id is None or not isinstance(attempts_raw, list):
+                continue
+            attempt_ids = {
+                str(attempt["attempt_id"])
+                for attempt in attempts_raw
+                if isinstance(attempt, Mapping)
+                and _coerce_str(attempt.get("attempt_id")) is not None
+                and attempt.get("outcome") in {"survived", "disproved"}
+            }
+            if attempt_ids:
+                result[hypothesis_id] = attempt_ids
+        return result
+
+    before_attempts = proof_attempts(before_dossier)
+    after_attempts = proof_attempts(after_dossier)
+    falsification_error_prefixes = (
+        "research_dossier_falsification_",
+        "falsification_intervention_",
+        "falsification_attempt_",
+        "primary_falsification_",
+    )
+
+    def names_identity(error: str, identity: str) -> bool:
+        return (
+            re.search(
+                rf"(?<![A-Za-z0-9_.-]){re.escape(identity)}(?![A-Za-z0-9_.-])",
+                error,
+            )
+            is not None
+        )
+
+    revisions: dict[str, set[str]] = {}
+    for hypothesis_id, prior_attempt_ids in before_attempts.items():
+        remaining_attempt_ids = after_attempts.get(hypothesis_id, set())
+        if remaining_attempt_ids:
+            continue
+        rejected_attempt_ids = {
+            attempt_id
+            for attempt_id in prior_attempt_ids
+            if any(
+                str(error).startswith(falsification_error_prefixes)
+                and names_identity(str(error), hypothesis_id)
+                and names_identity(str(error), attempt_id)
+                for error in validation_errors
+            )
+        }
+        if rejected_attempt_ids == prior_attempt_ids:
+            revisions[
+                f"root_cause_hypotheses[{hypothesis_id}].falsification"
+            ] = rejected_attempt_ids
+    return revisions
+
+
 def _epistemic_downgrade_basis(
     before_dossier: Mapping[str, Any],
     after_dossier: Mapping[str, Any],
@@ -2940,9 +3016,23 @@ def _unsupported_substantive_coverage_loss(
         for role, sources in direct_sources.items()
         if role in lost and sources and sources <= rejected_experiments
     }
-    if not verifier_direct_revisions:
+    verifier_falsification_revisions = {
+        role: attempts
+        for role, attempts in _verifier_rejected_falsification_roles(
+            before_dossier,
+            after_dossier,
+            validation_errors,
+        ).items()
+        if role in lost
+    }
+    if not verifier_direct_revisions and not verifier_falsification_revisions:
         return lost, []
-    remaining = [role for role in lost if role not in verifier_direct_revisions]
+    remaining = [
+        role
+        for role in lost
+        if role not in verifier_direct_revisions
+        and role not in verifier_falsification_revisions
+    ]
     basis = [
         f"validator_rejected_direct_support[{experiment_id}]"
         for experiment_id in sorted(
@@ -2953,6 +3043,14 @@ def _unsupported_substantive_coverage_loss(
             }
         )
     ]
+    for role, attempt_ids in sorted(verifier_falsification_revisions.items()):
+        hypothesis_id = role.removeprefix("root_cause_hypotheses[").removesuffix(
+            "].falsification"
+        )
+        basis.extend(
+            f"validator_rejected_falsification[{hypothesis_id}][{attempt_id}]"
+            for attempt_id in sorted(attempt_ids)
+        )
     return remaining, basis
 
 

@@ -3018,6 +3018,77 @@ def test_unrelated_binding_error_cannot_excuse_direct_support_loss() -> None:
     assert basis == []
 
 
+def test_verifier_rejected_falsification_can_be_removed_without_false_regression() -> None:
+    hypothesis_id = "hypothesis:historical-worker-panic"
+    attempt_id = "falsification:current-control"
+    baseline = {
+        "root_cause_hypotheses": [
+            {
+                "hypothesis_id": hypothesis_id,
+                "supporting_evidence": ["experiment:historical-classification"],
+                "mechanism_symbols": ["package.module.classify_panic"],
+                "falsification_attempts": [
+                    {
+                        "attempt_id": attempt_id,
+                        "outcome": "survived",
+                    }
+                ],
+            }
+        ]
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["root_cause_hypotheses"][0]["falsification_attempts"] = []
+    exact_rejection = (
+        "research_dossier_falsification_source_atoms_mismatch: "
+        f"hypothesis={hypothesis_id} attempt={attempt_id}"
+    )
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=[exact_rejection],
+    )
+
+    assert unsupported_loss == []
+    assert basis == [
+        f"validator_rejected_falsification[{hypothesis_id}][{attempt_id}]"
+    ]
+
+
+def test_unrelated_falsification_error_cannot_excuse_falsification_loss() -> None:
+    hypothesis_id = "hypothesis:historical-worker-panic"
+    attempt_id = "falsification:current-control"
+    baseline = {
+        "root_cause_hypotheses": [
+            {
+                "hypothesis_id": hypothesis_id,
+                "falsification_attempts": [
+                    {
+                        "attempt_id": attempt_id,
+                        "outcome": "survived",
+                    }
+                ],
+            }
+        ]
+    }
+    corrected = json.loads(json.dumps(baseline))
+    corrected["root_cause_hypotheses"][0]["falsification_attempts"] = []
+
+    unsupported_loss, basis = mod._unsupported_substantive_coverage_loss(
+        baseline,
+        corrected,
+        validation_errors=[
+            "research_dossier_falsification_source_atoms_mismatch: "
+            "hypothesis=hypothesis:other attempt=falsification:other"
+        ],
+    )
+
+    assert unsupported_loss == [
+        f"root_cause_hypotheses[{hypothesis_id}].falsification"
+    ]
+    assert basis == []
+
+
 def test_binding_error_does_not_excuse_silent_atom_removal_or_other_proof_loss() -> None:
     baseline = {
         "experiments": [
