@@ -823,6 +823,16 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Verification: the focused adapter module passes nine tests. A new persistence regression proves two selectors with different key insertion order mint byte-identical receipts and survive a sorted-JSON round trip; its negative proves changing the selected JSON pointer changes the proof receipt ID. Ruff and diff checks pass. The full causal-proof, Stage-contract, proof-adapter, research-evidence, and research-runner gate collected 562 tests; 561 passed and one expected skip in 232.5 seconds.
 - Closure proof: replay the exact retained Windows dossier without a model call, require downstream persisted-evidence verification to return `(True, [])`, then materialize Stage 3 and the required Stage 4 zero-option `not_required` disposition through the normal workflow.
 
+### BDS-114 - Stage 4 revalidated its own case-lineage envelope as model output
+
+- Status: `local_general_correction_affected_verification_green_exact_stage4_replay_pending`
+- Priority: Stage 3-to-4 baseline throughput
+- Objective impact: every normally persisted Stage 3 dossier can be rejected before optioning because Stage 4 treats two runner-added lineage fields as forbidden model-authored content. This yields zero downstream throughput even when research is valid, and it is unrelated to research depth or actionability.
+- Exact evidence: after the BDS-113 replay returned `ready=true` with zero persisted-evidence errors and production Stage 3 rematerialized the dossier, the Stage 4 no-change preflight failed with `research_proof_invalid` and `research_dossier_unknown_fields: ... ['canonical_problem_id', 'case_member_problem_ids']`. `_persist_downstream_case_lineage` adds those two fields after Stage 3 validation. `_run_solution_optioning_stage` then passed the enriched object directly to `assess_research_readiness`, `verify_persisted_research_evidence`, and `research_prompt_projection`, all of which intentionally validate the strict model dossier.
+- Correction: Stage 4 now removes exactly the two runner-owned case-lineage envelope fields before evidence/readiness revalidation and prompt projection. It preserves every other field, so genuinely unknown model content remains subject to the strict contract. Case identity continues to flow from the authenticated problem/case records and is reattached to Stage 4 output by the existing lineage materializer.
+- Verification: the focused Stage 4 boundary regression and the complete 69-test planning-depth contract module pass. The regression begins with both lineage fields present and proves readiness verification, persisted-evidence verification, and prompt projection receive only the strict authored contract; both no-change dispositions still emit `not_required` without a model call. Ruff and diff checks pass.
+- Closure proof: the exact preflight accepts the production Stage 3 artifact, and the production Stage 4 path emits one `not_required` outcome, zero options, zero rejected options, and zero model invocations while preserving the 24-case identity set.
+
 ### BDS-108 - Provisional same-cause member evidence was omitted from Stage 3
 
 - Status: `local_general_correction_and_exact_case_validation_green`
@@ -885,12 +895,12 @@ This is the supervisor-owned ledger for defects and unresolved findings discover
 - Exact evidence: the first focused `test_research_evidence.py` command used the system Python without repository package `src` roots and failed during collection with `ModuleNotFoundError: backlog_core`; no test body ran. Ruff still passed.
 - Containment and result: the focused suite reran immediately with every repository app/package source root in `PYTHONPATH`. It reached the new test, exposed one real unsupported-predicate assumption, and then passed after the general deterministic predicate correction. The collection mistake did not invoke a model or pipeline stage and is counted in the next lifecycle dashboard update.
 
-### AN-17 - Stage 4 no-change preflight used two incorrect helper boundaries
+### AN-17 - Stage 4 no-change preflight used incorrect helper boundaries
 
-- Status: `corrected_preflight_replay_pending`
+- Status: `corrected_helper_ready_for_post_product_fix_replay`
 - Classification: one supervisor diagnostic-helper cluster, not model, pipeline-stage, or product failures
-- Exact evidence: the throw-away Stage 4 helper first imported `verify_persisted_research_evidence` from the wrong package and stopped before optioning. After that import was corrected, it passed the lineage-enriched Stage 3 record directly to the strict model-dossier parser, which correctly rejected the runner-owned `canonical_problem_id` and `case_member_problem_ids` fields. Neither failure invoked a model, entered Stage 4, or changed pipeline state.
-- Containment and result: the helper now imports the production verifier from its owning package and removes only the two named runner-owned lineage fields before strict model-contract parsing. The subsequent preflight reached downstream persisted-proof verification and exposed BDS-113; it did not conceal or reinterpret that product failure. The two helper mistakes are counted as one supervisor-owned mechanics cluster.
+- Exact evidence: the throw-away Stage 4 helper first imported `verify_persisted_research_evidence` from the wrong package and stopped before optioning. After that import was corrected, its preliminary strict parse received the lineage-enriched Stage 3 record and rejected the runner-owned `canonical_problem_id` and `case_member_problem_ids` fields. Neither failure invoked a model, entered Stage 4, or changed pipeline state.
+- Containment and result: the helper now imports the production verifier from its owning package and removes only the two named runner-owned lineage fields at its preliminary authored-contract boundary. The subsequent preflight reached production-equivalent persistence validation and exposed BDS-113, then after BDS-113 reached BDS-114 in the actual Stage 4 readiness path. It did not conceal or reinterpret either product failure. The helper mistakes are counted as one supervisor-owned mechanics cluster.
 - Closure proof: the corrected helper passes preflight against the BDS-113 replay, then the production Stage 4 path emits exactly one `not_required` outcome, zero options, and zero model calls for the already-addressed case.
 
 ### BDS-082 - Attempt-14 preflight validated an authored projection as a persisted dossier

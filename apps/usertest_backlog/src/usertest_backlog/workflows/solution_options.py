@@ -725,10 +725,19 @@ def _run_solution_optioning_stage(
     status: str = "ok"
 
     for idx, pid in enumerate(focus_ids, start=1):
-        dossier = next(
+        persisted_dossier = next(
             (d for d in research_dossiers if isinstance(d, dict) and d.get("problem_id") == pid),
             {},
         )
+        # Stage 3 persistence adds runner-owned case-lineage fields after the strict
+        # model dossier has been verified. Downstream evidence checks must revalidate
+        # the authored contract, not misclassify that trusted envelope as model output.
+        # Preserve every other field so genuinely unknown authored content still fails.
+        dossier = {
+            key: value
+            for key, value in persisted_dossier.items()
+            if key not in {"canonical_problem_id", "case_member_problem_ids"}
+        }
         rec = records_by_id.get(pid) or {}
         dec = priority_by_id.get(pid) or {}
         priority_blockers = _priority_progression_blockers(

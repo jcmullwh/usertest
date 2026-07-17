@@ -1825,17 +1825,24 @@ def test_optioning_uses_orchestrator_prompts_but_inspects_exact_target_workspace
         )
         return response
 
+    def _accept_research(dossier: dict[str, Any]) -> tuple[bool, list[str]]:
+        assert "canonical_problem_id" not in dossier
+        assert "case_member_problem_ids" not in dossier
+        return True, []
+
     monkeypatch.setattr(
         "usertest_backlog.workflows.solution_options.assess_research_readiness",
-        lambda _dossier: (True, []),
+        _accept_research,
     )
     monkeypatch.setattr(
         "usertest_backlog.workflows.solution_options.verify_persisted_research_evidence",
-        lambda _dossier: (True, []),
+        _accept_research,
     )
 
     def _signed_projection(dossier: dict[str, Any]) -> dict[str, Any]:
         assert dossier["artifacts"]["untrusted_note"] == "UNTRUSTED_PROMPT_INJECTION"
+        assert "canonical_problem_id" not in dossier
+        assert "case_member_problem_ids" not in dossier
         return {
             "problem_id": dossier["problem_id"],
             "repo_revision": dossier["repo_revision"],
@@ -1874,6 +1881,8 @@ def test_optioning_uses_orchestrator_prompts_but_inspects_exact_target_workspace
         "research_dossiers": [
             {
                 "problem_id": "problem:case",
+                "canonical_problem_id": "problem:case",
+                "case_member_problem_ids": ["problem:case", "problem:symptom"],
                 "repo_revision": target_revision,
                 "experiments": [{"experiment_id": "exp-1"}],
                 "inspected_files": ["src.py"],
