@@ -64,6 +64,58 @@ def test_persisted_attempt_rescore_receipt_is_rehashed_even_for_invocation_failu
     ]
 
 
+def test_assignment_verifier_accepts_exact_whitelisted_nested_run_context(
+    tmp_path: Path,
+) -> None:
+    run_dir = tmp_path / "runs" / "source"
+    shell_probe_events = run_dir / "agent_shell_probe" / "raw_events.jsonl"
+    shell_probe_events.parent.mkdir(parents=True)
+    shell_probe_events.write_text(
+        '{"type":"item.completed","item":{"type":"command_execution",'
+        '"aggregated_output":"shell_probe=ok\\n","exit_code":0}}\n',
+        encoding="utf-8",
+    )
+    atom_id = "atom:nested-shell-probe"
+    snapshot = {"atom_id": atom_id, "run_dir": str(run_dir)}
+    assignment = {
+        "status": "complete",
+        "expected_atom_ids": [atom_id],
+        "atom_receipts": [
+            {
+                "atom_id": atom_id,
+                "atom_sha256": mod._canonical_json_sha256(snapshot),
+                "atom_snapshot": snapshot,
+                "artifact_receipts": [
+                    {
+                        "path": str(shell_probe_events),
+                        "source_relpath": "agent_shell_probe/raw_events.jsonl",
+                        "research_context_role": "agent_shell_probe_events",
+                        "sha256": sha256(shell_probe_events.read_bytes()).hexdigest(),
+                        "size_bytes": shell_probe_events.stat().st_size,
+                    }
+                ],
+            }
+        ],
+    }
+    assignment["assignment_sha256"] = mod.evidence_assignment_sha256(assignment)
+
+    assert mod._verify_assignment_files(
+        assignment,
+        expected_atom_ids=[atom_id],
+    ) == []
+
+    assignment["atom_receipts"][0]["artifact_receipts"][0]["source_relpath"] = (
+        "unapproved/raw_events.jsonl"
+    )
+    assignment["assignment_sha256"] = mod.evidence_assignment_sha256(assignment)
+    assert mod._verify_assignment_files(
+        assignment,
+        expected_atom_ids=[atom_id],
+    ) == [
+        f"origin_atom_context_artifact_invalid:{atom_id}:{shell_probe_events}"
+    ]
+
+
 def test_required_powershell_executable_prefers_cross_platform_pwsh(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

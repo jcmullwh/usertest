@@ -12616,11 +12616,9 @@ def _verify_assignment_files(
                     context_role not in set(RESEARCH_RUN_CONTEXT_FILES.values())
                     or rel is None
                     or rel.is_absolute()
-                    or len(rel.parts) != 1
-                    or RESEARCH_RUN_CONTEXT_FILES.get(rel.name) != context_role
+                    or RESEARCH_RUN_CONTEXT_FILES.get(rel.as_posix()) != context_role
                     or path is None
                     or path.is_symlink()
-                    or path.name != rel.name
                     or run_dir is None
                     or not run_dir.is_absolute()
                 )
