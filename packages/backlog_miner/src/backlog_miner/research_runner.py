@@ -1922,9 +1922,11 @@ def _research_retry_remediation_hints(
                 "experiments[].origin_evidence_bindings",
             ]
             required_change = (
-                "Use the exact immutable atom-binding keys: atom_id, role, field_path, and "
-                "value. field_path uses the restricted $.field[index] syntax, never a leading "
-                "/ JSON pointer, and the scalar belongs in value, never source_value. When the "
+                "Use exact immutable atom-binding keys. field_path uses the restricted "
+                "$.field[index] syntax, never a leading / JSON pointer. For a symptom binding "
+                "with observation_predicate, omit value when the runner should derive and hash "
+                "the immutable field value; otherwise put the exact scalar in value, never "
+                "source_value. When the "
                 "validation_error includes candidate_field_paths, those are exact runner-derived "
                 "locations for the declared value; choose one only when its field meaning matches "
                 "the claim. role=symptom must make the assertion or structured predicate directly "

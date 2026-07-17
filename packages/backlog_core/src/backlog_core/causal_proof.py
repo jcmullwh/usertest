@@ -270,6 +270,11 @@ def _builtin_predicate_contract(predicate: Mapping[str, Any]) -> list[str]:
         return ["predicate_expected_missing"]
     if kind == "membership" and not isinstance(predicate.get("members"), list):
         return ["predicate_members_invalid"]
+    if kind == "contains" and (
+        not isinstance(predicate.get("expected"), str)
+        or not str(predicate.get("expected")).strip()
+    ):
+        return ["predicate_contains_expected_invalid"]
     if kind == "range" and predicate.get("minimum") is None and predicate.get("maximum") is None:
         return ["predicate_range_unbounded"]
     if kind == "schema" and not isinstance(predicate.get("schema"), Mapping):
@@ -295,6 +300,10 @@ def _evaluate_builtin_predicate(
         return observed == predicate.get("expected"), []
     if kind == "membership":
         return observed in predicate.get("members", []), []
+    if kind == "contains":
+        if not isinstance(observed, str):
+            return False, ["predicate_contains_observation_invalid"]
+        return str(predicate.get("expected")) in observed, []
     if kind == "range":
         minimum = predicate.get("minimum")
         maximum = predicate.get("maximum")
@@ -344,6 +353,7 @@ def _evaluate_builtin_predicate(
 for _builtin_predicate_kind in (
     "equals",
     "membership",
+    "contains",
     "range",
     "schema",
     "existence",

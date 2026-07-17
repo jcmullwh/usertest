@@ -38,7 +38,7 @@ A harness proves a mechanism only when its production call determines the exact 
 An inconclusive command stopped by an external timeout/kill (exit 124/137) is a blocked attempt, not a replay experiment. Retain its artifact and material unknown outside `experiments`.
 If timeout is the assigned symptom, use a self-contained faithful replay whose `supports`/`refutes` outcome is the observed behavior, not the runner cutoff.
 
-`origin_evidence_bindings` may bind a structured symptom field with `observation_predicate` using any registered deterministic predicate. The runner evaluates it against the immutable atom value,
+`origin_evidence_bindings` may bind a structured symptom field with `observation_predicate` using any registered deterministic predicate. For `role="symptom"`, provide the exact `$.field` path and predicate; omit `value` when the runner should derive and hash a large immutable source value rather than copying it into model output. The runner evaluates the predicate against the immutable atom value,
 then the adapter baseline, and retains both in one content-addressed source-root receipt. Do not stringify numbers, booleans, JSON objects, state, or events merely to fit a text assertion.
 
 For the primary hypothesis, attempt to falsify it. State the disproof condition before interpreting
@@ -233,7 +233,7 @@ evidence uses the machine-checkable shapes below, not prose substitutes.
   selector and predicate that already match retained output.
 - A positive predicate is an object with a top-level discriminator: `{"kind":"equals",
   "expected":...}`, `{"kind":"membership","members":[...]}`, `{"kind":"range",
-  "minimum"?:...,"maximum"?:...}`, `{"kind":"schema","schema":{...}}`,
+  "minimum"?:...,"maximum"?:...}`, `{"kind":"contains","expected":"text"}`, `{"kind":"schema","schema":{...}}`,
   `{"kind":"existence","expected":true}`, `{"kind":"state_transition","from":...,"to":...}`,
   or `{"kind":"event_sequence","events":[...],"mode"?:"exact"|"ordered_subsequence"}`. It is
   not the experiment assertion shape `{source,operator,expected}`, and is not `{equals:{...}}`.

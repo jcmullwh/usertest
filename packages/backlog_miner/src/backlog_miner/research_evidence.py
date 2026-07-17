@@ -12807,6 +12807,13 @@ def _explicit_atom_binding_receipts(
         has_value = "value" in declaration
         has_source_value = "source_value" in declaration
         expected_value = declaration.get("value")
+        observation_predicate = declaration.get("observation_predicate")
+        generic_predicate_binding = role == "symptom" and isinstance(
+            observation_predicate, Mapping
+        )
+        runner_bound_predicate_value = (
+            generic_predicate_binding and not has_value and not has_source_value
+        )
         diagnostic_value = (
             declaration.get("source_value")
             if has_source_value and not has_value
@@ -12832,7 +12839,7 @@ def _explicit_atom_binding_receipts(
         }:
             errors.append(f"{prefix}:role")
             continue
-        if not has_value or has_source_value:
+        if (not has_value and not runner_bound_predicate_value) or has_source_value:
             errors.append(
                 _atom_binding_error_with_path_candidates(
                     prefix=prefix,
@@ -12852,15 +12859,29 @@ def _explicit_atom_binding_receipts(
                     snapshot=snapshot,
                     declared_value=expected_value,
                     declared_value_key=declared_value_key,
+                    search_candidates=has_value,
                 )
             )
             continue
-        expected_hash = _canonical_json_sha256(expected_value)
+        found, actual_value = _atom_field_path_value(snapshot, field_path)
+        if not found:
+            errors.append(
+                _atom_binding_error_with_path_candidates(
+                    prefix=prefix,
+                    reason="snapshot_value",
+                    snapshot=snapshot,
+                    declared_value=expected_value,
+                    declared_value_key=declared_value_key,
+                    search_candidates=has_value,
+                )
+            )
+            continue
+        bound_value = actual_value if runner_bound_predicate_value else expected_value
+        expected_hash = _canonical_json_sha256(bound_value)
         if declared_hash is not None and declared_hash != expected_hash:
             errors.append(f"{prefix}:value_hash")
             continue
-        found, actual_value = _atom_field_path_value(snapshot, field_path)
-        if not found or _canonical_json_sha256(actual_value) != expected_hash:
+        if has_value and _canonical_json_sha256(actual_value) != expected_hash:
             errors.append(
                 _atom_binding_error_with_path_candidates(
                     prefix=prefix,
@@ -12872,8 +12893,6 @@ def _explicit_atom_binding_receipts(
             )
             continue
         binding_is_direct = False
-        observation_predicate = declaration.get("observation_predicate")
-        generic_predicate_binding = role == "symptom" and isinstance(observation_predicate, Mapping)
         if observation_predicate is not None and not generic_predicate_binding:
             errors.append(f"{prefix}:observation_predicate_role")
             continue

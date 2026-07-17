@@ -8187,6 +8187,47 @@ def test_explicit_symptom_binding_accepts_registered_structured_predicates(
     )
 
 
+def test_explicit_symptom_predicate_binds_runner_owned_large_atom_value() -> None:
+    atom_value = "windows-sandbox-rs:" + (" retained panic context" * 4096)
+    snapshot = {"excerpt_tail": atom_value}
+    experiment = {
+        "origin_evidence_bindings": [
+            {
+                "role": "symptom",
+                "atom_id": "atom:stderr",
+                "field_path": "$.excerpt_tail",
+                "observation_predicate": {
+                    "kind": "contains",
+                    "expected": "windows-sandbox-rs",
+                },
+            }
+        ]
+    }
+    errors: list[str] = []
+
+    bindings, direct = mod._explicit_atom_binding_receipts(
+        experiment=experiment,
+        experiment_id="experiment:baseline",
+        atom_id="atom:stderr",
+        atom_receipt={
+            "atom_id": "atom:stderr",
+            "atom_sha256": mod._canonical_json_sha256(snapshot),
+            "atom_snapshot": snapshot,
+        },
+        assertion={},
+        command="runner verify",
+        errors=errors,
+    )
+
+    assert errors == []
+    assert direct is True
+    assert len(bindings) == 1
+    assert bindings[0]["origin_atom_value"] == atom_value
+    assert bindings[0]["origin_atom_value_sha256"] == mod._canonical_json_sha256(
+        atom_value
+    )
+
+
 def test_structured_atom_predicate_is_attested_against_adapter_baseline(
     tmp_path: Path,
 ) -> None:
